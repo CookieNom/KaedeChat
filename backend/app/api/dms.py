@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from redis.asyncio import Redis
@@ -14,7 +16,15 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
-from app.chat.e2ee import channel_encryption_policy_payload
+from app.bots.dm_capability import (
+    BotDMCapabilityPayload,
+    apply_bot_dm_capability,
+)
+from app.chat.e2ee import (
+    channel_encryption_policy_payload,
+    validate_channel_encryption_policy,
+    validate_channel_encryption_policy_transition,
+)
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
@@ -26,7 +36,7 @@ from app.chat.group_conversations import (
     require_group_member,
 )
 from app.chat.payloads import dm_channel_payload, render_message_payload
-from app.chat.privacy import blocked_between, require_can_direct_message
+from app.chat.privacy import blocked_between, lock_dm_policy, require_can_direct_message
 from app.chat.schemas import DMGroupCreate, DMGroupMemberAdd, DMGroupUpdate, DMOpenRequest
 from app.core.dm import (
     MAX_GROUP_DM_PARTICIPANTS,
@@ -55,17 +65,151 @@ from app.federation.network import (
     decode_federation_response_json,
 )
 from app.federation.replication import (
+    database_snowflake,
     profile_from_user,
     replicate_conversation,
     replicate_group_notice,
 )
-from app.federation.schemas import RemoteUserProfile
+from app.federation.schemas import EventEnvelope, RemoteUserProfile
 from app.federation.terminal_rooms import queue_terminal_room_deletion
 from app.federation.users import resolve_handle
 from app.media.tombstones import prepare_terminal_channel_media
 from app.tasks import federation_deliver, media_local_purge
 
 router = APIRouter(prefix="/api/v1/users/@me/channels", tags=["direct messages"])
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedGroupMutationResult:
+    conversation: dict[str, object]
+    participants: tuple[RemoteUserProfile, ...]
+    deleted: bool
+    notice: dict[str, object] | None
+
+
+def validate_group_mutation_result(
+    payload: dict[str, object],
+    *,
+    conversation: DMConversation,
+    channel: Channel,
+    before: list[User],
+    actor: User,
+    action: str,
+    target: User | None,
+    name: str | None,
+) -> ValidatedGroupMutationResult:
+    """Bind an authority response to the exact requested group transition."""
+
+    if not {"conversation", "participants"} <= payload.keys() or not payload.keys() <= {
+        "conversation",
+        "participants",
+        "notice",
+    }:
+        raise ValueError("group mutation result fields are invalid")
+    raw_conversation = payload["conversation"]
+    raw_participants = payload["participants"]
+    if not isinstance(raw_conversation, dict) or not isinstance(raw_participants, list):
+        raise ValueError("group mutation result is malformed")
+    expected_conversation_fields = {
+        "id",
+        "origin_domain",
+        "pair_key",
+        "type",
+        "authority_domain",
+        "owner",
+        "name",
+        "state_version",
+        "deleted",
+        "encryption_policy",
+    }
+    if raw_conversation.keys() != expected_conversation_fields:
+        raise ValueError("group mutation conversation fields are invalid")
+    raw_owner = raw_conversation["owner"]
+    raw_policy = raw_conversation["encryption_policy"]
+    if (
+        not isinstance(raw_owner, dict)
+        or raw_owner.keys() != {"id", "origin_domain"}
+        or not isinstance(raw_policy, dict)
+        or raw_policy.keys()
+        != {"mode", "state", "generation", "protocol", "suite", "group_id", "epoch"}
+    ):
+        raise ValueError("group mutation conversation fields are malformed")
+
+    conversation_id = database_snowflake(raw_conversation["id"], "group conversation id")
+    state_version = database_snowflake(
+        raw_conversation["state_version"], "group conversation state version"
+    )
+    owner_ref = (
+        database_snowflake(raw_owner["id"], "group conversation owner id"),
+        raw_owner["origin_domain"],
+    )
+    deleted = raw_conversation["deleted"]
+    if type(deleted) is not bool:
+        raise ValueError("group mutation deletion marker is invalid")
+    if (
+        conversation_id != conversation.id
+        or raw_conversation["origin_domain"] != conversation.origin_domain
+        or raw_conversation["pair_key"] != conversation.pair_key
+        or raw_conversation["type"] != "group"
+        or raw_conversation["authority_domain"] != conversation.authority_domain
+        or state_version != conversation.state_version + 1
+    ):
+        raise ValueError("group mutation conversation identity is invalid")
+
+    # The policy parser owns its internal state-machine invariants.  Exact keys
+    # and decimal-string revisions above keep the response wire format strict.
+    database_snowflake(raw_policy["generation"], "group encryption policy generation")
+    if raw_policy["epoch"] is not None:
+        database_snowflake(raw_policy["epoch"], "group encryption policy epoch")
+    policy = validate_channel_encryption_policy(raw_policy)
+    validate_channel_encryption_policy_transition(channel, policy, label="group DM")
+
+    if len(raw_participants) > MAX_GROUP_DM_PARTICIPANTS:
+        raise ValueError("group mutation participant list is too large")
+    profiles = tuple(RemoteUserProfile.model_validate(item) for item in raw_participants)
+    profile_refs = [(int(profile.id), profile.origin_domain) for profile in profiles]
+    if len(profile_refs) != len(set(profile_refs)):
+        raise ValueError("group mutation participants are duplicated")
+    before_refs = {(user.id, user.origin_domain) for user in before}
+    expected_refs = set(before_refs)
+    if action == "add" and target is not None:
+        expected_refs.add((target.id, target.origin_domain))
+    elif action == "leave":
+        expected_refs.discard((actor.id, actor.origin_domain))
+    elif action == "remove" and target is not None:
+        expected_refs.discard((target.id, target.origin_domain))
+    if set(profile_refs) != expected_refs:
+        raise ValueError("group mutation participants do not match the request")
+
+    previous_owner = (conversation.owner_id, conversation.owner_domain)
+    expected_owner = previous_owner
+    if action == "leave" and previous_owner == (actor.id, actor.origin_domain) and profile_refs:
+        # The authority orders participants by join time and transfers to the
+        # earliest remaining member before serializing the same ordered list.
+        expected_owner = profile_refs[0]
+    expected_name = name if action == "rename" else channel.name
+    if owner_ref != expected_owner or raw_conversation["name"] != expected_name:
+        raise ValueError("group mutation state does not match the request")
+
+    expected_deleted = action == "leave" and not expected_refs
+    if deleted is not expected_deleted:
+        raise ValueError("group mutation deletion state does not match the request")
+    raw_notice = payload.get("notice")
+    notice_expected = (
+        action in {"add", "leave", "remove"} and not deleted and (policy["mode"] == "plaintext")
+    )
+    if notice_expected:
+        if "notice" not in payload or not isinstance(raw_notice, dict):
+            raise ValueError("group mutation notice is missing")
+    elif "notice" in payload:
+        raise ValueError("group mutation notice is unexpected")
+
+    return ValidatedGroupMutationResult(
+        conversation=raw_conversation,
+        participants=profiles,
+        deleted=deleted,
+        notice=raw_notice if isinstance(raw_notice, dict) else None,
+    )
 
 
 async def authorize_group_invitee(
@@ -307,7 +451,7 @@ async def list_direct_messages(
     return result
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("")
 async def open_direct_message(
     payload: DMOpenRequest,
     response_status: Response,
@@ -317,6 +461,29 @@ async def open_direct_message(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
+    return await open_direct_message_for(
+        payload,
+        response_status,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+    )
+
+
+async def open_direct_message_for(
+    payload: DMOpenRequest,
+    response_status: Response,
+    auth: AuthenticatedUser,
+    session: AsyncSession,
+    redis: Redis,
+    snowflake: SnowflakeGenerator,
+    settings: Settings,
+    *,
+    resolved_target: User | None = None,
+    bot_capability: tuple[EventEnvelope, BotDMCapabilityPayload, EventEnvelope] | None = None,
+) -> dict[str, object]:
     await enforce_client_rate_limit(
         redis,
         response_status,
@@ -325,20 +492,47 @@ async def open_direct_message(
         user_domain=auth.user.origin_domain,
     )
     requester_key = f"{auth.user.origin_domain}:{auth.user.id}"
-    target = await resolve_handle(session, settings, redis, requester_key, payload.handle)
+    target = resolved_target or await resolve_handle(
+        session, settings, redis, requester_key, payload.handle
+    )
     if (target.id, target.origin_domain) == (auth.user.id, auth.user.origin_domain):
         raise HTTPException(status_code=400, detail={"code": "CANNOT_DM_SELF"})
     # A local block is authoritative even when the other participant and the
     # conversation authority are remote. Remote privacy is then confirmed by
     # the peer's authorization endpoint below.
+    if auth.user.account_type == "bot" and target.origin_domain == settings.domain:
+        await lock_dm_policy(session, auth.user, target)
     if await blocked_between(session, auth.user, target):
         raise HTTPException(status_code=403, detail={"code": "CANNOT_DM_USER"})
-    if target.origin_domain == settings.domain:
+    if target.origin_domain == settings.domain and auth.user.account_type != "bot":
         await require_can_direct_message(session, auth.user, target)
     first_handle = f"{auth.user.username}@{auth.user.origin_domain}"
     second_handle = f"{target.username}@{target.origin_domain}"
     pair_key = dm_pair_key(first_handle, second_handle)
     authority = dm_authority_domain(first_handle, second_handle)
+    capability_envelope: EventEnvelope | None = None
+    capability_payload: BotDMCapabilityPayload | None = None
+    runtime_envelope: EventEnvelope | None = None
+    if bot_capability is None:
+        if auth.user.account_type == "bot":
+            raise HTTPException(status_code=403, detail={"code": "BOT_DM_GRANT_REQUIRED"})
+    else:
+        capability_envelope, capability_payload, runtime_envelope = bot_capability
+        if auth.user.account_type != "bot" or (
+            capability_payload.bot_user != EntityRef(f"{auth.user.id}@{auth.user.origin_domain}")
+            or capability_payload.target_user != EntityRef(f"{target.id}@{target.origin_domain}")
+            or capability_payload.pair_key != pair_key
+            or capability_payload.authority_domain != authority
+        ):
+            raise HTTPException(status_code=403, detail={"code": "BOT_DM_GRANT_INVALID"})
+    federation_open_payload: dict[str, object] = {
+        "participants": [profile_from_user(user) for user in (auth.user, target)]
+    }
+    if capability_envelope is not None:
+        federation_open_payload["bot_capability"] = capability_envelope.model_dump(mode="json")
+        if runtime_envelope is None:
+            raise RuntimeError("bot DM capability lost its application runtime proof")
+        federation_open_payload["bot_runtime_proof"] = runtime_envelope.model_dump(mode="json")
     if authority == settings.domain and target.origin_domain != settings.domain:
         try:
             authorization = await signed_request(
@@ -347,7 +541,7 @@ async def open_direct_message(
                 "POST",
                 target.origin_domain,
                 "/_kaede/v1/dm/authorize",
-                payload={"participants": [profile_from_user(user) for user in (auth.user, target)]},
+                payload=federation_open_payload,
             )
         except (httpx.HTTPError, FederationNetworkError, RuntimeError):
             raise HTTPException(
@@ -360,7 +554,6 @@ async def open_direct_message(
                 status_code=502, detail={"code": "FEDERATION_DM_AUTHORIZATION_FAILED"}
             )
     if authority != settings.domain:
-        participant_payload = [profile_from_user(user) for user in (auth.user, target)]
         try:
             response = await signed_request(
                 session,
@@ -368,15 +561,22 @@ async def open_direct_message(
                 "POST",
                 authority,
                 "/_kaede/v1/dm/open",
-                payload={"participants": participant_payload},
+                payload=federation_open_payload,
             )
         except (httpx.HTTPError, FederationNetworkError, RuntimeError):
+            if capability_envelope is not None:
+                # A short-lived installation proof cannot be placed in the
+                # durable federation outbox: it may expire before delivery.
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "BOT_DM_AUTHORITY_UNAVAILABLE"},
+                ) from None
             request_envelope = await build_envelope(
                 session,
                 settings,
                 "dm.open.request",
                 auth.user,
-                {"participants": participant_payload, "pair_key": pair_key},
+                federation_open_payload | {"pair_key": pair_key},
             )
             await queue_event(session, settings, authority, request_envelope)
             await session.commit()
@@ -399,12 +599,17 @@ async def open_direct_message(
                 detail=parse_upstream_error(error_body, "FEDERATED_DM_STORAGE_QUOTA_EXCEEDED"),
             )
         if response.status_code == 429 or response.status_code >= 500:
+            if capability_envelope is not None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "BOT_DM_AUTHORITY_UNAVAILABLE"},
+                )
             request_envelope = await build_envelope(
                 session,
                 settings,
                 "dm.open.request",
                 auth.user,
-                {"participants": participant_payload, "pair_key": pair_key},
+                federation_open_payload | {"pair_key": pair_key},
             )
             await queue_event(session, settings, authority, request_envelope)
             await session.commit()
@@ -450,6 +655,22 @@ async def open_direct_message(
                 conversation_payload,
                 response_profiles,
             )
+            if capability_envelope is not None and capability_payload is not None:
+                conversation = await session.get(
+                    DMConversation,
+                    (channel.id, channel.origin_domain),
+                )
+                if conversation is None:
+                    raise RuntimeError("replicated bot DM conversation disappeared")
+                await apply_bot_dm_capability(
+                    session,
+                    snowflake,
+                    capability_envelope,
+                    capability_payload,
+                    conversation=conversation,
+                    runtime_admitted=True,
+                    admit_fenced_projection=True,
+                )
         except FederatedDMQuotaExceeded as exc:
             raise HTTPException(status_code=507, detail=exc.detail()) from exc
         except (KeyError, TypeError, ValueError, RuntimeError):
@@ -505,6 +726,16 @@ async def open_direct_message(
                 conversation,
                 participant_domains=participant_domains,
             )
+        if capability_envelope is not None and capability_payload is not None:
+            await apply_bot_dm_capability(
+                session,
+                snowflake,
+                capability_envelope,
+                capability_payload,
+                conversation=conversation,
+                runtime_admitted=True,
+                admit_fenced_projection=True,
+            )
         channel = Channel(
             id=conversation_id,
             origin_domain=settings.domain,
@@ -547,6 +778,16 @@ async def open_direct_message(
                         "encryption_policy": channel_encryption_policy_payload(channel),
                     },
                     "participants": [profile_from_user(user) for user in (auth.user, target)],
+                    **(
+                        {"bot_capability": capability_envelope.model_dump(mode="json")}
+                        if capability_envelope is not None
+                        else {}
+                    ),
+                    **(
+                        {"bot_runtime_proof": runtime_envelope.model_dump(mode="json")}
+                        if runtime_envelope is not None
+                        else {}
+                    ),
                 },
             )
             await queue_event(session, settings, target.origin_domain, envelope)
@@ -564,6 +805,17 @@ async def open_direct_message(
                 conversation,
                 participant_domains=participant_domains,
             )
+        if capability_envelope is not None and capability_payload is not None:
+            await apply_bot_dm_capability(
+                session,
+                snowflake,
+                capability_envelope,
+                capability_payload,
+                conversation=conversation,
+                runtime_admitted=True,
+                admit_fenced_projection=True,
+            )
+            await session.commit()
         conversation_id = conversation.id
         existing_channel = await session.scalar(
             select(Channel).where(
@@ -592,7 +844,7 @@ async def open_direct_message(
     return result
 
 
-@router.post("/group", status_code=status.HTTP_201_CREATED)
+@router.post("/group")
 async def create_group_direct_message(
     payload: DMGroupCreate,
     response_status: Response,
@@ -752,18 +1004,18 @@ async def proxy_group_mutation(
 async def apply_group_mutation_response(
     session: AsyncSession,
     settings: Settings,
-    payload: dict[str, object],
+    result: ValidatedGroupMutationResult,
     before: list[User],
     actor: User,
     previous_owner: tuple[int | None, str | None],
 ) -> tuple[Channel, DMConversation, list[User], Message | None]:
-    raw_conversation = payload.get("conversation")
-    raw_participants = payload.get("participants")
-    if not isinstance(raw_conversation, dict) or not isinstance(raw_participants, list):
-        raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
     try:
-        profiles = [RemoteUserProfile.model_validate(item) for item in raw_participants]
-        channel = await replicate_conversation(session, settings, raw_conversation, profiles)
+        channel = await replicate_conversation(
+            session,
+            settings,
+            result.conversation,
+            list(result.participants),
+        )
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
@@ -773,11 +1025,11 @@ async def apply_group_mutation_response(
         raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
     participants = await conversation_participants(session, channel.id, channel.origin_domain)
     notice = None
-    if payload.get("notice") is not None:
+    if result.notice is not None:
         notice = await replicate_group_notice(
             session,
             settings,
-            payload["notice"],
+            result.notice,
             conversation,
             channel,
             before,
@@ -818,6 +1070,13 @@ async def mutate_group(
         await require_group_member(session, existing, auth.user)
         await authorize_group_invitee(session, settings, auth.user, target)
     if existing.authority_domain != settings.domain:
+        existing_channel = await session.get(Channel, (conversation_id, conversation_domain))
+        if (
+            existing_channel is None
+            or existing_channel.guild_id is not None
+            or existing_channel.type != 1
+        ):
+            raise HTTPException(status_code=404, detail={"code": "GROUP_DM_NOT_FOUND"})
         remote = await proxy_group_mutation(
             session,
             settings,
@@ -827,41 +1086,22 @@ async def mutate_group(
             target=target,
             name=name,
         )
-        remote_conversation = remote.get("conversation")
-        remote_participants = remote.get("participants")
-        if not isinstance(remote_participants, list):
-            raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
         try:
-            remote_refs = {
-                (int(profile.id), profile.origin_domain)
-                for profile in (
-                    RemoteUserProfile.model_validate(item) for item in remote_participants
-                )
-            }
+            validated_remote = validate_group_mutation_result(
+                remote,
+                conversation=existing,
+                channel=existing_channel,
+                before=before,
+                actor=auth.user,
+                action=action,
+                target=target,
+                name=name,
+            )
         except (TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
             ) from exc
-        before_refs = {(user.id, user.origin_domain) for user in before}
-        expected_refs = set(before_refs)
-        if action == "add" and target is not None:
-            expected_refs.add((target.id, target.origin_domain))
-        elif action == "leave":
-            expected_refs.discard((auth.user.id, auth.user.origin_domain))
-        elif action == "remove" and target is not None:
-            expected_refs.discard((target.id, target.origin_domain))
-        if remote_refs != expected_refs:
-            raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
-        remote_deleted = (
-            bool(remote_conversation.get("deleted"))
-            if isinstance(remote_conversation, dict)
-            else False
-        )
-        if remote_deleted:
-            if action != "leave" or expected_refs:
-                raise HTTPException(
-                    status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
-                )
+        if validated_remote.deleted:
             membership = await session.get(
                 DMParticipant,
                 (conversation_id, conversation_domain, auth.user.id, auth.user.origin_domain),
@@ -877,7 +1117,12 @@ async def mutate_group(
             )
             return {"status": "left"}
         channel, conversation, participants, notice_message = await apply_group_mutation_response(
-            session, settings, remote, before, auth.user, previous_owner
+            session,
+            settings,
+            validated_remote,
+            before,
+            auth.user,
+            previous_owner,
         )
         notice_ref = (
             (notice_message.id, notice_message.origin_domain)

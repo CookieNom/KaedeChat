@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import html
@@ -88,6 +87,7 @@ from app.chat.e2ee import (
     RELEASE_ACCOUNT_VAULT_LEASE,
     account_vault_lease_key,
 )
+from app.core.base64url import decode_base64url, encode_base64url
 from app.core.proxy import resolve_client_ip
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -149,20 +149,17 @@ def email_verification_required(user: User, settings: Settings) -> bool:
 
 def decode_password_salt(value: str) -> bytes:
     try:
-        decoded = base64.b64decode(value + "==", altchars=b"-_", validate=True)
-    except (ValueError, UnicodeEncodeError) as exc:
+        return decode_base64url(value, size=16)
+    except ValueError as exc:
         raise auth_error(
             "PASSWORD_KDF_INVALID",
             "Password protection parameters are invalid",
             422,
         ) from exc
-    if len(decoded) != 16 or base64.urlsafe_b64encode(decoded).decode().rstrip("=") != value:
-        raise auth_error("PASSWORD_KDF_INVALID", "Password protection parameters are invalid", 422)
-    return decoded
 
 
 def encode_password_salt(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+    return encode_base64url(value)
 
 
 def fake_password_salt(settings: Settings, identifier: str, purpose: str) -> bytes:

@@ -9,8 +9,18 @@ from app.core.federation import canonical_json
 from app.core.settings import Settings
 from app.federation.client import federation_signing_headers
 from app.federation.network import FederationNetworkError, ensure_peer
+from app.federation.security import lock_block_policy_shared, matching_block
 
 RELAY_WAKE_PATH = "/_kaede/push/v1/wakes"
+
+
+async def _require_relay_exchange_allowed(session: AsyncSession, destination: str) -> None:
+    """Apply global suspension while leaving guild-only silence irrelevant."""
+
+    await lock_block_policy_shared(session)
+    block = await matching_block(session, destination)
+    if block is not None and block.level == "suspend":
+        raise FederationNetworkError("federation with the push relay is suspended")
 
 
 async def send_relay_wake(
@@ -20,6 +30,7 @@ async def send_relay_wake(
 ) -> httpx.Response:
     """Send one idempotent wake to the operator-pinned relay transport URL."""
 
+    await _require_relay_exchange_allowed(session, settings.push_relay_origin)
     await ensure_peer(session, settings, settings.push_relay_origin)
     body = canonical_json(payload)
     headers = await federation_signing_headers(
@@ -47,6 +58,7 @@ async def revoke_relay_subscription(
     subscription_id: str,
 ) -> None:
     path = f"/_kaede/push/v1/subscriptions/{subscription_id}"
+    await _require_relay_exchange_allowed(session, settings.push_relay_origin)
     await ensure_peer(session, settings, settings.push_relay_origin)
     headers = await federation_signing_headers(
         session, settings, "DELETE", settings.push_relay_origin, path, b""

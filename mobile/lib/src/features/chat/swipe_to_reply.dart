@@ -32,7 +32,7 @@ final class _SwipeToReplyState extends State<SwipeToReply>
 
   late final AnimationController _settleController = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 190),
+    duration: Duration(milliseconds: 190),
   );
   Animation<double>? _settle;
   var _offset = 0.0;
@@ -165,31 +165,32 @@ final class _SwipeToReplyState extends State<SwipeToReply>
               child: Align(
                 alignment: Alignment.centerRight,
                 child: Padding(
-                  padding: const EdgeInsets.only(right: 18),
+                  padding: EdgeInsets.only(right: 18),
                   child: Opacity(
                     opacity: progress,
                     child: Transform.scale(
                       scale: .72 + .28 * progress,
                       child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 90),
+                        duration: Duration(milliseconds: 90),
                         width: 36,
                         height: 36,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color:
-                              _armed ? KaedeColors.coralSoft : KaedeColors.rail,
+                          color: _armed
+                              ? context.kaede.coralSoft
+                              : context.kaede.rail,
                           border: Border.all(
                             color: _armed
-                                ? KaedeColors.coralText
-                                : KaedeColors.border,
+                                ? context.kaede.coralText
+                                : context.kaede.border,
                           ),
                         ),
                         child: Icon(
                           Icons.reply_rounded,
                           size: 21,
                           color: _armed
-                              ? KaedeColors.coralText
-                              : KaedeColors.muted,
+                              ? context.kaede.coralText
+                              : context.kaede.muted,
                         ),
                       ),
                     ),

@@ -6,6 +6,7 @@
     messageSearchOperator,
     moveSearchSuggestion,
     replaceMessageSearchOperator,
+    type MessageSearchAuthorType,
     type MessageSearchOperator
   } from '$lib/chat/message-search';
   import { entityRef } from '$lib/chat/refs';
@@ -46,7 +47,7 @@
   let mentionRef = $state('');
   let has = $state<string[]>([]);
   let pinned = $state<'any' | 'yes' | 'no'>('any');
-  let authorType = $state<'any' | 'user' | 'webhook'>('any');
+  let authorType = $state<'any' | MessageSearchAuthorType>('any');
   let sort = $state<'relevance' | 'newest' | 'oldest'>('relevance');
   let before = $state('');
   let after = $state('');
@@ -610,7 +611,8 @@
                   <label
                     >Author type<select bind:value={authorType}
                       ><option value="any">Anyone</option><option value="user">People</option
-                      ><option value="webhook">Webhooks</option></select
+                      ><option value="bot">Bots</option><option value="webhook">Webhooks</option
+                      ></select
                     ></label
                   >
                   <label>After<input type="date" bind:value={after} /></label>

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { GuildMemberSummary, PresenceStatus, Role } from './types';
-import { groupGuildMembers, highestColoredRole, highestIconRole, memberRoleColor } from './members';
+import {
+  groupGuildMembers,
+  guildMemberSearchPath,
+  highestColoredRole,
+  highestIconRole,
+  memberRoleColor,
+  mergeGuildMemberPage
+} from './members';
 
 function member(id: string, username: string, presence: PresenceStatus): GuildMemberSummary {
   return {
@@ -40,6 +47,33 @@ function role(id: string, name: string, position: number, hoist = true): Role {
 }
 
 describe('groupGuildMembers', () => {
+  it('builds a bounded authority member search without preloading the full guild', () => {
+    expect(guildMemberSearchPath('1@guild.example', '  @ari  ')).toBe(
+      '/guilds/1%40guild.example/members?limit=26&query=%40ari'
+    );
+    expect(guildMemberSearchPath('1@guild.example', '', 500)).toBe(
+      '/guilds/1%40guild.example/members?limit=100'
+    );
+    expect(guildMemberSearchPath('1@guild.example', 'ari', 26, '55@remote.example')).toBe(
+      '/guilds/1%40guild.example/members?limit=26&after=55%40remote.example&query=ari'
+    );
+  });
+
+  it('merges paged member matches without duplicates and advances by composite cursor', () => {
+    const first = member('1', 'one', 'online');
+    const replaced = member('2', 'old', 'offline');
+    const replacement = member('2', 'new', 'online');
+    const next = member('3', 'next', 'online');
+    next.user.origin_domain = 'remote.example';
+    const overflow = member('4', 'overflow', 'online');
+
+    const page = mergeGuildMemberPage([first, replaced], [replacement, next, overflow], 2);
+
+    expect(page.members.map((item) => item.user.username)).toEqual(['one', 'new', 'next']);
+    expect(page.cursor).toBe('3@remote.example');
+    expect(page.hasMore).toBe(true);
+  });
+
   it('keeps active members above offline members and orders presence states consistently', () => {
     const members = [
       member('4', 'Zed', 'offline'),

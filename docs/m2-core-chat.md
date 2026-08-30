@@ -46,8 +46,11 @@ runtime scaling.
   reconciliation. History paging, edit, soft-delete, reactions, pins, read
   acknowledgements, typing events, and per-channel slow mode are all in place.
 - Bulk message soft deletion is permission-gated. Reaction removal works for
-  self and moderators, and pin listing/removal sends gateway updates through
-  the shared channel fanout.
+  self and moderators. Pins use the modern 50-item timestamp-paged resource,
+  enforce the 250-item cap and `PIN_MESSAGES`, create type-6 pin notices, write
+  guild audit actions 74/75, and send `CHANNEL_PINS_UPDATE` through the shared
+  channel fanout. Guild and DM authorities provide the same contract to remote
+  apps, websites, and bot workers.
 - Local relationships cover listing, friend request/accept/remove flows, and
   blocking. Direct-message privacy is recipient-controlled (`everyone`, shared
   guild, or friends), with blocks taking precedence.
@@ -122,9 +125,16 @@ runtime scaling.
   posted-date ordering, and list/gallery presentation. The parent policy and
   thread metadata remain plaintext.
 - Optional thread E2EE is content-only and future-only. An E2EE-required forum
-  commits the plaintext starter and immediately requires activation of the
-  child MLS group before replies; ordinary threads can be activated explicitly.
-  Bots fail closed until a verified bot-device MLS participant protocol exists.
+  commits only an owner-bound child shell, activates the child MLS group, and
+  then atomically claims a nonce-bound rich-v2 encrypted starter. A thread from
+  an encrypted parent message similarly keeps only the source reference while
+  using an independent child group; ordinary threads can be activated
+  explicitly.
+  Participant-mode bots use verified worker-owned MLS devices and signed
+  KeyPackages. A guild administrator must admit the app to the exact child
+  thread and an authorized client must commit that membership change before
+  the bot can read or write encrypted content; all incomplete states fail
+  closed without plaintext fallback.
 
 ## Validation
 
@@ -156,8 +166,10 @@ drift.
 
 ## Scope limits
 
-Stages, vanity invites, and MessagePack are outside the current scope. Native
-Android and iOS clients are implemented in `mobile/` and consume the same
-core-chat contracts. Federation behavior is documented in
+Vanity invites and MessagePack are outside the current scope. Stage channels,
+Stage instances, speaker/audience state, scheduled Stage events, bot controls,
+and their federated authority paths are implemented alongside ordinary voice
+channels. Native Android and iOS clients are implemented in `mobile/` and
+consume the same core-chat contracts. Federation behavior is documented in
 [m3-federation.md](m3-federation.md), and the MLS security boundary is
 documented in [e2ee.md](e2ee.md).

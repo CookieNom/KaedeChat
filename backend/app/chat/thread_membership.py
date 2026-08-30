@@ -10,6 +10,7 @@ from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import federation_channel_state, queue_guild_mutation
 from app.chat.payloads import channel_payload
 from app.core.settings import Settings
+from app.db.materialization import materialize_updated_at
 from app.db.models import Channel, Guild, ThreadMember, User
 
 
@@ -18,6 +19,8 @@ class RemovedThreadMembers:
     thread: Channel
     removed_refs: list[tuple[int, str]]
     rekeyed: bool
+    member_count: int
+    rendered_thread: dict[str, object] | None
 
 
 async def cleanup_guild_member_threads(
@@ -105,7 +108,19 @@ async def cleanup_guild_member_threads(
                 channel=thread,
                 snapshot_required=thread.type == 12 and index == len(removed_refs) - 1,
             )
-        removals.append(RemovedThreadMembers(thread, removed_refs, rekeyed))
+        rendered_thread: dict[str, object] | None = None
+        if rekeyed:
+            await materialize_updated_at(session, thread)
+            rendered_thread = channel_payload(thread)
+        removals.append(
+            RemovedThreadMembers(
+                thread,
+                removed_refs,
+                rekeyed,
+                int(thread.member_count or 0),
+                rendered_thread,
+            )
+        )
     return removals
 
 
@@ -117,11 +132,13 @@ async def publish_guild_thread_member_cleanup(
     topic = guild_topic(guild.origin_domain, guild.id)
     for removal in removals:
         if removal.rekeyed:
+            if removal.rendered_thread is None:
+                raise RuntimeError("rekeyed thread projection was not materialized")
             await publish_dispatch(
                 redis,
                 topic,
                 "THREAD_UPDATE",
-                channel_payload(removal.thread),
+                removal.rendered_thread,
             )
         await publish_dispatch(
             redis,
@@ -132,7 +149,7 @@ async def publish_guild_thread_member_cleanup(
                 "thread_domain": removal.thread.origin_domain,
                 "guild_id": str(guild.id),
                 "guild_domain": guild.origin_domain,
-                "member_count": min(50, int(removal.thread.member_count or 0)),
+                "member_count": min(50, removal.member_count),
                 "added_members": [],
                 "removed_member_ids": [str(item[0]) for item in removal.removed_refs],
                 "removed_member_refs": [

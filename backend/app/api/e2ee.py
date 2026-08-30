@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -24,6 +23,8 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.bots.e2ee import claim_bot_e2ee_key_packages
+from app.bots.installations import usable_guild_installation
 from app.chat.channel_access import (
     ChannelAccess,
     load_channel_access,
@@ -41,11 +42,14 @@ from app.chat.e2ee import (
     validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
 )
-from app.chat.e2ee_controls import apply_e2ee_control_metadata, room_policy_change_context
+from app.chat.e2ee_controls import (
+    apply_e2ee_control_metadata,
+    e2ee_control_record_payload,
+)
 from app.chat.e2ee_membership import (
-    e2ee_policy_destinations,
     pause_local_e2ee_for_device_change,
     publish_e2ee_policy_updates,
+    queue_e2ee_policy_federation,
     remote_e2ee_authorities_for_user,
 )
 from app.chat.events import publish_dispatch, user_topic
@@ -57,14 +61,26 @@ from app.chat.guild_revision import (
 from app.chat.payloads import channel_payload, message_payload
 from app.chat.permissions import get_permissions, require_permissions
 from app.chat.schemas import RequestModel
+from app.core.base64url import decode_base64url, encode_base64url
+from app.core.channel_types import is_message_capable_channel_type
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
+from app.db.bot_models import (
+    BotApplication,
+    BotDMGrant,
+    BotDMGrantConsent,
+    BotE2EEDevice,
+    BotE2EEParticipation,
+    BotInstallation,
+)
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Channel,
+    ChannelFollow,
     DMConversation,
     E2EEAccountVault,
     E2EEAccountVaultDigest,
@@ -73,10 +89,13 @@ from app.db.models import (
     E2EEKeyPackage,
     E2EEPackageClaimBatch,
     E2EERoomOperation,
+    FederatedChannelFollow,
     GuildMember,
     Message,
     MessageProjection,
     User,
+    WebhookE2EEDevice,
+    WebhookE2EEParticipation,
 )
 from app.federation.client import signed_request
 from app.federation.dm_storage import (
@@ -84,7 +103,11 @@ from app.federation.dm_storage import (
     dm_message_storage_delta,
     lock_federated_dm_authority,
 )
-from app.federation.events import build_envelope, queue_event
+from app.federation.events import (
+    build_envelope,
+    discard_superseded_latest_state_event,
+    queue_event,
+)
 from app.federation.network import FederationNetworkError, decode_federation_response_json
 from app.federation.replication import profile_from_user
 from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
@@ -103,28 +126,6 @@ MAX_ROOM_E2EE_DEVICES = 48
 DEVICE_CAPABILITIES = frozenset({"e2ee-mls/1", "e2ee-media/1"})
 ROOM_OPERATION_TTL = timedelta(minutes=30)
 MAX_ACCOUNT_VAULT_CIPHERTEXT_BYTES = 32 * 1024 * 1024 + 16
-
-
-def encode_base64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def decode_base64url(value: str, *, size: int | None = None, maximum: int | None = None) -> bytes:
-    try:
-        decoded = base64.b64decode(
-            value + "=" * (-len(value) % 4),
-            altchars=b"-_",
-            validate=True,
-        )
-    except (ValueError, UnicodeEncodeError) as exc:
-        raise ValueError("value is not canonical URL-safe base64") from exc
-    if encode_base64url(decoded) != value:
-        raise ValueError("value is not canonical URL-safe base64")
-    if size is not None and len(decoded) != size:
-        raise ValueError(f"value must decode to exactly {size} bytes")
-    if maximum is not None and len(decoded) > maximum:
-        raise ValueError(f"value must decode to at most {maximum} bytes")
-    return decoded
 
 
 class DeviceChallengeRequest(RequestModel):
@@ -218,7 +219,9 @@ class KeyPackageUpload(RequestModel):
 
 class RoomProposalRequest(RequestModel):
     operation_id: str = Field(pattern=r"^keo_[A-Za-z0-9_-]{43}$")
-    sender_device_id: str = Field(pattern=r"^ked_[A-Za-z0-9_-]{43}$")
+    # Automation routes authenticate `kbe_`/`kwe_` devices separately; the
+    # public human routes below still prove exact `ked_` ownership.
+    sender_device_id: str = Field(pattern=r"^(?:ked|kbe|kwe)_[A-Za-z0-9_-]{43}$")
 
 
 class RoomActivationRequest(RoomProposalRequest):
@@ -695,7 +698,13 @@ async def queue_device_change_updates(
     paused_channels: list[Channel],
 ) -> set[str]:
     destinations = await remote_e2ee_authorities_for_user(session, settings, user)
-    if destinations:
+    for destination in sorted(destinations):
+        await discard_superseded_latest_state_event(
+            session,
+            destination=destination,
+            event_type="e2ee.device-list.changed",
+            actor_ref=(user.id, user.origin_domain),
+        )
         envelope = await build_envelope(
             session,
             settings,
@@ -703,26 +712,14 @@ async def queue_device_change_updates(
             user,
             {"profile": profile_from_user(user)},
         )
-        for destination in destinations:
-            await queue_event(session, settings, destination, envelope)
+        await queue_event(session, settings, destination, envelope)
     for channel in paused_channels:
-        channel_destinations = await e2ee_policy_destinations(session, settings, channel)
-        if not channel_destinations:
-            continue
-        envelope = await build_envelope(
+        channel_destinations = await queue_e2ee_policy_federation(
             session,
             settings,
-            "e2ee.room-policy.changed",
             user,
-            {
-                "channel_id": str(channel.id),
-                "channel_domain": channel.origin_domain,
-                "encryption_policy": channel_encryption_policy_payload(channel),
-            },
-            context=room_policy_change_context(channel, user),
+            channel,
         )
-        for destination in channel_destinations:
-            await queue_event(session, settings, destination, envelope)
         destinations.update(channel_destinations)
     return destinations
 
@@ -1586,25 +1583,9 @@ async def room_encryption_control_log(
     )
     controls: list[dict[str, object]] = []
     for message in candidates[:limit]:
-        envelope = message.envelope if isinstance(message.envelope, dict) else None
-        if envelope is None or envelope.get("operation") not in {"welcome", "commit"}:
-            continue
-        controls.append(
-            {
-                "id": str(message.id),
-                "origin_domain": message.origin_domain,
-                "channel_id": str(message.channel_id),
-                "channel_domain": message.channel_domain,
-                "author_id": str(message.author_id),
-                "author_domain": message.author_domain,
-                "e2ee": envelope,
-                "encryption_policy_generation": str(message.policy_generation),
-                "encryption_epoch": str(message.epoch),
-                "apply": message.apply_mode != "audit",
-                "room_operation_id": message.room_operation_id,
-                "room_operation_domain": message.room_operation_domain,
-            }
-        )
+        rendered = e2ee_control_record_payload(message)
+        if rendered is not None:
+            controls.append(rendered)
     next_after = None
     if len(candidates) > limit:
         cursor = candidates[limit - 1]
@@ -1649,6 +1630,7 @@ async def proxy_room_e2ee_request(
             },
             request_timeout=15,
             max_response_bytes=8 * 1024 * 1024,
+            guild_context=getattr(channel, "guild_id", None) is not None,
         )
     except FederationNetworkError as exc:
         raise HTTPException(
@@ -1763,6 +1745,9 @@ def validate_remote_room_commit_response(
             decode_base64url(cast(str, rendered_group_id), size=32)
         except ValueError:
             valid_group = False
+    expected_epoch = (
+        1 if kind == "activate" else max(1, int(getattr(channel, "encryption_epoch", 0) or 0) + 1)
+    )
     if (
         kind not in {"activate", "rekey"}
         or operation_status.get("operation_id") != operation_id
@@ -1789,7 +1774,7 @@ def validate_remote_room_commit_response(
         or rendered.get("encryption_policy_generation") != policy_generation
         or rendered.get("encryption_protocol") != E2EE_PROTOCOL_MLS_10
         or rendered.get("encryption_suite") != E2EE_SUITE_MLS_128
-        or rendered.get("encryption_epoch") != "1"
+        or rendered.get("encryption_epoch") != str(expected_epoch)
         or not valid_group
         or not valid_controls
     ):
@@ -1804,9 +1789,73 @@ async def room_participants(
     redis: Redis,
     access: ChannelAccess,
 ) -> list[User]:
-    if access.guild is None:
-        return access.participants
-    members = list(
+    guild = getattr(access, "guild", None)
+    if guild is None:
+        human_participants = [
+            participant for participant in access.participants if participant.account_type != "bot"
+        ]
+        human_refs = {
+            (participant.id, participant.origin_domain) for participant in human_participants
+        }
+        grant_rows = list(
+            (
+                await session.execute(
+                    select(BotDMGrant, User)
+                    .join(
+                        BotApplication,
+                        (BotApplication.id == BotDMGrant.application_id)
+                        & (BotApplication.origin_domain == BotDMGrant.application_domain),
+                    )
+                    .join(
+                        User,
+                        (User.id == BotApplication.bot_user_id)
+                        & (User.origin_domain == BotApplication.bot_user_domain),
+                    )
+                    .join(
+                        BotE2EEParticipation,
+                        BotE2EEParticipation.dm_grant_id == BotDMGrant.id,
+                    )
+                    .where(
+                        BotDMGrant.conversation_id == access.channel.id,
+                        BotDMGrant.conversation_domain == access.channel.origin_domain,
+                        BotDMGrant.consent_state == "active",
+                        BotDMGrant.revoked_at.is_(None),
+                        BotApplication.status == "active",
+                        User.account_type == "bot",
+                        User.disabled_at.is_(None),
+                        BotE2EEParticipation.status.in_(("pending", "active")),
+                    )
+                    .distinct()
+                )
+            ).tuples()
+        )
+        bots: list[User] = []
+        for grant, bot in grant_rows:
+            consent_refs = set(
+                (
+                    await session.execute(
+                        select(
+                            BotDMGrantConsent.user_id,
+                            BotDMGrantConsent.user_domain,
+                        ).where(
+                            BotDMGrantConsent.grant_id == grant.id,
+                            BotDMGrantConsent.consent_generation == grant.consent_generation,
+                            BotDMGrantConsent.status == "active",
+                            BotDMGrantConsent.revoked_at.is_(None),
+                        )
+                    )
+                ).tuples()
+            )
+            if human_refs <= consent_refs:
+                bots.append(bot)
+        participants = sorted(
+            {(item.id, item.origin_domain): item for item in [*human_participants, *bots]}.values(),
+            key=lambda participant: (participant.origin_domain, participant.id),
+        )
+        if len(participants) > MAX_ROOM_E2EE_MEMBERS:
+            raise HTTPException(status_code=409, detail={"code": "E2EE_ROOM_MEMBER_LIMIT"})
+        return participants
+    human_members = list(
         await session.scalars(
             select(User)
             .join(
@@ -1814,13 +1863,50 @@ async def room_participants(
                 (GuildMember.user_id == User.id) & (GuildMember.user_domain == User.origin_domain),
             )
             .where(
-                GuildMember.guild_id == access.guild.id,
-                GuildMember.guild_domain == access.guild.origin_domain,
+                GuildMember.guild_id == guild.id,
+                GuildMember.guild_domain == guild.origin_domain,
                 User.account_type != "bot",
             )
             .order_by(User.origin_domain, User.id)
             .limit(MAX_ROOM_E2EE_MEMBERS + 1)
         )
+    )
+    bot_members = list(
+        await session.scalars(
+            select(User)
+            .join(
+                GuildMember,
+                (GuildMember.user_id == User.id) & (GuildMember.user_domain == User.origin_domain),
+            )
+            .join(
+                BotInstallation,
+                (BotInstallation.bot_user_id == User.id)
+                & (BotInstallation.bot_user_domain == User.origin_domain)
+                & (BotInstallation.guild_id == GuildMember.guild_id)
+                & (BotInstallation.guild_domain == GuildMember.guild_domain),
+            )
+            .join(
+                BotE2EEParticipation,
+                BotE2EEParticipation.installation_id == BotInstallation.id,
+            )
+            .where(
+                GuildMember.guild_id == guild.id,
+                GuildMember.guild_domain == guild.origin_domain,
+                User.account_type == "bot",
+                usable_guild_installation(),
+                BotInstallation.e2ee_mode == "participant",
+                BotE2EEParticipation.channel_id == access.channel.id,
+                BotE2EEParticipation.channel_domain == access.channel.origin_domain,
+                BotE2EEParticipation.status.in_(("pending", "active")),
+            )
+            .distinct()
+            .order_by(User.origin_domain, User.id)
+            .limit(MAX_ROOM_E2EE_MEMBERS + 1)
+        )
+    )
+    members = sorted(
+        [*human_members, *bot_members],
+        key=lambda member: (member.origin_domain, member.id),
     )
     if len(members) > MAX_ROOM_E2EE_MEMBERS:
         raise HTTPException(status_code=409, detail={"code": "E2EE_ROOM_MEMBER_LIMIT"})
@@ -1829,7 +1915,7 @@ async def room_participants(
         permissions = await get_permissions(
             session,
             redis,
-            access.guild,
+            guild,
             member,
             channel=access.channel,
         )
@@ -2049,7 +2135,10 @@ def validate_claimed_package(
     ):
         raise ValueError("remote key package belongs to the wrong user")
     device_id = raw.get("device_id")
-    if not isinstance(device_id, str) or not device_id.startswith("ked_") or len(device_id) != 47:
+    if (
+        not isinstance(device_id, str)
+        or re.fullmatch(r"(?:ked|kbe|kwe)_[A-Za-z0-9_-]{43}", device_id) is None
+    ):
         raise ValueError("remote key package device ID is invalid")
     identity_key = raw.get("identity_key")
     credential = raw.get("credential")
@@ -2060,6 +2149,191 @@ def validate_claimed_package(
     decode_base64url(str(credential), maximum=16_384)
     decode_base64url(str(key_package), maximum=32_768)
     return {key: str(value) for key, value in raw.items()}
+
+
+async def bot_participant_device_ids(
+    session: AsyncSession,
+    channel: Channel,
+    participant: User,
+) -> tuple[BotApplication, list[str]]:
+    if channel.guild_id is None:
+        application = await session.scalar(
+            select(BotApplication)
+            .join(
+                BotDMGrant,
+                (BotDMGrant.application_id == BotApplication.id)
+                & (BotDMGrant.application_domain == BotApplication.origin_domain),
+            )
+            .where(
+                BotApplication.bot_user_id == participant.id,
+                BotApplication.bot_user_domain == participant.origin_domain,
+                BotApplication.status == "active",
+                BotDMGrant.conversation_id == channel.id,
+                BotDMGrant.conversation_domain == channel.origin_domain,
+                BotDMGrant.consent_state == "active",
+                BotDMGrant.revoked_at.is_(None),
+            )
+        )
+        if application is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "E2EE_PARTICIPANT_DEVICE_MISSING"},
+            )
+        protocol_ids = list(
+            await session.scalars(
+                select(BotE2EEDevice.protocol_id)
+                .join(
+                    BotE2EEParticipation,
+                    BotE2EEParticipation.device_id == BotE2EEDevice.id,
+                )
+                .join(BotDMGrant, BotDMGrant.id == BotE2EEParticipation.dm_grant_id)
+                .where(
+                    BotDMGrant.application_id == application.id,
+                    BotDMGrant.application_domain == application.origin_domain,
+                    BotDMGrant.conversation_id == channel.id,
+                    BotDMGrant.conversation_domain == channel.origin_domain,
+                    BotDMGrant.consent_state == "active",
+                    BotDMGrant.revoked_at.is_(None),
+                    BotE2EEParticipation.channel_id == channel.id,
+                    BotE2EEParticipation.channel_domain == channel.origin_domain,
+                    BotE2EEParticipation.status.in_(("pending", "active")),
+                    BotE2EEDevice.trust_state == "trusted",
+                    BotE2EEDevice.revoked_at.is_(None),
+                )
+                .order_by(BotE2EEDevice.protocol_id)
+            )
+        )
+        if not protocol_ids:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "E2EE_PARTICIPANT_DEVICE_MISSING"},
+            )
+        return application, protocol_ids
+    row = (
+        await session.execute(
+            select(BotApplication, BotInstallation)
+            .join(
+                BotInstallation,
+                (BotInstallation.application_id == BotApplication.id)
+                & (BotInstallation.application_domain == BotApplication.origin_domain),
+            )
+            .where(
+                BotApplication.bot_user_id == participant.id,
+                BotApplication.bot_user_domain == participant.origin_domain,
+                BotApplication.status == "active",
+                BotInstallation.guild_id == channel.guild_id,
+                BotInstallation.guild_domain == channel.guild_domain,
+                BotInstallation.bot_user_id == participant.id,
+                BotInstallation.bot_user_domain == participant.origin_domain,
+                usable_guild_installation(),
+                BotInstallation.e2ee_mode == "participant",
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "E2EE_PARTICIPANT_DEVICE_MISSING"},
+        )
+    application, installation = row
+    protocol_ids = list(
+        await session.scalars(
+            select(BotE2EEDevice.protocol_id)
+            .join(
+                BotE2EEParticipation,
+                BotE2EEParticipation.device_id == BotE2EEDevice.id,
+            )
+            .where(
+                BotE2EEParticipation.installation_id == installation.id,
+                BotE2EEParticipation.channel_id == channel.id,
+                BotE2EEParticipation.channel_domain == channel.origin_domain,
+                BotE2EEParticipation.status.in_(("pending", "active")),
+                BotE2EEDevice.trust_state == "trusted",
+                BotE2EEDevice.revoked_at.is_(None),
+            )
+            .order_by(BotE2EEDevice.protocol_id)
+        )
+    )
+    if not protocol_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "E2EE_PARTICIPANT_DEVICE_MISSING"},
+        )
+    return application, protocol_ids
+
+
+async def claim_local_bot_room_key_packages(
+    session: AsyncSession,
+    *,
+    application: BotApplication,
+    target: User,
+    protocol_ids: list[str],
+    operation_id: str,
+    operation_domain: str,
+    channel_ref: tuple[int, str],
+    claimant_ref: tuple[int, str],
+    max_devices: int,
+) -> list[dict[str, str]]:
+    if len(protocol_ids) > max_devices:
+        raise HTTPException(status_code=409, detail={"code": "E2EE_ROOM_DEVICE_LIMIT"})
+    request_digest = protocol_request_digest(
+        "kaede-bot-e2ee-package-claim-v1",
+        {
+            "operation_id": operation_id,
+            "operation_domain": operation_domain,
+            "channel_id": str(channel_ref[0]),
+            "channel_domain": channel_ref[1],
+            "claimant_id": str(claimant_ref[0]),
+            "claimant_domain": claimant_ref[1],
+            "target_id": str(target.id),
+            "target_domain": target.origin_domain,
+            "bot_device_ids": protocol_ids,
+            "max_devices": max_devices,
+        },
+    )
+    batch = await session.get(
+        E2EEPackageClaimBatch,
+        (operation_id, operation_domain, target.id, target.origin_domain),
+    )
+    if batch is not None:
+        if not secrets.compare_digest(batch.request_digest, request_digest):
+            raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_CONFLICT"})
+        stored = batch.response.get("key_packages")
+        if not isinstance(stored, list):
+            raise RuntimeError("persisted bot E2EE package claim is invalid")
+        try:
+            return [
+                validate_claimed_package(item, expected_user=(target.id, target.origin_domain))
+                for item in stored
+            ]
+        except ValueError as exc:
+            raise RuntimeError("persisted bot E2EE package claim is invalid") from exc
+    claimed = await claim_bot_e2ee_key_packages(
+        session,
+        application=application,
+        target=target,
+        protocol_ids=protocol_ids,
+        operation_id=operation_id,
+        operation_domain=operation_domain,
+    )
+    session.add(
+        E2EEPackageClaimBatch(
+            operation_id=operation_id,
+            operation_domain=operation_domain,
+            target_id=target.id,
+            target_domain=target.origin_domain,
+            target_is_local=True,
+            channel_id=channel_ref[0],
+            channel_domain=channel_ref[1],
+            claimant_id=claimant_ref[0],
+            claimant_domain=claimant_ref[1],
+            excluded_device_id=None,
+            max_devices=max_devices,
+            request_digest=request_digest,
+            response={"key_packages": claimed},
+        )
+    )
+    return claimed
 
 
 async def claim_room_key_packages(
@@ -2073,18 +2347,53 @@ async def claim_room_key_packages(
     operation_domain: str,
     excluded_device_id: str,
 ) -> list[dict[str, str]]:
-    local = [
-        participant for participant in participants if participant.origin_domain == settings.domain
+    local_humans = [
+        participant
+        for participant in participants
+        if participant.origin_domain == settings.domain and participant.account_type != "bot"
     ]
     claimed = await claim_local_room_key_packages(
         session,
-        local,
+        local_humans,
         operation_id=operation_id,
         operation_domain=operation_domain,
         channel_ref=(channel.id, channel.origin_domain),
         claimant_ref=(claimant.id, claimant.origin_domain),
         excluded_device_id=excluded_device_id,
         max_devices=MAX_ROOM_E2EE_DEVICES,
+    )
+    for participant in participants:
+        if participant.origin_domain != settings.domain or participant.account_type != "bot":
+            continue
+        application, protocol_ids = await bot_participant_device_ids(
+            session,
+            channel,
+            participant,
+        )
+        claimed.extend(
+            await claim_local_bot_room_key_packages(
+                session,
+                application=application,
+                target=participant,
+                protocol_ids=protocol_ids,
+                operation_id=operation_id,
+                operation_domain=operation_domain,
+                channel_ref=(channel.id, channel.origin_domain),
+                claimant_ref=(claimant.id, claimant.origin_domain),
+                max_devices=MAX_ROOM_E2EE_DEVICES - len(claimed),
+            )
+        )
+    from app.api.webhook_e2ee import claim_webhook_e2ee_key_packages
+
+    claimed.extend(
+        await claim_webhook_e2ee_key_packages(
+            session,
+            channel,
+            operation_id=operation_id,
+            operation_domain=operation_domain,
+            max_devices=MAX_ROOM_E2EE_DEVICES - len(claimed),
+            excluded_device_id=excluded_device_id,
+        )
     )
     # The authority operation already exists durably. Commit local claims
     # before crossing the network so a crash can resume every home with the
@@ -2095,6 +2404,13 @@ async def claim_room_key_packages(
             continue
         if len(claimed) >= MAX_ROOM_E2EE_DEVICES:
             raise HTTPException(status_code=409, detail={"code": "E2EE_ROOM_DEVICE_LIMIT"})
+        bot_device_ids: list[str] = []
+        if participant.account_type == "bot":
+            _, bot_device_ids = await bot_participant_device_ids(
+                session,
+                channel,
+                participant,
+            )
         try:
             response = await signed_request(
                 session,
@@ -2116,10 +2432,12 @@ async def claim_room_key_packages(
                         if participant.origin_domain == claimant.origin_domain
                         else None
                     ),
+                    "bot_device_ids": bot_device_ids,
                     "max_devices": MAX_ROOM_E2EE_DEVICES - len(claimed),
                 },
                 request_timeout=8,
                 max_response_bytes=1024 * 1024,
+                guild_context=getattr(channel, "guild_id", None) is not None,
             )
         except FederationNetworkError as exc:
             raise HTTPException(
@@ -2158,6 +2476,11 @@ async def claim_room_key_packages(
                 status_code=502,
                 detail={"code": "E2EE_PARTICIPANT_HOME_REJECTED"},
             ) from exc
+        if bot_device_ids and {item["device_id"] for item in remote} != set(bot_device_ids):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "E2EE_PARTICIPANT_HOME_REJECTED"},
+            )
         if not remote:
             raise HTTPException(status_code=409, detail={"code": "E2EE_PARTICIPANT_DEVICE_MISSING"})
         claimed.extend(remote)
@@ -2172,20 +2495,11 @@ async def publish_policy_update(
     actor: User,
 ) -> None:
     if access.guild is not None:
-        event_actor = actor
-        if actor.origin_domain != settings.domain:
-            owner_actor = await session.get(
-                User,
-                (access.guild.owner_id, access.guild.owner_domain),
-            )
-            if owner_actor is None or not owner_actor.is_local:
-                raise RuntimeError("local guild owner cannot sign the E2EE policy update")
-            event_actor = owner_actor
         await queue_guild_mutation(
             session,
             settings,
             access.guild,
-            event_actor,
+            actor,
             "guild.channel.update",
             {"channel": federation_channel_state(access.channel)},
             channel=access.channel,
@@ -2263,14 +2577,50 @@ async def _propose_room_operation(
     session: AsyncSession,
     redis: Redis,
     settings: Settings,
+    *,
+    automation_authorized: bool = False,
 ) -> dict[str, object]:
     access = await lock_local_channel_mutation(session, settings, access)
-    await require_room_policy_authority(session, redis, settings, access, auth.user)
-    if auth.user.origin_domain == settings.domain:
+    if not automation_authorized:
+        await require_room_policy_authority(session, redis, settings, access, auth.user)
+    if auth.user.origin_domain == settings.domain and not automation_authorized:
         await require_active_sender_device(session, auth.user, payload.sender_device_id)
     channel = access.channel
-    if channel.type not in {0, 1, 2, 5, 10, 11, 12}:
+    if not is_message_capable_channel_type(
+        channel.type,
+        guild_channel=getattr(access, "guild", None) is not None,
+    ):
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
+    if kind == "activate" and channel.type == 5:
+        # Announcement publication fans one server-readable snapshot into
+        # independently keyed rooms. Without an explicit participant bridge
+        # there is nobody authorized to decrypt and re-encrypt that snapshot.
+        raise HTTPException(status_code=409, detail={"code": "E2EE_CROSSPOST_UNSUPPORTED"})
+    if kind == "activate" and channel.type == 0:
+        local_follow = await session.scalar(
+            select(ChannelFollow.id)
+            .where(
+                ChannelFollow.target_channel_id == channel.id,
+                ChannelFollow.target_channel_domain == channel.origin_domain,
+                ChannelFollow.active.is_(True),
+            )
+            .limit(1)
+        )
+        federated_follow = await session.scalar(
+            select(FederatedChannelFollow.id)
+            .where(
+                FederatedChannelFollow.target_channel_id == channel.id,
+                FederatedChannelFollow.target_channel_domain == channel.origin_domain,
+                FederatedChannelFollow.local_role == "target",
+                FederatedChannelFollow.active.is_(True),
+            )
+            .limit(1)
+        )
+        if local_follow is not None or federated_follow is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "E2EE_CROSSPOST_UNSUPPORTED"},
+            )
     request_digest = _operation_request_digest(kind, channel, auth.user, payload)
     operation = await session.scalar(
         select(E2EERoomOperation)
@@ -2466,6 +2816,30 @@ async def propose_room_encryption(
     )
 
 
+async def propose_automation_room_encryption(
+    access: ChannelAccess,
+    payload: RoomProposalRequest,
+    auth: AuthenticatedUser,
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+) -> dict[str, object]:
+    """Prepare a locally-authorized MLS group for an exact automation device."""
+
+    if not settings.e2ee_activation_enabled:
+        raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
+    return await _propose_room_operation(
+        "activate",
+        access,
+        payload,
+        auth,
+        session,
+        redis,
+        settings,
+        automation_authorized=True,
+    )
+
+
 @router.post("/channels/{channel_id}/rekey/propose")
 async def propose_room_rekey(
     channel_id: EntityRef,
@@ -2497,15 +2871,22 @@ async def _commit_room_operation(
     settings: Settings,
     *,
     actor_home_attested: bool,
+    automation_access: ChannelAccess | None = None,
 ) -> dict[str, object]:
-    access = await load_channel_access(session, settings, auth.user, channel_id)
-    remote_conversation = await require_room_policy_authority(
-        session,
-        redis,
-        settings,
-        access,
-        auth.user,
-        allow_remote_authority=True,
+    access = automation_access or await load_channel_access(
+        session, settings, auth.user, channel_id
+    )
+    remote_conversation = (
+        None
+        if automation_access is not None
+        else await require_room_policy_authority(
+            session,
+            redis,
+            settings,
+            access,
+            auth.user,
+            allow_remote_authority=True,
+        )
     )
     authority = room_authority_domain(settings, access, remote_conversation)
     if authority != settings.domain:
@@ -2554,23 +2935,28 @@ async def _commit_room_operation(
     # A local actor's durable User row is the vault-lease fencing point. Take
     # it before the channel lock and retain both locks through the operation
     # commit, so a reset/vault writer and activation have one total order.
-    if auth.user.origin_domain == settings.domain:
-        await require_active_sender_device(session, auth.user, payload.sender_device_id)
-        await require_prepared_account_vault(
-            session,
-            redis,
-            auth.user,
-            lease_token=payload.vault_lease_token,
-            revision=payload.prepared_vault_revision,
-            digest=payload.prepared_vault_digest,
-        )
-    elif not actor_home_attested:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "E2EE_ACCOUNT_VAULT_ATTESTATION_REQUIRED"},
-        )
+    if automation_access is None:
+        if auth.user.origin_domain == settings.domain:
+            await require_active_sender_device(session, auth.user, payload.sender_device_id)
+            await require_prepared_account_vault(
+                session,
+                redis,
+                auth.user,
+                lease_token=payload.vault_lease_token,
+                revision=payload.prepared_vault_revision,
+                digest=payload.prepared_vault_digest,
+            )
+        elif not actor_home_attested:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "E2EE_ACCOUNT_VAULT_ATTESTATION_REQUIRED"},
+            )
     access = await lock_local_channel_mutation(session, settings, access)
-    conversation = await require_room_policy_authority(session, redis, settings, access, auth.user)
+    conversation = (
+        None
+        if automation_access is not None
+        else await require_room_policy_authority(session, redis, settings, access, auth.user)
+    )
     channel = access.channel
     operation = await session.scalar(
         select(E2EERoomOperation)
@@ -2598,10 +2984,13 @@ async def _commit_room_operation(
             operation.status = "failed"
             await session.commit()
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_EXPIRED"})
+    expected_epoch = (
+        1 if kind == "activate" else max(1, int(getattr(channel, "encryption_epoch", 0) or 0) + 1)
+    )
     if (
         operation.policy_generation != int(payload.policy_generation)
         or operation.group_id != payload.group_id
-        or int(payload.epoch) != 1
+        or int(payload.epoch) != expected_epoch
     ):
         raise HTTPException(status_code=409, detail={"code": "E2EE_POLICY_CONTEXT_MISMATCH"})
     if kind == "activate":
@@ -2620,6 +3009,60 @@ async def _commit_room_operation(
         raise HTTPException(status_code=409, detail={"code": "E2EE_POLICY_CONTEXT_MISMATCH"})
     participants = await room_participants(session, redis, access)
     if _operation_participant_refs(participants) != operation.participant_refs:
+        operation.status = "failed"
+        await session.commit()
+        raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
+    current_bot_devices = set(
+        await session.scalars(
+            select(BotE2EEDevice.protocol_id)
+            .join(
+                BotE2EEParticipation,
+                BotE2EEParticipation.device_id == BotE2EEDevice.id,
+            )
+            .where(
+                BotE2EEParticipation.channel_id == channel.id,
+                BotE2EEParticipation.channel_domain == channel.origin_domain,
+                BotE2EEParticipation.status.in_(("pending", "active")),
+                BotE2EEDevice.trust_state == "trusted",
+                BotE2EEDevice.revoked_at.is_(None),
+            )
+        )
+    )
+    prepared_bot_devices = {
+        str(item.get("device_id"))
+        for item in operation.key_packages
+        if isinstance(item, dict) and str(item.get("device_id", "")).startswith("kbe_")
+    }
+    if current_bot_devices != prepared_bot_devices:
+        operation.status = "failed"
+        await session.commit()
+        raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
+    current_webhook_devices = set(
+        await session.scalars(
+            select(WebhookE2EEDevice.protocol_id)
+            .join(
+                WebhookE2EEParticipation,
+                WebhookE2EEParticipation.device_id == WebhookE2EEDevice.id,
+            )
+            .where(
+                WebhookE2EEParticipation.channel_id == channel.id,
+                WebhookE2EEParticipation.channel_domain == channel.origin_domain,
+                WebhookE2EEParticipation.status.in_(("pending", "active")),
+                WebhookE2EEDevice.trust_state == "trusted",
+                WebhookE2EEDevice.revoked_at.is_(None),
+            )
+        )
+    )
+    prepared_webhook_devices = {
+        str(item.get("device_id"))
+        for item in operation.key_packages
+        if isinstance(item, dict) and str(item.get("device_id", "")).startswith("kwe_")
+    }
+    # The MLS committer is already a member of its newly-created group and
+    # therefore has no KeyPackage in the add-members proposal.
+    if payload.sender_device_id.startswith("kwe_"):
+        prepared_webhook_devices.add(payload.sender_device_id)
+    if current_webhook_devices != prepared_webhook_devices:
         operation.status = "failed"
         await session.commit()
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
@@ -2645,9 +3088,46 @@ async def _commit_room_operation(
     channel.encryption_suite = E2EE_SUITE_MLS_128
     channel.encryption_policy_generation = operation.policy_generation
     channel.encryption_group_id = operation.group_id
-    channel.encryption_epoch = 1
+    channel.encryption_epoch = expected_epoch
     if kind == "activate":
         channel.encryption_activated_at = datetime.now(UTC)
+    current_participations = list(
+        await session.scalars(
+            select(BotE2EEParticipation)
+            .join(BotE2EEDevice, BotE2EEDevice.id == BotE2EEParticipation.device_id)
+            .where(
+                BotE2EEParticipation.channel_id == channel.id,
+                BotE2EEParticipation.channel_domain == channel.origin_domain,
+                BotE2EEParticipation.status.in_(("pending", "active")),
+                BotE2EEDevice.protocol_id.in_(prepared_bot_devices),
+            )
+            .with_for_update()
+        )
+    )
+    for bot_participation in current_participations:
+        bot_participation.status = "active"
+        bot_participation.joined_epoch = expected_epoch
+        bot_participation.revoked_at = None
+    current_webhook_participations = list(
+        await session.scalars(
+            select(WebhookE2EEParticipation)
+            .join(
+                WebhookE2EEDevice,
+                WebhookE2EEDevice.id == WebhookE2EEParticipation.device_id,
+            )
+            .where(
+                WebhookE2EEParticipation.channel_id == channel.id,
+                WebhookE2EEParticipation.channel_domain == channel.origin_domain,
+                WebhookE2EEParticipation.status.in_(("pending", "active")),
+                WebhookE2EEDevice.protocol_id.in_(prepared_webhook_devices),
+            )
+            .with_for_update()
+        )
+    )
+    for webhook_participation in current_webhook_participations:
+        webhook_participation.status = "active"
+        webhook_participation.joined_epoch = expected_epoch
+        webhook_participation.revoked_at = None
     controls: list[tuple[Message, dict[str, object]]] = []
     for control_operation, ciphertext, apply in (
         ("welcome", payload.welcome, True),
@@ -2660,7 +3140,7 @@ async def _commit_room_operation(
                 "suite": E2EE_SUITE_MLS_128,
                 "group_id": operation.group_id,
                 "policy_generation": str(operation.policy_generation),
-                "epoch": "1",
+                "epoch": str(expected_epoch),
                 "sender_device_id": payload.sender_device_id,
                 "operation": control_operation,
                 "ciphertext": ciphertext,
@@ -2695,7 +3175,7 @@ async def _commit_room_operation(
             content=None,
             e2ee=control_envelope,
             encryption_policy_generation=operation.policy_generation,
-            encryption_epoch=1,
+            encryption_epoch=expected_epoch,
             message_type=7,
             flags=4,
             mention_user_refs=[],
@@ -2724,23 +3204,15 @@ async def _commit_room_operation(
     await publish_policy_update(session, redis, settings, access, auth.user)
     rendered_messages = [message_payload(message, auth.user, []) for message, _ in controls]
     if access.guild is not None:
-        event_actor = auth.user
         event_type = "guild.message.create"
         if auth.user.origin_domain != settings.domain:
-            owner_actor = await session.get(
-                User,
-                (access.guild.owner_id, access.guild.owner_domain),
-            )
-            if owner_actor is None or not owner_actor.is_local:
-                raise RuntimeError("local guild owner cannot sign the E2EE control")
-            event_actor = owner_actor
             event_type = "guild.message.committed"
         for rendered_message, (_, metadata) in zip(rendered_messages, controls, strict=True):
             await queue_guild_mutation(
                 session,
                 settings,
                 access.guild,
-                event_actor,
+                auth.user,
                 event_type,
                 {
                     "message": rendered_message,
@@ -2784,6 +3256,7 @@ async def _commit_room_operation(
             )
             for destination in destinations:
                 await queue_event(session, settings, destination, federation_envelope)
+    await materialize_updated_at(session, channel)
     rendered_channel = channel_payload(channel)
     committed_response: dict[str, object] = {
         **rendered_channel,
@@ -2834,6 +3307,33 @@ async def activate_room_encryption(
         snowflake,
         settings,
         actor_home_attested=False,
+    )
+
+
+async def activate_automation_room_encryption(
+    access: ChannelAccess,
+    payload: RoomActivationRequest,
+    auth: AuthenticatedUser,
+    session: AsyncSession,
+    redis: Redis,
+    snowflake: SnowflakeGenerator,
+    settings: Settings,
+) -> dict[str, object]:
+    """Commit a locally-authorized MLS group without a human account vault."""
+
+    if not settings.e2ee_activation_enabled:
+        raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
+    return await _commit_room_operation(
+        "activate",
+        EntityRef(f"{access.channel.id}@{access.channel.origin_domain}"),
+        payload,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+        actor_home_attested=False,
+        automation_access=access,
     )
 
 

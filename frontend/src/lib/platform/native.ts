@@ -41,6 +41,7 @@ export interface NativePreferences {
   input_mode: 'push_to_talk' | 'voice_activity';
   vad_threshold: number;
   push_to_talk_hotkey: string | null;
+  priority_push_to_talk_hotkey: string | null;
   noise_suppression: 'off' | 'standard' | 'voice_isolation';
   echo_cancellation: boolean;
   automatic_gain_control: boolean;
@@ -73,6 +74,21 @@ export interface NativeVoiceStatus {
   muted?: boolean;
   deafened?: boolean;
   input_level?: number;
+  priority_speakers?: string[];
+}
+
+export function nativePrioritySpeakerIdentities(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(
+    value.filter(
+      (identity): identity is string =>
+        typeof identity === 'string' &&
+        identity.length > 2 &&
+        identity.length <= 320 &&
+        identity.includes('@') &&
+        !/\s/u.test(identity)
+    )
+  );
 }
 
 export interface NativeSessionBootstrap {
@@ -153,7 +169,7 @@ function safeNativeRoute(value: string): string | null {
     const url = new URL(value, 'https://desktop.kaede.invalid');
     if (url.origin !== 'https://desktop.kaede.invalid') return null;
     if (
-      !/^\/(?:home(?:\/|$)|g\/|settings(?:\/|$)|developers(?:\/|$)|administration(?:\/|$)|applications\/|invite\/)/.test(
+      !/^\/(?:home(?:\/|$)|g\/|settings(?:\/|$)|developers(?:\/|$)|administration(?:\/|$)|application-directory(?:\/|$)|applications\/|invite\/)/.test(
         url.pathname
       )
     )

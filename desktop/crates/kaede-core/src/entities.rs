@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use kaede_protocol::{Domain, EntityRef, PermissionBits, ResourceVersion, Snowflake};
 use serde::{Deserialize, Serialize};
@@ -102,8 +104,16 @@ pub enum ChannelKind {
     Text,
     DirectMessage,
     Voice,
+    GroupDirectMessage,
     Category,
     Announcement,
+    AnnouncementThread,
+    PublicThread,
+    PrivateThread,
+    Stage,
+    GuildDirectory,
+    Forum,
+    Media,
     Tracker,
     Unknown(u8),
 }
@@ -114,11 +124,26 @@ impl From<u8> for ChannelKind {
             0 => Self::Text,
             1 => Self::DirectMessage,
             2 => Self::Voice,
+            3 => Self::GroupDirectMessage,
             4 => Self::Category,
             5 => Self::Announcement,
+            10 => Self::AnnouncementThread,
+            11 => Self::PublicThread,
+            12 => Self::PrivateThread,
+            13 => Self::Stage,
+            14 => Self::GuildDirectory,
+            15 => Self::Forum,
+            16 => Self::Media,
             17 => Self::Tracker,
             unknown => Self::Unknown(unknown),
         }
+    }
+}
+
+impl ChannelKind {
+    #[must_use]
+    pub const fn is_voice_like(self) -> bool {
+        matches!(self, Self::Voice | Self::Stage)
     }
 }
 
@@ -128,8 +153,16 @@ impl From<ChannelKind> for u8 {
             ChannelKind::Text => 0,
             ChannelKind::DirectMessage => 1,
             ChannelKind::Voice => 2,
+            ChannelKind::GroupDirectMessage => 3,
             ChannelKind::Category => 4,
             ChannelKind::Announcement => 5,
+            ChannelKind::AnnouncementThread => 10,
+            ChannelKind::PublicThread => 11,
+            ChannelKind::PrivateThread => 12,
+            ChannelKind::Stage => 13,
+            ChannelKind::GuildDirectory => 14,
+            ChannelKind::Forum => 15,
+            ChannelKind::Media => 16,
             ChannelKind::Tracker => 17,
             ChannelKind::Unknown(value) => value,
         }
@@ -224,6 +257,11 @@ impl Channel {
     #[must_use]
     pub fn guild_key(&self) -> Option<EntityRef> {
         Some(EntityRef::new(self.guild_id?, self.guild_domain.clone()?))
+    }
+
+    #[must_use]
+    pub const fn is_voice_like(&self) -> bool {
+        self.kind.is_voice_like()
     }
 }
 
@@ -328,6 +366,16 @@ pub struct Message {
     pub mention_user_refs: Vec<EntityRef>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub reaction_counts: HashMap<String, u64>,
+    #[serde(default)]
+    pub reacted_emoji: Vec<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub pinned_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub poll: Option<Value>,
     #[serde(default)]
     pub flags: u64,
     pub created_at: DateTime<Utc>,
@@ -526,7 +574,11 @@ mod tests {
     fn tracker_channel_kind_has_a_stable_wire_value() {
         assert_eq!(ChannelKind::from(17), ChannelKind::Tracker);
         assert_eq!(u8::from(ChannelKind::Tracker), 17);
-        assert_eq!(ChannelKind::from(16), ChannelKind::Unknown(16));
+        assert_eq!(ChannelKind::from(10), ChannelKind::AnnouncementThread);
+        assert_eq!(ChannelKind::from(12), ChannelKind::PrivateThread);
+        assert_eq!(ChannelKind::from(13), ChannelKind::Stage);
+        assert_eq!(ChannelKind::from(15), ChannelKind::Forum);
+        assert_eq!(ChannelKind::from(16), ChannelKind::Media);
     }
 
     #[test]

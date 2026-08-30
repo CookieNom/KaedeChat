@@ -13,7 +13,47 @@ from app.federation.network import normalize_domain
 ROLE_MENTION = re.compile(
     r"<@&(?P<id>[1-9][0-9]{0,18})@(?P<domain>[a-z0-9.-]{1,253})>", re.IGNORECASE
 )
+USER_MENTION = re.compile(
+    r"<@(?P<id>[1-9][0-9]{0,18})(?:@(?P<domain>[a-z0-9.-]{1,253}))?>",
+    re.IGNORECASE,
+)
 MAX_ROLE_MENTION_RECIPIENTS = 5_000
+
+
+def role_mention_refs(content: object) -> list[tuple[int, str]]:
+    """Return canonical, ordered role tokens from visible message text."""
+
+    if not isinstance(content, str):
+        return []
+    return list(
+        dict.fromkeys(
+            (int(match.group("id")), normalize_domain(match.group("domain")))
+            for match in ROLE_MENTION.finditer(content)
+        )
+    )
+
+
+def syntactic_mention_count(content: object, *, default_domain: str) -> int:
+    """Count visible unique user and role mention tokens for AutoMod.
+
+    Role expansion is deliberately excluded: one ``@role`` is one mention,
+    regardless of how many members receive the notification.
+    """
+
+    if not isinstance(content, str):
+        return 0
+    users = {
+        (
+            int(match.group("id")),
+            normalize_domain(match.group("domain") or default_domain),
+        )
+        for match in USER_MENTION.finditer(content)
+    }
+    roles = {
+        (int(match.group("id")), normalize_domain(match.group("domain")))
+        for match in ROLE_MENTION.finditer(content)
+    }
+    return len(users) + len(roles)
 
 
 async def role_mention_recipients(
@@ -22,16 +62,14 @@ async def role_mention_recipients(
     content: object,
     actor_permissions: int,
 ) -> list[tuple[int, str]]:
-    """Validate canonical role mentions and resolve their current recipients."""
+    """Validate role tokens and resolve only roles the actor may notify.
 
-    if not isinstance(content, str):
-        return []
-    requested = list(
-        dict.fromkeys(
-            (int(match.group("id")), normalize_domain(match.group("domain")))
-            for match in ROLE_MENTION.finditer(content)
-        )
-    )
+    Discord accepts a message containing an unmentionable role but does not
+    notify that role unless the actor can mention everyone. Keeping the token
+    valid while returning no recipients preserves that behavior.
+    """
+
+    requested = role_mention_refs(content)
     if not requested:
         return []
     if len(requested) > 25:
@@ -54,14 +92,14 @@ async def role_mention_recipients(
     may_mention_all_roles = bool(
         actor_permissions & (Permission.ADMINISTRATOR | Permission.MENTION_EVERYONE)
     )
-    if (
-        any(not role_by_ref[reference].mentionable for reference in requested)
-        and not may_mention_all_roles
-    ):
-        raise HTTPException(status_code=403, detail={"code": "ROLE_NOT_MENTIONABLE"})
+    notify_roles = [
+        reference
+        for reference in requested
+        if may_mention_all_roles or role_by_ref[reference].mentionable
+    ]
 
     recipients: set[tuple[int, str]] = set()
-    if (guild.id, guild.origin_domain) in requested:
+    if (guild.id, guild.origin_domain) in notify_roles:
         recipients.update(
             (
                 await session.execute(
@@ -72,7 +110,7 @@ async def role_mention_recipients(
                 )
             ).tuples()
         )
-    assigned_refs = [reference for reference in requested if reference[0] != guild.id]
+    assigned_refs = [reference for reference in notify_roles if reference[0] != guild.id]
     if assigned_refs:
         recipients.update(
             (

@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
+pub const PRIORITY_SPEAKER_TOPIC: &str = "kaede.priority-speaker.v1";
+pub const PRIORITY_SPEAKER_INACTIVE_PAYLOAD: [u8; 1] = [0];
+pub const PRIORITY_SPEAKER_ACTIVE_PAYLOAD: [u8; 1] = [1];
+
+pub const PERMISSION_SCHEMA: &str = "kaede-permissions-v1";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[repr(u8)]
 pub enum GatewayOp {
@@ -19,6 +25,8 @@ pub enum GatewayOp {
     Hello = 10,
     HeartbeatAck = 11,
     SubscribeMemberList = 12,
+    RequestSoundboardSounds = 31,
+    RequestChannelInfo = 43,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -41,13 +49,23 @@ pub const EVENT_NAMES: &[&str] = &[
     "MESSAGE_CREATE",
     "MESSAGE_UPDATE",
     "MESSAGE_DELETE",
+    "MESSAGE_DELETE_BULK",
     "MESSAGE_SEND_REJECTED",
     "MESSAGE_DELIVERY_UPDATE",
+    "MESSAGE_REACTION_ADD",
+    "MESSAGE_REACTION_REMOVE",
+    "MESSAGE_REACTION_REMOVE_ALL",
+    "MESSAGE_REACTION_REMOVE_EMOJI",
+    "MESSAGE_PIN_UPDATE",
+    "MESSAGE_POLL_VOTE_ADD",
+    "MESSAGE_POLL_VOTE_REMOVE",
     "ATTACHMENT_UPDATE",
     "DM_OPEN_REJECTED",
     "CHANNEL_CREATE",
     "CHANNEL_UPDATE",
     "CHANNEL_DELETE",
+    "CHANNEL_PINS_UPDATE",
+    "CHANNEL_INFO",
     "CHANNEL_ACCESS_GRANTED",
     "CHANNEL_ACCESS_REVOKED",
     "CHANNEL_PERMISSION_UPDATE",
@@ -71,30 +89,107 @@ pub const EVENT_NAMES: &[&str] = &[
     "GUILD_ROLE_UPDATE",
     "GUILD_ROLE_DELETE",
     "GUILD_EMOJI_CREATE",
+    "GUILD_EMOJI_UPDATE",
     "GUILD_EMOJI_DELETE",
+    "GUILD_EMOJIS_UPDATE",
     "GUILD_STICKER_CREATE",
+    "GUILD_STICKER_UPDATE",
     "GUILD_STICKER_DELETE",
+    "GUILD_STICKERS_UPDATE",
     "GUILD_MEMBER_ADD",
     "GUILD_MEMBER_UPDATE",
     "GUILD_MEMBER_REMOVE",
+    "GUILD_MEMBERS_PRUNED",
     "GUILD_MEMBERS_CHUNK",
     "GUILD_MEMBER_LIST_UPDATE",
+    "GUILD_BAN_ADD",
+    "GUILD_BAN_REMOVE",
+    "GUILD_AUDIT_LOG_ENTRY_CREATE",
+    "GUILD_INTEGRATIONS_UPDATE",
+    "APPLICATION_COMMAND_PERMISSIONS_UPDATE",
+    "INTEGRATION_CREATE",
+    "INTEGRATION_UPDATE",
+    "INTEGRATION_DELETE",
+    "WEBHOOKS_UPDATE",
+    "INVITE_CREATE",
+    "INVITE_DELETE",
+    "GUILD_SCHEDULED_EVENT_CREATE",
+    "GUILD_SCHEDULED_EVENT_UPDATE",
+    "GUILD_SCHEDULED_EVENT_DELETE",
+    "GUILD_SCHEDULED_EVENT_USER_ADD",
+    "GUILD_SCHEDULED_EVENT_USER_REMOVE",
+    "STAGE_INSTANCE_CREATE",
+    "STAGE_INSTANCE_UPDATE",
+    "STAGE_INSTANCE_DELETE",
+    "GUILD_SOUNDBOARD_SOUND_CREATE",
+    "GUILD_SOUNDBOARD_SOUND_UPDATE",
+    "GUILD_SOUNDBOARD_SOUND_DELETE",
+    "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
+    "AUTO_MODERATION_RULE_CREATE",
+    "AUTO_MODERATION_RULE_UPDATE",
+    "AUTO_MODERATION_RULE_DELETE",
+    "AUTO_MODERATION_ACTION_EXECUTION",
+    "BOT_INSTALLATION_CREATE",
+    "BOT_INSTALLATION_UPDATE",
+    "BOT_INSTALLATION_DELETE",
     "GUILD_AVAILABILITY_UPDATE",
     "GUILD_NAVIGATION_UPDATE",
     "GUILD_HISTORY_SYNC_UPDATE",
     "PRESENCE_UPDATE",
     "TYPING_START",
     "VOICE_STATE_UPDATE",
+    "VOICE_CHANNEL_EFFECT_SEND",
+    "VOICE_CHANNEL_STATUS_UPDATE",
+    "VOICE_CHANNEL_START_TIME_UPDATE",
     "VOICE_CHANNEL_MOVE",
     "VOICE_TOKEN",
     "READ_STATE_UPDATE",
     "USER_UPDATE",
     "FEDERATION_PEER_STATUS",
+    "INTERACTION_CREATE",
+    "INTERACTION_RESPONSE_CREATE",
+    "INTERACTION_RESPONSE_UPDATE",
+    "INTERACTION_RESPONSE_DELETE",
     "CALL_CREATE",
     "CALL_RING",
     "CALL_ACCEPT",
     "CALL_DECLINE",
     "CALL_END",
+];
+
+pub const BOT_INTENT_NAMES: &[&str] = &[
+    "guilds",
+    "guild_members",
+    "guild_moderation",
+    "guild_expressions",
+    "guild_integrations",
+    "guild_webhooks",
+    "guild_invites",
+    "guild_voice_states",
+    "guild_presences",
+    "guild_messages",
+    "guild_message_reactions",
+    "guild_message_typing",
+    "direct_messages",
+    "direct_message_reactions",
+    "direct_message_typing",
+    "message_content",
+    "guild_scheduled_events",
+    "auto_moderation_configuration",
+    "auto_moderation_execution",
+    "guild_message_polls",
+    "direct_message_polls",
+    "interactions",
+    "guild_tasks",
+    "voice_states",
+    "message_reactions",
+    "guild_typing",
+];
+
+pub const BOT_INTENT_ALIASES: &[(&str, &str)] = &[
+    ("voice_states", "guild_voice_states"),
+    ("message_reactions", "guild_message_reactions"),
+    ("guild_typing", "guild_message_typing"),
 ];
 
 pub mod permission {
@@ -106,8 +201,10 @@ pub mod permission {
     pub const MANAGE_GUILD: u64 = 32;
     pub const ADD_REACTIONS: u64 = 64;
     pub const VIEW_AUDIT_LOG: u64 = 128;
+    pub const PRIORITY_SPEAKER: u64 = 256;
     pub const VIEW_CHANNEL: u64 = 1024;
     pub const SEND_MESSAGES: u64 = 2048;
+    pub const SEND_TTS_MESSAGES: u64 = 4096;
     pub const MANAGE_MESSAGES: u64 = 8192;
     pub const EMBED_LINKS: u64 = 16384;
     pub const ATTACH_FILES: u64 = 32768;
@@ -127,12 +224,22 @@ pub mod permission {
     pub const MANAGE_EMOJIS: u64 = 1073741824;
     pub const STREAM: u64 = 2147483648;
     pub const USE_APPLICATION_COMMANDS: u64 = 4294967296;
+    pub const REQUEST_TO_SPEAK: u64 = 8589934592;
     pub const MANAGE_THREADS: u64 = 17179869184;
     pub const CREATE_PUBLIC_THREADS: u64 = 34359738368;
     pub const CREATE_PRIVATE_THREADS: u64 = 68719476736;
     pub const SEND_MESSAGES_IN_THREADS: u64 = 274877906944;
+    pub const MANAGE_EVENTS: u64 = 549755813888;
     pub const MODERATE_MEMBERS: u64 = 1099511627776;
     pub const BAN_INSTANCES: u64 = 2199023255552;
+    pub const USE_SOUNDBOARD: u64 = 8796093022208;
+    pub const CREATE_GUILD_EXPRESSIONS: u64 = 17592186044416;
+    pub const CREATE_EVENTS: u64 = 35184372088832;
+    pub const USE_EXTERNAL_SOUNDS: u64 = 70368744177664;
+    pub const SEND_VOICE_MESSAGES: u64 = 140737488355328;
+    pub const SET_VOICE_CHANNEL_STATUS: u64 = 281474976710656;
+    pub const SEND_POLLS: u64 = 562949953421312;
+    pub const USE_EXTERNAL_APPS: u64 = 1125899906842624;
     pub const PIN_MESSAGES: u64 = 2251799813685248;
     pub const BYPASS_SLOWMODE: u64 = 4503599627370496;
     pub const CREATE_TRACKER_TASKS: u64 = 9007199254740992;
@@ -140,6 +247,10 @@ pub mod permission {
     pub const MANAGE_TRACKER_TASKS: u64 = 36028797018963968;
     pub const ASSIGN_TRACKER_TASKS: u64 = 72057594037927936;
     pub const MANAGE_TRACKER: u64 = 144115188075855872;
+    pub const USE_EXTERNAL_STICKERS: u64 = 288230376151711744;
+    pub const CREATE_INSTANT_INVITE: u64 = 1;
+    pub const MANAGE_GUILD_EXPRESSIONS: u64 = 1073741824;
+    pub const MANAGE_AUTO_MODERATION: u64 = 32;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,7 +274,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Create guild invitation links.",
         group: "General",
         resource_scopes: &["guild", "channel"],
-        channel_types: &[],
+        channel_types: &[0, 2, 4, 5, 10, 11, 12, 13, 15, 17],
         dependencies: &[],
         danger: "normal",
     },
@@ -207,7 +318,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Create, edit, reorder, and delete channels and categories.",
         group: "Management",
         resource_scopes: &["guild", "channel"],
-        channel_types: &[],
+        channel_types: &[0, 2, 4, 5, 10, 11, 12, 13, 15, 17],
         dependencies: &[],
         danger: "elevated",
     },
@@ -229,7 +340,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Add reactions to messages.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024, 65536],
         danger: "normal",
     },
@@ -245,13 +356,24 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         danger: "elevated",
     },
     PermissionMetadata {
+        name: "PRIORITY_SPEAKER",
+        bit: 256,
+        label: "Priority speaker",
+        description: "Reduce other participants' volume while speaking in voice channels.",
+        group: "Voice",
+        resource_scopes: &["channel"],
+        channel_types: &[2],
+        dependencies: &[1048576, 2097152],
+        danger: "normal",
+    },
+    PermissionMetadata {
         name: "VIEW_CHANNEL",
         bit: 1024,
         label: "View channel",
         description: "See a channel and its live activity.",
         group: "General",
         resource_scopes: &["channel"],
-        channel_types: &[0, 2, 4, 5, 10, 11, 12, 15, 17],
+        channel_types: &[0, 2, 4, 5, 10, 11, 12, 13, 15, 17],
         dependencies: &[],
         danger: "normal",
     },
@@ -262,8 +384,19 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Send messages in channels and create posts in forum channels.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 15],
+        channel_types: &[0, 2, 5, 13, 15],
         dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "SEND_TTS_MESSAGES",
+        bit: 4096,
+        label: "Send text-to-speech messages",
+        description: "Send messages that clients may read aloud.",
+        group: "Text",
+        resource_scopes: &["channel"],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
+        dependencies: &[1024, 2048],
         danger: "normal",
     },
     PermissionMetadata {
@@ -273,7 +406,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Delete and moderate other members' messages.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024, 65536],
         danger: "elevated",
     },
@@ -284,7 +417,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Expand links into rich previews.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024],
         danger: "normal",
     },
@@ -295,7 +428,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Upload and attach files to messages.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024],
         danger: "normal",
     },
@@ -306,7 +439,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Read retained messages and receive permitted federated history.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024],
         danger: "normal",
     },
@@ -317,18 +450,29 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Notify broad guild or role audiences.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024],
         danger: "elevated",
     },
     PermissionMetadata {
         name: "USE_EXTERNAL_EMOJIS",
         bit: 262144,
-        label: "Use external emoji and stickers",
-        description: "Use emoji and stickers originating outside this guild.",
+        label: "Use external emoji",
+        description: "Use emoji originating outside this guild.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
+        dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "USE_EXTERNAL_STICKERS",
+        bit: 288230376151711744,
+        label: "Use external stickers",
+        description: "Use stickers originating outside this guild.",
+        group: "Text",
+        resource_scopes: &["channel"],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024],
         danger: "normal",
     },
@@ -339,7 +483,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Join voice channels.",
         group: "Voice",
         resource_scopes: &["channel"],
-        channel_types: &[2],
+        channel_types: &[2, 13],
         dependencies: &[1024],
         danger: "normal",
     },
@@ -361,7 +505,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Server-mute other voice participants.",
         group: "Voice moderation",
         resource_scopes: &["channel"],
-        channel_types: &[2],
+        channel_types: &[2, 13],
         dependencies: &[1048576],
         danger: "elevated",
     },
@@ -383,7 +527,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Move voice participants between channels.",
         group: "Voice moderation",
         resource_scopes: &["channel"],
-        channel_types: &[2],
+        channel_types: &[2, 13],
         dependencies: &[1048576],
         danger: "elevated",
     },
@@ -427,7 +571,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Manage lower roles, member role assignments, and channel overwrites.",
         group: "Management",
         resource_scopes: &["guild", "channel"],
-        channel_types: &[],
+        channel_types: &[0, 2, 4, 5, 10, 11, 12, 13, 15, 17],
         dependencies: &[],
         danger: "critical",
     },
@@ -438,7 +582,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Create, edit, rotate, and revoke channel webhooks.",
         group: "Management",
         resource_scopes: &["guild", "channel"],
-        channel_types: &[0, 5, 15],
+        channel_types: &[0, 2, 5, 13, 15],
         dependencies: &[],
         danger: "critical",
     },
@@ -457,10 +601,10 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         name: "STREAM",
         bit: 2147483648,
         label: "Share video and screen",
-        description: "Publish camera video or screen shares in voice channels.",
+        description: "Publish camera video or screen shares in voice and Stage channels.",
         group: "Voice",
         resource_scopes: &["channel"],
-        channel_types: &[2],
+        channel_types: &[2, 13],
         dependencies: &[1048576],
         danger: "normal",
     },
@@ -471,8 +615,19 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Use slash commands and context menu commands from applications.",
         group: "Applications",
         resource_scopes: &["channel"],
-        channel_types: &[0, 2, 5, 10, 11, 12, 15, 17],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15, 17],
         dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "REQUEST_TO_SPEAK",
+        bit: 8589934592,
+        label: "Request to speak",
+        description: "Request speaker access in moderated voice channels.",
+        group: "Voice",
+        resource_scopes: &["channel"],
+        channel_types: &[13],
+        dependencies: &[1024, 1048576],
         danger: "normal",
     },
     PermissionMetadata {
@@ -520,6 +675,17 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         danger: "normal",
     },
     PermissionMetadata {
+        name: "MANAGE_EVENTS",
+        bit: 549755813888,
+        label: "Manage events",
+        description: "Edit and cancel guild events created by other members.",
+        group: "Management",
+        resource_scopes: &["guild", "channel"],
+        channel_types: &[2, 13],
+        dependencies: &[],
+        danger: "elevated",
+    },
+    PermissionMetadata {
         name: "MODERATE_MEMBERS",
         bit: 1099511627776,
         label: "Timeout members",
@@ -542,6 +708,94 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         danger: "critical",
     },
     PermissionMetadata {
+        name: "USE_SOUNDBOARD",
+        bit: 8796093022208,
+        label: "Use soundboard",
+        description: "Play guild soundboard sounds in voice channels.",
+        group: "Voice",
+        resource_scopes: &["channel"],
+        channel_types: &[2],
+        dependencies: &[1024, 1048576, 2097152],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "CREATE_GUILD_EXPRESSIONS",
+        bit: 17592186044416,
+        label: "Create guild expressions",
+        description: "Create guild emoji, stickers, and soundboard sounds.",
+        group: "Management",
+        resource_scopes: &["guild"],
+        channel_types: &[],
+        dependencies: &[],
+        danger: "elevated",
+    },
+    PermissionMetadata {
+        name: "CREATE_EVENTS",
+        bit: 35184372088832,
+        label: "Create events",
+        description: "Create guild events.",
+        group: "Management",
+        resource_scopes: &["guild", "channel"],
+        channel_types: &[2, 13],
+        dependencies: &[],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "USE_EXTERNAL_SOUNDS",
+        bit: 70368744177664,
+        label: "Use external sounds",
+        description: "Play soundboard sounds originating outside this guild.",
+        group: "Voice",
+        resource_scopes: &["channel"],
+        channel_types: &[2],
+        dependencies: &[1024, 1048576, 2097152, 8796093022208],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "SEND_VOICE_MESSAGES",
+        bit: 140737488355328,
+        label: "Send voice messages",
+        description: "Send recorded voice messages in text, voice, Stage, and thread chats.",
+        group: "Text",
+        resource_scopes: &["channel"],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
+        dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "SET_VOICE_CHANNEL_STATUS",
+        bit: 281474976710656,
+        label: "Set voice channel status",
+        description: "Set the displayed status for a voice channel.",
+        group: "Voice",
+        resource_scopes: &["channel"],
+        channel_types: &[2],
+        dependencies: &[1024, 1048576],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "SEND_POLLS",
+        bit: 562949953421312,
+        label: "Send polls",
+        description: "Create polls in text, voice, Stage, and thread chats.",
+        group: "Text",
+        resource_scopes: &["channel"],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
+        dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "USE_EXTERNAL_APPS",
+        bit: 1125899906842624,
+        label: "Use external apps",
+        description: "Let user-installed apps that are not installed to this guild send public responses; otherwise their responses are private.",
+        group: "Applications",
+        resource_scopes: &["channel"],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15, 17],
+        dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
         name: "PIN_MESSAGES",
         bit: 2251799813685248,
         label: "Pin messages",
@@ -559,7 +813,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Send messages and create posts without waiting for slowmode.",
         group: "Text",
         resource_scopes: &["channel"],
-        channel_types: &[0, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 13, 15],
         dependencies: &[1024],
         danger: "elevated",
     },

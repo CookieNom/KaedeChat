@@ -14,7 +14,10 @@
     type GuildNavigationGroupItem
   } from '$lib/guild-navigation';
   import { assetUrl } from '$lib/media/assets';
+  import { guildApplicationDirectoryPath, guildSettingsPath } from '$lib/navigation/routes';
   import { guildNavigation } from '$lib/stores/guild-navigation.svelte';
+  import { placeContextMenu } from '$lib/ui/context-menu';
+  import { tick } from 'svelte';
   import CreateGuildDialog from './CreateGuildDialog.svelte';
   import Icon from './Icon.svelte';
 
@@ -44,6 +47,15 @@
   let editingName = $state('');
   let railDropActive = $state(false);
   let createGuildOpen = $state(false);
+  let guildContextMenu = $state<{
+    guild: Guild;
+    x: number;
+    y: number;
+    trigger: HTMLElement;
+  } | null>(null);
+  let guildContextMenuElement = $state<HTMLElement>();
+  let serverSettingsMenuItem = $state<HTMLButtonElement>();
+  let settingsSubmenuOpen = $state(false);
 
   function compactBadge(count: number): string {
     return count > 99 ? '99+' : String(count);
@@ -184,7 +196,107 @@
     closeGroupEditor();
     void guildNavigation.save(next.items);
   }
+
+  function directoryHref(guild: Guild): string {
+    return guildApplicationDirectoryPath(guild);
+  }
+
+  function contextMenuIsFor(guild: Guild): boolean {
+    return Boolean(guildContextMenu && entityKey(guildContextMenu.guild) === entityKey(guild));
+  }
+
+  function closeGuildContextMenu(restoreFocus = false): void {
+    const trigger = guildContextMenu?.trigger;
+    guildContextMenu = null;
+    settingsSubmenuOpen = false;
+    if (restoreFocus && trigger) void tick().then(() => trigger.focus());
+  }
+
+  async function positionAndFocusGuildContextMenu(): Promise<void> {
+    await tick();
+    if (!guildContextMenu || !guildContextMenuElement) return;
+    placeContextMenu(guildContextMenuElement, guildContextMenu.x, guildContextMenu.y);
+    serverSettingsMenuItem?.focus();
+  }
+
+  function showGuildContextMenu(guild: Guild, trigger: HTMLElement, x: number, y: number): void {
+    guildContextMenu = { guild, trigger, x, y };
+    settingsSubmenuOpen = false;
+    void positionAndFocusGuildContextMenu();
+  }
+
+  function openGuildContextMenu(event: MouseEvent, guild: Guild): void {
+    event.preventDefault();
+    event.stopPropagation();
+    showGuildContextMenu(guild, event.currentTarget as HTMLElement, event.clientX, event.clientY);
+  }
+
+  function guildContextKeydown(event: KeyboardEvent, guild: Guild): void {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const trigger = event.currentTarget as HTMLElement;
+    const bounds = trigger.getBoundingClientRect();
+    showGuildContextMenu(guild, trigger, bounds.right + 6, bounds.top);
+  }
+
+  async function openSettingsSubmenu(focusFirst = false): Promise<void> {
+    settingsSubmenuOpen = true;
+    if (!focusFirst) return;
+    await tick();
+    guildContextMenuElement
+      ?.querySelector<HTMLElement>('.guild-settings-submenu [role="menuitem"]')
+      ?.focus();
+  }
+
+  function guildSettingsSubmenuKeydown(event: KeyboardEvent): void {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      settingsSubmenuOpen = false;
+      void tick().then(() => serverSettingsMenuItem?.focus());
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = Array.from(
+      guildContextMenuElement?.querySelectorAll<HTMLElement>(
+        '.guild-settings-submenu [role="menuitem"]'
+      ) ?? []
+    );
+    if (!items.length) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : event.key === 'ArrowUp'
+            ? (current - 1 + items.length) % items.length
+            : (current + 1) % items.length;
+    items[next]?.focus();
+  }
 </script>
+
+<!-- eslint-disable svelte/no-navigation-without-resolve -- guild and directory helpers resolve the configured base path. -->
+
+<svelte:window
+  onclick={(event) => {
+    if (guildContextMenu && !guildContextMenuElement?.contains(event.target as Node)) {
+      closeGuildContextMenu();
+    }
+  }}
+  oncontextmenu={(event) => {
+    if (guildContextMenu && !guildContextMenuElement?.contains(event.target as Node)) {
+      closeGuildContextMenu();
+    }
+  }}
+  onkeydown={(event) => {
+    if (guildContextMenu && event.key === 'Escape') {
+      event.preventDefault();
+      closeGuildContextMenu(true);
+    }
+  }}
+/>
 
 <nav
   class:rail-drop-active={railDropActive}
@@ -224,9 +336,13 @@
           class:dragging={draggedGuild === item.guild}
           href={resolve(guildHref(guild) as `/g/${string}/${string}`)}
           draggable={!guildNavigation.saving}
+          aria-haspopup="menu"
+          aria-expanded={contextMenuIsFor(guild) ? 'true' : undefined}
           aria-label={mentions ? `${guild.name}, ${mentions} mentions` : guild.name}
           aria-current={activeGuildKey === item.guild ? 'page' : undefined}
-          title={`${guild.name} · drag to reorder or group`}
+          title={`${guild.name} · right-click for server settings · drag to reorder or group`}
+          oncontextmenu={(event) => openGuildContextMenu(event, guild)}
+          onkeydown={(event) => guildContextKeydown(event, guild)}
           ondragstart={(event) => guildDragStart(event, item.guild)}
           ondragend={guildDragEnd}
           ondragover={allowDrop}
@@ -286,11 +402,15 @@
                 class:dragging={draggedGuild === member.ref}
                 href={resolve(guildHref(member.guild) as `/g/${string}/${string}`)}
                 draggable={!guildNavigation.saving}
+                aria-haspopup="menu"
+                aria-expanded={contextMenuIsFor(member.guild) ? 'true' : undefined}
                 aria-label={mentions
                   ? `${member.guild.name}, ${mentions} mentions`
                   : member.guild.name}
                 aria-current={activeGuildKey === member.ref ? 'page' : undefined}
-                title={`${member.guild.name} · drag into a rail gap to remove from folder`}
+                title={`${member.guild.name} · right-click for server settings · drag into a rail gap to remove from folder`}
+                oncontextmenu={(event) => openGuildContextMenu(event, member.guild)}
+                onkeydown={(event) => guildContextKeydown(event, member.guild)}
                 ondragstart={(event) => {
                   event.stopPropagation();
                   guildDragStart(event, member.ref);
@@ -337,6 +457,68 @@
   {/if}
 </nav>
 
+{#if guildContextMenu}
+  <div
+    bind:this={guildContextMenuElement}
+    class="guild-context-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label={`${guildContextMenu.guild.name} server menu`}
+    oncontextmenu={(event) => event.preventDefault()}
+  >
+    <button
+      bind:this={serverSettingsMenuItem}
+      type="button"
+      role="menuitem"
+      aria-haspopup="menu"
+      aria-expanded={settingsSubmenuOpen}
+      aria-controls="guild-settings-context-submenu"
+      onmouseenter={() => void openSettingsSubmenu()}
+      onclick={() => {
+        if (settingsSubmenuOpen) settingsSubmenuOpen = false;
+        else void openSettingsSubmenu(true);
+      }}
+      onkeydown={(event) => {
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+          event.preventDefault();
+          void openSettingsSubmenu(true);
+        }
+      }}
+    >
+      <Icon name="settings" size={17} />
+      <span>Server Settings</span>
+      <Icon name="chevron-right" size={15} />
+    </button>
+    {#if settingsSubmenuOpen}
+      <div
+        id="guild-settings-context-submenu"
+        class="guild-settings-submenu"
+        role="menu"
+        tabindex="-1"
+        aria-label="Server Settings"
+        onkeydown={guildSettingsSubmenuKeydown}
+      >
+        <a
+          role="menuitem"
+          tabindex="-1"
+          href={guildSettingsPath(guildContextMenu.guild)}
+          onclick={() => closeGuildContextMenu()}
+        >
+          <Icon name="settings" size={17} />Overview
+        </a>
+        <a
+          role="menuitem"
+          tabindex="-1"
+          href={directoryHref(guildContextMenu.guild)}
+          onclick={() => closeGuildContextMenu()}
+        >
+          <Icon name="sparkles" size={17} />App Directory
+        </a>
+      </div>
+    {/if}
+  </div>
+{/if}
+
 <CreateGuildDialog bind:open={createGuildOpen} />
 
 {#if editingGroup}
@@ -372,6 +554,59 @@
 {/if}
 
 <style>
+  .guild-context-menu,
+  .guild-settings-submenu {
+    z-index: 300;
+    width: 220px;
+    box-sizing: border-box;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 6px;
+    color: var(--text);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .guild-context-menu {
+    position: fixed;
+  }
+
+  .guild-context-menu button,
+  .guild-context-menu a {
+    display: grid;
+    width: 100%;
+    min-height: 38px;
+    box-sizing: border-box;
+    grid-template-columns: 20px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-weight: 700;
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .guild-context-menu button:hover,
+  .guild-context-menu button:focus-visible,
+  .guild-context-menu a:hover,
+  .guild-context-menu a:focus-visible {
+    outline: 0;
+    color: var(--text-inverse);
+    background: var(--accent);
+  }
+
+  .guild-settings-submenu {
+    position: absolute;
+    top: 0;
+    left: calc(100% + 6px);
+  }
+
   .guild-folder {
     position: relative;
     display: grid;

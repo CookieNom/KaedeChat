@@ -1,9 +1,9 @@
 import { api } from '$lib/api/client';
-import { uploadObject, type UploadTicket } from '$lib/media/uploads';
-import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
-import { attachmentMediaPath } from '$lib/media/authenticated';
+import { uploadObject, type UploadTicket, type VoiceUploadMetadata } from '$lib/media/uploads';
+import { attachmentMediaPath, authenticatedMediaBlob } from '$lib/media/authenticated';
 import {
   base64url,
+  clearBytes,
   concatBytes,
   fromBase64url,
   ownedBytes,
@@ -27,11 +27,16 @@ export interface EncryptedFileManifest {
   filename: string;
   content_type: string;
   plaintext_size: number;
+  /** SHA-256 commitment to exact plaintext bytes. Legacy history may omit it. */
+  plaintext_sha256?: string;
   ciphertext_size: number;
   ciphertext_sha256: string;
   chunk_size: number;
   attachment_id?: string;
   attachment_domain?: string;
+  /** Authenticated voice metadata. Both fields are present only for voice messages. */
+  duration_millis?: number;
+  waveform?: string;
   preview?: EncryptedFileManifest;
 }
 
@@ -87,6 +92,7 @@ export async function encryptFile(
   const fileHeader = header(file.size, chunkSize, salt, noncePrefix);
   try {
     const key = await contentKey(rawKey, salt);
+    const plaintextSha256 = base64url(await sha256(await file.arrayBuffer()));
     const count = Math.ceil(file.size / chunkSize);
     const parts: BlobPart[] = [fileHeader];
     for (let index = 0; index < count; index += 1) {
@@ -121,6 +127,7 @@ export async function encryptFile(
       filename: file.name?.trim() || 'file',
       content_type: file.type || 'application/octet-stream',
       plaintext_size: file.size,
+      plaintext_sha256: plaintextSha256,
       ciphertext_size: ciphertext.size,
       ciphertext_sha256: base64url(await sha256(bytes)),
       chunk_size: chunkSize
@@ -190,7 +197,22 @@ export async function decryptFile(
   }
   if (offset !== all.length || produced !== plainSize)
     throw new Error('Encrypted file framing is invalid.');
-  return new Blob(parts, { type: manifest.content_type });
+  const plaintext = new Blob(parts, { type: manifest.content_type });
+  if (manifest.plaintext_sha256 !== undefined) {
+    let expected: Uint8Array | null = null;
+    try {
+      expected = fromBase64url(manifest.plaintext_sha256, 32);
+      if (expected.length !== 32 || base64url(expected) !== manifest.plaintext_sha256) {
+        throw new Error('Encrypted file plaintext digest is invalid.');
+      }
+    } finally {
+      if (expected) clearBytes(expected);
+    }
+    if (base64url(await sha256(await plaintext.arrayBuffer())) !== manifest.plaintext_sha256) {
+      throw new Error('Encrypted file plaintext was modified.');
+    }
+  }
+  return plaintext;
 }
 
 export async function encryptedManifestDigest(
@@ -203,7 +225,8 @@ export async function uploadEncryptedChannelFile(
   channelRef: string,
   file: File,
   onProgress: (progress: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  voice?: VoiceUploadMetadata
 ): Promise<{ ticket: UploadTicket; manifest: EncryptedFileManifest }> {
   const encrypted = await encryptFile(file);
   const ticket = await api<UploadTicket>(
@@ -229,14 +252,21 @@ export async function uploadEncryptedChannelFile(
     manifest: {
       ...encrypted.manifest,
       attachment_id: ticket.id,
-      attachment_domain: ticket.origin_domain
+      attachment_domain: ticket.origin_domain,
+      ...(voice
+        ? {
+            duration_millis: Math.round(voice.durationSecs * 1_000),
+            waveform: voice.waveform
+          }
+        : {})
     }
   };
 }
 
 export async function decryptEncryptedAttachment(
   manifest: EncryptedFileManifest,
-  historyMediaUrl?: string | null
+  historyMediaUrl?: string | null,
+  privateMediaUrl?: string | null
 ): Promise<Blob> {
   if (!manifest.attachment_id || !manifest.attachment_domain)
     throw new Error('Encrypted attachment reference is missing.');
@@ -244,34 +274,22 @@ export async function decryptEncryptedAttachment(
     manifest.attachment_domain,
     manifest.attachment_id,
     'original',
-    historyMediaUrl
+    historyMediaUrl,
+    privateMediaUrl
   );
-  let ciphertext: Blob;
-  if (isNativeDesktop()) {
-    const response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>(
-      'native_media_request',
-      {
-        path
-      }
-    );
-    const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
-    ciphertext = new Blob([ownedBytes(bytes)], { type: 'application/octet-stream' });
-  } else {
-    const response = await fetch(path, { credentials: 'same-origin' });
-    if (!response.ok) throw new Error('Could not download the encrypted file.');
-    const declared = Number(response.headers.get('content-length') ?? '0');
-    if (Number.isFinite(declared) && declared > manifest.ciphertext_size)
-      throw new Error('Encrypted file response is larger than its authenticated manifest.');
-    ciphertext = await response.blob();
-  }
+  const ciphertext = await authenticatedMediaBlob(
+    { path, contentType: 'application/octet-stream' },
+    manifest.ciphertext_size
+  );
   return decryptFile(ciphertext, manifest);
 }
 
 export async function downloadEncryptedFile(
   manifest: EncryptedFileManifest,
-  historyMediaUrl?: string | null
+  historyMediaUrl?: string | null,
+  privateMediaUrl?: string | null
 ): Promise<void> {
-  const plaintext = await decryptEncryptedAttachment(manifest, historyMediaUrl);
+  const plaintext = await decryptEncryptedAttachment(manifest, historyMediaUrl, privateMediaUrl);
   const objectUrl = URL.createObjectURL(plaintext);
   try {
     const anchor = document.createElement('a');

@@ -7,6 +7,7 @@ import {
   type EventName
 } from '$lib/generated/ops';
 import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
+import { stripNetworkClientState } from '$lib/api/network-boundary';
 
 export interface Dispatch<T = unknown> {
   op: GatewayOp.DISPATCH;
@@ -34,7 +35,12 @@ interface GatewayEnvelope {
 interface QueuedGatewayCommand {
   key: string;
   browserPayload: object;
-  nativeCommand: 'presence' | 'request_members' | 'subscribe_members';
+  nativeCommand:
+    | 'presence'
+    | 'request_members'
+    | 'subscribe_members'
+    | 'request_channel_info'
+    | 'request_soundboard_sounds';
   nativePayload: Record<string, unknown>;
   failureMessage: string;
 }
@@ -199,6 +205,40 @@ export class GatewayClient extends EventTarget {
     this.#queueCommand(command);
   }
 
+  requestChannelInfo(
+    guildRef: string,
+    fields: Array<'status' | 'voice_start_time'> = ['status', 'voice_start_time']
+  ): void {
+    const [guild_id, guild_domain = ''] = guildRef.split('@', 2);
+    this.#queueCommand({
+      key: `channel-info:${guildRef}`,
+      browserPayload: {
+        op: GatewayOp.REQUEST_CHANNEL_INFO,
+        d: { guild_id: guildRef, fields }
+      },
+      nativeCommand: 'request_channel_info',
+      nativePayload: { guild_id, guild_domain, fields },
+      failureMessage: 'Could not refresh live voice channel information.'
+    });
+  }
+
+  requestSoundboardSounds(guildRefs: string[]): void {
+    const guilds = guildRefs.map((value) => {
+      const [guild_id, guild_domain = ''] = value.split('@', 2);
+      return { guild_id, guild_domain };
+    });
+    this.#queueCommand({
+      key: 'soundboard-sounds',
+      browserPayload: {
+        op: GatewayOp.REQUEST_SOUNDBOARD_SOUNDS,
+        d: { guild_ids: guildRefs }
+      },
+      nativeCommand: 'request_soundboard_sounds',
+      nativePayload: { guilds },
+      failureMessage: 'Could not refresh guild soundboard sounds.'
+    });
+  }
+
   releaseMembers(): void {
     this.#memberSubscription = null;
     this.#pendingCommands.delete('member-subscription');
@@ -231,6 +271,33 @@ export class GatewayClient extends EventTarget {
   rememberPresence(status: 'online' | 'idle' | 'dnd' | 'invisible'): void {
     this.#preferredPresence = status;
     this.#presencePending = false;
+  }
+
+  async setSelfVoiceState(selfMute: boolean, selfDeaf: boolean): Promise<void> {
+    const state = {
+      self_mute: selfMute || selfDeaf,
+      self_deaf: selfDeaf
+    };
+    if (!this.#gatewayReady || this.#manualClose) {
+      throw new Error('Realtime updates are offline. Your voice state was not shared.');
+    }
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_gateway_command', {
+        command: 'voice_state',
+        payload: state
+      });
+      return;
+    }
+    const socket = this.#socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error('Realtime updates are offline. Your voice state was not shared.');
+    }
+    try {
+      socket.send(JSON.stringify({ op: GatewayOp.VOICE_STATE_UPDATE, d: state }));
+    } catch (caught) {
+      socket.close(1012, 'Gateway voice-state send failed');
+      throw caught;
+    }
   }
 
   #receive(raw: string): void {
@@ -277,7 +344,6 @@ export class GatewayClient extends EventTarget {
     if (envelope.op === GatewayOp.DISPATCH) {
       if (
         typeof envelope.t !== 'string' ||
-        !(EVENT_NAMES as readonly string[]).includes(envelope.t) ||
         !Number.isSafeInteger(envelope.s) ||
         (envelope.s ?? -1) < 0
       ) {
@@ -287,6 +353,10 @@ export class GatewayClient extends EventTarget {
       if (this.#sequence !== null) {
         sessionStorage.setItem('kaede.gateway.sequence', String(this.#sequence));
       }
+      // Event registries are additive. An older client must advance past an
+      // unknown event without trying to interpret its payload or reconnecting
+      // forever on the same sequence during a rolling deployment.
+      if (!(EVENT_NAMES as readonly string[]).includes(envelope.t)) return;
       if (envelope.t === 'READY') {
         const ready = envelope.d as { session_id: string; presence_preference?: string };
         if (typeof ready.session_id !== 'string' || !ready.session_id) {
@@ -321,7 +391,7 @@ export class GatewayClient extends EventTarget {
       if (envelope.t === 'READY' || envelope.t === 'RESUMED') this.#flushPendingCommands();
       this.dispatchEvent(
         new CustomEvent('dispatch', {
-          detail: envelope as Dispatch
+          detail: { ...envelope, d: stripNetworkClientState(envelope.d) } as Dispatch
         })
       );
       if (envelope.t === 'READY' && this.#reconcileOnReady) {

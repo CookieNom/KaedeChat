@@ -50,7 +50,7 @@ String encryptedRoomJoinWarning(EncryptedRoomKind kind) {
   };
   final unavailableFeatures = kind == EncryptedRoomKind.media
       ? 'Server recording and transcription are unavailable, and an unsupported client cannot join.'
-      : 'Server message search, automatic previews, bots, webhooks, server file previews and scanning, call recording, and transcription are unavailable. Notifications are generic, and unsupported clients cannot participate.';
+      : 'Server message search, automatic previews, server file previews and scanning, call recording, and transcription are unavailable. Webhooks receive no access automatically; a verified webhook device can receive only future content after an explicit grant, rekey, and history floor. A verified participant-mode app follows the same future-only admission rule: every person in a private conversation must consent, while a guild administrator admits it to a server channel. Notifications are generic, and unsupported clients cannot participate.';
   final historyAndRecovery = kind == EncryptedRoomKind.media
       ? ''
       : ' Existing plaintext history is not retroactively protected. Losing the synchronized encrypted account vault, all trusted local state, and the recovery backup permanently loses encrypted history.';

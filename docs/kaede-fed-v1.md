@@ -18,10 +18,13 @@ covers:
 {
   "server": "federation.example.com",
   "versions": ["1", "2"],
+  "permission_schema": "kaede-permissions-v1",
   "capabilities": [
+    "permission-schema/kaede-permissions-v1",
     "dm-history-page/1",
     "e2ee-transport/1",
     "group-dm/1",
+    "guild-audit-log/1",
     "guild-history-sync/1",
     "member-self-moderation/1",
     "message-search/1",
@@ -37,7 +40,23 @@ The server value is a public hostname, not a URL. Clients connect only to port
 replay-protected version 2 signing form below. When there is no mutually
 supported version, the failure code is `KAED_FED_UNSUPPORTED_VERSION`.
 
-Capabilities are optional, bounded strings:
+`permission_schema` and the matching
+`permission-schema/kaede-permissions-v1` capability are mandatory. Every
+decimal permission field in discovery, signed federation requests, event
+envelopes, and imported snapshots uses Kaede's published bit layout. That
+layout is intentionally not a raw Discord API v10 mask: in particular, Kaede
+retains its published `STREAM = 1 << 31` and
+`USE_APPLICATION_COMMANDS = 1 << 32` assignments. Implementations MUST reject
+a missing or different schema instead of guessing by software name or silently
+reinterpreting bits. A Discord-mask bridge needs its own explicitly versioned
+translation at the bridge boundary.
+
+Capability entries are bounded strings. The permission-schema entry is
+mandatory; the remaining capabilities are optional extensions:
+
+- `permission-schema/kaede-permissions-v1` is the mandatory permission-mask
+  negotiation fence described above. A peer that omits it or advertises a
+  different `permission_schema` cannot exchange authenticated federation data.
 
 - `guild-history-sync/1` advertises the permission-bound retained-history
   transfer in section 5.1. A peer MUST NOT call that extension when it is
@@ -63,6 +82,9 @@ Capabilities are optional, bounded strings:
   `dm.group.state`. Receivers still require that actor in the prior or resulting
   participant set, and a newly added local participant must already be the
   actor's accepted friend.
+- `guild-audit-log/1` advertises private, requester-bound audit-log paging at
+  the guild home. Audit rows never appear in guild snapshots or events; the
+  home rechecks current membership and `VIEW_AUDIT_LOG` for every page.
 - `profile-by-ref/1` advertises exact composite-ID public profile proofs. It
   lets a replica resolve an opaque historical author from that user's own home
   without trusting mutable profile data relayed by a guild authority. Absence
@@ -204,41 +226,61 @@ same signed bytes differently.
 Unregistered durable event types are rejected. The HTTP inbox and hot link
 accept the following exact names:
 
-| Event type                                                             | Authority and purpose                                                                                                                                           |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `relationship.request`                                                 | A user's home sends a versioned actor profile and an unguessable request correlation ID to the target user's home.                                              |
-| `relationship.accept`                                                  | The target user's home accepts only the exact still-pending correlation ID. Late acceptance cannot recreate cancelled or blocked state.                         |
-| `relationship.remove`                                                  | A user's home removes friendship or pending state at the peer. The sender never reveals whether the local reason was removal or blocking.                       |
-| `relationship.profile`                                                 | A user's home sends a versioned profile update to an accepted remote friend. The receiver applies it only while the exact friendship is still active.           |
-| `dm.open.request`                                                      | A participant asks the deterministic DM authority to open a conversation asynchronously.                                                                        |
-| `dm.conversation.create`                                               | The deterministic authority announces the converged conversation and its two participants.                                                                      |
-| `dm.open.rejected`                                                     | The authority rejects a previously queued open request with a stable code.                                                                                      |
-| `dm.message.create`                                                    | A participant's home replicates one DM message to the other participant's instance.                                                                             |
-| `guild.member.add`                                                     | The guild home announces a remote invite join.                                                                                                                  |
-| `guild.update`                                                         | The guild home replaces mutable guild metadata.                                                                                                                 |
-| `guild.channel.create`, `guild.channel.update`, `guild.channel.delete` | The guild home creates, replaces, or removes channel state.                                                                                                     |
-| `guild.role.create`, `guild.role.update`, `guild.role.delete`          | The guild home creates, replaces, or removes role state.                                                                                                        |
-| `guild.emoji.create`, `guild.emoji.delete`                             | The guild home creates or removes a content-addressed custom emoji.                                                                                             |
-| `guild.overwrite.upsert`                                               | The guild home replaces a channel permission overwrite.                                                                                                         |
-| `guild.member.update`, `guild.member.remove`                           | The guild home updates or removes membership state.                                                                                                             |
-| `guild.members.origin.remove`                                          | The guild home atomically removes every member homed on one federated origin after an instance-wide sanction.                                                   |
-| `guild.member.role.add`, `guild.member.role.remove`                    | The guild home changes one member-role assignment.                                                                                                              |
-| `guild.ban.add`, `guild.ban.remove`                                    | The guild home changes its moderation ban set; an add may carry an absolute expiry.                                                                             |
-| `guild.access.revoked`                                                 | The guild home directly removes one user at the target user's origin; it remains valid when that origin has no member left and can no longer request snapshots. |
-| `guild.instance_access.revoked`                                        | The guild home directly removes all of the target origin's local members and instructs that origin to purge its cached guild data after an instance-wide ban.   |
-| `guild.resync.required`                                                | A revision-bound guild-home marker replaces expired delivery rows and requires background gap-fill/full snapshot recovery.                                      |
-| `guild.message.create`                                                 | The guild home announces a message authored on the home instance.                                                                                               |
-| `guild.message.update`, `guild.message.delete`, `guild.message.purge`  | The guild home edits, tombstones, or author/time-range purges messages.                                                                                         |
-| `guild.reaction.add`, `guild.reaction.remove`                          | The guild home changes one message reaction.                                                                                                                    |
-| `guild.pin.add`, `guild.pin.remove`                                    | The guild home changes one channel pin.                                                                                                                         |
-| `guild.proxy.message.create`                                           | A replica durably queues a remote member's write for the guild home.                                                                                            |
-| `guild.message.committed`                                              | The guild home announces the authoritative result of a proxied write.                                                                                           |
-| `guild.event.redacted`                                                 | Signed placeholder that advances a peer past a channel event none of its members may inspect.                                                                   |
-| `message.send_rejected`                                                | The guild home rejects a previously queued proxy write.                                                                                                         |
-| `media.delete`                                                         | The attachment origin invalidates every cached variant of one origin-owned attachment.                                                                          |
+| Event type                                                             | Authority and purpose                                                                                                                                                            |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `relationship.request`                                                 | A user's home sends a versioned actor profile and an unguessable request correlation ID to the target user's home.                                                               |
+| `relationship.accept`                                                  | The target user's home accepts only the exact still-pending correlation ID. Late acceptance cannot recreate cancelled or blocked state.                                          |
+| `relationship.remove`                                                  | A user's home removes friendship or pending state at the peer. The sender never reveals whether the local reason was removal or blocking.                                        |
+| `relationship.profile`                                                 | A user's home sends a versioned profile update to an accepted remote friend. The receiver applies it only while the exact friendship is still active.                            |
+| `dm.open.request`                                                      | A participant asks the deterministic DM authority to open a conversation asynchronously.                                                                                         |
+| `dm.conversation.create`                                               | The deterministic authority announces the converged conversation and its two participants.                                                                                       |
+| `dm.open.rejected`                                                     | The authority rejects a previously queued open request with a stable code.                                                                                                       |
+| `dm.message.create`                                                    | A participant's home replicates one DM message to the other participant's instance.                                                                                              |
+| `dm.message.update`, `dm.message.delete`                               | The deterministic conversation authority relays an author's validated edit or terminal tombstone to every participant home.                                                      |
+| `dm.reaction.add`, `dm.reaction.remove`                                | The deterministic conversation authority relays one participant's canonical reaction state change.                                                                               |
+| `dm.poll.vote.add`, `dm.poll.vote.remove`, `dm.poll.finalize`          | The deterministic conversation authority relays opaque poll vote state or finalization; encrypted question and answer text never enters the event.                               |
+| `dm.pin.add`, `dm.pin.remove`                                          | The deterministic conversation authority relays the shared conversation pin state to every participant home.                                                                     |
+| `guild.member.add`                                                     | The guild home announces a remote invite join.                                                                                                                                   |
+| `guild.member.profile`                                                 | A user's home sends its exact versioned profile either to a remote guild authority or, when it is also the guild authority, directly to the guild's current remote member homes. |
+| `guild.update`                                                         | The guild home replaces mutable guild metadata.                                                                                                                                  |
+| `guild.channel.create`, `guild.channel.update`, `guild.channel.delete` | The guild home creates, replaces, or removes channel state.                                                                                                                      |
+| `guild.role.create`, `guild.role.update`, `guild.role.delete`          | The guild home creates, replaces, or removes role state.                                                                                                                         |
+| `guild.emoji.create`, `guild.emoji.delete`                             | The guild home creates or removes a content-addressed custom emoji.                                                                                                              |
+| `guild.overwrite.upsert`                                               | The guild home replaces a channel permission overwrite.                                                                                                                          |
+| `guild.member.update`, `guild.member.remove`                           | The guild home updates or removes membership state.                                                                                                                              |
+| `guild.member.profile.relay`                                           | The guild home sequences an exact user-home-signed `guild.member.profile` source for current member homes; it cannot rewrite the nested profile.                                 |
+| `guild.members.origin.remove`                                          | The guild home atomically removes every member homed on one federated origin after an instance-wide sanction.                                                                    |
+| `guild.member.role.add`, `guild.member.role.remove`                    | The guild home changes one member-role assignment.                                                                                                                               |
+| `guild.ban.add`, `guild.ban.remove`                                    | The guild home changes its moderation ban set; an add may carry an absolute expiry.                                                                                              |
+| `guild.access.revoked`                                                 | The guild home directly removes one user at the target user's origin; it remains valid when that origin has no member left and can no longer request snapshots.                  |
+| `guild.instance_access.revoked`                                        | The guild home directly removes all of the target origin's local members and instructs that origin to purge its cached guild data after an instance-wide ban.                    |
+| `guild.resync.required`                                                | A revision-bound guild-home marker replaces expired delivery rows and requires background gap-fill/full snapshot recovery.                                                       |
+| `guild.message.create`                                                 | The guild home announces a message authored on the home instance.                                                                                                                |
+| `guild.message.update`, `guild.message.delete`, `guild.message.purge`  | The guild home edits, tombstones, or author/time-range purges messages.                                                                                                          |
+| `guild.reaction.add`, `guild.reaction.remove`                          | The guild home changes one message reaction.                                                                                                                                     |
+| `guild.poll.vote.add`, `guild.poll.vote.remove`, `guild.poll.finalize` | The guild home changes one poll vote or closes a poll; member homes apply the mutation in guild sequence order.                                                                  |
+| `guild.pin.add`, `guild.pin.remove`                                    | The guild home changes one channel pin.                                                                                                                                          |
+| `guild.proxy.message.create`                                           | A replica durably queues a remote member's write for the guild home.                                                                                                             |
+| `guild.message.committed`                                              | The guild home announces the authoritative result of a proxied write.                                                                                                            |
+| `guild.event.redacted`                                                 | Signed placeholder that advances a peer past a channel event none of its members may inspect.                                                                                    |
+| `message.send_rejected`                                                | The guild home rejects a previously queued proxy write.                                                                                                                          |
+| `media.delete`                                                         | The attachment origin invalidates every cached variant of one origin-owned attachment.                                                                                           |
 
-Typing, presence, voice-state, and occupancy are not durable events. Peers that
-advertise `presence/1` may send a signed `POST /_kaede/v1/presence` projection.
+Typing, presence, voice-state, and occupancy are not durable events. A typing
+actor's home sends a signed, ten-second `POST /_kaede/v1/typing/publish`
+projection to the exact channel authority. The authority rechecks current room
+membership, channel visibility, member-interaction policy, and bot installation
+or DM-capability lineage before sending direct
+`POST /_kaede/v1/typing/relay` requests. Each relay carries a sorted, bounded
+batch of exact destination-home user references selected under the authority's
+current channel ACL. The receiver intersects that audience with its own current
+membership and channel ACL, rejects a removed actor or an empty intersection,
+and publishes only ephemeral per-user Gateway events. Typing never enters the
+SQL inbox/outbox or a resumable Redis stream; stale, duplicate, delayed, and
+out-of-order generations are discarded. Token webhooks have no typing operation.
+
+Peers that advertise `presence/1` may send a signed
+`POST /_kaede/v1/presence` projection.
 The subject domain must equal the signing origin, the recipient must already
 know the subject through a shared guild, and the projection expires within 90
 seconds unless refreshed. Receivers reject stale timestamps and publish the
@@ -246,11 +288,43 @@ state only to local subscribers of shared guilds. Media bytes are fetched on
 demand; only deletion is durable.
 Future durable names require an explicit registry revision.
 
+### Message pins
+
+Pin state has one room authority and mirrors Discord's current contract. A
+channel may contain at most 250 pins. `GET /channels/{channel}/messages/pins`
+uses an aware ISO-8601 `before` cursor and a `limit` from 1 through 50 (default
+50), returning newest-first `{items: [{pinned_at, message}], has_more}` pages.
+The deprecated `/channels/{channel}/pins` projection remains a first-page
+compatibility view. Guild mutations require `VIEW_CHANNEL`,
+`READ_MESSAGE_HISTORY`, and `PIN_MESSAGES`; any current DM participant may
+manage the shared DM pin set. Ordinary messages, replies, application-command
+results, and context-command responses are pinnable; system messages are not.
+
+A successful new pin writes audit action 74 for guilds, then creates a
+contentless type-6 `CHANNEL_PINNED_MESSAGE` referencing the source message.
+Unpin writes action 75 and creates no system message. Both mutations publish
+`CHANNEL_PINS_UPDATE` with `channel_id`, optional `guild_id`, and the current
+`last_pin_timestamp`; Kaede's qualified message/domain fields are additive
+extensions. Deleting a pinned message removes its pin without emitting that
+event, matching Discord's Gateway behavior. Remote reads and writes are sent
+directly to the guild or DM authority, which rechecks current membership and
+permissions. Replicas accept only authority-attested pin notices and bounded,
+cursor-consistent pin pages, so bots, websites, and apps see the same result on
+every participant home.
+
 ## 4. Durable delivery
 
 `POST /_kaede/v1/inbox` accepts at most 100 events and 1 MiB. It returns a result
 per event (`accepted`, `duplicate`, `rejected`, or `retry`) rather than failing an
 otherwise valid batch. `(origin,event_id)` is the idempotency key.
+
+Each destination outbox is a strict total-order stream. A retry whose backoff has
+not elapsed is a head-of-line barrier: later due events cannot overtake it. An
+inbox also stops before the unprocessed suffix after returning `retry` for an
+earlier event. The sender retries that omitted suffix behind the same barrier.
+This ordering is what makes unsequenced authority-owned DM edit/delete,
+reaction, poll, and pin deltas converge under outages without retaining
+plaintext message content at any intermediary.
 
 Receivers also bound cumulative retained protocol state. The default admission
 budgets are 5,000,000 inbox/idempotency rows and 16 GiB of accepted canonical event
@@ -326,11 +400,24 @@ page, event, byte, duration, and cursor-progress budgets. A signed event that fa
 semantic application quarantines the incremental stream and triggers a fresh
 signed snapshot instead of being retried forever.
 
-A guild home may relay profile-shaped member data, but it is authoritative only
-for users homed on that same instance. A local user is always resolved from local
-storage. For an unknown third-party user, the replica retains only the exact
-composite reference and a non-authoritative placeholder; the relayed copy cannot
-create or mutate that third party's profile. A peer advertising `profile-by-ref/1`
+A guild home may relay a third-party member profile only by preserving the exact
+inner `guild.member.profile` envelope signed by that user's home inside a
+sequenced `guild.member.profile.relay`. Every receiver verifies both the outer
+guild-authority signature and the inner user-home signature, requires the subject
+to remain a current guild member, and applies profile versions monotonically. If
+the user's home is also the guild home, that exact home-signed source is delivered
+directly to each current remote member home; its monotonic profile version makes
+guild sequencing unnecessary and avoids locking every guild during a single user
+profile edit. Receivers recheck that both the subject and at least one local user
+remain members before accepting either form. A local user is always rendered from
+local storage, so replaying an older valid source cannot regress their profile.
+The guild authority also emits a full `GUILD_MEMBER_UPDATE` locally. A guild
+snapshot remains the recovery path after a sequenced relay gap.
+
+Unsequenced profile-shaped member data remains authoritative only for users homed
+on the sending instance. For an unknown third-party user, the replica retains
+only the exact composite reference and a non-authoritative placeholder; a guild
+authority cannot create or mutate that third party's profile. A peer advertising `profile-by-ref/1`
 may then request `GET /users/profile?user_id=…&user_domain=…` directly from that
 user's home. The home returns a signed `user.profile` envelope whose actor,
 subject, and embedded profile must all match the requested composite reference.
@@ -359,9 +446,15 @@ recipients. Committed message events carry the authority-derived user references
 which keeps notification fanout deterministic across instances.
 
 An ownership transfer is represented by an authority-signed `guild.update` and
-may name only an existing member homed on the guild-home instance. A remote
-member leaves through its home instance, which durably delivers a signed
-`guild.leave.request`; the direct
+may name an active human member from any canonical user home. The transfer event
+is authorized against the pre-update owner; snapshots require the resulting
+owner to remain in the signed member collection. When the current owner is
+remote, the guild home may authority-attest that exact owner as the envelope
+actor for the closed guild-control event family. The signed content retains the
+semantic remote member or message author, and receivers independently validate
+that identity and current membership; the guild home never signs an envelope as
+an arbitrary remote member. A remote member leaves through its home instance,
+which durably delivers a signed `guild.leave.request`; the direct
 `DELETE /_kaede/v1/guilds/{id}/members/@me` federation route remains the
 equivalent request/response form. In either form, the user domain must match the
 signing origin. The guild home removes membership before emitting the sequenced
@@ -432,6 +525,22 @@ that timing with an unavailable reason and `details_available: false`;
 authoritative enforcement remains at the guild home. A user home may perform
 deduplicated domain-only capability rediscovery, and clients automatically retry
 that private lookup without a user click.
+
+Remote human audit-log reads use the following private extension:
+
+```text
+POST /_kaede/v1/guilds/{guild_id}/audit-logs
+```
+
+The signed request binds the canonical guild, requester, requesting instance,
+exact normalized filters and cursor, a random one-use request ID, issue time, and
+a deadline no more than 15 seconds later. The guild home verifies that binding,
+consumes the request ID once, and rechecks live membership and
+`VIEW_AUDIT_LOG`; replica permissions are never authoritative. The home returns
+a bounded `guild.audit-log.page` envelope that echoes the request. The caller
+verifies the home signature, authority, freshness, request and requester
+bindings, schema, filters, cursors, ordering, and response size before exposing
+the page. Audit pages MUST NOT be persisted in a shared cache or redistributed.
 
 When home is unavailable, replicas stay mounted and readable and emit availability
 and peer-status updates. Writes remain visibly pending. Unavailability never means
@@ -547,15 +656,27 @@ packages, MLS groups and welcomes, recovery UX, and encrypted attachments. The
 Ed25519 signatures in sections 2 and 3 authenticate one instance to another;
 they do not prove which participant device created a ciphertext.
 
-The version-2 MLS extension defines a canonical NUL-separated authenticated-data
-encoding that binds:
+The version-2 MLS extension defines a canonical authenticated-data encoding
+shared by web, mobile, desktop, and the Python SDK. It binds:
 
 - the encryption protocol and cipher-suite versions;
 - the composite guild/channel or DM reference (numeric ID and origin domain);
 - the authenticated sender device (the MLS credential binds the user account);
 - an authenticated room-policy generation and cryptographic epoch;
-- the create/edit operation and edit target, if any; and
-- the hashes and semantics of any encrypted attachment manifest.
+- the create/edit operation, monotonic message revision, and exact edit target;
+- the author, application/installation lineage, reply reference, delivery
+  flags, and resolved mention-routing projection;
+- authenticated attachment manifests, sticker refs, and custom-emoji refs;
+- sanitized component and opaque poll routing contracts; and
+- canonical rich-body and author-free forward-projection digests.
+
+The encrypted body has plaintext-message feature parity where cryptography
+permits it: content, embeds, Components V1/V2, polls, stickers, TTS and voice
+markers, flags, and file manifests. Federation carries the exact opaque MLS
+envelope and the authenticated public routing projection; it MUST NOT project
+questions, poll labels, component display text, embed text, filenames, or other
+decrypted rich data. Peers preserve application attribution, reply references,
+view/poll revisions, attachment references, and opaque vote counts exactly.
 
 The extension also enforces downgrade protection. Enabling encryption cannot be
 an unauthenticated boolean: it must advance an authenticated, monotonic room-policy
@@ -565,20 +686,99 @@ encryption is enabled. Authorities and replicas must reject writes that conflict
 with the current policy. The mere presence or absence of `e2ee`, or a peer's
 capability advertisement by itself, is not a secure negotiation mechanism.
 
-Encrypted bodies cannot participate in server-side full-text search, link previews,
-plaintext moderation, or mention extraction. Notification previews, mention lists,
-filenames, thumbnails, and attachment dimensions also reveal information and must
-be omitted, end-to-end encrypted, or explicitly designed as consented projections.
-Without such a future projection, notifications for encrypted messages must be
-generic and server-side content features disabled. Routing still exposes participant
-instances, composite room and sender references, timestamps, ciphertext sizes, and
-delivery activity; padding and traffic-analysis resistance are not provided by
-`e2ee-transport/1`.
+Encrypted bodies cannot participate in server-side full-text search, link
+previews, or plaintext moderation. Mention delivery uses a consented,
+authenticated routing projection: clients commit visible user/role/everyone
+intent and allowed-mention policy, the authority rechecks permission and
+mentionability and binds the exact resolved recipients, and recipients compare
+that projection with decrypted tokens before rendering. Notification previews
+remain generic. Routing still exposes participant instances, composite room and
+sender references, timestamps, ciphertext sizes, approved expression/attachment
+references, poll counts, and delivery activity; padding and traffic-analysis
+resistance are not provided by `e2ee-transport/1`.
+
+Client-mediated forwarding uses the source-authority event
+`message.forward.source.authorized`. Its signed content is requester,
+application/device, source message/channel, destination channel/mode, nonce,
+expiry, age context, source type/flags/timestamps, attachment refs, and the
+rich-v2 forward-projection digest. The proof additionally binds the sorted
+canonical sticker items and custom-emoji routing tokens approved at the source;
+the destination rechecks external-expression permissions without receiving any
+encrypted text. It contains an authoritative author-free
+snapshot only for a plaintext source and never decrypted E2EE content. The
+destination authority verifies the source signature and exact bindings before
+admission. A client that is an MLS participant in both encrypted rooms decrypts
+locally and re-encrypts the depth-one snapshot and each attachment for the
+destination; mixed plaintext/E2EE directions use the same proof and require an
+explicit disclosure for E2EE-to-plaintext. Attachment semantics include the
+authenticated plaintext SHA-256 while all destination transport bindings are
+fresh. A delayed queued guild/DM proposal is accepted only when its signed
+outer event was issued before proof expiry. Polls, calls, activities, legacy
+E2EE envelopes without the v2 commitment, and unauthorized history floors fail
+closed.
+
+Announcement follow/crosspost is not treated as forwarding because its
+unattended fan-out has no endpoint that can consent to and perform cross-group
+MLS re-encryption. E2EE activation/follow configuration is rejected at the
+boundary unless a future bridge is explicitly admitted to every group; peers
+MUST NOT copy MLS ciphertext or downgrade to plaintext.
+
+For plaintext announcement channels, a cross-authority follow is a durable,
+generation-fenced saga. The source guild signs an exact, short-lived
+authorization for the source channel, target channel, creator, generation and
+stable authorization ID. The target persists a pending type-2 follower webhook
+and signs `authorized`; the source persists `accepted`; the target alone
+creates the deletable type-12 notice and emits `finalized`; only then do both
+sides expose the follow as active. Rejection, expiry and revocation are retained
+as tombstones, and every transition is safe to retry through the federation
+outbox. A new follow after revocation must use the next generation.
+
+When the authenticated actor home, source authority and target authority are
+three different instances, the actor home supplies one receiver-keyed nested
+intent per resource authority. Human intents are actor-home instance-signed;
+bot intents are worker-signed and bind the exact live worker generation plus
+runtime manifest, revocation and access-revocation revisions. Both forms bind
+the action, audience, qualified actor and exact resource map and consume a
+short-lived replay nonce. An outer instance signature never substitutes for
+the actor-home proof.
+
+The `bot-direct-auth/1` install and runtime manifest contract requires the
+owning developer team's exact `team_id` and `team_domain`; a peer rejects a
+manifest that omits either field. The team domain must equal the application
+authority, and an existing application must retain the same team and bot
+identities across refreshes. This makes install-first and
+developer-snapshot-first discovery converge on the same rows instead of
+inventing an order-dependent team ID.
+
+Application, command, template, worker, and emoji projections are
+generation-idempotent. A canonically equivalent replay at the stored
+generation is a no-op; a different projection at that generation is rejected
+as equivocation, and a lower generation is rejected as rollback. Only a
+strictly greater governing generation may replace a projection. A missing
+child is treated as an authoritative deletion only while applying such a
+strict parent-generation advance, never during an equal-generation replay.
+
+Publishing commits only a source receipt and one asynchronous delivery job per
+follower, so an unavailable target cannot delay healthy followers or the
+source response. Delivery is idempotent by follow generation and source
+message. Later edits and source deletion are queued for every delivered copy,
+including retained copies whose follow was subsequently revoked. Destination
+copies keep their target-owned follower name/avatar attribution. Interactive
+components are rebound only to an exact active installation of the same
+qualified application in the target guild; without one, link/display content
+remains visible but dispatchable component lineage is removed.
 
 ## 7. Federation routes
 
 Except for discovery at `/.well-known/kaede/server`, protocol routes are under
 `/_kaede/v1`:
+
+Guild-management results echo the exact request ID, closed operation name, and
+qualified guild identity from the signed request. Callers reject a mismatch in
+any of those fields before using the body. A closed per-operation result
+contract additionally binds top-level guild, channel, and resource identities
+where the public response shape carries them; nested creator, actor, member,
+and subscriber identities may remain legitimately foreign.
 
 | Method and path                                                        | Purpose                                                                   | Availability           |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------- |
@@ -592,6 +792,8 @@ Except for discovery at `/.well-known/kaede/server`, protocol routes are under
 | `POST /guilds/{id}/join`                                               | Consume an invite and obtain the authoritative guild identity             | v1                     |
 | `GET /guilds/{id}/snapshot`                                            | Paged structural initial/full synchronization                             | v1                     |
 | `GET /guilds/{id}/events`                                              | Sequence gap fill for registered guild events                             | v1                     |
+| `POST /guilds/{id}/management`                                         | Replay-bounded signed guild-management authority RPC                      | v1                     |
+| `POST /guilds/{id}/audit-logs`                                         | Private requester-bound audit-log page with live authority recheck        | `guild-audit-log/1`    |
 | `POST /guilds/{id}/history-exports`                                    | Create or resume a permission-bound history grant                         | `guild-history-sync/1` |
 | `GET /guilds/{id}/history-exports/{export}`                            | Read the bound manifest                                                   | `guild-history-sync/1` |
 | `GET /guilds/{id}/history-exports/{export}/channels/{channel}?after=…` | Read one bounded oldest-first page                                        | `guild-history-sync/1` |
@@ -599,7 +801,12 @@ Except for discovery at `/.well-known/kaede/server`, protocol routes are under
 | `POST /guilds/{id}/history-exports/{export}/complete`                  | Idempotently acknowledge a merged export                                  | `guild-history-sync/1` |
 | `POST /guilds/{id}/proxy`                                              | Idempotent remote guild message write                                     | v1                     |
 | `POST /guilds/{id}/proxy-pin`                                          | Permission-checked remote guild pin mutation                              | v1                     |
+| `POST /guilds/{id}/pins`                                               | Permission-checked authoritative guild pin page                           | v1                     |
+| `POST /dms/{id}/pins`                                                  | Participant-bound authoritative DM pin page                               | v1                     |
 | `POST /search/messages`                                                | Bounded permission-checked federated message search                       | `message-search/1`     |
+| `POST /application-directory/search`                                   | Signed, policy-filtered reviewed application search                       | v1                     |
+| `POST /application-directory/bot-profile`                              | Resolve one bot authority's active application and install template       | v1                     |
+| `POST /application-directory/detail`                                   | Read one exact reviewed application product projection                    | v1                     |
 | `GET /link`                                                            | Signed `kaede-fed.1` hot-link WebSocket upgrade                           | v1                     |
 | `POST /voice/token`                                                    | Home-SFU guild token broker                                               | v1                     |
 | `POST /voice/dm-token`                                                 | Caller-SFU DM call token broker                                           | v1                     |
@@ -607,12 +814,80 @@ Except for discovery at `/.well-known/kaede/server`, protocol routes are under
 | `POST /calls`                                                          | Droppable two-party DM call signaling                                     | v1                     |
 | `GET /media/{attachment}/{variant}`                                    | Signed remote-media stream                                                | v1                     |
 
+Application-directory responses use a strict, bounded schema and expose only
+approved public metadata, an ordered carousel of at most five owned images or
+allowlisted YouTube IDs, at most five named HTTPS links, bounded supported
+locales/localized descriptions, popular commands, similar reviewed apps, and an
+active install template. Peers never supply arbitrary image or video URLs;
+images resolve through the reviewed application-asset contract and clients
+construct a canonical YouTube embed from the validated ID. The requester binds
+list results to the exact queried origin, filters, selected collection, limit,
+stable ordering, and cursor; detail results are additionally bound to the exact
+qualified application reference. The application home applies target policy
+for the authenticated requesting origin, and an active peer silence or
+suspension rule denies both routes.
+
+The bot-profile projection is independently useful for Discord-style **Add
+App** from chat and member profiles, so it does not require a public Directory
+listing. Its strict response is bound to the exact requested qualified bot,
+requires an active bot and application at that bot's authority, and returns
+only the same bounded active-template projection used by reviewed listings.
+The requester still applies instance policy and rejects cross-origin bot,
+application, or template lineage.
+
+A foreign target may retain a signed user-installation grant only as a bounded
+authority mirror. The grant carries an aware expiry no more than 20 minutes in
+the future; missing, naive, expired, or excessively future expiry fails closed.
+All authorization consumers share one effective-installation predicate that
+requires either a user-home-owned row or an unexpired foreign lease. Equal
+authority revisions may only extend an otherwise identical lease, while lower,
+conflicting, or shortened replays cannot restore access. Expiry denies access
+immediately, and a minute-bounded sweep revokes E2EE admission and publishes
+zero-target snapshots. Application runtime generation remains a separate
+authority fence and cannot change the user home's installation revision.
+Lease expiry is absolute and anchored by the signed sender request before any
+network work: interaction grants cannot outlive the response window plus five
+minutes, and E2EE management grants cannot outlive twenty minutes from their
+signed issue time. A delayed pre-revocation request therefore never receives a
+fresh lease window merely because it arrived later.
+
 On a successful `POST /guilds/{id}/proxy`, the guild home returns the rendered
 message, its guild sequence, and the complete signed
 `guild.message.committed` envelope. The requester must verify that envelope and
 require its guild identity, sequence, and message to match the outer response
 before applying the authoritative result. Idempotent nonce replays return the
-original stored envelope rather than synthesizing an unsigned result.
+original stored envelope rather than synthesizing an unsigned result. The
+authority binds that receipt to a versioned canonical `proxy_request_fingerprint`
+inside the signed event. It covers the immutable message, attachment, mention,
+reference, application, and installation semantics, while excluding mutable
+actor profile fields and replaceable short-lived authorization proofs. An exact
+HTTP or queued replay is therefore resolved before live permission, membership,
+mention, proof-expiry, slowmode, or AutoMod checks; a changed proposal using the
+same nonce fails closed instead of creating a second message. A queued replay
+re-delivers the retained event to the original actor home and does not repeat
+message counters, attachment replication, mention work, or gateway fanout.
+
+`POST /guilds/{id}/management` is the internal signed instance-to-instance
+authority route used when website and native-app clients act through a user's
+home instance. Public bot access tokens and DPoP proofs never traverse this
+RPC: bot clients resolve qualified references and call the resource authority
+directly. A signed federation request may nevertheless carry a bot actor; that
+defense-in-depth path rebinds the actor to an exact active installation before
+dispatch. The closed operation set covers guild profile/lifecycle, channels
+and overwrites, roles, members, user and instance bans, invites, and the
+existing AutoMod, expression, media, webhook, scheduled-event, stage,
+soundboard, voice, tracker, and bot-E2EE settings surfaces. The signed request
+binds the exact qualified guild and human-or-bot actor to the authenticated
+requesting instance, one operation, bounded payload, random one-use request
+ID, issue time, and a deadline no more than 15 seconds later. The authority
+consumes the request ID once and rechecks live membership, resource ownership,
+operation-specific permissions, and—when the actor is a bot—the exact active
+installation, scopes, and installed permission ceiling; a user or bot home
+replica is never sufficient authorization. Responses echo the request ID,
+operation, and qualified guild and are validated against the operation's exact
+allowed status and body kind (object, list, or empty) plus applicable resource
+identity bindings before a client receives them. Malformed, mismatched,
+replayed, expired, or otherwise operation-incompatible responses fail closed.
 
 Payload URLs are forbidden. Media and federation URLs are reconstructed from the
 validated origin and fixed paths. Federation HTTP clients reject redirects;
@@ -669,9 +944,11 @@ treated as an authoritative handle; `profile_resolved=false` is the sole marker.
 
 `POST /_kaede/v1/search/messages` accepts:
 
-- a structured query (maximum 512 characters);
+- a structured query (maximum 1,024 characters);
 - exactly one `channel`, `guild`, or account-DM scope;
-- bounded author, mention, content-type, date, pin, and author-type filters;
+- bounded channel, author/author-type (including negation), mention,
+  role/everyone, reply, content-kind, embed, link, attachment, snowflake/date,
+  pin, and NSFW filters;
 - a sort order and an opaque cursor; and
 - an `actor_ref`.
 
@@ -680,19 +957,24 @@ The actor origin must equal the authenticated signing origin. The authority rech
 size, result-count, cursor, string, and JSON limits and consume a per-origin
 search rate budget.
 
-The response contains at most 50 minimal result projections: composite message,
+The response contains at most 25 minimal result projections: composite message,
 channel, guild, and author references, a bounded one-line snippet, and a
 timestamp. It never contains attachment URLs or an arbitrary full
 client payload. The receiving home validates every reference and timestamp,
 rechecks local channel access, and reconstructs client payloads from local state.
-It refuses peer-supplied bodies for locally authored messages. A peer failure or
-missing capability does not fail chat; clients identify locally cached results as
-partial.
+It refuses peer-supplied bodies for locally authored messages and fails closed
+on malformed, duplicate, or cross-scope peer results. A peer failure or missing
+capability does not fail chat; clients identify unavailable authorities and
+partial coverage explicitly.
 
 Channel-scoped DM search contacts the deterministic conversation authority.
-Account-wide DM search remains local-cache scoped so one query is not broadcast
-to every participant authority; clients MUST disclose that coverage rather than
-present it as complete federated history.
+Account-wide DM search snapshots the requesting user's active conversation
+authorities, then performs a bounded concurrent fan-out with independently
+signed authorization, timeouts, and per-authority cursors. The home merges
+results deterministically, stores the multi-authority cursor server-side under
+an actor-and-query-bound opaque token, and never advances an unavailable
+authority. Fan-out is capped at 256 authorities; exceeding that bound fails
+explicitly rather than presenting incomplete history as complete.
 
 An authority MUST NOT index or return a channel whose authenticated encryption
 policy is `e2ee`, nor a message carrying an opaque `e2ee` envelope. Guild-wide
@@ -718,6 +1000,46 @@ guild home. Receivers atomically ignore a timestamp older than their current
 heartbeat. A home sends the full snapshot every 30 seconds; after 75 seconds by
 default a client renders occupancy unknown, never asserted current.
 
+### Federated soundboard
+
+Instances advertising `guild-soundboard/1` expose three private signed routes:
+
+- `POST /_kaede/v1/guilds/{guild}/soundboard/query` for bounded list/get
+  operations;
+- `POST /_kaede/v1/guilds/{guild}/soundboard/play` for an authoritative playback
+  grant; and
+- `POST /_kaede/v1/voice/soundboard-effect` for occupant-home delivery.
+
+Each query/play request binds the requesting instance, human or bot identity,
+optional bot application, exact guild/channel/sound, operation, random request
+ID, issue time, and a deadline no more than ten seconds later. The guild home
+consumes that request ID once and rechecks current guild/channel permissions. For
+a bot it also rechecks the active installation, current bot membership, granted
+`soundboard.read` or `soundboard.use` scope, and channel restrictions; the caller
+instance's cached grant is never sufficient authority. Play additionally requires
+an authoritative current room occupant with speaking enabled and consumes the
+normal per-actor soundboard rate budget.
+
+The authority response is a signed, request-echoing envelope. Query responses
+contain at most 48 strictly bounded sound projections and no storage object key.
+Play responses contain one exact sound plus a media URL valid for at most 60
+seconds. Production receivers accept only HTTPS URLs on the exact
+`media.<guild-authority>` host, with the default HTTPS port and without credentials
+or a fragment, and validate the signed guild/channel/sound/actor context before
+exposing the capability. They never dereference an arbitrary host selected by a
+peer. Operators using external object storage must front federated soundboard
+objects with that authority-bound media hostname (for example through a CNAME or
+reverse proxy); an unrelated provider origin fails closed.
+
+The authority sends `VOICE_CHANNEL_EFFECT_SEND` only to users currently in the
+authoritative room. It delivers the same signed envelope to each occupied remote
+home, which rechecks its replicated room and publishes only to its own current
+occupants. A random delivery ID is consumed once for 120 seconds, so the initiating
+HTTP response and asynchronous fanout cannot double-play an effect. Silence and
+suspend policy applies to all three routes. Human and bot public APIs use this
+path transparently for remote-authority guilds; create/edit/delete remain owned by
+the guild home.
+
 DM calls use `dm.call.create`, `ring`, `accept`, `decline`, and `end` semantics on
 signed `POST /calls` requests. The payload binds call, channel, authority, actor,
 action, and creation time. Actor domain must equal the authenticated origin; the
@@ -729,9 +1051,14 @@ before `POST /voice/dm-token` can mint a grant.
 
 Federation can be `open` or `allowlist`. A local silence denies inbound and
 outbound guild snapshots, guild events, and remote-write proxy surfaces for the
-blocked instance while still permitting DM federation. A local suspend rejects
-all federation exchange. Both policies include subdomains when configured. CSV
-exchange uses Mastodon-compatible domain block fields.
+blocked instance while still permitting DM federation. User lookup and profile
+resolution remain available because DMs and user-installed applications depend
+on stable identity resolution; invite resolution and public application-directory
+search remain blocked because they discover or admit guild-scoped state. Global
+security reports and the operator-pinned push relay are also unaffected by
+silence. A local suspend rejects all federation exchange. Both policies include
+subdomains when configured. CSV exchange uses Mastodon-compatible domain block
+fields.
 
 Implemented transport and durable-delivery failures are registered below. HTTP
 errors contain top-level `code`, a safe `message`, `trace_id`, and optional
@@ -789,7 +1116,7 @@ the batch's HTTP status.
 | `KAED_DM_INVALID_PARTICIPANTS`                 | HTTP 400                                        | DM authorization does not contain the authenticated remote and local recipient.                                                                                                                                                                                                                    |
 | `KAED_DM_OPEN_REJECTED`                        | `dm.open.rejected` content                      | The DM authority rejected an open request without a more specific stable application code.                                                                                                                                                                                                         |
 | `KAED_GUILD_INVALID_MENTION`                   | HTTP 400                                        | A proxied message mentions an identity outside the guild.                                                                                                                                                                                                                                          |
-| `KAED_GUILD_NONCE_STATE_CONFLICT`              | HTTP 409                                        | A known proxy nonce has no matching authoritative guild event.                                                                                                                                                                                                                                     |
+| `KAED_GUILD_NONCE_STATE_CONFLICT`              | HTTP 409 or queued write rejection              | A known proxy nonce has no matching authoritative guild event, or was reused for different immutable message semantics.                                                                                                                                                                            |
 | `KAED_VOICE_INVALID_ROOM`                      | HTTP 400                                        | An occupancy payload does not bind its declared guild to a canonical guild room.                                                                                                                                                                                                                   |
 | `KAED_VOICE_INVALID_STATE`                     | HTTP 400                                        | Occupancy contains a malformed participant or mismatched room/identity.                                                                                                                                                                                                                            |
 | `VOICE_HOME_UNREACHABLE`                       | HTTP 503                                        | A new guild/call join cannot reach or validate the authoritative SFU broker; clients retry after the supplied delay.                                                                                                                                                                               |

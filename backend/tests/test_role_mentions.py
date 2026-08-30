@@ -78,17 +78,18 @@ async def test_role_mention_resolves_federated_recipients() -> None:
     ]
 
 
-async def test_unmentionable_role_requires_mention_everyone() -> None:
+async def test_unmentionable_role_notifies_only_with_mention_everyone() -> None:
     session = FakeSession([role(20, mentionable=False)], [])
 
-    with pytest.raises(HTTPException) as raised:
+    assert (
         await role_mention_recipients(
             session,  # type: ignore[arg-type]
             guild(),
             f"hello <@&20@{DOMAIN}>",
             0,
         )
-    assert raised.value.detail == {"code": "ROLE_NOT_MENTIONABLE"}
+        == []
+    )
 
     assert (
         await role_mention_recipients(

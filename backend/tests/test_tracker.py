@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql
 
+from app.api import guild_management_federation as guild_management_api
 from app.api import tracker as tracker_api
 from app.api.bot_gateway import event_intent, event_scope
 from app.api.dependencies import AuthenticatedUser
@@ -27,6 +28,7 @@ from app.db.models import (
     TrackerTask,
     User,
 )
+from app.federation.guild_management import GuildManagementRequest, GuildManagementResult
 from app.federation.guilds import SNAPSHOT_NEUTRAL_GUILD_EVENTS
 from app.tracker import outbox as tracker_outbox
 from app.tracker import service as tracker_service
@@ -512,7 +514,7 @@ async def test_member_removal_clears_assignments_and_versions_the_whole_board(
 
 
 @pytest.mark.asyncio
-async def test_remote_tracker_mutations_fail_explicitly_before_local_state_access(
+async def test_tracker_context_keeps_a_local_authority_invariant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = user()
@@ -542,7 +544,119 @@ async def test_remote_tracker_mutations_fail_explicitly_before_local_state_acces
             needed=Permission.VIEW_CHANNEL,
         )
     assert rejected.value.status_code == 409
-    assert rejected.value.detail["code"] == "FEDERATED_WRITE_UNSUPPORTED"
+    assert rejected.value.detail == {
+        "code": "TRACKER_AUTHORITY_REQUIRED",
+        "authority_domain": "remote.example",
+    }
+
+
+@pytest.mark.asyncio
+async def test_remote_human_tracker_mutation_is_proxied_to_guild_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = user()
+    access = SimpleNamespace(
+        channel=SimpleNamespace(id=50, origin_domain="remote.example", type=17),
+        guild=SimpleNamespace(id=10, origin_domain="remote.example"),
+    )
+    proxy = AsyncMock(
+        return_value=GuildManagementResult(
+            request_id="kagm_" + "a" * 32,
+            operation="tracker.board.update",
+            guild={"id": "10", "domain": "remote.example"},
+            status_code=200,
+            body={"key_prefix": "OPS"},
+        )
+    )
+    monkeypatch.setattr(tracker_service, "load_channel_access", AsyncMock(return_value=access))
+    monkeypatch.setattr(tracker_service, "proxy_remote_guild_management", proxy)
+    local_context = AsyncMock()
+    monkeypatch.setattr(tracker_service, "tracker_context", local_context)
+
+    rendered = await tracker_service.update_board(
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        settings(),
+        auth(actor),
+        EntityRef("50@remote.example"),
+        TrackerBoardUpdate(key_prefix="OPS"),
+        '"version"',
+    )
+
+    assert rendered == {"key_prefix": "OPS"}
+    local_context.assert_not_awaited()
+    assert proxy.await_args.args[2:] == (
+        EntityRef("10@remote.example"),
+        actor,
+        "tracker.board.update",
+        {
+            "channel_ref": "50@remote.example",
+            "data": {"key_prefix": "OPS"},
+            "if_match": '"version"',
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_bot_tracker_mutation_requires_direct_authority_target() -> None:
+    actor = user(domain="apps.example")
+    actor.account_type = "bot"
+
+    with pytest.raises(HTTPException) as rejected:
+        await tracker_service.proxy_remote_tracker_mutation(
+            cast(Any, SimpleNamespace()),
+            settings(),
+            auth(actor),
+            EntityRef("50@remote.example"),
+            "tracker.board.update",
+            {"data": {"key_prefix": "OPS"}},
+        )
+
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail == {
+        "code": "BOT_RESOURCE_AUTHORITY_REQUIRED",
+        "resource_ref": "50@remote.example",
+        "authority_domain": "remote.example",
+    }
+
+
+@pytest.mark.asyncio
+async def test_tracker_authority_dispatch_validates_and_reuses_local_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = user(domain="remote.example")
+    create = AsyncMock(return_value={"id": "70", "origin_domain": "home.example"})
+    monkeypatch.setattr(tracker_service, "create_lane", create)
+    request = GuildManagementRequest.model_validate(
+        {
+            "guild": {"id": "10", "domain": "home.example"},
+            "actor": {"id": str(actor.id), "domain": actor.origin_domain},
+            "requesting_instance": actor.origin_domain,
+            "request_id": "kagm_" + "a" * 32,
+            "issued_at": 10,
+            "deadline": 20,
+            "operation": "tracker.lane.create",
+            "payload": {
+                "channel_ref": "50@home.example",
+                "data": {"name": " Ready ", "color": 42},
+            },
+        }
+    )
+
+    result = await guild_management_api._dispatch_tracker(
+        request,
+        actor,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        settings(),
+    )
+
+    assert result.status_code == 201
+    assert result.body == {"id": "70", "origin_domain": "home.example"}
+    assert create.await_args.args[5] == EntityRef("50@home.example")
+    assert create.await_args.args[6].name == "Ready"
+    assert create.await_args.args[6].color == 42
 
 
 @pytest.mark.asyncio

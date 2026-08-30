@@ -141,6 +141,62 @@ describe('GatewayClient lifecycle', () => {
     client.close();
   });
 
+  it('advances past unknown additive events without dispatching or disconnecting', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    const dispatched: string[] = [];
+    client.addEventListener('dispatch', (event) => {
+      dispatched.push((event as CustomEvent<{ t: string }>).detail.t);
+    });
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'READY',
+      s: 0,
+      d: { session_id: 'forward-compatible-session' }
+    });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'FUTURE_ADDITIVE_EVENT',
+      s: 1,
+      d: { future: true }
+    });
+
+    expect(dispatched).toEqual(['READY']);
+    expect(storage.getItem('kaede.gateway.sequence')).toBe('1');
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+    client.close();
+  });
+
+  it('strips client-only decrypted state before dispatching network events', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    let detail: Record<string, unknown> | null = null;
+    client.addEventListener('dispatch', (event) => {
+      const dispatch = (event as CustomEvent<{ t: string; d: Record<string, unknown> }>).detail;
+      if (dispatch.t === 'MESSAGE_CREATE') detail = dispatch.d;
+    });
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'MESSAGE_CREATE',
+      s: 1,
+      d: {
+        id: '1',
+        e2ee_verified: true,
+        decrypted_content: 'peer-injected plaintext',
+        attachments: [{ id: '2', encrypted_manifest: { key: 'peer-injected-secret' } }]
+      }
+    });
+
+    expect(detail).toEqual({ id: '1', attachments: [{ id: '2' }] });
+    client.close();
+  });
+
   it('does not overwrite the account presence preference after READY', async () => {
     localStorageMemory.setItem('kaede.presence', 'dnd');
     const { GatewayClient } = await import('./client');
@@ -161,6 +217,37 @@ describe('GatewayClient lifecycle', () => {
       d: { status: 'dnd' }
     });
     client.close();
+  });
+
+  it('publishes only the two authoritative self voice-state fields', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'READY',
+      s: 0,
+      d: { session_id: 'voice-session' }
+    });
+
+    await client.setSelfVoiceState(false, true);
+
+    expect(JSON.parse(socket.sent.at(-1) ?? '')).toEqual({
+      op: GatewayOp.VOICE_STATE_UPDATE,
+      d: { self_mute: true, self_deaf: true }
+    });
+    client.close();
+  });
+
+  it('fails closed when an unmute cannot be shared', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+
+    await expect(client.setSelfVoiceState(false, false)).rejects.toThrow(
+      'Realtime updates are offline'
+    );
   });
 
   it('applies a server-backed preference that loads before READY', async () => {
@@ -208,6 +295,36 @@ describe('GatewayClient lifecycle', () => {
       GatewayOp.IDENTIFY,
       GatewayOp.REQUEST_MEMBERS,
       GatewayOp.SUBSCRIBE_MEMBER_LIST
+    ]);
+    client.close();
+  });
+
+  it('requests ephemeral voice info and soundboard sets with Discord gateway opcodes', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+
+    client.requestChannelInfo('10@remote.test', ['status', 'voice_start_time']);
+    client.requestSoundboardSounds(['10@remote.test', '11@other.test']);
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'READY',
+      s: 0,
+      d: { session_id: 'requested-resources-session' }
+    });
+
+    expect(socket.sent.map((payload) => JSON.parse(payload))).toEqual([
+      { op: GatewayOp.IDENTIFY, d: {} },
+      {
+        op: GatewayOp.REQUEST_CHANNEL_INFO,
+        d: { guild_id: '10@remote.test', fields: ['status', 'voice_start_time'] }
+      },
+      {
+        op: GatewayOp.REQUEST_SOUNDBOARD_SOUNDS,
+        d: { guild_ids: ['10@remote.test', '11@other.test'] }
+      }
     ]);
     client.close();
   });

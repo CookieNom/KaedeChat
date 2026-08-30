@@ -6,20 +6,29 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy import delete, exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.allowed_mentions import EVERYONE_MENTION
+from app.chat.channel_access import effective_channel_nsfw
+from app.chat.mentions import USER_MENTION, role_mention_refs
+from app.chat.rich_content import message_automod_text
 from app.core.settings import Settings
 from app.db.models import (
     Attachment,
     Channel,
+    DMConversation,
     DMParticipant,
     Message,
     Pin,
+    Poll,
+    PollAnswer,
     SearchIndexOutbox,
     SearchIndexState,
+    User,
 )
 
 LINK_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
@@ -28,11 +37,23 @@ FILTERABLE_ATTRIBUTES = [
     "channel_ref",
     "guild_ref",
     "dm_participant_refs",
+    "dm_authority",
     "author_ref",
     "mention_refs",
+    "mention_role_refs",
+    "mention_everyone",
+    "replied_to_user_ref",
+    "replied_to_message_ref",
     "content_types",
+    "embed_types",
+    "embed_providers",
+    "link_hostnames",
+    "attachment_filenames",
+    "attachment_extensions",
     "pinned",
     "author_type",
+    "nsfw",
+    "message_id",
     "created_at_ms",
 ]
 SORTABLE_ATTRIBUTES = ["created_at_ms"]
@@ -53,6 +74,93 @@ def canonical_ref(identifier: int, domain: str) -> str:
 
 def document_id(identifier: int, domain: str) -> str:
     return hashlib.sha256(canonical_ref(identifier, domain).encode()).hexdigest()
+
+
+def message_author_type(message: Message, author: User | None) -> str:
+    """Classify webhook delivery before bot identity, matching Discord filters."""
+
+    if message.webhook_id is not None:
+        return "webhook"
+    if author is not None and author.account_type == "bot":
+        return "bot"
+    return "user"
+
+
+def search_link_hostnames(*values: str) -> list[str]:
+    hostnames: set[str] = set()
+    for value in values:
+        for match in LINK_RE.finditer(value):
+            candidate = match.group(0).rstrip('.,;:!?)]}"')
+            hostname = urlsplit(candidate).hostname
+            if hostname:
+                hostnames.add(hostname.rstrip(".").lower())
+    return sorted(hostnames)
+
+
+def embed_search_projection(
+    embeds: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[str]]:
+    types: set[str] = set()
+    providers: set[str] = set()
+    urls: list[str] = []
+    type_aliases = {
+        "image": "image",
+        "video": "video",
+        "gif": "gif",
+        "gifv": "gif",
+        "sound": "sound",
+        "audio": "sound",
+        "article": "article",
+        "link": "article",
+    }
+    for embed in embeds:
+        raw_type = embed.get("type")
+        if isinstance(raw_type, str) and raw_type.lower() in type_aliases:
+            types.add(type_aliases[raw_type.lower()])
+        if isinstance(embed.get("image"), dict) or isinstance(embed.get("thumbnail"), dict):
+            types.add("image")
+        if isinstance(embed.get("video"), dict):
+            types.add("video")
+        if isinstance(embed.get("audio"), dict):
+            types.add("sound")
+        provider = embed.get("provider")
+        provider_name = provider.get("name") if isinstance(provider, dict) else provider
+        if isinstance(provider_name, str) and provider_name:
+            providers.add(provider_name)
+        for candidate in (
+            embed.get("url"),
+            *(
+                nested.get("url")
+                for key in ("image", "thumbnail", "video", "audio", "author")
+                if isinstance((nested := embed.get(key)), dict)
+            ),
+        ):
+            if isinstance(candidate, str):
+                urls.append(candidate)
+    return sorted(types), sorted(providers), search_link_hostnames(*urls)
+
+
+def attachment_search_projection(
+    attachments: list[Attachment],
+) -> tuple[set[str], list[str], list[str]]:
+    content_types: set[str] = set()
+    filenames: set[str] = set()
+    extensions: set[str] = set()
+    for attachment in attachments:
+        content_types.add("file")
+        media_type = attachment.detected_content_type or attachment.content_type
+        if media_type.startswith("image/"):
+            content_types.add("image")
+        elif media_type.startswith("video/"):
+            content_types.add("video")
+        elif media_type.startswith("audio/"):
+            content_types.update(("sound", "audio"))
+        filename = attachment.filename.casefold()
+        filenames.add(filename)
+        stem, separator, extension = filename.rpartition(".")
+        if separator and stem and extension:
+            extensions.add(extension)
+    return content_types, sorted(filenames), sorted(extensions)
 
 
 def search_index_uid(settings: Settings) -> str:
@@ -143,6 +251,28 @@ class MeiliClient:
     async def search(self, payload: dict[str, object]) -> dict[str, Any]:
         return await self.request("POST", f"/indexes/{self.uid}/search", payload=payload)
 
+    async def configured_filterable_attributes(self) -> frozenset[str] | None:
+        """Read the live index schema; ``None`` means the index does not exist."""
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.settings.search_url.rstrip("/"),
+                headers=self.headers,
+                timeout=self.settings.search_request_timeout_seconds,
+                follow_redirects=False,
+            ) as client:
+                response = await client.get(f"/indexes/{self.uid}/settings")
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                value = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SearchUnavailable("message search service is unavailable") from exc
+        raw = value.get("filterableAttributes") if isinstance(value, dict) else None
+        if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+            raise SearchUnavailable("message search returned an invalid index schema")
+        return frozenset(raw)
+
     async def reset_index(self) -> None:
         try:
             async with httpx.AsyncClient(
@@ -178,6 +308,9 @@ async def build_document(session: AsyncSession, message: Message) -> dict[str, o
         or message.deleted_at is not None
     ):
         return None
+    effective_nsfw = await effective_channel_nsfw(session, channel)
+    if effective_nsfw is None:
+        return None
     attachments = list(
         await session.scalars(
             select(Attachment).where(
@@ -187,22 +320,59 @@ async def build_document(session: AsyncSession, message: Message) -> dict[str, o
             )
         )
     )
-    types: set[str] = set()
-    for attachment in attachments:
-        content_type = attachment.detected_content_type or attachment.content_type
-        if content_type.startswith("image/"):
-            types.add("image")
-        elif content_type.startswith("video/"):
-            types.add("video")
-        elif content_type.startswith("audio/"):
-            types.add("audio")
-        else:
-            types.add("file")
-    content = message.content or ""
+    types, attachment_filenames, attachment_extensions = attachment_search_projection(attachments)
+    poll = await session.get(Poll, (message.id, message.origin_domain))
+    poll_answers = (
+        list(
+            await session.scalars(
+                select(PollAnswer)
+                .where(
+                    PollAnswer.message_id == message.id,
+                    PollAnswer.message_domain == message.origin_domain,
+                )
+                .order_by(PollAnswer.answer_id)
+            )
+        )
+        if poll is not None
+        else []
+    )
+    poll_projection: dict[str, object] | None = None
+    if poll is not None:
+        poll_projection = {
+            "question": poll.question,
+            "answers": [
+                {"poll_media": {"text": answer.text}}
+                for answer in poll_answers
+                if answer.text is not None
+            ],
+        }
+        types.add("poll")
+    content = (
+        message_automod_text(
+            message.content,
+            poll=poll_projection,
+            components=message.components or [],
+        )
+        or ""
+    )
     if LINK_RE.search(content):
         types.update(("link", "embed"))
+    embeds = [item for item in message.embeds if isinstance(item, dict)]
+    embed_types, embed_providers, embed_hostnames = embed_search_projection(embeds)
+    if embeds:
+        types.add("embed")
+    if message.sticker_items:
+        types.add("sticker")
+    if message.forward_snapshot is not None or message.flags & (1 << 14):
+        types.add("snapshot")
+    link_hostnames = sorted(set(search_link_hostnames(content)) | set(embed_hostnames))
     participant_refs: list[str] = []
+    dm_authority: str | None = None
     if channel.type == 1:
+        conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
+        if conversation is None:
+            return None
+        dm_authority = conversation.authority_domain
         participant_refs = [
             canonical_ref(user_id, user_domain)
             for user_id, user_domain in (
@@ -224,14 +394,39 @@ async def build_document(session: AsyncSession, message: Message) -> dict[str, o
             )
         )
     )
-    mentions = [
-        canonical_ref(int(item["id"]), str(item["origin_domain"]))
-        for item in message.mention_user_refs
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and str(item["id"]).isdigit()
-        and isinstance(item.get("origin_domain"), str)
-    ]
+    # Search the visible mention tokens, not the expanded notification route.
+    # A role or @everyone may notify thousands of users, but Discord's
+    # `mentions` filter must not report all of those users as direct mentions.
+    mentions = sorted(
+        {
+            canonical_ref(
+                int(match.group("id")),
+                (match.group("domain") or channel.origin_domain).lower(),
+            )
+            for match in USER_MENTION.finditer(content)
+        }
+    )
+    role_mentions = sorted(
+        canonical_ref(role_id, role_domain) for role_id, role_domain in role_mention_refs(content)
+    )
+    replied_to_message_ref = (
+        canonical_ref(message.referenced_message_id, message.referenced_message_domain)
+        if message.referenced_message_id is not None
+        and message.referenced_message_domain is not None
+        else None
+    )
+    replied_to_user_ref = None
+    if message.referenced_message_id is not None and message.referenced_message_domain is not None:
+        referenced = await session.get(
+            Message,
+            (message.referenced_message_id, message.referenced_message_domain),
+        )
+        if referenced is not None:
+            replied_to_user_ref = canonical_ref(
+                referenced.author_id,
+                referenced.author_domain,
+            )
+    author = await session.get(User, (message.author_id, message.author_domain))
     return {
         "document_id": document_id(message.id, message.origin_domain),
         "message_ref": canonical_ref(message.id, message.origin_domain),
@@ -242,12 +437,27 @@ async def build_document(session: AsyncSession, message: Message) -> dict[str, o
             else None
         ),
         "dm_participant_refs": participant_refs,
+        "dm_authority": dm_authority,
         "author_ref": canonical_ref(message.author_id, message.author_domain),
         "mention_refs": mentions,
+        "mention_role_refs": role_mentions,
+        "mention_everyone": EVERYONE_MENTION.search(content) is not None,
+        "replied_to_user_ref": replied_to_user_ref,
+        "replied_to_message_ref": replied_to_message_ref,
         "content": content,
         "content_types": sorted(types),
+        "embed_types": embed_types,
+        "embed_providers": embed_providers,
+        "link_hostnames": link_hostnames,
+        "attachment_filenames": attachment_filenames,
+        "attachment_extensions": attachment_extensions,
         "pinned": pinned,
-        "author_type": "webhook" if message.webhook_id is not None else "user",
+        "author_type": message_author_type(message, author),
+        "nsfw": effective_nsfw,
+        # Keep the numeric snowflake alongside its authority-qualified ref so
+        # max_id/min_id filters remain exact for messages created in the same
+        # millisecond.  Deriving only created_at_ms loses worker/sequence bits.
+        "message_id": message.id,
         "created_at_ms": int(message.created_at.timestamp() * 1000),
     }
 
@@ -320,6 +530,24 @@ async def reconcile_search_index_state(session: AsyncSession, settings: Settings
         state.backfill_after_domain = None
         state.backfill_completed = False
         state.updated_at = datetime.now(UTC)
+    if settings.search_enabled and not state.reset_required:
+        client = MeiliClient(settings)
+        cache_key = (settings.search_url.rstrip("/"), client.uid)
+        if cache_key not in _configured_indices:
+            schema_available = True
+            try:
+                current_attributes = await client.configured_filterable_attributes()
+            except SearchUnavailable:
+                schema_available = False
+                current_attributes = None
+            if schema_available and current_attributes != frozenset(FILTERABLE_ATTRIBUTES):
+                state.reset_required = True
+                state.backfill_after_id = None
+                state.backfill_after_domain = None
+                state.backfill_completed = False
+                state.updated_at = datetime.now(UTC)
+            elif schema_available:
+                _configured_indices.add(cache_key)
     if not settings.search_enabled:
         await session.execute(delete(SearchIndexOutbox))
     await session.commit()

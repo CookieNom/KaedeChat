@@ -27,6 +27,7 @@ Future<File> downloadEncryptedFile({
   required Map<String, Object?> manifest,
   required File destination,
   String? historyMediaUrl,
+  String? privateMediaUrl,
 }) async {
   if (manifest['version'] != 1 || manifest['protocol'] != 'kaede-file-v1') {
     throw const FormatException('Unsupported encrypted file.');
@@ -36,7 +37,11 @@ Future<File> downloadEncryptedFile({
     Domain('${manifest['attachment_domain']}'),
   );
   final all = Uint8List.fromList(await repository.api.getBytes(
-    attachmentMediaPath(attachment, historyMediaUrl: historyMediaUrl),
+    attachmentMediaPath(
+      attachment,
+      historyMediaUrl: historyMediaUrl,
+      privateMediaUrl: privateMediaUrl,
+    ),
   ));
   final expectedSize = (manifest['ciphertext_size'] as num?)?.toInt();
   final expectedPlainSize = (manifest['plaintext_size'] as num?)?.toInt();
@@ -71,6 +76,7 @@ Future<File> downloadEncryptedFile({
   rawKey.fillRange(0, rawKey.length, 0);
   final count = (plainSize + chunkSize - 1) ~/ chunkSize;
   final output = await destination.open(mode: FileMode.write);
+  final plaintextHash = Sha256().newHashSink();
   var offset = _headerSize;
   var produced = 0;
   try {
@@ -100,12 +106,22 @@ Future<File> downloadEncryptedFile({
         secretKey: derived,
         aad: aad,
       );
+      plaintextHash.add(plaintext);
       await output.writeFrom(plaintext);
       produced += plaintext.length;
       offset += length;
     }
     if (offset != all.length || produced != plainSize) {
       throw const FormatException('Encrypted file framing is invalid.');
+    }
+    plaintextHash.close();
+    final plaintextDigest = _base64url((await plaintextHash.hash()).bytes);
+    final expectedPlaintextDigest = manifest['plaintext_sha256'];
+    if (expectedPlaintextDigest != null &&
+        (expectedPlaintextDigest is! String ||
+            !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(expectedPlaintextDigest) ||
+            plaintextDigest != expectedPlaintextDigest)) {
+      throw const FormatException('Encrypted file plaintext was modified.');
     }
     await output.flush();
     return destination;
@@ -125,8 +141,39 @@ Future<EncryptedMobileUpload> uploadEncryptedFile({
   required File source,
   required String filename,
   required String contentType,
+  int? durationMillis,
+  String? waveform,
   void Function(int sent, int total)? onProgress,
 }) async {
+  if ((durationMillis == null) != (waveform == null)) {
+    throw const FormatException(
+      'Encrypted voice metadata must include duration and waveform together.',
+    );
+  }
+  Uint8List? waveformBytes;
+  if (durationMillis != null && waveform != null) {
+    try {
+      if (durationMillis < 1 ||
+          durationMillis > 1200000 ||
+          waveform.length < 4 ||
+          waveform.length > 344 ||
+          !RegExp(
+            r'^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$',
+          ).hasMatch(waveform)) {
+        throw const FormatException('Encrypted voice metadata is invalid.');
+      }
+      waveformBytes = base64.decode(waveform);
+      if (waveformBytes.isEmpty ||
+          waveformBytes.length > 256 ||
+          base64.encode(waveformBytes) != waveform) {
+        throw const FormatException('Encrypted voice metadata is invalid.');
+      }
+    } on FormatException {
+      throw const FormatException('Encrypted voice metadata is invalid.');
+    } finally {
+      waveformBytes?.fillRange(0, waveformBytes.length, 0);
+    }
+  }
   final encrypted = await _encryptFile(source, filename, contentType);
   try {
     final ticket = await repository.createAttachmentTicket(
@@ -153,6 +200,8 @@ Future<EncryptedMobileUpload> uploadEncryptedFile({
         ...encrypted.manifest,
         'attachment_id': attachment.id.value,
         'attachment_domain': attachment.domain.value,
+        if (durationMillis != null) 'duration_millis': durationMillis,
+        if (waveform != null) 'waveform': waveform,
       },
     );
   } finally {
@@ -175,6 +224,17 @@ Future<_EncryptedFile> _encryptFile(
   final size = await source.length();
   if (size < 1 || size > _maximumFileSize) {
     throw StateError('Encrypted files must be between 1 byte and 64 MiB.');
+  }
+  final safeFilename = filename.trim().isEmpty ? 'file' : filename.trim();
+  final safeContentType =
+      (contentType.isEmpty ? 'application/octet-stream' : contentType)
+          .toLowerCase();
+  if (safeFilename.length > 255 ||
+      safeFilename.runes.any((code) => code <= 0x1f || code == 0x7f) ||
+      safeContentType.length > 100 ||
+      !RegExp(r'^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$')
+          .hasMatch(safeContentType)) {
+    throw const FormatException('Encrypted file metadata is invalid.');
   }
   final fileId = _random(16);
   final rawKey = _random(32);
@@ -200,6 +260,7 @@ Future<_EncryptedFile> _encryptFile(
   final inputHandle = await source.open();
   final outputHandle = await output.open(mode: FileMode.write);
   final hash = Sha256().newHashSink();
+  final plaintextHash = Sha256().newHashSink();
   final count = (size + _chunkSize - 1) ~/ _chunkSize;
   try {
     await outputHandle.writeFrom(header);
@@ -207,6 +268,7 @@ Future<_EncryptedFile> _encryptFile(
     for (var index = 0; index < count; index++) {
       final plaintext =
           await inputHandle.read(min(_chunkSize, size - index * _chunkSize));
+      plaintextHash.add(plaintext);
       final nonce = Uint8List(12)..setRange(0, 8, noncePrefix);
       ByteData.sublistView(nonce).setUint32(8, index, Endian.big);
       final aad = Uint8List(_headerSize + 8)..setRange(0, _headerSize, header);
@@ -233,16 +295,18 @@ Future<_EncryptedFile> _encryptFile(
     }
     await outputHandle.flush();
     hash.close();
+    plaintextHash.close();
     final digest = await hash.hash();
+    final plaintextDigest = await plaintextHash.hash();
     return _EncryptedFile(output, {
       'version': 1,
       'protocol': 'kaede-file-v1',
       'file_id': _base64url(fileId),
       'key': _base64url(rawKey),
-      'filename': filename.trim().isEmpty ? 'file' : filename.trim(),
-      'content_type':
-          contentType.isEmpty ? 'application/octet-stream' : contentType,
+      'filename': safeFilename,
+      'content_type': safeContentType,
       'plaintext_size': size,
+      'plaintext_sha256': _base64url(plaintextDigest.bytes),
       'ciphertext_size': await output.length(),
       'ciphertext_sha256': _base64url(digest.bytes),
       'chunk_size': _chunkSize,

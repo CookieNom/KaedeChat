@@ -102,8 +102,20 @@ describe('native session startup', () => {
     rememberNativeRoute('/g/123%40chat.example/456%40chat.example?around=789');
     expect(storedNativeRoute()).toBe('/g/123%40chat.example/456%40chat.example?around=789');
 
+    rememberNativeRoute('/application-directory?from=%2Fg%2F123%2540chat.example%2Fsettings');
+    expect(storedNativeRoute()).toBe(
+      '/application-directory?from=%2Fg%2F123%2540chat.example%2Fsettings'
+    );
+
+    rememberNativeRoute('/application-directory/42%40apps.example?return_to=%2Fhome#overview');
+    expect(storedNativeRoute()).toBe(
+      '/application-directory/42%40apps.example?return_to=%2Fhome#overview'
+    );
+
     rememberNativeRoute('/login');
-    expect(storedNativeRoute()).toBe('/g/123%40chat.example/456%40chat.example?around=789');
+    expect(storedNativeRoute()).toBe(
+      '/application-directory/42%40apps.example?return_to=%2Fhome#overview'
+    );
 
     storage.setItem('kaede.native.last-route', 'https://attacker.example/steal');
     expect(storedNativeRoute()).toBeNull();

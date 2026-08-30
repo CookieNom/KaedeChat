@@ -18,19 +18,39 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.admin import router as admin_router
 from app.api.admin_portal import federation_router as report_federation_router
 from app.api.admin_portal import router as admin_portal_router
+from app.api.application_assets import router as application_assets_router
+from app.api.application_directory import (
+    federation_router as application_directory_federation_router,
+)
+from app.api.application_directory import router as application_directory_router
+from app.api.application_management_federation import (
+    router as application_management_federation_router,
+)
 from app.api.applications import federation_router as bot_install_federation_router
 from app.api.applications import router as applications_router
 from app.api.auth import router as auth_router
+from app.api.automod import router as automod_router
+from app.api.bot_control import router as bot_control_router
+from app.api.bot_dm_federation import router as bot_dm_federation_router
+from app.api.bot_e2ee import router as bot_e2ee_router
 from app.api.bot_federation import router as bot_federation_router
 from app.api.bot_gateway import router as bot_gateway_router
+from app.api.bot_voice import router as bot_voice_router
 from app.api.bots import router as bots_router
+from app.api.bulk_moderation import router as bulk_moderation_router
 from app.api.calls import router as calls_router
 from app.api.channels import router as channels_router
+from app.api.developer_management_federation import (
+    router as developer_management_federation_router,
+)
 from app.api.dms import router as dms_router
 from app.api.e2ee import router as e2ee_router
+from app.api.expressions import federation_router as expression_federation_router
+from app.api.expressions import router as expressions_router
 from app.api.federation import router as federation_router
 from app.api.gifs import router as gifs_router
 from app.api.guild_lifecycle import router as guild_lifecycle_router
+from app.api.guild_management_federation import router as guild_management_federation_router
 from app.api.guilds import router as guilds_router
 from app.api.interactions import federation_router as interaction_federation_router
 from app.api.interactions import router as interactions_router
@@ -39,11 +59,18 @@ from app.api.link_previews import router as link_previews_router
 from app.api.management import router as management_router
 from app.api.media import router as media_router
 from app.api.mobile_links import router as mobile_links_router
+from app.api.moderation import federation_router as audit_log_federation_router
 from app.api.moderation import router as moderation_router
 from app.api.push import relay_router as push_relay_router
 from app.api.push import router as push_router
 from app.api.relationships import router as relationships_router
+from app.api.scheduled_events import router as scheduled_events_router
 from app.api.search import router as search_router
+from app.api.soundboard import federation_router as soundboard_federation_router
+from app.api.soundboard import human_router as human_soundboard_router
+from app.api.soundboard import router as soundboard_router
+from app.api.stage_instances import bot_router as bot_stage_instances_router
+from app.api.stage_instances import router as stage_instances_router
 from app.api.threads import bot_router as bot_threads_router
 from app.api.threads import federation_router as thread_federation_router
 from app.api.threads import router as threads_router
@@ -51,6 +78,7 @@ from app.api.tracker import bot_router as bot_tracker_router
 from app.api.tracker import router as tracker_router
 from app.api.users import router as users_router
 from app.api.voice import router as voice_router
+from app.api.webhook_e2ee import router as webhook_e2ee_router
 from app.api.webhooks import router as webhooks_router
 from app.core.errors import (
     API_ERROR_RESPONSES,
@@ -122,14 +150,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(auth_router)
+app.include_router(automod_router)
 app.include_router(admin_router)
 app.include_router(admin_portal_router)
 app.include_router(report_federation_router)
 app.include_router(applications_router)
+app.include_router(application_directory_router)
+app.include_router(application_directory_federation_router)
+app.include_router(application_assets_router)
+app.include_router(application_management_federation_router)
+app.include_router(developer_management_federation_router)
 app.include_router(bot_install_federation_router)
 app.include_router(bots_router)
+app.include_router(bot_control_router)
+app.include_router(bot_dm_federation_router)
+app.include_router(bot_e2ee_router)
 app.include_router(bot_federation_router)
 app.include_router(bot_gateway_router)
+app.include_router(bot_voice_router)
+app.include_router(bulk_moderation_router)
+app.include_router(human_soundboard_router)
+app.include_router(soundboard_router)
+app.include_router(soundboard_federation_router)
+app.include_router(stage_instances_router)
+app.include_router(bot_stage_instances_router)
+app.include_router(guild_management_federation_router)
 app.include_router(federation_router)
 app.include_router(users_router)
 app.include_router(voice_router)
@@ -145,6 +190,8 @@ app.include_router(thread_federation_router)
 app.include_router(calls_router)
 app.include_router(dms_router)
 app.include_router(e2ee_router)
+app.include_router(expressions_router)
+app.include_router(expression_federation_router)
 app.include_router(invites_router)
 app.include_router(interactions_router)
 app.include_router(interaction_federation_router)
@@ -153,11 +200,14 @@ app.include_router(management_router)
 app.include_router(media_router)
 app.include_router(mobile_links_router)
 app.include_router(moderation_router)
+app.include_router(audit_log_federation_router)
 app.include_router(push_router)
 app.include_router(push_relay_router)
 app.include_router(relationships_router)
 app.include_router(search_router)
+app.include_router(scheduled_events_router)
 app.include_router(webhooks_router)
+app.include_router(webhook_e2ee_router)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -234,7 +284,13 @@ async def trace_request(
                     ),
                 )
                 if is_federation and body:
-                    request.state.federation_json = strict_json_loads(body)
+                    request.state.federation_json = strict_json_loads(
+                        body,
+                        allow_floats=(
+                            request.url.path.startswith("/_kaede/v1/channels/")
+                            and request.url.path.endswith("/interactions")
+                        ),
+                    )
             except ValueError:
                 response = error_response(
                     request,

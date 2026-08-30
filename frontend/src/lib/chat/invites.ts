@@ -59,3 +59,54 @@ export function inviteReferencesInMessage(content: string): string[] {
   }
   return [...references].slice(0, 3);
 }
+
+/** Use the guild authority for links because invite codes are authority-local. */
+export function guildInviteUrl(
+  code: string,
+  authorityDomain: string,
+  currentOrigin?: string
+): string {
+  const path = `/invite/${encodeURIComponent(code)}`;
+  if (currentOrigin) {
+    try {
+      const origin = new URL(currentOrigin);
+      if (origin.hostname.toLowerCase() === authorityDomain.toLowerCase()) {
+        return `${origin.origin}${path}`;
+      }
+    } catch {
+      // Fall through to the canonical HTTPS authority URL.
+    }
+  }
+  return `https://${authorityDomain.toLowerCase()}${path}`;
+}
+
+/** Route an authority-local invite through the recipient's own account home. */
+export function federatedInviteHomeUrl(
+  code: string,
+  authorityDomain: string,
+  homeDomain: string
+): string | null {
+  const authority = authorityDomain.trim().toLowerCase().replace(/\.$/, '');
+  const home = homeDomain.trim().toLowerCase().replace(/\.$/, '');
+  if (!FEDERATION_DOMAIN.test(authority) || !FEDERATION_DOMAIN.test(home)) return null;
+  const normalized = normalizedCode(code, authority);
+  if (!normalized) return null;
+  const bareCode = normalized.slice(0, normalized.indexOf('@'));
+  const reference = home === authority ? bareCode : `${bareCode}@${authority}`;
+  return `https://${home}/invite/${encodeURIComponent(reference)}`;
+}
+
+export function guildInviteManagementPath(
+  code: string,
+  authorityDomain: string,
+  guildRef: string
+): string {
+  const inviteRef = `${code}@${authorityDomain.toLowerCase()}`;
+  const query = new URLSearchParams({ guild_ref: guildRef });
+  return `/invites/${encodeURIComponent(inviteRef)}?${query}`;
+}
+
+/** List invites through the channel authority encoded in its qualified ref. */
+export function channelInviteListPath(channelRef: string): string {
+  return `/channels/${encodeURIComponent(channelRef)}/invites`;
+}

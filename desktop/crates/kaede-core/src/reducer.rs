@@ -238,7 +238,10 @@ impl AppState {
         match event {
             "READY" => self.ready(envelope.d),
             "RESUMED" => self.resumed(envelope.d),
-            "VOICE_TOKEN" | "FEDERATION_PEER_STATUS" => Ok(Reduction {
+            "VOICE_TOKEN"
+            | "FEDERATION_PEER_STATUS"
+            | "THREAD_MEMBER_UPDATE"
+            | "THREAD_MEMBERS_UPDATE" => Ok(Reduction {
                 changed: true,
                 ..Reduction::default()
             }),
@@ -249,11 +252,22 @@ impl AppState {
             "MESSAGE_CREATE" => self.upsert_message(envelope.d),
             "MESSAGE_UPDATE" => self.update_message(&envelope.d),
             "MESSAGE_DELETE" => self.delete_message(&envelope.d),
-            "CHANNEL_CREATE"
-            | "CHANNEL_UPDATE"
-            | "CHANNEL_ACCESS_GRANTED"
-            | "CHANNEL_PERMISSION_UPDATE" => self.upsert_channel(envelope.d),
+            "MESSAGE_DELETE_BULK" => self.delete_messages_bulk(&envelope.d),
+            "MESSAGE_REACTION_ADD" => self.update_reaction(&envelope.d, true),
+            "MESSAGE_REACTION_REMOVE" => self.update_reaction(&envelope.d, false),
+            "MESSAGE_REACTION_REMOVE_ALL" => self.clear_reactions(&envelope.d, false),
+            "MESSAGE_REACTION_REMOVE_EMOJI" => self.clear_reactions(&envelope.d, true),
+            "MESSAGE_PIN_UPDATE" | "CHANNEL_PINS_UPDATE" => self.update_pin(&envelope.d),
+            "MESSAGE_POLL_VOTE_ADD" => self.update_poll_vote(&envelope.d, true),
+            "MESSAGE_POLL_VOTE_REMOVE" => self.update_poll_vote(&envelope.d, false),
+            "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_ACCESS_GRANTED" => {
+                self.upsert_channel(envelope.d)
+            }
+            "CHANNEL_PERMISSION_UPDATE" => self.update_channel_permissions(envelope.d),
             "CHANNEL_DELETE" | "CHANNEL_ACCESS_REVOKED" => self.remove_channel(&envelope.d),
+            "THREAD_CREATE" | "THREAD_UPDATE" => self.upsert_thread(envelope.d),
+            "THREAD_DELETE" => self.remove_thread(&envelope.d),
+            "THREAD_LIST_SYNC" => self.sync_threads(envelope.d),
             "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_AVAILABILITY_UPDATE" => {
                 self.upsert_guild(envelope.d)
             }
@@ -269,7 +283,7 @@ impl AppState {
             "GUILD_MEMBER_REMOVE" => self.remove_member(&envelope.d),
             "PRESENCE_UPDATE" => self.upsert_presence(envelope.d),
             "TYPING_START" => self.upsert_typing(envelope.d),
-            "VOICE_STATE_UPDATE" | "VOICE_CHANNEL_MOVE" => self.upsert_voice(envelope.d),
+            "VOICE_STATE_UPDATE" | "VOICE_CHANNEL_MOVE" => self.upsert_voice(&envelope.d),
             "READ_STATE_UPDATE" => self.upsert_read_state(envelope.d),
             "USER_UPDATE" => self.upsert_user_or_relationship(envelope.d),
             "MESSAGE_SEND_REJECTED" => self.reject_message(envelope.d),
@@ -408,9 +422,231 @@ impl AppState {
         }
 
         let key = entity_ref(value)?;
+        if let Some(message) = self.messages.get_mut(&key)
+            && let Some(pinned) = value.get("pinned")
+        {
+            message.pinned =
+                serde_json::from_value(pinned.clone()).map_err(ReduceError::Payload)?;
+            if !message.pinned {
+                message.pinned_at = None;
+            }
+        }
         Ok(Reduction {
             changed: self.messages.contains_key(&key),
             reconcile_required: !self.messages.contains_key(&key),
+            ..Reduction::default()
+        })
+    }
+
+    fn delete_messages_bulk(&mut self, value: &Value) -> Result<Reduction, ReduceError> {
+        #[derive(Deserialize)]
+        struct DeletedRef {
+            id: kaede_protocol::Snowflake,
+            origin_domain: kaede_protocol::Domain,
+        }
+        #[derive(Deserialize)]
+        struct BulkDelete {
+            ids: Vec<DeletedRef>,
+            channel_id: kaede_protocol::Snowflake,
+            channel_domain: kaede_protocol::Domain,
+        }
+        let update: BulkDelete = decode(value.clone())?;
+        let channel = EntityRef::new(update.channel_id, update.channel_domain);
+        let mut changed = false;
+        for item in update.ids {
+            let key = EntityRef::new(item.id, item.origin_domain);
+            if self
+                .messages
+                .get(&key)
+                .is_some_and(|message| message.channel_key() != channel)
+            {
+                return Err(ReduceError::MissingField(
+                    "bulk delete message/channel linkage".to_owned(),
+                ));
+            }
+            changed |= self.messages.remove(&key).is_some();
+            self.link_previews.remove(&key);
+            if let Some(order) = self.message_order.get_mut(&channel) {
+                order.retain(|candidate| candidate != &key);
+            }
+        }
+        Ok(Reduction {
+            changed,
+            ..Reduction::default()
+        })
+    }
+
+    fn update_reaction(&mut self, value: &Value, added: bool) -> Result<Reduction, ReduceError> {
+        #[derive(Deserialize)]
+        struct ReactionUpdate {
+            user_id: kaede_protocol::Snowflake,
+            user_domain: kaede_protocol::Domain,
+            reaction: String,
+        }
+        let update: ReactionUpdate = decode(value.clone())?;
+        if update.reaction.is_empty() {
+            return Err(ReduceError::MissingField("reaction".to_owned()));
+        }
+        // Reaction payloads intentionally include both the canonical
+        // `message_*` fields and the legacy `id`/`origin_domain` aliases.
+        // Resolve the composite reference explicitly so serde does not reject
+        // the two aliases as a duplicate field.
+        let key = message_event_ref(value)?;
+        let Some(message) = self.messages.get_mut(&key) else {
+            return Ok(Reduction::default());
+        };
+        let count = message
+            .reaction_counts
+            .get(&update.reaction)
+            .copied()
+            .unwrap_or_default();
+        if added {
+            message
+                .reaction_counts
+                .insert(update.reaction.clone(), count.saturating_add(1));
+        } else if count <= 1 {
+            message.reaction_counts.remove(&update.reaction);
+        } else {
+            message
+                .reaction_counts
+                .insert(update.reaction.clone(), count - 1);
+        }
+        let actor = EntityRef::new(update.user_id, update.user_domain);
+        if self
+            .current_user
+            .as_ref()
+            .is_some_and(|current| current.key() == actor)
+        {
+            message
+                .reacted_emoji
+                .retain(|emoji| emoji != &update.reaction);
+            if added {
+                message.reacted_emoji.push(update.reaction);
+            }
+        }
+        Ok(Reduction {
+            changed: true,
+            ..Reduction::default()
+        })
+    }
+
+    fn clear_reactions(
+        &mut self,
+        value: &Value,
+        one_emoji: bool,
+    ) -> Result<Reduction, ReduceError> {
+        let key = message_event_ref(value)?;
+        let Some(message) = self.messages.get_mut(&key) else {
+            return Ok(Reduction::default());
+        };
+        if one_emoji {
+            let reaction = value
+                .get("reaction")
+                .and_then(Value::as_str)
+                .filter(|reaction| !reaction.is_empty())
+                .ok_or_else(|| ReduceError::MissingField("reaction".to_owned()))?;
+            message.reaction_counts.remove(reaction);
+            message.reacted_emoji.retain(|emoji| emoji != reaction);
+        } else {
+            message.reaction_counts.clear();
+            message.reacted_emoji.clear();
+        }
+        Ok(Reduction {
+            changed: true,
+            ..Reduction::default()
+        })
+    }
+
+    fn update_pin(&mut self, value: &Value) -> Result<Reduction, ReduceError> {
+        if value.get("message_id").is_none() && value.get("id").is_none() {
+            return Ok(Reduction::default());
+        }
+        let key = message_event_ref(value)?;
+        let Some(message) = self.messages.get_mut(&key) else {
+            return Ok(Reduction::default());
+        };
+        if let (Some(channel_id), Some(channel_domain)) =
+            (value.get("channel_id"), value.get("channel_domain"))
+        {
+            let channel = EntityRef::new(
+                serde_json::from_value(channel_id.clone()).map_err(ReduceError::Payload)?,
+                serde_json::from_value(channel_domain.clone()).map_err(ReduceError::Payload)?,
+            );
+            if message.channel_key() != channel {
+                return Err(ReduceError::MissingField(
+                    "pin message/channel linkage".to_owned(),
+                ));
+            }
+        }
+        let pinned = value
+            .get("pinned")
+            .map(|raw| serde_json::from_value(raw.clone()).map_err(ReduceError::Payload))
+            .transpose()?
+            .unwrap_or(message.pinned);
+        message.pinned = pinned;
+        if !pinned {
+            message.pinned_at = None;
+        }
+        Ok(Reduction {
+            changed: true,
+            ..Reduction::default()
+        })
+    }
+
+    fn update_poll_vote(&mut self, value: &Value, added: bool) -> Result<Reduction, ReduceError> {
+        #[derive(Deserialize)]
+        struct PollVoteUpdate {
+            message_id: kaede_protocol::Snowflake,
+            message_domain: kaede_protocol::Domain,
+            user_id: kaede_protocol::Snowflake,
+            user_domain: kaede_protocol::Domain,
+            answer_id: u64,
+        }
+        let update: PollVoteUpdate = decode(value.clone())?;
+        if update.answer_id == 0 {
+            return Err(ReduceError::MissingField("positive answer_id".to_owned()));
+        }
+        let key = EntityRef::new(update.message_id, update.message_domain);
+        let Some(message) = self.messages.get_mut(&key) else {
+            return Ok(Reduction::default());
+        };
+        let Some(poll) = message.poll.as_mut() else {
+            return Ok(Reduction::default());
+        };
+        let counts = poll
+            .get_mut("results")
+            .and_then(Value::as_object_mut)
+            .and_then(|results| results.get_mut("answer_counts"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| ReduceError::MissingField("poll results.answer_counts".to_owned()))?;
+        let current_user = self.current_user.as_ref().map(User::key);
+        let actor = EntityRef::new(update.user_id, update.user_domain);
+        let Some(count) = counts
+            .iter_mut()
+            .find(|count| count.get("id").and_then(Value::as_u64) == Some(update.answer_id))
+        else {
+            return Err(ReduceError::MissingField("poll answer count".to_owned()));
+        };
+        let object = count
+            .as_object_mut()
+            .ok_or_else(|| ReduceError::MissingField("poll answer count".to_owned()))?;
+        let previous = object
+            .get("count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        object.insert(
+            "count".to_owned(),
+            Value::from(if added {
+                previous.saturating_add(1)
+            } else {
+                previous.saturating_sub(1)
+            }),
+        );
+        if current_user.as_ref() == Some(&actor) {
+            object.insert("me_voted".to_owned(), Value::Bool(added));
+        }
+        Ok(Reduction {
+            changed: true,
             ..Reduction::default()
         })
     }
@@ -622,6 +858,57 @@ impl AppState {
         })
     }
 
+    fn update_channel_permissions(&mut self, value: Value) -> Result<Reduction, ReduceError> {
+        #[derive(Deserialize)]
+        struct PermissionUpdate {
+            channel_id: kaede_protocol::Snowflake,
+            channel_domain: kaede_protocol::Domain,
+            permissions: kaede_protocol::PermissionBits,
+        }
+        let update: PermissionUpdate = decode(value)?;
+        let key = EntityRef::new(update.channel_id, update.channel_domain);
+        let Some(channel) = self.channels.get_mut(&key) else {
+            return Ok(Reduction::default());
+        };
+        channel.permissions = update.permissions;
+        Ok(Reduction {
+            changed: true,
+            ..Reduction::default()
+        })
+    }
+
+    fn upsert_thread(&mut self, value: Value) -> Result<Reduction, ReduceError> {
+        let channel = value
+            .get("channel")
+            .or_else(|| value.get("thread"))
+            .cloned()
+            .unwrap_or(value);
+        self.upsert_channel(channel)
+    }
+
+    fn remove_thread(&mut self, value: &Value) -> Result<Reduction, ReduceError> {
+        let channel = value
+            .get("channel")
+            .or_else(|| value.get("thread"))
+            .unwrap_or(value);
+        self.remove_channel(channel)
+    }
+
+    fn sync_threads(&mut self, value: Value) -> Result<Reduction, ReduceError> {
+        #[derive(Deserialize)]
+        struct ThreadSync {
+            #[serde(default)]
+            threads: Vec<Channel>,
+        }
+        let update: ThreadSync = decode(value)?;
+        let changed = !update.threads.is_empty();
+        self.hydrate_channels(update.threads);
+        Ok(Reduction {
+            changed,
+            ..Reduction::default()
+        })
+    }
+
     fn remove_channel(&mut self, value: &Value) -> Result<Reduction, ReduceError> {
         let key = entity_ref(value)?;
         self.channels.remove(&key);
@@ -770,14 +1057,153 @@ impl AppState {
         })
     }
 
-    fn upsert_voice(&mut self, value: Value) -> Result<Reduction, ReduceError> {
-        let voice: VoiceState = decode(value)?;
-        let user = EntityRef::new(voice.user_id, voice.user_domain.clone());
-        if voice.channel_id.is_none() {
-            self.voice_states.remove(&user);
-        } else {
-            self.voice_states.insert(user, voice);
+    fn replace_voice_snapshot(
+        &mut self,
+        value: &Value,
+        participants: &[Value],
+    ) -> Result<Reduction, ReduceError> {
+        let channel = EntityRef::new(
+            serde_json::from_value(
+                value
+                    .get("channel_id")
+                    .cloned()
+                    .ok_or_else(|| ReduceError::MissingField("channel_id".to_owned()))?,
+            )
+            .map_err(ReduceError::Payload)?,
+            serde_json::from_value(
+                value
+                    .get("channel_domain")
+                    .cloned()
+                    .ok_or_else(|| ReduceError::MissingField("channel_domain".to_owned()))?,
+            )
+            .map_err(ReduceError::Payload)?,
+        );
+        self.voice_states.retain(|_, current| {
+            current.channel_id != Some(channel.id)
+                || current.channel_domain.as_ref() != Some(&channel.domain)
+        });
+        for participant in participants {
+            let mut normalized = participant
+                .as_object()
+                .cloned()
+                .ok_or_else(|| ReduceError::MissingField("voice participant".to_owned()))?;
+            normalized
+                .entry("channel_domain".to_owned())
+                .or_insert_with(|| Value::String(channel.domain.to_string()));
+            if normalized
+                .get("guild_id")
+                .is_some_and(|guild| !guild.is_null())
+            {
+                let guild_domain = value
+                    .get("guild_domain")
+                    .or_else(|| value.get("channel_domain"))
+                    .cloned()
+                    .ok_or_else(|| ReduceError::MissingField("guild_domain".to_owned()))?;
+                normalized
+                    .entry("guild_domain".to_owned())
+                    .or_insert(guild_domain);
+            }
+            let voice: VoiceState = decode(Value::Object(normalized))?;
+            self.voice_states.insert(
+                EntityRef::new(voice.user_id, voice.user_domain.clone()),
+                voice,
+            );
         }
+        Ok(Reduction {
+            changed: true,
+            ..Reduction::default()
+        })
+    }
+
+    fn upsert_voice(&mut self, value: &Value) -> Result<Reduction, ReduceError> {
+        if let Some(raw_participants) = value.get("participants") {
+            let participants = raw_participants
+                .as_array()
+                .ok_or_else(|| ReduceError::MissingField("voice participants".to_owned()))?;
+            return self.replace_voice_snapshot(value, participants);
+        }
+
+        let user = EntityRef::new(
+            serde_json::from_value(
+                value
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| ReduceError::MissingField("user_id".to_owned()))?,
+            )
+            .map_err(ReduceError::Payload)?,
+            serde_json::from_value(
+                value
+                    .get("user_domain")
+                    .cloned()
+                    .ok_or_else(|| ReduceError::MissingField("user_domain".to_owned()))?,
+            )
+            .map_err(ReduceError::Payload)?,
+        );
+        if value.get("connected").and_then(Value::as_bool) == Some(false)
+            || value.get("channel_id").is_some_and(Value::is_null)
+        {
+            let changed = self.voice_states.remove(&user).is_some();
+            return Ok(Reduction {
+                changed,
+                ..Reduction::default()
+            });
+        }
+
+        let existing = self.voice_states.get(&user);
+        if existing.is_none() && value.get("channel_id").is_none() {
+            // A moderation-only delta for an occupant outside the local
+            // snapshot is harmless; the next heartbeat will include it.
+            return Ok(Reduction::default());
+        }
+        let mut normalized = existing
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(ReduceError::Payload)?
+            .and_then(|current| current.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(state) = value.get("state").and_then(Value::as_object) {
+            normalized.extend(state.clone());
+        }
+        if let Some(update) = value.as_object() {
+            for (name, item) in update {
+                if !matches!(
+                    name.as_str(),
+                    "state" | "participants" | "heartbeat" | "generated_at"
+                ) {
+                    normalized.insert(name.clone(), item.clone());
+                }
+            }
+        }
+        if normalized
+            .get("channel_id")
+            .is_some_and(|channel| !channel.is_null())
+        {
+            let fallback_domain = value
+                .get("channel_domain")
+                .or_else(|| value.get("guild_domain"))
+                .cloned();
+            if let Some(domain) = fallback_domain {
+                normalized
+                    .entry("channel_domain".to_owned())
+                    .or_insert(domain);
+            }
+        }
+        if normalized
+            .get("guild_id")
+            .is_some_and(|guild| !guild.is_null())
+        {
+            let fallback_domain = value
+                .get("guild_domain")
+                .or_else(|| value.get("channel_domain"))
+                .cloned();
+            if let Some(domain) = fallback_domain {
+                normalized
+                    .entry("guild_domain".to_owned())
+                    .or_insert(domain);
+            }
+        }
+        let voice: VoiceState = decode(Value::Object(normalized))?;
+        self.voice_states.insert(user, voice);
         Ok(Reduction {
             changed: true,
             ..Reduction::default()
@@ -989,6 +1415,26 @@ fn entity_ref(value: &Value) -> Result<EntityRef, ReduceError> {
     let id = serde_json::from_value(id.clone()).map_err(ReduceError::Payload)?;
     let domain = serde_json::from_value(domain.clone()).map_err(ReduceError::Payload)?;
     Ok(EntityRef::new(id, domain))
+}
+
+fn message_event_ref(value: &Value) -> Result<EntityRef, ReduceError> {
+    let (id_name, domain_name) = if value.get("message_id").is_some() {
+        ("message_id", "message_domain")
+    } else {
+        ("id", "origin_domain")
+    };
+    let id = value
+        .get(id_name)
+        .cloned()
+        .ok_or_else(|| ReduceError::MissingField(id_name.to_owned()))?;
+    let domain = value
+        .get(domain_name)
+        .cloned()
+        .ok_or_else(|| ReduceError::MissingField(domain_name.to_owned()))?;
+    Ok(EntityRef::new(
+        serde_json::from_value(id).map_err(ReduceError::Payload)?,
+        serde_json::from_value(domain).map_err(ReduceError::Payload)?,
+    ))
 }
 
 fn nested_entity_ref(value: &Value, name: &str) -> Result<EntityRef, ReduceError> {
@@ -1640,6 +2086,146 @@ mod tests {
         assert!(reduction.changed);
         assert!(!reduction.reconcile_required);
         assert_eq!(state.messages[&key].content.as_deref(), Some("hello"));
+        assert!(state.messages[&key].pinned);
+    }
+
+    #[test]
+    fn aggregate_message_events_reconcile_composite_cached_state() {
+        let mut state = AppState::default();
+        state
+            .reduce(dispatch("MESSAGE_CREATE", 1, message()))
+            .expect("first message");
+        let mut other = message();
+        other["origin_domain"] = json!("other.example");
+        state
+            .reduce(dispatch("MESSAGE_CREATE", 2, other))
+            .expect("same snowflake on another authority");
+
+        state
+            .reduce(dispatch(
+                "MESSAGE_DELETE_BULK",
+                3,
+                json!({
+                    "ids": [{"id": "7", "origin_domain": "guild.example"}],
+                    "channel_id": "5",
+                    "channel_domain": "guild.example",
+                    "guild_id": "3",
+                    "guild_domain": "guild.example"
+                }),
+            ))
+            .expect("bulk delete");
+
+        assert!(
+            !state
+                .messages
+                .contains_key(&"7@guild.example".parse().expect("local message"))
+        );
+        assert!(
+            state
+                .messages
+                .contains_key(&"7@other.example".parse().expect("remote message"))
+        );
+    }
+
+    #[test]
+    fn reaction_and_poll_events_update_only_the_matching_federated_actor() {
+        let mut state = AppState::default();
+        state.hydrate_identity(
+            serde_json::from_value(user("9", "home.example", "viewer")).expect("current user"),
+        );
+        let mut initial = message();
+        initial["poll"] = json!({
+            "question": {"text": "Pick", "emoji": null},
+            "answers": [
+                {"answer_id": 1, "poll_media": {"text": "A", "emoji": null}},
+                {"answer_id": 2, "poll_media": {"text": "B", "emoji": null}}
+            ],
+            "expiry": "2026-08-30T00:00:00Z",
+            "allow_multiselect": false,
+            "layout_type": 1,
+            "results": {
+                "is_finalized": false,
+                "answer_counts": [
+                    {"id": 1, "count": 0, "me_voted": false},
+                    {"id": 2, "count": 1, "me_voted": false}
+                ]
+            }
+        });
+        state
+            .reduce(dispatch("MESSAGE_CREATE", 1, initial))
+            .expect("poll message");
+        let base = json!({
+            "id": "7", "origin_domain": "guild.example",
+            "message_id": "7", "message_domain": "guild.example",
+            "channel_id": "5", "channel_domain": "guild.example",
+            "user_id": "9", "user_domain": "home.example"
+        });
+        let mut reaction = base.clone();
+        reaction["reaction"] = json!("👋");
+        state
+            .reduce(dispatch("MESSAGE_REACTION_ADD", 2, reaction))
+            .expect("reaction add");
+        let mut vote = base;
+        vote["answer_id"] = json!(2);
+        state
+            .reduce(dispatch("MESSAGE_POLL_VOTE_ADD", 3, vote))
+            .expect("poll vote");
+
+        let key: EntityRef = "7@guild.example".parse().expect("message reference");
+        let current = &state.messages[&key];
+        assert_eq!(current.reaction_counts.get("👋"), Some(&1));
+        assert_eq!(current.reacted_emoji, ["👋"]);
+        let count = &current.poll.as_ref().expect("poll")["results"]["answer_counts"][1];
+        assert_eq!(count["count"], 2);
+        assert_eq!(count["me_voted"], true);
+    }
+
+    #[test]
+    fn voice_snapshots_and_terminal_deltas_converge_without_full_user_payloads() {
+        let mut state = AppState::default();
+        state
+            .reduce(dispatch(
+                "VOICE_STATE_UPDATE",
+                1,
+                json!({
+                    "guild_id": "3",
+                    "channel_id": "4",
+                    "channel_domain": "guild.example",
+                    "heartbeat": true,
+                    "participants": [{
+                        "identity": "5@remote.example",
+                        "user_id": "5",
+                        "user_domain": "remote.example",
+                        "room": "g.3.4",
+                        "guild_id": "3",
+                        "channel_id": "4",
+                        "joined_at": 1,
+                        "self_mute": false,
+                        "self_deaf": false,
+                        "server_mute": false,
+                        "server_deaf": false
+                    }]
+                }),
+            ))
+            .expect("voice snapshot");
+        let user: EntityRef = "5@remote.example".parse().expect("voice user");
+        assert!(state.voice_states.contains_key(&user));
+
+        state
+            .reduce(dispatch(
+                "VOICE_STATE_UPDATE",
+                2,
+                json!({
+                    "guild_id": "3",
+                    "channel_id": "4",
+                    "channel_domain": "guild.example",
+                    "user_id": "5",
+                    "user_domain": "remote.example",
+                    "connected": false
+                }),
+            ))
+            .expect("voice leave");
+        assert!(!state.voice_states.contains_key(&user));
     }
 
     #[test]

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
+from app.api import push as push_api
 from app.api.push import (
     _push_relay_rate_limit,
     relay_enrollment_key,
@@ -15,6 +17,9 @@ from app.api.push import (
 )
 from app.chat.payloads import public_user_display_name
 from app.db.models import User
+from app.federation.network import FederationNetworkError
+from app.federation.security import FederationPrincipal
+from app.push import client as push_client
 from app.push.presentation import notification_previews_enabled, push_presentation
 from app.push.relay import stable_wake_identifier, wake_mac
 from app.push.schemas import (
@@ -264,6 +269,10 @@ def test_relay_wake_schema_and_idempotency_identifiers_are_strict() -> None:
     assert wake.version == 2
     with pytest.raises(ValidationError):
         PushRelayWakeCreate(**{**wake.model_dump(), "request_id": "not opaque"})
+    with pytest.raises(ValidationError):
+        PushRelayWakeCreate.model_validate({**wake.model_dump(), "version": True})
+    with pytest.raises(ValidationError):
+        PushRelayWakeCreate.model_validate({**wake.model_dump(), "expires_at": "2000000000"})
 
 
 def test_relay_subscription_rejects_malformed_device_secrets() -> None:
@@ -276,6 +285,168 @@ def test_relay_pending_enrollment_keys_do_not_expose_device_routes() -> None:
     key = relay_enrollment_key(route)
     assert route not in key
     assert key == relay_enrollment_key(route)
+
+
+def relay_request(method: str, path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": method,
+            "scheme": "https",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [(b"host", b"relay.example")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("relay.example", 443),
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("level", "verifies_grant"), [("silence", True), ("suspend", False)])
+async def test_push_relay_enrollment_ignores_guild_silence_but_honors_suspension(
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    verifies_grant: bool,
+) -> None:
+    verify = AsyncMock(side_effect=ValueError("stop after the policy check"))
+    monkeypatch.setattr(push_api, "_relay_registration_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        push_api,
+        "matching_block",
+        AsyncMock(return_value=SimpleNamespace(level=level)),
+    )
+    monkeypatch.setattr(push_api, "verify_push_document", verify)
+    body = PushRelaySubscriptionCreate(
+        grant={"origin": "home.example"},
+        provider_token="p" * 32,
+        management_secret="m" * 43,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await push_api.create_relay_subscription(
+            body,
+            relay_request("POST", "/push/v1/subscriptions"),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(
+                push_relay_service_enabled=True,
+                push_relay_url="https://relay.example",
+            ),  # type: ignore[arg-type]
+        )
+
+    assert caught.value.detail["code"] == "PUSH_RELAY_GRANT_INVALID"
+    assert bool(verify.await_count) is verifies_grant
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("level", "blocked"), [("silence", False), ("suspend", True)])
+async def test_outbound_push_relay_ignores_silence_but_honors_suspension(
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    blocked: bool,
+) -> None:
+    lock = AsyncMock()
+    monkeypatch.setattr(push_client, "lock_block_policy_shared", lock)
+    monkeypatch.setattr(
+        push_client,
+        "matching_block",
+        AsyncMock(return_value=SimpleNamespace(level=level)),
+    )
+
+    if blocked:
+        with pytest.raises(FederationNetworkError):
+            await push_client._require_relay_exchange_allowed(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                "relay.example",
+            )
+    else:
+        await push_client._require_relay_exchange_allowed(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            "relay.example",
+        )
+
+    lock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_federated_push_wake_rate_limit_precedes_subscription_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rejected = HTTPException(status_code=429, detail={"code": "RATE_LIMITED"})
+    rate_limit = AsyncMock(side_effect=rejected)
+    session = SimpleNamespace(get=AsyncMock())
+    redis = SimpleNamespace()
+    monkeypatch.setattr(push_api, "enforce_federation_route_rate_limit", rate_limit)
+    body = PushRelayWakeCreate(
+        version=2,
+        request_id="q" * 43,
+        subscription_id="kps_" + "s" * 40,
+        route_id="r" * 43,
+        event_token="e" * 43,
+        delivery_id="d" * 43,
+        expires_at=2_000_000_000,
+        wake_mac="m" * 43,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await push_api.accept_relay_wake(
+            body,
+            relay_request("POST", "/_kaede/push/v1/wakes"),
+            FederationPrincipal("home.example", "ed25519:test", silenced=True),
+            session,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            SimpleNamespace(
+                push_relay_service_enabled=True,
+                push_relay_url="https://relay.example",
+            ),  # type: ignore[arg-type]
+        )
+
+    assert caught.value is rejected
+    rate_limit.assert_awaited_once_with(
+        redis,
+        "home.example",
+        "push-relay-wake",
+        capacity=600,
+        refill_per_minute=600,
+    )
+    session.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_federated_push_revoke_rate_limit_precedes_subscription_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rejected = HTTPException(status_code=429, detail={"code": "RATE_LIMITED"})
+    rate_limit = AsyncMock(side_effect=rejected)
+    session = SimpleNamespace(get=AsyncMock())
+    redis = SimpleNamespace()
+    monkeypatch.setattr(push_api, "enforce_federation_route_rate_limit", rate_limit)
+
+    with pytest.raises(HTTPException) as caught:
+        await push_api.revoke_relay_subscription(
+            "kps_" + "s" * 40,
+            relay_request("DELETE", "/_kaede/push/v1/subscriptions/kps_test"),
+            FederationPrincipal("home.example", "ed25519:test", silenced=True),
+            session,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            SimpleNamespace(
+                push_relay_service_enabled=True,
+                push_relay_url="https://relay.example",
+            ),  # type: ignore[arg-type]
+        )
+
+    assert caught.value is rejected
+    rate_limit.assert_awaited_once_with(
+        redis,
+        "home.example",
+        "push-relay-revoke",
+        capacity=120,
+        refill_per_minute=120,
+    )
+    session.get.assert_not_awaited()
 
 
 @pytest.mark.asyncio

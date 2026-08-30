@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "purpose": "kaede.message.poll-result.v1",
+  "description": "Discord message type 46. The outer poll_result projection is authority-authenticated and label-free for E2EE sources; clients may resolve labels only from the locally verified referenced poll.",
+  "projection_fields": [
+    "answer_counts",
+    "poll_message_ref",
+    "source_encryption_mode",
+    "total_votes",
+    "version",
+    "victor_answer_id",
+    "victor_answer_votes"
+  ],
+  "vectors": [
+    {
+      "name": "plaintext_unique_winner",
+      "message": {
+        "id": "124",
+        "origin_domain": "polls.example",
+        "channel_id": "77",
+        "channel_domain": "polls.example",
+        "message_type": 46,
+        "referenced_message_id": "123",
+        "referenced_message_domain": "polls.example",
+        "poll_result": {
+          "version": 1,
+          "poll_message_ref": "123@polls.example",
+          "source_encryption_mode": "plaintext",
+          "answer_counts": [
+            { "id": 1, "count": 3 },
+            { "id": 2, "count": 1 }
+          ],
+          "total_votes": 4,
+          "victor_answer_id": 1,
+          "victor_answer_votes": 3
+        },
+        "embeds": [
+          {
+            "type": "poll_result",
+            "fields": [
+              { "name": "poll_question_text", "value": "Ship it?", "inline": false },
+              { "name": "victor_answer_votes", "value": "3", "inline": false },
+              { "name": "total_votes", "value": "4", "inline": false },
+              { "name": "victor_answer_id", "value": "1", "inline": false },
+              { "name": "victor_answer_text", "value": "Yes", "inline": false }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "e2ee_unique_winner_federated_ref",
+      "message": {
+        "id": "900@home.example",
+        "origin_domain": "home.example",
+        "channel_id": "77",
+        "channel_domain": "home.example",
+        "message_type": 46,
+        "referenced_message_id": "456",
+        "referenced_message_domain": "author.example",
+        "poll_result": {
+          "version": 1,
+          "poll_message_ref": "456@author.example",
+          "source_encryption_mode": "e2ee",
+          "answer_counts": [
+            { "id": 1, "count": 2 },
+            { "id": 2, "count": 5 }
+          ],
+          "total_votes": 7,
+          "victor_answer_id": 2,
+          "victor_answer_votes": 5
+        },
+        "embeds": [
+          {
+            "type": "poll_result",
+            "fields": [
+              { "name": "victor_answer_votes", "value": "5", "inline": false },
+              { "name": "total_votes", "value": "7", "inline": false },
+              { "name": "victor_answer_id", "value": "2", "inline": false }
+            ]
+          }
+        ]
+      },
+      "verified_source_poll": {
+        "question": { "text": "Secret launch choice" },
+        "answers": [
+          { "answer_id": 1, "poll_media": { "text": "Wait" } },
+          { "answer_id": 2, "poll_media": { "text": "Launch" } }
+        ]
+      },
+      "resolved_labels": {
+        "question_text": "Secret launch choice",
+        "victor_answer_text": "Launch"
+      }
+    },
+    {
+      "name": "tie",
+      "message": {
+        "id": "125",
+        "origin_domain": "polls.example",
+        "channel_id": "77",
+        "channel_domain": "polls.example",
+        "message_type": 46,
+        "referenced_message_id": "123",
+        "referenced_message_domain": "polls.example",
+        "poll_result": {
+          "version": 1,
+          "poll_message_ref": "123@polls.example",
+          "source_encryption_mode": "plaintext",
+          "answer_counts": [
+            { "id": 1, "count": 2 },
+            { "id": 2, "count": 2 }
+          ],
+          "total_votes": 4,
+          "victor_answer_id": null,
+          "victor_answer_votes": 2
+        },
+        "embeds": [
+          {
+            "type": "poll_result",
+            "fields": [
+              { "name": "poll_question_text", "value": "Tie?", "inline": false },
+              { "name": "victor_answer_votes", "value": "2", "inline": false },
+              { "name": "total_votes", "value": "4", "inline": false }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "no_votes",
+      "message": {
+        "id": "126",
+        "origin_domain": "polls.example",
+        "channel_id": "77",
+        "channel_domain": "polls.example",
+        "message_type": 46,
+        "referenced_message_id": "123",
+        "referenced_message_domain": "polls.example",
+        "poll_result": {
+          "version": 1,
+          "poll_message_ref": "123@polls.example",
+          "source_encryption_mode": "plaintext",
+          "answer_counts": [
+            { "id": 1, "count": 0 },
+            { "id": 2, "count": 0 }
+          ],
+          "total_votes": 0,
+          "victor_answer_id": null,
+          "victor_answer_votes": 0
+        },
+        "embeds": [
+          {
+            "type": "poll_result",
+            "fields": [
+              { "name": "poll_question_text", "value": "Anyone?", "inline": false },
+              { "name": "victor_answer_votes", "value": "0", "inline": false },
+              { "name": "total_votes", "value": "0", "inline": false }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "invalid_mutations": [
+    "noncanonical_poll_message_ref",
+    "mismatched_referenced_message",
+    "unsorted_or_duplicate_answer_ids",
+    "inconsistent_vote_totals",
+    "private_label_in_e2ee_embed",
+    "missing_inline_false",
+    "nonzero_flags_or_nonempty_content_rich_or_attachment_body"
+  ]
+}

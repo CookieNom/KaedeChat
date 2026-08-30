@@ -166,6 +166,7 @@ async def test_remote_device_change_reaches_all_authorities_across_three_homes()
     user = SimpleNamespace(
         id=7,
         origin_domain="alpha.localhost",
+        account_type="human",
         username="local_user",
         display_name=None,
         avatar_hash=None,
@@ -223,16 +224,19 @@ async def test_policy_updates_use_thread_events_for_encrypted_threads(
     )
     publish = AsyncMock()
     redis = SimpleNamespace()
+    session = SimpleNamespace(flush=AsyncMock(), refresh=AsyncMock())
     monkeypatch.setattr(e2ee_membership, "channel_payload", lambda item: {"id": str(item.id)})
     monkeypatch.setattr(e2ee_membership, "publish_dispatch", publish)
 
     await publish_e2ee_policy_updates(
-        cast(Any, SimpleNamespace()),
+        cast(Any, session),
         cast(Any, redis),
         cast(Any, _settings()),
         cast(list[Channel], [channel]),
     )
 
+    session.flush.assert_awaited_once_with()
+    session.refresh.assert_awaited_once_with(channel, attribute_names=("updated_at",))
     publish.assert_awaited_once()
     assert publish.await_args.args[0] is redis
     assert publish.await_args.args[2:] == ("THREAD_UPDATE", {"id": "10"})
@@ -256,12 +260,17 @@ async def test_guild_mutation_returns_paused_policy_channels_to_postcommit_calle
         "guild_mutation_signer",
         AsyncMock(return_value=actor),
     )
+    monkeypatch.setattr(
+        guild_revision,
+        "lock_current_guild",
+        AsyncMock(return_value=guild),
+    )
     pause = AsyncMock(side_effect=[[thread], []])
     monkeypatch.setattr(guild_revision, "pause_guild_e2ee_for_membership_change", pause)
     monkeypatch.setattr(guild_revision, "assign_guild_sequence", AsyncMock(side_effect=[1, 2, 3]))
     monkeypatch.setattr(
         guild_revision,
-        "build_envelope",
+        "build_guild_authority_envelope",
         AsyncMock(
             side_effect=[
                 {"event_id": "one"},
@@ -353,6 +362,7 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
     user = SimpleNamespace(
         id=7,
         origin_domain="alpha.localhost",
+        account_type="human",
         username="local_user",
         display_name=None,
         avatar_hash=None,
@@ -389,7 +399,7 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
         AsyncMock(return_value={"beta.localhost", "gamma.localhost"}),
     )
     monkeypatch.setattr(
-        e2ee_api,
+        e2ee_membership,
         "e2ee_policy_destinations",
         AsyncMock(
             side_effect=[
@@ -398,6 +408,14 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
             ]
         ),
     )
+    compact = AsyncMock()
+    monkeypatch.setattr(e2ee_api, "discard_superseded_latest_state_event", compact)
+    monkeypatch.setattr(
+        e2ee_membership,
+        "discard_superseded_latest_state_event",
+        compact,
+    )
+    event_sequence = 0
 
     async def envelope(
         _session: object,
@@ -407,12 +425,18 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
         content: dict[str, object],
         *,
         context: dict[str, object] | None = None,
+        authority_attested_actor: bool = False,
     ) -> dict[str, object]:
+        nonlocal event_sequence
+        event_sequence += 1
         if event_type == "e2ee.room-policy.changed":
             assert context is not None
             assert context["reason"] == "e2ee.device-list.changed"
+            assert not authority_attested_actor
         return {
-            "event_id": f"event-{event_type}-{content.get('channel_id', 'account')}",
+            "event_id": (
+                f"event-{event_type}-{content.get('channel_id', 'account')}-{event_sequence}"
+            ),
             "type": event_type,
         }
 
@@ -428,6 +452,8 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
 
     monkeypatch.setattr(e2ee_api, "build_envelope", envelope)
     monkeypatch.setattr(e2ee_api, "queue_event", queue)
+    monkeypatch.setattr(e2ee_membership, "build_envelope", envelope)
+    monkeypatch.setattr(e2ee_membership, "queue_event", queue)
 
     destinations = await queue_device_change_updates(
         cast(Any, SimpleNamespace()),
@@ -441,14 +467,16 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
         "gamma.localhost",
         "delta.localhost",
     }
-    assert set(queued) == {
-        ("beta.localhost", "event-e2ee.device-list.changed-account"),
-        ("gamma.localhost", "event-e2ee.device-list.changed-account"),
-        ("beta.localhost", "event-e2ee.room-policy.changed-10"),
-        ("gamma.localhost", "event-e2ee.room-policy.changed-10"),
-        ("gamma.localhost", "event-e2ee.room-policy.changed-11"),
-        ("delta.localhost", "event-e2ee.room-policy.changed-11"),
-    }
+    assert [destination for destination, _event_id in queued] == [
+        "beta.localhost",
+        "gamma.localhost",
+        "beta.localhost",
+        "gamma.localhost",
+        "delta.localhost",
+        "gamma.localhost",
+    ]
+    assert len({event_id for _destination, event_id in queued}) == len(queued)
+    assert compact.await_count == len(queued)
 
 
 @pytest.mark.asyncio
@@ -465,6 +493,7 @@ async def test_remote_room_authority_outage_is_retryable_without_projection(
     actor = SimpleNamespace(
         id=7,
         origin_domain="beta.localhost",
+        account_type="human",
         username="remote_user",
         display_name=None,
         avatar_hash=None,

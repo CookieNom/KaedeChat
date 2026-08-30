@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { stickerFromToken, stickerOptions, stickerToken, stickerUrl } from './stickers';
+import {
+  stickerFromToken,
+  stickerItem,
+  stickerOptions,
+  stickerToken,
+  stickerUrl
+} from './stickers';
 
 describe('guild sticker identity', () => {
   const sticker = {
@@ -37,5 +43,17 @@ describe('guild sticker identity', () => {
     expect(
       stickerOptions([other, sticker], { id: '10', origin_domain: 'chat.example' })[0].id
     ).toBe(sticker.id);
+  });
+
+  it('builds the Discord message sticker reference and immutable snapshot', () => {
+    const option = stickerOptions([sticker])[0];
+    expect(option.value).toBe('75512661369970688@chat.example');
+    expect(stickerItem(option)).toEqual({
+      id: sticker.id,
+      origin_domain: 'chat.example',
+      name: sticker.name,
+      format_type: 1,
+      media_hash: sticker.media_hash
+    });
   });
 });

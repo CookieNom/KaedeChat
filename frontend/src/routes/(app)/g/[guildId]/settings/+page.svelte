@@ -4,8 +4,38 @@
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { firstNavigableChannel, groupChannels } from '$lib/chat/channels';
+  import {
+    canAccessGuildExpressionSettings,
+    canEditGuildExpression,
+    guildOwnerRef,
+    hasGuildPermissionOrOwnership,
+    isQualifiedGuildOwner
+  } from '$lib/chat/guild-admin';
+  import {
+    channelInviteListPath,
+    guildInviteManagementPath,
+    guildInviteUrl
+  } from '$lib/chat/invites';
+  import { hasAllPermissions } from '$lib/chat/permissions';
   import { entityKey, entityRef } from '$lib/chat/refs';
+  import {
+    commitGuildWebhookAvatar,
+    createGuildWebhook,
+    createGuildWebhookAvatarTicket,
+    deleteGuildWebhook,
+    deleteGuildWebhookAvatar,
+    listGuildWebhooks,
+    manageableWebhookChannels,
+    rotateGuildWebhook,
+    updateGuildWebhook,
+    type WebhookSummary
+  } from '$lib/chat/webhooks';
   import { forumDefaultReactionPayload } from '$lib/chat/threads';
+  import {
+    listScheduledEvents,
+    scheduledEventRef,
+    type ScheduledEvent
+  } from '$lib/chat/scheduled-events';
   import type {
     Channel,
     CustomEmoji,
@@ -18,6 +48,9 @@
   } from '$lib/chat/types';
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import Icon from '$lib/components/Icon.svelte';
+  import GuildAuditLog from '$lib/components/GuildAuditLog.svelte';
+  import GuildSafetyTools from '$lib/components/GuildSafetyTools.svelte';
+  import AnnouncementFollowers from '$lib/components/AnnouncementFollowers.svelte';
   import ImageUploadField from '$lib/components/ImageUploadField.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { initializeE2EE } from '$lib/e2ee/client';
@@ -25,6 +58,7 @@
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
+  import { completeScannedMediaResource } from '$lib/media/scanned';
   import { moveCrop, resizeCrop, type CropCorner, type NormalizedCrop } from '$lib/media/crop';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import { TRACKER_CHANNEL_TYPE } from '$lib/task-tracker/types';
@@ -33,10 +67,16 @@
     type GuildNotificationLevel,
     type GuildNotificationPreference
   } from '$lib/notifications/browser.svelte';
-  import { guildChannelPath, type ChannelSettingsPanel } from '$lib/navigation/routes';
+  import {
+    guildChannelPath,
+    guildApplicationDirectoryPath,
+    guildIntegrationsPath,
+    type ChannelSettingsPanel
+  } from '$lib/navigation/routes';
   import { formatDateTime } from '$lib/ui/locale';
   import { portal } from '$lib/ui/portal';
   import { onDestroy, tick } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
 
   interface GuildView extends Guild {
     banner_hash: string | null;
@@ -45,22 +85,17 @@
   interface InviteSummary {
     code: string;
     channel_id: string | null;
-    uses: number;
-    max_uses: number | null;
+    uses?: number;
+    max_uses?: number | null;
     expires_at: string | null;
-    created_at: string;
-  }
-
-  interface WebhookSummary {
-    id: string;
-    guild_id: string;
-    guild_domain: string;
-    channel_id: string;
-    channel_domain: string;
-    name: string;
-    avatar_hash: string | null;
-    revoked: boolean;
-    token?: string;
+    created_at?: string;
+    temporary?: boolean;
+    reusable?: boolean;
+    target_type: 'stream' | null;
+    target_user_id: string | null;
+    scheduled_event_id: string | null;
+    role_ids: string[];
+    target_user_count: number;
   }
 
   interface MemberSummary extends GuildMemberSummary {
@@ -100,6 +135,14 @@
 
   interface EditableForumTag extends Omit<ForumTag, 'id'> {
     id?: string;
+  }
+
+  interface VoiceRegion {
+    id: string;
+    name: string;
+    optimal: boolean;
+    deprecated: boolean;
+    custom: boolean;
   }
 
   type DestructiveConfirmation =
@@ -159,6 +202,20 @@
 
   const MEMBER_PAGE_SIZE = 25;
   const acceptedImageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+  function validStickerName(value: string): boolean {
+    const length = [...value.trim()].length;
+    const hasControlCharacter = [...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || codePoint === 127;
+    });
+    return length >= 2 && length <= 30 && !hasControlCharacter;
+  }
+
+  function validStickerDescription(value: string): boolean {
+    const length = [...value.trim()].length;
+    return length === 0 || (length >= 2 && length <= 100);
+  }
+
   const channelOnly = $derived(Boolean(page.params.channelId));
   const guildId = $derived(page.params.guildId ?? '');
   const channelId = $derived(channelOnly ? (page.params.channelId ?? '') : '');
@@ -196,8 +253,11 @@
   let instanceBanReason = $state('');
   let instanceBanDuration = $state('permanent');
   let invites = $state<InviteSummary[]>([]);
+  let scheduledEvents = $state<ScheduledEvent[]>([]);
   let webhooks = $state<WebhookSummary[]>([]);
   let newWebhookName = $state('');
+  let webhookNameDrafts = $state<Record<string, string>>({});
+  let webhookChannelDrafts = $state<Record<string, string>>({});
   let revealedWebhookToken = $state('');
   let loading = $state(true);
   let busy = $state(false);
@@ -213,11 +273,15 @@
   let emojiFile = $state<File | null>(null);
   let emojiInput = $state<HTMLInputElement | null>(null);
   let emojiBusy = $state(false);
+  let emojiDrafts = $state<Record<string, { name: string; roles: string[] }>>({});
   let stickerName = $state('');
   let stickerDescription = $state('');
   let stickerFile = $state<File | null>(null);
   let stickerInput = $state<HTMLInputElement | null>(null);
   let stickerBusy = $state(false);
+  let stickerDrafts = $state<Record<string, { name: string; description: string; tags: string }>>(
+    {}
+  );
   let stickerPreviewUrl = $state('');
   let stickerCropX = $state(0);
   let stickerCropY = $state(0);
@@ -244,8 +308,15 @@
   let selectedChannel = $state<Channel | null>(null);
   let channelName = $state('');
   let channelTopic = $state('');
+  let channelNsfw = $state(false);
   let channelParent = $state('');
   let channelSlowmode = $state(0);
+  let channelBitrate = $state(64000);
+  let channelUserLimit = $state(0);
+  let channelRtcRegion = $state('');
+  let channelVoiceRegions = $state<VoiceRegion[]>([]);
+  let channelVoiceRegionsError = $state('');
+  let channelVideoQualityMode = $state<1 | 2>(1);
   let channelHistoryPolicy = $state<'inherit' | 'disabled' | 'full_retained'>('inherit');
   let channelForumTags = $state<EditableForumTag[]>([]);
   let newForumTagName = $state('');
@@ -288,6 +359,12 @@
   let inviteChannel = $state('');
   let inviteMaxAge = $state('86400');
   let inviteMaxUses = $state('');
+  let inviteTemporary = $state(false);
+  let inviteUnique = $state(false);
+  let inviteTargetType = $state<'' | 'stream'>('');
+  let inviteTargetUser = $state('');
+  let inviteScheduledEvent = $state('');
+  let inviteRoleIds = $state<string[]>([]);
   let createdInvite = $state<InviteSummary | null>(null);
   let destructiveConfirmation = $state<DestructiveConfirmation | null>(null);
   let confirmationDialog = $state<HTMLElement | null>(null);
@@ -359,21 +436,44 @@
     }
   });
 
+  const isGuildOwner = $derived(isQualifiedGuildOwner(guild, currentUserRef));
+
   function hasPermission(permission: bigint): boolean {
-    return Boolean(effectivePermissions & (permission | Permission.ADMINISTRATOR));
+    return hasGuildPermissionOrOwnership(
+      effectivePermissions,
+      permission,
+      currentUserRef,
+      guild ? guildOwnerRef(guild) : null
+    );
   }
 
-  const canManageGuild = $derived(isLocalGuild && hasPermission(Permission.MANAGE_GUILD));
-  const isGuildOwner = $derived(
-    Boolean(
-      guild &&
-      currentUserRef &&
-      `${guild.owner_id}@${guild.owner_domain ?? guild.origin_domain}` === currentUserRef
-    )
-  );
+  const canManageGuild = $derived(hasPermission(Permission.MANAGE_GUILD));
+  const canManageGuildAssets = $derived(hasPermission(Permission.MANAGE_GUILD));
   function latestMember(member: MemberSummary): MemberSummary {
     const user = entities.users.get(entityKey(member.user));
     return user ? { ...member, user: { ...member.user, ...user } } : member;
+  }
+
+  function initializeExpressionDrafts(target: Guild) {
+    emojiDrafts = Object.fromEntries(
+      (target.emojis ?? []).map((emoji) => [
+        entityKey(emoji),
+        {
+          name: emoji.name,
+          roles: [...(emoji.roles ?? [])]
+        }
+      ])
+    );
+    stickerDrafts = Object.fromEntries(
+      (target.stickers ?? []).map((sticker) => [
+        entityKey(sticker),
+        {
+          name: sticker.name,
+          description: sticker.description ?? '',
+          tags: (sticker.tags ?? []).join(', ')
+        }
+      ])
+    );
   }
   const currentMembers = $derived(members.map(latestMember));
   const currentMemberSearchResults = $derived(memberSearchResults.map(latestMember));
@@ -381,12 +481,17 @@
   const ownershipCandidates = $derived(
     currentMembers.filter(
       (member) =>
-        member.user.origin_domain === localDomain && entityRef(member.user) !== currentUserRef
+        member.user.account_type !== 'bot' &&
+        member.user.bot !== true &&
+        entityRef(member.user) !== currentUserRef
     )
   );
-  const canManageChannels = $derived(isLocalGuild && hasPermission(Permission.MANAGE_CHANNELS));
-  const canManageRoles = $derived(isLocalGuild && hasPermission(Permission.MANAGE_ROLES));
-  const canManageEmojis = $derived(isLocalGuild && hasPermission(Permission.MANAGE_EMOJIS));
+  const canManageChannels = $derived(hasPermission(Permission.MANAGE_CHANNELS));
+  const canManageRoles = $derived(hasPermission(Permission.MANAGE_ROLES));
+  const canCreateExpressions = $derived(hasPermission(Permission.CREATE_GUILD_EXPRESSIONS));
+  const canAccessExpressions = $derived(
+    canAccessGuildExpressionSettings(effectivePermissions, isGuildOwner)
+  );
   const actorHighestRole = $derived(
     guild?.roles?.find((role) => role.id === guild?.actor_highest_role_id) ?? null
   );
@@ -405,6 +510,35 @@
     if (!canManageRoles) return false;
     if (isGuildOwner) return true;
     return Boolean(actorHighestRole && compareRoleRank(actorHighestRole, role) > 0);
+  }
+
+  function canManageExpressionRole(role: Role): boolean {
+    if (!canAccessExpressions) return false;
+    if (isGuildOwner) return true;
+    return Boolean(actorHighestRole && compareRoleRank(actorHighestRole, role) > 0);
+  }
+
+  function canEditExpression(creatorId?: string, creatorDomain?: string): boolean {
+    return (
+      isGuildOwner ||
+      canEditGuildExpression(effectivePermissions, currentUserRef, creatorId, creatorDomain)
+    );
+  }
+
+  function canEditEmoji(emoji: CustomEmoji): boolean {
+    return canEditExpression(emoji.creator_id, emoji.creator_domain);
+  }
+
+  function canEditSticker(sticker: GuildSticker): boolean {
+    return canEditExpression(sticker.creator_id, sticker.creator_domain);
+  }
+
+  function canEditEmojiRoleRestrictions(emoji: CustomEmoji): boolean {
+    if (!canEditEmoji(emoji)) return false;
+    return (emoji.roles ?? []).every((reference) => {
+      const role = guild?.roles?.find((candidate) => entityRef(candidate) === reference);
+      return Boolean(role && canManageExpressionRole(role));
+    });
   }
 
   function canReorderRole(role: Role): boolean {
@@ -437,11 +571,12 @@
   }
 
   const canManageSelectedRole = $derived(Boolean(selectedRole && canManageRole(selectedRole)));
-  const canViewMembers = $derived(isLocalGuild && hasPermission(Permission.VIEW_CHANNEL));
-  const canKickMembers = $derived(isLocalGuild && hasPermission(Permission.KICK_MEMBERS));
-  const canBanMembers = $derived(isLocalGuild && hasPermission(Permission.BAN_MEMBERS));
-  const canTimeoutMembers = $derived(isLocalGuild && hasPermission(Permission.MODERATE_MEMBERS));
-  const canBanInstances = $derived(isLocalGuild && hasPermission(Permission.BAN_INSTANCES));
+  const canViewAuditLog = $derived(hasPermission(Permission.VIEW_AUDIT_LOG));
+  const canViewMembers = $derived(hasPermission(Permission.VIEW_CHANNEL));
+  const canKickMembers = $derived(hasPermission(Permission.KICK_MEMBERS));
+  const canBanMembers = $derived(hasPermission(Permission.BAN_MEMBERS));
+  const canTimeoutMembers = $derived(hasPermission(Permission.MODERATE_MEMBERS));
+  const canBanInstances = $derived(hasPermission(Permission.BAN_INSTANCES));
   const canModerateMembers = $derived(canKickMembers || canBanMembers || canTimeoutMembers);
   const visibleMembers = $derived(
     memberSearch.trim()
@@ -459,9 +594,26 @@
     !memberSearch.trim() &&
       ((memberPage + 1) * MEMBER_PAGE_SIZE < members.length || membersHaveMore)
   );
-  const canCreateInvites = $derived(isLocalGuild && hasPermission(Permission.CREATE_INVITE));
+  const canCreateInvites = $derived(hasPermission(Permission.CREATE_INVITE));
   const canAccessInvites = $derived(canManageGuild || canCreateInvites);
-  const canManageWebhooks = $derived(isLocalGuild && hasPermission(Permission.MANAGE_WEBHOOKS));
+  const canManageWebhooks = $derived(hasPermission(Permission.MANAGE_WEBHOOKS));
+  const canAccessGuildIntegrations = $derived(
+    canManageGuild ||
+      canManageWebhooks ||
+      Boolean(
+        guild?.channels?.some((channel) => {
+          if (channel.type !== 5) return false;
+          try {
+            return hasAllPermissions(
+              BigInt(channel.permissions ?? guild?.permissions ?? '0'),
+              Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
+            );
+          } catch {
+            return false;
+          }
+        })
+      )
+  );
   const selectedEffectivePermissions = $derived.by(() => {
     try {
       return BigInt(selectedChannel?.permissions ?? guild?.permissions ?? '0');
@@ -474,18 +626,28 @@
     return Boolean(selectedEffectivePermissions & (permission | Permission.ADMINISTRATOR));
   }
 
-  const canEditSelectedChannel = $derived(
-    isLocalGuild && selectedHasPermission(Permission.MANAGE_CHANNELS)
-  );
-  const canEditSelectedPermissions = $derived(
-    isLocalGuild && selectedHasPermission(Permission.MANAGE_ROLES)
-  );
-  const canCreateSelectedInvite = $derived(
-    isLocalGuild && selectedHasPermission(Permission.CREATE_INVITE)
-  );
+  const canEditSelectedChannel = $derived(selectedHasPermission(Permission.MANAGE_CHANNELS));
+  const canDeleteSelectedChannel = $derived(selectedHasPermission(Permission.MANAGE_CHANNELS));
+  const canEditSelectedPermissions = $derived(selectedHasPermission(Permission.MANAGE_ROLES));
+  const canCreateSelectedInvite = $derived(selectedHasPermission(Permission.CREATE_INVITE));
   const canManageSelectedWebhooks = $derived(
-    isLocalGuild && selectedHasPermission(Permission.MANAGE_WEBHOOKS)
+    selectedChannel?.encryption_mode !== 'e2ee' && selectedHasPermission(Permission.MANAGE_WEBHOOKS)
   );
+  const manageableWebhookTargets = $derived(guild ? manageableWebhookChannels(guild) : []);
+  const canReadSelectedAnnouncementFollows = $derived(
+    selectedChannel?.type === 5 &&
+      selectedHasPermission(Permission.VIEW_CHANNEL) &&
+      selectedHasPermission(Permission.READ_MESSAGE_HISTORY)
+  );
+  const canAccessSelectedIntegrations = $derived(
+    canManageSelectedWebhooks || canReadSelectedAnnouncementFollows
+  );
+  const announcementGuilds = $derived.by(() => {
+    const available = new SvelteMap<string, Guild>();
+    for (const item of entities.guilds.values) available.set(entityRef(item), item);
+    if (guild) available.set(entityRef(guild), guild);
+    return [...available.values()];
+  });
   const selectedChannelInvites = $derived(
     selectedChannel ? invites.filter((invite) => invite.channel_id === selectedChannel?.id) : []
   );
@@ -521,7 +683,8 @@
   function channelPanelDescription(panel: ChannelSettingsPanel): string {
     if (panel === 'permissions') return 'Customize who can access and act in this channel.';
     if (panel === 'invites') return 'Create and manage invitation links for this channel.';
-    if (panel === 'integrations') return 'Manage webhooks that can post in this channel.';
+    if (panel === 'integrations')
+      return 'Manage webhooks and announcement follower channels for this channel.';
     if (panel === 'delete') return 'Permanently remove this channel and its configuration.';
     return 'Update the channel name, topic, category, and behavior.';
   }
@@ -605,13 +768,24 @@
   function selectChannel(channel: Channel, force = false) {
     if (busy && !force) return;
     selectedChannel = channel;
+    if (channelEditorPanel === 'invites' && channel.type !== 4) {
+      // Deep-linking directly to Channel Settings > Invites does not pass
+      // through selectChannelPanel(). Keep creation anchored to the channel
+      // whose permission grant made this surface visible.
+      inviteChannel = entityKey(channel);
+    }
     channelName = channel.name ?? '';
     channelTopic = channel.topic ?? '';
+    channelNsfw = channel.nsfw ?? false;
     channelParent =
       channel.parent_id && channel.parent_domain
         ? `${channel.parent_id}@${channel.parent_domain}`
         : '';
     channelSlowmode = channel.rate_limit_per_user;
+    channelBitrate = channel.bitrate ?? 64000;
+    channelUserLimit = channel.user_limit ?? 0;
+    channelRtcRegion = channel.rtc_region ?? '';
+    channelVideoQualityMode = channel.video_quality_mode === 2 ? 2 : 1;
     channelHistoryPolicy = channel.federated_history_policy ?? 'inherit';
     channelForumTags = [...(channel.available_tags ?? [])];
     newForumTagName = '';
@@ -672,7 +846,7 @@
       return;
     }
     const confirmed = window.confirm(
-      'Require end-to-end encryption for replies in future posts? This policy is permanent once saved and affects only posts created afterward; existing posts do not change. Titles, starter messages, title search, and starter previews remain readable to the server. Each future post must activate its own encryption group before replies can be sent. Server reply search, link and GIF previews, bots, webhooks, file previews, malware scanning, and PhotoDNA scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted reply history. Removed members keep content they already received.'
+      'Require end-to-end encryption for future posts? This policy is permanent once saved and affects only posts created afterward; existing posts do not change. Titles and title search remain readable to the server, but each future post establishes its encryption keys before its starter body, files, or replies are sent. Server starter previews, message search, link and GIF previews, file previews, malware scanning, and PhotoDNA scanning will stop. Webhooks receive no access automatically; a verified webhook device can receive only future post content after a server administrator grants it and the post establishes a rekey and history floor. Verified participant-mode apps follow the same future-only admission rule. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted post history. Removed members, apps, and webhooks keep content they already received.'
     );
     channelForumE2EE = confirmed;
     if (!confirmed) input.checked = false;
@@ -681,8 +855,8 @@
   function selectChannelPanel(panel: ChannelSettingsPanel) {
     if (panel === 'overview' && !canEditSelectedChannel) return;
     if (panel === 'permissions' && !canEditSelectedPermissions) return;
-    if (panel === 'invites' && !(canAccessInvites && canCreateSelectedInvite)) return;
-    if (panel === 'integrations' && !canManageSelectedWebhooks) return;
+    if (panel === 'invites' && !(canCreateSelectedInvite || canEditSelectedChannel)) return;
+    if (panel === 'integrations' && !canAccessSelectedIntegrations) return;
     if (panel === 'delete' && !canEditSelectedChannel) return;
     if (panel === 'invites' && selectedChannel) inviteChannel = entityKey(selectedChannel);
     channelEditorPanel = panel;
@@ -823,7 +997,7 @@
     const activationWarning =
       channel.type === 2
         ? 'Turn on end-to-end encryption for this voice channel? This is permanent. Microphone, camera, screen video, and screen audio will be encrypted on participant devices. Recording, transcription, server media moderation, and unsupported clients will stop working. Participant, timing, track, and traffic metadata remains visible. Anyone can still record content on their own device. Participant identities remain unverified until members compare the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance.'
-        : 'Turn on end-to-end encryption for this channel? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, bots, webhooks, file previews, malware scanning, and PhotoDNA scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until members compare the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members keep content they already received.';
+        : 'Turn on end-to-end encryption for this channel? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, file previews, malware scanning, and PhotoDNA scanning will stop. Webhooks receive no access automatically; a verified webhook device can receive only future content after a server administrator grants it and the room establishes a rekey and history floor. Verified participant-mode apps follow the same future-only admission rule. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until members compare the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members, apps, and webhooks keep content they already received.';
     if (
       !window.confirm(
         rekey
@@ -929,6 +1103,7 @@
         // Guild settings remain available on clients without secure device storage.
       });
       guild = loaded;
+      initializeExpressionDrafts(loaded);
       name = loaded.name;
       description = loaded.description ?? '';
       guildHistoryPolicy = loaded.federated_history_policy ?? 'disabled';
@@ -949,11 +1124,58 @@
       selectedRole =
         loaded.roles?.find((role) => role.id !== loaded.id) ?? loaded.roles?.[0] ?? null;
       if (selectedRole) selectRole(selectedRole);
-      const local = loaded.origin_domain.toLowerCase() === currentUser.origin_domain.toLowerCase();
       const permissions = BigInt(loaded.permissions ?? '0');
-      const administrator = Boolean(permissions & Permission.ADMINISTRATOR);
+      const ownerRef = `${loaded.owner_id}@${loaded.owner_domain ?? loaded.origin_domain}`;
+      const allows = (permission: bigint) =>
+        hasGuildPermissionOrOwnership(
+          permissions,
+          permission,
+          `${currentUser.id}@${currentUser.origin_domain}`,
+          ownerRef
+        );
       const optional: Promise<unknown>[] = [];
-      if (local && (administrator || Boolean(permissions & Permission.VIEW_CHANNEL))) {
+      channelVoiceRegions = [];
+      channelVoiceRegionsError = '';
+      if (
+        allows(Permission.MANAGE_CHANNELS) &&
+        loaded.channels?.some((channel) => channel.type === 2 || channel.type === 13)
+      ) {
+        optional.push(
+          api<VoiceRegion[]>(`/voice/regions?guild_ref=${encodeURIComponent(targetGuild)}`, {
+            signal
+          })
+            .then((value) => {
+              if (generation === loadGeneration) channelVoiceRegions = value;
+            })
+            .catch((caught) => {
+              if (signal.aborted || generation !== loadGeneration) return;
+              channelVoiceRegionsError = userErrorMessage(
+                caught,
+                'Region overrides are temporarily unavailable.'
+              );
+            })
+        );
+      }
+      scheduledEvents = [];
+      optional.push(
+        listScheduledEvents(targetGuild, signal).then((value) => {
+          if (generation === loadGeneration) scheduledEvents = value;
+        })
+      );
+      if (allows(Permission.CREATE_GUILD_EXPRESSIONS | Permission.MANAGE_GUILD_EXPRESSIONS)) {
+        optional.push(
+          Promise.all([
+            api<CustomEmoji[]>(`/guilds/${encodeURIComponent(targetGuild)}/emojis`, { signal }),
+            api<GuildSticker[]>(`/guilds/${encodeURIComponent(targetGuild)}/stickers`, { signal })
+          ]).then(([emojis, stickers]) => {
+            if (generation === loadGeneration && guild) {
+              guild = { ...guild, emojis, stickers };
+              initializeExpressionDrafts(guild);
+            }
+          })
+        );
+      }
+      if (allows(Permission.VIEW_CHANNEL)) {
         optional.push(
           api<MemberSummary[]>(
             `/guilds/${encodeURIComponent(targetGuild)}/members?limit=${MEMBER_PAGE_SIZE + 1}`,
@@ -967,7 +1189,7 @@
           })
         );
       }
-      if (local && (administrator || Boolean(permissions & Permission.MANAGE_GUILD))) {
+      if (allows(Permission.MANAGE_GUILD)) {
         optional.push(
           api<InviteSummary[]>(`/guilds/${encodeURIComponent(targetGuild)}/invites`, {
             signal
@@ -975,17 +1197,37 @@
             if (generation === loadGeneration) invites = value;
           })
         );
+      } else if (channelOnly && requestedChannel) {
+        let channelPermissions = 0n;
+        try {
+          channelPermissions = BigInt(requestedChannel.permissions ?? loaded.permissions ?? '0');
+        } catch {
+          channelPermissions = 0n;
+        }
+        if (hasAllPermissions(channelPermissions, Permission.MANAGE_CHANNELS)) {
+          optional.push(
+            api<InviteSummary[]>(channelInviteListPath(entityRef(requestedChannel)), {
+              signal
+            }).then((value) => {
+              if (generation === loadGeneration) invites = value;
+            })
+          );
+        }
       }
-      if (local && (administrator || Boolean(permissions & Permission.MANAGE_WEBHOOKS))) {
+      if (allows(Permission.MANAGE_WEBHOOKS)) {
         optional.push(
-          api<WebhookSummary[]>(`/guilds/${encodeURIComponent(targetGuild)}/webhooks`, {
-            signal
-          }).then((value) => {
-            if (generation === loadGeneration) webhooks = value;
+          listGuildWebhooks(targetGuild, signal).then((value) => {
+            if (generation === loadGeneration) {
+              webhooks = value;
+              webhookNameDrafts = Object.fromEntries(value.map((item) => [item.id, item.name]));
+              webhookChannelDrafts = Object.fromEntries(
+                value.map((item) => [item.id, `${item.channel_id}@${item.channel_domain}`])
+              );
+            }
           })
         );
       }
-      if (local && (administrator || Boolean(permissions & Permission.BAN_MEMBERS))) {
+      if (allows(Permission.BAN_MEMBERS)) {
         optional.push(
           api<BanSummary[]>(`/guilds/${encodeURIComponent(targetGuild)}/bans?limit=1000`, {
             signal
@@ -994,7 +1236,7 @@
           })
         );
       }
-      if (local && (administrator || Boolean(permissions & Permission.BAN_INSTANCES))) {
+      if (allows(Permission.BAN_INSTANCES)) {
         optional.push(
           api<InstanceBanSummary[]>(
             `/guilds/${encodeURIComponent(targetGuild)}/instance-bans?limit=1000`,
@@ -1131,7 +1373,7 @@
 
   async function uploadGuildAsset(kind: GuildAssetKind, file: File) {
     const controller = routeController;
-    if (busy || loading || !guild || !canManageGuild || !controller) return;
+    if (busy || loading || !guild || !canManageGuildAssets || !controller) return;
     if (!acceptedImageTypes.has(file.type)) {
       guildAssetError = 'Choose a PNG, JPEG, GIF, or WebP image.';
       error = '';
@@ -1187,46 +1429,32 @@
       }
       guildAssetProgress = 100;
       guildAssetStage = 'scanning';
-      await api(`/guilds/${encodeURIComponent(targetGuild)}/assets/${kind}`, {
-        method: 'PUT',
-        signal: controller.signal,
-        body: JSON.stringify({ attachment_id: ticket.id })
+      await completeScannedMediaResource(
+        () =>
+          api<{ scan_status: string }>(
+            `/guilds/${encodeURIComponent(targetGuild)}/assets/${kind}`,
+            {
+              method: 'PUT',
+              signal: controller.signal,
+              body: JSON.stringify({ attachment_id: ticket.id })
+            }
+          ),
+        (attachment): attachment is { scan_status: string } => attachment.scan_status === 'clean',
+        {
+          signal: controller.signal,
+          maxAttempts: 30,
+          rejectedMessage: 'The image did not pass media processing.'
+        }
+      );
+      const updated = await api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}`, {
+        signal: controller.signal
       });
-
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        const attachment = await api<{ scan_status: string }>(`/attachments/${ticket.id}`, {
-          signal: controller.signal
-        });
-        if (attachment.scan_status === 'clean') {
-          await api(`/guilds/${encodeURIComponent(targetGuild)}/assets/${kind}`, {
-            method: 'PUT',
-            signal: controller.signal,
-            body: JSON.stringify({ attachment_id: ticket.id })
-          });
-          const updated = await api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}`, {
-            signal: controller.signal
-          });
-          if (
-            controller.signal.aborted ||
-            generation !== loadGeneration ||
-            targetGuild !== guildId
-          ) {
-            return;
-          }
-          if (guild) guild = mergeGuildState(guild, updated);
-          notice = `${kind === 'icon' ? 'Guild icon' : 'Guild banner'} updated.`;
-          return;
-        }
-        if (
-          attachment.scan_status === 'rejected' ||
-          attachment.scan_status === 'infected' ||
-          attachment.scan_status === 'failed'
-        ) {
-          throw new Error('The image did not pass media processing.');
-        }
-        await cancelableDelay(1000, controller.signal);
+      if (controller.signal.aborted || generation !== loadGeneration || targetGuild !== guildId) {
+        return;
       }
-      throw new Error('Media processing is taking longer than expected. Try again shortly.');
+      if (guild) guild = mergeGuildState(guild, updated);
+      notice = `${kind === 'icon' ? 'Guild icon' : 'Guild banner'} updated.`;
+      return;
     } catch (caught) {
       if (controller.signal.aborted || generation !== loadGeneration || targetGuild !== guildId) {
         return;
@@ -1245,17 +1473,48 @@
     }
   }
 
+  async function removeGuildAsset(kind: GuildAssetKind) {
+    const controller = routeController;
+    if (busy || loading || !guild || !canManageGuildAssets || !controller) return;
+    const label = kind === 'icon' ? 'guild icon' : 'guild banner';
+    if (!window.confirm(`Remove the ${label}? You can upload a new one at any time.`)) return;
+    const targetGuild = guildId;
+    const generation = loadGeneration;
+    busy = true;
+    error = '';
+    notice = '';
+    try {
+      const updated = await api<GuildView>(
+        `/guilds/${encodeURIComponent(targetGuild)}/assets/${kind}`,
+        { method: 'DELETE', signal: controller.signal }
+      );
+      if (controller.signal.aborted || generation !== loadGeneration || targetGuild !== guildId) {
+        return;
+      }
+      if (guild) guild = mergeGuildState(guild, updated);
+      entities.guilds.upsert(updated);
+      notice = `${kind === 'icon' ? 'Guild icon' : 'Guild banner'} removed.`;
+    } catch (caught) {
+      if (controller.signal.aborted || generation !== loadGeneration || targetGuild !== guildId) {
+        return;
+      }
+      error = userErrorMessage(caught, `Could not remove the ${label}. Try again.`);
+    } finally {
+      if (generation === loadGeneration && targetGuild === guildId) busy = false;
+    }
+  }
+
   async function createEmoji(event: SubmitEvent) {
     event.preventDefault();
     const signal = routeController?.signal;
-    if (!guild || !emojiFile || !canManageEmojis || emojiBusy || !signal) return;
+    if (!guild || !emojiFile || !canCreateExpressions || emojiBusy || !signal) return;
     const file = emojiFile;
     if (!acceptedImageTypes.has(file.type)) {
       error = 'Choose a PNG, JPEG, GIF, or WebP image.';
       return;
     }
-    if (file.size > (guild.emoji_max_bytes ?? 524288)) {
-      error = `Emoji images can be at most ${Math.ceil((guild.emoji_max_bytes ?? 524288) / 1024)} KiB.`;
+    if (file.size > (guild.emoji_max_bytes ?? 262144)) {
+      error = `Emoji images can be at most ${Math.ceil((guild.emoji_max_bytes ?? 262144) / 1024)} KiB.`;
       return;
     }
     emojiBusy = true;
@@ -1270,31 +1529,19 @@
         }
       );
       await uploadObject(ticket, file, () => undefined, signal);
-      let created = await api<CustomEmoji>(`/guilds/${encodeURIComponent(guildId)}/emojis`, {
-        method: 'POST',
-        body: JSON.stringify({ attachment_id: ticket.id, name: emojiName.trim() })
-      });
-      if (!created.media_hash) {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
-          await cancelableDelay(1000, signal);
-          const status = await api<{ scan_status: string }>(`/attachments/${ticket.id}`);
-          if (status.scan_status === 'clean') {
-            created = await api<CustomEmoji>(`/guilds/${encodeURIComponent(guildId)}/emojis`, {
-              method: 'POST',
-              body: JSON.stringify({ attachment_id: ticket.id, name: emojiName.trim() })
-            });
-            break;
+      const commit = () =>
+        api<CustomEmoji | { scan_status: string }>(
+          `/guilds/${encodeURIComponent(guildId)}/emojis`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ attachment_id: ticket.id, name: emojiName.trim() })
           }
-          if (
-            status.scan_status === 'rejected' ||
-            status.scan_status === 'infected' ||
-            status.scan_status === 'failed'
-          ) {
-            throw new Error('The emoji did not pass media processing.');
-          }
-        }
-      }
-      if (!created.media_hash) throw new Error('Emoji processing is taking longer than expected.');
+        );
+      const created = await completeScannedMediaResource(
+        commit,
+        (value): value is CustomEmoji => 'media_hash' in value && Boolean(value.media_hash),
+        { signal, maxAttempts: 30, rejectedMessage: 'The emoji did not pass media processing.' }
+      );
       guild = {
         ...guild,
         emojis: [
@@ -1302,6 +1549,10 @@
           created
         ]
       };
+      patchEmojiDraft(created, {
+        name: created.name,
+        roles: created.roles ?? []
+      });
       emojiName = '';
       emojiFile = null;
       if (emojiInput) emojiInput.value = '';
@@ -1317,7 +1568,8 @@
   }
 
   async function deleteEmoji(emoji: CustomEmoji) {
-    if (!guild || !canManageEmojis || emojiBusy) return;
+    if (!guild || !canEditEmoji(emoji) || emojiBusy) return;
+    if (!confirm(`Delete :${emoji.name}:? This cannot be undone.`)) return;
     emojiBusy = true;
     error = '';
     try {
@@ -1331,6 +1583,58 @@
       notice = `:${emoji.name}: was deleted.`;
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not delete the emoji. Try again.');
+    } finally {
+      emojiBusy = false;
+    }
+  }
+
+  function patchEmojiDraft(emoji: CustomEmoji, patch: Partial<{ name: string; roles: string[] }>) {
+    const key = entityKey(emoji);
+    emojiDrafts = {
+      ...emojiDrafts,
+      [key]: {
+        ...(emojiDrafts[key] ?? {
+          name: emoji.name,
+          roles: emoji.roles ?? []
+        }),
+        ...patch
+      }
+    };
+  }
+
+  async function updateEmoji(emoji: CustomEmoji) {
+    const draftValue = emojiDrafts[entityKey(emoji)];
+    if (!guild || !draftValue || !canEditEmoji(emoji) || emojiBusy) return;
+    if (!draftValue.name.trim()) {
+      error = 'Emoji names cannot be blank.';
+      return;
+    }
+    emojiBusy = true;
+    error = '';
+    try {
+      const updated = await api<CustomEmoji>(
+        `/guilds/${encodeURIComponent(guildId)}/emojis/${encodeURIComponent(emoji.id)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            name: draftValue.name.trim(),
+            ...(canEditEmojiRoleRestrictions(emoji) ? { role_ids: draftValue.roles } : {})
+          })
+        }
+      );
+      guild = {
+        ...guild,
+        emojis: (guild.emojis ?? []).map((item) =>
+          entityKey(item) === entityKey(updated) ? updated : item
+        )
+      };
+      patchEmojiDraft(updated, {
+        name: updated.name,
+        roles: updated.roles ?? []
+      });
+      notice = `:${updated.name}: was updated.`;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update the emoji. Try again.');
     } finally {
       emojiBusy = false;
     }
@@ -1434,14 +1738,24 @@
   async function createSticker(event: SubmitEvent) {
     event.preventDefault();
     const signal = routeController?.signal;
-    if (!guild || !stickerFile || !canManageEmojis || stickerBusy || !signal) return;
+    if (!guild || !stickerFile || !canCreateExpressions || stickerBusy || !signal) return;
     const file = stickerFile;
     if (!acceptedImageTypes.has(file.type)) {
       error = 'Choose a PNG, JPEG, GIF, or WebP image.';
       return;
     }
-    if (file.size > (guild.sticker_max_bytes ?? 2097152)) {
-      error = `Sticker images can be at most ${Math.ceil((guild.sticker_max_bytes ?? 2097152) / 1048576)} MiB.`;
+    if (file.size > (guild.sticker_max_bytes ?? 524288)) {
+      error = `Sticker images can be at most ${Math.ceil((guild.sticker_max_bytes ?? 524288) / 1024)} KiB.`;
+      return;
+    }
+    const cleanedName = stickerName.trim();
+    const cleanedDescription = stickerDescription.trim();
+    if (!validStickerName(cleanedName)) {
+      error = 'Sticker names must contain 2–30 meaningful characters.';
+      return;
+    }
+    if (!validStickerDescription(cleanedDescription)) {
+      error = 'Sticker descriptions must be empty or contain 2–100 characters.';
       return;
     }
     stickerBusy = true;
@@ -1468,30 +1782,22 @@
       );
       await uploadObject(ticket, file, () => undefined, signal);
       const commit = () =>
-        api<GuildSticker>(`/guilds/${encodeURIComponent(guildId)}/stickers`, {
-          method: 'POST',
-          body: JSON.stringify({
-            attachment_id: ticket.id,
-            name: stickerName.trim(),
-            description: stickerDescription.trim() || null
-          })
-        });
-      let created = await commit();
-      if (!created.media_hash) {
-        for (let attempt = 0; attempt < 45; attempt += 1) {
-          await cancelableDelay(1000, signal);
-          const status = await api<{ scan_status: string }>(`/attachments/${ticket.id}`);
-          if (status.scan_status === 'clean') {
-            created = await commit();
-            break;
+        api<GuildSticker | { scan_status: string }>(
+          `/guilds/${encodeURIComponent(guildId)}/stickers`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              attachment_id: ticket.id,
+              name: cleanedName,
+              description: cleanedDescription || null
+            })
           }
-          if (['rejected', 'infected', 'failed'].includes(status.scan_status)) {
-            throw new Error('The sticker did not pass media processing.');
-          }
-        }
-      }
-      if (!created.media_hash)
-        throw new Error('Sticker processing is taking longer than expected.');
+        );
+      const created = await completeScannedMediaResource(
+        commit,
+        (value): value is GuildSticker => 'media_hash' in value && Boolean(value.media_hash),
+        { signal, rejectedMessage: 'The sticker did not pass media processing.' }
+      );
       guild = {
         ...guild,
         stickers: [
@@ -1499,6 +1805,11 @@
           created
         ]
       };
+      patchStickerDraft(created, {
+        name: created.name,
+        description: created.description ?? '',
+        tags: (created.tags ?? []).join(', ')
+      });
       stickerName = '';
       stickerDescription = '';
       if (stickerPreviewUrl) URL.revokeObjectURL(stickerPreviewUrl);
@@ -1517,7 +1828,8 @@
   }
 
   async function deleteSticker(sticker: GuildSticker) {
-    if (!guild || !canManageEmojis || stickerBusy) return;
+    if (!guild || !canEditSticker(sticker) || stickerBusy) return;
+    if (!confirm(`Delete the sticker “${sticker.name}”? This cannot be undone.`)) return;
     stickerBusy = true;
     error = '';
     try {
@@ -1532,6 +1844,87 @@
       notice = `${sticker.name} was deleted.`;
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not delete the sticker. Try again.');
+    } finally {
+      stickerBusy = false;
+    }
+  }
+
+  function patchStickerDraft(
+    sticker: GuildSticker,
+    patch: Partial<{ name: string; description: string; tags: string }>
+  ) {
+    const key = entityKey(sticker);
+    stickerDrafts = {
+      ...stickerDrafts,
+      [key]: {
+        ...(stickerDrafts[key] ?? {
+          name: sticker.name,
+          description: sticker.description ?? '',
+          tags: (sticker.tags ?? []).join(', ')
+        }),
+        ...patch
+      }
+    };
+  }
+
+  async function updateSticker(sticker: GuildSticker) {
+    const draftValue = stickerDrafts[entityKey(sticker)];
+    if (!guild || !draftValue || !canEditSticker(sticker) || stickerBusy) return;
+    const tags = [
+      ...new Set(
+        draftValue.tags
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    ];
+    const cleanedName = draftValue.name.trim();
+    const cleanedDescription = draftValue.description.trim();
+    if (!validStickerName(cleanedName)) {
+      error = 'Sticker names must contain 2–30 meaningful characters.';
+      return;
+    }
+    if (!validStickerDescription(cleanedDescription)) {
+      error = 'Sticker descriptions must be empty or contain 2–100 characters.';
+      return;
+    }
+    if (
+      !tags.length ||
+      tags.length > 10 ||
+      tags.some((tag) => tag.length > 100) ||
+      tags.join(',').length > 200
+    ) {
+      error = 'Sticker tags must contain 1–10 unique values and use at most 200 characters.';
+      return;
+    }
+    stickerBusy = true;
+    error = '';
+    try {
+      const updated = await api<GuildSticker>(
+        `/guilds/${encodeURIComponent(guildId)}/stickers/${encodeURIComponent(sticker.id)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            name: cleanedName,
+            description: cleanedDescription || null,
+            tags
+          })
+        }
+      );
+      guild = {
+        ...guild,
+        stickers: (guild.stickers ?? []).map((item) =>
+          entityKey(item) === entityKey(updated) ? updated : item
+        )
+      };
+      patchStickerDraft(updated, {
+        name: updated.name,
+        description: updated.description ?? '',
+        tags: (updated.tags ?? []).join(', ')
+      });
+      notice = `${updated.name} was updated.`;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update the sticker. Try again.');
     } finally {
       stickerBusy = false;
     }
@@ -1564,7 +1957,7 @@
   }
 
   function saveChannel() {
-    if (!canManageChannels || !selectedChannel) return;
+    if (!canEditSelectedChannel || !selectedChannel) return;
     const target = selectedChannel;
     return run(async (targetGuild, generation) => {
       const parent = guild?.channels?.find(
@@ -1578,6 +1971,7 @@
           body: JSON.stringify({
             name: channelName,
             topic: channelTopic.trim() || null,
+            nsfw: channelNsfw,
             parent_id: target.type === 4 ? null : (parent?.id ?? null),
             rate_limit_per_user: target.type === 4 ? 0 : channelSlowmode,
             federated_history_policy:
@@ -1603,6 +1997,16 @@
                   default_forum_layout: channelForumLayout,
                   e2ee_required: target.e2ee_required ? true : channelForumE2EE,
                   flags: channelForumRequireTag ? 1 << 4 : 0
+                }
+              : {}),
+            ...(target.type === 2 || target.type === 13
+              ? {
+                  bitrate: channelBitrate,
+                  user_limit: channelUserLimit,
+                  // Region IDs are deliberately opaque. Empty keeps automatic
+                  // selection and remains compatible with future providers.
+                  rtc_region: channelRtcRegion.trim() || null,
+                  video_quality_mode: channelVideoQualityMode
                 }
               : {})
           })
@@ -1739,7 +2143,7 @@
       roleIconError = 'Choose a PNG, JPEG, GIF, or WebP image.';
       return;
     }
-    const maxBytes = guild.emoji_max_bytes ?? 524288;
+    const maxBytes = guild.emoji_max_bytes ?? 262144;
     if (file.size > maxBytes) {
       roleIconError = `Role icons can be at most ${Math.ceil(maxBytes / 1024)} KiB.`;
       return;
@@ -1754,31 +2158,15 @@
         body: JSON.stringify({ filename: file.name, content_type: file.type, size: file.size })
       });
       await uploadObject(ticket, file, () => undefined, signal);
-      let updated = await api<Role | { scan_status: string }>(path, {
-        method: 'PUT',
-        body: JSON.stringify({ attachment_id: ticket.id })
-      });
-      if (!('guild_id' in updated)) {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
-          await cancelableDelay(1000, signal);
-          const status = await api<{ scan_status: string }>(`/attachments/${ticket.id}`, {
-            signal
-          });
-          if (status.scan_status === 'clean') {
-            updated = await api<Role>(path, {
-              method: 'PUT',
-              body: JSON.stringify({ attachment_id: ticket.id })
-            });
-            break;
-          }
-          if (['rejected', 'infected', 'failed'].includes(status.scan_status)) {
-            throw new Error('The role icon did not pass media processing.');
-          }
-        }
-      }
-      if (!('guild_id' in updated)) {
-        throw new Error('Role icon processing is taking longer than expected.');
-      }
+      const updated = await completeScannedMediaResource(
+        () =>
+          api<Role | { scan_status: string }>(path, {
+            method: 'PUT',
+            body: JSON.stringify({ attachment_id: ticket.id })
+          }),
+        (value): value is Role => 'guild_id' in value,
+        { signal, maxAttempts: 30, rejectedMessage: 'The role icon did not pass media processing.' }
+      );
       if (guild) {
         guild = {
           ...guild,
@@ -1962,19 +2350,27 @@
   }
 
   function createInvite() {
-    if (!canCreateInvites) return;
+    if (!(channelOnly ? canCreateSelectedInvite : canCreateInvites)) return;
     return run(async (targetGuild, generation) => {
-      const channel = guild?.channels?.find(
-        (item) => entityKey(item) === inviteChannel && item.type !== 4
-      );
+      const channel =
+        channelOnly && selectedChannel?.type !== 4
+          ? selectedChannel
+          : guild?.channels?.find((item) => entityKey(item) === inviteChannel && item.type !== 4);
+      if (channelOnly && !channel) return;
       const invite = await api<InviteSummary>(
         `/guilds/${encodeURIComponent(targetGuild)}/invites`,
         {
           method: 'POST',
           body: JSON.stringify({
-            channel_id: channel?.id ?? null,
+            channel_id: channel ? entityRef(channel) : null,
             max_age_seconds: inviteMaxAge ? Number(inviteMaxAge) : null,
-            max_uses: inviteMaxUses ? Number(inviteMaxUses) : null
+            max_uses: inviteMaxUses ? Number(inviteMaxUses) : null,
+            temporary: inviteTemporary,
+            unique: inviteUnique,
+            target_type: inviteTargetType || null,
+            target_user_id: inviteTargetType === 'stream' ? inviteTargetUser || null : null,
+            scheduled_event_id: inviteScheduledEvent || null,
+            role_ids: inviteRoleIds
           })
         }
       );
@@ -1989,47 +2385,153 @@
     if (!canManageWebhooks || !selectedChannel || selectedChannel.type === 4) return;
     const channel = selectedChannel;
     return run(async (targetGuild, generation) => {
-      const created = await api<WebhookSummary>(
-        `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(channel))}/webhooks`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ name: newWebhookName })
-        }
-      );
+      const created = await createGuildWebhook(targetGuild, entityRef(channel), newWebhookName);
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       webhooks = [...webhooks, created];
+      webhookNameDrafts = { ...webhookNameDrafts, [created.id]: created.name };
+      webhookChannelDrafts = {
+        ...webhookChannelDrafts,
+        [created.id]: `${created.channel_id}@${created.channel_domain}`
+      };
       newWebhookName = '';
-      revealedWebhookToken = created.token ?? '';
-      notice = 'Webhook created. Copy its token now; it will not be shown again.';
+      revealedWebhookToken = created.execution_url ?? '';
+      notice = 'Webhook created. Its URL remains available to server managers.';
     });
   }
 
   function rotateWebhook(webhook: WebhookSummary) {
     if (!canManageWebhooks) return;
-    return run(async (_targetGuild, generation) => {
-      const updated = await api<WebhookSummary>(`/webhooks/${webhook.id}/rotate`, {
-        method: 'POST'
+    if (
+      !confirm(
+        `Rotate the token for “${webhook.name}”? The current token will stop working immediately.`
+      )
+    )
+      return;
+    return run(async (targetGuild, generation) => {
+      const updated = await rotateGuildWebhook(targetGuild, webhook);
+      if (generation !== loadGeneration) return;
+      webhooks = webhooks.map((item) => (item.id === webhook.id ? updated : item));
+      revealedWebhookToken = updated.execution_url ?? '';
+      notice = 'Webhook token rotated. The previous token no longer works.';
+    });
+  }
+
+  function updateWebhook(webhook: WebhookSummary) {
+    if (!canManageWebhooks) return;
+    const nextName = (webhookNameDrafts[webhook.id] ?? webhook.name).trim();
+    if (!nextName) {
+      error = 'Webhook names cannot be blank.';
+      return;
+    }
+    const nextChannel =
+      webhookChannelDrafts[webhook.id] ?? `${webhook.channel_id}@${webhook.channel_domain}`;
+    const targetChannel = manageableWebhookTargets.find(
+      (channel) => entityRef(channel) === nextChannel
+    );
+    if (!targetChannel) {
+      error = 'Choose a text, announcement, or forum channel for this webhook.';
+      return;
+    }
+    return run(async (targetGuild, generation) => {
+      const updated = await updateGuildWebhook(targetGuild, webhook, {
+        name: nextName,
+        channel_id: entityRef(targetChannel)
       });
       if (generation !== loadGeneration) return;
       webhooks = webhooks.map((item) => (item.id === webhook.id ? updated : item));
-      revealedWebhookToken = updated.token ?? '';
-      notice = 'Webhook token rotated. The previous token no longer works.';
+      webhookNameDrafts = { ...webhookNameDrafts, [updated.id]: updated.name };
+      webhookChannelDrafts = {
+        ...webhookChannelDrafts,
+        [updated.id]: `${updated.channel_id}@${updated.channel_domain}`
+      };
+      notice = 'Webhook saved.';
+    });
+  }
+
+  function uploadWebhookAvatar(
+    webhook: WebhookSummary,
+    file: File | null,
+    input: HTMLInputElement
+  ) {
+    if (!file || !canManageWebhooks) return;
+    if (!acceptedImageTypes.has(file.type)) {
+      error = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      input.value = '';
+      return;
+    }
+    if (!file.size) {
+      error = 'Choose a non-empty image file.';
+      input.value = '';
+      return;
+    }
+    return run(async (targetGuild, generation) => {
+      const signal = routeController?.signal;
+      if (!signal) return;
+      const ticket = await createGuildWebhookAvatarTicket(
+        targetGuild,
+        webhook,
+        {
+          filename: file.name || 'webhook-avatar',
+          content_type: file.type,
+          size: file.size
+        },
+        signal
+      );
+      await uploadObject(ticket, file, () => undefined, signal);
+      let updated: WebhookSummary | null = null;
+      for (let attempt = 0; attempt < 45; attempt += 1) {
+        const result = await commitGuildWebhookAvatar(targetGuild, webhook, ticket.id, signal);
+        if ('guild_id' in result) {
+          updated = result;
+          break;
+        }
+        const scanStatus = result.attachment?.scan_status ?? 'pending';
+        if (['infected', 'rejected', 'failed'].includes(scanStatus)) {
+          throw new Error('The webhook avatar did not pass media safety processing.');
+        }
+        await cancelableDelay(1000, signal);
+      }
+      if (!updated) {
+        throw new Error('Webhook avatar processing is taking longer than expected. Try again.');
+      }
+      if (generation !== loadGeneration) return;
+      webhooks = webhooks.map((item) => (item.id === updated?.id ? updated : item));
+      input.value = '';
+      notice = 'Webhook avatar updated.';
+    });
+  }
+
+  function deleteWebhookAvatar(webhook: WebhookSummary) {
+    if (!canManageWebhooks || !webhook.avatar_hash) return;
+    if (!confirm(`Remove the avatar for “${webhook.name}”?`)) return;
+    return run(async (targetGuild, generation) => {
+      const updated = await deleteGuildWebhookAvatar(targetGuild, webhook);
+      if (generation !== loadGeneration) return;
+      webhooks = webhooks.map((item) => (item.id === updated.id ? updated : item));
+      notice = 'Webhook avatar removed.';
     });
   }
 
   function deleteWebhook(webhook: WebhookSummary) {
     if (!canManageWebhooks) return;
-    return run(async (_targetGuild, generation) => {
-      await api(`/webhooks/${webhook.id}`, { method: 'DELETE' });
+    if (!confirm(`Delete the webhook “${webhook.name}”? This cannot be undone.`)) return;
+    return run(async (targetGuild, generation) => {
+      await deleteGuildWebhook(targetGuild, webhook);
       if (generation !== loadGeneration) return;
       webhooks = webhooks.filter((item) => item.id !== webhook.id);
+      const remainingNames = { ...webhookNameDrafts };
+      delete remainingNames[webhook.id];
+      webhookNameDrafts = remainingNames;
+      const remainingChannels = { ...webhookChannelDrafts };
+      delete remainingChannels[webhook.id];
+      webhookChannelDrafts = remainingChannels;
       revealedWebhookToken = '';
       notice = 'Webhook deleted.';
     });
   }
 
   function revokeInvite(invite: InviteSummary) {
-    if (!canManageGuild) return;
+    if (!canRevokeInvite(invite)) return;
     void openDestructiveConfirmation({
       kind: 'invite',
       target: invite,
@@ -2039,9 +2541,27 @@
     });
   }
 
+  function canRevokeInvite(invite: InviteSummary): boolean {
+    if (canManageGuild) return true;
+    if (!invite.channel_id) return false;
+    const inviteChannel = guild?.channels?.find((channel) => channel.id === invite.channel_id);
+    if (!inviteChannel) return false;
+    try {
+      return hasAllPermissions(
+        BigInt(inviteChannel.permissions ?? guild?.permissions ?? '0'),
+        Permission.MANAGE_CHANNELS
+      );
+    } catch {
+      return false;
+    }
+  }
+
   function revokeConfirmedInvite(invite: InviteSummary) {
-    return run(async (_targetGuild, generation) => {
-      await api(`/invites/${encodeURIComponent(invite.code)}`, { method: 'DELETE' });
+    return run(async (targetGuild, generation) => {
+      if (!guild) return;
+      await api(guildInviteManagementPath(invite.code, guild.origin_domain, targetGuild), {
+        method: 'DELETE'
+      });
       if (generation !== loadGeneration) return;
       invites = invites.filter((item) => item.code !== invite.code);
       notice = 'Invite revoked.';
@@ -2111,7 +2631,7 @@
   }
 
   function requestDeleteGuild() {
-    if (!guild || !isGuildOwner || !isLocalGuild) return;
+    if (!guild || !isGuildOwner) return;
     void openDestructiveConfirmation({
       kind: 'guild-delete',
       verificationText: guild.name,
@@ -2158,13 +2678,28 @@
   async function copyInvite(invite: InviteSummary) {
     error = '';
     try {
-      await navigator.clipboard.writeText(
-        `${window.location.origin}/invite/${encodeURIComponent(invite.code)}`
-      );
+      await navigator.clipboard.writeText(inviteUrl(invite.code));
       notice = 'Invite link copied.';
     } catch {
       error = 'Browser denied clipboard access. Allow clipboard permission and try again.';
     }
+  }
+
+  async function copyWebhookUrl(url = revealedWebhookToken) {
+    if (!url) return;
+    error = '';
+    try {
+      await navigator.clipboard.writeText(url);
+      notice = 'Webhook URL copied.';
+    } catch {
+      error = 'Browser denied clipboard access. Select the webhook URL and copy it manually.';
+    }
+  }
+
+  function inviteUrl(code: string): string {
+    if (!guild) return '';
+    const currentOrigin = typeof window === 'undefined' ? undefined : window.location.origin;
+    return guildInviteUrl(code, guild.origin_domain, currentOrigin);
   }
 
   function toggleMemberRole(member: MemberSummary, role: Role, enabled: boolean) {
@@ -2196,7 +2731,10 @@
   function isModeratableMember(member: MemberSummary): boolean {
     return (
       entityRef(member.user) !== currentUserRef &&
-      !(member.user.id === guild?.owner_id && member.user.origin_domain === guild?.origin_domain)
+      !(
+        member.user.id === guild?.owner_id &&
+        member.user.origin_domain === (guild?.owner_domain ?? guild?.origin_domain)
+      )
     );
   }
 
@@ -2664,14 +3202,14 @@
             onclick={() => selectChannelPanel('permissions')}>Permissions</button
           >
         {/if}
-        {#if canAccessInvites && canCreateSelectedInvite && selectedChannel?.type !== 4}
+        {#if (canCreateSelectedInvite || canEditSelectedChannel) && selectedChannel?.type !== 4}
           <button
             class:active={channelEditorPanel === 'invites'}
             type="button"
             onclick={() => selectChannelPanel('invites')}>Invites</button
           >
         {/if}
-        {#if canManageSelectedWebhooks && (selectedChannel?.type === 0 || selectedChannel?.type === 5)}
+        {#if canAccessSelectedIntegrations && (selectedChannel?.type === 0 || selectedChannel?.type === 5)}
           <button
             class:active={channelEditorPanel === 'integrations'}
             type="button"
@@ -2715,17 +3253,32 @@
         <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
         <p>Guild</p>
         <a href="#overview"><Icon name="server" size={18} />Overview</a>
-        {#if hasPermission(Permission.MANAGE_GUILD)}
-          <a href={`/g/${encodeURIComponent(guildId)}/integrations`}
-            ><Icon name="server" size={18} />Bots & automations</a
+        {#if canAccessGuildIntegrations && guild}
+          <a href={guildIntegrationsPath(guild)}><Icon name="server" size={18} />Integrations</a>
+        {/if}
+        {#if canManageGuild && !channelOnly && guild}
+          <a href={guildApplicationDirectoryPath(guild)}
+            ><Icon name="sparkles" size={18} />App Directory</a
           >
         {/if}
         {#if canManageRoles}
           <a href="#roles"><Icon name="shield" size={18} />Roles</a>
         {/if}
-        {#if canManageEmojis}
+        {#if canAccessExpressions}
           <a href="#emoji"><span aria-hidden="true">☺</span>Emoji</a>
           <a href="#stickers"><span aria-hidden="true">▱</span>Stickers</a>
+        {/if}
+        {#if hasPermission(Permission.MANAGE_AUTO_MODERATION)}
+          <a href="#automod"><Icon name="shield" size={18} />AutoMod</a>
+        {/if}
+        {#if canKickMembers || canBanMembers}
+          <a href="#bulk-moderation"><Icon name="users" size={18} />Bulk moderation</a>
+        {/if}
+        {#if canAccessExpressions}
+          <a href="#soundboard"><span aria-hidden="true">♫</span>Soundboard</a>
+        {/if}
+        {#if canViewAuditLog}
+          <a href="#audit-log"><Icon name="clock" size={18} />Audit log</a>
         {/if}
         {#if canViewMembers}
           <p>Community</p>
@@ -2846,8 +3399,8 @@
             <p class="settings-helper">
               Notifications must also be enabled in <a href={resolve('/settings#notifications')}
                 >User Settings</a
-              >. This preference will also be available to desktop and mobile clients when those
-              clients are introduced.
+              >. The preference syncs across the web, desktop, and mobile clients signed in to your
+              account.
             </p>
           </div>
         </section>
@@ -2864,8 +3417,9 @@
           {#if !isLocalGuild}
             <div class="notice-banner info-banner">
               <Icon name="globe" size={18} />
-              This guild is hosted by <strong>{guild.origin_domain}</strong>. Administrative changes
-              must be made on its home instance.
+              This guild is hosted by <strong>{guild.origin_domain}</strong>. Changes are forwarded
+              there and your current membership, permissions, and resource versions are
+              re-authorized before they are applied.
             </div>
           {/if}
 
@@ -2893,7 +3447,7 @@
             </div>
           </div>
 
-          {#if canManageGuild}
+          {#if canManageGuildAssets}
             <div class="settings-card">
               <div class="settings-card-row">
                 <div>
@@ -2915,6 +3469,16 @@
                       }}
                     />
                   </label>
+                  {#if guild.icon_hash}
+                    <button
+                      class="secondary-button"
+                      type="button"
+                      disabled={busy}
+                      onclick={() => void removeGuildAsset('icon')}
+                    >
+                      <Icon name="trash" size={16} />Remove icon
+                    </button>
+                  {/if}
                   <label class="secondary-button">
                     <Icon name="image" size={16} />Change banner
                     <input
@@ -2929,6 +3493,16 @@
                       }}
                     />
                   </label>
+                  {#if guild.banner_hash}
+                    <button
+                      class="secondary-button"
+                      type="button"
+                      disabled={busy}
+                      onclick={() => void removeGuildAsset('banner')}
+                    >
+                      <Icon name="trash" size={16} />Remove banner
+                    </button>
+                  {/if}
                 </div>
               </div>
               {#if guildAssetKind && guildAssetStage}
@@ -3017,7 +3591,7 @@
         </section>
       {/if}
 
-      {#if channelOnly && (canEditSelectedChannel || canEditSelectedPermissions || canCreateSelectedInvite || canManageSelectedWebhooks)}
+      {#if channelOnly && (canEditSelectedChannel || canEditSelectedPermissions || canCreateSelectedInvite || canAccessSelectedIntegrations)}
         <section id="channels" class="settings-section">
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="hash" /></span>
@@ -3101,7 +3675,7 @@
                       onclick={() => selectChannelPanel('permissions')}>Permissions</button
                     >
                   {/if}
-                  {#if canAccessInvites && canCreateSelectedInvite && selectedChannel.type !== 4}
+                  {#if (canCreateSelectedInvite || canEditSelectedChannel) && selectedChannel.type !== 4}
                     <button
                       class:active={channelEditorPanel === 'invites'}
                       type="button"
@@ -3110,7 +3684,7 @@
                       onclick={() => selectChannelPanel('invites')}>Invites</button
                     >
                   {/if}
-                  {#if canManageSelectedWebhooks && (selectedChannel.type === 0 || selectedChannel.type === 5)}
+                  {#if canAccessSelectedIntegrations && (selectedChannel.type === 0 || selectedChannel.type === 5)}
                     <button
                       class:active={channelEditorPanel === 'integrations'}
                       type="button"
@@ -3119,7 +3693,7 @@
                       onclick={() => selectChannelPanel('integrations')}>Integrations</button
                     >
                   {/if}
-                  {#if canEditSelectedChannel}
+                  {#if canDeleteSelectedChannel}
                     <button
                       class="danger-tab"
                       class:active={channelEditorPanel === 'delete'}
@@ -3284,8 +3858,9 @@
                               Titles, starter messages, title search, and starter previews remain
                               plaintext. This permanent policy applies only to posts created after
                               it is enabled. Each future post secures its own subsequent replies;
-                              bots, webhooks, reply search and previews, and server scanning are
-                              unavailable there.
+                              webhooks, reply search and previews, and server scanning are
+                              unavailable there. Verified participant-mode apps require an explicit
+                              per-post grant.
                             </small>
                           </span>
                           <input
@@ -3341,6 +3916,92 @@
                           </div>
                         {/if}
                       {/if}
+                      {#if selectedChannel.type === 0 || selectedChannel.type === 5 || selectedChannel.type === 15}
+                        <label class="settings-toggle-row">
+                          <span>
+                            <strong>Age-restricted channel</strong>
+                            <small>
+                              Only age-assured adult members can use age-restricted application
+                              commands here. Threads inherit this setting from their parent.
+                            </small>
+                          </span>
+                          <input type="checkbox" bind:checked={channelNsfw} disabled={busy} />
+                        </label>
+                      {/if}
+                      {#if selectedChannel.type === 2 || selectedChannel.type === 13}
+                        <fieldset class="forum-settings-group">
+                          <legend>Voice quality and capacity</legend>
+                          <small>
+                            These limits apply to every Web, Desktop, Mobile, and bot connection.
+                            Stage channels use the same authority-advertised media regions.
+                          </small>
+                          <div class="forum-tag-add">
+                            <label class="form-field compact-field">
+                              <span>Bitrate</span>
+                              <select bind:value={channelBitrate} disabled={busy}>
+                                <option value={8000}>8 kbps</option>
+                                <option value={32000}>32 kbps</option>
+                                <option value={64000}>64 kbps</option>
+                                {#if selectedChannel.type === 2}
+                                  <option value={96000}>96 kbps</option>
+                                  <option value={128000}>128 kbps</option>
+                                  <option value={256000}>256 kbps</option>
+                                  <option value={384000}>384 kbps</option>
+                                {/if}
+                              </select>
+                            </label>
+                            <label class="form-field compact-field">
+                              <span>User limit</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max={selectedChannel.type === 13 ? 10000 : 99}
+                                bind:value={channelUserLimit}
+                                disabled={busy}
+                              />
+                              <small>0 means no explicit limit.</small>
+                            </label>
+                            <label class="form-field compact-field">
+                              <span>Video quality</span>
+                              <select bind:value={channelVideoQualityMode} disabled={busy}>
+                                <option value={1}>Automatic</option>
+                                <option value={2}>Full resolution</option>
+                              </select>
+                            </label>
+                          </div>
+                          <label class="form-field compact-field">
+                            <span>Region Override</span>
+                            <select
+                              bind:value={channelRtcRegion}
+                              disabled={busy || !canEditSelectedChannel}
+                            >
+                              <option value="">Automatic</option>
+                              {#if channelRtcRegion && !channelVoiceRegions.some((region) => region.id === channelRtcRegion)}
+                                <option value={channelRtcRegion}
+                                  >{channelRtcRegion} (unavailable)</option
+                                >
+                              {/if}
+                              {#each channelVoiceRegions as region (region.id)}
+                                <option
+                                  value={region.id}
+                                  disabled={region.deprecated && region.id !== channelRtcRegion}
+                                >
+                                  {region.name}{region.optimal
+                                    ? ' — Recommended'
+                                    : ''}{region.deprecated ? ' — Deprecated' : ''}
+                                </option>
+                              {/each}
+                            </select>
+                            <small>
+                              Automatic chooses the lowest-latency region. The catalog comes from
+                              this server's authority, including for federated servers.
+                            </small>
+                            {#if channelVoiceRegionsError}
+                              <small class="field-error">{channelVoiceRegionsError}</small>
+                            {/if}
+                          </label>
+                        </fieldset>
+                      {/if}
                       {#if (selectedChannel.type === 0 || selectedChannel.type === 2 || selectedChannel.type === 5) && (selectedChannel.encryption_mode === 'e2ee' || e2eeActivationEnabled)}
                         <div class="notice-banner compact-warning" role="note">
                           <Icon name="lock" size={17} />
@@ -3375,7 +4036,7 @@
                               <p>
                                 {selectedChannel.type === 2
                                   ? 'Optional and permanent. Encrypts microphone, camera, and screen-share frames. Unsupported devices cannot join, and key loss prevents access.'
-                                  : 'Optional and permanent. Disables server search, previews, bots, webhooks, and file scanning in this channel. Key loss can make history unrecoverable.'}
+                                  : 'Optional and permanent. Disables server search, previews, and file scanning. Verified app and webhook devices receive no access automatically and require an explicit future-only grant and rekey. Key loss can make history unrecoverable.'}
                               </p>
                               <button
                                 class="secondary-button"
@@ -3612,7 +4273,7 @@
                     </div>
                   </section>
                 {/if}
-                {#if channelEditorPanel === 'invites' && canAccessInvites && canCreateSelectedInvite}
+                {#if channelEditorPanel === 'invites' && (canCreateSelectedInvite || canEditSelectedChannel)}
                   <section
                     class="channel-permissions-editor"
                     aria-labelledby="channel-invites-title"
@@ -3622,7 +4283,7 @@
                       <h4 id="channel-invites-title">Invites</h4>
                       <p>Create links that open this channel after the person joins the guild.</p>
                     </div>
-                    {#if canCreateInvites}
+                    {#if canCreateSelectedInvite}
                       <div class="settings-form">
                         <div class="two-column-fields">
                           <label class="form-field compact-field">
@@ -3666,7 +4327,7 @@
                                 : 'No expiry'}</small
                             >
                           </span>
-                          {#if canManageGuild}
+                          {#if canRevokeInvite(invite)}
                             <button
                               class="danger-text-button"
                               type="button"
@@ -3681,71 +4342,173 @@
                     </div>
                   </section>
                 {/if}
-                {#if channelEditorPanel === 'integrations' && canManageSelectedWebhooks}
-                  <section
-                    class="channel-permissions-editor"
-                    aria-labelledby="channel-integrations-title"
-                  >
-                    <div>
-                      <span>Integrations</span>
-                      <h4 id="channel-integrations-title">Webhooks</h4>
-                      <p>
-                        Webhooks can post into this channel. Tokens are shown only when created or
-                        rotated.
-                      </p>
-                    </div>
-                    <form
-                      class="inline-settings-form"
-                      onsubmit={(event) => {
-                        event.preventDefault();
-                        void createChannelWebhook();
-                      }}
+                {#if channelEditorPanel === 'integrations' && canAccessSelectedIntegrations}
+                  {#if canManageSelectedWebhooks}
+                    <section
+                      class="channel-permissions-editor"
+                      aria-labelledby="channel-integrations-title"
                     >
-                      <label class="form-field compact-field">
-                        <span>Webhook name</span>
-                        <input
-                          bind:value={newWebhookName}
-                          minlength="1"
-                          maxlength="80"
-                          required
-                          disabled={busy}
-                        />
-                      </label>
-                      <button class="primary-button" disabled={busy}>Create webhook</button>
-                    </form>
-                    {#if revealedWebhookToken}
-                      <div class="notice-banner warning-banner" role="status">
-                        <Icon name="lock" size={18} />
-                        <span
-                          ><strong>Save this token now</strong><code>{revealedWebhookToken}</code
-                          ></span
-                        >
+                      <div>
+                        <span>Integrations</span>
+                        <h4 id="channel-integrations-title">Webhooks</h4>
+                        <p>
+                          Webhooks can post into this channel. Tokens are shown only when created or
+                          rotated.
+                        </p>
                       </div>
-                    {/if}
-                    <div class="settings-list compact-list">
-                      {#each selectedChannelWebhooks as webhook (webhook.id)}
-                        <div class="settings-list-row">
-                          <span><strong>{webhook.name}</strong><small>ID {webhook.id}</small></span>
-                          <div class="row-actions">
-                            <button
-                              class="secondary-button"
-                              type="button"
-                              disabled={busy}
-                              onclick={() => void rotateWebhook(webhook)}>Rotate token</button
-                            >
-                            <button
-                              class="danger-text-button"
-                              type="button"
-                              disabled={busy}
-                              onclick={() => void deleteWebhook(webhook)}>Delete</button
-                            >
-                          </div>
+                      <form
+                        class="inline-settings-form"
+                        onsubmit={(event) => {
+                          event.preventDefault();
+                          void createChannelWebhook();
+                        }}
+                      >
+                        <label class="form-field compact-field">
+                          <span>Webhook name</span>
+                          <input
+                            bind:value={newWebhookName}
+                            minlength="1"
+                            maxlength="80"
+                            required
+                            disabled={busy}
+                          />
+                        </label>
+                        <button class="primary-button" disabled={busy}>Create webhook</button>
+                      </form>
+                      {#if revealedWebhookToken}
+                        <div class="notice-banner warning-banner" role="status">
+                          <Icon name="lock" size={18} />
+                          <span
+                            ><strong>Webhook URL</strong><code>{revealedWebhookToken}</code></span
+                          >
+                          <button
+                            class="secondary-button"
+                            type="button"
+                            onclick={() => void copyWebhookUrl()}>Copy webhook URL</button
+                          >
                         </div>
-                      {:else}
-                        <p class="muted-copy">No webhooks post to this channel.</p>
-                      {/each}
-                    </div>
-                  </section>
+                      {/if}
+                      <div class="settings-list compact-list">
+                        {#each selectedChannelWebhooks as webhook (webhook.id)}
+                          <div class="settings-list-row webhook-settings-row">
+                            <div class="webhook-avatar-editor">
+                              {#if webhook.avatar_hash}
+                                <img
+                                  src={assetUrl(
+                                    webhook.avatar_hash,
+                                    'thumbnail_128',
+                                    webhook.guild_domain
+                                  )}
+                                  alt=""
+                                />
+                              {:else}
+                                <span class="webhook-avatar-placeholder" aria-hidden="true">
+                                  <Icon name="image" size={20} />
+                                </span>
+                              {/if}
+                              <label class="secondary-button webhook-avatar-button">
+                                <span>{webhook.avatar_hash ? 'Replace avatar' : 'Add avatar'}</span>
+                                <input
+                                  type="file"
+                                  accept="image/png,image/jpeg,image/gif,image/webp"
+                                  disabled={busy}
+                                  onchange={(event) => {
+                                    const input = event.currentTarget;
+                                    void uploadWebhookAvatar(
+                                      webhook,
+                                      input.files?.[0] ?? null,
+                                      input
+                                    );
+                                  }}
+                                />
+                              </label>
+                              {#if webhook.avatar_hash}
+                                <button
+                                  class="danger-text-button"
+                                  type="button"
+                                  disabled={busy}
+                                  onclick={() => void deleteWebhookAvatar(webhook)}
+                                  >Remove avatar</button
+                                >
+                              {/if}
+                            </div>
+                            <div class="webhook-fields">
+                              <label class="form-field compact-field webhook-name-field">
+                                <span>Name <small>ID {webhook.id}</small></span>
+                                <input
+                                  value={webhookNameDrafts[webhook.id] ?? webhook.name}
+                                  minlength="1"
+                                  maxlength="80"
+                                  disabled={busy}
+                                  oninput={(event) =>
+                                    (webhookNameDrafts = {
+                                      ...webhookNameDrafts,
+                                      [webhook.id]: event.currentTarget.value
+                                    })}
+                                />
+                              </label>
+                              <label class="form-field compact-field">
+                                <span>Post to channel</span>
+                                <select
+                                  value={webhookChannelDrafts[webhook.id] ??
+                                    `${webhook.channel_id}@${webhook.channel_domain}`}
+                                  disabled={busy}
+                                  onchange={(event) =>
+                                    (webhookChannelDrafts = {
+                                      ...webhookChannelDrafts,
+                                      [webhook.id]: event.currentTarget.value
+                                    })}
+                                >
+                                  {#each manageableWebhookTargets as channel (entityRef(channel))}
+                                    <option value={entityRef(channel)}>#{channel.name}</option>
+                                  {/each}
+                                </select>
+                              </label>
+                            </div>
+                            <div class="row-actions">
+                              {#if webhook.execution_url}
+                                <button
+                                  class="secondary-button"
+                                  type="button"
+                                  disabled={busy}
+                                  onclick={() => void copyWebhookUrl(webhook.execution_url)}
+                                  >Copy webhook URL</button
+                                >
+                              {/if}
+                              <button
+                                class="secondary-button"
+                                type="button"
+                                disabled={busy ||
+                                  !(webhookNameDrafts[webhook.id] ?? webhook.name).trim()}
+                                onclick={() => void updateWebhook(webhook)}>Save</button
+                              >
+                              <button
+                                class="secondary-button"
+                                type="button"
+                                disabled={busy}
+                                onclick={() => void rotateWebhook(webhook)}>Rotate token</button
+                              >
+                              <button
+                                class="danger-text-button"
+                                type="button"
+                                disabled={busy}
+                                onclick={() => void deleteWebhook(webhook)}>Delete</button
+                              >
+                            </div>
+                          </div>
+                        {:else}
+                          <p class="muted-copy">No webhooks post to this channel.</p>
+                        {/each}
+                      </div>
+                    </section>
+                  {/if}
+                  {#if selectedChannel.type === 5}
+                    <AnnouncementFollowers
+                      sourceChannel={selectedChannel}
+                      guilds={announcementGuilds}
+                      canRead={canReadSelectedAnnouncementFollows}
+                    />
+                  {/if}
                 {/if}
                 {#if channelEditorPanel === 'delete' && canEditSelectedChannel}
                   <section
@@ -3843,7 +4606,7 @@
         </section>
       {/if}
 
-      {#if !channelOnly && canManageEmojis}
+      {#if !channelOnly && canAccessExpressions}
         <section id="emoji" class="settings-section">
           <div class="settings-section-heading">
             <span class="section-icon" aria-hidden="true">☺</span>
@@ -3859,58 +4622,117 @@
                 <p>{guild?.emojis?.length ?? 0} of {guild?.emoji_limit ?? 100} used</p>
               </div>
             </div>
-            <form class="inline-create-form" onsubmit={createEmoji}>
-              <label class="form-field compact-field">
-                <span>Name</span>
-                <input
-                  bind:value={emojiName}
-                  pattern={'[A-Za-z0-9_]{2,32}'}
-                  minlength="2"
-                  maxlength="32"
-                  placeholder="party_blob"
-                  required
-                  disabled={emojiBusy}
-                />
-              </label>
-              <label class="form-field compact-field">
-                <span>Image</span>
-                <ImageUploadField
-                  id="emoji-image"
-                  file={emojiFile}
-                  required
-                  disabled={emojiBusy}
-                  onSelect={(file, input) => {
-                    emojiFile = file;
-                    emojiInput = input;
-                  }}
-                />
-              </label>
-              <button
-                class="primary-button"
-                disabled={emojiBusy || (guild?.emojis?.length ?? 0) >= (guild?.emoji_limit ?? 100)}
-                >{emojiBusy ? 'Uploading…' : 'Upload emoji'}</button
-              >
-            </form>
+            {#if canCreateExpressions}
+              <form class="inline-create-form" onsubmit={createEmoji}>
+                <label class="form-field compact-field">
+                  <span>Name</span>
+                  <input
+                    bind:value={emojiName}
+                    pattern={'[A-Za-z0-9_]{2,32}'}
+                    minlength="2"
+                    maxlength="32"
+                    placeholder="party_blob"
+                    required
+                    disabled={emojiBusy}
+                  />
+                </label>
+                <label class="form-field compact-field">
+                  <span>Image</span>
+                  <ImageUploadField
+                    id="emoji-image"
+                    file={emojiFile}
+                    required
+                    disabled={emojiBusy}
+                    onSelect={(file, input) => {
+                      emojiFile = file;
+                      emojiInput = input;
+                    }}
+                  />
+                </label>
+                <button
+                  class="primary-button"
+                  disabled={emojiBusy ||
+                    (guild?.emojis?.length ?? 0) >= (guild?.emoji_limit ?? 100)}
+                  >{emojiBusy ? 'Uploading…' : 'Upload emoji'}</button
+                >
+              </form>
+            {/if}
             <div class="emoji-management-grid">
               {#each guild?.emojis ?? [] as emoji (entityKey(emoji))}
-                <article class="emoji-management-item">
+                {@const editable = canEditEmoji(emoji)}
+                <article class="emoji-management-item expression-management-item">
                   {#if emoji.media_hash}
                     <img
                       src={assetUrl(emoji.media_hash, 'thumbnail_128', emoji.origin_domain)}
                       alt={`:${emoji.name}:`}
                     />
                   {/if}
-                  <span
-                    ><strong>:{emoji.name}:</strong><small
-                      >{emoji.animated ? 'Animated' : 'Image'}</small
-                    ></span
-                  >
-                  <button
-                    class="secondary-button danger-button"
-                    type="button"
-                    disabled={emojiBusy}
-                    onclick={() => void deleteEmoji(emoji)}>Delete</button
-                  >
+                  {#if emojiDrafts[entityKey(emoji)]}
+                    <div class="expression-fields">
+                      <label class="form-field compact-field">
+                        <span>Name</span>
+                        <input
+                          value={emojiDrafts[entityKey(emoji)].name}
+                          pattern={'[A-Za-z0-9_]{2,32}'}
+                          minlength="2"
+                          maxlength="32"
+                          disabled={emojiBusy || !editable}
+                          oninput={(event) =>
+                            patchEmojiDraft(emoji, { name: event.currentTarget.value })}
+                        />
+                      </label>
+                      <label class="form-field compact-field">
+                        <span>Role restrictions <small>None means everyone</small></span>
+                        <select
+                          multiple
+                          size="3"
+                          value={emojiDrafts[entityKey(emoji)].roles}
+                          disabled={emojiBusy || !canEditEmojiRoleRestrictions(emoji)}
+                          onchange={(event) =>
+                            patchEmojiDraft(emoji, {
+                              roles: Array.from(
+                                event.currentTarget.selectedOptions,
+                                (option) => option.value
+                              )
+                            })}
+                        >
+                          {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id && canManageExpressionRole(role)) as role (entityKey(role))}
+                            <option value={entityRef(role)}>{role.name}</option>
+                          {/each}
+                        </select>
+                        {#if editable && !canEditEmojiRoleRestrictions(emoji)}
+                          <small>
+                            A restriction is above your highest role. You can edit the emoji, but
+                            not its role access.
+                          </small>
+                        {/if}
+                      </label>
+                      <p class="field-hint">
+                        <strong>{emoji.available === false ? 'Unavailable' : 'Available'}</strong>
+                        · Availability is controlled by the server and cannot be edited.
+                      </p>
+                    </div>
+                    {#if editable}
+                      <div class="row-actions expression-actions">
+                        <button
+                          class="secondary-button"
+                          type="button"
+                          disabled={emojiBusy}
+                          onclick={() => void updateEmoji(emoji)}>Save</button
+                        >
+                        <button
+                          class="secondary-button danger-button"
+                          type="button"
+                          disabled={emojiBusy}
+                          onclick={() => void deleteEmoji(emoji)}>Delete</button
+                        >
+                      </div>
+                    {:else}
+                      <small class="field-hint"
+                        >Only its creator or an expression manager can edit this emoji.</small
+                      >
+                    {/if}
+                  {/if}
                 </article>
               {:else}
                 <p class="empty-copy">This guild has no custom emoji yet.</p>
@@ -3937,153 +4759,206 @@
                 <p>{guild?.stickers?.length ?? 0} of {guild?.sticker_limit ?? 60} used</p>
               </div>
             </div>
-            <form class="sticker-create-form" onsubmit={createSticker}>
-              <div class="sticker-fields">
-                <label class="form-field compact-field">
-                  <span>Name</span>
-                  <input
-                    bind:value={stickerName}
-                    pattern={'[A-Za-z0-9_]{2,32}'}
-                    minlength="2"
-                    maxlength="32"
-                    placeholder="hello_wave"
-                    required
-                    disabled={stickerBusy}
-                  />
-                </label>
-                <label class="form-field compact-field">
-                  <span>Description <small>Optional</small></span>
-                  <input
-                    bind:value={stickerDescription}
-                    maxlength="100"
-                    placeholder="A friendly wave"
-                    disabled={stickerBusy}
-                  />
-                </label>
-                <label class="form-field compact-field">
-                  <span>Image</span>
-                  <ImageUploadField
-                    id="sticker-image"
-                    file={stickerFile}
-                    required
-                    disabled={stickerBusy}
-                    onSelect={selectStickerFile}
-                  />
-                </label>
-              </div>
-              {#if stickerPreviewUrl}
-                <div class="sticker-editor">
-                  <div class="sticker-crop-stage">
-                    <div
-                      class="sticker-crop-preview"
-                      role="application"
-                      aria-label="Sticker crop editor"
-                      style:--sticker-image-aspect={String(stickerImageAspect)}
-                      onpointermove={moveStickerCropGesture}
-                      onpointerup={endStickerCropGesture}
-                      onpointercancel={endStickerCropGesture}
-                    >
-                      <img
-                        src={stickerPreviewUrl}
-                        alt="Sticker source"
-                        draggable="false"
-                        onload={(event) => {
-                          const image = event.currentTarget as HTMLImageElement;
-                          stickerImageAspect = image.naturalWidth / image.naturalHeight || 1;
-                        }}
-                      />
+            {#if canCreateExpressions}
+              <form class="sticker-create-form" onsubmit={createSticker}>
+                <div class="sticker-fields">
+                  <label class="form-field compact-field">
+                    <span>Name</span>
+                    <input
+                      bind:value={stickerName}
+                      minlength="2"
+                      maxlength="30"
+                      placeholder="Friendly wave"
+                      required
+                      disabled={stickerBusy}
+                    />
+                  </label>
+                  <label class="form-field compact-field">
+                    <span>Description <small>Optional</small></span>
+                    <input
+                      bind:value={stickerDescription}
+                      minlength="2"
+                      maxlength="100"
+                      placeholder="A friendly wave"
+                      disabled={stickerBusy}
+                    />
+                  </label>
+                  <label class="form-field compact-field">
+                    <span>Image</span>
+                    <ImageUploadField
+                      id="sticker-image"
+                      file={stickerFile}
+                      required
+                      disabled={stickerBusy}
+                      onSelect={selectStickerFile}
+                    />
+                  </label>
+                </div>
+                {#if stickerPreviewUrl}
+                  <div class="sticker-editor">
+                    <div class="sticker-crop-stage">
                       <div
-                        class="sticker-crop-selection"
-                        role="button"
-                        aria-label="Crop selection. Drag to move, or use the arrow keys."
-                        tabindex="0"
-                        style:left={`${stickerCropX * 100}%`}
-                        style:top={`${stickerCropY * 100}%`}
-                        style:width={`${stickerCropWidth * 100}%`}
-                        style:height={`${stickerCropHeight * 100}%`}
-                        onpointerdown={(event) => beginStickerCropGesture(event, 'move')}
-                        onkeydown={moveStickerCropWithKeyboard}
+                        class="sticker-crop-preview"
+                        role="application"
+                        aria-label="Sticker crop editor"
+                        style:--sticker-image-aspect={String(stickerImageAspect)}
+                        onpointermove={moveStickerCropGesture}
+                        onpointerup={endStickerCropGesture}
+                        onpointercancel={endStickerCropGesture}
                       >
-                        <span class="crop-grid-line crop-grid-line-v first"></span>
-                        <span class="crop-grid-line crop-grid-line-v second"></span>
-                        <span class="crop-grid-line crop-grid-line-h first"></span>
-                        <span class="crop-grid-line crop-grid-line-h second"></span>
-                        {#each ['nw', 'ne', 'sw', 'se'] as corner (corner)}
-                          <button
-                            class={`crop-handle ${corner}`}
-                            type="button"
-                            aria-label={`Resize crop from ${corner.toUpperCase()} corner`}
-                            onpointerdown={(event) =>
-                              beginStickerCropGesture(event, corner as CropCorner, true)}
-                            onkeydown={(event) =>
-                              resizeStickerCropWithKeyboard(event, corner as CropCorner)}
-                          ></button>
-                        {/each}
+                        <img
+                          src={stickerPreviewUrl}
+                          alt="Sticker source"
+                          draggable="false"
+                          onload={(event) => {
+                            const image = event.currentTarget as HTMLImageElement;
+                            stickerImageAspect = image.naturalWidth / image.naturalHeight || 1;
+                          }}
+                        />
+                        <div
+                          class="sticker-crop-selection"
+                          role="button"
+                          aria-label="Crop selection. Drag to move, or use the arrow keys."
+                          tabindex="0"
+                          style:left={`${stickerCropX * 100}%`}
+                          style:top={`${stickerCropY * 100}%`}
+                          style:width={`${stickerCropWidth * 100}%`}
+                          style:height={`${stickerCropHeight * 100}%`}
+                          onpointerdown={(event) => beginStickerCropGesture(event, 'move')}
+                          onkeydown={moveStickerCropWithKeyboard}
+                        >
+                          <span class="crop-grid-line crop-grid-line-v first"></span>
+                          <span class="crop-grid-line crop-grid-line-v second"></span>
+                          <span class="crop-grid-line crop-grid-line-h first"></span>
+                          <span class="crop-grid-line crop-grid-line-h second"></span>
+                          {#each ['nw', 'ne', 'sw', 'se'] as corner (corner)}
+                            <button
+                              class={`crop-handle ${corner}`}
+                              type="button"
+                              aria-label={`Resize crop from ${corner.toUpperCase()} corner`}
+                              onpointerdown={(event) =>
+                                beginStickerCropGesture(event, corner as CropCorner, true)}
+                              onkeydown={(event) =>
+                                resizeStickerCropWithKeyboard(event, corner as CropCorner)}
+                            ></button>
+                          {/each}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div class="sticker-crop-controls">
-                    <strong>Crop your sticker</strong>
-                    <p>Drag the box to move it. Drag any corner to resize it.</p>
-                    <small>
-                      Selection: {Math.round(stickerCropWidth * 100)}% × {Math.round(
-                        stickerCropHeight * 100
-                      )}%
-                    </small>
-                    <button
-                      class="secondary-button crop-reset-button"
-                      type="button"
-                      onclick={() => applyStickerCrop({ x: 0, y: 0, width: 1, height: 1 })}
-                      >Reset crop</button
-                    >
-                    <label class="toggle-row">
-                      <input
-                        type="checkbox"
-                        bind:checked={stickerRemoveBackground}
-                        disabled={stickerBusy ||
-                          stickerFile?.type === 'image/gif' ||
-                          !guild?.sticker_background_removal_enabled}
-                      />
-                      <span
-                        >Remove background <small
-                          >{stickerFile?.type === 'image/gif'
-                            ? 'Static images only'
-                            : guild?.sticker_background_removal_enabled
-                              ? 'Powered by rembg'
-                              : 'Not enabled on this server'}</small
-                        ></span
+                    <div class="sticker-crop-controls">
+                      <strong>Crop your sticker</strong>
+                      <p>Drag the box to move it. Drag any corner to resize it.</p>
+                      <small>
+                        Selection: {Math.round(stickerCropWidth * 100)}% × {Math.round(
+                          stickerCropHeight * 100
+                        )}%
+                      </small>
+                      <button
+                        class="secondary-button crop-reset-button"
+                        type="button"
+                        onclick={() => applyStickerCrop({ x: 0, y: 0, width: 1, height: 1 })}
+                        >Reset crop</button
                       >
-                    </label>
+                      <label class="toggle-row">
+                        <input
+                          type="checkbox"
+                          bind:checked={stickerRemoveBackground}
+                          disabled={stickerBusy ||
+                            stickerFile?.type === 'image/gif' ||
+                            !guild?.sticker_background_removal_enabled}
+                        />
+                        <span
+                          >Remove background <small
+                            >{stickerFile?.type === 'image/gif'
+                              ? 'Static images only'
+                              : guild?.sticker_background_removal_enabled
+                                ? 'Powered by rembg'
+                                : 'Not enabled on this server'}</small
+                          ></span
+                        >
+                      </label>
+                    </div>
                   </div>
-                </div>
-              {/if}
-              <button
-                class="primary-button"
-                disabled={stickerBusy ||
-                  !stickerFile ||
-                  (guild?.stickers?.length ?? 0) >= (guild?.sticker_limit ?? 60)}
-                >{stickerBusy ? 'Creating sticker…' : 'Create sticker'}</button
-              >
-            </form>
+                {/if}
+                <button
+                  class="primary-button"
+                  disabled={stickerBusy ||
+                    !stickerFile ||
+                    (guild?.stickers?.length ?? 0) >= (guild?.sticker_limit ?? 60)}
+                  >{stickerBusy ? 'Creating sticker…' : 'Create sticker'}</button
+                >
+              </form>
+            {/if}
             <div class="sticker-management-grid">
               {#each guild?.stickers ?? [] as sticker (entityKey(sticker))}
-                <article class="sticker-management-item">
+                {@const editable = canEditSticker(sticker)}
+                <article class="sticker-management-item expression-management-item">
                   {#if sticker.media_hash}<img
                       src={assetUrl(sticker.media_hash, 'thumbnail_512', sticker.origin_domain)}
                       alt={sticker.name}
                     />{/if}
-                  <span
-                    ><strong>{sticker.name}</strong><small
-                      >{sticker.description ??
-                        (sticker.animated ? 'Animated sticker' : 'Static sticker')}</small
-                    ></span
-                  >
-                  <button
-                    class="secondary-button danger-button"
-                    type="button"
-                    disabled={stickerBusy}
-                    onclick={() => void deleteSticker(sticker)}>Delete</button
-                  >
+                  {#if stickerDrafts[entityKey(sticker)]}
+                    <div class="expression-fields">
+                      <label class="form-field compact-field">
+                        <span>Name</span>
+                        <input
+                          value={stickerDrafts[entityKey(sticker)].name}
+                          minlength="2"
+                          maxlength="30"
+                          disabled={stickerBusy || !editable}
+                          oninput={(event) =>
+                            patchStickerDraft(sticker, { name: event.currentTarget.value })}
+                        />
+                      </label>
+                      <label class="form-field compact-field">
+                        <span>Description</span>
+                        <input
+                          value={stickerDrafts[entityKey(sticker)].description}
+                          minlength="2"
+                          maxlength="100"
+                          disabled={stickerBusy || !editable}
+                          oninput={(event) =>
+                            patchStickerDraft(sticker, {
+                              description: event.currentTarget.value
+                            })}
+                        />
+                      </label>
+                      <label class="form-field compact-field">
+                        <span>Tags <small>Comma separated</small></span>
+                        <input
+                          value={stickerDrafts[entityKey(sticker)].tags}
+                          maxlength="200"
+                          disabled={stickerBusy || !editable}
+                          oninput={(event) =>
+                            patchStickerDraft(sticker, { tags: event.currentTarget.value })}
+                        />
+                      </label>
+                      <p class="field-hint">
+                        <strong>{sticker.available === false ? 'Unavailable' : 'Available'}</strong>
+                        · Availability is controlled by the server and cannot be edited.
+                      </p>
+                    </div>
+                    {#if editable}
+                      <div class="row-actions expression-actions">
+                        <button
+                          class="secondary-button"
+                          type="button"
+                          disabled={stickerBusy}
+                          onclick={() => void updateSticker(sticker)}>Save</button
+                        >
+                        <button
+                          class="secondary-button danger-button"
+                          type="button"
+                          disabled={stickerBusy}
+                          onclick={() => void deleteSticker(sticker)}>Delete</button
+                        >
+                      </div>
+                    {:else}
+                      <small class="field-hint"
+                        >Only its creator or an expression manager can edit this sticker.</small
+                      >
+                    {/if}
+                  {/if}
                 </article>
               {:else}
                 <p class="empty-copy">This guild has no stickers yet.</p>
@@ -4091,6 +4966,10 @@
             </div>
           </div>
         </section>
+      {/if}
+
+      {#if !channelOnly}
+        <GuildSafetyTools {guild} {currentUserRef} />
       {/if}
 
       {#if !channelOnly && canManageRoles}
@@ -4474,6 +5353,21 @@
         </section>
       {/if}
 
+      {#if !channelOnly && canViewAuditLog}
+        <section id="audit-log" class="settings-section">
+          <div class="settings-section-heading">
+            <span class="section-icon"><Icon name="clock" /></span>
+            <div>
+              <h2>Audit log</h2>
+              <p>Review administrative actions, affected resources, reasons, and field changes.</p>
+            </div>
+          </div>
+          <div class="settings-card">
+            <GuildAuditLog {guild} members={currentMembers} />
+          </div>
+        </section>
+      {/if}
+
       {#if !channelOnly && canViewMembers}
         <section id="members" class="settings-section">
           <div class="settings-section-heading">
@@ -4794,11 +5688,84 @@
                   bind:value={inviteMaxUses}
                   type="number"
                   min="1"
-                  max="1000"
+                  max="100"
                   placeholder="Unlimited"
                   disabled={busy}
                 />
               </label>
+              <details class="invite-advanced-options">
+                <summary>Advanced options</summary>
+                <div class="invite-advanced-grid">
+                  <label class="toggle-row">
+                    <input type="checkbox" bind:checked={inviteTemporary} disabled={busy} />
+                    <span
+                      ><strong>Temporary membership</strong><small
+                        >Remove members when their final voice connection ends unless a role is
+                        assigned.</small
+                      ></span
+                    >
+                  </label>
+                  <label class="toggle-row">
+                    <input type="checkbox" bind:checked={inviteUnique} disabled={busy} />
+                    <span
+                      ><strong>Always create a new code</strong><small
+                        >When off, an equivalent reusable invite may be returned.</small
+                      ></span
+                    >
+                  </label>
+                  <label class="form-field compact-field">
+                    <span>Voice invite target</span>
+                    <select bind:value={inviteTargetType} disabled={busy}>
+                      <option value="">None</option>
+                      <option value="stream">Member's Go Live stream</option>
+                    </select>
+                    <small>Voice targets require a voice or Stage destination.</small>
+                  </label>
+                  {#if inviteTargetType === 'stream'}
+                    <label class="form-field compact-field">
+                      <span>Streaming member</span>
+                      <select bind:value={inviteTargetUser} required disabled={busy}>
+                        <option value="">Choose a member</option>
+                        {#each members as member (entityKey(member.user))}
+                          <option value={entityRef(member.user)}
+                            >{member.user.display_name ?? member.user.username} · {member.user
+                              .origin_domain}</option
+                          >
+                        {/each}
+                      </select>
+                      <small>The member must currently be able to stream in the destination.</small>
+                    </label>
+                  {/if}
+                  <label class="form-field compact-field">
+                    <span>Scheduled event</span>
+                    <select bind:value={inviteScheduledEvent} disabled={busy}>
+                      <option value="">No event association</option>
+                      {#each scheduledEvents as scheduledEvent (scheduledEventRef(scheduledEvent))}
+                        <option value={scheduledEventRef(scheduledEvent)}
+                          >{scheduledEvent.name} · {formatDateTime(
+                            scheduledEvent.scheduled_start_time
+                          )}</option
+                        >
+                      {/each}
+                    </select>
+                    <small>Event details are included independently of a voice target.</small>
+                  </label>
+                  {#if canManageRoles}
+                    <label class="form-field compact-field">
+                      <span>Roles (optional)</span>
+                      <select multiple bind:value={inviteRoleIds} size="5" disabled={busy}>
+                        {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id && canManageRole(role)) as role (entityKey(role))}
+                          <option value={entityRef(role)}>{role.name}</option>
+                        {/each}
+                      </select>
+                      <small
+                        >Members receive these roles when they accept—even if they already joined.
+                        Only roles below your highest role are available.</small
+                      >
+                    </label>
+                  {/if}
+                </div>
+              </details>
               <button class="primary-button" disabled={busy}>
                 <Icon name="plus" size={16} />Create invite
               </button>
@@ -4812,7 +5779,7 @@
                     when the guild is private.
                   </p>
                 </div>
-                <code>{window.location.origin}/invite/{createdInvite.code}</code>
+                <code>{inviteUrl(createdInvite.code)}</code>
                 <button
                   class="secondary-button"
                   type="button"
@@ -4825,7 +5792,7 @@
             {/if}
           {/if}
 
-          {#if canManageGuild}
+          {#if canManageGuild || canViewAuditLog}
             <div class="settings-card invite-list">
               <div class="settings-list-heading">
                 <strong>Active invites</strong>
@@ -4836,10 +5803,20 @@
                   <div>
                     <code>{invite.code}</code>
                     <span>
-                      {invite.uses}{invite.max_uses ? ` / ${invite.max_uses}` : ''} uses ·
-                      {invite.expires_at
+                      {#if invite.uses !== undefined}
+                        {invite.uses}{invite.max_uses ? ` / ${invite.max_uses}` : ''} uses ·
+                      {/if}{invite.expires_at
                         ? `expires ${formatDateTime(invite.expires_at)}`
-                        : 'never expires'}
+                        : 'never expires'}{invite.temporary
+                        ? ' · temporary'
+                        : ''}{invite.target_type
+                        ? ` · targets ${invite.target_type.replaceAll('_', ' ')}`
+                        : ''}{invite.scheduled_event_id ? ' · includes scheduled event' : ''}{invite
+                        .role_ids?.length
+                        ? ` · grants ${invite.role_ids.length} role${invite.role_ids.length === 1 ? '' : 's'}`
+                        : ''}{invite.target_user_count
+                        ? ` · limited to ${invite.target_user_count} user${invite.target_user_count === 1 ? '' : 's'}`
+                        : ''}
                     </span>
                   </div>
                   <button
@@ -4851,15 +5828,17 @@
                   >
                     <Icon name="copy" size={17} />
                   </button>
-                  <button
-                    class="icon-button danger-icon-button"
-                    type="button"
-                    disabled={busy}
-                    aria-label={`Revoke invite ${invite.code}`}
-                    onclick={() => revokeInvite(invite)}
-                  >
-                    <Icon name="trash" size={17} />
-                  </button>
+                  {#if canRevokeInvite(invite)}
+                    <button
+                      class="icon-button danger-icon-button"
+                      type="button"
+                      disabled={busy}
+                      aria-label={`Revoke invite ${invite.code}`}
+                      onclick={() => revokeInvite(invite)}
+                    >
+                      <Icon name="trash" size={17} />
+                    </button>
+                  {/if}
                 </article>
               {:else}
                 <div class="empty-state compact-empty">
@@ -4882,19 +5861,19 @@
               <p>Leave this community or manage its ownership and permanent deletion.</p>
             </div>
           </div>
-          {#if isGuildOwner && isLocalGuild}
+          {#if isGuildOwner}
             <div class="settings-card guild-ownership-card">
               <div class="settings-list-heading">
                 <div>
                   <strong>Transfer ownership</strong>
-                  <p>Ownership can only be transferred to a member homed on this instance.</p>
+                  <p>Ownership can be transferred to any eligible human member of this guild.</p>
                 </div>
               </div>
               <div class="inline-settings-form">
                 <label class="form-field">
                   <span>New owner</span>
                   <select bind:value={ownershipTarget} disabled={busy}>
-                    <option value="">Choose a local member</option>
+                    <option value="">Choose a member</option>
                     {#each ownershipCandidates as member (entityKey(member.user))}
                       <option value={entityRef(member.user)}>
                         {member.nickname ?? userDisplayName(member.user)} · {userPublicHandle(
@@ -4912,7 +5891,7 @@
                 >
               </div>
               {#if !ownershipCandidates.length}
-                <p class="field-hint">No other local-instance member can receive ownership.</p>
+                <p class="field-hint">No other eligible human member can receive ownership.</p>
               {/if}
             </div>
             <div class="settings-card danger-zone guild-delete-card">

@@ -1,21 +1,24 @@
 import io
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 import pyvips  # type: ignore[import-untyped]
-from fastapi import Response
+from fastapi import HTTPException, Response
 from PIL import Image
 
 from app.api import media as media_api
+from app.api.channels import require_attachment_upload_channel
 from app.api.media import select_variant
 from app.api.webhooks import new_webhook_token, token_digest
 from app.chat.payloads import guild_payload
 from app.chat.schemas import MessageCreate
 from app.core.settings import Settings
-from app.db.models import Attachment, Guild, Role, User
+from app.core.types import EntityRef
+from app.db.models import Attachment, Channel, Guild, Role, User
 from app.media.jobs import image_derivatives_are_current
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
@@ -27,8 +30,13 @@ from app.media.processing import (
     sniff_content_type,
     validate_detected_type,
 )
-from app.media.service import clean_object_key, original_object_key
-from app.media.storage import S3Storage, StorageError
+from app.media.service import clean_object_key, media_redirect_response, original_object_key
+from app.media.storage import (
+    S3Storage,
+    StorageError,
+    media_url_origin,
+    validate_media_url_origin,
+)
 
 
 def settings(**overrides: object) -> Settings:
@@ -113,6 +121,19 @@ def test_virtual_hosted_s3_presigning_places_bucket_in_host() -> None:
     parsed = urlsplit(url)
     assert parsed.hostname == "kaede-attachments.s3.example.com"
     assert parsed.path == "/alpha.localhost/123/original"
+    assert media_url_origin(url) == "https://kaede-attachments.s3.example.com"
+
+
+def test_media_capability_origin_is_exact_and_exposed_on_redirects() -> None:
+    location = "https://objects.example:8443/object?signature=opaque"
+    origin = "https://objects.example:8443"
+    validate_media_url_origin(location, origin)
+    with pytest.raises(ValueError, match="escaped"):
+        validate_media_url_origin(location, "https://objects.example")
+
+    response = media_redirect_response(location)
+    assert response.headers["location"] == location
+    assert response.headers["X-Kaede-Media-Origin"] == origin
 
 
 async def test_external_bucket_verification_never_creates_when_disabled(
@@ -208,6 +229,93 @@ def test_message_can_be_attachment_only_but_not_empty() -> None:
     assert MessageCreate(content=None, attachment_ids=["1"]).content is None
     with pytest.raises(ValueError):
         MessageCreate(content=None)
+
+
+async def test_remote_channel_ticket_stays_on_the_uploader_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = User(
+        id=20,
+        origin_domain="alpha.localhost",
+        is_local=True,
+        username="owner",
+        password_hash="unused",
+    )
+    channel = Channel(
+        id=30,
+        origin_domain="guild.example",
+        guild_id=40,
+        guild_domain="guild.example",
+        type=0,
+        name="general",
+        created_floor_id=1,
+    )
+    access = SimpleNamespace(channel=channel, guild=SimpleNamespace())
+    issue = AsyncMock(return_value={"id": "50", "origin_domain": "alpha.localhost"})
+    monkeypatch.setattr(media_api, "enforce_client_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        media_api,
+        "require_channel_attachment_access",
+        AsyncMock(return_value=access),
+    )
+    monkeypatch.setattr(media_api, "issue_channel_attachment_ticket", issue)
+    signed = AsyncMock(side_effect=AssertionError("channel tickets must not move authorities"))
+    monkeypatch.setattr(media_api, "signed_request", signed)
+
+    rendered = await media_api.create_channel_attachment_ticket(
+        EntityRef("30@guild.example"),
+        media_api.UploadTicketRequest(
+            filename="photo.png",
+            content_type="image/png",
+            size=128,
+        ),
+        Response(),
+        SimpleNamespace(user=user),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(domain="alpha.localhost"),
+    )
+
+    assert rendered == {"id": "50", "origin_domain": "alpha.localhost"}
+    issue.assert_awaited_once()
+    assert issue.await_args.args[3] is user
+    assert issue.await_args.args[4] is access
+    signed.assert_not_awaited()
+
+
+def test_channel_ticket_provenance_cannot_be_rebound() -> None:
+    channel = Channel(
+        id=30,
+        origin_domain="guild.example",
+        guild_id=40,
+        guild_domain="guild.example",
+        type=0,
+        name="general",
+        created_floor_id=1,
+    )
+    attachment = Attachment(
+        id=50,
+        origin_domain="alpha.localhost",
+        uploader_id=20,
+        uploader_domain="alpha.localhost",
+        filename="photo.png",
+        content_type="image/png",
+        size=128,
+        object_key="alpha.localhost/50/staging/original",
+        purpose="attachment",
+        upload_channel_id=31,
+        upload_channel_domain="guild.example",
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        require_attachment_upload_channel(attachment, channel)
+
+    assert caught.value.status_code == 404
+    assert caught.value.detail == {"code": "ATTACHMENT_NOT_FOUND"}
+
+    attachment.upload_channel_id = channel.id
+    require_attachment_upload_channel(attachment, channel)
     with pytest.raises(ValueError):
         MessageCreate(content="hello", attachment_ids=["1", "1"])
 
@@ -523,7 +631,7 @@ async def test_user_asset_commit_updates_each_profile_image_kind(
 
     monkeypatch.setattr(media_api, "finalize_attachment", finalize_attachment)
     monkeypatch.setattr(media_api, "bind_asset", bind_asset)
-    monkeypatch.setattr(media_api, "queue_friend_profile_updates", friend_updates)
+    monkeypatch.setattr(media_api, "queue_profile_updates", friend_updates)
     monkeypatch.setattr(media_api, "publish_dispatch", no_op)
 
     rendered = await media_api.commit_user_asset(
@@ -681,3 +789,39 @@ def test_sticker_crop_preserves_animation_timing() -> None:
         assert rendered.n_frames == 2
     rendered_vips = pyvips.Image.new_from_buffer(derivatives[0].content, "", n=-1)
     assert rendered_vips.get("delay") == [120, 280]
+
+
+def test_sticker_pipeline_enforces_dimensions_duration_and_derivative_metadata() -> None:
+    source = io.BytesIO()
+    frames = [Image.new("RGBA", (320, 320), color) for color in ("red", "blue")]
+    frames[0].save(
+        source,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[120, 280],
+        loop=0,
+    )
+    derivatives, _, _, width, height = image_derivatives(
+        source.getvalue(),
+        transform={"sticker": True},
+    )
+    assert (width, height) == (320, 320)
+    assert all(item.animated and item.duration_ms == 400 for item in derivatives)
+
+    wrong_size = io.BytesIO()
+    Image.new("RGBA", (319, 320), "red").save(wrong_size, format="PNG")
+    with pytest.raises(MediaValidationError, match="320 by 320"):
+        image_derivatives(wrong_size.getvalue(), transform={"sticker": True})
+
+    too_long = io.BytesIO()
+    frames[0].save(
+        too_long,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[2_600, 2_600],
+        loop=0,
+    )
+    with pytest.raises(MediaValidationError, match="5 seconds"):
+        image_derivatives(too_long.getvalue(), transform={"sticker": True})

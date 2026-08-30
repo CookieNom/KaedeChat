@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_session
+from app.chat.guild_revision import build_guild_authority_envelope, guild_authority_owner
 from app.core.federation import (
     BLOCK_POLICY_ADVISORY_NAME,
     POLICY_HELD_OUTBOX_PREFIX,
@@ -26,10 +27,9 @@ from app.db.models import (
     GuildMember,
     Instance,
     InstanceBlock,
-    User,
 )
 from app.federation.delivery import MAX_QUEUE_AGE
-from app.federation.events import build_envelope, queue_event
+from app.federation.events import queue_event
 from app.federation.network import FederationNetworkError, ensure_peer, normalize_domain
 from app.federation.schemas import InstanceBlockPut
 from app.federation.security import admin_authorized, matching_block
@@ -138,7 +138,9 @@ async def reconcile_destination_policy(
     for outbox, event in rows:
         block_level = block.level if block is not None else None
         should_hold = block_level is not None and federation_policy_holds_event(
-            block_level, event.event_type
+            block_level,
+            event.event_type,
+            context=getattr(event, "envelope", {}).get("context"),
         )
         was_policy_held = bool(
             outbox.last_error and outbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX)
@@ -215,12 +217,11 @@ async def queue_unblock_reconciliation(
             )
         )
         for guild in guilds:
-            owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-            if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-                raise RuntimeError("local guild owner cannot sign unblock reconciliation")
-            marker = await build_envelope(
+            owner = await guild_authority_owner(session, settings, guild)
+            marker = await build_guild_authority_envelope(
                 session,
                 settings,
+                guild,
                 "guild.resync.required",
                 owner,
                 {"reason": "instance_block_removed"},

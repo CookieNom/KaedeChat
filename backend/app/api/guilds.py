@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Annotated, cast
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
@@ -31,7 +32,11 @@ from app.chat.payloads import (
     role_payload,
     sticker_payload,
 )
-from app.chat.permissions import get_permissions, require_permissions
+from app.chat.permissions import (
+    get_permissions,
+    require_bot_channel_grant,
+    require_permissions,
+)
 from app.chat.schemas import (
     ChannelCreate,
     GuildCreate,
@@ -39,12 +44,18 @@ from app.chat.schemas import (
     OverwritePut,
     RoleCreate,
 )
+from app.chat.voice_messages import (
+    VoiceMessageCapability,
+    guild_voice_message_capability,
+)
+from app.core.channel_types import GUILD_VOICE_CHANNEL_TYPES
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef, EntityReference, EntityReferenceLike
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Channel,
     ChannelOverwrite,
@@ -56,7 +67,14 @@ from app.db.models import (
     Sticker,
     User,
 )
+from app.federation.guild_management import (
+    guild_management_dict_body,
+    proxy_remote_guild_management,
+    qualified_management_ref,
+    require_guild_management_status,
+)
 from app.tracker.service import create_tracker_state
+from app.voice.regions import require_configured_rtc_region
 
 router = APIRouter(prefix="/api/v1", tags=["guilds"])
 log = structlog.get_logger()
@@ -384,6 +402,43 @@ async def create_guild(
     return result
 
 
+@router.get(
+    "/guilds/{guild_ref}/voice-message-capability",
+    response_model=VoiceMessageCapability,
+)
+async def voice_message_capability(
+    guild_ref: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> VoiceMessageCapability:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_ref,
+        auth.user,
+        "voice_message.capability",
+    )
+    if proxied is not None:
+        try:
+            return VoiceMessageCapability.model_validate(proxied.body)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "FEDERATED_GUILD_MANAGEMENT_RESPONSE_INVALID"},
+            ) from None
+
+    guild_id, guild_domain = guild_ref.resolve(settings.domain)
+    guild = await session.get(Guild, (guild_id, guild_domain))
+    member = await session.get(
+        GuildMember,
+        (guild_id, guild_domain, auth.user.id, auth.user.origin_domain),
+    )
+    if guild is None or guild.unavailable or member is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    return await guild_voice_message_capability(session, guild)
+
+
 @router.get("/users/@me/guilds")
 async def list_my_guilds(
     auth: AuthenticatedUser = Depends(require_user),
@@ -628,13 +683,29 @@ async def create_channel(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
-    guild = await local_guild(session, settings, guild_id, for_update=True)
-    await require_permissions(
-        session, redis, guild, auth.user, required_permissions("channel.create")
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.create",
+        {"data": payload.model_dump(mode="json"), "reason": reason},
     )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 201)
+
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    create_permissions = required_permissions("channel.create")
+    await require_permissions(session, redis, guild, auth.user, create_permissions)
     if payload.type == 15 and payload.e2ee_required and not settings.e2ee_activation_enabled:
         raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
+    rtc_region = (
+        require_configured_rtc_region(settings, payload.rtc_region)
+        if payload.type in GUILD_VOICE_CHANNEL_TYPES
+        else None
+    )
     if payload.type == 15:
         await validate_forum_emoji_ids(
             session,
@@ -653,6 +724,7 @@ async def create_channel(
         )
         if parent.type != 4:
             raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
+        await require_bot_channel_grant(session, guild, auth.user, parent)
     channel_id = await snowflake.mint()
     now = datetime.now(UTC)
     position = await session.scalar(
@@ -669,6 +741,7 @@ async def create_channel(
         guild_id=guild.id,
         guild_domain=guild.origin_domain,
         type=payload.type,
+        nsfw=payload.nsfw,
         name=payload.name,
         topic=payload.topic,
         position=int(position or 0) + 1,
@@ -676,6 +749,19 @@ async def create_channel(
         parent_domain=settings.domain if payload.parent_id is not None else None,
         permissions_synced=payload.parent_id is not None,
         rate_limit_per_user=payload.rate_limit_per_user,
+        bitrate=(payload.bitrate if payload.bitrate is not None else 64_000)
+        if payload.type in GUILD_VOICE_CHANNEL_TYPES
+        else None,
+        user_limit=(payload.user_limit if payload.user_limit is not None else 0)
+        if payload.type in GUILD_VOICE_CHANNEL_TYPES
+        else None,
+        rtc_region=rtc_region,
+        video_quality_mode=(
+            payload.video_quality_mode if payload.video_quality_mode is not None else 1
+        )
+        if payload.type in GUILD_VOICE_CHANNEL_TYPES
+        else None,
+        voice_status=None,
         flags=payload.flags if forum else 0,
         default_auto_archive_duration=(
             payload.default_auto_archive_duration if payload.type in {0, 5, 15} else None
@@ -720,7 +806,9 @@ async def create_channel(
         10,
         target_type="channel",
         target_ref={"id": str(channel.id)},
+        reason=reason,
     )
+    await materialize_updated_at(session, channel)
     await session.commit()
     await wake_queued_guild_federation(guild)
     result = await channel_payload_for(session, redis, guild, auth.user, channel)
@@ -728,7 +816,7 @@ async def create_channel(
     return result
 
 
-@router.post("/guilds/{guild_id}/roles", status_code=status.HTTP_201_CREATED)
+@router.post("/guilds/{guild_id}/roles")
 async def create_role(
     guild_id: EntityRef,
     payload: RoleCreate,
@@ -737,7 +825,19 @@ async def create_role(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "role.create",
+        {"data": payload.model_dump(mode="json"), "reason": reason},
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 201)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     actor_permissions = await require_permissions(
         session, redis, guild, auth.user, required_permissions("role.create")
@@ -775,6 +875,7 @@ async def create_role(
     )
     guild.permission_generation += 1
     session.add(role)
+    await materialize_updated_at(session, *existing_roles, role)
     await queue_guild_mutation(
         session,
         settings,
@@ -792,6 +893,7 @@ async def create_role(
         30,
         target_type="role",
         target_ref={"id": str(role.id)},
+        reason=reason,
     )
     await session.commit()
     for existing_role in existing_roles:
@@ -823,6 +925,25 @@ async def put_overwrite(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason", max_length=512),
 ) -> dict[str, str]:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    remote_data = payload.model_dump(mode="json")
+    target_default = guild_domain if payload.target_type == "role" else settings.domain
+    remote_data["target_id"] = qualified_management_ref(payload.target_id, target_default)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.overwrite.put",
+        {
+            "channel_ref": qualified_management_ref(channel_id, guild_domain),
+            "data": remote_data,
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return cast(dict[str, str], guild_management_dict_body(proxied, 200))
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     if channel.type in {10, 11, 12}:
@@ -914,6 +1035,7 @@ async def put_overwrite(
         target_ref={"id": str(channel.id)},
         reason=reason,
     )
+    await materialize_updated_at(session, channel)
     await session.commit()
     await wake_queued_guild_federation(guild)
     await publish_e2ee_policy_updates(
@@ -944,6 +1066,25 @@ async def list_overwrites(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, str]]:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.overwrite.list",
+        {"channel_ref": qualified_management_ref(channel_id, guild_domain)},
+    )
+    if proxied is not None:
+        body = guild_management_dict_body(proxied, 200)
+        overwrites = body.get("overwrites")
+        if not isinstance(overwrites, list):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "FEDERATED_GUILD_MANAGEMENT_RESPONSE_INVALID"},
+            )
+        return cast(list[dict[str, str]], overwrites)
+
     guild = await local_guild(session, settings, guild_id)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     if channel.type in {10, 11, 12}:
@@ -999,6 +1140,25 @@ async def delete_overwrite(
 ) -> Response:
     if target_type not in {"role", "member"}:
         raise HTTPException(status_code=400, detail={"code": "INVALID_OVERWRITE_TARGET"})
+    _, guild_domain = guild_id.resolve(settings.domain)
+    target_default = guild_domain if target_type == "role" else settings.domain
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.overwrite.delete",
+        {
+            "channel_ref": qualified_management_ref(channel_id, guild_domain),
+            "target_type": target_type,
+            "target_ref": qualified_management_ref(target_id, target_default),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     actor_permissions = await require_permissions(
@@ -1054,6 +1214,7 @@ async def delete_overwrite(
         target_ref={"id": str(channel.id)},
         reason=reason,
     )
+    await materialize_updated_at(session, channel)
     await session.commit()
     await wake_queued_guild_federation(guild)
     await publish_e2ee_policy_updates(
@@ -1083,6 +1244,21 @@ async def sync_channel_permissions(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason", max_length=512),
 ) -> dict[str, object]:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.permissions.sync",
+        {
+            "channel_ref": qualified_management_ref(channel_id, guild_domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     await require_permissions(
@@ -1095,6 +1271,18 @@ async def sync_channel_permissions(
     )
     if channel.parent_id is None or channel.type == 4:
         raise HTTPException(status_code=400, detail={"code": "CHANNEL_HAS_NO_CATEGORY"})
+    parent = await guild_channel(
+        session,
+        settings,
+        guild_id,
+        EntityReference(
+            channel.parent_id,
+            channel.parent_domain or channel.origin_domain,
+        ),
+    )
+    if parent.type != 4:
+        raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
+    await require_bot_channel_grant(session, guild, auth.user, parent)
     await session.execute(
         delete(ChannelOverwrite).where(
             ChannelOverwrite.channel_id == channel.id,
@@ -1123,6 +1311,7 @@ async def sync_channel_permissions(
         target_ref={"id": str(channel.id)},
         reason=reason,
     )
+    await materialize_updated_at(session, channel)
     await session.commit()
     await wake_queued_guild_federation(guild)
     result = await channel_payload_for(session, redis, guild, auth.user, channel)

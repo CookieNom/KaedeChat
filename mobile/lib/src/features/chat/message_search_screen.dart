@@ -13,7 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 enum MessageSearchOperator { from, mentions, has }
 
 final class MessageSearchOperatorMatch {
-  const MessageSearchOperatorMatch({
+  MessageSearchOperatorMatch({
     required this.operator,
     required this.needle,
     required this.start,
@@ -361,7 +361,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
       return;
     }
     _userSearchDebounce = Timer(
-      const Duration(milliseconds: 250),
+      Duration(milliseconds: 250),
       () => _loadScopeUsers(query: match.needle),
     );
   }
@@ -637,9 +637,9 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Search messages')),
+      appBar: AppBar(title: Text('Search messages')),
       body: _encrypted
-          ? const Center(
+          ? Center(
               child: Padding(
                 padding: EdgeInsets.all(28),
                 child: Column(
@@ -662,7 +662,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
               ),
             )
           : _featureAvailable == false
-              ? const Center(
+              ? Center(
                   child: Padding(
                     padding: EdgeInsets.all(28),
                     child: Column(
@@ -688,14 +688,14 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
               : ListView(
                   keyboardDismissBehavior:
                       ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+                  padding: EdgeInsets.fromLTRB(16, 16, 16, 28),
                   children: [
                     SearchBar(
-                      key: const ValueKey('message-search-query'),
+                      key: ValueKey('message-search-query'),
                       controller: _query,
                       focusNode: _queryFocus,
                       hintText: 'Search messages or type from:',
-                      leading: const Icon(Icons.search_rounded),
+                      leading: Icon(Icons.search_rounded),
                       trailing: _query.text.isEmpty
                           ? null
                           : <Widget>[
@@ -705,17 +705,17 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                   _query.clear();
                                   _queryChanged('');
                                 },
-                                icon: const Icon(Icons.close_rounded),
+                                icon: Icon(Icons.close_rounded),
                               ),
                             ],
                       onChanged: _queryChanged,
                       onSubmitted: (_) => _submitQuery(),
                     ),
                     if (_queryFocus.hasFocus) ...[
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                       _operatorSuggestions(),
                     ],
-                    const SizedBox(height: 12),
+                    SizedBox(height: 12),
                     Row(
                       children: [
                         Expanded(
@@ -723,8 +723,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             key: ValueKey('search-sort-$_sort'),
                             initialValue: _sort,
                             isExpanded: true,
-                            decoration:
-                                const InputDecoration(labelText: 'Sort'),
+                            decoration: InputDecoration(labelText: 'Sort'),
                             items: const [
                               DropdownMenuItem(
                                   value: 'relevance',
@@ -738,14 +737,13 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                 () => _sort = value ?? 'relevance'),
                           ),
                         ),
-                        const SizedBox(width: 12),
+                        SizedBox(width: 12),
                         Expanded(
                           child: DropdownButtonFormField<bool?>(
                             key: ValueKey('search-pinned-$_pinned'),
                             initialValue: _pinned,
                             isExpanded: true,
-                            decoration:
-                                const InputDecoration(labelText: 'Pinned'),
+                            decoration: InputDecoration(labelText: 'Pinned'),
                             items: const [
                               DropdownMenuItem(
                                   value: null, child: Text('Either')),
@@ -760,30 +758,31 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
+                    SizedBox(height: 10),
                     DropdownButtonFormField<String?>(
                       key: ValueKey('search-author-type-$_authorType'),
                       initialValue: _authorType,
                       isExpanded: true,
-                      decoration:
-                          const InputDecoration(labelText: 'Author type'),
+                      decoration: InputDecoration(labelText: 'Author type'),
                       items: const <DropdownMenuItem<String?>>[
                         DropdownMenuItem<String?>(
                             value: null, child: Text('Anyone')),
                         DropdownMenuItem<String?>(
                             value: 'user', child: Text('People')),
                         DropdownMenuItem<String?>(
+                            value: 'bot', child: Text('Bots')),
+                        DropdownMenuItem<String?>(
                             value: 'webhook', child: Text('Webhooks')),
                       ],
                       onChanged: (value) =>
                           _changeCriteria(() => _authorType = value),
                     ),
-                    const SizedBox(height: 10),
+                    SizedBox(height: 10),
                     Row(
                       children: [
                         Expanded(
                           child: _UserFilterField(
-                            key: const ValueKey('search-author'),
+                            key: ValueKey('search-author'),
                             label: 'From',
                             user: _userFor(_author),
                             loading: _loadingUsers,
@@ -793,10 +792,10 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                 : () => _changeCriteria(() => _author = null),
                           ),
                         ),
-                        const SizedBox(width: 12),
+                        SizedBox(width: 12),
                         Expanded(
                           child: _UserFilterField(
-                            key: const ValueKey('search-mention'),
+                            key: ValueKey('search-mention'),
                             label: 'Mentions',
                             user: _userFor(_mention),
                             loading: _loadingUsers,
@@ -810,18 +809,18 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                     ),
                     if (_userLoadError != null && _users.isEmpty)
                       Padding(
-                        padding: const EdgeInsets.only(top: 6),
+                        padding: EdgeInsets.only(top: 6),
                         child: Text(
                           _userLoadError!,
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),
-                    const SizedBox(height: 10),
+                    SizedBox(height: 10),
                     Row(
                       children: [
                         Expanded(
                           child: OutlinedButton.icon(
-                            icon: const Icon(Icons.date_range_rounded),
+                            icon: Icon(Icons.date_range_rounded),
                             label: Text(_after == null
                                 ? 'After date'
                                 : MaterialLocalizations.of(context)
@@ -839,10 +838,10 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             },
                           ),
                         ),
-                        const SizedBox(width: 12),
+                        SizedBox(width: 12),
                         Expanded(
                           child: OutlinedButton.icon(
-                            icon: const Icon(Icons.event_rounded),
+                            icon: Icon(Icons.event_rounded),
                             label: Text(_before == null
                                 ? 'Before date'
                                 : MaterialLocalizations.of(context)
@@ -862,7 +861,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
+                    SizedBox(height: 10),
                     Wrap(
                       spacing: 8,
                       runSpacing: 4,
@@ -885,25 +884,24 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                       alignment: Alignment.centerLeft,
                       child: TextButton(
                         onPressed: _clearFilters,
-                        child: const Text('Clear filters'),
+                        child: Text('Clear filters'),
                       ),
                     ),
                     FilledButton.icon(
                       onPressed: _loading || !_canSearch ? null : _search,
-                      icon: const Icon(Icons.search_rounded),
+                      icon: Icon(Icons.search_rounded),
                       label: Text(_loading ? 'Searching…' : 'Search'),
                     ),
                     if (_history.isNotEmpty) ...[
-                      const SizedBox(height: 10),
+                      SizedBox(height: 10),
                       Row(
                         children: [
-                          const Expanded(
+                          Expanded(
                             child: Text('Recent searches',
                                 style: TextStyle(fontWeight: FontWeight.w700)),
                           ),
                           TextButton(
-                              onPressed: _clearHistory,
-                              child: const Text('Clear')),
+                              onPressed: _clearHistory, child: Text('Clear')),
                         ],
                       ),
                       Wrap(
@@ -925,39 +923,39 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                     ],
                     if (_error case final error?)
                       Padding(
-                        padding: const EdgeInsets.only(top: 8),
+                        padding: EdgeInsets.only(top: 8),
                         child: Text(error,
                             style: TextStyle(
                                 color: Theme.of(context).colorScheme.error)),
                       ),
                     if (_page?.authorityCoverage
                         case 'unavailable' || 'unsupported')
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.only(top: 8),
                         child: Text(
                             'Showing locally cached matches. The home instance could not provide complete results.'),
                       ),
                     if (_page?.localCoverage == 'cached' &&
                         _page?.authorityCoverage == 'not_queried')
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.only(top: 8),
                         child: Text(
                             'Account-wide direct-message search uses this home’s recent federated cache. Search inside a conversation for complete results from its authority.'),
                       ),
                     if (_page?.indexing == true)
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.only(top: 8),
                         child: Text(
                             'Search is catching up with recent messages. Results may be incomplete for a moment.'),
                       ),
                     if (_page?.encryptedChannelRefs.isNotEmpty == true)
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.only(top: 8),
                         child: Text(
                             'Encrypted conversations were excluded from these results.'),
                       ),
                     if (_page != null && _page!.results.isEmpty)
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.all(24),
                         child: Text(
                           'No messages matched those filters.',
@@ -970,7 +968,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                     if (_page?.nextCursor != null)
                       TextButton(
                         onPressed: _loading ? null : () => _search(more: true),
-                        child: const Text('Load more'),
+                        child: Text('Load more'),
                       ),
                   ],
                 ),
@@ -985,18 +983,18 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         runSpacing: 6,
         children: [
           ActionChip(
-            avatar: const Icon(Icons.person_search_rounded, size: 18),
-            label: const Text('From'),
+            avatar: Icon(Icons.person_search_rounded, size: 18),
+            label: Text('From'),
             onPressed: () => _beginOperator(MessageSearchOperator.from),
           ),
           ActionChip(
-            avatar: const Icon(Icons.alternate_email_rounded, size: 18),
-            label: const Text('Mentions'),
+            avatar: Icon(Icons.alternate_email_rounded, size: 18),
+            label: Text('Mentions'),
             onPressed: () => _beginOperator(MessageSearchOperator.mentions),
           ),
           ActionChip(
-            avatar: const Icon(Icons.attach_file_rounded, size: 18),
-            label: const Text('Has'),
+            avatar: Icon(Icons.attach_file_rounded, size: 18),
+            label: Text('Has'),
             onPressed: () => _beginOperator(MessageSearchOperator.has),
           ),
         ],
@@ -1009,12 +1007,12 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
           for (final kind in kinds)
             ListTile(
               dense: true,
-              leading: const Icon(Icons.attach_file_rounded),
+              leading: Icon(Icons.attach_file_rounded),
               title: Text('Has $kind'),
               onTap: () => _selectContentKind(kind),
             ),
           if (kinds.isEmpty)
-            const ListTile(
+            ListTile(
               dense: true,
               title: Text('No matching attachment type'),
             ),
@@ -1027,18 +1025,18 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         for (final user in users)
           ListTile(
             dense: true,
-            leading: const Icon(Icons.person_outline_rounded),
+            leading: Icon(Icons.person_outline_rounded),
             title: Text(user.name),
             subtitle: Text(user.handle),
             onTap: () => _selectOperatorUser(match.operator, user),
           ),
         if (_loadingUsers)
-          const Padding(
+          Padding(
             padding: EdgeInsets.all(12),
             child: Center(child: CircularProgressIndicator()),
           )
         else if (users.isEmpty)
-          const ListTile(
+          ListTile(
             dense: true,
             title: Text('No matching members'),
           ),
@@ -1055,18 +1053,18 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
     final author = result.message.author;
     final localTime = result.message.createdAt.toLocal();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.only(bottom: 8),
       child: Material(
-        color: KaedeColors.panel,
+        color: context.kaede.panel,
         borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: InkWell(
           onTap: _jumping ? null : () => _jumpToResult(result),
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: Container(
-            padding: const EdgeInsets.fromLTRB(12, 11, 12, 12),
+            padding: EdgeInsets.fromLTRB(12, 11, 12, 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(KaedeRadius.medium),
-              border: Border.all(color: KaedeColors.border),
+              border: Border.all(color: context.kaede.border),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1077,15 +1075,15 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                       contextLabel,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: KaedeColors.muted,
+                      style: TextStyle(
+                        color: context.kaede.muted,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1093,9 +1091,9 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                       UserAvatar(
                         user: author,
                         radius: 15,
-                        ringColor: KaedeColors.panel,
+                        ringColor: context.kaede.panel,
                       ),
-                      const SizedBox(width: 10),
+                      SizedBox(width: 10),
                     ],
                     Expanded(
                       child: Column(
@@ -1110,32 +1108,32 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                   author?.name ?? 'Unknown sender',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontWeight: FontWeight.w700,
                                     fontSize: 14,
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 8),
+                              SizedBox(width: 8),
                               Text(
                                 '${MaterialLocalizations.of(context).formatShortDate(localTime)} '
                                 '${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(localTime))}',
-                                style: const TextStyle(
-                                  color: KaedeColors.muted,
+                                style: TextStyle(
+                                  color: context.kaede.muted,
                                   fontSize: 11,
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 3),
+                          SizedBox(height: 3),
                           Text(
                             messageSearchSafeSnippet(result.snippet),
                             maxLines: 3,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 13.5,
                               height: 1.35,
-                              color: KaedeColors.textSoft,
+                              color: context.kaede.textSoft,
                             ),
                           ),
                         ],
@@ -1184,7 +1182,7 @@ final class _SuggestionCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         color: Theme.of(context).colorScheme.surfaceContainerHigh,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 260),
+          constraints: BoxConstraints(maxHeight: 260),
           child: SingleChildScrollView(child: Column(children: children)),
         ),
       );
@@ -1215,18 +1213,18 @@ final class _UserFilterField extends StatelessWidget {
             labelText: label,
             suffixIcon: onClear == null
                 ? loading
-                    ? const Padding(
+                    ? Padding(
                         padding: EdgeInsets.all(14),
                         child: SizedBox.square(
                           dimension: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                       )
-                    : const Icon(Icons.arrow_drop_down_rounded)
+                    : Icon(Icons.arrow_drop_down_rounded)
                 : IconButton(
                     tooltip: 'Clear $label filter',
                     onPressed: onClear,
-                    icon: const Icon(Icons.close_rounded),
+                    icon: Icon(Icons.close_rounded),
                   ),
           ),
           child: Text(
@@ -1281,7 +1279,7 @@ final class _MessageSearchUserPickerState
     final search = widget.remoteSearch;
     if (search == null) return;
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 250), () async {
+    _debounce = Timer(Duration(milliseconds: 250), () async {
       final generation = ++_generation;
       setState(() {
         _loading = true;
@@ -1324,44 +1322,44 @@ final class _MessageSearchUserPickerState
         child: FractionallySizedBox(
           heightFactor: .72,
           child: ListView(
-            key: const ValueKey('message-search-member-picker'),
+            key: ValueKey('message-search-member-picker'),
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             children: [
               Text(widget.title, style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 12),
+              SizedBox(height: 12),
               SearchBar(
-                key: const ValueKey('message-search-member-query'),
+                key: ValueKey('message-search-member-query'),
                 controller: _query,
                 autoFocus: true,
                 hintText: 'Search members',
-                leading: const Icon(Icons.search_rounded),
+                leading: Icon(Icons.search_rounded),
                 onChanged: _changed,
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               if (_error case final error?)
                 Text(error,
                     style:
                         TextStyle(color: Theme.of(context).colorScheme.error)),
               if (visible.isEmpty && _loading)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.all(24),
                   child: Center(child: CircularProgressIndicator()),
                 )
               else if (visible.isEmpty)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.all(24),
                   child: Center(child: Text('No matching members.')),
                 )
               else
                 for (final user in visible)
                   ListTile(
-                    leading: const Icon(Icons.person_outline_rounded),
+                    leading: Icon(Icons.person_outline_rounded),
                     title: Text(user.name),
                     subtitle: Text(user.handle),
                     onTap: () => Navigator.pop(context, user),
                   ),
               if (visible.isNotEmpty && _loading)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.all(12),
                   child: Center(child: CircularProgressIndicator()),
                 ),

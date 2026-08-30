@@ -3,6 +3,7 @@ from pathlib import Path
 from sqlalchemy import CheckConstraint, Computed, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
+from app.core.permissions import ALL_PERMISSIONS
 from app.db import models  # noqa: F401
 from app.db.base import Base
 
@@ -82,15 +83,57 @@ def test_complete_v1_schema_is_registered() -> None:
         "instance_audit_events",
         "developer_teams",
         "developer_team_members",
+        "developer_team_member_highwaters",
         "bot_applications",
+        "bot_application_targets",
+        "bot_application_runtime_highwaters",
         "bot_credentials",
         "bot_workers",
         "bot_instance_rules",
         "bot_install_templates",
         "application_commands",
+        "application_command_permissions",
+        "application_assets",
+        "application_emojis",
+        "auto_mod_actions",
+        "auto_mod_executions",
+        "auto_mod_member_blocks",
+        "auto_mod_rule_exempt_channels",
+        "auto_mod_rule_exempt_roles",
+        "auto_mod_rules",
+        "bot_dm_grants",
+        "bot_dm_grant_consents",
+        "bot_dm_capabilities",
+        "bot_dm_capability_highwaters",
+        "bot_e2ee_devices",
+        "bot_e2ee_key_packages",
+        "bot_e2ee_participations",
         "bot_installations",
+        "bot_interaction_poll_answers",
+        "bot_interaction_poll_votes",
+        "bot_interaction_polls",
+        "bot_interaction_responses",
+        "federated_interaction_admission_grants",
+        "federated_interaction_attachment_grants",
+        "federated_interaction_response_locators",
+        "interaction_create_dispatch_outbox",
+        "interaction_dispatch_outbox",
         "bot_tokens",
         "bot_interactions",
+        "bot_user_installations",
+        "channel_follows",
+        "emoji_role_restrictions",
+        "federated_channel_follows",
+        "federated_message_crossposts",
+        "guild_scheduled_event_subscriptions",
+        "guild_scheduled_events",
+        "stage_instances",
+        "message_crossposts",
+        "message_views",
+        "poll_answers",
+        "poll_votes",
+        "polls",
+        "soundboard_sounds",
         "abuse_reports",
         "e2ee_account_vaults",
         "e2ee_account_vault_digests",
@@ -99,8 +142,31 @@ def test_complete_v1_schema_is_registered() -> None:
         "e2ee_key_packages",
         "e2ee_package_claim_batches",
         "e2ee_room_operations",
+        "encrypted_forum_starter_reservations",
+        "webhook_e2ee_devices",
+        "webhook_e2ee_key_packages",
+        "webhook_e2ee_participations",
     }
     assert required == set(Base.metadata.tables)
+
+
+def test_community_invite_columns_belong_to_invites_not_stage_instances() -> None:
+    invites = Base.metadata.tables["invites"]
+    invite_columns = invites.c
+    stage_columns = Base.metadata.tables["stage_instances"].c
+
+    assert {"role_ids", "target_user_ids"} <= set(invite_columns.keys())
+    assert "target_application_id" not in invite_columns
+    assert "target_application_domain" not in invite_columns
+    assert "role_ids" not in stage_columns
+    assert "target_user_ids" not in stage_columns
+    max_uses = next(
+        constraint
+        for constraint in invites.constraints
+        if constraint.name == "ck_invites_positive_max_uses"
+    )
+    assert isinstance(max_uses, CheckConstraint)
+    assert "BETWEEN 1 AND 100" in str(max_uses.sqltext)
 
 
 def test_push_devices_are_local_encrypted_registrations() -> None:
@@ -408,6 +474,23 @@ def test_profiles_and_relationship_requests_have_bounded_state() -> None:
     assert "ck_relationships_relationship_request_id_format" in constraint_names("relationships")
 
 
+def test_developer_team_members_accept_federated_user_identities() -> None:
+    members = Base.metadata.tables["developer_team_members"]
+    assert not any(
+        isinstance(constraint, CheckConstraint) and str(constraint.sqltext) == "user_is_local"
+        for constraint in members.constraints
+    )
+    user = foreign_key_for_columns(
+        "developer_team_members",
+        ("user_id", "user_domain", "user_is_local"),
+    )
+    assert tuple(element.target_fullname for element in user.elements) == (
+        "users.id",
+        "users.origin_domain",
+        "users.is_local",
+    )
+
+
 def test_federated_entity_identities_use_composite_primary_keys() -> None:
     for table_name in {
         "users",
@@ -472,6 +555,295 @@ def test_composite_references_are_complete_and_guild_scoped() -> None:
         ("role_id", "role_domain", "guild_id", "guild_domain"),
         ("roles.id", "roles.origin_domain", "roles.guild_id", "roles.guild_domain"),
     )
+
+
+def test_bot_installation_application_reference_binds_the_exact_bot_identity() -> None:
+    constraint = foreign_key_for_columns(
+        "bot_installations",
+        ("application_id", "application_domain", "bot_user_id", "bot_user_domain"),
+    )
+
+    assert tuple(element.target_fullname for element in constraint.elements) == (
+        "bot_applications.id",
+        "bot_applications.origin_domain",
+        "bot_applications.bot_user_id",
+        "bot_applications.bot_user_domain",
+    )
+    assert constraint.name == "fk_bot_installations_application_bot_user_lineage"
+    # Default NO ACTION prevents hard deletion while installations remain. An
+    # application's soft-delete status is not part of the key, so retention is valid.
+    assert constraint.ondelete is None
+
+
+def test_role_and_overwrite_masks_exclude_reserved_permission_bits() -> None:
+    for table_name, constraint_name in (
+        ("roles", "ck_roles_known_permission_mask"),
+        ("channel_overwrites", "ck_channel_overwrites_known_permission_masks"),
+    ):
+        constraint = next(
+            item
+            for item in Base.metadata.tables[table_name].constraints
+            if item.name == constraint_name
+        )
+        assert isinstance(constraint, CheckConstraint)
+        assert f"~{ALL_PERMISSIONS}" in str(constraint.sqltext)
+    # Reserved bits 9, 37, and 42 must not become accidental grants.
+    assert ALL_PERMISSIONS == 576456216817434111
+    migration = (
+        Path(__file__).parents[1] / "migrations/versions/fc9a4b7d2e10_bot_parity_foundation.py"
+    ).read_text()
+    assert "NEW_PERMISSION_MASK = ((1 << 59) - 1) & ~(1 << 19)" in migration
+    for table_name, constraint_name, column_name in (
+        (
+            "bot_applications",
+            "ck_bot_applications_bot_application_positive_values",
+            "default_permissions",
+        ),
+        (
+            "bot_install_templates",
+            "ck_bot_install_templates_bot_template_positive_values",
+            "permissions",
+        ),
+        (
+            "bot_installations",
+            "ck_bot_installations_bot_installation_positive_values",
+            "granted_permissions",
+        ),
+        (
+            "bot_interactions",
+            "ck_bot_interactions_bot_interaction_invocation_permissions_nonnegative",
+            "invocation_permissions",
+        ),
+    ):
+        constraint = next(
+            item
+            for item in Base.metadata.tables[table_name].constraints
+            if item.name == constraint_name
+        )
+        assert isinstance(constraint, CheckConstraint)
+        sql = str(constraint.sqltext)
+        assert column_name in sql
+        assert f"~{ALL_PERMISSIONS}" in sql
+
+
+def test_message_parity_columns_and_authoritative_install_source_are_registered() -> None:
+    messages = Base.metadata.tables["messages"]
+    attachments = Base.metadata.tables["attachments"]
+    installations = Base.metadata.tables["bot_user_installations"]
+
+    assert {
+        "sticker_items",
+        "tts",
+        "webhook_avatar_url",
+        "message_reference",
+        "proxy_request_fingerprint_version",
+        "proxy_request_fingerprint",
+        "proxy_commit_seq",
+    } <= set(messages.c.keys())
+    assert {
+        "duration_secs",
+        "waveform",
+        "upload_channel_id",
+        "upload_channel_domain",
+    } <= set(attachments.c.keys())
+    assert {
+        "ck_messages_sticker_items_are_bounded_array",
+        "ck_messages_message_reference_is_object",
+        "ck_messages_channel_follow_has_reference",
+        "ck_messages_proxy_request_fingerprint_complete",
+        "ck_messages_proxy_request_fingerprint_version_positive",
+        "ck_messages_proxy_request_fingerprint_format",
+        "ck_messages_proxy_commit_seq_positive",
+        "ck_messages_proxy_request_fingerprint_has_nonce_receipt",
+    } <= constraint_names("messages")
+    assert "ix_messages_proxy_commit_receipt" in {index.name for index in messages.indexes}
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "fc9a4b7d2e10_bot_parity_foundation.py"
+    ).read_text()
+    assert 'sa.Column("message_reference", postgresql.JSONB())' in migration
+    assert 'sa.Column("proxy_request_fingerprint_version", sa.Integer())' in migration
+    assert 'sa.Column("proxy_request_fingerprint", sa.String(64))' in migration
+    assert 'sa.Column("proxy_commit_seq", sa.BigInteger())' in migration
+    assert "WITH proxy_receipts AS" in migration
+    assert "MIN(event.seq) AS commit_seq" in migration
+    assert "message.client_nonce IS NOT NULL" in migration
+    assert "message.message_type = 6" in migration
+    assert "'guild_id', channel.guild_id::text" in migration
+    assert "message_type <> 12 OR message_reference IS NOT NULL" in migration
+    assert "UPDATE messages SET message_type = 0" in migration
+    assert "WHERE message_type = 12 AND message_reference IS NULL" in migration
+    assert migration.rindex('"channel_follow_has_reference"') < migration.index(
+        'op.drop_column("messages", column)'
+    )
+    assert {
+        "ck_attachments_upload_channel_ref_complete",
+        "ck_attachments_voice_metadata_complete",
+        "ck_attachments_voice_metadata_valid",
+    } <= constraint_names("attachments")
+
+    assert installations.c.source_id.nullable is True
+    assert installations.c.source_domain.nullable is True
+    assert installations.c.authority_expires_at.nullable is True
+    assert "ix_bot_user_installations_authority_expiry" in {
+        index.name for index in installations.indexes
+    }
+    assert "ck_bot_user_installations_user_install_source_ref_complete" in constraint_names(
+        "bot_user_installations"
+    )
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys())
+        == (
+            "source_id",
+            "source_domain",
+            "application_id",
+            "application_domain",
+            "user_id",
+            "user_domain",
+        )
+        for constraint in installations.constraints
+    )
+    lease_migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "f95b2c3d8e41_developer_team_snapshot_highwaters.py"
+    ).read_text()
+    assert 'sa.Column("authority_expires_at", sa.DateTime(timezone=True))' in lease_migration
+    assert "installing_user.is_local IS FALSE" in lease_migration
+    assert '"ix_bot_user_installations_authority_expiry"' in lease_migration
+
+
+def test_bot_dm_runtime_lineage_and_terminal_highwaters_are_registered() -> None:
+    capabilities = Base.metadata.tables["bot_dm_capabilities"]
+    capability_highwaters = Base.metadata.tables["bot_dm_capability_highwaters"]
+    runtime_highwaters = Base.metadata.tables["bot_application_runtime_highwaters"]
+
+    assert "access_revocation_generation" not in capabilities.c
+    assert capabilities.c.target_access_revocation_generation.nullable is False
+    assert capabilities.c.proof_fingerprint.type.length == 32
+    assert "JSONB" in str(capabilities.c.proof.type)
+    assert {
+        "ck_bot_dm_capabilities_bot_dm_capability_positive_values",
+        "ck_bot_dm_capabilities_bot_dm_capability_status_value",
+    } <= constraint_names("bot_dm_capabilities")
+
+    assert tuple(capability_highwaters.primary_key.columns.keys()) == ("grant_id",)
+    assert {
+        "installation_authority_domain",
+        "identity_fingerprint",
+        "revision",
+        "authorization_fingerprint",
+        "status",
+        "expires_at",
+    } <= set(capability_highwaters.c.keys())
+    assert capability_highwaters.c.identity_fingerprint.type.length == 32
+    assert capability_highwaters.c.authorization_fingerprint.type.length == 32
+    assert capability_highwaters.c.expires_at.nullable is False
+    assert "ix_bot_dm_capability_highwaters_authority_expiry" in {
+        index.name for index in capability_highwaters.indexes
+    }
+
+    assert tuple(runtime_highwaters.primary_key.columns.keys()) == (
+        "application_id",
+        "application_domain",
+        "target_domain",
+    )
+    assert {
+        "manifest_generation",
+        "revocation_generation",
+        "access_revocation_generation",
+        "runtime_fingerprint",
+        "status",
+        "target_allowed",
+    } <= set(runtime_highwaters.c.keys())
+    assert runtime_highwaters.c.runtime_fingerprint.type.length == 32
+
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "fc9a4b7d2e10_bot_parity_foundation.py"
+    ).read_text()
+    assert '"target_access_revocation_generation"' in migration
+    assert '"bot_dm_capability_highwaters"' in migration
+    assert '"ix_bot_dm_capability_highwaters_authority_expiry"' in migration
+    assert '"bot_application_runtime_highwaters"' in migration
+    assert "octet_length(authorization_fingerprint) = 32" in migration
+
+
+def test_federated_application_children_separate_source_and_local_ids() -> None:
+    expected = {
+        "bot_workers": "ck_bot_workers_bot_worker_source_ref_complete",
+        "bot_install_templates": "ck_bot_install_templates_bot_template_source_ref_complete",
+        "application_commands": "ck_application_commands_command_source_ref_complete",
+    }
+    for table_name, check_name in expected.items():
+        table = Base.metadata.tables[table_name]
+        assert table.c.id.primary_key
+        assert table.c.source_id.nullable
+        assert table.c.source_domain.nullable
+        assert check_name in constraint_names(table_name)
+        assert any(
+            isinstance(constraint, UniqueConstraint)
+            and tuple(constraint.columns.keys()) == ("source_id", "source_domain")
+            for constraint in table.constraints
+        )
+
+
+def test_bot_parity_migration_drops_attachment_checks_before_their_columns() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "fc9a4b7d2e10_bot_parity_foundation.py"
+    ).read_text()
+    upload_check = 'op.f("ck_attachments_upload_channel_ref_complete")'
+    voice_check = 'op.f("ck_attachments_voice_metadata_complete")'
+    upload_column = 'op.drop_column("attachments", "upload_channel_domain")'
+    voice_column = 'op.drop_column("attachments", "waveform")'
+
+    assert migration.rindex(upload_check) < migration.index(upload_column)
+    assert migration.rindex(voice_check) < migration.index(voice_column)
+
+
+def test_bot_parity_downgrade_refuses_to_discard_feature_data() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "fc9a4b7d2e10_bot_parity_foundation.py"
+    ).read_text()
+    guard_start = migration.index("def _guard_feature_data_downgrade()")
+    upgrade_start = migration.index("def upgrade()", guard_start)
+    guard = migration[guard_start:upgrade_start]
+    downgrade_start = migration.index("def downgrade()")
+
+    assert "_guard_feature_data_downgrade()" in migration[downgrade_start:]
+    assert migration.index("_guard_feature_data_downgrade()", downgrade_start) < migration.index(
+        "_restore_bot_permission_masks()", downgrade_start
+    )
+    for protected_state in (
+        "guild_scheduled_events",
+        "stage_instances",
+        "soundboard_sounds",
+        "auto_mod_rules",
+        "bot_user_installations",
+        "bot_interaction_responses",
+        "bot_e2ee_participations",
+        "webhook_e2ee_participations",
+        "federated bot child projections exist",
+        "bot target replay or runtime state exists",
+        "proxy_request_fingerprint IS NOT NULL",
+        "type = 13",
+        "forward_snapshot IS NOT NULL",
+        "new permission grants exist",
+    ):
+        assert protected_state in guard
+    assert "export or deliberately remove the feature data first" in guard
 
 
 def test_channel_and_message_references_cannot_cross_owners() -> None:
@@ -590,7 +962,7 @@ def test_forum_and_thread_channel_metadata_is_bounded_and_contextual() -> None:
         for constraint in channels.constraints
         if constraint.name == "ck_channels_channel_type"
     )
-    assert str(channel_type.sqltext) == "type IN (0,1,2,4,5,10,11,12,15,17)"
+    assert str(channel_type.sqltext) == "type IN (0,1,2,4,5,10,11,12,13,15,17)"
     indexes = {index.name: index for index in channels.indexes}
     assert "ix_channels_parent_activity" in indexes
     assert "ix_channels_thread_archive_due" in indexes

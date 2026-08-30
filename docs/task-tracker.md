@@ -154,11 +154,12 @@ methods, typed delete and board-update events, and the `guild_tasks` intent.
 
 ## Authority and federation
 
-The guild home remains authoritative for tracker content. Writes against a
-non-authoritative replica fail explicitly with
-`409 FEDERATED_WRITE_UNSUPPORTED`; they are never accepted locally and replayed
-later. Clients must present that state rather than implying that a task was
-saved.
+The guild home remains authoritative for tracker content. Human writes made
+through a non-authoritative replica use the signed, replay-bounded guild
+management transport and are authorized again at the home before they commit.
+Bot tokens and DPoP proofs remain target-bound, so the Python SDK resolves a
+qualified tracker channel directly to its authority instead of relaying bot
+credentials through another instance.
 
 Reads work through a bounded replica cache. After the requesting human or bot
 passes the replica's live `VIEW_CHANNEL` and tracker-read checks, a missing or

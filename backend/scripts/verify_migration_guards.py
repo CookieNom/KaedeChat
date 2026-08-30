@@ -32,6 +32,23 @@ THREAD_MEMBER_DEFAULTS = (1 << 35) | (1 << 36) | (1 << 38)
 PIN_MESSAGES = 1 << 51
 BYPASS_SLOWMODE = 1 << 52
 TRACKER_MEMBER_DEFAULTS = (1 << 53) | (1 << 54)
+BOT_PERMISSION_DOMAIN = "migration-bot-permissions.invalid"
+BOT_PERMISSION_HUMAN_ID = 8_900_000_000_000_201
+BOT_PERMISSION_BOT_ID = 8_900_000_000_000_202
+BOT_PERMISSION_TEAM_ID = 8_900_000_000_000_203
+BOT_PERMISSION_APPLICATION_ID = 8_900_000_000_000_204
+BOT_PERMISSION_GUILD_ID = 8_900_000_000_000_205
+BOT_PERMISSION_TEMPLATE_ID = 8_900_000_000_000_206
+BOT_PERMISSION_INSTALLATION_ID = 8_900_000_000_000_207
+BOT_PERMISSION_PARENT_REVISION = "fb7c3e9a1d42"
+CURRENT_HEAD_REVISION = "4ea6c2d8f953"
+USE_EXTERNAL_EMOJIS = 1 << 18
+USE_EXTERNAL_STICKERS = 1 << 58
+BOT_PERMISSION_LEGACY_VALUE = SEND_MESSAGES | USE_EXTERNAL_EMOJIS
+FEATURE_GUARD_DOMAIN = "migration-foundation-feature-guard.invalid"
+FEATURE_GUARD_OWNER_ID = 8_900_000_000_000_301
+FEATURE_GUARD_GUILD_ID = 8_900_000_000_000_302
+FEATURE_GUARD_CHANNEL_ID = 8_900_000_000_000_303
 
 
 async def cleanup_federation_fixture(session: AsyncSession) -> None:
@@ -304,15 +321,270 @@ async def verify_thread_permission_fixture(session: AsyncSession) -> None:
         )
 
 
-async def verify_scoped_revision(session: AsyncSession) -> None:
+async def cleanup_bot_permission_fixture(session: AsyncSession) -> None:
+    values = {"domain": BOT_PERMISSION_DOMAIN}
+    await session.execute(
+        text("DELETE FROM bot_installations WHERE guild_domain = :domain"), values
+    )
+    await session.execute(
+        text("DELETE FROM bot_install_templates WHERE application_domain = :domain"), values
+    )
+    await session.execute(
+        text("DELETE FROM bot_applications WHERE origin_domain = :domain"), values
+    )
+    await session.execute(text("DELETE FROM guilds WHERE origin_domain = :domain"), values)
+    await session.execute(text("DELETE FROM developer_teams WHERE origin_domain = :domain"), values)
+    await session.execute(text("DELETE FROM users WHERE origin_domain = :domain"), values)
+    await session.execute(text("DELETE FROM instances WHERE domain = :domain"), values)
+
+
+async def prepare_bot_permission_fixture(session: AsyncSession) -> None:
+    await cleanup_bot_permission_fixture(session)
+    await session.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+    values = {
+        "domain": BOT_PERMISSION_DOMAIN,
+        "human_id": BOT_PERMISSION_HUMAN_ID,
+        "bot_id": BOT_PERMISSION_BOT_ID,
+        "team_id": BOT_PERMISSION_TEAM_ID,
+        "application_id": BOT_PERMISSION_APPLICATION_ID,
+        "guild_id": BOT_PERMISSION_GUILD_ID,
+        "template_id": BOT_PERMISSION_TEMPLATE_ID,
+        "installation_id": BOT_PERMISSION_INSTALLATION_ID,
+        "permissions": BOT_PERMISSION_LEGACY_VALUE,
+    }
+    await session.execute(
+        text("INSERT INTO instances (domain, is_self) VALUES (:domain, false)"), values
+    )
+    await session.execute(
+        text(
+            "INSERT INTO users "
+            "(id, origin_domain, is_local, username, account_type, "
+            "federation_introduced_by_domain) VALUES "
+            "(:human_id, :domain, false, 'bot_permission_owner', 'human', :domain), "
+            "(:bot_id, :domain, false, 'bot_permission_bot', 'bot', :domain)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO developer_teams (id, origin_domain, name) "
+            "VALUES (:team_id, :domain, 'Bot permission migration guard')"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) "
+            "VALUES (:guild_id, :domain, 'Bot permission migration guard', "
+            ":human_id, :domain)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO guild_members "
+            "(guild_id, guild_domain, user_id, user_domain, joined_at) "
+            "VALUES (:guild_id, :domain, :human_id, :domain, now())"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO bot_applications "
+            "(id, origin_domain, team_id, team_domain, bot_user_id, bot_user_domain, "
+            "name, default_permissions) VALUES "
+            "(:application_id, :domain, :team_id, :domain, :bot_id, :domain, "
+            "'Bot permission guard', :permissions)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO bot_install_templates "
+            "(id, application_id, application_domain, slug, name, permissions) VALUES "
+            "(:template_id, :application_id, :domain, 'permission_guard', "
+            "'Bot permission guard', :permissions)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO bot_installations "
+            "(id, application_id, application_domain, guild_id, guild_domain, "
+            "bot_user_id, bot_user_domain, installer_id, installer_domain, "
+            "granted_permissions) VALUES "
+            "(:installation_id, :application_id, :domain, :guild_id, :domain, "
+            ":bot_id, :domain, :human_id, :domain, :permissions)"
+        ),
+        values,
+    )
+
+
+async def verify_alembic_revision(session: AsyncSession, expected: str) -> None:
     revisions = {
         str(value)
         for value in await session.scalars(text("SELECT version_num FROM alembic_version"))
     }
-    if revisions != {REVISION}:
+    if revisions != {expected}:
         raise VerificationFailure(
-            f"downgrade expected Alembic revision {REVISION}; received {sorted(revisions)}"
+            f"expected Alembic revision {expected}; received {sorted(revisions)}"
         )
+
+
+async def verify_bot_permission_fixture(
+    session: AsyncSession, *, expected_revision: str, stickers: bool
+) -> None:
+    await verify_alembic_revision(session, expected_revision)
+    rows = {
+        str(source): int(permissions)
+        for source, permissions in (
+            await session.execute(
+                text(
+                    "SELECT 'application', default_permissions FROM bot_applications "
+                    "WHERE id = :application_id AND origin_domain = :domain "
+                    "UNION ALL "
+                    "SELECT 'template', permissions FROM bot_install_templates "
+                    "WHERE id = :template_id "
+                    "UNION ALL "
+                    "SELECT 'installation', granted_permissions FROM bot_installations "
+                    "WHERE id = :installation_id"
+                ),
+                {
+                    "domain": BOT_PERMISSION_DOMAIN,
+                    "application_id": BOT_PERMISSION_APPLICATION_ID,
+                    "template_id": BOT_PERMISSION_TEMPLATE_ID,
+                    "installation_id": BOT_PERMISSION_INSTALLATION_ID,
+                },
+            )
+        ).all()
+    }
+    expected_permissions = BOT_PERMISSION_LEGACY_VALUE | (USE_EXTERNAL_STICKERS if stickers else 0)
+    expected = {
+        "application": expected_permissions,
+        "template": expected_permissions,
+        "installation": expected_permissions,
+    }
+    if rows != expected:
+        raise VerificationFailure(
+            f"bot permission split backfill mismatch: {rows!r} != {expected!r}"
+        )
+
+
+async def prepare_bot_permission_downgrade(session: AsyncSession) -> None:
+    """Remove only the fixture's new provenance before testing an old schema.
+
+    The permission fixture deliberately belongs to a remote application, so
+    the foundation upgrade also backfills its authority-qualified source ref.
+    That provenance is correctly downgrade-protected.  Verify the backfill,
+    then clear the disposable fixture field so this independent guard can
+    continue exercising the legacy permission split downgrade.
+    """
+
+    await verify_alembic_revision(session, CURRENT_HEAD_REVISION)
+    source_ref = (
+        await session.execute(
+            text(
+                "SELECT source_id, source_domain FROM bot_install_templates "
+                "WHERE id = :template_id AND application_id = :application_id "
+                "AND application_domain = :domain"
+            ),
+            {
+                "template_id": BOT_PERMISSION_TEMPLATE_ID,
+                "application_id": BOT_PERMISSION_APPLICATION_ID,
+                "domain": BOT_PERMISSION_DOMAIN,
+            },
+        )
+    ).one_or_none()
+    expected = (BOT_PERMISSION_TEMPLATE_ID, BOT_PERMISSION_DOMAIN)
+    if source_ref != expected:
+        raise VerificationFailure(
+            f"bot template source backfill mismatch: {source_ref!r} != {expected!r}"
+        )
+    await session.execute(
+        text(
+            "UPDATE bot_install_templates SET source_id = NULL, source_domain = NULL "
+            "WHERE id = :template_id AND application_id = :application_id "
+            "AND application_domain = :domain"
+        ),
+        {
+            "template_id": BOT_PERMISSION_TEMPLATE_ID,
+            "application_id": BOT_PERMISSION_APPLICATION_ID,
+            "domain": BOT_PERMISSION_DOMAIN,
+        },
+    )
+
+
+async def cleanup_foundation_feature_fixture(session: AsyncSession) -> None:
+    values = {"domain": FEATURE_GUARD_DOMAIN}
+    await session.execute(text("DELETE FROM guilds WHERE origin_domain = :domain"), values)
+    await session.execute(text("DELETE FROM users WHERE origin_domain = :domain"), values)
+    await session.execute(text("DELETE FROM instances WHERE domain = :domain"), values)
+
+
+async def prepare_foundation_feature_fixture(session: AsyncSession) -> None:
+    await cleanup_foundation_feature_fixture(session)
+    await session.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+    values = {
+        "domain": FEATURE_GUARD_DOMAIN,
+        "owner_id": FEATURE_GUARD_OWNER_ID,
+        "guild_id": FEATURE_GUARD_GUILD_ID,
+        "channel_id": FEATURE_GUARD_CHANNEL_ID,
+    }
+    await session.execute(
+        text("INSERT INTO instances (domain, is_self) VALUES (:domain, false)"), values
+    )
+    await session.execute(
+        text(
+            "INSERT INTO users "
+            "(id, origin_domain, is_local, username, federation_introduced_by_domain) "
+            "VALUES (:owner_id, :domain, false, 'foundation_feature_guard', :domain)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) "
+            "VALUES (:guild_id, :domain, 'Foundation feature guard', :owner_id, :domain)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO guild_members "
+            "(guild_id, guild_domain, user_id, user_domain, joined_at) "
+            "VALUES (:guild_id, :domain, :owner_id, :domain, now())"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO channels "
+            "(id, origin_domain, guild_id, guild_domain, type, name, position, "
+            "created_floor_id, bitrate, user_limit, video_quality_mode) "
+            "VALUES (:channel_id, :domain, :guild_id, :domain, 13, 'stage-guard', 0, "
+            ":channel_id, 64000, 10000, 1)"
+        ),
+        values,
+    )
+
+
+async def verify_foundation_feature_fixture(session: AsyncSession) -> None:
+    await verify_alembic_revision(session, CURRENT_HEAD_REVISION)
+    stage_limit = await session.scalar(
+        text(
+            "SELECT user_limit FROM channels "
+            "WHERE id = :channel_id AND origin_domain = :domain AND type = 13"
+        ),
+        {"channel_id": FEATURE_GUARD_CHANNEL_ID, "domain": FEATURE_GUARD_DOMAIN},
+    )
+    if stage_limit != 10_000:
+        raise VerificationFailure(
+            "foundation downgrade guard did not preserve its 10,000-seat Stage fixture"
+        )
+
+
+async def verify_scoped_revision(session: AsyncSession) -> None:
+    await verify_alembic_revision(session, REVISION)
 
     constraint_names = {
         str(value)
@@ -433,6 +705,30 @@ async def run(action: str) -> None:
                 await verify_thread_permission_fixture(session)
             elif action == "cleanup-thread-permissions":
                 await cleanup_thread_permission_fixture(session)
+            elif action == "prepare-bot-permissions":
+                await prepare_bot_permission_fixture(session)
+            elif action == "verify-bot-permissions-upgrade":
+                await verify_bot_permission_fixture(
+                    session,
+                    expected_revision=CURRENT_HEAD_REVISION,
+                    stickers=True,
+                )
+            elif action == "prepare-bot-permissions-downgrade":
+                await prepare_bot_permission_downgrade(session)
+            elif action == "verify-bot-permissions-downgrade":
+                await verify_bot_permission_fixture(
+                    session,
+                    expected_revision=BOT_PERMISSION_PARENT_REVISION,
+                    stickers=False,
+                )
+            elif action == "cleanup-bot-permissions":
+                await cleanup_bot_permission_fixture(session)
+            elif action == "prepare-foundation-feature":
+                await prepare_foundation_feature_fixture(session)
+            elif action == "verify-foundation-feature":
+                await verify_foundation_feature_fixture(session)
+            elif action == "cleanup-foundation-feature":
+                await cleanup_foundation_feature_fixture(session)
             else:  # pragma: no cover - argparse enforces the choices
                 raise VerificationFailure(f"unsupported migration-guard action: {action!r}")
     finally:
@@ -453,6 +749,14 @@ def main() -> None:
             "prepare-thread-permissions",
             "verify-thread-permissions",
             "cleanup-thread-permissions",
+            "prepare-bot-permissions",
+            "verify-bot-permissions-upgrade",
+            "prepare-bot-permissions-downgrade",
+            "verify-bot-permissions-downgrade",
+            "cleanup-bot-permissions",
+            "prepare-foundation-feature",
+            "verify-foundation-feature",
+            "cleanup-foundation-feature",
         ),
     )
     args = parser.parse_args()

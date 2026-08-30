@@ -12,7 +12,7 @@
 //! frame indices between the scalar types required by native audio APIs.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -90,6 +90,7 @@ impl Default for CaptureSettings {
 pub struct CaptureGate {
     muted: AtomicBool,
     push_to_talk: AtomicBool,
+    priority_push_to_talk: AtomicBool,
     use_push_to_talk: AtomicBool,
     vad_threshold_bits: AtomicU32,
     level_bits: AtomicU32,
@@ -111,6 +112,9 @@ impl CaptureGate {
     pub fn set_push_to_talk(&self, active: bool) {
         self.push_to_talk.store(active, Ordering::Release);
     }
+    pub fn set_priority_push_to_talk(&self, active: bool) {
+        self.priority_push_to_talk.store(active, Ordering::Release);
+    }
     pub fn set_mode(&self, mode: InputMode) {
         self.use_push_to_talk
             .store(mode == InputMode::PushToTalk, Ordering::Release);
@@ -131,6 +135,7 @@ impl CaptureGate {
         }
         if self.use_push_to_talk.load(Ordering::Acquire) {
             self.push_to_talk.load(Ordering::Acquire)
+                || self.priority_push_to_talk.load(Ordering::Acquire)
         } else {
             let threshold = f32::from_bits(self.vad_threshold_bits.load(Ordering::Acquire));
             if level >= threshold {
@@ -522,51 +527,184 @@ pub struct PlaybackSink {
 /// Remote tracks must never write directly into one FIFO: that serializes
 /// participants instead of mixing them. This mixer also produces the exact
 /// far-end signal supplied to echo cancellation.
+#[derive(Default)]
+struct VoiceMixState {
+    tracks: HashMap<VoiceMixKey, VoiceMixQueue>,
+    priority_capable: HashSet<String>,
+    priority_active: HashSet<String>,
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct VoiceMixKey {
+    participant: String,
+    track: String,
+}
+
+struct VoiceMixQueue {
+    priority_eligible: bool,
+    samples: VecDeque<f32>,
+}
+
 #[derive(Clone, Default)]
 pub struct VoiceMixer {
-    participants: Arc<Mutex<HashMap<String, VecDeque<f32>>>>,
+    state: Arc<Mutex<VoiceMixState>>,
 }
 
 impl VoiceMixer {
     pub fn push(&self, participant: &str, samples: &[f32], source_rate: u32, source_channels: u16) {
+        self.push_track(
+            participant,
+            participant,
+            true,
+            samples,
+            source_rate,
+            source_channels,
+        );
+    }
+
+    pub fn push_track(
+        &self,
+        participant: &str,
+        track: &str,
+        priority_eligible: bool,
+        samples: &[f32],
+        source_rate: u32,
+        source_channels: u16,
+    ) {
         let mono = downmix(samples, usize::from(source_channels));
         let resampled = resample_linear(&mono, source_rate, VOICE_SAMPLE_RATE);
-        let mut participants = self.participants.lock();
-        let queue = participants.entry(participant.to_owned()).or_default();
-        queue.extend(resampled);
+        let mut state = self.state.lock();
+        let queue = register_voice_mix_track(&mut state, participant, track, priority_eligible);
+        queue.priority_eligible = priority_eligible;
+        queue.samples.extend(resampled);
         let maximum = VOICE_SAMPLE_RATE as usize * QUEUE_SECONDS;
-        if queue.len() > maximum {
-            queue.drain(..queue.len() - maximum);
+        if queue.samples.len() > maximum {
+            queue.samples.drain(..queue.samples.len() - maximum);
         }
     }
 
+    pub fn register_track(&self, participant: &str, track: &str, priority_eligible: bool) {
+        register_voice_mix_track(
+            &mut self.state.lock(),
+            participant,
+            track,
+            priority_eligible,
+        );
+    }
+
+    pub fn set_priority_capability(&self, participant: &str, capable: bool) {
+        let mut state = self.state.lock();
+        if capable {
+            state.priority_capable.insert(participant.to_owned());
+        } else {
+            state.priority_capable.remove(participant);
+            state.priority_active.remove(participant);
+        }
+    }
+
+    #[must_use]
+    pub fn set_priority_active(&self, participant: &str, active: bool) -> bool {
+        let mut state = self.state.lock();
+        if active && !state.priority_capable.contains(participant) {
+            return false;
+        }
+        if active {
+            state.priority_active.insert(participant.to_owned());
+        } else {
+            state.priority_active.remove(participant);
+        }
+        true
+    }
+
+    pub fn clear_priority_active(&self) {
+        self.state.lock().priority_active.clear();
+    }
+
     pub fn remove(&self, participant: &str) {
-        self.participants.lock().remove(participant);
+        self.remove_participant(participant);
+    }
+
+    #[must_use]
+    pub fn remove_track(&self, participant: &str, track: &str) -> bool {
+        let mut state = self.state.lock();
+        state.tracks.remove(&VoiceMixKey {
+            participant: participant.to_owned(),
+            track: track.to_owned(),
+        });
+        state
+            .tracks
+            .iter()
+            .any(|(key, queue)| key.participant == participant && queue.priority_eligible)
+    }
+
+    pub fn remove_participant(&self, participant: &str) {
+        let mut state = self.state.lock();
+        state
+            .tracks
+            .retain(|key, _queue| key.participant != participant);
+        state.priority_capable.remove(participant);
+        state.priority_active.remove(participant);
     }
 
     #[must_use]
     pub fn drain(&self, samples: usize) -> Vec<f32> {
-        let mut participants = self.participants.lock();
-        let active = participants
-            .values()
-            .filter(|queue| !queue.is_empty())
-            .count();
-        let normalization = if active > 1 {
-            1.0 / (active as f32).sqrt()
-        } else {
-            1.0
-        };
+        let mut state = self.state.lock();
+        let VoiceMixState {
+            tracks,
+            priority_capable,
+            priority_active,
+        } = &mut *state;
         let mut mixed = vec![0.0; samples];
-        for queue in participants.values_mut() {
-            for sample in &mut mixed {
-                *sample += queue.pop_front().unwrap_or(0.0) * normalization;
-            }
-        }
         for sample in &mut mixed {
+            let active = tracks
+                .values()
+                .filter(|queue| !queue.samples.is_empty())
+                .count();
+            let normalization = if active > 1 {
+                1.0 / (active as f32).sqrt()
+            } else {
+                1.0
+            };
+            let priority_audio = tracks.iter().any(|(key, queue)| {
+                queue.priority_eligible
+                    && !queue.samples.is_empty()
+                    && priority_active.contains(&key.participant)
+                    && priority_capable.contains(&key.participant)
+            });
+            for (key, queue) in tracks.iter_mut() {
+                let attenuation = if priority_audio
+                    && !(queue.priority_eligible
+                        && priority_active.contains(&key.participant)
+                        && priority_capable.contains(&key.participant))
+                {
+                    0.2
+                } else {
+                    1.0
+                };
+                *sample += queue.samples.pop_front().unwrap_or(0.0) * normalization * attenuation;
+            }
             *sample = sample.clamp(-1.0, 1.0);
         }
         mixed
     }
+}
+
+fn register_voice_mix_track<'a>(
+    state: &'a mut VoiceMixState,
+    participant: &str,
+    track: &str,
+    priority_eligible: bool,
+) -> &'a mut VoiceMixQueue {
+    state
+        .tracks
+        .entry(VoiceMixKey {
+            participant: participant.to_owned(),
+            track: track.to_owned(),
+        })
+        .or_insert_with(|| VoiceMixQueue {
+            priority_eligible,
+            samples: VecDeque::new(),
+        })
 }
 
 /// Bounded copy of the mono speaker mix used only by capture-side DSP. It
@@ -931,6 +1069,21 @@ mod tests {
     }
 
     #[test]
+    fn normal_and_priority_push_to_talk_keys_have_independent_state() {
+        let push_to_talk = CaptureGate::new(&CaptureSettings {
+            mode: InputMode::PushToTalk,
+            ..CaptureSettings::default()
+        });
+        push_to_talk.set_priority_push_to_talk(true);
+        assert!(push_to_talk.permits(0.1));
+        push_to_talk.set_push_to_talk(true);
+        push_to_talk.set_priority_push_to_talk(false);
+        assert!(push_to_talk.permits(0.1));
+        push_to_talk.set_muted(true);
+        assert!(!push_to_talk.permits(1.0));
+    }
+
+    #[test]
     fn render_reference_is_bounded_and_zero_pads() {
         let reference = RenderReference {
             queue: Arc::new(ArrayQueue::new(3)),
@@ -969,5 +1122,85 @@ mod tests {
         mixer.push("gone", &[0.8; 480], VOICE_SAMPLE_RATE, 1);
         mixer.remove("gone");
         assert_eq!(mixer.drain(2), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn authorized_priority_audio_ducks_other_participants() {
+        let mixer = VoiceMixer::default();
+        mixer.set_priority_capability("priority", true);
+        assert!(mixer.set_priority_active("priority", true));
+        mixer.push("priority", &[0.5], VOICE_SAMPLE_RATE, 1);
+        mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
+
+        let scale = 1.0 / 2.0_f32.sqrt();
+        assert!((mixer.drain(1)[0] - (0.5 + 0.1) * scale).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn priority_ducking_applies_only_to_the_microphone_track() {
+        let mixer = VoiceMixer::default();
+        mixer.set_priority_capability("priority", true);
+        assert!(mixer.set_priority_active("priority", true));
+        mixer.push_track("priority", "microphone", true, &[0.5], VOICE_SAMPLE_RATE, 1);
+        mixer.push_track(
+            "priority",
+            "screen-audio",
+            false,
+            &[0.5],
+            VOICE_SAMPLE_RATE,
+            1,
+        );
+        mixer.push_track("normal", "microphone", true, &[0.5], VOICE_SAMPLE_RATE, 1);
+
+        let scale = 1.0 / 3.0_f32.sqrt();
+        assert!((mixer.drain(1)[0] - (0.5 + 0.1 + 0.1) * scale).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn participant_removal_discards_all_of_their_audio_tracks() {
+        let mixer = VoiceMixer::default();
+        mixer.push_track("gone", "microphone", true, &[0.5], VOICE_SAMPLE_RATE, 1);
+        mixer.push_track("gone", "screen-audio", false, &[0.5], VOICE_SAMPLE_RATE, 1);
+        mixer.remove_participant("gone");
+        assert_eq!(mixer.drain(1), vec![0.0]);
+    }
+
+    #[test]
+    fn replacing_a_microphone_does_not_clear_priority_until_the_last_track_ends() {
+        let mixer = VoiceMixer::default();
+        mixer.register_track("priority", "old-microphone", true);
+        mixer.register_track("priority", "new-microphone", true);
+        assert!(mixer.remove_track("priority", "old-microphone"));
+        assert!(!mixer.remove_track("priority", "new-microphone"));
+    }
+
+    #[test]
+    fn priority_ducking_requires_capability_and_queued_priority_audio() {
+        let mixer = VoiceMixer::default();
+        assert!(!mixer.set_priority_active("unauthorized", true));
+        mixer.push("unauthorized", &[0.5], VOICE_SAMPLE_RATE, 1);
+        mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
+        assert!((mixer.drain(1)[0] - 1.0 / 2.0_f32.sqrt()).abs() < 0.000_01);
+
+        mixer.set_priority_capability("priority", true);
+        assert!(mixer.set_priority_active("priority", true));
+        mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
+        assert_eq!(mixer.drain(1), vec![0.5]);
+    }
+
+    #[test]
+    fn removing_or_resetting_priority_speaker_clears_ducking() {
+        let mixer = VoiceMixer::default();
+        mixer.set_priority_capability("priority", true);
+        assert!(mixer.set_priority_active("priority", true));
+        mixer.remove("priority");
+        mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
+        assert_eq!(mixer.drain(1), vec![0.5]);
+
+        mixer.set_priority_capability("priority", true);
+        assert!(mixer.set_priority_active("priority", true));
+        mixer.clear_priority_active();
+        mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
+        assert_eq!(mixer.drain(1), vec![0.5]);
     }
 }

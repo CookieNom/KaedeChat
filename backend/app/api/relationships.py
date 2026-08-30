@@ -10,6 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
+from app.bots.dm_capability import fence_bot_dm_capabilities_for_pair
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import relationship_payload, user_payload
 from app.chat.privacy import blocked_between, lock_relationship_pair, relationship
@@ -382,7 +384,16 @@ async def block_user(
     if target.origin_domain != settings.domain:
         # Send only a generic removal; never disclose that the local user blocked the peer.
         await queue_relationship_event(session, settings, "relationship.remove", auth.user, target)
+    paused_channels = await fence_bot_dm_capabilities_for_pair(
+        session,
+        redis,
+        settings,
+        auth.user,
+        target,
+    )
     await session.commit()
+    if paused_channels:
+        await publish_e2ee_policy_updates(session, redis, settings, paused_channels)
     if target.origin_domain != settings.domain:
         await enqueue_best_effort(federation_deliver, target.origin_domain)
     await notify_relationship(redis, auth.user, target, "blocked")

@@ -59,7 +59,7 @@ export function encryptedRoomJoinWarning(kind: EncryptedRoomKind): string {
   const unavailableFeatures =
     kind === 'media'
       ? 'Server recording and transcription are unavailable, and an unsupported client cannot join.'
-      : 'Server message search, automatic previews, bots, webhooks, server file previews and scanning, call recording, and transcription are unavailable. Notifications are generic, and unsupported clients cannot participate.';
+      : 'Server message search, automatic previews, server file previews and scanning, call recording, and transcription are unavailable. Webhooks receive no access automatically; a verified webhook device can receive only future content after an explicit grant, rekey, and history floor. A verified participant-mode app can likewise receive future content only after explicit admission. Notifications are generic, and unsupported clients cannot participate.';
   const historyAndRecovery =
     kind === 'media'
       ? ''

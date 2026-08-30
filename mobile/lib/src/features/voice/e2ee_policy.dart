@@ -1,9 +1,82 @@
 import 'package:kaede_mobile/src/domain/models.dart';
 
+final class VoiceMediaPolicy {
+  const VoiceMediaPolicy({
+    required this.bitrate,
+    required this.userLimit,
+    required this.rtcRegion,
+    required this.videoQualityMode,
+  });
+
+  static const defaults = VoiceMediaPolicy(
+    bitrate: 64000,
+    userLimit: 0,
+    rtcRegion: null,
+    videoQualityMode: 1,
+  );
+
+  final int bitrate;
+  final int userLimit;
+  final String? rtcRegion;
+  final int videoQualityMode;
+
+  bool matches(VoiceMediaPolicy other) =>
+      bitrate == other.bitrate &&
+      userLimit == other.userLimit &&
+      rtcRegion == other.rtcRegion &&
+      videoQualityMode == other.videoQualityMode;
+}
+
+VoiceMediaPolicy? voiceMediaPolicyFromGrant(Map<String, Object?> grant) {
+  final bitrate = grant['bitrate'];
+  final userLimit = grant['user_limit'];
+  final rtcRegion = grant['rtc_region'];
+  final videoQualityMode = grant['video_quality_mode'];
+  if (!grant.containsKey('rtc_region')) return null;
+  if (bitrate is! int || bitrate < 8000 || bitrate > 384000) return null;
+  // The grant does not carry the channel type. Authority-side channel
+  // validation caps ordinary voice at 99 and Stage at Discord's 10,000, so the
+  // client must accept the larger signed Stage policy here.
+  if (userLimit is! int || userLimit < 0 || userLimit > 10000) return null;
+  if (rtcRegion != null &&
+      (rtcRegion is! String ||
+          rtcRegion.runes.isEmpty ||
+          rtcRegion.runes.length > 64)) {
+    return null;
+  }
+  if (videoQualityMode != 1 && videoQualityMode != 2) return null;
+  return VoiceMediaPolicy(
+    bitrate: bitrate,
+    userLimit: userLimit,
+    rtcRegion: rtcRegion as String?,
+    videoQualityMode: videoQualityMode as int,
+  );
+}
+
+VoiceMediaPolicy? _voiceMediaPolicyFromChannel(KaedeChannel channel) {
+  final policy = <String, Object?>{
+    'bitrate': channel.bitrate,
+    'user_limit': channel.userLimit,
+    'rtc_region': channel.rtcRegion,
+    'video_quality_mode': channel.videoQualityMode,
+  };
+  final media = voiceMediaPolicyFromGrant(policy);
+  if (media == null || !channel.type.isVoiceLike) return null;
+  final maximumUserLimit = channel.type == ChannelType.stage ? 10000 : 99;
+  return media.userLimit <= maximumUserLimit ? media : null;
+}
+
 bool voiceGrantMatchesChannelPolicy(
   Map<String, Object?> grant,
   KaedeChannel channel,
 ) {
+  final grantMedia = voiceMediaPolicyFromGrant(grant);
+  final channelMedia = _voiceMediaPolicyFromChannel(channel);
+  if (grantMedia == null ||
+      channelMedia == null ||
+      !grantMedia.matches(channelMedia)) {
+    return false;
+  }
   final grantEncryptionMode = grant['e2ee'];
   final channelId = grant['channel_id'];
   final channelDomain = grant['channel_domain'];

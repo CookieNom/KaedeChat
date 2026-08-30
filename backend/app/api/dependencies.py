@@ -20,7 +20,15 @@ from app.db.models import User
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     async with request.app.state.sessionmaker() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            # Audit/integration dispatches are projections of already-committed
+            # SQL state. Draining in dependency teardown keeps them strictly
+            # post-commit without coupling every mutation route to gateway I/O.
+            from app.chat.postcommit import publish_committed_dispatches
+
+            await publish_committed_dispatches(session, request.app.state.redis)
 
 
 def get_redis(request: Request) -> Redis:
@@ -37,6 +45,17 @@ class AuthenticatedUser:
     grant: AccessGrant
     access_token: str
     cookie_authenticated: bool
+
+
+def federated_authenticated_user(user: object) -> AuthenticatedUser:
+    """Adapt an already authenticated signed-RPC actor for local services."""
+
+    return AuthenticatedUser(
+        user=cast(User, user),
+        grant=cast(AccessGrant, None),
+        access_token="",
+        cookie_authenticated=False,
+    )
 
 
 def unauthorized() -> HTTPException:
@@ -125,3 +144,18 @@ async def require_user(
             },
         )
     return AuthenticatedUser(user, grant, token, cookie_authenticated)
+
+
+async def optional_user(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedUser | None:
+    """Authenticate a request when it supplied credentials, otherwise stay anonymous."""
+
+    if not request.headers.get("Authorization") and request.cookies.get("kc_access") is None:
+        return None
+    # Invalid explicit credentials remain an authentication error. Treating
+    # them as anonymous could leak whether a targeted invite exists.
+    return await require_user(request, session, redis, settings)

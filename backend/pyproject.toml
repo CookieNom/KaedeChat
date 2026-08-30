@@ -19,6 +19,7 @@ dependencies = [
   "httpcore>=1.0,<2",
   "blurhash>=1.1,<2",
   "ImageHash>=4.3,<5",
+  "google-re2>=1.1.20240702,<2",
   "livekit-api>=1.0,<2",
   "numpy>=2.2,<3",
   "orjson>=3.10,<4",

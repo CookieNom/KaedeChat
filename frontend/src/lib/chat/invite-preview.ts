@@ -8,6 +8,34 @@ export interface InvitePreview {
   guild: Guild;
   channel_id: string | null;
   expires_at: string | null;
+  uses?: number;
+  max_uses?: number | null;
+  temporary?: boolean;
+  target_type?: 'stream' | null;
+  role_ids?: string[];
+  target_user_count?: number;
+  guild_scheduled_event?: {
+    name: string;
+    scheduled_start_time?: string;
+  } | null;
+}
+
+export function invitePreviewDetails(preview: InvitePreview): string[] {
+  const details: string[] = [];
+  if (preview.max_uses != null) {
+    details.push(`${Math.max(0, preview.max_uses - (preview.uses ?? 0))} uses remain`);
+  }
+  if (preview.role_ids?.length) {
+    details.push(
+      `Grants ${preview.role_ids.length} role${preview.role_ids.length === 1 ? '' : 's'}`
+    );
+  }
+  if ((preview.target_user_count ?? 0) > 0) details.push('Limited invitation');
+  if (preview.target_type === 'stream') details.push('Opens a Go Live stream');
+  if (preview.guild_scheduled_event?.name) {
+    details.push(`Event: ${preview.guild_scheduled_event.name}`);
+  }
+  return details;
 }
 
 export function invitedChannel(guild: Guild, channelId: string | null): Channel | null {

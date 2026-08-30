@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
 from app.auth.security import decrypt_secret
+from app.core.base64url import encode_base64url
 from app.core.settings import Settings
 from app.db.models import PushDevice
 from app.push.sync import PUSH_SYNC_TOKEN_RE
@@ -29,10 +30,6 @@ def decrypt_device_token(device: PushDevice, settings: Settings) -> str:
         settings.secret_key_bytes,
         context=PUSH_TOKEN_CONTEXT,
     )
-
-
-def _b64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
 @dataclass(slots=True)
@@ -132,8 +129,8 @@ class FcmClient:
             now = int(time.time())
             if self._access_token is not None and now < self._expires_at - 60:
                 return self._access_token
-            header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
-            claims = _b64url(
+            header = encode_base64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+            claims = encode_base64url(
                 json.dumps(
                     {
                         "iss": self.client_email,
@@ -148,7 +145,7 @@ class FcmClient:
             )
             unsigned = f"{header}.{claims}".encode("ascii")
             signature = self.private_key.sign(unsigned, padding.PKCS1v15(), hashes.SHA256())
-            assertion = f"{header}.{claims}.{_b64url(signature)}"
+            assertion = f"{header}.{claims}.{encode_base64url(signature)}"
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(
                     self.token_uri,

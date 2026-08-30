@@ -3,6 +3,35 @@ export interface FederatedIdentity {
   origin_domain: string;
 }
 
+const FEDERATION_DOMAIN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const SNOWFLAKE = /^[1-9]\d{0,18}$/u;
+const MAX_SNOWFLAKE = 9_223_372_036_854_775_807n;
+
+export function isCanonicalFederationDomain(value: unknown): value is string {
+  return typeof value === 'string' && FEDERATION_DOMAIN.test(value);
+}
+
+export function parseCanonicalEntityRef(
+  value: unknown,
+  expectedDomain?: string
+): FederatedIdentity | null {
+  if (typeof value !== 'string') return null;
+  const separator = value.lastIndexOf('@');
+  if (separator < 1) return null;
+  const id = value.slice(0, separator);
+  const origin_domain = value.slice(separator + 1);
+  if (
+    !SNOWFLAKE.test(id) ||
+    BigInt(id) > MAX_SNOWFLAKE ||
+    !isCanonicalFederationDomain(origin_domain) ||
+    (expectedDomain !== undefined && origin_domain !== expectedDomain)
+  ) {
+    return null;
+  }
+  return { id, origin_domain };
+}
+
 /** Canonical API/browser reference for an ID that is only instance-unique. */
 export function entityRef(entity: FederatedIdentity): string {
   return `${entity.id}@${entity.origin_domain}`;

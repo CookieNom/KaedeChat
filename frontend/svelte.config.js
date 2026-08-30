@@ -32,8 +32,19 @@ const config = {
         // Voice rooms are authoritative on the guild's home instance. A
         // federated member therefore connects directly to that instance's
         // secure LiveKit signaling endpoint after receiving a signed grant.
-        'connect-src': ['self', 'wss:', 'https://challenges.cloudflare.com', ...mediaUploadOrigins],
-        'frame-src': ['https://challenges.cloudflare.com'],
+        // Federated soundboard capabilities can point at any guild authority's
+        // exact media.<authority> host. Runtime validation narrows each fetch.
+        'connect-src': [
+          'self',
+          'wss:',
+          'https:',
+          'https://challenges.cloudflare.com',
+          ...mediaUploadOrigins
+        ],
+        // Directory videos use YouTube's privacy-enhanced player. Product-page
+        // code constructs this origin from a validated 11-character video ID;
+        // arbitrary publisher iframe origins are never accepted.
+        'frame-src': ['https://challenges.cloudflare.com', 'https://www.youtube-nocookie.com'],
         'font-src': ['self', 'data:']
       }
     }

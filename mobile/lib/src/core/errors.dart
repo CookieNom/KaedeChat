@@ -181,6 +181,10 @@ final class KaedeException implements Exception {
     const messages = <String, String>{
       'ADMIN_AUTHENTICATION_REQUIRED':
           'Administrator authentication is required for that action.',
+      'BOT_E2EE_PARTICIPANT_REQUIRED':
+          'This app must be allowed as a participant in this encrypted channel.',
+      'BOT_E2EE_PARTICIPATION_NOT_FOUND':
+          'This app is not allowed in that encrypted channel.',
       'AUTHENTICATION_REQUIRED': 'Sign in to continue.',
       'SESSION_EXPIRED': 'Your session expired. Sign in again.',
       'MISSING_PERMISSIONS': 'You do not have permission to do that.',
@@ -194,7 +198,7 @@ final class KaedeException implements Exception {
       'OWNER_MUST_TRANSFER_OR_DELETE_GUILD':
           'Transfer ownership or delete the guild before leaving it.',
       'OWNER_TRANSFER_REQUIRES_LOCAL_MEMBER':
-          'Ownership can only be transferred to a member on this guild’s home instance.',
+          'That member is not eligible to receive guild ownership.',
       'BANNED_FROM_GUILD': 'You are banned from that guild.',
       'INSTANCE_BANNED_FROM_GUILD':
           'Your home instance is banned from that guild.',
@@ -271,8 +275,6 @@ final class KaedeException implements Exception {
           'Tasks can only be assigned to current guild members.',
       'TRACKER_CLIENT_NONCE_CONFLICT':
           'That pending task does not match the original request. Create it again.',
-      'FEDERATED_WRITE_UNSUPPORTED':
-          'This remote tracker is read-only in this version of Kaede.',
       'PASSWORD_WORK_BUSY':
           'The server is busy checking passwords. Try again in a moment.',
       'TURNSTILE_REQUIRED': 'Complete the security check to continue.',
@@ -307,6 +309,14 @@ final class KaedeException implements Exception {
           'Too many uploads are already in progress. Wait for one to finish.',
       'UPLOAD_INFLIGHT_QUOTA_EXCEEDED':
           'Your active uploads exceed this server’s storage limit. Wait or remove an upload.',
+      'COMMAND_ATTACHMENT_INVALID':
+          'A command file selection is no longer valid. Choose the file again.',
+      'COMMAND_ATTACHMENTS_INVALID':
+          'Choose no more than ten different files for this command.',
+      'APPLICATION_ATTACHMENT_SCOPE_REQUIRED':
+          'This application does not have permission to read command attachments. Ask a guild administrator to update its installation.',
+      'FOCUSED_OPTION_INVALID':
+          'That command option does not support autocomplete. Refresh the command list and try again.',
       'USER_STORAGE_QUOTA_EXCEEDED':
           'Your attachment storage is full. Remove files before uploading another.',
       'MEDIA_STORAGE_UNAVAILABLE':

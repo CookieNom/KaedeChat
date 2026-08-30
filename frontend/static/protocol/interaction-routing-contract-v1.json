@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "option_commitment": "base64url-unpadded(sha256(utf8(value)))",
+  "vectors": [
+    {
+      "name": "message_unicode",
+      "callback_type": 4,
+      "input": {
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 1,
+            "components": [
+              {
+                "type": 3,
+                "custom_id": "choice",
+                "options": [
+                  { "label": "Greek", "value": "βeta" },
+                  { "label": "Accent", "value": "café" },
+                  { "label": "ASCII", "value": "alpha" }
+                ],
+                "min_values": 1,
+                "max_values": 2,
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      },
+      "contract": {
+        "version": 1,
+        "kind": "message",
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 3,
+            "custom_id": "choice",
+            "disabled": false,
+            "min_values": 1,
+            "max_values": 2,
+            "option_value_digests": [
+              "6IjK48e1QClNYvYShd1fxmKRSjKxh58EFtbrXcqwkP8",
+              "hQ99xDkQ_4kPiHnA7Sb-aXyToGetk6fVD0ZqcCipv04",
+              "jtP2rWhblZ6tcCJRjhr3bNgW-OjsfM3aHtQBjo8iI_g"
+            ]
+          }
+        ]
+      },
+      "digest": "aMejEYXsMvO52TlYiRh6yIPnt2Kl6OiBnfmPt1eyk0k"
+    },
+    {
+      "name": "message_unicode_reordered_options",
+      "callback_type": 7,
+      "input": {
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 1,
+            "components": [
+              {
+                "type": 3,
+                "custom_id": "choice",
+                "options": [
+                  { "label": "ASCII", "value": "alpha" },
+                  { "label": "Greek", "value": "βeta" },
+                  { "label": "Accent", "value": "café" }
+                ],
+                "min_values": 1,
+                "max_values": 2,
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      },
+      "contract": {
+        "version": 1,
+        "kind": "message",
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 3,
+            "custom_id": "choice",
+            "disabled": false,
+            "min_values": 1,
+            "max_values": 2,
+            "option_value_digests": [
+              "6IjK48e1QClNYvYShd1fxmKRSjKxh58EFtbrXcqwkP8",
+              "hQ99xDkQ_4kPiHnA7Sb-aXyToGetk6fVD0ZqcCipv04",
+              "jtP2rWhblZ6tcCJRjhr3bNgW-OjsfM3aHtQBjo8iI_g"
+            ]
+          }
+        ]
+      },
+      "digest": "aMejEYXsMvO52TlYiRh6yIPnt2Kl6OiBnfmPt1eyk0k"
+    },
+    {
+      "name": "modal_constraints",
+      "callback_type": 9,
+      "input": {
+        "title": "Private",
+        "custom_id": "settings",
+        "components": [
+          {
+            "type": 18,
+            "label": "Mode",
+            "component": {
+              "type": 21,
+              "custom_id": "mode",
+              "options": [
+                { "label": "Fast", "value": "⚡" },
+                { "label": "Quiet", "value": "quiet" }
+              ],
+              "required": true
+            }
+          },
+          {
+            "type": 18,
+            "label": "Files",
+            "component": {
+              "type": 19,
+              "custom_id": "files",
+              "required": false,
+              "min_values": 0,
+              "max_values": 2,
+              "file_types": [".pdf", "image/*"]
+            }
+          }
+        ]
+      },
+      "contract": {
+        "version": 1,
+        "kind": "modal",
+        "custom_id": "settings",
+        "components": [
+          {
+            "type": 18,
+            "component": {
+              "type": 21,
+              "custom_id": "mode",
+              "required": true,
+              "option_value_digests": [
+                "AI8HR_TifIRiuqmRpTgCW8wt0UPnhCLxr7382edXog8",
+                "rwxdqwHYiDfXucy0NQub3Zr9rFGNuEBmXn8GBgykDOY"
+              ]
+            }
+          },
+          {
+            "type": 18,
+            "component": {
+              "type": 19,
+              "custom_id": "files",
+              "required": false,
+              "min_values": 0,
+              "max_values": 2,
+              "file_types": [".pdf", "image/*"]
+            }
+          }
+        ]
+      },
+      "digest": "6J9Z6lQ9zor_Y49k8xS5kinmFoib7YMuaIgcrtrjvus"
+    }
+  ],
+  "invalid_contracts": [
+    {
+      "name": "duplicate_option_commitment",
+      "callback_type": 4,
+      "contract": {
+        "version": 1,
+        "kind": "message",
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 3,
+            "custom_id": "choice",
+            "disabled": false,
+            "min_values": 1,
+            "max_values": 2,
+            "option_value_digests": [
+              "6IjK48e1QClNYvYShd1fxmKRSjKxh58EFtbrXcqwkP8",
+              "6IjK48e1QClNYvYShd1fxmKRSjKxh58EFtbrXcqwkP8"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsorted_option_commitments",
+      "callback_type": 4,
+      "contract": {
+        "version": 1,
+        "kind": "message",
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 3,
+            "custom_id": "choice",
+            "disabled": false,
+            "min_values": 1,
+            "max_values": 2,
+            "option_value_digests": [
+              "jtP2rWhblZ6tcCJRjhr3bNgW-OjsfM3aHtQBjo8iI_g",
+              "6IjK48e1QClNYvYShd1fxmKRSjKxh58EFtbrXcqwkP8"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown_public_field",
+      "callback_type": 9,
+      "contract": {
+        "version": 1,
+        "kind": "modal",
+        "custom_id": "settings",
+        "title": "leaked",
+        "components": [
+          {
+            "type": 18,
+            "component": {
+              "type": 23,
+              "custom_id": "agree"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

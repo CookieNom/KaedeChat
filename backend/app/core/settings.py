@@ -10,7 +10,15 @@ from functools import lru_cache
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DOMAIN_RE = re.compile(
@@ -33,6 +41,13 @@ AUXILIARY_KAEDE_ENV = {
     "KAEDE_GATEWAY_SECRET_KEY",
     "KAEDE_GENERATED_OUTPUT",
     "KAEDE_GRAFANA_HOST_PORT",
+    "KAEDE_LANDING_PAGE",
+    "KAEDE_LEGAL_CONTACT_EMAIL",
+    "KAEDE_LEGAL_EFFECTIVE_DATE",
+    "KAEDE_LEGAL_INSTANCE_NAME",
+    "KAEDE_LEGAL_JURISDICTION",
+    "KAEDE_LEGAL_MINIMUM_AGE",
+    "KAEDE_LEGAL_OPERATOR_NAME",
     "KAEDE_TURN_UDP_PORT",
     "KAEDE_VOICE_ENABLED",
 }
@@ -47,6 +62,34 @@ def valid_url_host(host: str | None) -> bool:
         return True
     except ValueError:
         return HOST_RE.fullmatch(host) is not None
+
+
+class VoiceRegionConfiguration(BaseModel):
+    """One operator-configured RTC region exposed through the public API."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=100)
+    optimal: bool = False
+    deprecated: bool = False
+    custom: bool = True
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", normalized):
+            raise ValueError("must be a stable region identifier")
+        return normalized
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(ord(character) < 32 for character in normalized):
+            raise ValueError("must be a meaningful display name")
+        return normalized
 
 
 class Settings(BaseSettings):
@@ -276,10 +319,11 @@ class Settings(BaseSettings):
     media_remote_cache_ttl_days: int = Field(default=30, ge=1, le=365)
     media_retention_days: int | None = Field(default=None, ge=1)
     media_emoji_limit: int = Field(default=100, ge=1, le=1000)
-    media_max_emoji_bytes: int = Field(default=512 * 1024, ge=1024, le=15 * 1024 * 1024)
+    media_max_emoji_bytes: int = Field(default=256 * 1024, ge=1024, le=256 * 1024)
     media_sticker_limit: int = Field(default=60, ge=1, le=1000)
-    media_max_sticker_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=15 * 1024 * 1024)
+    media_max_sticker_bytes: int = Field(default=512 * 1024, ge=1024, le=512 * 1024)
     media_sticker_background_removal_enabled: bool = False
+    soundboard_default_sounds: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
 
     # Voice, video, and calls
     voice_enabled: bool = False
@@ -289,7 +333,9 @@ class Settings(BaseSettings):
     voice_api_secret: SecretStr | None = None
     voice_token_ttl_seconds: int = Field(default=15 * 60, ge=60, le=15 * 60)
     voice_occupancy_stale_seconds: int = Field(default=75, ge=60, le=300)
+    voice_stage_empty_grace_seconds: int = Field(default=5 * 60, ge=2 * 60, le=15 * 60)
     voice_call_ttl_seconds: int = Field(default=24 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+    voice_regions: list[VoiceRegionConfiguration] = Field(default_factory=list, max_length=100)
 
     # Email
     email_backend: Literal["smtp", "mailtrap_api", "console", "disabled"] = "console"
@@ -581,6 +627,18 @@ class Settings(BaseSettings):
                 "must be an absolute WebSocket URL with no path or the /livekit proxy path"
             )
         return value.rstrip("/")
+
+    @field_validator("voice_regions")
+    @classmethod
+    def validate_voice_regions(
+        cls, value: list[VoiceRegionConfiguration]
+    ) -> list[VoiceRegionConfiguration]:
+        region_ids = [region.id.casefold() for region in value]
+        if len(region_ids) != len(set(region_ids)):
+            raise ValueError("voice region IDs must be unique")
+        if sum(region.optimal for region in value) > 1:
+            raise ValueError("at most one voice region may be optimal")
+        return value
 
     @field_validator("voice_livekit_url")
     @classmethod

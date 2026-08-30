@@ -13,7 +13,8 @@ from sqlalchemy.dialects import postgresql
 from app import tasks
 from app.api import media as media_api
 from app.core.settings import Settings
-from app.db.models import Attachment, Emoji, Guild, Message, Role, User
+from app.db.bot_models import ApplicationEmoji
+from app.db.models import Attachment, Emoji, Guild, Message, Role, SoundboardSound, User
 from app.media import asset_invalidation, digest_revocation, service, tombstones
 from app.media import jobs as media_jobs
 
@@ -81,7 +82,7 @@ async def test_terminal_user_asset_is_cleared_and_friend_update_is_queued_atomic
             raise AssertionError("asset invalidation must not commit independently")
 
     queue_profiles = AsyncMock(return_value={REMOTE_DOMAIN})
-    monkeypatch.setattr(asset_invalidation, "queue_friend_profile_updates", queue_profiles)
+    monkeypatch.setattr(asset_invalidation, "queue_profile_updates", queue_profiles)
 
     result = await asset_invalidation.invalidate_terminal_asset_binding(
         cast(Any, Session()), settings(), item
@@ -89,7 +90,7 @@ async def test_terminal_user_asset_is_cleared_and_friend_update_is_queued_atomic
 
     assert result is not None
     assert result.user is user
-    assert result.friend_destinations == {REMOTE_DOMAIN}
+    assert result.profile_destinations == {REMOTE_DOMAIN}
     assert getattr(user, field_name) is None
     assert user.profile_version == 5
     assert item.asset_binding is None
@@ -226,6 +227,17 @@ async def test_terminal_role_icon_is_cleared_and_federated_atomically(
             calls += 1
             return guild if calls == 1 else role
 
+        async def flush(self) -> None:
+            return None
+
+        async def refresh(
+            self,
+            _row: object,
+            *,
+            attribute_names: tuple[str, ...],
+        ) -> None:
+            assert attribute_names == ("updated_at",)
+
     queue_mutation = AsyncMock(return_value=1)
     monkeypatch.setattr(asset_invalidation, "queue_guild_mutation", queue_mutation)
 
@@ -326,6 +338,90 @@ async def test_terminal_emoji_asset_deletes_emoji_and_queues_signed_mutation(
 
 
 @pytest.mark.asyncio
+async def test_terminal_soundboard_asset_deletes_its_playable_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = User(
+        id=20,
+        origin_domain=LOCAL_DOMAIN,
+        is_local=True,
+        username="owner",
+        password_hash="unused",
+        profile_version=1,
+        profile_resolved=True,
+    )
+    guild = Guild(
+        id=10,
+        origin_domain=LOCAL_DOMAIN,
+        name="Paper Lantern",
+        owner_id=20,
+        owner_domain=LOCAL_DOMAIN,
+        permission_generation=1,
+        history_policy_generation=1,
+        federated_history_policy="disabled",
+        next_event_seq=1,
+        last_event_seq=0,
+        sync_status="ready",
+        unavailable=False,
+    )
+    sound = SoundboardSound(
+        id=44,
+        origin_domain=LOCAL_DOMAIN,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        name="Horn",
+        media_hash=DIGEST,
+        object_key="alpha.localhost/30/clean/original",
+        content_type="audio/ogg",
+        volume=1,
+        duration_ms=900,
+        created_by_id=20,
+        created_by_domain=LOCAL_DOMAIN,
+        version=1,
+    )
+    item = attachment(f"soundboard:{LOCAL_DOMAIN}:{sound.id}")
+    deleted: list[object] = []
+    scalar_values = iter((guild, sound))
+
+    class Session:
+        async def get(self, model: object, key: object) -> object:
+            if model is SoundboardSound:
+                assert key == (sound.id, sound.origin_domain)
+                return sound
+            assert model is User
+            assert key == (owner.id, owner.origin_domain)
+            return owner
+
+        async def scalar(self, _statement: object) -> object:
+            return next(scalar_values)
+
+        async def delete(self, value: object) -> None:
+            deleted.append(value)
+
+        async def scalars(self, _statement: object) -> list[object]:
+            return []
+
+    queue_mutation = AsyncMock(return_value=1)
+    monkeypatch.setattr(asset_invalidation, "queue_guild_mutation", queue_mutation)
+
+    result = await asset_invalidation.invalidate_terminal_asset_binding(
+        cast(Any, Session()), settings(), item
+    )
+
+    assert result is not None
+    assert result.guild is guild
+    assert result.dispatch_type == "GUILD_SOUNDBOARD_SOUND_DELETE"
+    assert result.dispatch_payload is not None
+    assert result.dispatch_payload["id"] == str(sound.id)
+    assert deleted == [sound]
+    assert item.asset_binding is None
+    assert [call.args[4] for call in queue_mutation.await_args_list] == [
+        "guild.soundboard.sound.delete",
+        "guild.soundboard.sounds.update",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_public_asset_requires_a_current_non_null_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,6 +486,54 @@ async def test_public_emoji_rejects_a_hash_with_any_terminal_duplicate(
     assert "attachments.content_sha256 =" in statement_sql
     assert "attachments_1.content_sha256 = attachments.content_sha256" in statement_sql
     assert "attachments_1.scan_status IN" in statement_sql
+
+
+@pytest.mark.asyncio
+async def test_public_emoji_resolves_application_emoji_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emoji = SimpleNamespace(
+        id=41,
+        application_id=12,
+        application_domain=LOCAL_DOMAIN,
+        media_hash=DIGEST,
+        available=True,
+    )
+    statements: list[object] = []
+    scalar_values = iter((emoji, emoji, None))
+    digest_lock = AsyncMock()
+
+    class Session:
+        async def get(self, model: object, key: object) -> object | None:
+            assert model is Emoji
+            assert key == (emoji.id, emoji.application_domain)
+            return None
+
+        async def scalar(self, statement: object) -> object:
+            statements.append(statement)
+            return next(scalar_values)
+
+    monkeypatch.setattr(media_api, "lock_asset_digest", digest_lock)
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.public_emoji(
+            emoji_id=cast(Any, emoji.id),
+            variant="original",
+            session=cast(Any, Session()),
+            settings=settings(),
+        )
+
+    assert raised.value.status_code == 404
+    digest_lock.assert_awaited_once_with(ANY, DIGEST)
+    initial_sql = str(statements[0].compile(dialect=postgresql.dialect()))
+    revalidated_sql = str(statements[1].compile(dialect=postgresql.dialect()))
+    attachment_statement = statements[2].compile(dialect=postgresql.dialect())
+    assert ApplicationEmoji.__tablename__ in initial_sql
+    assert "application_emojis.media_hash =" in revalidated_sql
+    assert (
+        f"application:{LOCAL_DOMAIN}:{emoji.application_id}:emoji:{emoji.id}"
+        in attachment_statement.params.values()
+    )
 
 
 @pytest.mark.asyncio
@@ -596,7 +740,7 @@ async def test_bounded_digest_repair_clears_duplicate_user_projection(
 
     monkeypatch.setattr(asset_invalidation, "lock_asset_digest", lock)
     queue_profiles = AsyncMock(return_value={REMOTE_DOMAIN})
-    monkeypatch.setattr(asset_invalidation, "queue_friend_profile_updates", queue_profiles)
+    monkeypatch.setattr(asset_invalidation, "queue_profile_updates", queue_profiles)
 
     (
         invalidations,
@@ -615,7 +759,7 @@ async def test_bounded_digest_repair_clears_duplicate_user_projection(
     assert duplicate_purge_refs == [(duplicate.id, duplicate.origin_domain)]
     assert len(invalidations) == 1
     assert invalidations[0].user is user
-    assert invalidations[0].friend_destinations == {REMOTE_DOMAIN}
+    assert invalidations[0].profile_destinations == {REMOTE_DOMAIN}
     assert user.avatar_hash is None
     assert user.profile_version == 5
     assert duplicate.asset_binding is None
@@ -928,6 +1072,7 @@ def test_public_asset_redirect_has_a_short_revocable_cache_window(
 
     assert captured["expires"] == media_api.PUBLIC_MEDIA_CAPABILITY_SECONDS == 300
     assert response.headers["Cache-Control"] == "public, max-age=60, must-revalidate"
+    assert response.headers["X-Kaede-Media-Origin"] == "https://objects.example"
 
 
 def test_terminal_cleanup_retains_proof_for_bound_or_clean_unbound_public_duplicates() -> None:
@@ -1157,7 +1302,7 @@ async def test_media_process_wakes_guild_asset_mutation_only_after_verdict_commi
         user=user,
         guild=guild,
         dispatch_type="GUILD_UPDATE",
-        friend_destinations={REMOTE_DOMAIN},
+        profile_destinations={REMOTE_DOMAIN},
     )
     invalidate = AsyncMock(return_value=prepared)
     monkeypatch.setattr(tasks, "invalidate_terminal_asset_binding", invalidate)

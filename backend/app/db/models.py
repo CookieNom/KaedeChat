@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     Computed,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Identity,
@@ -28,6 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.permissions import ALL_PERMISSIONS
 from app.db.base import Base
 
 DOMAIN_LENGTH = 253
@@ -164,6 +166,11 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Private authority state. It is never included in federated profiles;
+    # remote authorities receive only a signed, request-scoped adult attestation.
+    age_assurance_state: Mapped[str] = mapped_column(
+        String(16), default="unknown", server_default="unknown", nullable=False
+    )
     profile_version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     e2ee_device_generation: Mapped[int] = mapped_column(
         BigInteger, server_default="0", nullable=False
@@ -192,6 +199,14 @@ class User(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint("username ~ '^[a-z0-9_.]{2,32}$'", name="username_format"),
         CheckConstraint("account_type IN ('human','bot')", name="account_type_value"),
+        CheckConstraint(
+            "age_assurance_state IN ('unknown','adult','minor')",
+            name="age_assurance_state_value",
+        ),
+        CheckConstraint(
+            "age_assurance_state = 'unknown' OR (is_local AND account_type = 'human')",
+            name="age_assurance_local_human_only",
+        ),
         CheckConstraint(
             "NOT is_local OR account_type = 'bot' OR password_hash IS NOT NULL",
             name="local_auth_fields",
@@ -331,6 +346,9 @@ class UserSettings(Base, LocalUserMixin, TimestampMixin):
     locale: Mapped[str] = mapped_column(String(16), server_default="en-US")
     theme: Mapped[str] = mapped_column(String(16), server_default="system")
     dm_privacy: Mapped[str] = mapped_column(String(16), server_default="shared_guild")
+    age_restricted_dm_commands_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     notification_settings: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=dict, server_default="{}"
     )
@@ -1036,6 +1054,35 @@ class Guild(Base, FederatedIdMixin, TimestampMixin):
     description: Mapped[str | None] = mapped_column(String(500))
     icon_hash: Mapped[str | None] = mapped_column(String(128))
     banner_hash: Mapped[str | None] = mapped_column(String(128))
+    verification_level: Mapped[int] = mapped_column(
+        SmallInteger, server_default="0", nullable=False
+    )
+    default_message_notifications: Mapped[int] = mapped_column(
+        SmallInteger, server_default="0", nullable=False
+    )
+    explicit_content_filter: Mapped[int] = mapped_column(
+        SmallInteger, server_default="0", nullable=False
+    )
+    preferred_locale: Mapped[str] = mapped_column(
+        String(35), server_default="en-US", nullable=False
+    )
+    afk_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    afk_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    afk_timeout: Mapped[int] = mapped_column(Integer, server_default="300", nullable=False)
+    system_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    system_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    system_channel_flags: Mapped[int] = mapped_column(
+        BigInteger, server_default="0", nullable=False
+    )
+    rules_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    rules_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    public_updates_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    public_updates_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    safety_alerts_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    safety_alerts_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    community_enabled: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    invites_disabled_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dms_disabled_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     owner_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
     next_event_seq: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
@@ -1070,6 +1117,71 @@ class Guild(Base, FederatedIdMixin, TimestampMixin):
             deferrable=True,
             initially="DEFERRED",
             use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["afk_channel_id", "afk_channel_domain", "id", "origin_domain"],
+            ["channels.id", "channels.origin_domain", "channels.guild_id", "channels.guild_domain"],
+            name="fk_guilds_afk_channel_ref",
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["system_channel_id", "system_channel_domain", "id", "origin_domain"],
+            ["channels.id", "channels.origin_domain", "channels.guild_id", "channels.guild_domain"],
+            name="fk_guilds_system_channel_ref",
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["rules_channel_id", "rules_channel_domain", "id", "origin_domain"],
+            ["channels.id", "channels.origin_domain", "channels.guild_id", "channels.guild_domain"],
+            name="fk_guilds_rules_channel_ref",
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["public_updates_channel_id", "public_updates_channel_domain", "id", "origin_domain"],
+            ["channels.id", "channels.origin_domain", "channels.guild_id", "channels.guild_domain"],
+            name="fk_guilds_public_updates_channel_ref",
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["safety_alerts_channel_id", "safety_alerts_channel_domain", "id", "origin_domain"],
+            ["channels.id", "channels.origin_domain", "channels.guild_id", "channels.guild_domain"],
+            name="fk_guilds_safety_alerts_channel_ref",
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+        ),
+        CheckConstraint(
+            "verification_level BETWEEN 0 AND 4",
+            name="verification_level_range",
+        ),
+        CheckConstraint(
+            "default_message_notifications BETWEEN 0 AND 1",
+            name="default_message_notifications_range",
+        ),
+        CheckConstraint(
+            "explicit_content_filter BETWEEN 0 AND 2",
+            name="explicit_content_filter_range",
+        ),
+        CheckConstraint(
+            "afk_timeout IN (60,300,900,1800,3600)",
+            name="afk_timeout_value",
+        ),
+        CheckConstraint("system_channel_flags >= 0", name="system_channel_flags_nonnegative"),
+        CheckConstraint(
+            "(afk_channel_id IS NULL) = (afk_channel_domain IS NULL) AND "
+            "(system_channel_id IS NULL) = (system_channel_domain IS NULL) AND "
+            "(rules_channel_id IS NULL) = (rules_channel_domain IS NULL) AND "
+            "(public_updates_channel_id IS NULL) = (public_updates_channel_domain IS NULL) AND "
+            "(safety_alerts_channel_id IS NULL) = (safety_alerts_channel_domain IS NULL)",
+            name="settings_channel_refs_complete",
         ),
         CheckConstraint(
             "sync_status IN ('ready','syncing','stale','failed','quota_paused')",
@@ -1254,6 +1366,10 @@ class GuildMember(Base, TimestampMixin):
     user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     nickname: Mapped[str | None] = mapped_column(String(100))
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Temporary invite memberships are removed after the user's final gateway
+    # session disconnects unless a role assignment promotes the membership.
+    temporary: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    last_guild_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     timeout_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     timeout_indefinite: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
@@ -1270,6 +1386,12 @@ class GuildMember(Base, TimestampMixin):
         CheckConstraint("voice_flags >= 0", name="nonnegative_voice_flags"),
         CheckConstraint("member_version >= 1", name="positive_member_version"),
         Index("ix_guild_members_user", "user_id", "user_domain"),
+        Index(
+            "ix_guild_members_prune_activity",
+            "guild_id",
+            "guild_domain",
+            "last_guild_activity_at",
+        ),
     )
 
 
@@ -1348,7 +1470,10 @@ class Role(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
         CheckConstraint("position >= 0", name="nonnegative_position"),
         CheckConstraint("permissions >= 0", name="nonnegative_permissions"),
-        CheckConstraint("(permissions & ~285982278599306495) = 0", name="known_permission_mask"),
+        CheckConstraint(
+            f"(permissions & ~{ALL_PERMISSIONS}) = 0",
+            name="known_permission_mask",
+        ),
         CheckConstraint("color BETWEEN 0 AND 16777215", name="color_range"),
         CheckConstraint(
             "icon_hash IS NULL OR char_length(icon_hash) = 64", name="icon_hash_length"
@@ -1393,6 +1518,7 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     guild_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     type: Mapped[int] = mapped_column(Integer, nullable=False)
     unavailable: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    nsfw: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     name: Mapped[str | None] = mapped_column(String(100))
     # Forum guidelines may use Discord's 4096-character limit. API schemas
     # retain the 1024-character limit for channel types that do not support it.
@@ -1404,6 +1530,13 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
         Boolean, server_default=false(), nullable=False
     )
     rate_limit_per_user: Mapped[int] = mapped_column(Integer, server_default="0")
+    bitrate: Mapped[int | None] = mapped_column(Integer)
+    user_limit: Mapped[int | None] = mapped_column(Integer)
+    # Kept nullable and opaque so a future deployment can negotiate regional
+    # routing without baking a provider-specific region list into the schema.
+    rtc_region: Mapped[str | None] = mapped_column(String(64))
+    video_quality_mode: Mapped[int | None] = mapped_column(SmallInteger)
+    voice_status: Mapped[str | None] = mapped_column(String(500))
     flags: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     owner_id: Mapped[int | None] = mapped_column(BigInteger)
     owner_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
@@ -1529,7 +1662,7 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             initially="DEFERRED",
             use_alter=True,
         ),
-        CheckConstraint("type IN (0,1,2,4,5,10,11,12,15,17)", name="channel_type"),
+        CheckConstraint("type IN (0,1,2,4,5,10,11,12,13,15,17)", name="channel_type"),
         CheckConstraint(
             "encryption_mode IN ('plaintext','e2ee')",
             name="channel_encryption_mode_value",
@@ -1652,6 +1785,27 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             name="default_thread_rate_limit_range",
         ),
         CheckConstraint(
+            "(type IN (2,13) AND bitrate IS NOT NULL AND user_limit IS NOT NULL "
+            "AND video_quality_mode IS NOT NULL) OR "
+            "(type NOT IN (2,13) AND bitrate IS NULL AND user_limit IS NULL "
+            "AND rtc_region IS NULL AND video_quality_mode IS NULL AND voice_status IS NULL)",
+            name="voice_metadata_context",
+        ),
+        CheckConstraint(
+            "bitrate IS NULL OR bitrate BETWEEN 8000 AND 384000",
+            name="voice_bitrate_range",
+        ),
+        CheckConstraint(
+            "user_limit IS NULL OR "
+            "(type = 2 AND user_limit BETWEEN 0 AND 99) OR "
+            "(type = 13 AND user_limit BETWEEN 0 AND 10000)",
+            name="voice_user_limit_range",
+        ),
+        CheckConstraint(
+            "video_quality_mode IS NULL OR video_quality_mode IN (1,2)",
+            name="video_quality_mode_value",
+        ),
+        CheckConstraint(
             "jsonb_typeof(available_tags) = 'array' AND jsonb_array_length(available_tags) <= 20",
             name="available_tags_value",
         ),
@@ -1727,6 +1881,118 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             "starter_message_domain",
             unique=True,
             postgresql_where=text("type IN (10,11,12) AND starter_message_id IS NOT NULL"),
+        ),
+    )
+
+
+class EncryptedForumStarterReservation(Base, TimestampMixin):
+    """Durable, idempotent ownership of an E2EE forum's first message."""
+
+    __tablename__ = "encrypted_forum_starter_reservations"
+    thread_id: Mapped[int] = mapped_column(BigInteger)
+    thread_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    parent_id: Mapped[int] = mapped_column(BigInteger)
+    parent_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    claimant_kind: Mapped[str] = mapped_column(String(16))
+    claimant_id: Mapped[int] = mapped_column(BigInteger)
+    claimant_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    worker_id: Mapped[int | None] = mapped_column(BigInteger)
+    claimant_device_id: Mapped[str | None] = mapped_column(String(48))
+    application_id: Mapped[int | None] = mapped_column(BigInteger)
+    application_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    installation_type: Mapped[str | None] = mapped_column(String(24))
+    installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    installation_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    installation_revision: Mapped[int | None] = mapped_column(BigInteger)
+    webhook_id: Mapped[int | None] = mapped_column(BigInteger)
+    webhook_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    client_nonce: Mapped[str] = mapped_column(String(64))
+    reservation_key: Mapped[bytes] = mapped_column(LargeBinary(32))
+    request_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
+    claim_request_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32))
+    claimed_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    claimed_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        PrimaryKeyConstraint("thread_id", "thread_domain"),
+        UniqueConstraint("reservation_key", name="uq_encrypted_forum_starter_reservation_key"),
+        ForeignKeyConstraint(
+            ["thread_id", "thread_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["parent_id", "parent_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["claimed_message_id", "claimed_message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "claimant_kind IN ('human','bot','webhook')",
+            name="claimant_kind_value",
+        ),
+        CheckConstraint(
+            "(application_id IS NULL) = (application_domain IS NULL)",
+            name="application_ref_complete",
+        ),
+        CheckConstraint(
+            "(installation_type IS NULL) = (installation_id IS NULL) "
+            "AND (installation_id IS NULL) = (installation_domain IS NULL) "
+            "AND (installation_id IS NULL) = (installation_revision IS NULL)",
+            name="installation_lineage_complete",
+        ),
+        CheckConstraint(
+            "installation_type IS NULL OR installation_type IN "
+            "('guild_install','user_install','dm_capability','webhook')",
+            name="installation_type_value",
+        ),
+        CheckConstraint(
+            "installation_revision IS NULL OR installation_revision >= 1",
+            name="installation_revision_positive",
+        ),
+        CheckConstraint(
+            "(webhook_id IS NULL) = (webhook_domain IS NULL)",
+            name="webhook_ref_complete",
+        ),
+        CheckConstraint(
+            "(claimant_kind = 'human' AND worker_id IS NULL "
+            "AND claimant_device_id IS NULL AND application_id IS NULL "
+            "AND installation_id IS NULL AND webhook_id IS NULL) OR "
+            "(claimant_kind = 'bot' AND application_id IS NOT NULL "
+            "AND installation_id IS NOT NULL AND webhook_id IS NULL "
+            "AND worker_id IS NOT NULL AND claimant_device_id IS NOT NULL) OR "
+            "(claimant_kind = 'webhook' AND webhook_id IS NOT NULL)",
+            name="claimant_lineage",
+        ),
+        CheckConstraint(
+            "claimant_device_id IS NULL OR claimant_device_id ~ '^(kbe|kwe)_[A-Za-z0-9_-]{43}$'",
+            name="claimant_device_id_format",
+        ),
+        CheckConstraint(
+            "(claimed_message_id IS NULL) = (claimed_message_domain IS NULL) "
+            "AND (claimed_at IS NULL) = (claimed_message_id IS NULL) "
+            "AND (claim_request_hash IS NULL) = (claimed_message_id IS NULL) "
+            "AND (claimed_message_id IS NULL OR "
+            "(claimed_message_id = thread_id AND claimed_message_domain = thread_domain))",
+            name="claim_state",
+        ),
+        CheckConstraint(
+            "char_length(client_nonce) BETWEEN 1 AND 64 AND client_nonce ~ '^[A-Za-z0-9._:-]+$'",
+            name="client_nonce_format",
+        ),
+        CheckConstraint(
+            "octet_length(reservation_key) = 32 AND octet_length(request_hash) = 32 "
+            "AND (claim_request_hash IS NULL OR octet_length(claim_request_hash) = 32)",
+            name="digest_lengths",
+        ),
+        Index(
+            "ix_encrypted_forum_starter_reservations_parent",
+            "parent_id",
+            "parent_domain",
         ),
     )
 
@@ -2134,7 +2400,7 @@ class ChannelOverwrite(Base):
         CheckConstraint("allow >= 0 AND deny >= 0", name="nonnegative_masks"),
         CheckConstraint("(allow & deny) = 0", name="disjoint_masks"),
         CheckConstraint(
-            "((allow | deny) & ~285982278599306495) = 0",
+            f"((allow | deny) & ~{ALL_PERMISSIONS}) = 0",
             name="known_permission_masks",
         ),
     )
@@ -2159,16 +2425,63 @@ class Message(Base, FederatedIdMixin):
     )
     encryption_epoch: Mapped[int | None] = mapped_column(BigInteger)
     message_type: Mapped[int] = mapped_column(Integer, server_default="0")
+    tts: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     flags: Mapped[int] = mapped_column(Integer, server_default="0")
     client_nonce: Mapped[str | None] = mapped_column(String(64))
+    # A guild proxy nonce remains replayable after mutable membership, role,
+    # mention, or application state changes.  The message owns the durable
+    # request binding and points at the exact retained authority event; the
+    # event repeats the versioned digest as a signed delivery receipt.
+    proxy_request_fingerprint_version: Mapped[int | None] = mapped_column(Integer)
+    proxy_request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    proxy_commit_seq: Mapped[int | None] = mapped_column(BigInteger)
     referenced_message_id: Mapped[int | None] = mapped_column(BigInteger)
     referenced_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    # Exact Discord Message Reference wire projection.  The legacy composite
+    # columns above remain the indexed reply/source identity; this JSONB also
+    # preserves channel-only system references (for example types 12 and 18)
+    # and federation domain qualifiers that cannot be reconstructed later.
+    message_reference: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     mention_user_refs: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, default=list, server_default="[]"
     )
+    mention_role_refs: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default="[]"
+    )
+    mention_everyone: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    embeds: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default="[]")
+    components: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default="[]"
+    )
+    sticker_items: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default="[]"
+    )
+    application_id: Mapped[int | None] = mapped_column(BigInteger)
+    application_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    # Authority-derived, immutable lineage for public interaction responses.
+    # Keep this outside E2EE bodies so every replica can validate and render
+    # Discord-style command/component attribution without seeing message text.
+    interaction_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    view_version: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    forwarded_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    forwarded_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    forwarded_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    forwarded_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    # Ordinary forwards retain a server-generated, author-free projection.
+    # Announcement crossposts keep their existing live reference and NULL here.
+    forward_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # Automatic type-46 POLL_RESULT messages expose only authority-computed,
+    # label-free vote metadata here.  Plaintext question/answer labels stay in
+    # the ordinary result embed; encrypted labels remain exclusively in MLS.
+    poll_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     webhook_id: Mapped[int | None] = mapped_column(BigInteger)
+    webhook_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     webhook_name: Mapped[str | None] = mapped_column(String(80))
     webhook_avatar_hash: Mapped[str | None] = mapped_column(String(128))
+    webhook_avatar_url: Mapped[str | None] = mapped_column(String(2048))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -2185,7 +2498,6 @@ class Message(Base, FederatedIdMixin):
             ["channel_id", "channel_domain"], ["channels.id", "channels.origin_domain"]
         ),
         ForeignKeyConstraint(["author_id", "author_domain"], ["users.id", "users.origin_domain"]),
-        ForeignKeyConstraint(["webhook_id"], ["webhooks.id"], ondelete="SET NULL"),
         # Reply references deliberately remain opaque after an older message
         # is evicted from a non-authoritative DM cache. Mutation paths validate
         # that a newly supplied reference belongs to this channel.
@@ -2194,7 +2506,40 @@ class Message(Base, FederatedIdMixin):
             "(referenced_message_id IS NULL) = (referenced_message_domain IS NULL)",
             name="referenced_message_ref_complete",
         ),
+        CheckConstraint(
+            "message_reference IS NULL OR jsonb_typeof(message_reference) = 'object'",
+            name="message_reference_is_object",
+        ),
+        CheckConstraint(
+            "message_type <> 12 OR message_reference IS NOT NULL",
+            name="channel_follow_has_reference",
+        ),
+        CheckConstraint(
+            "(webhook_id IS NULL) = (webhook_domain IS NULL)",
+            name="webhook_ref_complete",
+        ),
         CheckConstraint("flags >= 0", name="nonnegative_flags"),
+        CheckConstraint(
+            "(proxy_request_fingerprint_version IS NULL) = (proxy_request_fingerprint IS NULL)",
+            name="proxy_request_fingerprint_complete",
+        ),
+        CheckConstraint(
+            "proxy_request_fingerprint_version IS NULL OR proxy_request_fingerprint_version >= 1",
+            name="proxy_request_fingerprint_version_positive",
+        ),
+        CheckConstraint(
+            "proxy_request_fingerprint IS NULL OR proxy_request_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="proxy_request_fingerprint_format",
+        ),
+        CheckConstraint(
+            "proxy_commit_seq IS NULL OR proxy_commit_seq >= 1",
+            name="proxy_commit_seq_positive",
+        ),
+        CheckConstraint(
+            "proxy_request_fingerprint IS NULL OR "
+            "(client_nonce IS NOT NULL AND proxy_commit_seq IS NOT NULL)",
+            name="proxy_request_fingerprint_has_nonce_receipt",
+        ),
         CheckConstraint("content IS NULL OR char_length(content) <= 4000", name="content_length"),
         CheckConstraint(
             "deleted_at IS NULL OR content IS NULL", name="deleted_message_has_no_content"
@@ -2211,6 +2556,54 @@ class Message(Base, FederatedIdMixin):
             name="message_encryption_epoch_nonnegative",
         ),
         CheckConstraint("jsonb_typeof(mention_user_refs) = 'array'", name="mentions_are_array"),
+        CheckConstraint(
+            "jsonb_typeof(mention_role_refs) = 'array'",
+            name="role_mentions_are_array",
+        ),
+        CheckConstraint("jsonb_typeof(embeds) = 'array'", name="embeds_are_array"),
+        CheckConstraint("jsonb_typeof(components) = 'array'", name="components_are_array"),
+        CheckConstraint(
+            "jsonb_typeof(sticker_items) = 'array' AND jsonb_array_length(sticker_items) <= 3",
+            name="sticker_items_are_bounded_array",
+        ),
+        CheckConstraint(
+            "(application_id IS NULL) = (application_domain IS NULL)",
+            name="application_ref_complete",
+        ),
+        CheckConstraint(
+            "interaction_metadata IS NULL OR jsonb_typeof(interaction_metadata) = 'object'",
+            name="interaction_metadata_is_object",
+        ),
+        CheckConstraint(
+            "(forwarded_message_id IS NULL) = (forwarded_message_domain IS NULL)",
+            name="forwarded_message_ref_complete",
+        ),
+        CheckConstraint(
+            "(forwarded_channel_id IS NULL) = (forwarded_channel_domain IS NULL)",
+            name="forwarded_channel_ref_complete",
+        ),
+        CheckConstraint(
+            "forward_snapshot IS NULL OR jsonb_typeof(forward_snapshot) = 'object'",
+            name="forward_snapshot_is_object",
+        ),
+        CheckConstraint(
+            "forward_snapshot IS NULL OR "
+            "(forwarded_message_id IS NOT NULL AND forwarded_channel_id IS NOT NULL)",
+            name="forward_snapshot_has_source",
+        ),
+        CheckConstraint(
+            "poll_result IS NULL OR jsonb_typeof(poll_result) = 'object'",
+            name="poll_result_is_object",
+        ),
+        CheckConstraint(
+            "(message_type = 46) = (poll_result IS NOT NULL)",
+            name="poll_result_matches_message_type",
+        ),
+        CheckConstraint(
+            "message_type <> 46 OR referenced_message_id IS NOT NULL",
+            name="poll_result_has_reference",
+        ),
+        CheckConstraint("view_version >= 0", name="nonnegative_view_version"),
         Index("ix_messages_channel_id_desc", "channel_id", "channel_domain", "id"),
         Index("ix_messages_author_id_desc", "author_id", "author_domain", "id"),
         Index("ix_messages_id_brin", "id", postgresql_using="brin"),
@@ -2223,6 +2616,13 @@ class Message(Base, FederatedIdMixin):
             "author_domain",
             "client_nonce",
             postgresql_where=text("client_nonce IS NOT NULL"),
+        ),
+        Index(
+            "ix_messages_proxy_commit_receipt",
+            "proxy_commit_seq",
+            "channel_id",
+            "channel_domain",
+            postgresql_where=text("proxy_commit_seq IS NOT NULL"),
         ),
         {"postgresql_partition_by": "RANGE (id)"},
     )
@@ -2553,10 +2953,22 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "attachments"
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    # Announcement follower copies own a distinct attachment identity while
+    # retaining this immutable provenance for edit/delete convergence.
+    source_attachment_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_attachment_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    # Immutable upload-ticket provenance prevents a channel-scoped capability
+    # from being rebound through an interaction in another channel.
+    upload_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    upload_channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     report_id: Mapped[int | None] = mapped_column(BigInteger)
     uploader_id: Mapped[int] = mapped_column(BigInteger)
     uploader_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     bot_installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    bot_user_installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    bot_dm_capability_id: Mapped[int | None] = mapped_column(BigInteger)
+    interaction_id: Mapped[int | None] = mapped_column(BigInteger)
+    interaction_response_id: Mapped[int | None] = mapped_column(BigInteger)
     filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(255))
     size: Mapped[int] = mapped_column(BigInteger)
@@ -2564,6 +2976,8 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
     staging_object_key: Mapped[str | None] = mapped_column(String(512))
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
+    duration_secs: Mapped[float | None] = mapped_column(Float)
+    waveform: Mapped[str | None] = mapped_column(String(344))
     blurhash: Mapped[str | None] = mapped_column(String(128))
     content_sha256: Mapped[str | None] = mapped_column(String(64))
     perceptual_hash: Mapped[str | None] = mapped_column(String(64))
@@ -2600,9 +3014,66 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             ["bot_installations.id"],
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["bot_user_installation_id"],
+            ["bot_user_installations.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["bot_dm_capability_id"],
+            ["bot_dm_capabilities.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["interaction_id"],
+            ["bot_interactions.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["interaction_response_id"],
+            ["bot_interaction_responses.id"],
+            ondelete="CASCADE",
+        ),
         CheckConstraint(
             "(message_id IS NULL) = (message_domain IS NULL)",
             name="message_ref_complete",
+        ),
+        CheckConstraint(
+            "(source_attachment_id IS NULL) = (source_attachment_domain IS NULL)",
+            name="source_attachment_ref_complete",
+        ),
+        CheckConstraint(
+            "(upload_channel_id IS NULL) = (upload_channel_domain IS NULL)",
+            name="upload_channel_ref_complete",
+        ),
+        CheckConstraint(
+            "(duration_secs IS NULL) = (waveform IS NULL)",
+            name="voice_metadata_complete",
+        ),
+        CheckConstraint(
+            "duration_secs IS NULL OR (duration_secs > 0 AND duration_secs <= 1200 "
+            "AND length(waveform) BETWEEN 4 AND 344 AND content_type LIKE 'audio/%' "
+            "AND encryption_mode = 'plaintext')",
+            name="voice_metadata_valid",
+        ),
+        CheckConstraint(
+            "(bot_installation_id IS NOT NULL)::int + "
+            "(bot_user_installation_id IS NOT NULL)::int + "
+            "(bot_dm_capability_id IS NOT NULL)::int <= 1",
+            name="bot_usage_owner_exclusive",
+        ),
+        CheckConstraint(
+            "(message_id IS NOT NULL)::int + (interaction_id IS NOT NULL)::int + "
+            "(interaction_response_id IS NOT NULL)::int <= 1",
+            name="message_or_interaction_owner_exclusive",
+        ),
+        CheckConstraint(
+            "interaction_id IS NULL OR report_id IS NULL",
+            name="interaction_attachment_policy",
+        ),
+        CheckConstraint(
+            "interaction_response_id IS NULL OR report_id IS NULL",
+            name="interaction_response_attachment_policy",
         ),
         CheckConstraint(
             "report_id IS NULL OR "
@@ -2632,7 +3103,9 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint(
             "purpose IN ('attachment','avatar','banner','guild_icon',"
-            "'guild_banner','emoji','sticker','webhook_avatar','role_icon')",
+            "'guild_banner','emoji','sticker','webhook_avatar','role_icon',"
+            "'soundboard','scheduled_event_image','application_asset','application_emoji',"
+            "'webhook_attachment')",
             name="purpose_value",
         ),
         CheckConstraint(
@@ -2645,6 +3118,13 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint("jsonb_typeof(variants) = 'object'", name="variants_object"),
         UniqueConstraint("asset_binding", name="uq_attachments_asset_binding"),
+        UniqueConstraint(
+            "message_id",
+            "message_domain",
+            "source_attachment_id",
+            "source_attachment_domain",
+            name="uq_attachments_message_source_attachment",
+        ),
         Index("ix_attachments_report_id", "report_id"),
         Index(
             "ix_attachments_pending_gc",
@@ -2658,6 +3138,10 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         ),
         Index("ix_attachments_uploader_usage", "uploader_id", "uploader_domain"),
         Index("ix_attachments_bot_installation_usage", "bot_installation_id"),
+        Index("ix_attachments_bot_user_installation_usage", "bot_user_installation_id"),
+        Index("ix_attachments_bot_dm_capability_usage", "bot_dm_capability_id"),
+        Index("ix_attachments_interaction", "interaction_id"),
+        Index("ix_attachments_interaction_response", "interaction_response_id"),
         Index(
             "ix_attachments_live_message",
             "message_id",
@@ -2699,6 +3183,416 @@ class Reaction(Base):
         ),
         ForeignKeyConstraint(["user_id", "user_domain"], ["users.id", "users.origin_domain"]),
         CheckConstraint("char_length(emoji_key) > 0", name="nonempty_emoji"),
+    )
+
+
+class Poll(Base):
+    """A durable poll attached one-to-one to a plaintext message."""
+
+    __tablename__ = "polls"
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    question: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    allow_multiselect: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    layout_type: Mapped[int] = mapped_column(SmallInteger, server_default="1", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("message_id", "message_domain"),
+        ForeignKeyConstraint(
+            ["message_id", "message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("jsonb_typeof(question) = 'object'", name="question_is_object"),
+        CheckConstraint("layout_type = 1", name="layout_type_value"),
+        CheckConstraint("expires_at > created_at", name="positive_duration"),
+    )
+
+
+class PollAnswer(Base):
+    __tablename__ = "poll_answers"
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    answer_id: Mapped[int] = mapped_column(SmallInteger)
+    text: Mapped[str | None] = mapped_column(String(55))
+    emoji: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    __table_args__ = (
+        PrimaryKeyConstraint("message_id", "message_domain", "answer_id"),
+        ForeignKeyConstraint(
+            ["message_id", "message_domain"],
+            ["polls.message_id", "polls.message_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("answer_id BETWEEN 1 AND 10", name="answer_id_range"),
+        CheckConstraint("text IS NOT NULL OR emoji IS NOT NULL", name="answer_has_text_or_emoji"),
+        CheckConstraint("emoji IS NULL OR jsonb_typeof(emoji) = 'object'", name="emoji_is_object"),
+    )
+
+
+class PollVote(Base):
+    __tablename__ = "poll_votes"
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    answer_id: Mapped[int] = mapped_column(SmallInteger)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("message_id", "message_domain", "answer_id", "user_id", "user_domain"),
+        ForeignKeyConstraint(
+            ["message_id", "message_domain", "answer_id"],
+            ["poll_answers.message_id", "poll_answers.message_domain", "poll_answers.answer_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["user_id", "user_domain"], ["users.id", "users.origin_domain"]),
+        Index("ix_poll_votes_voter", "user_id", "user_domain", "message_id"),
+    )
+
+
+class MessageView(Base, TimestampMixin):
+    """Server ownership/version fence for interactive message components."""
+
+    __tablename__ = "message_views"
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    application_id: Mapped[int] = mapped_column(BigInteger)
+    application_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    # Exact installation selected when this interactive view was authored.
+    # IDs are qualified by the message authority because local installation
+    # surrogates can collide across federated instances.
+    integration_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    installation_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    installation_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
+    persistent: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        PrimaryKeyConstraint("message_id", "message_domain"),
+        ForeignKeyConstraint(
+            ["message_id", "message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["application_id", "application_domain"],
+            ["bot_applications.id", "bot_applications.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("version >= 1", name="positive_version"),
+        CheckConstraint(
+            "integration_type IN ('guild_install','user_install','dm_capability')",
+            name="message_view_integration_type_value",
+        ),
+        CheckConstraint(
+            "installation_revision >= 1",
+            name="message_view_installation_revision_positive",
+        ),
+        CheckConstraint("persistent OR expires_at IS NOT NULL", name="transient_view_has_expiry"),
+    )
+
+
+class ChannelFollow(Base, TimestampMixin):
+    __tablename__ = "channel_follows"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_channel_id: Mapped[int] = mapped_column(BigInteger)
+    source_channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    target_channel_id: Mapped[int] = mapped_column(BigInteger)
+    target_channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    creator_id: Mapped[int] = mapped_column(BigInteger)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str | None] = mapped_column(String(80))
+    avatar_hash: Mapped[str | None] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_channel_id", "source_channel_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["target_channel_id", "target_channel_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
+        UniqueConstraint(
+            "source_channel_id",
+            "source_channel_domain",
+            "target_channel_id",
+            "target_channel_domain",
+            name="uq_channel_follow_pair",
+        ),
+        CheckConstraint(
+            "(source_channel_id, source_channel_domain) <> "
+            "(target_channel_id, target_channel_domain)",
+            name="source_and_target_differ",
+        ),
+        CheckConstraint(
+            "name IS NULL OR (name = btrim(name) AND length(name) BETWEEN 1 AND 80)",
+            name="name_format",
+        ),
+        CheckConstraint(
+            "avatar_hash IS NULL OR avatar_hash ~ '^[0-9a-f]{64}$'",
+            name="avatar_hash_format",
+        ),
+    )
+
+
+class MessageCrosspost(Base):
+    __tablename__ = "message_crossposts"
+    source_message_id: Mapped[int] = mapped_column(BigInteger)
+    source_message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    follow_id: Mapped[int] = mapped_column(BigInteger)
+    destination_message_id: Mapped[int] = mapped_column(BigInteger)
+    destination_message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("source_message_id", "source_message_domain", "follow_id"),
+        ForeignKeyConstraint(
+            ["source_message_id", "source_message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["follow_id"], ["channel_follows.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(
+            ["destination_message_id", "destination_message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "destination_message_id",
+            "destination_message_domain",
+            name="uq_message_crosspost_destination",
+        ),
+    )
+
+
+class FederatedChannelFollow(Base, TimestampMixin):
+    """One authority's half of a cross-instance announcement subscription.
+
+    Remote channel identities deliberately are not foreign keys.  The target
+    authority owns the signed authorization receipt while the source authority
+    owns publication; each stores an exact, generation-fenced copy for its
+    role instead of pretending that a cached remote channel is authoritative.
+    """
+
+    __tablename__ = "federated_channel_follows"
+    id: Mapped[int] = mapped_column(BigInteger)
+    local_role: Mapped[str] = mapped_column(String(8))
+    source_channel_id: Mapped[int] = mapped_column(BigInteger)
+    source_channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    target_channel_id: Mapped[int] = mapped_column(BigInteger)
+    target_channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    source_authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    target_authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    creator_id: Mapped[int] = mapped_column(BigInteger)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    generation: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(
+        String(16), server_default="active", nullable=False
+    )
+    authorization_id: Mapped[str] = mapped_column(String(48), nullable=False)
+    authorization_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notice_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    notice_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str | None] = mapped_column(String(80))
+    avatar_hash: Mapped[str | None] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
+    authority_receipt: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "target_authority_domain", "local_role"),
+        UniqueConstraint(
+            "source_channel_id",
+            "source_channel_domain",
+            "target_channel_id",
+            "target_channel_domain",
+            "local_role",
+            name="uq_federated_channel_follow_pair_role",
+        ),
+        CheckConstraint("local_role IN ('source','target')", name="local_role_value"),
+        CheckConstraint("generation >= 1", name="positive_generation"),
+        CheckConstraint(
+            "lifecycle_state IN ('pending','accepted','active','revoked')",
+            name="lifecycle_state_value",
+        ),
+        CheckConstraint(
+            "active = (lifecycle_state = 'active')",
+            name="active_matches_lifecycle_state",
+        ),
+        CheckConstraint(
+            "authorization_id ~ '^kafi_[A-Za-z0-9_-]{43}$'",
+            name="authorization_id_format",
+        ),
+        CheckConstraint(
+            "(lifecycle_state = 'revoked') = (revoked_at IS NOT NULL)",
+            name="revoked_state_has_timestamp",
+        ),
+        CheckConstraint(
+            "lifecycle_state <> 'active' OR (activated_at IS NOT NULL AND revoked_at IS NULL)",
+            name="active_state_has_timestamp",
+        ),
+        CheckConstraint(
+            "lifecycle_state NOT IN ('pending','accepted') OR "
+            "(activated_at IS NULL AND revoked_at IS NULL)",
+            name="incomplete_state_timestamps",
+        ),
+        CheckConstraint(
+            "(notice_message_id IS NULL) = (notice_message_domain IS NULL)",
+            name="notice_message_ref_complete",
+        ),
+        CheckConstraint(
+            "notice_message_domain IS NULL OR notice_message_domain = target_channel_domain",
+            name="notice_matches_target",
+        ),
+        CheckConstraint(
+            "name IS NULL OR (name = btrim(name) AND length(name) BETWEEN 1 AND 80)",
+            name="name_format",
+        ),
+        CheckConstraint(
+            "avatar_hash IS NULL OR avatar_hash ~ '^[0-9a-f]{64}$'",
+            name="avatar_hash_format",
+        ),
+        CheckConstraint(
+            "source_authority_domain = source_channel_domain",
+            name="source_authority_matches_channel",
+        ),
+        CheckConstraint(
+            "target_authority_domain = target_channel_domain",
+            name="target_authority_matches_channel",
+        ),
+        CheckConstraint(
+            "(source_channel_id, source_channel_domain) <> "
+            "(target_channel_id, target_channel_domain)",
+            name="source_and_target_differ",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(authority_receipt) = 'object'",
+            name="authority_receipt_is_object",
+        ),
+        Index(
+            "ix_federated_channel_follows_source",
+            "source_channel_id",
+            "source_channel_domain",
+            "active",
+        ),
+        Index(
+            "ix_federated_channel_follows_target",
+            "target_channel_id",
+            "target_channel_domain",
+            "active",
+        ),
+    )
+
+
+class FederatedMessageCrosspost(Base):
+    """Idempotency receipt for one side of a federated live crosspost."""
+
+    __tablename__ = "federated_message_crossposts"
+    source_message_id: Mapped[int] = mapped_column(BigInteger)
+    source_message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    follow_id: Mapped[int] = mapped_column(BigInteger)
+    follow_authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    local_role: Mapped[str] = mapped_column(String(8))
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    destination_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    destination_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    delivery_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="delivered"
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_retry_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    source_projection: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_author_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "source_message_id",
+            "source_message_domain",
+            "follow_id",
+            "follow_authority_domain",
+            "local_role",
+        ),
+        ForeignKeyConstraint(
+            ["follow_id", "follow_authority_domain", "local_role"],
+            [
+                "federated_channel_follows.id",
+                "federated_channel_follows.target_authority_domain",
+                "federated_channel_follows.local_role",
+            ],
+            ondelete="CASCADE",
+            name="fk_federated_message_crossposts_follow_authority_ref",
+        ),
+        Index(
+            "uq_federated_message_crosspost_target_destination",
+            "destination_message_id",
+            "destination_message_domain",
+            "local_role",
+            unique=True,
+            postgresql_where=text("local_role = 'target'"),
+        ),
+        CheckConstraint("local_role IN ('source','target')", name="local_role_value"),
+        CheckConstraint("generation >= 1 AND attempts >= 0", name="positive_delivery_values"),
+        CheckConstraint(
+            "delivery_status IN ('pending','retry','delivered','terminal')",
+            name="delivery_status_value",
+        ),
+        CheckConstraint(
+            "(destination_message_id IS NULL) = (destination_message_domain IS NULL)",
+            name="destination_ref_complete",
+        ),
+        CheckConstraint(
+            "delivery_status <> 'delivered' OR destination_message_id IS NOT NULL",
+            name="completed_delivery_has_destination",
+        ),
+        CheckConstraint(
+            "(local_role = 'source' AND jsonb_typeof(source_projection) = 'object' "
+            "AND jsonb_typeof(source_author_profile) = 'object') OR "
+            "(local_role = 'target' AND source_projection IS NULL "
+            "AND source_author_profile IS NULL)",
+            name="source_job_projection_role",
+        ),
+        CheckConstraint(
+            "local_role <> 'target' OR (delivery_status = 'delivered' AND attempts = 1)",
+            name="target_receipt_is_delivered",
+        ),
+        Index(
+            "ix_federated_message_crossposts_destination",
+            "destination_message_id",
+            "destination_message_domain",
+        ),
+        Index(
+            "ix_federated_message_crossposts_follow",
+            "follow_id",
+            "follow_authority_domain",
+            "local_role",
+        ),
+        Index(
+            "ix_federated_message_crossposts_retry",
+            "local_role",
+            "delivery_status",
+            "next_retry_at",
+        ),
     )
 
 
@@ -2925,6 +3819,261 @@ class ReadState(Base, LocalUserMixin):
     )
 
 
+class GuildScheduledEvent(Base, FederatedIdMixin, TimestampMixin):
+    """A Discord-compatible scheduled event owned by a guild authority.
+
+    Entity and status values intentionally use Discord's published numeric
+    values.  Composite references remain explicit so a future federation
+    projection can carry events without changing the local database contract.
+    """
+
+    __tablename__ = "guild_scheduled_events"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    creator_id: Mapped[int] = mapped_column(BigInteger)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1000))
+    scheduled_start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scheduled_end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    privacy_level: Mapped[int] = mapped_column(SmallInteger, default=2, server_default="2")
+    status: Mapped[int] = mapped_column(SmallInteger, default=1, server_default="1")
+    entity_type: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    # References the live Stage instance created for a Stage event, when any.
+    entity_id: Mapped[int | None] = mapped_column(BigInteger)
+    entity_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    entity_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    recurrence_rule: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    image_hash: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        UniqueConstraint(
+            "id",
+            "origin_domain",
+            "guild_id",
+            "guild_domain",
+            name="uq_guild_scheduled_events_ref_guild",
+        ),
+        UniqueConstraint(
+            "id",
+            "origin_domain",
+            "guild_id",
+            "guild_domain",
+            "channel_id",
+            "channel_domain",
+            name="uq_guild_scheduled_events_stage_lineage",
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"],
+            ["guilds.id", "guilds.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "channels.id",
+                "channels.origin_domain",
+                "channels.guild_id",
+                "channels.guild_domain",
+            ],
+            name="fk_guild_scheduled_events_channel_ref",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["creator_id", "creator_domain"],
+            ["users.id", "users.origin_domain"],
+        ),
+        CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
+        CheckConstraint(
+            "(channel_id IS NULL) = (channel_domain IS NULL)",
+            name="channel_ref_complete",
+        ),
+        CheckConstraint(
+            "(entity_id IS NULL) = (entity_domain IS NULL)",
+            name="entity_ref_complete",
+        ),
+        CheckConstraint("char_length(name) BETWEEN 1 AND 100", name="name_length"),
+        CheckConstraint(
+            "description IS NULL OR char_length(description) BETWEEN 1 AND 1000",
+            name="description_length",
+        ),
+        CheckConstraint("privacy_level = 2", name="privacy_level_value"),
+        CheckConstraint("status IN (1,2,3,4)", name="status_value"),
+        CheckConstraint("entity_type IN (1,2,3)", name="entity_type_value"),
+        CheckConstraint(
+            "scheduled_end_time IS NULL OR scheduled_end_time > scheduled_start_time",
+            name="positive_duration",
+        ),
+        CheckConstraint(
+            "entity_metadata IS NULL OR jsonb_typeof(entity_metadata) = 'object'",
+            name="entity_metadata_object",
+        ),
+        CheckConstraint(
+            "recurrence_rule IS NULL OR jsonb_typeof(recurrence_rule) = 'object'",
+            name="recurrence_rule_object",
+        ),
+        CheckConstraint(
+            "(entity_type IN (1,2) AND channel_id IS NOT NULL "
+            "AND entity_metadata IS NULL) OR "
+            "(entity_type = 3 AND channel_id IS NULL "
+            "AND scheduled_end_time IS NOT NULL "
+            "AND entity_metadata IS NOT NULL "
+            "AND jsonb_typeof(entity_metadata->'location') = 'string' "
+            "AND char_length(entity_metadata->>'location') BETWEEN 1 AND 100)",
+            name="entity_fields_match_type",
+        ),
+        CheckConstraint(
+            "image_hash IS NULL OR char_length(image_hash) = 64",
+            name="image_hash_length",
+        ),
+        Index(
+            "ix_guild_scheduled_events_guild_status_start",
+            "guild_id",
+            "guild_domain",
+            "status",
+            "scheduled_start_time",
+        ),
+    )
+
+
+class StageInstance(Base, FederatedIdMixin, TimestampMixin):
+    """One live moderated Stage session in a guild Stage channel."""
+
+    __tablename__ = "stage_instances"
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    channel_type: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="13")
+    creator_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    topic: Mapped[str] = mapped_column(String(120), nullable=False)
+    privacy_level: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="2")
+    discoverable_disabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=true()
+    )
+    scheduled_event_id: Mapped[int | None] = mapped_column(BigInteger)
+    scheduled_event_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    empty_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "channel_type"],
+            ["channels.id", "channels.origin_domain", "channels.type"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "channels.id",
+                "channels.origin_domain",
+                "channels.guild_id",
+                "channels.guild_domain",
+            ],
+            name="fk_stage_instances_channel_guild_lineage",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"],
+            ["guilds.id", "guilds.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["creator_id", "creator_domain"],
+            ["users.id", "users.origin_domain"],
+        ),
+        ForeignKeyConstraint(
+            ["scheduled_event_id", "scheduled_event_domain"],
+            ["guild_scheduled_events.id", "guild_scheduled_events.origin_domain"],
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            [
+                "scheduled_event_id",
+                "scheduled_event_domain",
+                "guild_id",
+                "guild_domain",
+                "channel_id",
+                "channel_domain",
+            ],
+            [
+                "guild_scheduled_events.id",
+                "guild_scheduled_events.origin_domain",
+                "guild_scheduled_events.guild_id",
+                "guild_scheduled_events.guild_domain",
+                "guild_scheduled_events.channel_id",
+                "guild_scheduled_events.channel_domain",
+            ],
+            name="fk_stage_instances_scheduled_event_lineage",
+        ),
+        CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
+        CheckConstraint("channel_domain = guild_domain", name="channel_origin_matches_guild"),
+        CheckConstraint("creator_id >= 0", name="creator_id_nonnegative"),
+        CheckConstraint("channel_type = 13", name="channel_type"),
+        CheckConstraint("char_length(topic) BETWEEN 1 AND 120", name="topic_length"),
+        CheckConstraint("privacy_level = 2", name="privacy_level_value"),
+        CheckConstraint(
+            "(scheduled_event_id IS NULL) = (scheduled_event_domain IS NULL)",
+            name="scheduled_event_ref_complete",
+        ),
+        UniqueConstraint(
+            "channel_id",
+            "channel_domain",
+            name="uq_stage_instances_channel",
+        ),
+        UniqueConstraint(
+            "scheduled_event_id",
+            "scheduled_event_domain",
+            name="uq_stage_instances_scheduled_event",
+        ),
+    )
+
+
+class GuildScheduledEventSubscription(Base):
+    __tablename__ = "guild_scheduled_event_subscriptions"
+    event_id: Mapped[int] = mapped_column(BigInteger)
+    event_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("event_id", "event_domain", "user_id", "user_domain"),
+        ForeignKeyConstraint(
+            ["event_id", "event_domain", "guild_id", "guild_domain"],
+            [
+                "guild_scheduled_events.id",
+                "guild_scheduled_events.origin_domain",
+                "guild_scheduled_events.guild_id",
+                "guild_scheduled_events.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain", "user_id", "user_domain"],
+            [
+                "guild_members.guild_id",
+                "guild_members.guild_domain",
+                "guild_members.user_id",
+                "guild_members.user_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("event_domain = guild_domain", name="event_origin_matches_guild"),
+        Index(
+            "ix_guild_scheduled_event_subscriptions_user",
+            "user_id",
+            "user_domain",
+            "created_at",
+        ),
+    )
+
+
 class Invite(Base, TimestampMixin):
     __tablename__ = "invites"
     code: Mapped[str] = mapped_column(String(8), primary_key=True)
@@ -2936,6 +4085,19 @@ class Invite(Base, TimestampMixin):
     inviter_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     uses: Mapped[int] = mapped_column(Integer, server_default="0")
     max_uses: Mapped[int | None] = mapped_column(Integer)
+    temporary: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    reusable: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(String(32))
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    target_user_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    scheduled_event_id: Mapped[int | None] = mapped_column(BigInteger)
+    scheduled_event_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    role_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
+    target_user_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
@@ -2943,13 +4105,49 @@ class Invite(Base, TimestampMixin):
             ["guild_id", "guild_domain"], ["guilds.id", "guilds.origin_domain"], ondelete="CASCADE"
         ),
         ForeignKeyConstraint(["inviter_id", "inviter_domain"], ["users.id", "users.origin_domain"]),
+        ForeignKeyConstraint(
+            ["scheduled_event_id", "scheduled_event_domain", "guild_id", "guild_domain"],
+            [
+                "guild_scheduled_events.id",
+                "guild_scheduled_events.origin_domain",
+                "guild_scheduled_events.guild_id",
+                "guild_scheduled_events.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
         CheckConstraint("char_length(code) = 8", name="code_length"),
         CheckConstraint(
             "(channel_id IS NULL) = (channel_domain IS NULL)", name="channel_ref_complete"
         ),
         CheckConstraint("uses >= 0", name="nonnegative_uses"),
-        CheckConstraint("max_uses IS NULL OR max_uses > 0", name="positive_max_uses"),
+        CheckConstraint(
+            "max_uses IS NULL OR max_uses BETWEEN 1 AND 100",
+            name="positive_max_uses",
+        ),
         CheckConstraint("max_uses IS NULL OR uses <= max_uses", name="uses_within_limit"),
+        CheckConstraint(
+            "target_type IS NULL OR target_type = 'stream'",
+            name="target_type_value",
+        ),
+        CheckConstraint(
+            "(target_user_id IS NULL) = (target_user_domain IS NULL) AND "
+            "(scheduled_event_id IS NULL) = (scheduled_event_domain IS NULL)",
+            name="target_refs_complete",
+        ),
+        CheckConstraint(
+            "(target_type = 'stream' AND target_user_id IS NOT NULL) OR "
+            "(target_type IS NULL AND target_user_id IS NULL)",
+            name="target_type_matches_ref",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(role_ids) = 'array' AND jsonb_array_length(role_ids) <= 100",
+            name="role_ids_are_bounded_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(target_user_ids) = 'array' "
+            "AND jsonb_array_length(target_user_ids) <= 1000",
+            name="target_user_ids_are_bounded_array",
+        ),
         ForeignKeyConstraint(
             ["channel_id", "channel_domain"],
             ["channels.id", "channels.origin_domain"],
@@ -3043,6 +4241,251 @@ class AuditLogEntry(Base):
     )
 
 
+class AutoModRule(Base, FederatedIdMixin, TimestampMixin):
+    __tablename__ = "auto_mod_rules"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    creator_id: Mapped[int] = mapped_column(BigInteger)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    trigger_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default="{}"
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        UniqueConstraint(
+            "id", "origin_domain", "guild_id", "guild_domain", name="uq_auto_mod_rule_ref_guild"
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"],
+            ["guilds.id", "guilds.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
+        CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
+        CheckConstraint("event_type IN ('message_send','member_update')", name="event_type_value"),
+        CheckConstraint(
+            "trigger_type IN ('keyword','spam','keyword_preset','mention_spam','member_profile')",
+            name="trigger_type_value",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(trigger_metadata) = 'object'", name="trigger_metadata_is_object"
+        ),
+        CheckConstraint("version >= 1", name="positive_version"),
+        Index("ix_auto_mod_rules_guild", "guild_id", "guild_domain", "enabled"),
+    )
+
+
+class AutoModAction(Base):
+    __tablename__ = "auto_mod_actions"
+    rule_id: Mapped[int] = mapped_column(BigInteger)
+    rule_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    position: Mapped[int] = mapped_column(SmallInteger)
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    action_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, default=dict, server_default="{}"
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("rule_id", "rule_domain", "position"),
+        ForeignKeyConstraint(
+            ["rule_id", "rule_domain"],
+            ["auto_mod_rules.id", "auto_mod_rules.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("position BETWEEN 0 AND 9", name="position_range"),
+        CheckConstraint(
+            "action_type IN "
+            "('block_message','send_alert_message','timeout','block_member_interaction')",
+            name="action_type_value",
+        ),
+        CheckConstraint("jsonb_typeof(metadata) = 'object'", name="metadata_is_object"),
+    )
+
+
+class AutoModRuleExemptRole(Base):
+    __tablename__ = "auto_mod_rule_exempt_roles"
+    rule_id: Mapped[int] = mapped_column(BigInteger)
+    rule_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    role_id: Mapped[int] = mapped_column(BigInteger)
+    role_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("rule_id", "rule_domain", "role_id", "role_domain"),
+        ForeignKeyConstraint(
+            ["rule_id", "rule_domain", "guild_id", "guild_domain"],
+            [
+                "auto_mod_rules.id",
+                "auto_mod_rules.origin_domain",
+                "auto_mod_rules.guild_id",
+                "auto_mod_rules.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["role_id", "role_domain", "guild_id", "guild_domain"],
+            ["roles.id", "roles.origin_domain", "roles.guild_id", "roles.guild_domain"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class AutoModRuleExemptChannel(Base):
+    __tablename__ = "auto_mod_rule_exempt_channels"
+    rule_id: Mapped[int] = mapped_column(BigInteger)
+    rule_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("rule_id", "rule_domain", "channel_id", "channel_domain"),
+        ForeignKeyConstraint(
+            ["rule_id", "rule_domain", "guild_id", "guild_domain"],
+            [
+                "auto_mod_rules.id",
+                "auto_mod_rules.origin_domain",
+                "auto_mod_rules.guild_id",
+                "auto_mod_rules.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "channels.id",
+                "channels.origin_domain",
+                "channels.guild_id",
+                "channels.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class AutoModMemberBlock(Base):
+    """Durable member-profile quarantine owned by an authoritative guild.
+
+    A row records that one enabled member-profile rule currently matches a
+    member.  Keeping this separate from ordinary permission masks means rule
+    deletion and member removal can release the restriction transactionally
+    without mutating Kaede-specific roles or overwrites.
+    """
+
+    __tablename__ = "auto_mod_member_blocks"
+    rule_id: Mapped[int] = mapped_column(BigInteger)
+    rule_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    profile_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "rule_id",
+            "rule_domain",
+            "guild_id",
+            "guild_domain",
+            "user_id",
+            "user_domain",
+        ),
+        ForeignKeyConstraint(
+            ["rule_id", "rule_domain", "guild_id", "guild_domain"],
+            [
+                "auto_mod_rules.id",
+                "auto_mod_rules.origin_domain",
+                "auto_mod_rules.guild_id",
+                "auto_mod_rules.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain", "user_id", "user_domain"],
+            [
+                "guild_members.guild_id",
+                "guild_members.guild_domain",
+                "guild_members.user_id",
+                "guild_members.user_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("profile_digest ~ '^[0-9a-f]{64}$'", name="profile_digest_format"),
+        CheckConstraint("jsonb_typeof(evidence) = 'object'", name="evidence_is_object"),
+        Index(
+            "ix_auto_mod_member_blocks_member",
+            "guild_id",
+            "guild_domain",
+            "user_id",
+            "user_domain",
+        ),
+    )
+
+
+class AutoModExecution(Base):
+    __tablename__ = "auto_mod_executions"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    rule_id: Mapped[int] = mapped_column(BigInteger)
+    rule_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    channel_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
+    message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    target_user_id: Mapped[int] = mapped_column(BigInteger)
+    target_user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    matched_content_digest: Mapped[str | None] = mapped_column(String(64))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    outcome: Mapped[str] = mapped_column(String(24), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["rule_id", "rule_domain", "guild_id", "guild_domain"],
+            [
+                "auto_mod_rules.id",
+                "auto_mod_rules.origin_domain",
+                "auto_mod_rules.guild_id",
+                "auto_mod_rules.guild_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["target_user_id", "target_user_domain"], ["users.id", "users.origin_domain"]
+        ),
+        CheckConstraint(
+            "(channel_id IS NULL) = (channel_domain IS NULL) AND "
+            "(message_id IS NULL) = (message_domain IS NULL)",
+            name="optional_refs_complete",
+        ),
+        CheckConstraint(
+            "matched_content_digest IS NULL OR matched_content_digest ~ '^[0-9a-f]{64}$'",
+            name="matched_digest_format",
+        ),
+        CheckConstraint("jsonb_typeof(evidence) = 'object'", name="evidence_is_object"),
+        CheckConstraint(
+            "outcome IN ('blocked','alerted','timed_out','skipped','failed')",
+            name="outcome_value",
+        ),
+        Index("ix_auto_mod_executions_guild", "guild_id", "guild_domain", "id"),
+        Index("ix_auto_mod_executions_retention", "created_at"),
+    )
+
+
 class Emoji(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "emojis"
     guild_id: Mapped[int] = mapped_column(BigInteger)
@@ -3053,6 +4496,7 @@ class Emoji(Base, FederatedIdMixin, TimestampMixin):
     # value without copying the object into their own storage.
     media_hash: Mapped[str | None] = mapped_column(String(64))
     animated: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    available: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
     creator_id: Mapped[int] = mapped_column(BigInteger)
     creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     __table_args__ = (
@@ -3062,6 +4506,9 @@ class Emoji(Base, FederatedIdMixin, TimestampMixin):
         ),
         ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
+        UniqueConstraint(
+            "id", "origin_domain", "guild_id", "guild_domain", name="uq_emojis_ref_guild"
+        ),
         UniqueConstraint("guild_id", "guild_domain", "name", name="uq_emojis_guild_name"),
         CheckConstraint(
             "media_hash IS NULL OR media_hash ~ '^[0-9a-f]{64}$'",
@@ -3078,6 +4525,8 @@ class Sticker(Base, FederatedIdMixin, TimestampMixin):
     description: Mapped[str | None] = mapped_column(String(100))
     media_hash: Mapped[str | None] = mapped_column(String(64))
     animated: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    tags: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")
+    available: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
     creator_id: Mapped[int] = mapped_column(BigInteger)
     creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     __table_args__ = (
@@ -3092,12 +4541,83 @@ class Sticker(Base, FederatedIdMixin, TimestampMixin):
             "media_hash IS NULL OR media_hash ~ '^[0-9a-f]{64}$'",
             name="media_hash_format",
         ),
+        CheckConstraint(
+            "jsonb_typeof(tags) = 'array' AND jsonb_array_length(tags) <= 10",
+            name="tags_are_bounded_array",
+        ),
+    )
+
+
+class EmojiRoleRestriction(Base):
+    __tablename__ = "emoji_role_restrictions"
+    emoji_id: Mapped[int] = mapped_column(BigInteger)
+    emoji_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    role_id: Mapped[int] = mapped_column(BigInteger)
+    role_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("emoji_id", "emoji_domain", "role_id", "role_domain"),
+        ForeignKeyConstraint(
+            ["emoji_id", "emoji_domain", "guild_id", "guild_domain"],
+            ["emojis.id", "emojis.origin_domain", "emojis.guild_id", "emojis.guild_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["role_id", "role_domain", "guild_id", "guild_domain"],
+            ["roles.id", "roles.origin_domain", "roles.guild_id", "roles.guild_domain"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class SoundboardSound(Base, FederatedIdMixin, TimestampMixin):
+    __tablename__ = "soundboard_sounds"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    media_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    object_key: Mapped[str | None] = mapped_column(String(512))
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    volume: Mapped[float] = mapped_column(Float, server_default="1", nullable=False)
+    emoji_id: Mapped[int | None] = mapped_column(BigInteger)
+    emoji_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    emoji_name: Mapped[str | None] = mapped_column(String(64))
+    available: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by_id: Mapped[int] = mapped_column(BigInteger)
+    created_by_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        UniqueConstraint(
+            "id", "origin_domain", "guild_id", "guild_domain", name="uq_soundboard_ref_guild"
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"],
+            ["guilds.id", "guilds.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["created_by_id", "created_by_domain"], ["users.id", "users.origin_domain"]
+        ),
+        CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
+        CheckConstraint("media_hash ~ '^[0-9a-f]{64}$'", name="media_hash_format"),
+        CheckConstraint("volume BETWEEN 0 AND 1", name="volume_range"),
+        CheckConstraint("duration_ms BETWEEN 1 AND 5200", name="duration_range"),
+        CheckConstraint("content_type IN ('audio/mpeg','audio/ogg')", name="content_type_value"),
+        CheckConstraint("(emoji_id IS NULL) = (emoji_domain IS NULL)", name="emoji_ref_complete"),
+        CheckConstraint("version >= 1", name="positive_version"),
+        UniqueConstraint("guild_id", "guild_domain", "name", name="uq_soundboard_guild_name"),
     )
 
 
 class Webhook(Base, TimestampMixin):
     __tablename__ = "webhooks"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    type: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    application_id: Mapped[int | None] = mapped_column(BigInteger)
+    application_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     guild_id: Mapped[int] = mapped_column(BigInteger)
     guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     channel_id: Mapped[int] = mapped_column(BigInteger)
@@ -3105,11 +4625,15 @@ class Webhook(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(80))
     avatar_hash: Mapped[str | None] = mapped_column(String(128))
     token_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    # Incoming webhook URLs remain recoverable for authorized managers while
+    # the execution path continues to authenticate against the one-way hash.
+    token_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     creator_id: Mapped[int] = mapped_column(BigInteger)
     creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("token_hash", name="uq_webhooks_token_hash"),
+        UniqueConstraint("id", "guild_domain", name="uq_webhooks_ref_domain"),
         ForeignKeyConstraint(
             ["guild_id", "guild_domain"],
             ["guilds.id", "guilds.origin_domain"],
@@ -3127,6 +4651,178 @@ class Webhook(Base, TimestampMixin):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
+        ForeignKeyConstraint(
+            ["application_id", "application_domain"],
+            ["bot_applications.id", "bot_applications.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("type IN (1,2,3)", name="type_value"),
+        CheckConstraint(
+            "(type = 3) = (application_id IS NOT NULL) AND "
+            "(application_id IS NULL) = (application_domain IS NULL)",
+            name="application_matches_type",
+        ),
+    )
+
+
+class WebhookE2EEDevice(Base, TimestampMixin):
+    """A webhook-token automation endpoint with its own MLS identity."""
+
+    __tablename__ = "webhook_e2ee_devices"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    webhook_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    webhook_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    protocol_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    identity_key: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    credential: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    trust_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="trusted")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["webhook_id", "webhook_domain"],
+            ["webhooks.id", "webhooks.guild_domain"],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("protocol_id", name="uq_webhook_e2ee_devices_protocol_id"),
+        UniqueConstraint(
+            "id",
+            "webhook_id",
+            "webhook_domain",
+            name="uq_webhook_e2ee_devices_lineage",
+        ),
+        CheckConstraint(
+            "protocol_id ~ '^kwe_[A-Za-z0-9_-]{43}$'",
+            name="protocol_id_format",
+        ),
+        CheckConstraint("octet_length(identity_key) = 32", name="identity_key_length"),
+        CheckConstraint(
+            "octet_length(credential) BETWEEN 1 AND 16384",
+            name="credential_length",
+        ),
+        CheckConstraint("jsonb_typeof(capabilities) = 'array'", name="capabilities_array"),
+        CheckConstraint("generation >= 1", name="generation_positive"),
+        CheckConstraint("trust_state IN ('trusted','revoked')", name="trust_state_value"),
+        Index(
+            "uq_webhook_e2ee_devices_active_webhook",
+            "webhook_id",
+            "webhook_domain",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+
+class WebhookE2EEKeyPackage(Base):
+    """One signed, single-use MLS KeyPackage for a webhook device."""
+
+    __tablename__ = "webhook_e2ee_key_packages"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    device_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cipher_suite: Mapped[str] = mapped_column(String(96), nullable=False)
+    package: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    package_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_operation_id: Mapped[str | None] = mapped_column(String(64))
+    claimed_operation_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        ForeignKeyConstraint(["device_id"], ["webhook_e2ee_devices.id"], ondelete="CASCADE"),
+        UniqueConstraint(
+            "device_id",
+            "package_hash",
+            name="uq_webhook_e2ee_key_packages_digest",
+        ),
+        CheckConstraint(
+            "octet_length(package) BETWEEN 1 AND 32768",
+            name="package_length",
+        ),
+        CheckConstraint("octet_length(package_hash) = 32", name="package_hash_length"),
+        CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+        CheckConstraint(
+            "(claimed_at IS NULL) = (claimed_operation_id IS NULL) "
+            "AND (claimed_operation_id IS NULL) = (claimed_operation_domain IS NULL)",
+            name="claim_complete",
+        ),
+        Index(
+            "ix_webhook_e2ee_key_packages_available",
+            "device_id",
+            "expires_at",
+            postgresql_where=text("claimed_at IS NULL"),
+        ),
+    )
+
+
+class WebhookE2EEParticipation(Base, TimestampMixin):
+    """Manager-approved MLS access for one webhook device and exact channel."""
+
+    __tablename__ = "webhook_e2ee_participations"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    webhook_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    webhook_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    device_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    consenting_actor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    consenting_actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    consent_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    joined_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    history_floor_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    history_floor_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["webhook_id", "webhook_domain"],
+            ["webhooks.id", "webhooks.guild_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["device_id", "webhook_id", "webhook_domain"],
+            [
+                "webhook_e2ee_devices.id",
+                "webhook_e2ee_devices.webhook_id",
+                "webhook_e2ee_devices.webhook_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["consenting_actor_id", "consenting_actor_domain"],
+            ["users.id", "users.origin_domain"],
+        ),
+        UniqueConstraint(
+            "webhook_id",
+            "webhook_domain",
+            "channel_id",
+            "channel_domain",
+            "device_id",
+            name="uq_webhook_e2ee_participations_device_channel",
+        ),
+        CheckConstraint("consent_generation >= 1", name="consent_generation_positive"),
+        CheckConstraint("joined_epoch >= 0", name="joined_epoch_nonnegative"),
+        CheckConstraint(
+            "(history_floor_message_id IS NULL) = (history_floor_message_domain IS NULL)",
+            name="history_floor_complete",
+        ),
+        CheckConstraint(
+            "status IN ('pending','active','revoked')",
+            name="status_value",
+        ),
+        Index(
+            "ix_webhook_e2ee_participations_channel",
+            "channel_id",
+            "channel_domain",
+            "status",
+        ),
     )
 
 

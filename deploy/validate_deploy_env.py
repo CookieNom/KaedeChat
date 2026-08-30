@@ -12,13 +12,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import datetime
 import json
 import os
 import re
 import stat
 from pathlib import Path
 from urllib.parse import urlsplit
-
 
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 FCM_AUTH_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -29,6 +29,14 @@ PLACEHOLDER_MARKERS = (
     "not-used",
     "replace-",
     "replace_",
+)
+OPERATOR_LEGAL_NAMES = (
+    "KAEDE_LEGAL_INSTANCE_NAME",
+    "KAEDE_LEGAL_OPERATOR_NAME",
+    "KAEDE_LEGAL_CONTACT_EMAIL",
+    "KAEDE_LEGAL_EFFECTIVE_DATE",
+    "KAEDE_LEGAL_MINIMUM_AGE",
+    "KAEDE_LEGAL_JURISDICTION",
 )
 SENSITIVE_NAMES = {
     "DRAGONFLY_PASSWORD",
@@ -70,6 +78,10 @@ AUTO_UPDATE_PATH_RE = re.compile(r"^/[A-Za-z0-9_./-]+$")
 MEDIA_MAX_ATTACHMENT_BYTES_DEFAULT = 15 * 1024**2
 MEDIA_INFLIGHT_QUOTA_BYTES_DEFAULT = 500 * 1024**2
 REMOTE_MEDIA_CACHE_BYTES_DEFAULT = 100 * 1024**3
+MEDIA_ASSET_BYTE_LIMITS = {
+    "KAEDE_MEDIA_MAX_EMOJI_BYTES": 256 * 1024,
+    "KAEDE_MEDIA_MAX_STICKER_BYTES": 512 * 1024,
+}
 FEDERATION_INTEGER_DEFAULTS = {
     "KAEDE_FEDERATION_CLOCK_SKEW_SECONDS": 300,
     "KAEDE_FEDERATION_EVENT_RETENTION_DAYS": 30,
@@ -187,6 +199,66 @@ def _deployment_port(values: dict[str, str], name: str, default: int) -> int:
     return port
 
 
+def _validate_operator_legal_config(values: dict[str, str], landing_page: str) -> None:
+    configured = {name: values.get(name, "").strip() for name in OPERATOR_LEGAL_NAMES}
+    present = [name for name, value in configured.items() if value]
+    missing = [name for name, value in configured.items() if not value]
+    if not present and landing_page == "default":
+        return
+    if missing:
+        raise DeploymentConfigurationError(
+            f"KAEDE_LANDING_PAGE={landing_page} requires a complete operator legal "
+            f"configuration; missing {', '.join(missing)}"
+        )
+
+    text_limits = {
+        "KAEDE_LEGAL_INSTANCE_NAME": 200,
+        "KAEDE_LEGAL_OPERATOR_NAME": 300,
+        "KAEDE_LEGAL_JURISDICTION": 300,
+    }
+    for name, maximum in text_limits.items():
+        value = configured[name]
+        if (
+            len(value) > maximum
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or "[" in value
+            or "]" in value
+            or _is_placeholder(value)
+        ):
+            raise DeploymentConfigurationError(
+                f"{name} must be non-placeholder plain text no longer than {maximum} characters"
+            )
+
+    contact_email = configured["KAEDE_LEGAL_CONTACT_EMAIL"]
+    if (
+        len(contact_email) > 254
+        or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact_email)
+        or any(ord(character) < 32 or ord(character) == 127 for character in contact_email)
+        or _is_placeholder(contact_email)
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_LEGAL_CONTACT_EMAIL must be a valid non-placeholder email address"
+        )
+
+    effective_date = configured["KAEDE_LEGAL_EFFECTIVE_DATE"]
+    try:
+        parsed_date = datetime.date.fromisoformat(effective_date)
+    except ValueError as error:
+        raise DeploymentConfigurationError(
+            "KAEDE_LEGAL_EFFECTIVE_DATE must be a real date in YYYY-MM-DD format"
+        ) from error
+    if parsed_date.isoformat() != effective_date:
+        raise DeploymentConfigurationError(
+            "KAEDE_LEGAL_EFFECTIVE_DATE must be a real date in YYYY-MM-DD format"
+        )
+
+    minimum_age = configured["KAEDE_LEGAL_MINIMUM_AGE"]
+    if not minimum_age.isdecimal() or not 1 <= int(minimum_age) <= 120:
+        raise DeploymentConfigurationError(
+            "KAEDE_LEGAL_MINIMUM_AGE must be an integer from 1 through 120"
+        )
+
+
 def _validate_voice_ports(values: dict[str, str]) -> None:
     ports = {
         name: _deployment_port(values, name, default)
@@ -198,8 +270,7 @@ def _validate_voice_ports(values: dict[str, str]) -> None:
     collision = next((names for names in duplicates.values() if len(names) > 1), None)
     if collision:
         raise DeploymentConfigurationError(
-            "LiveKit host ports must be distinct; conflicting settings: "
-            + ", ".join(collision)
+            "LiveKit host ports must be distinct; conflicting settings: " + ", ".join(collision)
         )
 
     for name, default in (
@@ -220,9 +291,7 @@ def _validate_voice_ports(values: dict[str, str]) -> None:
     try:
         url_port = parsed.port
     except ValueError as error:
-        raise DeploymentConfigurationError(
-            "KAEDE_VOICE_LIVEKIT_URL has an invalid port"
-        ) from error
+        raise DeploymentConfigurationError("KAEDE_VOICE_LIVEKIT_URL has an invalid port") from error
     if (
         parsed.scheme != "http"
         or parsed.hostname not in {"host.docker.internal", "127.0.0.1", "localhost"}
@@ -289,20 +358,14 @@ def _validate_auto_update(values: dict[str, str]) -> None:
             "credentials in this setting"
         )
     branch = values.get("AUTO_UPDATE_BRANCH", "main").strip()
-    if (
-        not AUTO_UPDATE_BRANCH_RE.fullmatch(branch)
-        or branch.endswith("/")
-        or ".." in branch
-    ):
+    if not AUTO_UPDATE_BRANCH_RE.fullmatch(branch) or branch.endswith("/") or ".." in branch:
         raise DeploymentConfigurationError(
             "AUTO_UPDATE_BRANCH must be a branch name containing only letters, digits, "
             "dot, underscore, dash, or slash, without '..' or a trailing slash"
         )
     interval = values.get("AUTO_UPDATE_INTERVAL", "6h").strip()
     if interval not in {"6h", "12h", "1d", "1w"}:
-        raise DeploymentConfigurationError(
-            "AUTO_UPDATE_INTERVAL must be 6h, 12h, 1d, or 1w"
-        )
+        raise DeploymentConfigurationError("AUTO_UPDATE_INTERVAL must be 6h, 12h, 1d, or 1w")
     jitter = values.get("AUTO_UPDATE_JITTER", "30m").strip()
     if not AUTO_UPDATE_DURATION_RE.fullmatch(jitter):
         raise DeploymentConfigurationError(
@@ -314,9 +377,7 @@ def _validate_auto_update(values: dict[str, str]) -> None:
             "AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be an integer from 60 through 3600"
         )
     backup_hook = values.get("AUTO_UPDATE_BACKUP_HOOK", "").strip()
-    if backup_hook and (
-        not AUTO_UPDATE_PATH_RE.fullmatch(backup_hook) or ".." in backup_hook
-    ):
+    if backup_hook and (not AUTO_UPDATE_PATH_RE.fullmatch(backup_hook) or ".." in backup_hook):
         raise DeploymentConfigurationError(
             "AUTO_UPDATE_BACKUP_HOOK must be an absolute path containing only letters, "
             "digits, dot, underscore, dash, and slash, without '..'"
@@ -343,10 +404,7 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
     maximum_attachment_bytes = values.get(
         "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES", str(MEDIA_MAX_ATTACHMENT_BYTES_DEFAULT)
     ).strip()
-    if (
-        not re.fullmatch(r"[0-9]+", maximum_attachment_bytes)
-        or int(maximum_attachment_bytes) <= 0
-    ):
+    if not re.fullmatch(r"[0-9]+", maximum_attachment_bytes) or int(maximum_attachment_bytes) <= 0:
         raise DeploymentConfigurationError(
             "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES must be a positive integer number of bytes"
         )
@@ -362,9 +420,14 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
         )
     if int(maximum_attachment_bytes) > int(media_inflight_quota_bytes):
         raise DeploymentConfigurationError(
-            "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES cannot exceed "
-            "KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES"
+            "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES cannot exceed KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES"
         )
+    for name, maximum in MEDIA_ASSET_BYTE_LIMITS.items():
+        raw = values.get(name, str(maximum)).strip()
+        if not raw.isdecimal() or not 1024 <= int(raw) <= maximum:
+            raise DeploymentConfigurationError(
+                f"{name} must be an integer from 1024 through {maximum}"
+            )
     if (
         int(maximum_attachment_bytes)
         > configured["KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN"]
@@ -381,9 +444,7 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
         )
     e2ee_activation_enabled = values.get("KAEDE_E2EE_ACTIVATION_ENABLED", "true")
     if e2ee_activation_enabled.strip().lower() not in {"true", "false"}:
-        raise DeploymentConfigurationError(
-            "KAEDE_E2EE_ACTIVATION_ENABLED must be true or false"
-        )
+        raise DeploymentConfigurationError("KAEDE_E2EE_ACTIVATION_ENABLED must be true or false")
 
     non_strict_bounds = (
         (
@@ -450,9 +511,7 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
     )
     for lower_name, upper_name in non_strict_bounds:
         if configured[lower_name] > configured[upper_name]:
-            raise DeploymentConfigurationError(
-                f"{lower_name} cannot exceed {upper_name}"
-            )
+            raise DeploymentConfigurationError(f"{lower_name} cannot exceed {upper_name}")
 
     strict_bounds = (
         (
@@ -470,18 +529,14 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
     )
     for lower_name, upper_name in strict_bounds:
         if configured[lower_name] >= configured[upper_name]:
-            raise DeploymentConfigurationError(
-                f"{lower_name} must be below {upper_name}"
-            )
+            raise DeploymentConfigurationError(f"{lower_name} must be below {upper_name}")
 
 
 def validate_values(values: dict[str, str], *, observability: bool) -> None:
     _validate_auto_update(values)
     _validate_federation_budgets(values)
     environment = values.get("KAEDE_ENVIRONMENT", "production").strip().lower()
-    allow_nonproduction = (
-        values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"
-    )
+    allow_nonproduction = values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"
     if environment != "production":
         if not allow_nonproduction:
             raise DeploymentConfigurationError(
@@ -493,17 +548,13 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
     for name in sorted(SENSITIVE_NAMES):
         value = values.get(name, "").strip()
         if value and _is_placeholder(value):
-            raise DeploymentConfigurationError(
-                f"{name} still contains a documented placeholder"
-            )
+            raise DeploymentConfigurationError(f"{name} still contains a documented placeholder")
 
     if (
         values.get("KAEDE_KLIPY_ENABLED", "false").strip().lower() == "true"
         and not values.get("KAEDE_KLIPY_API_KEY", "").strip()
     ):
-        raise DeploymentConfigurationError(
-            "KAEDE_KLIPY_API_KEY is required when KLIPY is enabled"
-        )
+        raise DeploymentConfigurationError("KAEDE_KLIPY_API_KEY is required when KLIPY is enabled")
     if values.get("KAEDE_TURNSTILE_ENABLED", "false").strip().lower() == "true":
         if (
             not values.get("KAEDE_TURNSTILE_SITE_KEY", "").strip()
@@ -521,13 +572,9 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
         _validate_fcm_service_account(push_credential)
     relay_enabled = values.get("KAEDE_PUSH_RELAY_ENABLED", "true").strip().lower()
     if relay_enabled not in {"true", "false"}:
-        raise DeploymentConfigurationError(
-            "KAEDE_PUSH_RELAY_ENABLED must be true or false"
-        )
+        raise DeploymentConfigurationError("KAEDE_PUSH_RELAY_ENABLED must be true or false")
     if relay_enabled == "true":
-        relay_url = urlsplit(
-            values.get("KAEDE_PUSH_RELAY_URL", "https://push.kaede.chat").strip()
-        )
+        relay_url = urlsplit(values.get("KAEDE_PUSH_RELAY_URL", "https://push.kaede.chat").strip())
         if (
             relay_url.scheme != "https"
             or not relay_url.hostname
@@ -541,19 +588,13 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
                 "KAEDE_PUSH_RELAY_URL must be an HTTPS origin URL without a path"
             )
         relay_origin = values.get("KAEDE_PUSH_RELAY_ORIGIN", "kaede.chat").strip()
-        if not re.fullmatch(
-            r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", relay_origin
-        ):
+        if not re.fullmatch(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", relay_origin):
             raise DeploymentConfigurationError(
                 "KAEDE_PUSH_RELAY_ORIGIN must be a canonical lower-case domain"
             )
-    relay_service = (
-        values.get("KAEDE_PUSH_RELAY_SERVICE_ENABLED", "false").strip().lower()
-    )
+    relay_service = values.get("KAEDE_PUSH_RELAY_SERVICE_ENABLED", "false").strip().lower()
     if relay_service not in {"true", "false"}:
-        raise DeploymentConfigurationError(
-            "KAEDE_PUSH_RELAY_SERVICE_ENABLED must be true or false"
-        )
+        raise DeploymentConfigurationError("KAEDE_PUSH_RELAY_SERVICE_ENABLED must be true or false")
     if relay_service == "true":
         if (
             values.get("KAEDE_PUSH_RELAY_ORIGIN", "kaede.chat").strip()
@@ -579,9 +620,7 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
                 "KAEDE_SEARCH_MASTER_KEY must contain at least 32 non-placeholder "
                 "characters when message search is enabled; rerun `make setup` to generate it"
             )
-        search_url = urlsplit(
-            values.get("KAEDE_SEARCH_URL", "http://meilisearch:7700").strip()
-        )
+        search_url = urlsplit(values.get("KAEDE_SEARCH_URL", "http://meilisearch:7700").strip())
         if (
             search_url.scheme not in {"http", "https"}
             or not search_url.hostname
@@ -596,9 +635,7 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
                 "query, or fragment"
             )
         profiles = {
-            item.strip()
-            for item in values.get("COMPOSE_PROFILES", "").split(",")
-            if item.strip()
+            item.strip() for item in values.get("COMPOSE_PROFILES", "").split(",") if item.strip()
         }
         if search_url.hostname == "meilisearch" and "search" not in profiles:
             raise DeploymentConfigurationError(
@@ -642,14 +679,19 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
                 "licensed PhotoDNA Edge Hash SDK root"
             )
 
+    # An unconfigured default build exposes only a clearly non-operative notice
+    # on the legal routes. Custom operator copy must be complete before build.
+    landing_page = values.get("KAEDE_LANDING_PAGE", "default").strip().lower()
+    if landing_page not in {"default", "custom"}:
+        raise DeploymentConfigurationError("KAEDE_LANDING_PAGE must be default or custom")
+    _validate_operator_legal_config(values, landing_page)
+
     if values.get("KAEDE_VOICE_ENABLED", "false").strip().lower() == "true":
         _validate_voice_ports(values)
 
     domain = values.get("KAEDE_DOMAIN", "").strip().lower().removesuffix(".")
     if domain.endswith(".example.com"):
-        raise DeploymentConfigurationError(
-            "KAEDE_DOMAIN must not use the example.com template"
-        )
+        raise DeploymentConfigurationError("KAEDE_DOMAIN must not use the example.com template")
 
     smtp_url = values.get("KAEDE_SMTP_URL", "").strip()
     if values.get("KAEDE_EMAIL_BACKEND", "console") == "smtp" and smtp_url:

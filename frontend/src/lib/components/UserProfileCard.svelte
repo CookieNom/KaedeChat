@@ -1,15 +1,22 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, userErrorMessage } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
+  import type { ApplicationCommand } from '$lib/chat/application-commands';
+  import {
+    parseDirectoryBotProfileApplication,
+    type DirectoryBotProfileApplication
+  } from '$lib/chat/application-directory';
+  import { userAppContextCommands } from '$lib/chat/context-commands';
   import { entityRef } from '$lib/chat/refs';
   import type { PresenceStatus, Relationship, Role, UserSummary } from '$lib/chat/types';
-  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
+  import { isApplicationUser, userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
-  import { onMount, tick } from 'svelte';
+  import { tick } from 'svelte';
   import Icon from './Icon.svelte';
+  import AppContextCommandMenu from './AppContextCommandMenu.svelte';
 
   let {
     user,
@@ -24,7 +31,10 @@
     roles = [],
     roleIds = [],
     manageableRoles = [],
-    onRoleChange
+    onRoleChange,
+    applicationCommands = [],
+    contextCommandAccountRef = null,
+    onApplicationCommand
   }: {
     user: UserSummary;
     presence?: PresenceStatus;
@@ -39,6 +49,9 @@
     roleIds?: string[];
     manageableRoles?: Role[];
     onRoleChange?: (user: UserSummary, role: Role, enabled: boolean) => Promise<void>;
+    applicationCommands?: ApplicationCommand[];
+    contextCommandAccountRef?: string | null;
+    onApplicationCommand?: (command: ApplicationCommand, user: UserSummary) => void;
   } = $props();
 
   let popover = $state<HTMLElement | null>(null);
@@ -52,6 +65,11 @@
   let roleError = $state('');
   let rolePickerOpen = $state(false);
   let roleSearch = $state('');
+  let profileApplication = $state<DirectoryBotProfileApplication | null>(null);
+  let profileApplicationError = $state('');
+  let profileRequestGeneration = 0;
+  let relationshipMutationGeneration = 0;
+  let positionGeneration = 0;
   const assignedRoles = $derived(
     roles
       .filter((role) => roleIds.includes(role.id))
@@ -64,6 +82,7 @@
         role.name.toLowerCase().includes(roleSearch.trim().toLowerCase())
     )
   );
+  const appContextCommands = $derived(userAppContextCommands(applicationCommands, user));
 
   function roleIsManageable(role: Role): boolean {
     return manageableRoles.some(
@@ -80,24 +99,52 @@
           : 'Offline'
   );
 
-  onMount(() => {
-    const controller = new AbortController();
+  $effect(() => {
+    const targetX = x;
+    const targetY = y;
+    const generation = ++positionGeneration;
     void tick().then(() => {
-      if (!popover) return;
-      placeContextMenu(popover, x, y);
+      if (generation !== positionGeneration || !popover) return;
+      placeContextMenu(popover, targetX, targetY);
       popover.focus();
     });
-    if (!isSelf && user.profile_resolved !== false) {
+    return () => {
+      positionGeneration += 1;
+    };
+  });
+
+  $effect(() => {
+    const targetUser = user;
+    const targetRef = entityRef(targetUser);
+    const targetIsApplication = isApplicationUser(targetUser);
+    const targetIsSelf = isSelf;
+    const controller = new AbortController();
+    const generation = ++profileRequestGeneration;
+    relationshipMutationGeneration += 1;
+    relationshipType = 'loading';
+    relationshipError = '';
+    relationshipBusy = false;
+    profileApplication = null;
+    profileApplicationError = '';
+    if (!targetIsSelf && !targetIsApplication && targetUser.profile_resolved !== false) {
       void api<Relationship[]>('/users/@me/relationships', { signal: controller.signal })
         .then((relationships) => {
+          if (
+            generation !== profileRequestGeneration ||
+            entityRef(user) !== targetRef ||
+            isApplicationUser(user)
+          ) {
+            return;
+          }
           const relationship = relationships.find(
             (candidate) =>
-              candidate.user.id === user.id && candidate.user.origin_domain === user.origin_domain
+              candidate.user.id === targetUser.id &&
+              candidate.user.origin_domain === targetUser.origin_domain
           );
           relationshipType = relationship?.type ?? 'none';
         })
         .catch((caught: unknown) => {
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted || generation !== profileRequestGeneration) return;
           relationshipType = 'unavailable';
           relationshipError = userErrorMessage(
             caught,
@@ -105,18 +152,48 @@
           );
         });
     }
-    return () => controller.abort();
+    if (targetIsApplication && targetUser.profile_resolved !== false) {
+      void api<unknown>(`/application-directory/bot-profiles/${encodeURIComponent(targetRef)}`, {
+        signal: controller.signal
+      })
+        .then((value) => {
+          if (generation !== profileRequestGeneration || entityRef(user) !== targetRef) return;
+          const application = parseDirectoryBotProfileApplication(value, targetRef);
+          if (!application) throw new Error('The app profile response is invalid.');
+          profileApplication = application;
+        })
+        .catch((caught: unknown) => {
+          if (
+            controller.signal.aborted ||
+            generation !== profileRequestGeneration ||
+            (caught instanceof ApiError && caught.status === 404)
+          ) {
+            return;
+          }
+          profileApplicationError = userErrorMessage(
+            caught,
+            'Could not load this app’s Add App destination.'
+          );
+        });
+    }
+    return () => {
+      profileRequestGeneration += 1;
+      controller.abort();
+    };
   });
 
   async function updateFriendship() {
     if (
       isSelf ||
+      isApplicationUser(user) ||
       user.profile_resolved === false ||
       relationshipBusy ||
       !['none', 'pending_in'].includes(relationshipType)
     ) {
       return;
     }
+    const targetRef = entityRef(user);
+    const generation = ++relationshipMutationGeneration;
     relationshipBusy = true;
     relationshipError = '';
     try {
@@ -124,11 +201,22 @@
         method: 'POST',
         body: JSON.stringify({ handle: `@${user.handle}` })
       });
+      if (
+        generation !== relationshipMutationGeneration ||
+        entityRef(user) !== targetRef ||
+        isApplicationUser(user)
+      ) {
+        return;
+      }
       relationshipType = relationship.type;
     } catch (caught) {
-      relationshipError = userErrorMessage(caught, 'Could not update friendship. Try again.');
+      if (generation === relationshipMutationGeneration && entityRef(user) === targetRef) {
+        relationshipError = userErrorMessage(caught, 'Could not update friendship. Try again.');
+      }
     } finally {
-      relationshipBusy = false;
+      if (generation === relationshipMutationGeneration && entityRef(user) === targetRef) {
+        relationshipBusy = false;
+      }
     }
   }
 
@@ -261,7 +349,10 @@
       </div>
 
       <div class="user-popover-identity">
-        <h2>{userDisplayName(user)}</h2>
+        <h2>
+          {userDisplayName(user)}
+          {#if isApplicationUser(user)}<small class="app-badge">APP</small>{/if}
+        </h2>
         {#if userPublicHandle(user)}
           <p>@{userPublicHandle(user)}</p>
         {:else}
@@ -376,7 +467,30 @@
             <span>Message</span>
           </button>
         {/if}
-        {#if !isSelf && user.profile_resolved !== false}
+        {#if profileApplication}
+          <a
+            class="user-popover-primary"
+            href={resolve(
+              `/applications/${encodeURIComponent(profileApplication.application_ref)}/install/${encodeURIComponent(profileApplication.install_template.slug)}` as `/applications/${string}/install/${string}`
+            )}
+            onclick={onClose}
+          >
+            <Icon name="sparkles" size={17} />
+            <span>Add App</span>
+          </a>
+          {#if profileApplication.directory_listed}
+            <a
+              href={resolve(
+                `/application-directory/${encodeURIComponent(profileApplication.application_ref)}` as `/application-directory/${string}`
+              )}
+              onclick={onClose}
+            >
+              <Icon name="globe" size={17} />
+              <span>View app profile</span>
+            </a>
+          {/if}
+        {/if}
+        {#if !isSelf && !isApplicationUser(user) && user.profile_resolved !== false}
           <button
             type="button"
             class:relationship-friend={relationshipType === 'friend'}
@@ -404,6 +518,17 @@
             <span>{actionLabel('User ID copied', 'Copy technical user ID')}</span>
           </button>
         {/if}
+        {#if onApplicationCommand}
+          <AppContextCommandMenu
+            id={`profile-apps-${entityRef(user)}`}
+            entries={appContextCommands}
+            accountRef={contextCommandAccountRef}
+            onSelect={(entry) => {
+              onClose();
+              onApplicationCommand?.(entry.command, user);
+            }}
+          />
+        {/if}
         {#if moderationActions.length && onModerate}
           <div class="user-popover-moderation" role="group" aria-label="Moderation actions">
             {#each moderationActions as action (action.id)}
@@ -424,6 +549,9 @@
       </div>
       {#if relationshipError}
         <p class="user-popover-error" role="alert">{relationshipError}</p>
+      {/if}
+      {#if profileApplicationError}
+        <p class="user-popover-error" role="alert">{profileApplicationError}</p>
       {/if}
     </div>
   </div>

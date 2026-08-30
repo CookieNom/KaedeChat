@@ -20,6 +20,7 @@ from app.voice.state import (
     replace_occupancy,
     room_state_key,
     transition_call,
+    voice_room_registry_key,
 )
 from scripts.verification import VerificationFailure, failure_message, require
 
@@ -218,7 +219,7 @@ async def main() -> None:
             f"{replica_call_key}:accepted",
             f"{replica_call_key}:declined",
         )
-        await redis.srem("voice:rooms", room)
+        await redis.srem(voice_room_registry_key(settings.domain), room)
         await redis.aclose()
 
 

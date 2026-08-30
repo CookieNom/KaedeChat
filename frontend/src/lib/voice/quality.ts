@@ -1,4 +1,9 @@
-import type { ScreenShareCaptureOptions, TrackPublishOptions } from 'livekit-client';
+import {
+  VideoPresets,
+  type ScreenShareCaptureOptions,
+  type TrackPublishOptions,
+  type VideoCaptureOptions
+} from 'livekit-client';
 
 export type ScreenShareProfileId = 'data_saver' | 'smooth' | 'sharp' | 'source';
 export type AudioQualityId = 'data_saver' | 'standard' | 'high' | 'studio';
@@ -189,12 +194,35 @@ export function webScreenShareOptions(
   };
 }
 
-export function webAudioPublishOptions(preferences: MediaQualityPreferences): TrackPublishOptions {
+export function webAudioPublishOptions(
+  preferences: MediaQualityPreferences,
+  channelBitrate = Number.POSITIVE_INFINITY
+): TrackPublishOptions {
   const quality = audioQuality(preferences.audioQuality);
   return {
-    audioPreset: { maxBitrate: quality.maxBitrate },
+    audioPreset: { maxBitrate: Math.min(quality.maxBitrate, channelBitrate) },
     forceStereo: quality.stereo,
     dtx: !quality.stereo,
     red: true
+  };
+}
+
+/**
+ * Discord's automatic channel mode favors an adaptive 360p working set;
+ * full mode raises the camera's primary capture/encoding target to 720p.
+ * Screen-share capture and encoding remain governed by the independent
+ * screen-share profile above.
+ */
+export function webCameraDefaults(videoQualityMode: 1 | 2): {
+  capture: VideoCaptureOptions;
+  publish: TrackPublishOptions;
+} {
+  const preset = videoQualityMode === 2 ? VideoPresets.h720 : VideoPresets.h360;
+  return {
+    capture: { resolution: preset.resolution },
+    publish: {
+      videoEncoding: preset.encoding,
+      simulcast: true
+    }
   };
 }

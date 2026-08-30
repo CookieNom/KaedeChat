@@ -6,6 +6,7 @@ import {
   saveMediaQuality,
   screenShareProfile,
   webAudioPublishOptions,
+  webCameraDefaults,
   webScreenShareOptions
 } from './quality';
 
@@ -59,6 +60,33 @@ describe('media quality preferences', () => {
       audioPreset: { maxBitrate: 128_000 },
       forceStereo: true,
       dtx: false
+    });
+  });
+
+  it('caps microphone audio to the effective channel bitrate', () => {
+    expect(
+      webAudioPublishOptions({ ...DEFAULT_MEDIA_QUALITY, audioQuality: 'studio' }, 32_000)
+        .audioPreset
+    ).toEqual({ maxBitrate: 32_000 });
+    expect(
+      webAudioPublishOptions({ ...DEFAULT_MEDIA_QUALITY, audioQuality: 'data_saver' }, 96_000)
+        .audioPreset
+    ).toEqual({ maxBitrate: 24_000 });
+  });
+
+  it('keeps adaptive and full camera defaults separate from screen-share profiles', () => {
+    const automatic = webCameraDefaults(1);
+    const full = webCameraDefaults(2);
+
+    expect(automatic.capture.resolution).toMatchObject({ width: 640, height: 360 });
+    expect(full.capture.resolution).toMatchObject({ width: 1280, height: 720 });
+    expect(automatic.publish.videoEncoding?.maxBitrate).toBeLessThan(
+      full.publish.videoEncoding?.maxBitrate ?? 0
+    );
+    expect(webScreenShareOptions(DEFAULT_MEDIA_QUALITY).capture.resolution).toEqual({
+      width: 1280,
+      height: 720,
+      frameRate: 30
     });
   });
 

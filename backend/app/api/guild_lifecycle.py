@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, or_, select, tuple_, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.dependencies import (
     AuthenticatedUser,
@@ -16,11 +17,13 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.management import require_current_version
+from app.bots.e2ee import revoke_bot_e2ee_access
 from app.bots.installations import (
     cleanup_installation_roles,
     publish_deleted_installation_roles,
     revoke_installations_for_guild_member,
 )
+from app.chat.announcement_guards import announcement_dependencies_exist
 from app.chat.audit import add_audit_entry
 from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
@@ -29,6 +32,7 @@ from app.chat.guild_revision import (
     wake_queued_guild_federation,
 )
 from app.chat.payloads import guild_payload
+from app.chat.postcommit import publish_committed_dispatches
 from app.chat.schemas import GuildOwnershipTransfer
 from app.chat.thread_membership import (
     cleanup_guild_member_threads,
@@ -38,12 +42,14 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Attachment,
     Channel,
     Guild,
     GuildMember,
     MediaTombstoneDestination,
+    MemberRole,
     Message,
     ReadState,
     RemoteMediaCache,
@@ -51,6 +57,12 @@ from app.db.models import (
     User,
 )
 from app.federation.events import build_envelope, queue_event
+from app.federation.guild_management import (
+    guild_management_dict_body,
+    proxy_remote_guild_management,
+    qualified_management_ref,
+    require_guild_management_status,
+)
 from app.federation.guilds import apply_guild_access_revocation, mark_remote_guild_departed
 from app.federation.terminal_rooms import lock_terminal_room, queue_terminal_room_deletion
 from app.media.tombstones import (
@@ -106,24 +118,19 @@ async def _publish_guild_removed(
     )
 
 
-@router.delete("/{guild_id}/members/@me", status_code=204)
-async def leave_guild(
-    guild_id: EntityRef,
-    auth: AuthenticatedUser = Depends(require_user),
-    session: AsyncSession = Depends(get_session),
-    redis: Redis = Depends(get_redis),
-    settings: Settings = Depends(get_settings),
-) -> Response:
-    actor_id = auth.user.id
-    actor_domain = auth.user.origin_domain
-    guild = await _locked_guild(session, settings, guild_id)
-    member = await session.get(
-        GuildMember,
-        (guild.id, guild.origin_domain, actor_id, actor_domain),
-    )
-    if member is None:
-        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
-    if _is_owner(guild, auth.user):
+async def _remove_guild_membership(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    guild: Guild,
+    user: User,
+    member: GuildMember,
+) -> None:
+    """Remove one self-owned membership and publish its durable side effects."""
+
+    actor_id = user.id
+    actor_domain = user.origin_domain
+    if _is_owner(guild, user):
         raise HTTPException(
             status_code=409,
             detail={"code": "OWNER_MUST_TRANSFER_OR_DELETE_GUILD"},
@@ -146,7 +153,7 @@ async def leave_guild(
             session,
             settings,
             "guild.leave.request",
-            auth.user,
+            user,
             {"user": {"id": str(actor_id), "domain": actor_domain}},
             context={
                 "guild_id": str(guild.id),
@@ -166,14 +173,14 @@ async def leave_guild(
             session,
             settings,
             guild,
-            auth.user,
+            user,
             [(actor_id, actor_domain)],
         )
         await clear_tracker_assignees(
             session,
             settings,
             guild,
-            auth.user,
+            user,
             [(actor_id, actor_domain)],
         )
         revoked_installations = await revoke_installations_for_guild_member(
@@ -183,11 +190,19 @@ async def leave_guild(
             user_id=actor_id,
             user_domain=actor_domain,
         )
+        e2ee_policy_channels.extend(
+            await revoke_bot_e2ee_access(
+                session,
+                redis,
+                settings,
+                installation_ids=(item.id for item in revoked_installations),
+            )
+        )
         deleted_role_refs = await cleanup_installation_roles(
             session,
             settings,
             guild,
-            auth.user,
+            user,
             revoked_installations,
         )
         await session.delete(member)
@@ -195,7 +210,7 @@ async def leave_guild(
             session,
             settings,
             guild,
-            auth.user,
+            user,
             "guild.member.remove",
             {"user": {"id": str(actor_id), "origin_domain": actor_domain}},
             snapshot_required=True,
@@ -203,6 +218,7 @@ async def leave_guild(
         )
 
     await session.commit()
+    await publish_committed_dispatches(session, redis)
     if guild.origin_domain == settings.domain:
         await wake_tracker_membership_cleanup(guild)
         await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
@@ -218,6 +234,97 @@ async def leave_guild(
         user_id=actor_id,
         user_domain=actor_domain,
     )
+
+
+async def expire_temporary_memberships(
+    redis: Redis,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    *,
+    user_id: int,
+    user_domain: str,
+) -> None:
+    """Remove role-less temporary memberships after the final disconnect."""
+
+    async with sessionmaker() as session:
+        membership_refs = list(
+            (
+                await session.execute(
+                    select(GuildMember.guild_id, GuildMember.guild_domain).where(
+                        GuildMember.user_id == user_id,
+                        GuildMember.user_domain == user_domain,
+                        GuildMember.temporary.is_(True),
+                        ~select(MemberRole.role_id)
+                        .where(
+                            MemberRole.guild_id == GuildMember.guild_id,
+                            MemberRole.guild_domain == GuildMember.guild_domain,
+                            MemberRole.user_id == GuildMember.user_id,
+                            MemberRole.user_domain == GuildMember.user_domain,
+                        )
+                        .exists(),
+                    )
+                )
+            ).all()
+        )
+
+    for guild_id, guild_domain in membership_refs:
+        try:
+            async with sessionmaker() as session:
+                guild = await _locked_guild(
+                    session, settings, EntityRef(f"{guild_id}@{guild_domain}")
+                )
+                member = await session.get(
+                    GuildMember,
+                    (guild.id, guild.origin_domain, user_id, user_domain),
+                )
+                user = await session.get(User, (user_id, user_domain))
+                has_role = await session.scalar(
+                    select(MemberRole.role_id)
+                    .where(
+                        MemberRole.guild_id == guild.id,
+                        MemberRole.guild_domain == guild.origin_domain,
+                        MemberRole.user_id == user_id,
+                        MemberRole.user_domain == user_domain,
+                    )
+                    .limit(1)
+                )
+                if (
+                    member is None
+                    or user is None
+                    or not member.temporary
+                    or has_role is not None
+                    or _is_owner(guild, user)
+                ):
+                    continue
+                await _remove_guild_membership(session, redis, settings, guild, user, member)
+        except Exception:
+            log.exception(
+                "temporary_membership_expiration_failed",
+                guild_id=str(guild_id),
+                guild_domain=str(guild_domain),
+                user_id=str(user_id),
+                user_domain=user_domain,
+            )
+
+
+@router.delete("/{guild_id}/members/@me", status_code=204)
+async def leave_guild(
+    guild_id: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    actor_id = auth.user.id
+    actor_domain = auth.user.origin_domain
+    guild = await _locked_guild(session, settings, guild_id)
+    member = await session.get(
+        GuildMember,
+        (guild.id, guild.origin_domain, actor_id, actor_domain),
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
+    await _remove_guild_membership(session, redis, settings, guild, auth.user, member)
     return Response(status_code=204)
 
 
@@ -231,7 +338,21 @@ async def transfer_guild_ownership(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
     if_match: str | None = Header(default=None, alias="If-Match"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
+    remote_data = payload.model_dump(mode="json")
+    remote_data["owner_id"] = qualified_management_ref(payload.owner_id, settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "guild.owner.transfer",
+        {"data": remote_data, "if_match": if_match, "reason": reason},
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
     guild = await _locked_guild(session, settings, guild_id)
     if guild.origin_domain != settings.domain:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
@@ -239,11 +360,6 @@ async def transfer_guild_ownership(
     if not _is_owner(guild, auth.user):
         raise HTTPException(status_code=403, detail={"code": "GUILD_OWNER_REQUIRED"})
     target_id, target_domain = payload.owner_id.resolve(settings.domain)
-    if target_domain != settings.domain:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "OWNER_TRANSFER_REQUIRES_LOCAL_MEMBER"},
-        )
     if (target_id, target_domain) == (guild.owner_id, guild.owner_domain):
         raise HTTPException(status_code=409, detail={"code": "ALREADY_GUILD_OWNER"})
     target = await session.get(User, (target_id, target_domain))
@@ -253,7 +369,8 @@ async def transfer_guild_ownership(
     )
     if (
         target is None
-        or not target.is_local
+        or target.is_local != (target_domain == settings.domain)
+        or not target.profile_resolved
         or target.account_type != "human"
         or target.disabled_at is not None
         or member is None
@@ -261,6 +378,10 @@ async def transfer_guild_ownership(
         raise HTTPException(status_code=404, detail={"code": "GUILD_MEMBER_NOT_FOUND"})
 
     guild.permission_generation += 1
+    # The old owner must sign the transfer event, but its resource version
+    # represents the final mutation. PostgreSQL ``now()`` is transaction-
+    # stable, so materialize that version before changing the signer identity.
+    await materialize_updated_at(session, guild)
     transferred = {
         **guild_payload(guild),
         "owner_id": str(target_id),
@@ -283,6 +404,7 @@ async def transfer_guild_ownership(
         27,
         target_type="user",
         target_ref={"id": str(target_id), "origin_domain": target_domain},
+        reason=reason,
         changes=[
             {
                 "key": "owner",
@@ -455,12 +577,40 @@ async def delete_guild(
     settings: Settings = Depends(get_settings),
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "guild.delete",
+        {"if_match": if_match},
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await _locked_guild(session, settings, guild_id)
     if guild.origin_domain != settings.domain:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     require_current_version(guild.updated_at, if_match)
     if not _is_owner(guild, auth.user):
         raise HTTPException(status_code=403, detail={"code": "GUILD_OWNER_REQUIRED"})
+
+    channel_refs = set(
+        (
+            await session.execute(
+                select(Channel.id, Channel.origin_domain).where(
+                    Channel.guild_id == guild.id,
+                    Channel.guild_domain == guild.origin_domain,
+                )
+            )
+        ).tuples()
+    )
+    if await announcement_dependencies_exist(session, channel_refs):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "GUILD_HAS_ANNOUNCEMENT_DEPENDENCIES"},
+        )
 
     members = list(
         await session.scalars(

@@ -11,6 +11,7 @@
     | 'forum'
     | 'globe'
     | 'hash'
+    | 'headphones'
     | 'headphones-off'
     | 'home'
     | 'image'
@@ -20,12 +21,15 @@
     | 'lock'
     | 'logout'
     | 'mail'
+    | 'megaphone'
     | 'message'
     | 'microphone'
     | 'microphone-off'
     | 'more'
+    | 'music'
     | 'palette'
     | 'phone-off'
+    | 'poll'
     | 'plus'
     | 'search'
     | 'server'
@@ -37,6 +41,7 @@
     | 'threads'
     | 'user'
     | 'users'
+    | 'upload'
     | 'video'
     | 'video-off'
     | 'volume'
@@ -90,6 +95,9 @@
     />
   {:else if name === 'hash'}
     <path d="M5 9h14M4 15h14M10 3 8 21M16 3l-2 18" />
+  {:else if name === 'headphones'}
+    <path d="M4 13v4a2 2 0 0 0 2 2h2v-7H4Zm16 0v4a2 2 0 0 1-2 2h-2v-7h4Z" />
+    <path d="M4 12a8 8 0 0 1 16 0" />
   {:else if name === 'headphones-off'}
     <path
       d="m3 3 18 18M5.2 8.2A8 8 0 0 1 18.8 7M4 12v5a2 2 0 0 0 2 2h2v-7H4Zm16 2.5V12h-4v3.5M12 4a8 8 0 0 1 8 8v5a2 2 0 0 1-2 2h-1"
@@ -118,6 +126,8 @@
   {:else if name === 'mail'}
     <rect x="3" y="5" width="18" height="14" rx="2" />
     <path d="m3 7 9 6 9-6" />
+  {:else if name === 'megaphone'}
+    <path d="m3 11 14-5v12L3 13Zm14-1 3-2v8l-3-2M6 14l1.5 5h3L9 13" />
   {:else if name === 'message'}
     <path d="M21 15a4 4 0 0 1-4 4H8l-5 2V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" />
   {:else if name === 'microphone'}
@@ -131,6 +141,10 @@
     <circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none" />
     <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
     <circle cx="19" cy="12" r="1.2" fill="currentColor" stroke="none" />
+  {:else if name === 'music'}
+    <path d="M9 18V5l11-2v13" />
+    <circle cx="6" cy="18" r="3" />
+    <circle cx="17" cy="16" r="3" />
   {:else if name === 'palette'}
     <path
       d="M12 3a9 9 0 0 0 0 18h1.5a1.5 1.5 0 0 0 0-3H12a2 2 0 0 1 0-4h4a5 5 0 0 0 5-5c0-3.3-3.7-6-9-6Z"
@@ -143,6 +157,8 @@
     <path
       d="M5.2 10.2a15.5 15.5 0 0 1 13.6 0l1.3.7a2 2 0 0 1 .8 2.6l-1.2 2.2a2 2 0 0 1-2.5.9l-2.4-1.1a2 2 0 0 1-1.1-1.8v-1.2a9 9 0 0 0-3.4 0v1.2a2 2 0 0 1-1.1 1.8l-2.4 1.1a2 2 0 0 1-2.5-.9l-1.2-2.2a2 2 0 0 1 .8-2.6Z"
     />
+  {:else if name === 'poll'}
+    <path d="M5 20V10M12 20V4M19 20v-7" />
   {:else if name === 'plus'}
     <path d="M12 5v14M5 12h14" />
   {:else if name === 'search'}
@@ -177,6 +193,8 @@
   {:else if name === 'users'}
     <circle cx="9" cy="7" r="4" />
     <path d="M2 21v-2a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v2M16 3.5a4 4 0 0 1 0 7M18 14a5 5 0 0 1 4 5v2" />
+  {:else if name === 'upload'}
+    <path d="M12 16V4m0 0-5 5m5-5 5 5M4 20h16" />
   {:else if name === 'video'}
     <rect x="3" y="6" width="13" height="12" rx="2" />
     <path d="m16 10 5-3v10l-5-3Z" />

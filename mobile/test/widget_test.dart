@@ -420,6 +420,10 @@ void main() {
         rankRecentReactions(<String>['👍', '😂', '🔥']),
         <String>['🔥', '😂', '👍'],
       );
+      expect(
+        rankRecentReactions(<String>['❤️', '❤', '🔥']),
+        <String>['❤', '🔥'],
+      );
     });
 
     test('uses a compact useful default for a new user', () {
@@ -636,6 +640,35 @@ void main() {
       expect(find.text('maple@remote.example'), findsOneWidget);
     });
 
+    testWidgets('author type filter includes bots separately from webhooks',
+        (tester) async {
+      final repository = KaedeRepository(
+        KaedeApiClient(vault: const SessionVault()),
+      );
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('7@home.example'),
+        type: ChannelType.dm,
+        position: 0,
+        permissions: BigInt.zero,
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MessageSearchScreen(
+          repository: repository,
+          scope: 'channel',
+          scopeRef: channel.ref,
+          channel: channel,
+          accountRef: null,
+          onJump: (_) async {},
+        ),
+      ));
+
+      await tester.tap(find.byKey(const ValueKey('search-author-type-null')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Bots'), findsOneWidget);
+      expect(find.text('Webhooks'), findsOneWidget);
+    });
+
     testWidgets('member picker scrolls in compact keyboard space',
         (tester) async {
       tester.view.physicalSize = const Size(640, 360);
@@ -814,6 +847,20 @@ void main() {
       expect(preview, 'Before Spoiler and Spoiler after');
       expect(preview, isNot(contains('classified')));
       expect(preview, isNot(contains('secret')));
+
+      final injected = KaedeMessage.fromJson(<String, Object?>{
+        'id': '11',
+        'origin_domain': 'home.example',
+        'channel_id': '10',
+        'channel_domain': 'home.example',
+        'author_id': '2',
+        'author_domain': 'home.example',
+        'content': 'peer-injected plaintext',
+        'e2ee': <String, Object?>{'ciphertext': 'opaque'},
+        'message_type': 0,
+        'created_at': '2026-08-28T00:00:00Z',
+      });
+      expect(replyReferencePreview(injected), 'Encrypted message unavailable');
     });
 
     testWidgets('refreshes user and role tokens when identity data resolves',
@@ -1414,7 +1461,6 @@ void main() {
 
     test('waits for a clean scan and repeats the binding commit', () async {
       var commits = 0;
-      var polls = 0;
       final result = await commitScannedMedia(
         commit: () async {
           commits += 1;
@@ -1422,44 +1468,30 @@ void main() {
             'scan_status': commits == 1 ? 'pending' : 'clean',
           };
         },
-        status: () async {
-          polls += 1;
-          return <String, Object?>{
-            'scan_status': polls < 2 ? 'pending' : 'clean',
-          };
-        },
         pollInterval: Duration.zero,
       );
 
       expect(commits, 2);
-      expect(polls, 2);
       expect(result['scan_status'], 'clean');
     });
 
     test('does not repeat a commit that already bound clean media', () async {
       var commits = 0;
-      var polls = 0;
       await commitScannedMedia(
         commit: () async {
           commits += 1;
-          return <String, Object?>{'scan_status': 'clean'};
-        },
-        status: () async {
-          polls += 1;
           return <String, Object?>{'scan_status': 'clean'};
         },
         pollInterval: Duration.zero,
       );
 
       expect(commits, 1);
-      expect(polls, 0);
     });
 
     test('surfaces rejected and timed-out processing', () async {
       await expectLater(
         commitScannedMedia(
-          commit: () async => <String, Object?>{'scan_status': 'pending'},
-          status: () async => <String, Object?>{'scan_status': 'rejected'},
+          commit: () async => <String, Object?>{'scan_status': 'rejected'},
           pollInterval: Duration.zero,
         ),
         throwsA(isA<KaedeException>().having(
@@ -1471,7 +1503,6 @@ void main() {
       await expectLater(
         commitScannedMedia(
           commit: () async => <String, Object?>{'scan_status': 'pending'},
-          status: () async => <String, Object?>{'scan_status': 'pending'},
           pollInterval: Duration.zero,
           maxPollAttempts: 2,
         ),
@@ -1773,16 +1804,48 @@ void main() {
         EntityRef.parse('79044282979201024@kaede.chat'),
         historyMediaUrl: '/api/v1/dms/history/media/token',
       ),
-      '/api/v1/dms/history/media/token',
+      '/media/kaede.chat/79044282979201024/original',
     );
     const expired =
-        '/api/v1/dms/43@home.example/history-media/50@remote.example/79044282979201024@kaede.chat/original?expires=1&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO';
+        '/api/v1/dms/43@home.example/history-media/50@kaede.chat/79044282979201024@kaede.chat/original?expires=1&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO';
     expect(
       attachmentMediaPath(
         EntityRef.parse('79044282979201024@kaede.chat'),
         historyMediaUrl: expired,
       ),
       expired,
+    );
+    expect(
+      dmHistoryAttachmentMediaPath(
+        EntityRef.parse('79044282979201024@kaede.chat'),
+        'original',
+        expired,
+      ),
+      expired,
+    );
+    expect(
+      dmHistoryAttachmentMediaPath(
+        EntityRef.parse('79044282979201025@kaede.chat'),
+        'original',
+        expired,
+      ),
+      isNull,
+    );
+    expect(
+      dmHistoryAttachmentMediaPath(
+        EntityRef.parse('79044282979201024@kaede.chat'),
+        'thumbnail_512',
+        expired,
+      ),
+      isNull,
+    );
+    expect(
+      dmHistoryAttachmentMediaPath(
+        EntityRef.parse('79044282979201024@kaede.chat'),
+        'original',
+        '$expired&next=/api/v1/users/@me',
+      ),
+      isNull,
     );
     expect(
       attachmentMediaPath(
@@ -1799,6 +1862,22 @@ void main() {
         EntityRef.parse('79044282979201024@remote.example'),
       ),
       '/api/v1/attachments/79044282979201024',
+    );
+    expect(
+      canPollAttachmentStatus(
+        attachment: EntityRef.parse('79044282979201024@remote.example'),
+        messageAuthor: EntityRef.parse('5@home.example'),
+        currentUser: EntityRef.parse('5@home.example'),
+      ),
+      isFalse,
+    );
+    expect(
+      canPollAttachmentStatus(
+        attachment: EntityRef.parse('79044282979201024@home.example'),
+        messageAuthor: EntityRef.parse('5@home.example'),
+        currentUser: EntityRef.parse('5@home.example'),
+      ),
+      isTrue,
     );
   });
 
@@ -1833,6 +1912,22 @@ void main() {
       );
       expect(previewMediaUrl('https://example.test/page'), isNull);
     });
+
+    test('never derives network previews from decrypted message content', () {
+      const media = 'look https://static.example/cat.webp';
+      const link = 'read https://example.test/page';
+
+      expect(
+        automaticMessageMediaPreview(media, encrypted: false),
+        Uri.parse('https://static.example/cat.webp'),
+      );
+      expect(
+        automaticMessageLinkPreview(link, encrypted: false),
+        'https://example.test/page',
+      );
+      expect(automaticMessageMediaPreview(media, encrypted: true), isNull);
+      expect(automaticMessageLinkPreview(link, encrypted: true), isNull);
+    });
   });
 
   group('voice participant labels', () {
@@ -1856,6 +1951,39 @@ void main() {
         ),
         'Turtle',
       );
+    });
+  });
+
+  group('soundboard media capabilities', () {
+    test('accepts an exact signed external S3 origin', () {
+      expect(
+        validSoundboardMediaCapability(
+          download: Uri.parse(
+            'https://kaede-sounds.s3.example.com/object?signature=opaque',
+          ),
+          authorityDomain: 'Guild.Example',
+          mediaOrigin: 'https://kaede-sounds.s3.example.com',
+        ),
+        isTrue,
+      );
+    });
+
+    test('rejects origin substitution, credentials, and fragments', () {
+      for (final value in <String>[
+        'https://attacker.example/object',
+        'https://user@kaede-sounds.s3.example.com/object',
+        'https://kaede-sounds.s3.example.com/object#replacement',
+      ]) {
+        expect(
+          validSoundboardMediaCapability(
+            download: Uri.parse(value),
+            authorityDomain: 'guild.example',
+            mediaOrigin: 'https://kaede-sounds.s3.example.com',
+          ),
+          isFalse,
+          reason: value,
+        );
+      }
     });
   });
 

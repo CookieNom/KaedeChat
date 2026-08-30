@@ -1,28 +1,50 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
+import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 from redis.asyncio import Redis
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bots import (
+    BotChannelGrant,
+    bind_bot_thread_runtime_grant,
+    bot_can_read_ambient_message_content,
+    bot_e2ee_sender_device_id,
+    bot_message_grant_ids,
+    bot_messages_after_history_floor,
     installation_for_channel,
     installation_for_guild,
+    optional_bot_channel_e2ee_access,
     redact_bot_thread_payload,
+    render_bot_message_response,
+    require_bot_forward_source_access,
+    require_bot_installation_intent,
     require_owned_attachments_for_installation,
     user_auth,
 )
 from app.api.channels import (
+    WEBHOOK_CAPABILITY_MESSAGE_PERMISSIONS,
     MessageAdmissionOptions,
+    MessageCreateTransaction,
     create_message,
+    load_webhook_capability_channel_access,
+    message_view_installation_lineage,
     publish_current_thread_member_updates,
     raise_proxy_rejection,
     slowmode_retry_after_ms,
@@ -34,7 +56,14 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.auth.instance_restrictions import require_remote_user_creation_allowed
 from app.auth.tokens import AccessGrant
+from app.automod.service import (
+    evaluate_message as evaluate_automod_message,
+)
+from app.automod.service import (
+    require_member_interactions_allowed,
+)
 from app.bots.auth import BotPrincipal, require_bot
 from app.chat.audit import add_audit_entry
 from app.chat.channel_access import (
@@ -48,6 +77,7 @@ from app.chat.guild_revision import (
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
+from app.chat.mentions import merge_mention_recipients, role_mention_recipients
 from app.chat.payloads import (
     attachment_payload,
     channel_payload,
@@ -58,16 +88,20 @@ from app.chat.payloads import (
     user_payload,
 )
 from app.chat.permissions import get_permissions, require_permissions
+from app.chat.rich_content import message_automod_text
 from app.chat.schemas import MessageCreate, RequestModel, cleaned_nonempty
 from app.chat.thread_limits import MAX_ACTIVE_THREADS, require_active_thread_capacity
+from app.core.base64url import decode_base64url, encode_base64url
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, WireSnowflake
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Attachment,
     Channel,
+    EncryptedForumStarterReservation,
     Guild,
     GuildMember,
     Message,
@@ -103,10 +137,19 @@ MAX_THREAD_MEMBERS = 1000
 MESSAGE_FLAG_HAS_THREAD = 1 << 5
 
 
+def validate_auto_archive_duration(value: int) -> int:
+    if value not in AUTO_ARCHIVE_DURATIONS:
+        raise ValueError("unsupported auto-archive duration")
+    return value
+
+
+AutoArchiveDuration = Annotated[int, AfterValidator(validate_auto_archive_duration)]
+
+
 class ThreadCreate(RequestModel):
     name: str = Field(min_length=1, max_length=100)
     type: Literal[10, 11, 12] | None = None
-    auto_archive_duration: int | None = None
+    auto_archive_duration: AutoArchiveDuration | None = None
     rate_limit_per_user: int | None = Field(default=None, ge=0, le=21_600)
     invitable: bool | None = None
     applied_tag_ids: list[WireSnowflake] = Field(
@@ -115,6 +158,12 @@ class ThreadCreate(RequestModel):
         validation_alias=AliasChoices("applied_tag_ids", "applied_tags"),
     )
     message: MessageCreate | None = None
+    starter_reservation_nonce: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
     # Flat compatibility keeps the web/mobile composer thin while the nested
     # form remains the canonical bot/slash-command contract.
@@ -129,13 +178,6 @@ class ThreadCreate(RequestModel):
     @classmethod
     def clean_name(cls, value: str) -> str:
         return cleaned_nonempty(value)
-
-    @field_validator("auto_archive_duration")
-    @classmethod
-    def valid_auto_archive(cls, value: int | None) -> int | None:
-        if value is not None and value not in AUTO_ARCHIVE_DURATIONS:
-            raise ValueError("unsupported auto-archive duration")
-        return value
 
     @model_validator(mode="after")
     def one_starter_form(self) -> ThreadCreate:
@@ -182,7 +224,7 @@ class ThreadCreate(RequestModel):
 
 class ThreadFromMessageCreate(RequestModel):
     name: str = Field(min_length=1, max_length=100)
-    auto_archive_duration: int | None = None
+    auto_archive_duration: AutoArchiveDuration | None = None
     rate_limit_per_user: int | None = Field(default=None, ge=0, le=21_600)
 
     @field_validator("name")
@@ -190,12 +232,133 @@ class ThreadFromMessageCreate(RequestModel):
     def clean_name(cls, value: str) -> str:
         return cleaned_nonempty(value)
 
-    @field_validator("auto_archive_duration")
-    @classmethod
-    def valid_auto_archive(cls, value: int | None) -> int | None:
-        if value is not None and value not in AUTO_ARCHIVE_DURATIONS:
-            raise ValueError("unsupported auto-archive duration")
-        return value
+
+def _canonical_request_hash(value: object) -> bytes:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).digest()
+
+
+async def _starter_reservation_identity(
+    session: AsyncSession,
+    settings: Settings,
+    actor: User,
+    options: MessageAdmissionOptions,
+    *,
+    claimant_device_id: str | None = None,
+) -> dict[str, object]:
+    if options.webhook_id is not None:
+        if claimant_device_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "STARTER_RESERVATION_DEVICE_REQUIRED"},
+            )
+        if re.fullmatch(r"kwe_[A-Za-z0-9_-]{43}", claimant_device_id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "STARTER_RESERVATION_DEVICE_INVALID"},
+            )
+        return {
+            "claimant_kind": "webhook",
+            "claimant_id": actor.id,
+            "claimant_domain": actor.origin_domain,
+            "worker_id": options.bot_worker_id,
+            "claimant_device_id": claimant_device_id,
+            "application_id": options.application_id,
+            "application_domain": options.application_domain,
+            "installation_type": None,
+            "installation_id": None,
+            "installation_domain": None,
+            "installation_revision": None,
+            "webhook_id": options.webhook_id,
+            "webhook_domain": settings.domain,
+        }
+    if options.application_id is not None and options.application_domain is not None:
+        if options.bot_worker_id is None or claimant_device_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "STARTER_RESERVATION_DEVICE_REQUIRED"},
+            )
+        if re.fullmatch(r"kbe_[A-Za-z0-9_-]{43}", claimant_device_id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "STARTER_RESERVATION_DEVICE_INVALID"},
+            )
+        (
+            kind,
+            installation_id,
+            installation_domain,
+            revision,
+        ) = await message_view_installation_lineage(session, settings, options)
+        return {
+            "claimant_kind": "bot",
+            "claimant_id": actor.id,
+            "claimant_domain": actor.origin_domain,
+            "worker_id": options.bot_worker_id,
+            "claimant_device_id": claimant_device_id,
+            "application_id": options.application_id,
+            "application_domain": options.application_domain,
+            "installation_type": kind,
+            "installation_id": installation_id,
+            "installation_domain": installation_domain,
+            "installation_revision": revision,
+            "webhook_id": None,
+            "webhook_domain": None,
+        }
+    return {
+        "claimant_kind": "human",
+        "claimant_id": actor.id,
+        "claimant_domain": actor.origin_domain,
+        "worker_id": None,
+        "claimant_device_id": None,
+        "application_id": None,
+        "application_domain": None,
+        "installation_type": None,
+        "installation_id": None,
+        "installation_domain": None,
+        "installation_revision": None,
+        "webhook_id": None,
+        "webhook_domain": None,
+    }
+
+
+def _starter_reservation_key(
+    parent: Channel,
+    identity: dict[str, object],
+    nonce: str,
+) -> bytes:
+    return _canonical_request_hash(
+        {
+            "parent_ref": f"{parent.id}@{parent.origin_domain}",
+            "claimant_kind": identity["claimant_kind"],
+            "claimant_ref": (f"{identity['claimant_id']}@{identity['claimant_domain']}"),
+            "application_ref": (
+                f"{identity['application_id']}@{identity['application_domain']}"
+                if identity["application_id"] is not None
+                else None
+            ),
+            "worker_id": identity["worker_id"],
+            "claimant_device_id": identity["claimant_device_id"],
+            "installation_type": identity["installation_type"],
+            "installation_ref": (
+                f"{identity['installation_id']}@{identity['installation_domain']}"
+                if identity["installation_id"] is not None
+                else None
+            ),
+            "installation_revision": identity["installation_revision"],
+            "webhook_ref": (
+                f"{identity['webhook_id']}@{identity['webhook_domain']}"
+                if identity["webhook_id"] is not None
+                else None
+            ),
+            "client_nonce": nonce,
+        }
+    )
 
 
 class ThreadUpdate(RequestModel):
@@ -203,7 +366,7 @@ class ThreadUpdate(RequestModel):
     archived: bool | None = None
     locked: bool | None = None
     invitable: bool | None = None
-    auto_archive_duration: int | None = None
+    auto_archive_duration: AutoArchiveDuration | None = None
     rate_limit_per_user: int | None = Field(default=None, ge=0, le=21_600)
     applied_tag_ids: list[WireSnowflake] | None = Field(
         default=None,
@@ -217,13 +380,6 @@ class ThreadUpdate(RequestModel):
     @classmethod
     def clean_name(cls, value: str | None) -> str | None:
         return cleaned_nonempty(value) if value is not None else None
-
-    @field_validator("auto_archive_duration")
-    @classmethod
-    def valid_auto_archive(cls, value: int | None) -> int | None:
-        if value is not None and value not in AUTO_ARCHIVE_DURATIONS:
-            raise ValueError("unsupported auto-archive duration")
-        return value
 
     @model_validator(mode="after")
     def valid_update(self) -> ThreadUpdate:
@@ -257,6 +413,7 @@ class GuildThreadProxyRequest(RequestModel):
     operation: Literal[
         "thread.create",
         "thread.create_from_message",
+        "thread.starter.claim",
         "thread.update",
         "thread.delete",
         "thread.member.put",
@@ -268,6 +425,7 @@ class GuildThreadProxyRequest(RequestModel):
     message_id: EntityRef | None = None
     target_user_id: EntityRef | None = None
     attachments: list[dict[str, object]] = Field(default_factory=list, max_length=10)
+    reason: str | None = Field(default=None, max_length=512)
 
     @model_validator(mode="after")
     def operation_shape(self) -> GuildThreadProxyRequest:
@@ -277,8 +435,11 @@ class GuildThreadProxyRequest(RequestModel):
             raise ValueError("source thread mutation has an invalid message reference")
         if member_operation != (self.target_user_id is not None):
             raise ValueError("thread member mutation has an invalid target reference")
-        if self.attachments and self.operation != "thread.create":
-            raise ValueError("attachments are valid only for thread creation")
+        if self.attachments and self.operation not in {
+            "thread.create",
+            "thread.starter.claim",
+        }:
+            raise ValueError("attachments are invalid for this thread operation")
         if self.operation in {"thread.delete", "thread.member.delete"} and self.payload:
             raise ValueError("delete thread mutations do not accept a payload")
         if (
@@ -287,6 +448,7 @@ class GuildThreadProxyRequest(RequestModel):
                 "thread.create",
                 "thread.create_from_message",
                 "thread.update",
+                "thread.starter.claim",
             }
             and not self.payload
         ):
@@ -305,6 +467,7 @@ async def proxy_remote_thread_mutation(
     message_ref: EntityRef | None = None,
     target_ref: EntityRef | None = None,
     attachments: list[dict[str, object]] | None = None,
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Submit one mutation to the remote guild home and bound its response."""
 
@@ -318,6 +481,8 @@ async def proxy_remote_thread_mutation(
         "payload": payload or {},
         "attachments": attachments or [],
     }
+    if reason is not None:
+        body["reason"] = reason
     if message_ref is not None:
         message_id, message_domain = message_ref.resolve(settings.domain)
         body["message_id"] = f"{message_id}@{message_domain}"
@@ -347,7 +512,65 @@ async def proxy_remote_thread_mutation(
     if not isinstance(decoded, dict):
         raise HTTPException(status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"})
     result = {str(key): value for key, value in decoded.items()}
-    if operation in {"thread.create", "thread.create_from_message", "thread.update"}:
+    expected_response_keys = (
+        {"message"}
+        if operation == "thread.starter.claim"
+        else {"thread"}
+        if operation
+        in {
+            "thread.create",
+            "thread.create_from_message",
+            "thread.update",
+            "thread.delete",
+        }
+        else {"updated"}
+    )
+    if set(result) != expected_response_keys:
+        raise HTTPException(status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"})
+    if operation == "thread.starter.claim":
+        rendered = result.get("message")
+        if not isinstance(rendered, dict) or payload is None:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
+            )
+        raw_attachments = rendered.get("attachments")
+        if not isinstance(raw_attachments, list) or any(
+            not isinstance(item, dict) for item in raw_attachments
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
+            )
+        rendered_attachment_refs = {
+            (item.get("id"), item.get("origin_domain")) for item in raw_attachments
+        }
+        expected_attachment_refs = {
+            (str(item.get("id")), item.get("origin_domain")) for item in attachments or []
+        }
+        if (
+            rendered.get("id") != str(access.channel.id)
+            or rendered.get("origin_domain") != access.channel.origin_domain
+            or rendered.get("channel_id") != str(access.channel.id)
+            or rendered.get("channel_domain") != access.channel.origin_domain
+            or rendered.get("author_id") != str(actor.id)
+            or rendered.get("author_domain") != actor.origin_domain
+            or rendered.get("e2ee") != payload.get("e2ee")
+            or rendered.get("client_nonce") != payload.get("client_nonce")
+            or len(raw_attachments) != len(expected_attachment_refs)
+            or rendered_attachment_refs != expected_attachment_refs
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
+            )
+        return {str(key): value for key, value in rendered.items()}
+    if operation in {
+        "thread.create",
+        "thread.create_from_message",
+        "thread.update",
+        "thread.delete",
+    }:
         rendered = result.get("thread")
         if not isinstance(rendered, dict):
             raise HTTPException(
@@ -393,6 +616,9 @@ async def proxy_remote_thread_mutation(
             if (rendered.get("id"), rendered.get("origin_domain")) != (
                 str(source_id),
                 source_domain,
+            ) or (
+                access.channel.encryption_mode == "e2ee"
+                and rendered.get("e2ee_required") is not True
             ):
                 raise HTTPException(
                     status_code=502,
@@ -416,15 +642,16 @@ async def proxy_remote_thread_mutation(
                         detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
                     )
                 raw_rendered_attachments = starter.get("attachments")
-                rendered_attachment_refs = (
-                    {
-                        (item.get("id"), item.get("origin_domain"))
-                        for item in raw_rendered_attachments
-                        if isinstance(item, dict)
-                    }
-                    if isinstance(raw_rendered_attachments, list)
-                    else set()
-                )
+                if not isinstance(raw_rendered_attachments, list) or any(
+                    not isinstance(item, dict) for item in raw_rendered_attachments
+                ):
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
+                    )
+                rendered_attachment_refs = {
+                    (item.get("id"), item.get("origin_domain")) for item in raw_rendered_attachments
+                }
                 requested_attachment_refs = {
                     (str(item.get("id")), item.get("origin_domain")) for item in attachments or []
                 }
@@ -434,7 +661,26 @@ async def proxy_remote_thread_mutation(
                     or starter.get("content") != starter_request.get("content")
                     or starter.get("e2ee") != starter_request.get("e2ee")
                     or starter.get("client_nonce") != starter_request.get("client_nonce")
+                    or len(raw_rendered_attachments) != len(requested_attachment_refs)
                     or rendered_attachment_refs != requested_attachment_refs
+                ):
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
+                    )
+            reservation_nonce = payload.get("starter_reservation_nonce")
+            if reservation_nonce is not None:
+                reservation = rendered.get("starter_reservation")
+                if (
+                    rendered.get("e2ee_required") is not True
+                    or rendered.get("starter_message") is not None
+                    or rendered.get("message") is not None
+                    or not isinstance(reservation, dict)
+                    or reservation
+                    != {
+                        "client_nonce": reservation_nonce,
+                        "claimed": False,
+                    }
                 ):
                     raise HTTPException(
                         status_code=502,
@@ -473,7 +719,7 @@ async def proxy_remote_thread_mutation(
                     detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"},
                 )
         return {str(key): value for key, value in rendered.items()}
-    expected_flag = "deleted" if operation == "thread.delete" else "updated"
+    expected_flag = "updated"
     if result.get(expected_flag) is not True:
         raise HTTPException(status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"})
     return result
@@ -500,7 +746,12 @@ async def prepare_remote_starter_attachments(
             int(attachment_id),
             required_purpose="attachment",
         )
-        if attachment.message_id is not None or attachment.message_domain is not None:
+        if (
+            attachment.message_id is not None
+            or attachment.message_domain is not None
+            or attachment.interaction_id is not None
+            or attachment.interaction_response_id is not None
+        ):
             raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
         attachments.append(attachment)
     await record_attachment_recipients(
@@ -536,7 +787,7 @@ def _encode_thread_cursor(
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    return encode_base64url(raw)
 
 
 def _decode_thread_cursor(
@@ -547,8 +798,7 @@ def _decode_thread_cursor(
     sort_order: int,
 ) -> tuple[bool, datetime, int, str]:
     try:
-        padding = "=" * (-len(value) % 4)
-        raw = json.loads(base64.urlsafe_b64decode(value + padding))
+        raw = json.loads(decode_base64url(value, maximum=512))
         if (
             not isinstance(raw, dict)
             or raw.get("v") != 1
@@ -641,8 +891,10 @@ async def rendered_thread(
     guild: Guild,
     actor: User,
     thread: Channel,
+    *,
+    base_payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    rendered = channel_payload(thread)
+    rendered = dict(base_payload) if base_payload is not None else channel_payload(thread)
     permissions = await get_permissions(session, redis, guild, actor, channel=thread)
     rendered["permissions"] = str(int(permissions))
     current_member = await session.get(
@@ -834,9 +1086,27 @@ async def create_thread_service(
     snowflake: SnowflakeGenerator,
     settings: Settings,
     *,
+    reason: str | None = None,
     replicated_attachments: tuple[dict[str, object], ...] = (),
+    starter_admission_options: MessageAdmissionOptions | None = None,
+    starter_claimant_device_id: str | None = None,
 ) -> dict[str, object]:
-    access = await load_channel_access(session, settings, auth.user, parent_ref)
+    starter_options = starter_admission_options or MessageAdmissionOptions()
+    if starter_options.webhook_id is not None:
+        if (
+            starter_options.webhook_channel_id is None
+            or starter_options.webhook_channel_domain is None
+        ):
+            raise RuntimeError("webhook thread admission lost its bound channel")
+        access = await load_webhook_capability_channel_access(
+            session,
+            settings,
+            parent_ref,
+            webhook_channel_id=starter_options.webhook_channel_id,
+            webhook_channel_domain=starter_options.webhook_channel_domain,
+        )
+    else:
+        access = await load_channel_access(session, settings, auth.user, parent_ref)
     if access.guild is None or access.channel.type not in THREAD_PARENTS:
         raise HTTPException(status_code=400, detail={"code": "THREAD_PARENT_INVALID"})
     if access.guild.origin_domain != settings.domain:
@@ -845,10 +1115,6 @@ async def create_thread_service(
             raise HTTPException(
                 status_code=400, detail={"code": "CLIENT_NONCE_REQUIRED_FOR_FEDERATION"}
             )
-        if auth.user.account_type == "bot" and (
-            access.channel.e2ee_required or access.channel.encryption_mode == "e2ee"
-        ):
-            raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
         local_attachments, remote_attachments = await prepare_remote_starter_attachments(
             session, settings, access, auth.user, starter_payload
         )
@@ -861,6 +1127,7 @@ async def create_thread_service(
                 "thread.create",
                 payload=payload.model_dump(mode="json", exclude_none=True),
                 attachments=remote_attachments,
+                reason=reason,
             )
         finally:
             for attachment in local_attachments:
@@ -868,14 +1135,35 @@ async def create_thread_service(
     access = await lock_local_channel_mutation(session, settings, access)
     parent = access.channel
     guild = cast(Guild, access.guild)
-    if auth.user.account_type == "bot" and (
-        parent.e2ee_required or parent.encryption_mode == "e2ee"
-    ):
-        raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
+    if starter_options.webhook_id is not None and parent.type != 15:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "WEBHOOK_FORUM_REQUIRED",
+                "message": "Webhook-created threads require a forum destination.",
+            },
+        )
     thread_type = _thread_type(parent, payload.type)
     starter_payload = payload.starter()
-    if parent.type == 15 and starter_payload is None:
+    encrypted_forum_reservation = parent.type == 15 and bool(parent.e2ee_required)
+    if encrypted_forum_reservation:
+        if starter_payload is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "E2EE_FORUM_STARTER_REQUIRES_ACTIVATION"},
+            )
+        if payload.starter_reservation_nonce is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "STARTER_RESERVATION_NONCE_REQUIRED"},
+            )
+    elif parent.type == 15 and starter_payload is None:
         raise HTTPException(status_code=400, detail={"code": "FORUM_STARTER_REQUIRED"})
+    elif payload.starter_reservation_nonce is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "STARTER_RESERVATION_NOT_ALLOWED"},
+        )
     if (
         parent.type == 15
         and starter_payload is not None
@@ -898,9 +1186,66 @@ async def create_thread_service(
         needed = Permission.VIEW_CHANNEL | _thread_create_permission(thread_type)
         if starter_payload is not None:
             needed |= Permission.SEND_MESSAGES_IN_THREADS
-    actor_permissions = await require_permissions(
-        session, redis, guild, auth.user, needed, channel=parent
+    actor_permissions = (
+        WEBHOOK_CAPABILITY_MESSAGE_PERMISSIONS
+        if starter_options.webhook_id is not None
+        else await require_permissions(session, redis, guild, auth.user, needed, channel=parent)
     )
+    reservation_identity: dict[str, object] | None = None
+    reservation_key: bytes | None = None
+    reservation_request_hash: bytes | None = None
+    if encrypted_forum_reservation:
+        nonce = cast(str, payload.starter_reservation_nonce)
+        reservation_identity = await _starter_reservation_identity(
+            session,
+            settings,
+            auth.user,
+            starter_options,
+            claimant_device_id=starter_claimant_device_id,
+        )
+        reservation_key = _starter_reservation_key(parent, reservation_identity, nonce)
+        reservation_request_hash = _canonical_request_hash(
+            payload.model_dump(mode="json", exclude_none=True)
+        )
+        reservation_lock = int.from_bytes(
+            reservation_key[:8],
+            byteorder="big",
+            signed=True,
+        )
+        await session.execute(select(func.pg_advisory_xact_lock(reservation_lock)))
+        existing_reservation = await session.scalar(
+            select(EncryptedForumStarterReservation).where(
+                EncryptedForumStarterReservation.reservation_key == reservation_key
+            )
+        )
+        if existing_reservation is not None:
+            if existing_reservation.request_hash != reservation_request_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "STARTER_RESERVATION_NONCE_CONFLICT"},
+                )
+            existing_thread = await session.get(
+                Channel,
+                (existing_reservation.thread_id, existing_reservation.thread_domain),
+            )
+            if existing_thread is None or existing_thread.unavailable:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "STARTER_RESERVATION_STATE_INVALID"},
+                )
+            existing_result = await rendered_thread(
+                session,
+                redis,
+                guild,
+                auth.user,
+                existing_thread,
+            )
+            existing_result["starter_reservation"] = {
+                "client_nonce": existing_reservation.client_nonce,
+                "claimed": existing_reservation.claimed_at is not None,
+            }
+            existing_result["message"] = existing_result.get("starter_message")
+            return existing_result
     applied_tags = [int(item) for item in payload.applied_tag_ids]
     validate_applied_tags(parent, applied_tags)
     if set(applied_tags) & _moderated_tag_ids(parent) and not (
@@ -909,7 +1254,6 @@ async def create_thread_service(
         raise HTTPException(status_code=403, detail={"code": "MODERATED_TAG_FORBIDDEN"})
     if thread_type != 12 and payload.invitable is not None:
         raise HTTPException(status_code=400, detail={"code": "THREAD_INVITABLE_PRIVATE_ONLY"})
-
     # A thread-create retry must resolve before it consumes another slowmode
     # admission or snowflake. The guild mutation fence already serializes local
     # channel writes; this narrower advisory fence also documents and preserves
@@ -928,7 +1272,7 @@ async def create_thread_service(
             signed=True,
         )
         await session.execute(select(func.pg_advisory_xact_lock(nonce_lock)))
-        existing_thread = await session.scalar(
+        existing_statement = (
             select(Channel)
             .join(
                 Message,
@@ -949,15 +1293,78 @@ async def create_thread_service(
                 Message.client_nonce == starter_nonce,
             )
         )
+        if starter_options.webhook_id is not None:
+            existing_statement = existing_statement.where(
+                Message.webhook_id == starter_options.webhook_id
+            )
+        existing_thread = await session.scalar(existing_statement)
         if existing_thread is not None:
             existing_result = await rendered_thread(
                 session, redis, guild, auth.user, existing_thread
             )
             if parent.type == 15:
+                if starter_options.webhook_id is not None:
+                    existing_starter = await session.get(
+                        Message,
+                        (
+                            existing_thread.starter_message_id,
+                            existing_thread.starter_message_domain,
+                        ),
+                    )
+                    if (
+                        existing_starter is None
+                        or existing_starter.deleted_at is not None
+                        or existing_starter.webhook_id != starter_options.webhook_id
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "code": "WEBHOOK_IDEMPOTENCY_STATE_INVALID",
+                                "message": (
+                                    "The existing webhook forum post is no longer available."
+                                ),
+                            },
+                        )
+                    existing_result["starter_message"] = await render_message_payload(
+                        session, existing_starter
+                    )
                 existing_result["message"] = existing_result.get("starter_message")
             return existing_result
 
     await require_active_thread_capacity(session, guild)
+    starter_automod_post_commit = None
+    if starter_payload is not None and starter_options.webhook_id is None:
+        explicit_mention_pairs = list(
+            dict.fromkeys(
+                item.resolve(settings.domain) for item in starter_payload.mention_user_ids
+            )
+        )
+        role_mention_pairs = await role_mention_recipients(
+            session,
+            guild,
+            starter_payload.content,
+            actor_permissions,
+        )
+        mention_pairs = merge_mention_recipients(
+            explicit_mention_pairs,
+            role_mention_pairs,
+        )
+        starter_automod_post_commit = await evaluate_automod_message(
+            session,
+            redis,
+            settings,
+            snowflake,
+            guild,
+            parent,
+            auth.user,
+            message_automod_text(
+                starter_payload.content,
+                poll=starter_payload.poll,
+                components=starter_payload.components,
+            ),
+            mention_count=len(mention_pairs),
+            actor_permissions=actor_permissions,
+        )
     await enforce_thread_create_slowmode(redis, parent, auth.user, actor_permissions)
 
     now = datetime.now(UTC)
@@ -967,6 +1374,13 @@ async def create_thread_service(
         payload.rate_limit_per_user
         if payload.rate_limit_per_user is not None
         else int(parent.default_thread_rate_limit_per_user or 0)
+    )
+    creator_is_member = starter_options.webhook_id is None or (
+        await session.get(
+            GuildMember,
+            (guild.id, guild.origin_domain, auth.user.id, auth.user.origin_domain),
+        )
+        is not None
     )
     thread = Channel(
         id=thread_id,
@@ -993,27 +1407,81 @@ async def create_thread_service(
         last_activity_at=now,
         message_count=0,
         total_message_sent=0,
-        member_count=1,
+        member_count=1 if creator_is_member else 0,
         flags=0,
         applied_tag_ids=[str(item) for item in applied_tags],
         e2ee_required=bool(
             (parent.type == 15 and parent.e2ee_required) or parent.encryption_mode == "e2ee"
         ),
+        encryption_mode="plaintext",
+        encryption_state="plaintext",
         created_floor_id=thread_id,
         created_at=now,
     )
     session.add(thread)
-    creator_membership = ThreadMember(
-        thread_id=thread.id,
-        thread_domain=thread.origin_domain,
-        guild_id=guild.id,
-        guild_domain=guild.origin_domain,
-        user_id=auth.user.id,
-        user_domain=auth.user.origin_domain,
-        flags=0,
-        notification_level="inherit",
+    starter_reservation: EncryptedForumStarterReservation | None = None
+    if encrypted_forum_reservation:
+        if (
+            reservation_identity is None
+            or reservation_key is None
+            or reservation_request_hash is None
+            or payload.starter_reservation_nonce is None
+        ):
+            raise RuntimeError("encrypted forum starter reservation lost its identity")
+        starter_reservation = EncryptedForumStarterReservation(
+            thread_id=thread.id,
+            thread_domain=thread.origin_domain,
+            parent_id=parent.id,
+            parent_domain=parent.origin_domain,
+            claimant_kind=cast(str, reservation_identity["claimant_kind"]),
+            claimant_id=cast(int, reservation_identity["claimant_id"]),
+            claimant_domain=cast(str, reservation_identity["claimant_domain"]),
+            worker_id=cast(int | None, reservation_identity["worker_id"]),
+            claimant_device_id=cast(
+                str | None,
+                reservation_identity["claimant_device_id"],
+            ),
+            application_id=cast(int | None, reservation_identity["application_id"]),
+            application_domain=cast(
+                str | None,
+                reservation_identity["application_domain"],
+            ),
+            installation_type=cast(
+                str | None,
+                reservation_identity["installation_type"],
+            ),
+            installation_id=cast(int | None, reservation_identity["installation_id"]),
+            installation_domain=cast(
+                str | None,
+                reservation_identity["installation_domain"],
+            ),
+            installation_revision=cast(
+                int | None,
+                reservation_identity["installation_revision"],
+            ),
+            webhook_id=cast(int | None, reservation_identity["webhook_id"]),
+            webhook_domain=cast(str | None, reservation_identity["webhook_domain"]),
+            client_nonce=payload.starter_reservation_nonce,
+            reservation_key=reservation_key,
+            request_hash=reservation_request_hash,
+        )
+        session.add(starter_reservation)
+    creator_membership = (
+        ThreadMember(
+            thread_id=thread.id,
+            thread_domain=thread.origin_domain,
+            guild_id=guild.id,
+            guild_domain=guild.origin_domain,
+            user_id=auth.user.id,
+            user_domain=auth.user.origin_domain,
+            flags=0,
+            notification_level="inherit",
+        )
+        if creator_is_member
+        else None
     )
-    session.add(creator_membership)
+    if creator_membership is not None:
+        session.add(creator_membership)
     await add_audit_entry(
         session,
         snowflake,
@@ -1022,6 +1490,7 @@ async def create_thread_service(
         110,
         target_type="thread",
         target_ref={"id": str(thread.id)},
+        reason=reason,
     )
     await session.flush()
     initial_thread_state = federation_channel_state(thread)
@@ -1043,19 +1512,20 @@ async def create_thread_service(
         {"channel": initial_thread_state},
         channel=thread,
     )
-    await queue_guild_mutation(
-        session,
-        settings,
-        guild,
-        auth.user,
-        "guild.thread.member.upsert",
-        {
-            "member": thread_member_payload(creator_membership),
-            "member_count": thread.member_count,
-        },
-        channel=thread,
-        snapshot_required=thread.type == 12,
-    )
+    if creator_membership is not None:
+        await queue_guild_mutation(
+            session,
+            settings,
+            guild,
+            auth.user,
+            "guild.thread.member.upsert",
+            {
+                "member": thread_member_payload(creator_membership),
+                "member_count": thread.member_count,
+            },
+            channel=thread,
+            snapshot_required=thread.type == 12,
+        )
     if parent.type == 15:
         parent.last_thread_id = thread.id
         parent.last_thread_domain = thread.origin_domain
@@ -1098,7 +1568,8 @@ async def create_thread_service(
             redis,
             snowflake,
             settings,
-            MessageAdmissionOptions(
+            replace(
+                starter_options,
                 allow_required_e2ee_starter=parent.type == 15,
                 mark_thread_starter=True,
                 queue_thread_create=False,
@@ -1106,8 +1577,11 @@ async def create_thread_service(
                 forum_starter_permissions_checked=parent.type == 15,
                 forced_message_id=thread.id if parent.type == 15 else None,
                 replicated_attachments=replicated_attachments,
+                automod_already_evaluated=True,
             ),
         )
+        if starter_automod_post_commit is not None:
+            await starter_automod_post_commit.publish(redis)
         await session.refresh(thread)
     else:
         await session.commit()
@@ -1116,6 +1590,11 @@ async def create_thread_service(
     result["starter_message"] = starter
     if parent.type == 15:
         result["message"] = starter
+    if starter_reservation is not None:
+        result["starter_reservation"] = {
+            "client_nonce": starter_reservation.client_nonce,
+            "claimed": False,
+        }
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),
@@ -1149,6 +1628,172 @@ async def create_thread_service(
     return result
 
 
+async def claim_encrypted_forum_starter_service(
+    thread_ref: EntityRef,
+    payload: MessageCreate,
+    auth: AuthenticatedUser,
+    session: AsyncSession,
+    redis: Redis,
+    snowflake: SnowflakeGenerator,
+    settings: Settings,
+    *,
+    replicated_attachments: tuple[dict[str, object], ...] = (),
+    admission_options: MessageAdmissionOptions | None = None,
+    claimant_device_id: str | None = None,
+) -> dict[str, object]:
+    """Atomically consume one reserved E2EE forum starter after MLS activation."""
+
+    options = admission_options or MessageAdmissionOptions()
+    if options.webhook_id is not None:
+        if options.webhook_channel_id is None or options.webhook_channel_domain is None:
+            raise RuntimeError("webhook starter claim lost its bound channel")
+        access = await load_webhook_capability_channel_access(
+            session,
+            settings,
+            thread_ref,
+            webhook_channel_id=options.webhook_channel_id,
+            webhook_channel_domain=options.webhook_channel_domain,
+        )
+    else:
+        access = await load_channel_access(session, settings, auth.user, thread_ref)
+    if access.guild is None:
+        raise HTTPException(status_code=404, detail={"code": "THREAD_NOT_FOUND"})
+    if access.guild.origin_domain != settings.domain:
+        local_attachments, remote_attachments = await prepare_remote_starter_attachments(
+            session,
+            settings,
+            access,
+            auth.user,
+            payload,
+        )
+        try:
+            return await proxy_remote_thread_mutation(
+                session,
+                settings,
+                access,
+                auth.user,
+                "thread.starter.claim",
+                payload=payload.model_dump(mode="json", exclude_none=True),
+                attachments=remote_attachments,
+            )
+        finally:
+            for attachment in local_attachments:
+                await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
+    access = await lock_local_channel_mutation(session, settings, access)
+    thread = access.channel
+    if (
+        thread.type not in THREAD_TYPES
+        or not thread.e2ee_required
+        or thread.parent_id is None
+        or thread.parent_domain is None
+    ):
+        raise HTTPException(status_code=409, detail={"code": "STARTER_RESERVATION_NOT_FOUND"})
+    parent = await session.get(Channel, (thread.parent_id, thread.parent_domain))
+    if parent is None or parent.type != 15 or not parent.e2ee_required:
+        raise HTTPException(status_code=409, detail={"code": "STARTER_RESERVATION_NOT_FOUND"})
+    reservation = await session.scalar(
+        select(EncryptedForumStarterReservation)
+        .where(
+            EncryptedForumStarterReservation.thread_id == thread.id,
+            EncryptedForumStarterReservation.thread_domain == thread.origin_domain,
+        )
+        .with_for_update()
+    )
+    if reservation is None:
+        raise HTTPException(status_code=409, detail={"code": "STARTER_RESERVATION_NOT_FOUND"})
+    identity = await _starter_reservation_identity(
+        session,
+        settings,
+        auth.user,
+        options,
+        claimant_device_id=claimant_device_id,
+    )
+    for field in (
+        "claimant_kind",
+        "claimant_id",
+        "claimant_domain",
+        "worker_id",
+        "claimant_device_id",
+        "application_id",
+        "application_domain",
+        "installation_type",
+        "installation_id",
+        "installation_domain",
+        "installation_revision",
+        "webhook_id",
+        "webhook_domain",
+    ):
+        if getattr(reservation, field) != identity[field]:
+            raise HTTPException(status_code=403, detail={"code": "STARTER_RESERVATION_NOT_OWNED"})
+    if (thread.owner_id, thread.owner_domain) != (auth.user.id, auth.user.origin_domain):
+        raise HTTPException(status_code=403, detail={"code": "STARTER_RESERVATION_NOT_OWNED"})
+    if (
+        payload.client_nonce != reservation.client_nonce
+        or not isinstance(payload.e2ee, dict)
+        or "rich_payload_digest" not in payload.e2ee
+        or payload.e2ee.get("operation") != "create"
+        or payload.content is not None
+        or payload.embeds
+        or payload.components
+        or payload.poll is not None
+        or payload.sticker_ids
+        or payload.referenced_message_id is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "E2EE_FORUM_STARTER_CLAIM_INVALID"},
+        )
+    claim_hash = _canonical_request_hash(payload.model_dump(mode="json", exclude_none=True))
+    if reservation.claimed_at is not None:
+        if reservation.claim_request_hash != claim_hash:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "STARTER_RESERVATION_ALREADY_CLAIMED"},
+            )
+        existing = await session.get(Message, (thread.id, thread.origin_domain))
+        if existing is None or existing.deleted_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "STARTER_RESERVATION_STATE_INVALID"},
+            )
+        return await render_message_payload(session, existing, viewer=auth.user)
+    transaction = MessageCreateTransaction()
+    rendered = await create_message(
+        EntityRef(f"{thread.id}@{thread.origin_domain}"),
+        payload,
+        Response(),
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+        replace(
+            options,
+            mark_thread_starter=True,
+            queue_thread_create=False,
+            defer_dispatch=False,
+            forum_starter_permissions_checked=False,
+            forced_message_id=thread.id,
+            replicated_attachments=replicated_attachments,
+            transaction=transaction,
+        ),
+    )
+    reservation.claimed_message_id = thread.id
+    reservation.claimed_message_domain = thread.origin_domain
+    reservation.claim_request_hash = claim_hash
+    reservation.claimed_at = datetime.now(UTC)
+    await transaction.commit(session, redis, settings)
+    guild = cast(Guild, access.guild)
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "THREAD_UPDATE",
+        channel_payload(thread),
+    )
+    return rendered
+
+
 @router.post("/channels/{parent_ref}/threads", status_code=status.HTTP_201_CREATED)
 async def create_thread(
     parent_ref: EntityRef,
@@ -1158,9 +1803,41 @@ async def create_thread(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
     return await create_thread_service(
-        parent_ref, payload, auth, session, redis, snowflake, settings
+        parent_ref,
+        payload,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+        reason=reason,
+    )
+
+
+@router.post(
+    "/channels/{thread_ref}/starter",
+    status_code=status.HTTP_201_CREATED,
+)
+async def claim_encrypted_forum_starter(
+    thread_ref: EntityRef,
+    payload: MessageCreate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return await claim_encrypted_forum_starter_service(
+        thread_ref,
+        payload,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
 
@@ -1177,15 +1854,12 @@ async def create_thread_from_message(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
     access = await load_channel_access(session, settings, auth.user, parent_ref)
     if access.guild is None or access.channel.type not in {0, 5}:
         raise HTTPException(status_code=400, detail={"code": "THREAD_PARENT_INVALID"})
     if access.guild.origin_domain != settings.domain:
-        if auth.user.account_type == "bot" and (
-            access.channel.e2ee_required or access.channel.encryption_mode == "e2ee"
-        ):
-            raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
         return await proxy_remote_thread_mutation(
             session,
             settings,
@@ -1194,14 +1868,11 @@ async def create_thread_from_message(
             "thread.create_from_message",
             payload=payload.model_dump(mode="json", exclude_none=True),
             message_ref=message_ref,
+            reason=reason,
         )
     access = await lock_local_channel_mutation(session, settings, access)
     parent = access.channel
     guild = cast(Guild, access.guild)
-    if parent.encryption_mode == "e2ee":
-        raise HTTPException(
-            status_code=409, detail={"code": "THREAD_E2EE_CHILD_ACTIVATION_REQUIRED"}
-        )
     source_id, source_domain = message_ref.resolve(settings.domain)
     source = await session.scalar(
         select(Message)
@@ -1232,7 +1903,9 @@ async def create_thread_from_message(
         redis,
         guild,
         auth.user,
-        Permission.VIEW_CHANNEL | _thread_create_permission(thread_type),
+        Permission.VIEW_CHANNEL
+        | Permission.READ_MESSAGE_HISTORY
+        | _thread_create_permission(thread_type),
         channel=parent,
     )
     await require_active_thread_capacity(session, guild)
@@ -1284,7 +1957,12 @@ async def create_thread_from_message(
         member_count=1,
         flags=0,
         applied_tag_ids=[],
-        e2ee_required=False,
+        # A source-attached thread is an independent room.  An encrypted
+        # parent therefore creates only a required-E2EE child shell; the
+        # source remains in the parent group and is never copied or decrypted.
+        e2ee_required=parent.encryption_mode == "e2ee",
+        encryption_mode="plaintext",
+        encryption_state="plaintext",
         created_floor_id=thread_id,
         created_at=now,
     )
@@ -1308,6 +1986,7 @@ async def create_thread_from_message(
         110,
         target_type="thread",
         target_ref={"id": str(thread.id)},
+        reason=reason,
     )
     source.flags |= MESSAGE_FLAG_HAS_THREAD
     await queue_guild_mutation(
@@ -1667,6 +2346,7 @@ async def update_thread(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
     proxy_access, _ = await thread_access(
         session, redis, settings, auth.user, thread_ref, lock=False
@@ -1679,6 +2359,7 @@ async def update_thread(
             auth.user,
             "thread.update",
             payload=payload.model_dump(mode="json", exclude_none=True),
+            reason=reason,
         )
     access, permissions = await thread_access(
         session, redis, settings, auth.user, thread_ref, lock=True
@@ -1748,6 +2429,16 @@ async def update_thread(
             guild,
             excluding=(thread.id, thread.origin_domain),
         )
+    # Thread ownership is not a permission bit, so a timeout can leave an
+    # owner with VIEW_CHANNEL while still forbidding interactive changes.
+    # Apply the shared interaction policy only after every resource-specific
+    # authorization and shape check above to avoid exposing moderation state.
+    await require_member_interactions_allowed(
+        session,
+        guild,
+        auth.user,
+        Permission.SEND_MESSAGES_IN_THREADS,
+    )
 
     changed: list[dict[str, object]] = []
     sibling_updates: list[Channel] = []
@@ -1817,22 +2508,34 @@ async def update_thread(
             111,
             target_type="thread",
             target_ref={"id": str(thread.id)},
+            reason=reason,
             changes=changed,
+        )
+        await materialize_updated_at(session, *sibling_updates, thread)
+        sibling_payloads = [channel_payload(item) for item in sibling_updates]
+        thread_payload = channel_payload(thread)
+        rendered = await rendered_thread(
+            session,
+            redis,
+            guild,
+            auth.user,
+            thread,
+            base_payload=thread_payload,
         )
         await session.commit()
         await wake_queued_guild_federation(guild)
-        for item in sibling_updates:
+        for sibling_payload in sibling_payloads:
             await publish_dispatch(
                 redis,
                 guild_topic(guild.origin_domain, guild.id),
                 "THREAD_UPDATE",
-                channel_payload(item),
+                sibling_payload,
             )
         await publish_dispatch(
             redis,
             guild_topic(guild.origin_domain, guild.id),
             "THREAD_UPDATE",
-            channel_payload(thread),
+            thread_payload,
         )
         if was_archived and not thread.archived:
             await publish_current_thread_member_updates(
@@ -1841,10 +2544,11 @@ async def update_thread(
                 guild,
                 thread,
             )
+        return rendered
     return await rendered_thread(session, redis, guild, auth.user, thread)
 
 
-@router.delete("/channels/{thread_ref}", status_code=204)
+@router.delete("/channels/{thread_ref}")
 async def delete_thread(
     thread_ref: EntityRef,
     auth: AuthenticatedUser = Depends(require_user),
@@ -1852,7 +2556,8 @@ async def delete_thread(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
-) -> Response:
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
+) -> dict[str, object]:
     proxy_access, _ = await thread_access(
         session,
         redis,
@@ -1863,14 +2568,14 @@ async def delete_thread(
         lock=False,
     )
     if cast(Guild, proxy_access.guild).origin_domain != settings.domain:
-        await proxy_remote_thread_mutation(
+        return await proxy_remote_thread_mutation(
             session,
             settings,
             proxy_access,
             auth.user,
             "thread.delete",
+            reason=reason,
         )
-        return Response(status_code=204)
     access, _ = await thread_access(
         session,
         redis,
@@ -1894,6 +2599,7 @@ async def delete_thread(
     parent = await session.get(Channel, (thread.parent_id, thread.parent_domain))
     if parent is None:
         raise HTTPException(status_code=409, detail={"code": "THREAD_PARENT_INVALID"})
+    rendered_deleted = await rendered_thread(session, redis, guild, auth.user, thread)
 
     linked_message_event: tuple[str, dict[str, object]] | None = None
     linked_message = await session.get(Message, (thread.id, thread.origin_domain))
@@ -2013,6 +2719,7 @@ async def delete_thread(
         112,
         target_type="thread",
         target_ref={"id": str(thread.id)},
+        reason=reason,
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
@@ -2026,7 +2733,7 @@ async def delete_thread(
     await publish_dispatch(
         redis, guild_topic(guild.origin_domain, guild.id), "THREAD_DELETE", deleted_payload
     )
-    return Response(status_code=204)
+    return rendered_deleted
 
 
 async def list_thread_members_service(
@@ -2214,8 +2921,6 @@ async def put_thread_member_service(
     target = await session.get(User, (target_id, target_domain))
     if target is None:
         raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
-    if target.account_type == "bot" and (thread.e2ee_required or thread.encryption_mode == "e2ee"):
-        raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
     parent = await session.get(Channel, (thread.parent_id, thread.parent_domain))
     if parent is None:
         raise HTTPException(status_code=409, detail={"code": "THREAD_PARENT_INVALID"})
@@ -2230,6 +2935,17 @@ async def put_thread_member_service(
     if member is None:
         if int(thread.member_count or 0) >= MAX_THREAD_MEMBERS:
             raise HTTPException(status_code=409, detail={"code": "THREAD_MEMBER_LIMIT"})
+        if self_update:
+            # Existing notification preferences remain self-service during a
+            # timeout, but joining creates membership and is an interaction.
+            # Defer this check until the channel, target, and membership have
+            # all been authorized so restriction state is not an oracle.
+            await require_member_interactions_allowed(
+                session,
+                guild,
+                actor,
+                Permission.SEND_MESSAGES_IN_THREADS,
+            )
         member = ThreadMember(
             thread_id=thread.id,
             thread_domain=thread.origin_domain,
@@ -2279,6 +2995,10 @@ async def put_thread_member_service(
         channel=thread,
         snapshot_required=private_access_changed,
     )
+    rendered_thread_payload: dict[str, object] | None = None
+    if member_added:
+        await materialize_updated_at(session, thread)
+        rendered_thread_payload = channel_payload(thread)
     await session.commit()
     await wake_queued_guild_federation(guild)
     if thread_rekeyed:
@@ -2286,7 +3006,7 @@ async def put_thread_member_service(
             redis,
             guild_topic(guild.origin_domain, guild.id),
             "THREAD_UPDATE",
-            channel_payload(thread),
+            cast(dict[str, object], rendered_thread_payload),
         )
     rendered = thread_member_payload(member)
     rich_rendered = await rich_thread_member_payload(session, member)
@@ -2304,7 +3024,7 @@ async def put_thread_member_service(
         redis,
         topic,
         "THREAD_CREATE",
-        channel_payload(thread) | {"member": rendered},
+        cast(dict[str, object], rendered_thread_payload) | {"member": rendered},
         audience_user_refs=[f"{target_id}@{target_domain}"],
     )
     await publish_dispatch(
@@ -2441,6 +3161,10 @@ async def delete_thread_member_service(
         channel=thread,
         snapshot_required=private_access_changed,
     )
+    rendered_thread_payload: dict[str, object] | None = None
+    if thread_rekeyed:
+        await materialize_updated_at(session, thread)
+        rendered_thread_payload = channel_payload(thread)
     await session.commit()
     await wake_queued_guild_federation(guild)
     if thread_rekeyed:
@@ -2448,7 +3172,7 @@ async def delete_thread_member_service(
             redis,
             guild_topic(guild.origin_domain, guild.id),
             "THREAD_UPDATE",
-            channel_payload(thread),
+            cast(dict[str, object], rendered_thread_payload),
         )
     topic = guild_topic(guild.origin_domain, guild.id)
     await publish_dispatch(
@@ -2527,6 +3251,17 @@ async def federation_guild_thread_proxy(
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     try:
         actor = await upsert_remote_user(session, settings, payload.actor)
+        target_actor_ref = (
+            payload.target_user_id.resolve(actor.origin_domain)
+            if payload.target_user_id is not None
+            else None
+        )
+        self_member_leave = payload.operation == "thread.member.delete" and target_actor_ref == (
+            actor.id,
+            actor.origin_domain,
+        )
+        if not self_member_leave:
+            await require_remote_user_creation_allowed(session, actor)
         await record_room_federation_recipient(
             session,
             ("guild", guild.id, guild.origin_domain),
@@ -2549,6 +3284,7 @@ async def federation_guild_thread_proxy(
                 redis,
                 snowflake,
                 settings,
+                reason=payload.reason,
                 replicated_attachments=tuple(payload.attachments),
             )
             return {"thread": rendered}
@@ -2565,8 +3301,22 @@ async def federation_guild_thread_proxy(
                 redis,
                 snowflake,
                 settings,
+                payload.reason,
             )
             return {"thread": rendered}
+        if payload.operation == "thread.starter.claim":
+            starter_payload = MessageCreate.model_validate(payload.payload)
+            rendered = await claim_encrypted_forum_starter_service(
+                channel_ref,
+                starter_payload,
+                auth,
+                session,
+                redis,
+                snowflake,
+                settings,
+                replicated_attachments=tuple(payload.attachments),
+            )
+            return {"message": rendered}
         if payload.operation == "thread.update":
             update_payload = ThreadUpdate.model_validate(payload.payload)
             rendered = await update_thread(
@@ -2577,18 +3327,20 @@ async def federation_guild_thread_proxy(
                 redis,
                 snowflake,
                 settings,
+                payload.reason,
             )
             return {"thread": rendered}
         if payload.operation == "thread.delete":
-            await delete_thread(
+            rendered = await delete_thread(
                 channel_ref,
                 auth,
                 session,
                 redis,
                 snowflake,
                 settings,
+                payload.reason,
             )
-            return {"deleted": True}
+            return {"thread": rendered}
         if payload.target_user_id is None:
             raise ValueError("thread member target is missing")
         if payload.operation == "thread.member.put":
@@ -2620,24 +3372,59 @@ async def federation_guild_thread_proxy(
 
 
 # Bot routes are deliberately thin adapters over the exact human services.
-def redact_bot_thread_result(
+async def render_bot_thread_result(
+    session: AsyncSession,
     rendered: dict[str, object],
     principal: BotPrincipal,
-    installation: object | None,
+    installation: BotChannelGrant,
+    *,
+    e2ee_device_id: str | None = None,
 ) -> dict[str, object]:
-    granted_scopes = getattr(installation, "granted_scopes", ())
-    return redact_bot_thread_payload(
+    if not isinstance(e2ee_device_id, str):
+        # Direct service tests/callers see FastAPI's unresolved Header default.
+        e2ee_device_id = None
+    raw_id = rendered.get("id")
+    raw_domain = rendered.get("origin_domain")
+    if not str(raw_id).isdigit() or not isinstance(raw_domain, str):
+        raise RuntimeError("rendered bot thread omitted its qualified identity")
+    thread = await session.get(Channel, (int(str(raw_id)), raw_domain))
+    if thread is None:
+        raise HTTPException(status_code=404, detail={"code": "THREAD_NOT_FOUND"})
+    participation = (
+        await optional_bot_channel_e2ee_access(
+            session,
+            thread,
+            installation,
+            e2ee_device_id,
+            worker_id=principal.worker.id,
+        )
+        if e2ee_device_id is not None
+        else None
+    )
+    can_read_e2ee = participation is not None
+    starters = [
+        item
+        for key in ("starter_message", "message")
+        if isinstance((item := rendered.get(key)), dict)
+    ]
+    if can_read_e2ee and starters:
+        visible = await bot_messages_after_history_floor(session, participation, starters)
+        can_read_e2ee = len(visible) == len(starters)
+    granted_scopes = set(installation.granted_scopes or [])
+    redacted = redact_bot_thread_payload(
         rendered,
         can_read_history=(
             "messages.history" in principal.scopes and "messages.history" in granted_scopes
         ),
-        can_read_content=(
-            "messages.content" in principal.scopes and "messages.content" in granted_scopes
-        ),
+        can_read_content=bot_can_read_ambient_message_content(principal, installation),
         can_read_attachments=(
             "attachments.read" in principal.scopes and "attachments.read" in granted_scopes
         ),
+        principal=principal,
+        direct_message=thread.guild_id is None,
+        can_read_e2ee=can_read_e2ee,
     )
+    return bind_bot_thread_runtime_grant(redacted, installation)
 
 
 @bot_router.post("/channels/{parent_ref}/threads", status_code=201)
@@ -2649,13 +3436,21 @@ async def bot_create_thread(
     redis: Annotated[Redis, Depends(get_redis)],
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
+    e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
-    parent, installation = await installation_for_channel(
+    _parent, installation = await installation_for_channel(
         session, settings, principal, parent_ref, "messages.send"
     )
-    if parent.e2ee_required or parent.encryption_mode == "e2ee":
-        raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
     starter = payload.starter()
+    if starter is not None and starter.forwarded_message_id is not None:
+        await require_bot_forward_source_access(
+            session,
+            settings,
+            principal,
+            starter.forwarded_message_id,
+            e2ee_device_id=bot_e2ee_sender_device_id(starter),
+        )
     if starter is not None and starter.attachment_ids:
         if installation is None:
             raise HTTPException(status_code=404, detail={"code": "BOT_INSTALLATION_NOT_FOUND"})
@@ -2666,18 +3461,100 @@ async def bot_create_thread(
             installation,
             [int(item) for item in starter.attachment_ids],
         )
-    return redact_bot_thread_result(
-        await create_thread_service(
-            parent_ref,
-            payload,
-            user_auth(principal),
-            session,
-            redis,
-            snowflake,
-            settings,
+    bot_installation_id, bot_dm_capability_id = bot_message_grant_ids(installation)
+    rendered = await create_thread_service(
+        parent_ref,
+        payload,
+        user_auth(principal),
+        session,
+        redis,
+        snowflake,
+        settings,
+        reason=reason,
+        starter_admission_options=MessageAdmissionOptions(
+            application_id=getattr(getattr(principal, "application", None), "id", None),
+            application_domain=getattr(
+                getattr(principal, "application", None),
+                "origin_domain",
+                None,
+            ),
+            bot_installation_id=bot_installation_id,
+            bot_dm_capability_id=bot_dm_capability_id,
+            bot_worker_id=getattr(getattr(principal, "worker", None), "id", None),
         ),
+        starter_claimant_device_id=e2ee_device_id,
+    )
+    return await render_bot_thread_result(
+        session,
+        rendered,
         principal,
         installation,
+        e2ee_device_id=(
+            bot_e2ee_sender_device_id(starter)
+            if starter is not None and starter.e2ee is not None
+            else e2ee_device_id
+        ),
+    )
+
+
+@bot_router.post("/channels/{thread_ref}/starter", status_code=201)
+async def bot_claim_encrypted_forum_starter(
+    thread_ref: EntityRef,
+    payload: MessageCreate,
+    principal: Annotated[BotPrincipal, Depends(require_bot)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    thread, installation = await installation_for_channel(
+        session,
+        settings,
+        principal,
+        thread_ref,
+        "messages.send",
+    )
+    if payload.forwarded_message_id is not None:
+        await require_bot_forward_source_access(
+            session,
+            settings,
+            principal,
+            payload.forwarded_message_id,
+            e2ee_device_id=bot_e2ee_sender_device_id(payload),
+        )
+    if payload.attachment_ids:
+        await require_owned_attachments_for_installation(
+            session,
+            settings,
+            principal,
+            installation,
+            [int(item) for item in payload.attachment_ids],
+        )
+    bot_installation_id, bot_dm_capability_id = bot_message_grant_ids(installation)
+    rendered = await claim_encrypted_forum_starter_service(
+        thread_ref,
+        payload,
+        user_auth(principal),
+        session,
+        redis,
+        snowflake,
+        settings,
+        admission_options=MessageAdmissionOptions(
+            application_id=principal.application.id,
+            application_domain=principal.application.origin_domain,
+            bot_installation_id=bot_installation_id,
+            bot_dm_capability_id=bot_dm_capability_id,
+            bot_worker_id=principal.worker.id,
+        ),
+        claimant_device_id=bot_e2ee_sender_device_id(payload),
+    )
+    return await render_bot_message_response(
+        session,
+        principal,
+        thread,
+        installation,
+        rendered,
+        e2ee_device_id=bot_e2ee_sender_device_id(payload),
     )
 
 
@@ -2691,25 +3568,37 @@ async def bot_create_thread_from_message(
     redis: Annotated[Redis, Depends(get_redis)],
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
+    e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
     parent, installation = await installation_for_channel(
         session, settings, principal, parent_ref, "messages.send"
     )
-    if parent.e2ee_required or parent.encryption_mode == "e2ee":
-        raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
-    return redact_bot_thread_result(
-        await create_thread_from_message(
-            parent_ref,
-            message_ref,
-            payload,
-            user_auth(principal),
+    if parent.encryption_mode == "e2ee":
+        await require_bot_forward_source_access(
             session,
-            redis,
-            snowflake,
             settings,
-        ),
+            principal,
+            message_ref,
+            e2ee_device_id=e2ee_device_id,
+        )
+    rendered = await create_thread_from_message(
+        parent_ref,
+        message_ref,
+        payload,
+        user_auth(principal),
+        session,
+        redis,
+        snowflake,
+        settings,
+        reason,
+    )
+    return await render_bot_thread_result(
+        session,
+        rendered,
         principal,
         installation,
+        e2ee_device_id=e2ee_device_id,
     )
 
 
@@ -2728,6 +3617,7 @@ async def bot_list_parent_threads(
     tag_id: list[WireSnowflake] | None = Query(default=None, max_length=20),
     sort_order: Literal[0, 1] | None = None,
     query: str | None = Query(default=None, min_length=1, max_length=100),
+    e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
 ) -> dict[str, object]:
     if archived and include_archived:
         raise HTTPException(status_code=400, detail={"code": "INVALID_PAGINATION"})
@@ -2750,7 +3640,13 @@ async def bot_list_parent_threads(
         query=query,
     )
     for rendered in cast(list[dict[str, object]], result["threads"]):
-        redact_bot_thread_result(rendered, principal, installation)
+        await render_bot_thread_result(
+            session,
+            rendered,
+            principal,
+            installation,
+            e2ee_device_id=e2ee_device_id,
+        )
     return result
 
 
@@ -2761,6 +3657,7 @@ async def bot_list_active_guild_threads(
     session: Annotated[AsyncSession, Depends(get_session)],
     redis: Annotated[Redis, Depends(get_redis)],
     settings: Annotated[Settings, Depends(get_settings)],
+    e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
 ) -> dict[str, object]:
     _, installation = await installation_for_guild(
         session, settings, principal, guild_ref, "channels.read"
@@ -2769,7 +3666,13 @@ async def bot_list_active_guild_threads(
         guild_ref, user_auth(principal), session, redis, settings
     )
     for rendered in cast(list[dict[str, object]], result["threads"]):
-        redact_bot_thread_result(rendered, principal, installation)
+        await render_bot_thread_result(
+            session,
+            rendered,
+            principal,
+            installation,
+            e2ee_device_id=e2ee_device_id,
+        )
     return result
 
 
@@ -2782,26 +3685,32 @@ async def bot_update_thread(
     redis: Annotated[Redis, Depends(get_redis)],
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
+    e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
     _, installation = await installation_for_channel(
         session, settings, principal, thread_ref, "channels.manage"
     )
-    return redact_bot_thread_result(
-        await update_thread(
-            thread_ref,
-            payload,
-            user_auth(principal),
-            session,
-            redis,
-            snowflake,
-            settings,
-        ),
+    rendered = await update_thread(
+        thread_ref,
+        payload,
+        user_auth(principal),
+        session,
+        redis,
+        snowflake,
+        settings,
+        reason,
+    )
+    return await render_bot_thread_result(
+        session,
+        rendered,
         principal,
         installation,
+        e2ee_device_id=e2ee_device_id,
     )
 
 
-@bot_router.delete("/channels/{thread_ref}", status_code=204)
+@bot_router.delete("/channels/{thread_ref}")
 async def bot_delete_thread(
     thread_ref: EntityRef,
     principal: Annotated[BotPrincipal, Depends(require_bot)],
@@ -2809,15 +3718,27 @@ async def bot_delete_thread(
     redis: Annotated[Redis, Depends(get_redis)],
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> Response:
-    await installation_for_channel(session, settings, principal, thread_ref, "channels.manage")
-    return await delete_thread(
+    e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
+) -> dict[str, object]:
+    _, installation = await installation_for_channel(
+        session, settings, principal, thread_ref, "channels.manage"
+    )
+    rendered = await delete_thread(
         thread_ref,
         user_auth(principal),
         session,
         redis,
         snowflake,
         settings,
+        reason,
+    )
+    return await render_bot_thread_result(
+        session,
+        rendered,
+        principal,
+        installation,
+        e2ee_device_id=e2ee_device_id,
     )
 
 
@@ -2832,7 +3753,10 @@ async def bot_list_thread_members(
     after: EntityRef | None = None,
     with_member: bool = False,
 ) -> list[dict[str, object]]:
-    await installation_for_channel(session, settings, principal, thread_ref, "members.read")
+    _, installation = await installation_for_channel(
+        session, settings, principal, thread_ref, "members.read"
+    )
+    require_bot_installation_intent(principal, installation, "guild_members")
     return await list_thread_members_service(
         thread_ref,
         principal.user,

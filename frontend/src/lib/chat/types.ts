@@ -1,4 +1,5 @@
 import type { FederatedIdentity } from './refs';
+import type { MessageEmbed, MessageLayoutComponent, MessagePoll } from './rich-content';
 
 export interface UserSummary {
   id: string;
@@ -12,6 +13,7 @@ export interface UserSummary {
   profile_version?: string;
   profile_resolved?: boolean;
   account_type?: 'human' | 'bot';
+  age_assurance_state?: 'unknown' | 'adult' | 'minor';
   bot?: boolean;
   handle: string;
 }
@@ -45,12 +47,18 @@ export interface Channel {
   type: number;
   name: string | null;
   topic: string | null;
+  nsfw?: boolean;
   position: number;
   parent_id: string | null;
   parent_domain: string | null;
   permissions_synced?: boolean;
   permissions?: string;
   rate_limit_per_user: number;
+  /** Voice-only configuration. A null rtc_region means automatic selection. */
+  bitrate?: number | null;
+  user_limit?: number | null;
+  rtc_region?: string | null;
+  video_quality_mode?: 1 | 2 | null;
   federated_history_policy?: 'inherit' | 'disabled' | 'full_retained';
   encryption_mode?: 'plaintext' | 'e2ee';
   encryption_state?:
@@ -141,6 +149,10 @@ export interface CustomEmoji {
   name: string;
   animated: boolean;
   media_hash: string | null;
+  available?: boolean;
+  roles?: string[];
+  creator_id?: string;
+  creator_domain?: string;
   version?: string | null;
 }
 
@@ -154,7 +166,20 @@ export interface GuildSticker {
   description: string | null;
   animated: boolean;
   media_hash: string | null;
+  available?: boolean;
+  tags?: string[];
+  creator_id?: string;
+  creator_domain?: string;
   version?: string | null;
+}
+
+/** Immutable sticker snapshot returned on a message. */
+export interface StickerItem {
+  id: string;
+  origin_domain: string;
+  name: string;
+  format_type: 1 | 2 | 3 | 4;
+  media_hash: string;
 }
 
 export interface Role {
@@ -172,6 +197,55 @@ export interface Role {
   version?: string | null;
 }
 
+export type InteractionMetadataIntegrationType = 'guild_install' | 'user_install' | 'dm_capability';
+
+export interface InteractionMetadataUser {
+  id: string;
+  origin_domain: string;
+  username: string;
+  display_name: string | null;
+  avatar_hash: string | null;
+  bot: boolean;
+}
+
+/** Durable, authority-sanitized attribution for an application response. */
+export interface MessageInteractionMetadata {
+  id: string;
+  origin_domain: string;
+  interaction_ref: string;
+  type: 'command' | 'component' | 'modal_submit';
+  user: InteractionMetadataUser;
+  user_ref: string;
+  application_ref: string;
+  integration_type: InteractionMetadataIntegrationType;
+  authorizing_integration_owners: Partial<Record<InteractionMetadataIntegrationType, string>>;
+  command_name?: string;
+  command_type?: 'chat_input' | 'user' | 'message';
+  target_user?: InteractionMetadataUser | null;
+  target_user_ref?: string | null;
+  target_message_id?: string | null;
+  target_message_domain?: string | null;
+  target_message_ref?: string | null;
+  original_response_message_id?: string | null;
+  original_response_message_domain?: string | null;
+  original_response_message_ref?: string | null;
+  interacted_message_id?: string | null;
+  interacted_message_domain?: string | null;
+  interacted_message_ref?: string | null;
+  triggering_interaction_metadata?: MessageInteractionMetadata | null;
+}
+
+/** Discord message-reference fields plus the domains required for federation. */
+export interface MessageReference {
+  type?: number;
+  message_id?: string | null;
+  message_domain?: string | null;
+  channel_id?: string | null;
+  channel_domain?: string | null;
+  guild_id?: string | null;
+  guild_domain?: string | null;
+}
+
 export interface Message {
   id: string;
   origin_domain: string;
@@ -181,35 +255,70 @@ export interface Message {
   author_domain: string;
   author: UserSummary | null;
   content: string | null;
+  sticker_items?: StickerItem[];
+  /** Stable server flag for Discord-compatible text-to-speech playback. */
+  tts?: boolean;
+  embeds?: MessageEmbed[];
+  components?: MessageLayoutComponent[];
+  application_id?: string | null;
+  application_domain?: string | null;
+  view_version?: number;
+  view_persistent?: boolean;
+  view_expires_at?: string | null;
+  interaction_integration_type?: 'guild_install' | 'user_install' | 'dm_capability' | null;
+  interaction_installation_ref?: string | null;
+  interaction_installation_revision?: string | null;
+  interaction_metadata?: MessageInteractionMetadata | null;
+  forwarded_message_id?: string | null;
+  forwarded_message_domain?: string | null;
+  forwarded_message_ref?: string | null;
+  /** Legacy live projection; new forwards use author-free immutable snapshots below. */
+  forwarded_message?: Message | null;
+  /** Discord-compatible, immutable and author-free forwarded message material. */
+  message_snapshots?: Array<{ message: MessageSnapshot }>;
+  poll?: MessagePoll | null;
+  /** Authority-authenticated, label-free Discord type-46 result projection. */
+  poll_result?: Record<string, unknown> | null;
   e2ee?: Record<string, unknown> | null;
   encryption_policy_generation?: string;
   encryption_epoch?: string | null;
   /** Client-only plaintext produced after authenticated E2EE decryption. Never persisted or relayed. */
   decrypted_content?: string | null;
+  /** Client-only proof that the encrypted body authenticated even when it has no text. */
+  e2ee_verified?: boolean;
   /** Client-only attachment keys authenticated inside the decrypted MLS application. */
   decrypted_attachments?: import('$lib/e2ee/media').EncryptedFileManifest[];
+  /** Client-only notification policy authenticated inside rich-v2 ciphertext. */
+  decrypted_allowed_mentions?: import('$lib/e2ee/client').EncryptedAllowedMentions;
+  /** Client-only author-free snapshot authenticated inside rich-v2 ciphertext. */
+  decrypted_forward_snapshot?: Record<string, unknown> | null;
   message_type: number;
   flags: number;
   client_nonce: string | null;
   referenced_message_id: string | null;
   referenced_message_domain: string | null;
-  message_reference?: {
-    type?: number;
-    message_id: string | null;
-    message_domain?: string | null;
-    channel_id: string | null;
-    channel_domain?: string | null;
-    guild_id?: string | null;
-    guild_domain?: string | null;
-  } | null;
+  message_reference?: MessageReference | null;
   /** Resolved source/reply payload. Type-21 thread starters keep their body only here. */
   referenced_message?: Message | null;
   mention_user_refs: FederatedIdentity[];
+  /** Canonical public mention intent retained for Discord-style search. */
+  mention_role_refs?: FederatedIdentity[];
+  mention_everyone?: boolean;
   attachments?: Attachment[];
   reaction_counts?: Record<string, number>;
   reacted_emoji?: string[];
+  /** Present on the modern channel-pins projection or client reconciliation. */
+  pinned?: boolean;
+  pinned_at?: string;
   webhook_id?: string | null;
-  webhook?: { id: string | null; name: string; avatar_hash: string | null } | null;
+  webhook?: {
+    id: string | null;
+    origin_domain?: string | null;
+    ref?: string | null;
+    name: string;
+    avatar_hash: string | null;
+    avatar_url?: string | null;
+  } | null;
   edited_at: string | null;
   deleted_at: string | null;
   created_at: string;
@@ -228,6 +337,20 @@ export interface Message {
   content_unavailable?: boolean;
   /** Active thread projected onto its parent-channel starter or thread-created notice. */
   thread?: Channel | null;
+}
+
+export interface MessageSnapshot {
+  content: string | null;
+  sticker_items?: StickerItem[];
+  embeds: MessageEmbed[];
+  components: MessageLayoutComponent[];
+  attachments: Attachment[];
+  mention_user_refs?: FederatedIdentity[];
+  message_snapshots?: Array<{ message: MessageSnapshot }>;
+  message_type: number;
+  flags: number;
+  created_at: string;
+  edited_at?: string | null;
 }
 
 export interface ReactionUsersResponse {
@@ -267,6 +390,9 @@ export interface Attachment {
   encryption_mode?: 'plaintext' | 'e2ee';
   encryption_protocol?: 'kaede-file-v1' | null;
   variants: Record<string, { width?: number; height?: number; content_type?: string }>;
+  /** Discord voice-message metadata. Present together on the single audio attachment. */
+  duration_secs?: number | null;
+  waveform?: string | null;
   /**
    * Same-origin, authenticated stream for media returned by an on-demand
    * federated history page. These attachments are intentionally not inserted
@@ -274,6 +400,10 @@ export interface Attachment {
    * exist.
    */
   history_media_url?: string | null;
+  /** Same-origin authenticated base path for an isolated interaction file. */
+  private_media_url?: string | null;
+  /** Client-only manifest authenticated inside an encrypted forwarded snapshot. */
+  encrypted_manifest?: import('$lib/e2ee/media').EncryptedFileManifest;
 }
 
 export interface ReadStateStatus {
@@ -298,6 +428,7 @@ export interface GuildMemberSummary {
   timeout_until?: string | null;
   timeout_indefinite?: boolean;
   timeout_reason?: string | null;
+  temporary?: boolean;
   presence?: PresenceStatus;
 }
 

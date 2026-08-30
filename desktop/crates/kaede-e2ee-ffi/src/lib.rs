@@ -256,6 +256,13 @@ fn invoke(method: &str, handle: u64, value: &Value) -> Result<Value, String> {
                 .map(|roster| json!({"bytes": encode(&roster)}))
                 .map_err(|error| error.to_string())
         }
+        "group_epoch" => {
+            let group_id = decode(value, "group_id", 128)?;
+            client
+                .group_epoch(&group_id)
+                .map(|epoch| json!({"epoch": epoch.to_string()}))
+                .map_err(|error| error.to_string())
+        }
         "process" => {
             let group_id = decode(value, "group_id", 128)?;
             let message = decode(value, "message", 64 * 1024)?;
@@ -360,6 +367,37 @@ pub unsafe extern "C" fn kaede_e2ee_buffer_free(buffer: KaedeE2eeBuffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_epoch_is_a_decimal_string_from_the_native_state() -> Result<(), String> {
+        let generated = invoke(
+            "generate",
+            0,
+            &json!({"credential": encode(b"voice-bot@example.test")}),
+        )?;
+        let handle = generated["handle"]
+            .as_str()
+            .ok_or_else(|| "native handle is not a string".to_owned())?
+            .parse::<u64>()
+            .map_err(|error| error.to_string())?;
+        let group_id = b"voice-media-group";
+        invoke(
+            "create_group",
+            handle,
+            &json!({"group_id": encode(group_id)}),
+        )?;
+
+        assert_eq!(
+            invoke(
+                "group_epoch",
+                handle,
+                &json!({"group_id": encode(group_id)}),
+            )?,
+            json!({"epoch": "0"})
+        );
+        kaede_e2ee_close(handle);
+        Ok(())
+    }
 
     #[test]
     fn nested_json_strings_are_zeroized_before_drop() {

@@ -24,6 +24,8 @@ def attachment_payload(
         "size": attachment.size,
         "width": attachment.width,
         "height": attachment.height,
+        "duration_secs": attachment.duration_secs,
+        "waveform": attachment.waveform,
         "blurhash": attachment.blurhash,
         "scan_status": public_scan_status(attachment.scan_status),
         "encryption_mode": attachment.encryption_mode,
@@ -41,6 +43,20 @@ def attachment_payload(
                 ),
             }
         )
+    return payload
+
+
+def federation_attachment_payload(attachment: Attachment) -> dict[str, object]:
+    """Add authority-only integrity metadata to an attachment projection.
+
+    The digest is never returned by client message APIs.  A plaintext room
+    authority needs it to attest an immutable forward without downloading a
+    remote object or trusting a caller-supplied hash.
+    """
+
+    payload = attachment_payload(attachment)
+    if attachment.encryption_mode == "plaintext" and attachment.content_sha256 is not None:
+        payload["content_sha256"] = attachment.content_sha256
     return payload
 
 

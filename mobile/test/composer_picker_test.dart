@@ -127,7 +127,7 @@ void main() {
           type: ChannelType.text,
           position: 0,
           permissions: external
-              ? BigInt.from(Permission.useExternalEmojis)
+              ? BigInt.from(Permission.useExternalStickers)
               : BigInt.zero,
         );
 
@@ -184,6 +184,35 @@ void main() {
       expect(parsed?.ref, EntityRef.parse('41@home.example'));
       expect(messageSticker('hello <sticker:wave:41@home.example>'), isNull);
       expect(messageSticker('<sticker:bad name:41@home.example>'), isNull);
+    });
+
+    test('prefers immutable sticker_items and keeps token parsing as fallback',
+        () {
+      final message = KaedeMessage.fromJson(<String, Object?>{
+        'id': '50',
+        'origin_domain': 'home.example',
+        'channel_id': '30',
+        'channel_domain': 'home.example',
+        'author_id': '7',
+        'author_domain': 'home.example',
+        'content': null,
+        'sticker_items': <Object?>[
+          <String, Object?>{
+            'id': '41',
+            'origin_domain': 'home.example',
+            'name': 'wave',
+            'format_type': 1,
+            'media_hash': List<String>.filled(64, 'a').join(),
+          },
+        ],
+        'message_type': 0,
+        'flags': 0,
+        'mention_user_refs': const <String>[],
+        'created_at': '2026-08-28T00:00:00Z',
+      });
+      expect(messageStickers(message).single.ref,
+          EntityRef.parse('41@home.example'));
+      expect(message.toJson()['sticker_items'], isNotEmpty);
     });
   });
 
@@ -248,6 +277,7 @@ void main() {
               context,
               canAttach: false,
               gifsAllowed: false,
+              canCreatePoll: false,
             ),
             child: const Text('Open'),
           );
@@ -270,6 +300,12 @@ void main() {
     expect(
       find.byKey(const ValueKey('composer-action-media')),
       findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<ListTile>(find.byKey(const ValueKey('composer-action-poll')))
+          .enabled,
+      isFalse,
     );
     expect(find.byKey(const ValueKey('composer-action-gif')), findsNothing);
     expect(find.byKey(const ValueKey('composer-action-sticker')), findsNothing);
@@ -391,6 +427,78 @@ void main() {
     );
     expect(gifRequests, 0);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'reaction emoji picker keeps recents and returns a qualified custom token',
+      (tester) async {
+    const token = '<a:party_blob:41@home.example>';
+    final selected = <String>[];
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Scaffold(
+        body: ComposerEmojiPicker(
+          loader: () async => <Map<String, Object?>>[
+            <String, Object?>{
+              'id': '41',
+              'origin_domain': 'home.example',
+              'guild_id': '20',
+              'guild_domain': 'home.example',
+              'name': 'party_blob',
+              'animated': true,
+              'media_hash': 'sha256:local',
+            },
+            <String, Object?>{
+              'id': '42',
+              'origin_domain': 'remote.example',
+              'guild_id': '21',
+              'guild_domain': 'remote.example',
+              'name': 'not_usable_here',
+              'animated': false,
+              'media_hash': 'sha256:remote',
+            },
+          ],
+          channel: KaedeChannel(
+            ref: EntityRef.parse('30@home.example'),
+            guildRef: EntityRef.parse('20@home.example'),
+            type: ChannelType.text,
+            position: 0,
+            permissions: BigInt.zero,
+          ),
+          categories: const <String, List<String>>{
+            'Recent': <String>[],
+            'Smileys': <String>['😀'],
+          },
+          recent: const <String>[token, '🔥'],
+          semanticAction: 'React with',
+          canonicalizeReactions: true,
+          embedded: true,
+          onSelected: selected.add,
+        ),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('🔥'), findsOneWidget);
+    expect(find.byType(CustomEmojiImage), findsOneWidget);
+
+    await tester.tap(find.text('Custom'));
+    await tester.pump();
+
+    expect(find.byType(CustomEmojiImage), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'React with :party_blob:',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tapAt(tester.getCenter(find.byType(CustomEmojiImage)));
+    await tester.pump();
+    expect(selected, const <String>[token]);
   });
 
   testWidgets(

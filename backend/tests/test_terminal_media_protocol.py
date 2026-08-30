@@ -57,14 +57,16 @@ def sql(statement: object) -> str:
     )
 
 
-def media_delete_envelope(*, event_id: str, generation: int) -> EventEnvelope:
+def media_delete_envelope(
+    *, event_id: str, generation: int, actor_domain: str = ORIGIN_DOMAIN
+) -> EventEnvelope:
     return EventEnvelope.model_validate(
         {
             "event_id": event_id,
             "origin": ORIGIN_DOMAIN,
             "type": "media.delete",
             "ts": int(datetime.now(UTC).timestamp() * 1000),
-            "actor": {"id": "7", "domain": ORIGIN_DOMAIN},
+            "actor": {"id": "7", "domain": actor_domain},
             "context": {},
             "content": {
                 "attachment_id": "41",
@@ -149,7 +151,11 @@ def test_exact_current_media_delete_uses_dynamic_cascade_path() -> None:
 async def test_process_event_exact_proof_dynamically_upgrades_retry_to_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    envelope = media_delete_envelope(event_id="kcfe_2222222222222222", generation=2)
+    envelope = media_delete_envelope(
+        event_id="kcfe_2222222222222222",
+        generation=2,
+        actor_domain="uploader.localhost",
+    )
     source = SimpleNamespace(
         attachment_id=41,
         attachment_domain=ORIGIN_DOMAIN,
@@ -1326,14 +1332,18 @@ async def test_live_upload_capability_keeps_deterministic_purge_marker(
         finalized_at=datetime.now(UTC),
         scan_status="rejected",
         variants={},
+        source_attachment_id=None,
+        source_attachment_domain=None,
     )
 
     class Session:
         def __init__(self) -> None:
             self.commits = 0
+            self.scalar_calls = 0
 
         async def scalar(self, _statement: object) -> object:
-            return attachment
+            self.scalar_calls += 1
+            return attachment if self.scalar_calls == 1 else False
 
         async def scalars(self, _statement: object) -> list[object]:
             return [attachment]
@@ -1398,9 +1408,11 @@ async def test_expired_purge_deletes_preexisting_staging_marker_once(
             "thumbnail_128": {"object_key": "derived/42/thumbnail"},
             "duplicate": {"object_key": "derived/42/thumbnail"},
         },
+        source_attachment_id=None,
+        source_attachment_domain=None,
     )
     session = SimpleNamespace(
-        scalar=AsyncMock(return_value=attachment),
+        scalar=AsyncMock(side_effect=[attachment, False]),
         commit=AsyncMock(),
     )
     deleted: list[tuple[str, str]] = []
@@ -1443,12 +1455,18 @@ async def test_clean_duplicate_purge_deletes_objects_before_one_quota_discard(
         upload_expires_at=datetime.now(UTC) - timedelta(minutes=17),
         deleted_at=None,
         variants={"thumbnail_128": {"object_key": "derived/43/thumbnail"}},
+        source_attachment_id=None,
+        source_attachment_domain=None,
     )
     events: list[tuple[str, str] | str] = []
 
     class Session:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+
         async def scalar(self, _statement: object) -> object:
-            return attachment
+            self.scalar_calls += 1
+            return attachment if self.scalar_calls == 1 else False
 
         async def commit(self) -> None:
             events.append("commit")
@@ -1487,3 +1505,45 @@ async def test_clean_duplicate_purge_deletes_objects_before_one_quota_discard(
     quota_discard.assert_awaited_once()
     assert attachment.deleted_at is not None
     assert attachment.staging_object_key is None
+
+
+@pytest.mark.asyncio
+async def test_purge_retains_shared_announcement_objects_until_last_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachment = SimpleNamespace(
+        id=44,
+        origin_domain=LOCAL_DOMAIN,
+        object_key="clean/44/original",
+        staging_object_key=None,
+        upload_expires_at=None,
+        deleted_at=datetime.now(UTC),
+        variants={"thumbnail_128": {"object_key": "derived/44/thumbnail"}},
+        source_attachment_id=12,
+        source_attachment_domain=LOCAL_DOMAIN,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(side_effect=[attachment, True]),
+        commit=AsyncMock(),
+    )
+    deleted: list[tuple[str, str]] = []
+
+    class Storage:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        async def delete(self, bucket: str, key: str) -> None:
+            deleted.append((bucket, key))
+
+    monkeypatch.setattr(media_jobs, "S3Storage", Storage)
+
+    result = await media_jobs.purge_local_attachment(
+        cast(Any, session),
+        cast(Any, settings()),
+        attachment.id,
+        attachment.origin_domain,
+    )
+
+    assert result == "deleted"
+    assert deleted == []
+    session.commit.assert_awaited_once()

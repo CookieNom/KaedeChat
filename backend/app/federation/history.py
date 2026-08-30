@@ -4,7 +4,7 @@ import json
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 from sqlalchemy import delete, exists, func, select, tuple_, update
@@ -12,13 +12,24 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.chat.custom_emojis import canonical_reaction_emoji
 from app.chat.e2ee import (
     validate_e2ee_envelope,
     validate_e2ee_message_projection,
     validate_message_encryption_policy,
 )
-from app.chat.payloads import message_payload, user_payload
+from app.chat.message_flags import MESSAGE_FLAG_IS_CROSSPOST
+from app.chat.message_references import (
+    validate_channel_follow_message_fields,
+    validate_message_reference_projection,
+)
+from app.chat.payloads import message_payload, render_poll_payload
 from app.chat.permissions import calculate_permissions
+from app.chat.poll_results import (
+    POLL_RESULT_MESSAGE_TYPE,
+    validate_poll_result_wire_body,
+)
+from app.core.channel_types import GUILD_MESSAGE_CHANNEL_TYPES, is_message_capable_channel_type
 from app.core.permissions import Permission
 from app.core.settings import Settings
 from app.core.snowflake import SnowflakeGenerator
@@ -38,7 +49,11 @@ from app.db.models import (
     Instance,
     MediaTombstoneSource,
     Message,
+    MessageView,
     Pin,
+    Poll,
+    PollAnswer,
+    PollVote,
     Reaction,
     ReadState,
     TerminalRoomDeletion,
@@ -46,7 +61,9 @@ from app.db.models import (
 )
 from app.federation.client import signed_request
 from app.federation.events import attachment_refs_from_payloads
+from app.federation.guilds import _validated_message_rich_projection
 from app.federation.identity_storage import admit_remote_user_identity
+from app.federation.message_content import validate_webhook_attribution
 from app.federation.network import (
     FederationNetworkError,
     decode_federation_response_json,
@@ -63,6 +80,7 @@ from app.federation.replication import (
     advance_channel_cursor,
     database_snowflake,
     insert_unresolved_remote_user,
+    profile_from_user,
     remote_media_dimensions,
     replicate_message_attachments,
     resolve_delegated_profile,
@@ -75,6 +93,7 @@ from app.federation.schemas import RemoteUserProfile
 from app.federation.security import validated_event_envelope
 from app.federation.terminal_rooms import lock_terminal_room
 from app.media.processing import normalize_declared_type, sanitize_filename
+from app.media.schemas import validate_voice_attachment_metadata
 from app.media.tombstones import (
     lock_media_tombstone_ref,
     queue_terminal_attachment_tombstone,
@@ -87,9 +106,14 @@ HISTORY_EVENT_TYPES = frozenset(
     {
         "guild.message.update",
         "guild.message.delete",
+        "guild.message.bulk_delete",
         "guild.message.purge",
         "guild.reaction.add",
         "guild.reaction.remove",
+        "guild.reaction.clear",
+        "guild.poll.vote.add",
+        "guild.poll.vote.remove",
+        "guild.poll.finalize",
         "guild.pin.add",
         "guild.pin.remove",
     }
@@ -375,7 +399,7 @@ async def history_channel_allowed(
     user: User,
     channel: Channel,
 ) -> bool:
-    if channel.type not in {0, 5} or channel.unavailable:
+    if not is_message_capable_channel_type(channel.type, guild_channel=True) or channel.unavailable:
         return False
     if effective_history_policy(guild, channel) != "full_retained":
         return False
@@ -395,7 +419,7 @@ async def eligible_history_channels(
             .where(
                 Channel.guild_id == guild.id,
                 Channel.guild_domain == guild.origin_domain,
-                Channel.type.in_((0, 5)),
+                Channel.type.in_(tuple(sorted(GUILD_MESSAGE_CHANNEL_TYPES))),
                 Channel.unavailable.is_(False),
             )
             .order_by(Channel.position, Channel.id)
@@ -740,6 +764,7 @@ async def history_export_page(
     }
     attachments_by_message: dict[tuple[int, str], list[Attachment]] = {}
     reactions_by_message: dict[tuple[int, str], list[Reaction]] = {}
+    poll_votes_by_message: dict[tuple[int, str], list[PollVote]] = {}
     pins_by_message: dict[tuple[int, str], Pin] = {}
     if message_refs:
         for attachment in await session.scalars(
@@ -761,6 +786,14 @@ async def history_export_page(
             reactions_by_message.setdefault(
                 (reaction.message_id, reaction.message_domain), []
             ).append(reaction)
+        for vote in await session.scalars(
+            select(PollVote).where(
+                tuple_(PollVote.message_id, PollVote.message_domain).in_(message_refs)
+            )
+        ):
+            poll_votes_by_message.setdefault((vote.message_id, vote.message_domain), []).append(
+                vote
+            )
         for pin in await session.scalars(
             select(Pin).where(tuple_(Pin.message_id, Pin.message_domain).in_(message_refs))
         ):
@@ -776,18 +809,33 @@ async def history_export_page(
             message,
             author,
             attachments_by_message.get(message_ref, []),
+            poll=await render_poll_payload(session, message),
         )
-        payload["history_author"] = user_payload(author)
+        # History is a federation protocol, not a client response.  Keep both
+        # author fields on the strict RemoteUserProfile wire contract: the
+        # general API user payload renders numeric generations as strings.
+        author_profile = profile_from_user(author)
+        payload["author"] = author_profile
+        payload["history_author"] = author_profile
         reactions = reactions_by_message.get(message_ref, [])
         selected_pin = pins_by_message.get(message_ref)
         payload["reactions"] = [
             {
                 "user_id": str(reaction.user_id),
                 "user_domain": reaction.user_domain,
-                "emoji": reaction.emoji_key,
+                "emoji": canonical_reaction_emoji(reaction.emoji_key),
                 "created_at": reaction.created_at.isoformat(),
             }
             for reaction in reactions
+        ]
+        payload["poll_votes"] = [
+            {
+                "answer_id": vote.answer_id,
+                "user_id": str(vote.user_id),
+                "user_domain": vote.user_domain,
+                "created_at": vote.created_at.isoformat(),
+            }
+            for vote in poll_votes_by_message.get(message_ref, [])
         ]
         payload["pin"] = (
             {
@@ -1166,6 +1214,16 @@ def _history_ref(raw: object, field: str) -> tuple[int, str]:
     )
 
 
+def _validated_history_reaction_emoji(raw: object) -> str:
+    if not isinstance(raw, str) or not 1 <= len(raw) <= 320:
+        raise ValueError("historical reaction emoji is invalid")
+    try:
+        canonical = canonical_reaction_emoji(raw)
+    except ValueError:
+        raise ValueError("historical reaction emoji is invalid") from None
+    return canonical
+
+
 async def _ensure_history_identity(
     session: AsyncSession,
     settings: Settings,
@@ -1229,7 +1287,24 @@ def _validate_manifest(
     guild: Guild,
     user: User,
 ) -> tuple[int, int, int, int, int, list[tuple[int, int]]]:
-    if not isinstance(payload, dict) or payload.get("available") is False:
+    expected_fields = {
+        "available",
+        "export_id",
+        "guild_id",
+        "guild_domain",
+        "requester_user",
+        "baseline_seq",
+        "requester_member_version",
+        "permission_generation",
+        "history_policy_generation",
+        "expires_at",
+        "channels",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_fields
+        or payload.get("available") is not True
+    ):
         raise ValueError("history export is unavailable")
     export_id = database_snowflake(payload.get("export_id"), "history export id")
     if (
@@ -1238,6 +1313,10 @@ def _validate_manifest(
     ) != (guild.id, guild.origin_domain):
         raise ValueError("history export references the wrong guild")
     requester = _history_ref(payload.get("requester_user"), "history requester")
+    if not isinstance(payload.get("requester_user"), dict) or set(
+        cast(dict[str, object], payload["requester_user"])
+    ) != {"id", "domain"}:
+        raise ValueError("history export requester has an invalid shape")
     if requester != (user.id, user.origin_domain):
         raise ValueError("history export references the wrong user")
     baseline_seq = database_snowflake(payload.get("baseline_seq"), "history baseline")
@@ -1250,20 +1329,34 @@ def _validate_manifest(
     policy_generation = database_snowflake(
         payload.get("history_policy_generation"), "history policy generation"
     )
+    try:
+        expires_at = datetime.fromisoformat(str(payload.get("expires_at")))
+    except ValueError:
+        raise ValueError("history export expiry is invalid") from None
+    if expires_at.tzinfo is None or expires_at <= datetime.now(UTC):
+        raise ValueError("history export is expired")
     raw_channels = payload.get("channels")
     if not isinstance(raw_channels, list) or len(raw_channels) > 10_000:
         raise ValueError("history export channel set is invalid")
     channels: list[tuple[int, int]] = []
     seen: set[int] = set()
+    previous_channel_id: int | None = None
     for raw in raw_channels:
+        if not isinstance(raw, dict) or set(raw) != {"id", "origin_domain", "upper_bound_id"}:
+            raise ValueError("history export channel has an invalid shape")
         channel_ref = _history_ref(raw, "history channel")
         upper = database_snowflake(
             raw.get("upper_bound_id") if isinstance(raw, dict) else None,
             "history upper bound",
         )
-        if channel_ref[1] != guild.origin_domain or channel_ref[0] in seen:
+        if (
+            channel_ref[1] != guild.origin_domain
+            or channel_ref[0] in seen
+            or (previous_channel_id is not None and channel_ref[0] <= previous_channel_id)
+        ):
             raise ValueError("history export contains an invalid channel")
         seen.add(channel_ref[0])
+        previous_channel_id = channel_ref[0]
         channels.append((channel_ref[0], upper))
     return (
         export_id,
@@ -1306,7 +1399,9 @@ def _validate_history_message(
     raw: object,
     *,
     guild_origin: str,
+    guild_id: int | None = None,
     channel_id: int,
+    channel_type: int | None = None,
     after: int,
     upper_bound: int,
     before: int | None = None,
@@ -1331,6 +1426,9 @@ def _validate_history_message(
         normalize_domain(str(raw.get("channel_domain", ""))),
     ) != (channel_id, guild_origin):
         raise ValueError("historical message references the wrong channel")
+    message_type = raw.get("message_type", 0)
+    if isinstance(message_type, bool) or not isinstance(message_type, int) or message_type < 0:
+        raise ValueError("historical message type is invalid")
     if raw.get("deleted_at") is not None:
         raise ValueError("history export included deleted content")
     try:
@@ -1377,8 +1475,11 @@ def _validate_history_message(
     )
     attachments = raw.get("attachments", [])
     reactions = raw.get("reactions", [])
+    poll_votes = raw.get("poll_votes", [])
     pin = raw.get("pin")
     mentions = raw.get("mention_user_refs", [])
+    role_mentions = raw.get("mention_role_refs", [])
+    mention_everyone = raw.get("mention_everyone", False)
     webhook = raw.get("webhook")
     if content is not None and (not isinstance(content, str) or not 1 <= len(content) <= 4000):
         raise ValueError("historical message content is invalid")
@@ -1386,15 +1487,31 @@ def _validate_history_message(
         raise ValueError("historical message attachments are invalid")
     if not isinstance(reactions, list) or len(reactions) > 10_000:
         raise ValueError("historical message reactions are invalid")
+    if not isinstance(poll_votes, list) or len(poll_votes) > 10_000:
+        raise ValueError("historical message poll votes are invalid")
     if not isinstance(mentions, list) or len(mentions) > 5_000:
         raise ValueError("historical message mentions are invalid")
+    if not isinstance(role_mentions, list) or len(role_mentions) > 100:
+        raise ValueError("historical message role mentions are invalid")
+    if not isinstance(mention_everyone, bool):
+        raise ValueError("historical message everyone mention marker is invalid")
     if pin is not None and not isinstance(pin, dict):
         raise ValueError("historical message pin is invalid")
     if webhook is not None and not isinstance(webhook, dict):
         raise ValueError("historical message webhook is invalid")
     if content is not None and e2ee is not None:
         raise ValueError("historical message mixes plaintext and encrypted content")
-    if content is None and e2ee is None and not attachments:
+    if (
+        content is None
+        and e2ee is None
+        and not attachments
+        and not raw.get("embeds")
+        and not raw.get("components")
+        and not raw.get("sticker_items")
+        and raw.get("poll") is None
+        and raw.get("forwarded_message_id") is None
+        and message_type not in {6, 12, 18, 21}
+    ):
         raise ValueError("historical message has no content")
     client_nonce = raw.get("client_nonce")
     if client_nonce is not None and (
@@ -1405,9 +1522,13 @@ def _validate_history_message(
     referenced_domain = raw.get("referenced_message_domain")
     if (referenced_id is None) != (referenced_domain is None):
         raise ValueError("historical message reference is incomplete")
+    wire_referenced_ref: tuple[int, str] | None = None
     if referenced_id is not None:
-        database_snowflake(referenced_id, "historical reply")
-        if normalize_domain(str(referenced_domain)) != guild_origin:
+        wire_referenced_ref = (
+            database_snowflake(referenced_id, "historical reply"),
+            normalize_domain(str(referenced_domain)),
+        )
+        if wire_referenced_ref[1] != guild_origin:
             raise ValueError("historical message reference has a non-authoritative origin")
     normalized_mentions: list[dict[str, str]] = []
     seen_mentions: set[tuple[int, str]] = set()
@@ -1417,26 +1538,24 @@ def _validate_history_message(
             continue
         seen_mentions.add(mention_ref)
         normalized_mentions.append({"id": str(mention_ref[0]), "origin_domain": mention_ref[1]})
-    message_type = raw.get("message_type", 0)
-    if message_type == 2:
-        if not isinstance(webhook, dict):
-            raise ValueError("historical webhook attribution is missing")
-        webhook_name = webhook.get("name")
-        webhook_avatar = webhook.get("avatar_hash")
-        if (
-            not isinstance(webhook_name, str)
-            or not 1 <= len(webhook_name) <= 80
-            or not webhook_name.strip()
-        ):
-            raise ValueError("historical webhook name is invalid")
-        if webhook_avatar is not None and (
-            not isinstance(webhook_avatar, str)
-            or len(webhook_avatar) != 64
-            or any(character not in "0123456789abcdef" for character in webhook_avatar)
-        ):
-            raise ValueError("historical webhook avatar is invalid")
-    elif webhook is not None:
-        raise ValueError("ordinary historical message contains webhook attribution")
+    normalized_role_mentions: list[dict[str, str]] = []
+    seen_role_mentions: set[tuple[int, str]] = set()
+    for mention in role_mentions:
+        mention_ref = _history_ref(mention, "historical role mention")
+        if mention_ref[1] != guild_origin:
+            raise ValueError("historical role mention has a non-authoritative origin")
+        if mention_ref in seen_role_mentions:
+            raise ValueError("historical role mentions must be unique")
+        seen_role_mentions.add(mention_ref)
+        normalized_role_mentions.append(
+            {"id": str(mention_ref[0]), "origin_domain": mention_ref[1]}
+        )
+    validate_webhook_attribution(
+        webhook,
+        message_type=message_type,
+        message_origin=guild_origin,
+        label="historical message",
+    )
     profile = RemoteUserProfile.model_validate(raw.get("history_author"))
     if (
         database_snowflake(raw.get("author_id"), "historical author id"),
@@ -1471,6 +1590,25 @@ def _validate_history_message(
             raise ValueError("historical attachment size is invalid")
         width, height = remote_media_dimensions(attachment)
         blurhash = sanitized_remote_blurhash(attachment.get("blurhash"))
+        duration_raw = attachment.get("duration_secs")
+        duration_secs = (
+            float(duration_raw)
+            if isinstance(duration_raw, (int, float)) and not isinstance(duration_raw, bool)
+            else None
+        )
+        waveform = attachment.get("waveform")
+        if (
+            duration_raw is not None
+            and duration_secs is None
+            or (waveform is not None and not isinstance(waveform, str))
+        ):
+            raise ValueError("historical voice metadata is invalid")
+        validate_voice_attachment_metadata(
+            content_type=normalized_content_type,
+            encryption_mode=str(attachment.get("encryption_mode", "plaintext")),
+            duration_secs=duration_secs,
+            waveform=waveform,
+        )
         variants = sanitized_remote_variants(
             attachment.get("variants", {}), max_bytes=attachment_max_bytes
         )
@@ -1480,6 +1618,8 @@ def _validate_history_message(
                 "content_type": normalized_content_type,
                 "width": width,
                 "height": height,
+                "duration_secs": duration_secs,
+                "waveform": waveform,
                 "blurhash": blurhash,
                 "variants": variants,
             }
@@ -1494,14 +1634,61 @@ def _validate_history_message(
         or flags < 0
     ):
         raise ValueError("historical message flags are invalid")
+    rich = _validated_message_rich_projection(
+        raw,
+        message_id=message_id,
+        message_origin=guild_origin,
+        message_created_at=created_at,
+        e2ee=e2ee,
+        message_type=message_type,
+        flags=flags,
+    )
+    forwarded_ref = cast(tuple[int, str] | None, rich["forwarded_ref"])
+    forwarded_channel_ref = cast(tuple[int, str] | None, rich["forwarded_channel_ref"])
+    forward_snapshot = cast(dict[str, Any] | None, rich["forward_snapshot"])
+    message_reference = validate_message_reference_projection(
+        raw.get("message_reference"),
+        message_type=message_type,
+        channel_ref=(channel_id, guild_origin),
+        guild_ref=((guild_id, guild_origin) if guild_id is not None else None),
+        referenced_message_ref=wire_referenced_ref,
+        forwarded_message_ref=forwarded_ref,
+        forwarded_channel_ref=forwarded_channel_ref,
+        has_forward_snapshot=bool(
+            forward_snapshot is not None or rich.get("has_encrypted_forward")
+        ),
+        is_crosspost=bool(flags & MESSAGE_FLAG_IS_CROSSPOST),
+        label="historical message",
+    )
+    validate_channel_follow_message_fields(
+        raw,
+        rich,
+        message_type=message_type,
+        channel_type=channel_type if channel_type is not None else 0,
+        content=content,
+        e2ee=e2ee,
+        attachments=attachments,
+        webhook=webhook,
+        mention_user_refs=normalized_mentions,
+        mention_role_refs=normalized_role_mentions,
+        mention_everyone=mention_everyone,
+        flags=flags,
+        tts=raw.get("tts", False),
+        client_nonce=client_nonce,
+        referenced_message_ref=wire_referenced_ref,
+        label="historical channel follow notice",
+    )
+    if poll_votes and rich["poll"] is None:
+        raise ValueError("historical poll votes reference a message without a poll")
+    normalized_reactions: list[dict[str, Any]] = []
+    reaction_indexes: dict[tuple[int, str, str], int] = {}
+    reaction_timestamps: dict[tuple[int, str, str], datetime] = {}
     for reaction in reactions:
         if not isinstance(reaction, dict):
             raise ValueError("historical reaction is invalid")
-        database_snowflake(reaction.get("user_id"), "historical reaction user")
-        normalize_domain(str(reaction.get("user_domain", "")))
-        emoji = reaction.get("emoji")
-        if not isinstance(emoji, str) or not 1 <= len(emoji) <= 320:
-            raise ValueError("historical reaction emoji is invalid")
+        reaction_user_id = database_snowflake(reaction.get("user_id"), "historical reaction user")
+        reaction_user_domain = normalize_domain(str(reaction.get("user_domain", "")))
+        reaction_emoji = _validated_history_reaction_emoji(reaction.get("emoji"))
         try:
             reaction_created = datetime.fromisoformat(str(reaction.get("created_at")))
         except ValueError:
@@ -1513,6 +1700,71 @@ def _validate_history_message(
             or int(reaction_created.timestamp() * 1000) > timestamp_ceiling
         ):
             raise ValueError("historical reaction timestamp is outside the message bounds")
+        reaction_key = (reaction_user_id, reaction_user_domain, reaction_emoji)
+        normalized_reaction = {
+            **reaction,
+            "user_id": str(reaction_user_id),
+            "user_domain": reaction_user_domain,
+            "emoji": reaction_emoji,
+            "created_at": reaction_created.isoformat(),
+        }
+        existing_index = reaction_indexes.get(reaction_key)
+        if existing_index is None:
+            reaction_indexes[reaction_key] = len(normalized_reactions)
+            reaction_timestamps[reaction_key] = reaction_created
+            normalized_reactions.append(normalized_reaction)
+        elif reaction_created < reaction_timestamps[reaction_key]:
+            reaction_timestamps[reaction_key] = reaction_created
+            normalized_reactions[existing_index] = normalized_reaction
+    seen_poll_votes: set[tuple[int, int, str]] = set()
+    seen_single_select_voters: set[tuple[int, str]] = set()
+    poll_projection = cast(
+        tuple[
+            dict[str, object],
+            list[tuple[int, str | None, dict[str, object] | None]],
+            bool,
+            int,
+            datetime,
+        ]
+        | None,
+        rich["poll"],
+    )
+    for vote in poll_votes:
+        if not isinstance(vote, dict):
+            raise ValueError("historical poll vote is invalid")
+        answer_id = vote.get("answer_id")
+        if (
+            isinstance(answer_id, bool)
+            or not isinstance(answer_id, int)
+            or not 1 <= answer_id <= 10
+        ):
+            raise ValueError("historical poll vote answer is invalid")
+        voter_ref = (
+            database_snowflake(vote.get("user_id"), "historical poll voter"),
+            normalize_domain(str(vote.get("user_domain", ""))),
+        )
+        vote_key = (answer_id, voter_ref[0], voter_ref[1])
+        if vote_key in seen_poll_votes:
+            raise ValueError("historical poll votes contain a duplicate")
+        seen_poll_votes.add(vote_key)
+        voter_key = (voter_ref[0], voter_ref[1])
+        if (
+            poll_projection is not None
+            and not poll_projection[2]
+            and voter_key in seen_single_select_voters
+        ):
+            raise ValueError("historical single-select poll contains multiple votes")
+        seen_single_select_voters.add(voter_key)
+        try:
+            voted_at = datetime.fromisoformat(str(vote.get("created_at")))
+        except ValueError:
+            raise ValueError("historical poll vote timestamp is invalid") from None
+        if (
+            voted_at.tzinfo is None
+            or voted_at < created_at
+            or int(voted_at.timestamp() * 1000) > timestamp_ceiling
+        ):
+            raise ValueError("historical poll vote timestamp is outside the message bounds")
     if isinstance(pin, dict):
         database_snowflake(pin.get("pinned_by_id"), "historical pinner")
         normalize_domain(str(pin.get("pinned_by_domain", "")))
@@ -1525,8 +1777,15 @@ def _validate_history_message(
         if pinned_at < created_at or int(pinned_at.timestamp() * 1000) > timestamp_ceiling:
             raise ValueError("historical pin timestamp is outside the message bounds")
     validated = dict(raw)
+    validated["embeds"] = rich["embeds"]
+    validated["components"] = rich["components"]
+    validated["sticker_items"] = rich["sticker_items"]
     validated["mention_user_refs"] = normalized_mentions
+    validated["mention_role_refs"] = normalized_role_mentions
+    validated["mention_everyone"] = mention_everyone
     validated["attachments"] = normalized_attachments
+    validated["reactions"] = normalized_reactions
+    validated["message_reference"] = message_reference
     return message_id, validated
 
 
@@ -1632,8 +1891,37 @@ async def _stage_history_pages(
             if response.status_code != 200:
                 raise history_response_error(response)
             payload = decode_federation_response_json(response)
-            if not isinstance(payload, dict):
+            expected_page_fields = {
+                "export_id",
+                "channel_id",
+                "channel_domain",
+                "upper_bound_id",
+                "messages",
+                "page_bytes",
+                "next_after",
+                "next_before",
+                "order",
+                "complete",
+            }
+            if not isinstance(payload, dict) or set(payload) != expected_page_fields:
                 raise ValueError("historical message page is invalid")
+            page_bytes = payload.get("page_bytes")
+            if (
+                database_snowflake(payload.get("export_id"), "history page export")
+                != history_import.export_id
+                or database_snowflake(payload.get("channel_id"), "history page channel")
+                != channel_id
+                or payload.get("channel_domain") != guild.origin_domain
+                or database_snowflake(payload.get("upper_bound_id"), "history page upper bound")
+                != upper_bound
+                or payload.get("order") != ("recent_first" if recent_first else "oldest_first")
+                or type(payload.get("complete")) is not bool
+                or type(page_bytes) is not int
+                or not 0 <= page_bytes <= settings.federation_history_page_bytes
+                or (recent_first and payload.get("next_after") is not None)
+                or (not recent_first and payload.get("next_before") is not None)
+            ):
+                raise ValueError("historical message page escaped its request binding")
             raw_messages = payload.get("messages")
             if (
                 not isinstance(raw_messages, list)
@@ -1650,7 +1938,9 @@ async def _stage_history_pages(
                 message_id, message_payload = _validate_history_message(
                     raw,
                     guild_origin=guild.origin_domain,
+                    guild_id=guild.id,
                     channel_id=channel_id,
+                    channel_type=channel.type,
                     after=last,
                     upper_bound=upper_bound,
                     before=channel_state.next_before_id if recent_first else None,
@@ -1693,6 +1983,23 @@ async def _stage_history_pages(
                 raise FederatedHistoryLimitExceeded("reactions")
             if next_bytes > settings.federation_history_max_bytes:
                 raise FederatedHistoryLimitExceeded("bytes")
+            complete = payload["complete"] is True
+            cursor_name = "next_before" if recent_first else "next_after"
+            next_cursor = payload.get(cursor_name)
+            parsed_next: int | None = None
+            if complete:
+                if next_cursor is not None:
+                    raise ValueError("complete historical message page carried a cursor")
+            else:
+                if not raw_messages or next_cursor is None:
+                    raise ValueError("historical message cursor did not advance")
+                parsed_next = database_snowflake(next_cursor, "historical message cursor")
+                if recent_first:
+                    expected = max(0, int(previous_id or 0) - 1)
+                    if parsed_next != expected or parsed_next >= channel_state.next_before_id:
+                        raise ValueError("historical recent-first cursor is invalid")
+                elif parsed_next != last or parsed_next <= after:
+                    raise ValueError("historical message cursor is invalid")
             history_import.pages_downloaded += 1
             history_import.messages_downloaded = next_messages
             history_import.reactions_downloaded = next_reactions
@@ -1700,24 +2007,15 @@ async def _stage_history_pages(
             channel_state.pages_downloaded += 1
             channel_state.messages_downloaded += len(raw_messages)
             channel_state.bytes_downloaded += response_bytes
-            complete = payload.get("complete")
-            if complete is True:
+            if complete:
                 channel_state.complete = True
                 await admit_replica_storage(session, settings, guild)
                 await session.commit()
                 continue
-            cursor_name = "next_before" if recent_first else "next_after"
-            next_cursor = payload.get(cursor_name)
-            if not raw_messages or next_cursor is None:
-                raise ValueError("historical message cursor did not advance")
-            parsed_next = database_snowflake(next_cursor, "historical message cursor")
             if recent_first:
-                expected = max(0, int(previous_id or 0) - 1)
-                if parsed_next != expected or parsed_next >= channel_state.next_before_id:
-                    raise ValueError("historical recent-first cursor is invalid")
+                if parsed_next is None:
+                    raise RuntimeError("validated history cursor disappeared")
                 channel_state.next_before_id = parsed_next
-            elif parsed_next != last or parsed_next <= after:
-                raise ValueError("historical message cursor is invalid")
             await admit_replica_storage(session, settings, guild)
             await session.commit()
     return history_import.messages_downloaded
@@ -1742,10 +2040,15 @@ async def _revalidate_staged_history_message(
     )
     if channel_state is None:
         raise ValueError("staged history message has no channel grant")
+    channel = await session.get(Channel, (staged.channel_id, staged.channel_domain))
+    if channel is None or channel.unavailable:
+        raise ValueError("staged history message channel is unavailable")
     message_id, validated = _validate_history_message(
         staged.payload,
         guild_origin=history_import.guild_domain,
+        guild_id=history_import.guild_id,
         channel_id=staged.channel_id,
+        channel_type=channel.type,
         after=0,
         upper_bound=channel_state.upper_bound_id,
         timestamp_upper_bound_ms=_history_timestamp_ceiling(settings),
@@ -1814,6 +2117,26 @@ async def _apply_history_delta_event(
             authenticated_event_ms=int(event.get("ts", 0)),
         )
         return
+    if event_type == "guild.message.bulk_delete":
+        raw_messages = content.get("messages")
+        if not isinstance(raw_messages, list) or not 2 <= len(raw_messages) <= 100:
+            raise ValueError("history bulk deletion message list is invalid")
+        message_refs = [_history_ref(item, "history bulk deleted message") for item in raw_messages]
+        if len(message_refs) != len(set(message_refs)):
+            raise ValueError("history bulk deletion contains duplicate messages")
+        for message_ref in message_refs:
+            staged = await session.get(
+                GuildHistoryStagedMessage,
+                (
+                    history_import.export_id,
+                    history_import.export_domain,
+                    message_ref[0],
+                    message_ref[1],
+                ),
+            )
+            if staged is not None:
+                await session.delete(staged)
+        return
     if event_type == "guild.message.purge":
         author_ref = _history_ref(content.get("author"), "history purge author")
         try:
@@ -1859,18 +2182,39 @@ async def _apply_history_delta_event(
         return
     raw = dict(staged.payload)
     if event_type.startswith("guild.reaction."):
-        user_ref = _history_ref(content.get("user"), "history reaction user")
-        emoji = content.get("emoji")
-        if not isinstance(emoji, str) or not emoji:
-            raise ValueError("history reaction is invalid")
-        reactions = list(raw.get("reactions", []))
-        key = (str(user_ref[0]), user_ref[1], emoji)
-        reactions = [
-            item
-            for item in reactions
-            if (str(item.get("user_id")), str(item.get("user_domain")), item.get("emoji")) != key
-        ]
+        clear = event_type == "guild.reaction.clear"
+        user_ref = None if clear else _history_ref(content.get("user"), "history reaction user")
+        raw_emoji = content.get("emoji")
+        emoji = _validated_history_reaction_emoji(raw_emoji) if raw_emoji is not None else None
+        if not clear and (user_ref is None or emoji is None):
+            raise ValueError("historical reaction mutation is incomplete")
+        raw_reactions = raw.get("reactions", [])
+        if not isinstance(raw_reactions, list):
+            raise ValueError("historical message reactions are invalid")
+        reactions: list[dict[str, Any]] = []
+        for item in raw_reactions:
+            if not isinstance(item, dict):
+                raise ValueError("historical reaction is invalid")
+            reactions.append(
+                {**item, "emoji": _validated_history_reaction_emoji(item.get("emoji"))}
+            )
+        if clear:
+            reactions = (
+                [] if emoji is None else [item for item in reactions if item.get("emoji") != emoji]
+            )
+        else:
+            if user_ref is None or emoji is None:
+                raise RuntimeError("validated reaction mutation lost required fields")
+            key = (str(user_ref[0]), user_ref[1], emoji)
+            reactions = [
+                item
+                for item in reactions
+                if (str(item.get("user_id")), str(item.get("user_domain")), item.get("emoji"))
+                != key
+            ]
         if event_type.endswith("add"):
+            if user_ref is None or emoji is None:
+                raise RuntimeError("validated reaction addition lost required fields")
             reactions.append(
                 {
                     "user_id": str(user_ref[0]),
@@ -1883,6 +2227,57 @@ async def _apply_history_delta_event(
                 }
             )
         raw["reactions"] = reactions
+    elif event_type.startswith("guild.poll.vote."):
+        user_ref = _history_ref(content.get("user"), "history poll voter")
+        answer_id = content.get("answer_id")
+        if (
+            isinstance(answer_id, bool)
+            or not isinstance(answer_id, int)
+            or not 1 <= answer_id <= 10
+        ):
+            raise ValueError("history poll vote is invalid")
+        votes = list(raw.get("poll_votes", []))
+        poll_vote_key = (answer_id, str(user_ref[0]), user_ref[1])
+        votes = [
+            item
+            for item in votes
+            if (
+                item.get("answer_id"),
+                str(item.get("user_id")),
+                str(item.get("user_domain")),
+            )
+            != poll_vote_key
+        ]
+        if event_type.endswith("add"):
+            votes.append(
+                {
+                    "answer_id": answer_id,
+                    "user_id": str(user_ref[0]),
+                    "user_domain": user_ref[1],
+                    "created_at": datetime.fromtimestamp(
+                        int(event.get("ts", 0)) / 1000,
+                        tz=UTC,
+                    ).isoformat(),
+                }
+            )
+        raw["poll_votes"] = votes
+    elif event_type == "guild.poll.finalize":
+        poll = raw.get("poll")
+        if not isinstance(poll, dict) or not isinstance(poll.get("results"), dict):
+            raise ValueError("history poll finalization is invalid")
+        finalized_at = content.get("finalized_at")
+        try:
+            parsed_finalized_at = datetime.fromisoformat(str(finalized_at))
+        except ValueError:
+            raise ValueError("history poll finalization timestamp is invalid") from None
+        if parsed_finalized_at.tzinfo is None:
+            raise ValueError("history poll finalization timestamp lacks a timezone")
+        results = dict(poll["results"])
+        results["is_finalized"] = True
+        poll = dict(poll)
+        poll["finalized_at"] = parsed_finalized_at.isoformat()
+        poll["results"] = results
+        raw["poll"] = poll
     elif event_type.startswith("guild.pin."):
         actor_ref = _history_ref(event.get("actor"), "history pin actor")
         raw["pin"] = (
@@ -1978,54 +2373,78 @@ async def _reconcile_history_delta(
         raw_events = payload.get("events") if isinstance(payload, dict) else None
         if (
             not isinstance(payload, dict)
+            or set(payload) != {"events", "cursor_seq", "latest_seq", "complete"}
             or not isinstance(raw_events, list)
             or len(raw_events) > HISTORY_DELTA_EVENTS_PER_PAGE
-            or not isinstance(payload.get("complete"), bool)
+            or type(payload.get("complete")) is not bool
         ):
             raise ValueError("history reconciliation response is invalid")
+        next_cursor = database_snowflake(payload.get("cursor_seq"), "history delta cursor")
+        latest_seq = database_snowflake(payload.get("latest_seq"), "history latest cursor")
+        complete = payload["complete"] is True
+        if next_cursor < cursor or (next_cursor == cursor and (bool(raw_events) or not complete)):
+            raise ValueError("history reconciliation cursor did not advance")
+        if latest_seq < cursor or next_cursor > latest_seq:
+            raise ValueError("history reconciliation cursor is outside the remote bound")
+        if complete != (next_cursor >= latest_seq):
+            raise ValueError("history reconciliation completion marker is inconsistent")
+
         response_bytes = len(response.content)
         next_pages = int(history_import.pages_downloaded) + 1
         next_messages = int(history_import.messages_downloaded) + len(raw_events)
         next_bytes = int(history_import.bytes_downloaded) + response_bytes
-        reaction_events = sum(
-            1
-            for raw_event in raw_events
-            if isinstance(raw_event, dict)
-            and str(raw_event.get("type", "")).startswith("guild.reaction.")
-        )
-        next_reactions = int(history_import.reactions_downloaded) + reaction_events
         if next_pages > settings.federation_history_max_pages:
             raise FederatedHistoryLimitExceeded("pages")
         if next_messages > settings.federation_history_max_messages:
             raise FederatedHistoryLimitExceeded("messages")
         if next_bytes > settings.federation_history_max_bytes:
             raise FederatedHistoryLimitExceeded("bytes")
-        if next_reactions > settings.federation_history_max_reactions:
-            raise FederatedHistoryLimitExceeded("reactions")
 
-        next_cursor = database_snowflake(payload.get("cursor_seq"), "history delta cursor")
-        complete = payload["complete"] is True
-        if next_cursor < cursor or (next_cursor == cursor and (bool(raw_events) or not complete)):
-            raise ValueError("history reconciliation cursor did not advance")
-        if payload.get("latest_seq") is not None:
-            latest_seq = database_snowflake(payload.get("latest_seq"), "history latest cursor")
-            if latest_seq < cursor or next_cursor > latest_seq:
-                raise ValueError("history reconciliation cursor is outside the remote bound")
-            if complete != (next_cursor >= latest_seq):
-                raise ValueError("history reconciliation completion marker is inconsistent")
-
+        validated_events: list[dict[str, Any]] = []
+        previous_seq = cursor
         for raw_event in raw_events:
             envelope = await validated_event_envelope(
                 session,
                 settings,
                 guild.origin_domain,
                 raw_event,
+                allow_authority_attested_actor=True,
             )
+            event = envelope.model_dump(mode="json")
+            context = event.get("context")
+            if (
+                event.get("type") not in HISTORY_EVENT_TYPES
+                or not isinstance(context, dict)
+                or context.get("guild_id") != str(guild.id)
+                or context.get("guild_domain") != guild.origin_domain
+            ):
+                raise ValueError("history reconciliation event escaped its guild binding")
+            event_seq = database_snowflake(
+                event.get("seq") or context.get("seq"),
+                "history delta event sequence",
+            )
+            if not previous_seq < event_seq <= next_cursor:
+                raise ValueError("history reconciliation events are out of order")
+            previous_seq = event_seq
+            validated_events.append(event)
+        reaction_events = sum(
+            1
+            for event in validated_events
+            if (
+                str(event.get("type", "")).startswith("guild.reaction.")
+                or str(event.get("type", "")).startswith("guild.poll.vote.")
+            )
+        )
+        next_reactions = int(history_import.reactions_downloaded) + reaction_events
+        if next_reactions > settings.federation_history_max_reactions:
+            raise FederatedHistoryLimitExceeded("reactions")
+
+        for event in validated_events:
             await _apply_history_delta_event(
                 session,
                 settings,
                 history_import,
-                envelope.model_dump(mode="json"),
+                event,
             )
         history_import.pages_downloaded = next_pages
         history_import.messages_downloaded = next_messages
@@ -2038,6 +2457,24 @@ async def _reconcile_history_delta(
         if complete:
             return cursor
     raise FederatedHistoryLimitExceeded("delta_requests")
+
+
+def _validate_historical_channel_follow_source(
+    known_source: Channel | None,
+    *,
+    source_channel_ref: tuple[int, str],
+    source_guild_ref: tuple[int, str],
+) -> None:
+    """Validate immutable source identity without comparing a mutable name."""
+
+    if known_source is None or known_source.unavailable:
+        return
+    if (
+        (known_source.id, known_source.origin_domain) != source_channel_ref
+        or known_source.type != 5
+        or (known_source.guild_id, known_source.guild_domain) != source_guild_ref
+    ):
+        raise ValueError("historical channel follow source does not match its channel")
 
 
 async def _merge_history_import_batch(
@@ -2150,7 +2587,12 @@ async def _merge_history_import_batch(
         latest_by_channel[staged_channel_ref] = max(
             latest_by_channel.get(staged_channel_ref, 0), staged.message_id
         )
-        webhook = raw.get("webhook")
+        webhook = validate_webhook_attribution(
+            raw.get("webhook"),
+            message_type=int(raw.get("message_type", 0)),
+            message_origin=staged.message_domain,
+            label="historical message",
+        )
         profile = RemoteUserProfile.model_validate(raw.get("history_author"))
         author = await _ensure_history_identity(
             session,
@@ -2170,14 +2612,31 @@ async def _merge_history_import_batch(
             if referenced_id is not None
             else None
         )
+        referenced: Message | None = None
         if referenced_id is not None:
             referenced = await session.get(Message, (referenced_id, referenced_domain))
-            if referenced is None:
+            if referenced is None and int(raw.get("message_type", 0)) != POLL_RESULT_MESSAGE_TYPE:
                 referenced_id = None
                 referenced_domain = None
         channel = await session.get(Channel, staged_channel_ref)
         if channel is None or channel.guild_id != guild.id:
             raise RuntimeError("historical message channel disappeared")
+        if int(raw.get("message_type", 0)) == 12:
+            stored_reference = cast(dict[str, object], raw["message_reference"])
+            source_channel_ref = (
+                int(cast(str, stored_reference["channel_id"])),
+                cast(str, stored_reference["channel_domain"]),
+            )
+            source_guild_ref = (
+                int(cast(str, stored_reference["guild_id"])),
+                cast(str, stored_reference["guild_domain"]),
+            )
+            known_source = await session.get(Channel, source_channel_ref)
+            _validate_historical_channel_follow_source(
+                known_source,
+                source_channel_ref=source_channel_ref,
+                source_guild_ref=source_guild_ref,
+            )
         staged_e2ee = validate_e2ee_envelope(raw.get("e2ee"))
         validate_e2ee_message_projection(
             staged_e2ee,
@@ -2185,14 +2644,47 @@ async def _merge_history_import_batch(
             message_domain=staged.message_domain,
             edited=raw.get("edited_at") is not None,
         )
-        validate_message_encryption_policy(
-            channel.encryption_mode,
-            content=raw.get("content"),
+        if (
+            int(raw.get("message_type", 0)) != POLL_RESULT_MESSAGE_TYPE
+            or raw.get("poll_result") is None
+        ):
+            validate_message_encryption_policy(
+                channel.encryption_mode,
+                content=raw.get("content"),
+                e2ee=staged_e2ee,
+                attachment_count=len(raw.get("attachments", [])),
+                policy_generation=channel.encryption_policy_generation,
+                policy_epoch=channel.encryption_epoch,
+                policy_group_id=channel.encryption_group_id,
+            )
+        message_created_at = datetime.fromisoformat(str(raw["created_at"]))
+        rich = _validated_message_rich_projection(
+            raw,
+            message_id=staged.message_id,
+            message_origin=staged.message_domain,
+            message_created_at=message_created_at,
             e2ee=staged_e2ee,
-            attachment_count=len(raw.get("attachments", [])),
-            policy_generation=channel.encryption_policy_generation,
-            policy_epoch=channel.encryption_epoch,
-            policy_group_id=channel.encryption_group_id,
+            message_type=int(raw.get("message_type", 0)),
+            flags=int(raw.get("flags", 0)),
+        )
+        if int(raw.get("message_type", 0)) == POLL_RESULT_MESSAGE_TYPE:
+            projection, _embed = validate_poll_result_wire_body(
+                raw,
+                author_ref=(author.id, author.origin_domain),
+                channel_ref=(channel.id, channel.origin_domain),
+            )
+            if referenced is not None and (
+                (referenced.author_id, referenced.author_domain)
+                != (author.id, author.origin_domain)
+                or ("e2ee" if referenced.e2ee is not None else "plaintext")
+                != projection["source_encryption_mode"]
+            ):
+                raise ValueError("historical poll result source binding is invalid")
+        application_ref = cast(tuple[int, str] | None, rich["application_ref"])
+        forwarded_ref = cast(tuple[int, str] | None, rich["forwarded_ref"])
+        forwarded_channel_ref = cast(
+            tuple[int, str] | None,
+            rich["forwarded_channel_ref"],
         )
         inserted = await session.scalar(
             pg_insert(Message)
@@ -2205,33 +2697,174 @@ async def _merge_history_import_batch(
                 author_domain=author.origin_domain,
                 content=raw.get("content"),
                 e2ee=staged_e2ee,
+                embeds=cast(list[dict[str, Any]], rich["embeds"]),
+                components=cast(list[dict[str, Any]], rich["components"]),
+                sticker_items=cast(list[dict[str, Any]], rich["sticker_items"]),
+                application_id=(application_ref[0] if application_ref is not None else None),
+                application_domain=(application_ref[1] if application_ref is not None else None),
+                interaction_metadata=cast(
+                    dict[str, object] | None,
+                    rich["interaction_metadata"],
+                ),
+                view_version=cast(int, rich["view_version"]),
+                forwarded_message_id=(forwarded_ref[0] if forwarded_ref is not None else None),
+                forwarded_message_domain=(forwarded_ref[1] if forwarded_ref is not None else None),
+                forwarded_channel_id=(
+                    forwarded_channel_ref[0] if forwarded_channel_ref is not None else None
+                ),
+                forwarded_channel_domain=(
+                    forwarded_channel_ref[1] if forwarded_channel_ref is not None else None
+                ),
+                forward_snapshot=cast(dict[str, Any] | None, rich["forward_snapshot"]),
+                poll_result=cast(dict[str, Any] | None, rich["poll_result"]),
                 encryption_policy_generation=channel.encryption_policy_generation,
                 encryption_epoch=channel.encryption_epoch,
                 message_type=int(raw.get("message_type", 0)),
+                tts=bool(raw.get("tts", False)),
                 flags=int(raw.get("flags", 0)),
                 client_nonce=raw.get("client_nonce"),
                 referenced_message_id=referenced_id,
                 referenced_message_domain=referenced_domain,
-                mention_user_refs=raw.get("mention_user_refs", []),
-                webhook_name=webhook.get("name") if isinstance(webhook, dict) else None,
-                webhook_avatar_hash=(
-                    webhook.get("avatar_hash") if isinstance(webhook, dict) else None
+                message_reference=cast(
+                    dict[str, Any] | None,
+                    raw.get("message_reference"),
                 ),
+                mention_user_refs=raw.get("mention_user_refs", []),
+                mention_role_refs=raw.get("mention_role_refs", []),
+                mention_everyone=bool(raw.get("mention_everyone", False)),
+                webhook_id=(webhook.webhook_ref[0] if webhook is not None else None),
+                webhook_domain=(webhook.webhook_ref[1] if webhook is not None else None),
+                webhook_name=(webhook.name if webhook is not None else None),
+                webhook_avatar_hash=(webhook.avatar_hash if webhook is not None else None),
+                webhook_avatar_url=(webhook.avatar_url if webhook is not None else None),
                 edited_at=(
                     datetime.fromisoformat(str(raw["edited_at"]))
                     if raw.get("edited_at") is not None
                     else None
                 ),
-                created_at=datetime.fromisoformat(str(raw["created_at"])),
+                created_at=message_created_at,
             )
             .on_conflict_do_nothing(index_elements=["id", "origin_domain"])
             .returning(Message.id)
         )
         if inserted is None:
+            existing = await session.get(Message, (staged.message_id, staged.message_domain))
+            if (
+                existing is None
+                or (
+                    int(raw.get("message_type", 0)) in {6, 12}
+                    and existing.message_reference != raw.get("message_reference")
+                )
+                or (
+                    int(raw.get("message_type", 0)) == 12 and existing.content != raw.get("content")
+                )
+            ):
+                raise ValueError("historical system message conflicts with stored history")
             continue
         message = await session.get(Message, (staged.message_id, staged.message_domain))
         if message is None:
             raise RuntimeError("imported historical message disappeared")
+        poll_projection = cast(
+            tuple[
+                dict[str, object],
+                list[tuple[int, str | None, dict[str, object] | None]],
+                bool,
+                int,
+                datetime,
+            ]
+            | None,
+            rich["poll"],
+        )
+        if poll_projection is not None:
+            question, answers, allow_multiselect, layout_type, expiry = poll_projection
+            raw_poll = raw.get("poll")
+            raw_finalized_at = raw_poll.get("finalized_at") if isinstance(raw_poll, dict) else None
+            session.add(
+                Poll(
+                    message_id=message.id,
+                    message_domain=message.origin_domain,
+                    question=question,
+                    allow_multiselect=allow_multiselect,
+                    layout_type=layout_type,
+                    expires_at=expiry,
+                    finalized_at=(
+                        datetime.fromisoformat(str(raw_finalized_at))
+                        if raw_finalized_at is not None
+                        else None
+                    ),
+                    created_at=message_created_at,
+                )
+            )
+            for answer_id, text, emoji in answers:
+                session.add(
+                    PollAnswer(
+                        message_id=message.id,
+                        message_domain=message.origin_domain,
+                        answer_id=answer_id,
+                        text=text,
+                        emoji=emoji,
+                    )
+                )
+            await session.flush()
+            valid_answer_ids = {answer_id for answer_id, _text, _emoji in answers}
+            for vote in raw.get("poll_votes", []):
+                if not isinstance(vote, dict):
+                    continue
+                answer_id = int(vote["answer_id"])
+                if answer_id not in valid_answer_ids:
+                    raise ValueError("historical poll vote references an unknown answer")
+                voter_id = database_snowflake(
+                    vote.get("user_id"),
+                    "historical poll voter",
+                )
+                voter_domain = normalize_domain(str(vote.get("user_domain", "")))
+                try:
+                    await _ensure_history_identity(
+                        session,
+                        settings,
+                        voter_id,
+                        voter_domain,
+                        authority_origin=guild.origin_domain,
+                    )
+                except UnresolvedHistoryIdentity:
+                    continue
+                await session.execute(
+                    pg_insert(PollVote)
+                    .values(
+                        message_id=message.id,
+                        message_domain=message.origin_domain,
+                        answer_id=answer_id,
+                        user_id=voter_id,
+                        user_domain=voter_domain,
+                        created_at=datetime.fromisoformat(str(vote["created_at"])),
+                    )
+                    .on_conflict_do_nothing()
+                )
+        if bool(rich.get("has_encrypted_controls")):
+            installation_ref = cast(
+                tuple[int, str] | None,
+                rich.get("interaction_installation_ref"),
+            )
+            if application_ref is None or installation_ref is None:
+                raise ValueError("historical encrypted view lineage is incomplete")
+            session.add(
+                MessageView(
+                    message_id=message.id,
+                    message_domain=message.origin_domain,
+                    application_id=application_ref[0],
+                    application_domain=application_ref[1],
+                    integration_type=cast(str, rich["interaction_integration_type"]),
+                    installation_id=installation_ref[0],
+                    installation_domain=installation_ref[1],
+                    installation_revision=cast(
+                        int,
+                        rich["interaction_installation_revision"],
+                    ),
+                    version=cast(int, rich["view_version"]),
+                    persistent=cast(bool, rich["view_persistent"]),
+                    expires_at=cast(datetime | None, rich["view_expires_at"]),
+                )
+            )
         await replicate_message_attachments(
             session,
             settings,
@@ -2289,7 +2922,7 @@ async def _merge_history_import_batch(
                     message_domain=message.origin_domain,
                     user_id=user_id,
                     user_domain=user_domain,
-                    emoji_key=str(reaction.get("emoji", ""))[:320],
+                    emoji_key=reaction["emoji"],
                     created_at=datetime.fromisoformat(str(reaction["created_at"])),
                 )
                 .on_conflict_do_nothing()
@@ -2447,7 +3080,7 @@ async def request_and_import_history(
     if response.status_code != 200:
         raise history_response_error(response)
     raw_manifest = decode_federation_response_json(response)
-    if isinstance(raw_manifest, dict) and raw_manifest.get("available") is False:
+    if raw_manifest == {"available": False}:
         return 0
     (
         export_id,

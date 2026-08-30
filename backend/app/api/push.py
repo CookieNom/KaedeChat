@@ -42,6 +42,7 @@ from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.security import (
     FederationPrincipal,
     authenticate_federation,
+    enforce_federation_route_rate_limit,
     federation_client_ip,
     matching_block,
 )
@@ -477,7 +478,8 @@ async def create_relay_subscription(
     grant = dict(body.grant)
     try:
         home_origin = normalize_domain(str(grant["origin"]))
-        if await matching_block(session, home_origin) is not None:
+        block = await matching_block(session, home_origin)
+        if block is not None and block.level == "suspend":
             raise ValueError("push enrollment authority is blocked")
         await verify_push_document(
             session,
@@ -590,13 +592,19 @@ async def accept_relay_wake(
     request: Request,
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     if not settings.push_relay_service_enabled:
         raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
     require_relay_transport_host(request, settings)
-    if principal.silenced:
-        raise HTTPException(status_code=403, detail={"code": "PUSH_RELAY_ORIGIN_BLOCKED"})
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "push-relay-wake",
+        capacity=600,
+        refill_per_minute=600,
+    )
     if body.expires_at <= int(time.time()) or body.expires_at > int(time.time()) + 600:
         raise HTTPException(status_code=400, detail={"code": "PUSH_RELAY_WAKE_EXPIRED"})
     subscription = await session.get(PushRelaySubscription, body.subscription_id)
@@ -675,13 +683,19 @@ async def revoke_relay_subscription(
     request: Request,
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> None:
     if not settings.push_relay_service_enabled:
         raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
     require_relay_transport_host(request, settings)
-    if principal.silenced:
-        raise HTTPException(status_code=403, detail={"code": "PUSH_RELAY_ORIGIN_BLOCKED"})
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "push-relay-revoke",
+        capacity=120,
+        refill_per_minute=120,
+    )
     row = await session.get(PushRelaySubscription, subscription)
     if row is not None and row.home_origin == principal.origin:
         row.enabled = False
@@ -823,7 +837,9 @@ async def redeem_push_notification(
         )
     )
     author_name = message.webhook_name or public_user_display_name(author)
-    avatar_hash = message.webhook_avatar_hash or author.avatar_hash
+    avatar_hash = (
+        message.webhook_avatar_hash if message.webhook_id is not None else author.avatar_hash
+    )
     if avatar_hash is not None and (
         len(avatar_hash) != 64
         or any(character not in "0123456789abcdef" for character in avatar_hash)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Awaitable
@@ -14,12 +15,33 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
-from taskiq import SimpleRetryMiddleware
+from sqlalchemy.sql.dml import Delete
+from taskiq import SimpleRetryMiddleware, TaskiqEvents, TaskiqState
 from taskiq_redis import RedisStreamBroker
 
+from app.bots.interaction_dispatch import drain_interaction_create_dispatch_outbox
+from app.bots.interaction_events import (
+    drain_interaction_dispatch_outbox,
+    publish_interaction_response_event,
+    purge_expired_interaction_response_streams,
+    queue_interaction_response_event,
+    wake_interaction_dispatch_outbox,
+)
+from app.bots.target_discovery import (
+    expire_foreign_user_installation_leases,
+    recover_incomplete_application_runtime_targets,
+    wake_application_target_deliveries,
+)
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
+from app.chat.expression_events import (
+    publish_guild_emojis_update,
+    publish_guild_soundboard_sounds_update,
+    publish_guild_stickers_update,
+)
 from app.chat.guild_revision import (
     federation_channel_state,
+    guild_authority_owner,
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
@@ -31,12 +53,26 @@ from app.chat.payloads import (
     user_payload,
 )
 from app.chat.permissions import get_permissions
+from app.chat.postcommit import publish_committed_dispatches
+from app.chat.presence import decode_presence_state
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
 from app.core.metrics import observed_job
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
+from app.core.snowflake import SnowflakeGenerator, WorkerLease
 from app.core.task_wake import enqueue_best_effort
+from app.core.types import EntityRef
+from app.db.bot_models import (
+    BotInteraction,
+    BotInteractionPoll,
+    BotInteractionResponse,
+    FederatedInteractionAdmissionGrant,
+    FederatedInteractionAttachmentGrant,
+    FederatedInteractionResponseLocator,
+    InteractionCreateDispatchOutbox,
+    InteractionDispatchOutbox,
+)
 from app.db.models import (
     Attachment,
     AuditLogEntry,
@@ -58,11 +94,13 @@ from app.db.models import (
     Message,
     MessageProjection,
     OneTimeToken,
+    Poll,
     PushDevice,
     PushRelayDelivery,
     PushRelaySubscription,
     PushWakeOutbox,
     ReadState,
+    RemoteMediaTombstone,
     Session,
     ThreadMember,
     User,
@@ -135,8 +173,9 @@ from app.media.jobs import (
     sweep_orphan_uploads,
     sweep_staging_objects,
 )
-from app.media.payloads import attachment_update_payload
+from app.media.payloads import attachment_payload, attachment_update_payload
 from app.media.processing import IMAGE_PIPELINE_VERSION
+from app.media.service import discard_attachment
 from app.media.tombstones import (
     lock_media_tombstone_ref,
     queue_media_delete_tombstone,
@@ -153,6 +192,7 @@ from app.push.relay import (
 )
 from app.push.service import decrypt_device_token, fcm_client, relay_fcm_client
 from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync
+from app.scheduled_events.service import advance_scheduled_event_lifecycle
 from app.search.meili import (
     SearchUnavailable,
     process_search_outbox,
@@ -164,6 +204,7 @@ from app.tracker.outbox import drain_tracker_dispatch_outbox
 from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
 from app.voice.rooms import parse_room_name
+from app.voice.stage_lifecycle import advance_stage_instance_lifecycle
 
 configure_logging(os.environ.get("KAEDE_LOG_LEVEL", "INFO"))
 broker_url = os.environ.get("KAEDE_DRAGONFLY_URL")
@@ -172,6 +213,42 @@ if not broker_url:
 broker = RedisStreamBroker(url=broker_url).with_middlewares(
     SimpleRetryMiddleware(default_retry_count=5)
 )
+
+_worker_snowflake_redis: Redis | None = None
+_worker_snowflake_lease: WorkerLease | None = None
+_worker_snowflake: SnowflakeGenerator | None = None
+
+
+@broker.on_event(TaskiqEvents.WORKER_STARTUP)
+async def acquire_worker_snowflake(_state: TaskiqState) -> None:
+    """Lease one collision-safe Snowflake worker for this Taskiq process."""
+
+    global _worker_snowflake, _worker_snowflake_lease, _worker_snowflake_redis
+    settings = get_settings()
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        lease = await WorkerLease.acquire(redis)
+    except Exception:
+        await redis.aclose()
+        raise
+    lease.start_heartbeat()
+    _worker_snowflake_redis = redis
+    _worker_snowflake_lease = lease
+    _worker_snowflake = SnowflakeGenerator(lease)
+
+
+@broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
+async def release_worker_snowflake(_state: TaskiqState) -> None:
+    global _worker_snowflake, _worker_snowflake_lease, _worker_snowflake_redis
+    lease, redis = _worker_snowflake_lease, _worker_snowflake_redis
+    _worker_snowflake = None
+    _worker_snowflake_lease = None
+    _worker_snowflake_redis = None
+    if lease is not None:
+        await lease.close()
+    if redis is not None:
+        await redis.aclose()
+
 
 THREAD_TYPES = frozenset({10, 11, 12})
 THREAD_FLAG_PINNED = 1 << 1
@@ -225,11 +302,11 @@ async def voice_call_room_gc() -> int:
 @broker.task(task_name="voice.replicate_room", retry_on_error=True, max_retries=3)
 @observed_job("voice.replicate_room")
 async def voice_replicate_room(room: str) -> int:
-    """Immediately copy an authoritative guild room snapshot to member homes."""
+    """Immediately copy an authoritative guild or DM room snapshot to homes."""
 
     settings = get_settings()
     kind, _, _ = parse_room_name(room)
-    if not settings.voice_enabled or kind != "g":
+    if not settings.voice_enabled or kind not in {"g", "d"}:
         return 0
     engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
     redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
@@ -266,13 +343,23 @@ async def federation_presence_fanout(
         if current_generation is None or int(current_generation) != generation:
             return 0
         raw_state = await redis.get(f"presence:{user_domain}:{user_id}")
-        if not presence_fanout_state_is_current(raw_state, status, generation):
+        projection = presence_fanout_projection(raw_state, status, generation)
+        if projection is None:
             return 0
         async with sessionmaker() as session:
             user = await session.get(User, (user_id, user_domain))
             if user is None or not user.is_local:
                 return 0
-        await fanout_presence(sessionmaker, settings, user, status)
+        activities, since, afk = projection
+        await fanout_presence(
+            sessionmaker,
+            settings,
+            user,
+            status,
+            activities=activities,
+            since=since,
+            afk=afk,
+        )
         return 1
     finally:
         await redis.aclose()
@@ -284,16 +371,26 @@ def presence_fanout_state_is_current(
     status: str,
     generation: int,
 ) -> bool:
+    return presence_fanout_projection(raw_state, status, generation) is not None
+
+
+def presence_fanout_projection(
+    raw_state: str | bytes | None,
+    status: str,
+    generation: int,
+) -> tuple[list[dict[str, object]], int | None, bool] | None:
     if raw_state is None:
-        return status == "offline"
-    try:
-        state = json.loads(raw_state)
-        stored_status = str(state["status"])
-        stored_generation = int(state["generation"])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return False
+        return ([], None, False) if status == "offline" else None
+    decoded = decode_presence_state(raw_state)
+    if decoded is None:
+        return None
+    stored_status, stored_generation, activities, since, afk = decoded
     visible_status = "offline" if stored_status == "invisible" else stored_status
-    return stored_generation == generation and visible_status == status
+    if stored_generation != generation or visible_status != status:
+        return None
+    if visible_status == "offline":
+        return [], None, False
+    return activities, since, afk
 
 
 async def project_message_record(
@@ -1188,6 +1285,123 @@ async def mentions_fanout(message_id: int, message_domain: str) -> int:
         await engine.dispose()
 
 
+@broker.task(task_name="polls.expiry_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("polls.expiry_sweep")
+async def poll_expiry_sweep() -> int:
+    """Finalize due authoritative polls and materialize type-46 results."""
+
+    from app.api.channels import (
+        ensure_poll_result_message,
+        load_poll_result_channel_access,
+        queue_dm_poll_mutation,
+    )
+    from app.chat.channel_access import publish_channel_dispatch
+
+    settings = get_settings()
+    snowflake = _worker_snowflake
+    if snowflake is None:
+        raise RuntimeError("poll expiry sweep requires the worker Snowflake lease")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    finalized = 0
+    try:
+        for _ in range(100):
+            async with sessionmaker() as session:
+                row = await session.execute(
+                    select(Poll, Message, Channel)
+                    .join(
+                        Message,
+                        (Message.id == Poll.message_id)
+                        & (Message.origin_domain == Poll.message_domain),
+                    )
+                    .join(
+                        Channel,
+                        (Channel.id == Message.channel_id)
+                        & (Channel.origin_domain == Message.channel_domain),
+                    )
+                    .where(
+                        Poll.finalized_at.is_(None),
+                        Poll.expires_at <= datetime.now(UTC),
+                        Message.deleted_at.is_(None),
+                        Channel.origin_domain == settings.domain,
+                        Channel.unavailable.is_(False),
+                    )
+                    .order_by(Poll.expires_at, Poll.message_id, Poll.message_domain)
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+                candidate = row.one_or_none()
+                if candidate is None:
+                    break
+                poll, message, channel = candidate
+                poll.finalized_at = datetime.now(UTC)
+                author = await session.get(User, (message.author_id, message.author_domain))
+                if author is None:
+                    raise RuntimeError("poll author disappeared before scheduled finalization")
+                guild = (
+                    await session.get(Guild, (channel.guild_id, channel.guild_domain))
+                    if channel.guild_id is not None
+                    else None
+                )
+                access = await load_poll_result_channel_access(
+                    session,
+                    settings,
+                    EntityRef(f"{channel.id}@{channel.origin_domain}"),
+                )
+                if guild is not None:
+                    await queue_guild_mutation(
+                        session,
+                        settings,
+                        guild,
+                        author,
+                        "guild.poll.finalize",
+                        {
+                            "message": {
+                                "id": str(message.id),
+                                "origin_domain": message.origin_domain,
+                            },
+                            "finalized_at": poll.finalized_at.isoformat(),
+                        },
+                        channel=channel,
+                    )
+                else:
+                    await queue_dm_poll_mutation(
+                        session,
+                        settings,
+                        access,
+                        author,
+                        "dm.poll.finalize",
+                        message,
+                        finalized_at=poll.finalized_at,
+                    )
+                result_message, result_created = await ensure_poll_result_message(
+                    session,
+                    redis,
+                    settings,
+                    snowflake,
+                    message,
+                    poll,
+                )
+                await publish_channel_dispatch(
+                    redis,
+                    access,
+                    "MESSAGE_UPDATE",
+                    await render_message_payload(session, message, viewer=author),
+                )
+                if result_created:
+                    await publish_channel_dispatch(
+                        redis,
+                        access,
+                        "MESSAGE_CREATE",
+                        result_message,
+                    )
+                finalized += 1
+        return finalized
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
 @broker.task(task_name="messages.projection_sweep", schedule=[{"cron": "* * * * *"}])
 @observed_job("messages.projection_sweep")
 async def message_projection_sweep() -> int:
@@ -1283,9 +1497,7 @@ async def thread_auto_archive_sweep_in_session(
         )
         if guild is None or guild.origin_domain != settings.domain:
             continue
-        actor = await session.get(User, (guild.owner_id, guild.owner_domain))
-        if actor is None or not actor.is_local:
-            raise RuntimeError("local guild owner is unavailable for thread auto-archive")
+        actor = await guild_authority_owner(session, settings, guild)
         refs = candidates_by_guild[guild_ref]
         due = list(
             await session.scalars(
@@ -1325,17 +1537,30 @@ async def thread_auto_archive_sweep_in_session(
         await session.rollback()
         return 0
 
+    await session.flush()
+    archived_dispatches: list[tuple[tuple[int, str], dict[str, object]]] = []
+    for thread in archived:
+        # Channel.updated_at is a SQL-expression onupdate and is expired by the
+        # flush.  Resolve the authoritative timestamp while I/O is still
+        # explicit, then retain only primitive routing state across commit.
+        await session.refresh(thread)
+        if thread.guild_id is None or thread.guild_domain is None:
+            continue
+        archived_dispatches.append(
+            (
+                (int(thread.guild_id), str(thread.guild_domain)),
+                channel_payload(thread),
+            )
+        )
     await session.commit()
     for guild in guilds.values():
         await wake_queued_guild_federation(guild)
-    for thread in archived:
-        if thread.guild_id is None or thread.guild_domain is None:
-            continue
+    for guild_ref, payload in archived_dispatches:
         await publish_dispatch(
             redis,
-            guild_topic(str(thread.guild_domain), int(thread.guild_id)),
+            guild_topic(guild_ref[1], guild_ref[0]),
             "THREAD_UPDATE",
-            channel_payload(thread),
+            payload,
         )
     return len(archived)
 
@@ -1349,6 +1574,52 @@ async def thread_auto_archive_sweep() -> int:
     try:
         async with sessionmaker() as session:
             return await thread_auto_archive_sweep_in_session(session, redis, settings)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="scheduled_events.lifecycle_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("scheduled_events.lifecycle_sweep")
+async def scheduled_event_lifecycle_sweep() -> int:
+    settings = get_settings()
+    snowflake = _worker_snowflake
+    if snowflake is None or not snowflake.available:
+        raise RuntimeError("Taskiq Snowflake worker lease is unavailable")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            return await advance_scheduled_event_lifecycle(
+                session,
+                redis,
+                settings,
+                snowflake,
+            )
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="voice.stage_lifecycle_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("voice.stage_lifecycle_sweep")
+async def stage_lifecycle_sweep() -> int:
+    settings = get_settings()
+    snowflake = _worker_snowflake
+    if snowflake is None or not snowflake.available:
+        # Never synthesize IDs or reuse a resource ID when the worker lease is
+        # unavailable. Taskiq retries on the next scheduled sweep.
+        raise RuntimeError("Taskiq Snowflake worker lease is unavailable")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            return await advance_stage_instance_lifecycle(
+                session,
+                redis,
+                settings,
+                snowflake,
+            )
     finally:
         await redis.aclose()
         await engine.dispose()
@@ -1391,6 +1662,64 @@ async def tracker_dispatch_outbox_drain() -> int:
     try:
         async with sessionmaker() as session:
             return await drain_tracker_dispatch_outbox(session, redis)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="bots.interaction_dispatch_outbox_drain",
+    schedule=[{"cron": "* * * * *"}],
+)
+@observed_job("bots.interaction_dispatch_outbox_drain")
+async def interaction_dispatch_outbox_drain() -> int:
+    """Project committed private interaction events into resumable streams."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            return await drain_interaction_dispatch_outbox(session, redis)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="bots.interaction_create_dispatch_outbox_drain",
+    schedule=[{"cron": "* * * * *"}],
+)
+@observed_job("bots.interaction_create_dispatch_outbox_drain")
+async def interaction_create_dispatch_outbox_drain() -> int:
+    """Recover committed bot invocations whose Redis publish was interrupted."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            delivered = 0
+            # The cron remains a cold-start fallback, but a post-commit wake
+            # must retry within Discord's three-second acknowledgement window
+            # when Redis briefly disappears. Gateway SQL polling independently
+            # covers a task-worker crash during the same interval.
+            for attempt in range(4):
+                delivered += await drain_interaction_create_dispatch_outbox(
+                    session,
+                    redis,
+                    settings,
+                )
+                outstanding = await session.scalar(
+                    select(func.count(InteractionCreateDispatchOutbox.interaction_id)).where(
+                        InteractionCreateDispatchOutbox.dispatched_at.is_(None),
+                        InteractionCreateDispatchOutbox.expires_at > datetime.now(UTC),
+                    )
+                )
+                if not outstanding or attempt == 3:
+                    break
+                await asyncio.sleep(0.5)
+            return delivered
     finally:
         await redis.aclose()
         await engine.dispose()
@@ -1815,6 +2144,10 @@ async def _publish_terminal_asset_invalidation(
 ) -> None:
     """Publish and wake one asset projection only after its verdict commits."""
 
+    # Terminal media workers do not use the request-session dependency that
+    # normally drains transaction-bound guild profile projections.
+    await publish_committed_dispatches(session, redis)
+
     if invalidation.user is not None:
         user = invalidation.user
         await session.refresh(user)
@@ -1824,7 +2157,7 @@ async def _publish_terminal_asset_invalidation(
             "USER_UPDATE",
             user_payload(user),
         )
-        for destination in sorted(invalidation.friend_destinations):
+        for destination in sorted(invalidation.profile_destinations):
             await enqueue_best_effort(federation_deliver, destination)
     if invalidation.guild is not None:
         guild = invalidation.guild
@@ -1843,6 +2176,12 @@ async def _publish_terminal_asset_invalidation(
             invalidation.dispatch_type,
             dispatch_payload,
         )
+        if invalidation.dispatch_type == "GUILD_EMOJI_DELETE":
+            await publish_guild_emojis_update(session, redis, guild)
+        elif invalidation.dispatch_type == "GUILD_STICKER_DELETE":
+            await publish_guild_stickers_update(session, redis, guild)
+        elif invalidation.dispatch_type == "GUILD_SOUNDBOARD_SOUND_DELETE":
+            await publish_guild_soundboard_sounds_update(session, redis, guild)
 
 
 @broker.task(
@@ -2029,6 +2368,11 @@ async def media_process(attachment_id: int, origin_domain: str) -> str:
                 origin_domain,
                 before_terminal_commit=queue_tombstone_before_terminal_commit,
             )
+            # Some idempotent lifecycle results do not need their own write.
+            # End their row-lock transaction before projecting the result into
+            # a private interaction response, whose edit path locks in the
+            # opposite (response -> attachment) order.
+            await session.commit()
             attachment = await session.get(Attachment, (attachment_id, origin_domain))
             # Terminal verdict state, public projection invalidation, and all
             # signed outbox rows were committed atomically by
@@ -2050,6 +2394,55 @@ async def media_process(attachment_id: int, origin_domain: str) -> str:
                     redis,
                     asset_invalidation,
                 )
+            private_response: BotInteractionResponse | None = None
+            private_interaction: BotInteraction | None = None
+            interaction_response_id = (
+                getattr(attachment, "interaction_response_id", None)
+                if attachment is not None
+                else None
+            )
+            if attachment is not None and interaction_response_id is not None:
+                private_row = (
+                    await session.execute(
+                        select(BotInteractionResponse, BotInteraction)
+                        .join(
+                            BotInteraction,
+                            BotInteraction.id == BotInteractionResponse.interaction_id,
+                        )
+                        .where(
+                            BotInteractionResponse.id == interaction_response_id,
+                            BotInteractionResponse.ephemeral.is_(True),
+                            BotInteractionResponse.deleted_at.is_(None),
+                            BotInteraction.expires_at > datetime.now(UTC),
+                        )
+                        .with_for_update(of=(BotInteractionResponse, BotInteraction))
+                    )
+                ).one_or_none()
+                if private_row is not None:
+                    candidate_response, candidate_interaction = private_row
+                    projections = candidate_response.payload.get("attachments", [])
+                    if isinstance(projections, list):
+                        attachment_ref = str(attachment.id)
+                        refreshed: list[object] = []
+                        changed = False
+                        for projection in projections:
+                            if (
+                                isinstance(projection, dict)
+                                and str(projection.get("id")) == attachment_ref
+                            ):
+                                refreshed.append(
+                                    attachment_payload(attachment, include_lifecycle=False)
+                                )
+                                changed = True
+                            else:
+                                refreshed.append(projection)
+                        if changed:
+                            response_payload = dict(candidate_response.payload)
+                            response_payload["attachments"] = refreshed
+                            candidate_response.payload = response_payload
+                            private_response = candidate_response
+                            private_interaction = candidate_interaction
+                            await session.commit()
             message = (
                 await session.get(
                     Message,
@@ -2095,7 +2488,332 @@ async def media_process(attachment_id: int, origin_domain: str) -> str:
                             "ATTACHMENT_UPDATE",
                             payload,
                         )
+            if private_response is not None and private_interaction is not None:
+                await publish_interaction_response_event(
+                    redis,
+                    private_interaction,
+                    private_response,
+                    "UPDATE",
+                )
             return result
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+async def expire_federated_interaction_attachment_grants(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    now: datetime,
+    limit: int = 300,
+) -> list[Attachment]:
+    """Release expired A-side media capabilities and C-side projections."""
+
+    candidates = list(
+        (
+            await session.execute(
+                select(
+                    FederatedInteractionAttachmentGrant.grant_id,
+                    FederatedInteractionAttachmentGrant.attachment_id,
+                    FederatedInteractionAttachmentGrant.attachment_domain,
+                )
+                .where(FederatedInteractionAttachmentGrant.expires_at <= now)
+                .order_by(
+                    FederatedInteractionAttachmentGrant.attachment_domain,
+                    FederatedInteractionAttachmentGrant.attachment_id,
+                    FederatedInteractionAttachmentGrant.grant_id,
+                )
+                .limit(limit)
+            )
+        ).tuples()
+    )
+    local_purges: list[Attachment] = []
+    for grant_id, attachment_id, attachment_domain in candidates:
+        # Match the live path's media-ref -> grant-row lock order.
+        await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
+        grant = await session.scalar(
+            select(FederatedInteractionAttachmentGrant)
+            .where(
+                FederatedInteractionAttachmentGrant.grant_id == grant_id,
+                FederatedInteractionAttachmentGrant.expires_at <= now,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if grant is None:
+            continue
+        attachment = await session.scalar(
+            select(Attachment)
+            .where(
+                Attachment.id == attachment_id,
+                Attachment.origin_domain == attachment_domain,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if attachment is not None and attachment_domain == settings.domain:
+            if (
+                attachment.deleted_at is None
+                and attachment.message_id is None
+                and attachment.interaction_id is None
+                and attachment.interaction_response_id is None
+                and attachment.asset_binding is None
+            ):
+                await discard_attachment(session, settings, attachment)
+                local_purges.append(attachment)
+        elif attachment is not None and grant.destination_domain == settings.domain:
+            event_id = hashlib.sha256(
+                f"interaction-attachment-expiry:{grant.grant_id}".encode()
+            ).hexdigest()
+            await session.execute(
+                pg_insert(RemoteMediaTombstone)
+                .values(
+                    origin_domain=attachment_domain,
+                    attachment_id=attachment_id,
+                    event_id=event_id,
+                    deleted_at=now,
+                    expires_at=now + timedelta(days=30),
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        RemoteMediaTombstone.origin_domain,
+                        RemoteMediaTombstone.attachment_id,
+                    ],
+                    set_={
+                        "event_id": event_id,
+                        "deleted_at": now,
+                        "expires_at": now + timedelta(days=30),
+                    },
+                )
+            )
+            await session.delete(attachment)
+        await session.delete(grant)
+    return local_purges
+
+
+async def expire_bot_interactions_batch(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    now: datetime,
+    limit: int = 100,
+) -> tuple[
+    list[tuple[BotInteraction, BotInteractionResponse]],
+    list[Attachment],
+    int,
+    set[str],
+    set[str],
+]:
+    """Expire interaction tokens and remove their isolated response data."""
+
+    grant_attachments = await expire_federated_interaction_attachment_grants(
+        session,
+        settings,
+        now=now,
+    )
+    expired_topics = {
+        user_topic(str(user_domain), int(user_id))
+        for user_id, user_domain in (
+            await session.execute(
+                select(
+                    FederatedInteractionResponseLocator.user_id,
+                    FederatedInteractionResponseLocator.user_domain,
+                )
+                .where(FederatedInteractionResponseLocator.expires_at <= now)
+                .distinct()
+            )
+        ).all()
+    }
+    # Private signed envelopes and both local/received dispatch references are
+    # secret-bearing projections. Their protocol deadline is authoritative;
+    # generic federation retention must never extend it.
+    await session.execute(
+        delete(FederationEvent).where(
+            FederationEvent.event_type == "bot.interaction.response",
+            FederationEvent.expires_at <= now,
+        )
+    )
+    await session.execute(
+        delete(InteractionDispatchOutbox).where(InteractionDispatchOutbox.expires_at <= now)
+    )
+    await session.execute(
+        delete(InteractionCreateDispatchOutbox).where(
+            InteractionCreateDispatchOutbox.expires_at <= now
+        )
+    )
+
+    interactions = list(
+        await session.scalars(
+            select(BotInteraction)
+            .where(
+                BotInteraction.expires_at <= now,
+                BotInteraction.status.in_(("pending", "deferred", "responded")),
+            )
+            .order_by(BotInteraction.expires_at, BotInteraction.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    if not interactions:
+        await session.execute(
+            delete(FederatedInteractionAdmissionGrant).where(
+                FederatedInteractionAdmissionGrant.expires_at <= now
+            )
+        )
+        await session.execute(
+            delete(FederatedInteractionResponseLocator).where(
+                FederatedInteractionResponseLocator.expires_at <= now - timedelta(days=1)
+            )
+        )
+        await session.commit()
+        return [], grant_attachments, 0, set(), expired_topics
+
+    interaction_by_id = {item.id: item for item in interactions}
+    responses = list(
+        await session.scalars(
+            select(BotInteractionResponse)
+            .where(
+                BotInteractionResponse.interaction_id.in_(interaction_by_id),
+                BotInteractionResponse.message_id.is_(None),
+                BotInteractionResponse.message_domain.is_(None),
+            )
+            .order_by(
+                BotInteractionResponse.interaction_id,
+                BotInteractionResponse.sequence,
+            )
+            .with_for_update()
+        )
+    )
+    response_ids = {item.id for item in responses}
+    if response_ids:
+        attachment_query = select(Attachment.id).where(
+            or_(
+                Attachment.interaction_id.in_(interaction_by_id),
+                Attachment.interaction_response_id.in_(response_ids),
+            ),
+            Attachment.deleted_at.is_(None),
+        )
+    else:
+        attachment_query = select(Attachment.id).where(
+            Attachment.interaction_id.in_(interaction_by_id),
+            Attachment.deleted_at.is_(None),
+        )
+    attachment_ids = set(await session.scalars(attachment_query))
+    for attachment_id in sorted(attachment_ids):
+        await lock_media_tombstone_ref(session, attachment_id, settings.domain)
+    attachments: list[Attachment] = []
+    if attachment_ids:
+        attachments = list(
+            await session.scalars(
+                select(Attachment)
+                .where(
+                    Attachment.id.in_(attachment_ids),
+                    Attachment.origin_domain == settings.domain,
+                    Attachment.deleted_at.is_(None),
+                )
+                .order_by(Attachment.id)
+                .with_for_update()
+            )
+        )
+    for attachment in attachments:
+        await discard_attachment(session, settings, attachment)
+
+    if response_ids:
+        # Private poll votes contain user identities and follow the same hard
+        # 15-minute retention boundary as the isolated response payload.
+        await session.execute(
+            delete(BotInteractionPoll).where(BotInteractionPoll.response_id.in_(response_ids))
+        )
+
+    expired_events: list[tuple[BotInteraction, BotInteractionResponse]] = []
+    relay_destinations: set[str] = set()
+    for response in responses:
+        response.payload = {}
+        response.deleted_at = response.deleted_at or now
+        interaction = interaction_by_id[response.interaction_id]
+        destination = await queue_interaction_response_event(
+            session,
+            settings,
+            interaction,
+            response,
+            "DELETE",
+        )
+        if destination is not None:
+            relay_destinations.add(destination)
+        expired_events.append((interaction, response))
+    for interaction in interactions:
+        expired_topics.add(user_topic(interaction.user_domain, interaction.user_id))
+        interaction.status = "expired"
+        interaction.token_hash = None
+        interaction.dispatch_fingerprint = None
+        interaction.response_grant_id = None
+        interaction.payload = {}
+        interaction.encrypted_payload = None
+    await session.execute(
+        delete(FederatedInteractionAdmissionGrant).where(
+            FederatedInteractionAdmissionGrant.expires_at <= now
+        )
+    )
+    await session.execute(
+        delete(FederatedInteractionResponseLocator).where(
+            FederatedInteractionResponseLocator.expires_at <= now - timedelta(days=1)
+        )
+    )
+    await session.commit()
+    purges = {
+        (attachment.id, attachment.origin_domain): attachment
+        for attachment in (*grant_attachments, *attachments)
+    }
+    return (
+        expired_events,
+        list(purges.values()),
+        len(interactions),
+        relay_destinations,
+        expired_topics,
+    )
+
+
+@broker.task(task_name="bots.interaction_expiry_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("bots.interaction_expiry_sweep")
+async def bot_interaction_expiry_sweep() -> int:
+    """Enforce the interaction-token deadline and ephemeral-data retention."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            (
+                events,
+                attachments,
+                expired_count,
+                relay_destinations,
+                expired_topics,
+            ) = await expire_bot_interactions_batch(
+                session,
+                settings,
+                now=datetime.now(UTC),
+            )
+        for interaction, response in events:
+            await publish_interaction_response_event(redis, interaction, response, "DELETE")
+        for destination in relay_destinations:
+            await enqueue_best_effort(federation_deliver, destination)
+        await wake_interaction_dispatch_outbox()
+        await purge_expired_interaction_response_streams(
+            redis,
+            expired_topics,
+            now=datetime.now(UTC),
+        )
+        for attachment in attachments:
+            await enqueue_best_effort(
+                media_local_purge,
+                attachment.id,
+                attachment.origin_domain,
+            )
+        if expired_count == 100:
+            await enqueue_best_effort(bot_interaction_expiry_sweep)
+        return expired_count
     finally:
         await redis.aclose()
         await engine.dispose()
@@ -2492,9 +3210,7 @@ async def moderation_expiry_sweep_in_session(
         )
         if guild is None:
             continue
-        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-        if owner is None or not owner.is_local:
-            raise RuntimeError("local guild owner is unavailable for timeout expiry")
+        owner = await guild_authority_owner(session, settings, guild)
         member.timeout_until = None
         member.timeout_indefinite = False
         member.timeout_reason = None
@@ -2662,6 +3378,135 @@ async def federation_deliver(destination: str) -> int:
         await engine.dispose()
 
 
+@broker.task(task_name="announcements.crosspost_deliver")
+@observed_job("announcements.crosspost_deliver")
+async def announcement_crosspost_deliver(
+    source_message_id: int,
+    source_message_domain: str,
+    follow_id: int,
+    follow_authority_domain: str | None = None,
+) -> int:
+    """Deliver one persisted follower job; its own ledger owns all retries.
+
+    The optional authority is a rolling-upgrade bridge for tasks queued before
+    follow identities became domain-qualified.  Such a task is safe only while
+    its old three-part identity still resolves to exactly one source receipt.
+    """
+
+    from app.api.channels import deliver_federated_announcement_crosspost_job
+    from app.db.models import FederatedMessageCrosspost
+
+    settings = get_settings()
+    source_message_domain = normalize_domain(source_message_domain)
+    if follow_authority_domain is not None:
+        follow_authority_domain = normalize_domain(follow_authority_domain)
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            if follow_authority_domain is None:
+                legacy_authorities = list(
+                    await session.scalars(
+                        select(FederatedMessageCrosspost.follow_authority_domain)
+                        .where(
+                            FederatedMessageCrosspost.source_message_id == source_message_id,
+                            FederatedMessageCrosspost.source_message_domain
+                            == source_message_domain,
+                            FederatedMessageCrosspost.follow_id == follow_id,
+                            FederatedMessageCrosspost.local_role == "source",
+                        )
+                        .distinct()
+                        .limit(2)
+                    )
+                )
+                if len(legacy_authorities) != 1:
+                    return 0
+                follow_authority_domain = normalize_domain(legacy_authorities[0])
+            status, delivery_wake = await deliver_federated_announcement_crosspost_job(
+                session,
+                settings,
+                source_message_id=source_message_id,
+                source_message_domain=source_message_domain,
+                follow_id=follow_id,
+                follow_authority_domain=follow_authority_domain,
+            )
+        if delivery_wake is not None:
+            await enqueue_best_effort(federation_deliver, delivery_wake)
+        return int(status == "delivered")
+    finally:
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="announcements.crosspost_delivery_sweep",
+    schedule=[{"cron": "* * * * *"}],
+)
+@observed_job("announcements.crosspost_delivery_sweep")
+async def announcement_crosspost_delivery_sweep() -> int:
+    """Recover pending jobs when a post-commit task wake was lost."""
+
+    from app.db.models import FederatedMessageCrosspost
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            jobs = list(
+                (
+                    await session.execute(
+                        select(
+                            FederatedMessageCrosspost.source_message_id,
+                            FederatedMessageCrosspost.source_message_domain,
+                            FederatedMessageCrosspost.follow_id,
+                            FederatedMessageCrosspost.follow_authority_domain,
+                        )
+                        .where(
+                            FederatedMessageCrosspost.local_role == "source",
+                            FederatedMessageCrosspost.delivery_status.in_({"pending", "retry"}),
+                            FederatedMessageCrosspost.next_retry_at <= datetime.now(UTC),
+                        )
+                        .order_by(FederatedMessageCrosspost.next_retry_at)
+                        .limit(500)
+                    )
+                ).tuples()
+            )
+        for source_id, source_domain, follow_id, follow_authority_domain in jobs:
+            await enqueue_best_effort(
+                announcement_crosspost_deliver,
+                source_id,
+                source_domain,
+                follow_id,
+                follow_authority_domain,
+            )
+        return len(jobs)
+    finally:
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="announcements.follow_reconcile",
+    schedule=[{"cron": "* * * * *"}],
+)
+@observed_job("announcements.follow_reconcile")
+async def announcement_follow_reconcile() -> int:
+    """Reject prepares that never completed their durable authority hand-off."""
+
+    from app.api.channels import reconcile_expired_announcement_follow_prepares
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            destinations = await reconcile_expired_announcement_follow_prepares(
+                session,
+                settings,
+            )
+        for destination in sorted(destinations):
+            await enqueue_best_effort(federation_deliver, destination)
+        return len(destinations)
+    finally:
+        await engine.dispose()
+
+
 @broker.task(task_name="federation.guild_sync", retry_on_error=True, max_retries=5)
 @observed_job("federation.guild_sync")
 async def federation_guild_sync(origin: str, guild_id: int) -> int:
@@ -2710,6 +3555,23 @@ async def federation_guild_sync(origin: str, guild_id: int) -> int:
                             terminal_attachment,
                         )
                     )
+            # ``updated_at`` is populated by a SQL expression on UPDATE.  A
+            # flush therefore expires it even though worker sessions use
+            # ``expire_on_commit=False``.  Materialize every ORM-derived
+            # dispatch before the commit; publishing still happens afterwards,
+            # so clients can never observe state that failed to commit.
+            await session.flush()
+            await session.refresh(guild)
+            guild_dispatch = guild_payload(guild)
+            message_dispatches: list[tuple[tuple[int, str], dict[str, object]]] = []
+            for message in messages:
+                await session.refresh(message)
+                message_dispatches.append(
+                    (
+                        (message.id, message.origin_domain),
+                        await render_message_payload(session, message),
+                    )
+                )
             await session.commit()
             for destination in sorted(tombstone_destinations):
                 await enqueue_best_effort(federation_deliver, destination)
@@ -2729,18 +3591,18 @@ async def federation_guild_sync(origin: str, guild_id: int) -> int:
                 redis,
                 guild_topic(origin, guild_id),
                 "GUILD_UPDATE",
-                guild_payload(guild),
+                guild_dispatch,
             )
-            for message in messages:
+            for message_ref, message_dispatch in message_dispatches:
                 await publish_dispatch(
                     redis,
                     guild_topic(origin, guild_id),
                     "MESSAGE_CREATE",
-                    await render_message_payload(session, message),
+                    message_dispatch,
                 )
-                await enqueue_best_effort(mentions_fanout, message.id, message.origin_domain)
+                await enqueue_best_effort(mentions_fanout, *message_ref)
             await enqueue_best_effort(federation_history_sync_guild, guild_id, origin)
-            return len(messages)
+            return len(message_dispatches)
     finally:
         await redis.aclose()
         await engine.dispose()
@@ -2776,6 +3638,51 @@ async def federation_outbox_sweep() -> int:
         for destination in destinations:
             await enqueue_best_effort(federation_deliver, destination)
         return len(destinations)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="bots.runtime_target_recovery_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("bots.runtime_target_recovery_sweep")
+async def bot_runtime_target_recovery_sweep() -> int:
+    """Recover upgraded federated installs that lack signed runtime state."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            recovered, destinations = await recover_incomplete_application_runtime_targets(
+                session,
+                settings,
+            )
+            await session.commit()
+        for destination in sorted(destinations):
+            await enqueue_best_effort(federation_deliver, destination)
+        return recovered
+    finally:
+        await engine.dispose()
+
+
+@broker.task(task_name="bots.user_installation_lease_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("bots.user_installation_lease_sweep")
+async def bot_user_installation_lease_sweep() -> int:
+    """Converge expired foreign user-install mirrors and derived access."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            expired, destinations, paused_channels = await expire_foreign_user_installation_leases(
+                session,
+                redis,
+                settings,
+            )
+            await session.commit()
+            await publish_e2ee_policy_updates(session, redis, settings, paused_channels)
+        await wake_application_target_deliveries(destinations)
+        return expired
     finally:
         await redis.aclose()
         await engine.dispose()
@@ -3071,6 +3978,33 @@ async def purge_unverified_accounts_in_session(
     return len(result.scalars().all())
 
 
+def prunable_guild_events_statement(cutoff: datetime) -> Delete:
+    """Delete expired history except message-owned proxy replay receipts."""
+
+    retained_proxy_receipt = exists(
+        select(Message.id)
+        .select_from(Message)
+        .join(
+            Channel,
+            and_(
+                Message.channel_id == Channel.id,
+                Message.channel_domain == Channel.origin_domain,
+            ),
+        )
+        .where(
+            Message.proxy_commit_seq == GuildEvent.seq,
+            Message.origin_domain == GuildEvent.guild_domain,
+            Channel.guild_id == GuildEvent.guild_id,
+            Channel.guild_domain == GuildEvent.guild_domain,
+        )
+        .correlate(GuildEvent)
+    )
+    return delete(GuildEvent).where(
+        GuildEvent.created_at < cutoff,
+        ~retained_proxy_receipt,
+    )
+
+
 @broker.task(task_name="retention.prune", schedule=[{"cron": "31 4 * * *"}])
 @observed_job("retention.prune")
 async def retention_prune() -> dict[str, int]:
@@ -3102,7 +4036,7 @@ async def retention_prune() -> dict[str, int]:
                     delete(AuthEvent).where(AuthEvent.created_at < audit_cutoff)
                 ),
                 "guild_events": await session.execute(
-                    delete(GuildEvent).where(GuildEvent.created_at < federation_cutoff)
+                    prunable_guild_events_statement(federation_cutoff)
                 ),
                 "message_projections": await session.execute(
                     delete(MessageProjection).where(

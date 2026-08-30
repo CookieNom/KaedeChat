@@ -935,9 +935,16 @@ fn install_voice(
                 };
                 let output = settings.output_device.clone();
                 drop(settings);
-                kaede_voice::join_call(account.api.clone(), &call.key(), capture, output, None, None)
-                    .await
-                    .map_err(|error| error.to_string())
+                kaede_voice::join_call(
+                    account.api.clone(),
+                    &call.key(),
+                    capture,
+                    output,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())
             }
             .await;
             match result {
@@ -2364,7 +2371,9 @@ fn install_navigation(
                     .get(&channel)
                     .map(|value| value.kind);
                 let result = match kind {
-                    Some(ChannelKind::Voice) => account.refresh_voice_occupancy(&channel).await,
+                    Some(kind) if kind.is_voice_like() => {
+                        account.refresh_voice_occupancy(&channel).await
+                    }
                     _ => account.load_channel(&channel).await.map(|_| ()),
                 };
                 if matches!(kind, Some(ChannelKind::DirectMessage))
@@ -2424,7 +2433,7 @@ fn install_navigation(
                                 window.set_new_marker_message(new_marker.into());
                                 apply_snapshot(&window, snapshot);
                             });
-                        if !matches!(kind, Some(ChannelKind::Voice)) {
+                        if !kind.is_some_and(ChannelKind::is_voice_like) {
                             account.refresh_link_previews(&channel).await;
                             account.refresh_message_media(&channel).await;
                             refresh_gif_stills(account.clone(), weak.clone()).await;
@@ -4526,17 +4535,19 @@ fn install_navigation(
                 channels
                     .iter()
                     .enumerate()
-                    .map(|(position, item)| kaede_api::service::PositionPatch {
-                        id: item.id,
-                        position: position as i32,
-                        parent_id: item.parent_id,
-                        sync_permissions: false,
-                        version: item.version.clone(),
-                    })
+                    .map(
+                        |(position, item)| kaede_api::service::ChannelPositionPatch {
+                            id: item.id,
+                            position: Some(position as i32),
+                            parent_id: None,
+                            lock_permissions: None,
+                            flags: None,
+                        },
+                    )
                     .collect::<Vec<_>>()
             };
             match account.service.reorder_channels(&guild, &positions).await {
-                Ok(_) => {
+                Ok(()) => {
                     let _ = account.load_guild(&guild).await;
                     let snapshot = ui_snapshot(&*account.state.read().await);
                     let _ =
@@ -6554,10 +6565,7 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
             sync_status: guild.sync_status.clone().unwrap_or_default(),
             sync_error_code: guild.sync_error_code.clone().unwrap_or_default(),
             history_sync_status: guild.history_sync_status.clone().unwrap_or_default(),
-            history_sync_error_code: guild
-                .history_sync_error_code
-                .clone()
-                .unwrap_or_default(),
+            history_sync_error_code: guild.history_sync_error_code.clone().unwrap_or_default(),
             history_sync_retry_after_ms: guild.history_sync_retry_after_ms.unwrap_or_default(),
         })
         .collect::<Vec<_>>();
@@ -6587,12 +6595,13 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
             }),
             kind: match channel.kind {
                 ChannelKind::DirectMessage => "dm",
-                ChannelKind::Voice => "voice",
+                ChannelKind::Voice | ChannelKind::Stage => "voice",
                 ChannelKind::Category => "category",
                 _ => "text",
             }
             .to_owned(),
-            unread: !matches!(channel.kind, ChannelKind::Voice | ChannelKind::Category)
+            unread: !channel.kind.is_voice_like()
+                && channel.kind != ChannelKind::Category
                 && channel.last_message_id.is_some_and(|last| {
                     state.read_states.get(&channel.key()).is_none_or(|read| {
                         read.unread
@@ -7943,7 +7952,7 @@ async fn hydrate_guild_landing(
         .get(&channel)
         .map(|value| value.kind);
     match kind {
-        Some(ChannelKind::Voice) => account.refresh_voice_occupancy(&channel).await?,
+        Some(kind) if kind.is_voice_like() => account.refresh_voice_occupancy(&channel).await?,
         _ => {
             account.load_channel(&channel).await?;
         }
@@ -8128,20 +8137,16 @@ mod tests {
             friendly_error("503 FEDERATED_DM_HISTORY_UNAVAILABLE")
                 .contains("temporarily unavailable")
         );
-        assert!(
-            friendly_error("KAED_FED_HISTORY_CAPACITY").contains("retries automatically")
-        );
+        assert!(friendly_error("KAED_FED_HISTORY_CAPACITY").contains("retries automatically"));
         assert!(
             friendly_error("FEDERATED_GUILD_HISTORY_LIMIT_REACHED")
                 .contains("configured safety limit")
         );
         assert!(
-            friendly_error("FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED")
-                .contains("remote account")
+            friendly_error("FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED").contains("remote account")
         );
         assert!(
-            friendly_error("FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED")
-                .contains("remote server")
+            friendly_error("FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED").contains("remote server")
         );
         assert!(
             friendly_error("KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED")

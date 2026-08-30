@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
@@ -26,6 +26,7 @@ from app.api.guilds import (
     overwrite_source_channel,
     validate_forum_emoji_ids,
 )
+from app.chat.announcement_guards import announcement_dependencies_exist
 from app.chat.audit import add_audit_entry
 from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch
@@ -42,7 +43,7 @@ from app.chat.hierarchy import (
     role_reorder_allowed,
 )
 from app.chat.payloads import channel_payload, guild_payload, member_payload, role_payload
-from app.chat.permissions import require_permissions
+from app.chat.permissions import require_bot_channel_grant, require_permissions
 from app.chat.schemas import (
     ChannelPositionBatch,
     ChannelUpdate,
@@ -51,11 +52,14 @@ from app.chat.schemas import (
     RolePositionBatch,
     RoleUpdate,
 )
+from app.core.channel_types import GUILD_VOICE_CHANNEL_TYPES, validate_voice_channel_limits
 from app.core.permission_contract import required_permissions
+from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Attachment,
     Channel,
@@ -66,8 +70,22 @@ from app.db.models import (
     Role,
     User,
 )
+from app.federation.guild_management import (
+    guild_management_dict_body,
+    guild_management_list_body,
+    proxy_remote_guild_management,
+    qualified_management_ref,
+    require_guild_management_status,
+)
+from app.voice.regions import require_configured_rtc_region
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-management"])
+
+
+def channel_update_permissions(_payload: ChannelUpdate) -> Permission:
+    """Return the exact live permission mask for a mixed channel update."""
+
+    return required_permissions("channel.update")
 
 
 async def render_member_update(session: AsyncSession, member: GuildMember) -> dict[str, object]:
@@ -116,7 +134,23 @@ async def update_guild(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
     if_match: str | None = Header(default=None, alias="If-Match"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "guild.update",
+        {
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     require_current_version(guild.updated_at, if_match)
     await require_permissions(
@@ -136,10 +170,7 @@ async def update_guild(
             from app.federation.history import revoke_history_exports
 
             await revoke_history_exports(session, guild)
-            # The revocation query autoflushes the guild update. PostgreSQL's
-            # server-managed ``updated_at`` is then expired, so refresh it
-            # before the synchronous event serializer reads the version.
-            await session.refresh(guild)
+        await materialize_updated_at(session, guild)
         await queue_guild_mutation(
             session,
             settings,
@@ -156,6 +187,7 @@ async def update_guild(
             1,
             target_type="guild",
             target_ref={"id": str(guild.id)},
+            reason=reason,
             changes=changes,
         )
         await session.commit()
@@ -178,23 +210,41 @@ async def update_channel(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
     if_match: str | None = Header(default=None, alias="If-Match"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.update",
+        {
+            "channel_ref": qualified_management_ref(channel_id, guild_domain),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     if channel.type in {10, 11, 12}:
         raise HTTPException(status_code=400, detail={"code": "USE_THREAD_ENDPOINT"})
     require_current_version(channel.updated_at, if_match)
+    values = payload.model_dump(exclude_unset=True)
     await require_permissions(
         session,
         redis,
         guild,
         auth.user,
-        required_permissions("channel.update"),
+        channel_update_permissions(payload),
         channel=channel,
     )
     original_parent_id = channel.parent_id
     original_permissions_synced = channel.permissions_synced
-    values = payload.model_dump(exclude_unset=True)
     if values.get("e2ee_required") is False and channel.type == 15 and channel.e2ee_required:
         raise HTTPException(
             status_code=409,
@@ -215,6 +265,27 @@ async def update_channel(
         "e2ee_required",
         "flags",
     }
+    voice_fields = {
+        "bitrate",
+        "user_limit",
+        "rtc_region",
+        "video_quality_mode",
+    }
+    if channel.type not in GUILD_VOICE_CHANNEL_TYPES and values.keys() & voice_fields:
+        raise HTTPException(status_code=400, detail={"code": "VOICE_FIELDS_VOICE_ONLY"})
+    try:
+        validate_voice_channel_limits(
+            channel.type,
+            bitrate=payload.bitrate if "bitrate" in values else None,
+            user_limit=payload.user_limit if "user_limit" in values else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VOICE_CHANNEL_LIMIT_INVALID", "message": str(exc)},
+        ) from exc
+    if "rtc_region" in values:
+        values["rtc_region"] = require_configured_rtc_region(settings, payload.rtc_region)
     if channel.type != 15 and values.keys() & forum_fields:
         raise HTTPException(status_code=400, detail={"code": "FORUM_FIELDS_FORUM_ONLY"})
     if "default_auto_archive_duration" in values and channel.type not in {0, 5, 15}:
@@ -256,8 +327,10 @@ async def update_channel(
     if "default_reaction_emoji" in values:
         values["default_reaction_emoji"] = forum_reaction_payload(payload.default_reaction_emoji)
     permission_state_changed = False
+    target_parent: Channel | None = None
     if "parent_id" in values:
         parent_id = values["parent_id"]
+        parent_changed = parent_id != original_parent_id
         if parent_id == channel.id:
             raise HTTPException(status_code=400, detail={"code": "INVALID_CHANNEL_PARENT"})
         if parent_id is not None:
@@ -271,16 +344,32 @@ async def update_channel(
             )
             if parent.type != 4:
                 raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
+            await require_bot_channel_grant(session, guild, auth.user, parent)
+            target_parent = parent
         values["parent_domain"] = settings.domain if parent_id is not None else None
-        if parent_id != channel.parent_id and channel.permissions_synced:
-            source = await overwrite_source_channel(session, channel)
-            await copy_overwrites(session, source, channel)
-            channel.permissions_synced = False
+        if parent_changed:
             permission_state_changed = True
+            if channel.permissions_synced:
+                source = await overwrite_source_channel(session, channel)
+                await copy_overwrites(session, source, channel)
+                channel.permissions_synced = False
     target_parent_id = values.get("parent_id", channel.parent_id)
     if sync_permissions:
         if target_parent_id is None or channel.type == 4:
             raise HTTPException(status_code=400, detail={"code": "CHANNEL_HAS_NO_CATEGORY"})
+        if target_parent is None:
+            target_parent = await guild_channel(
+                session,
+                settings,
+                EntityReference(guild.id, guild.origin_domain),
+                EntityReference(
+                    target_parent_id,
+                    channel.parent_domain or channel.origin_domain,
+                ),
+            )
+            if target_parent.type != 4:
+                raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
+            await require_bot_channel_grant(session, guild, auth.user, target_parent)
         await require_permissions(
             session,
             redis,
@@ -328,17 +417,20 @@ async def update_channel(
             setattr(channel, field, value)
             history_policy_changed = history_policy_changed or field == "federated_history_policy"
     if changes or permission_state_changed:
+        e2ee_policy_channels: list[Channel] = []
         if permission_state_changed:
-            changes.append(
-                {
-                    "key": "permissions_synced",
-                    "old_value": original_permissions_synced,
-                    "new_value": channel.permissions_synced,
-                }
-            )
+            if original_permissions_synced != channel.permissions_synced:
+                changes.append(
+                    {
+                        "key": "permissions_synced",
+                        "old_value": original_permissions_synced,
+                        "new_value": channel.permissions_synced,
+                    }
+                )
             guild.permission_generation += 1
             if channel.encryption_mode == "e2ee" and channel.encryption_state == "active":
                 channel.encryption_state = "rekeying"
+                e2ee_policy_channels.append(channel)
         if history_policy_changed:
             guild.history_policy_generation += 1
             from app.federation.history import revoke_history_exports
@@ -352,7 +444,7 @@ async def update_channel(
             "guild.channel.update",
             {"channel": federation_channel_state(channel)},
             channel=channel,
-            snapshot_required=history_policy_changed,
+            snapshot_required=history_policy_changed or permission_state_changed,
         )
         for thread in tagged_thread_updates:
             await queue_guild_mutation(
@@ -372,18 +464,26 @@ async def update_channel(
             11,
             target_type="channel",
             target_ref={"id": str(channel.id)},
+            reason=reason,
             changes=changes,
         )
         await session.commit()
         await session.refresh(guild)
         await session.refresh(channel)
         await wake_queued_guild_federation(guild)
-        await publish_dispatch(
+        await publish_e2ee_policy_updates(
+            session,
             redis,
-            guild_topic(guild.origin_domain, guild.id),
-            "CHANNEL_UPDATE",
-            channel_payload(channel),
+            settings,
+            e2ee_policy_channels,
         )
+        if not e2ee_policy_channels:
+            await publish_dispatch(
+                redis,
+                guild_topic(guild.origin_domain, guild.id),
+                "CHANNEL_UPDATE",
+                channel_payload(channel),
+            )
         for thread in tagged_thread_updates:
             await publish_dispatch(
                 redis,
@@ -394,7 +494,7 @@ async def update_channel(
     return channel_payload(channel)
 
 
-@router.patch("/{guild_id}/channels")
+@router.patch("/{guild_id}/channels", status_code=204)
 async def reorder_channels(
     guild_id: EntityRef,
     payload: ChannelPositionBatch,
@@ -403,7 +503,22 @@ async def reorder_channels(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
-) -> list[dict[str, object]]:
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
+) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.reorder",
+        {
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("channel.reorder")
@@ -418,49 +533,156 @@ async def reorder_channels(
                 Channel.type.not_in({10, 11, 12}),
             )
             .order_by(Channel.position, Channel.id)
-            .with_for_update()
         )
     )
     by_id = {channel.id: channel for channel in channels}
     requested_ids = {item.id for item in payload.channels}
-    if requested_ids != set(by_id):
+    if not requested_ids.issubset(by_id):
         raise HTTPException(status_code=409, detail={"code": "CHANNEL_SET_CHANGED"})
+    if any(
+        item.position is not None and item.position >= len(channels) for item in payload.channels
+    ):
+        raise HTTPException(status_code=400, detail={"code": "CHANNEL_POSITION_INVALID"})
+
+    next_parent_ids: dict[int, int | None] = {}
+    parent_changed_ids: set[int] = set()
+    permission_checks: dict[int, Permission] = {}
+    bot_fence_ids = set(requested_ids)
+
+    def add_permission_check(channel_id: int, permissions: Permission) -> None:
+        permission_checks[channel_id] = (
+            permission_checks.get(channel_id, Permission(0)) | permissions
+        )
 
     for item in payload.channels:
         channel = by_id[item.id]
-        if channel.type == 4 and item.parent_id is not None:
+        parent_supplied = "parent_id" in item.model_fields_set
+        next_parent_id = item.parent_id if parent_supplied else channel.parent_id
+        next_parent_ids[channel.id] = next_parent_id
+        parent_changed = parent_supplied and next_parent_id != channel.parent_id
+        if parent_changed:
+            parent_changed_ids.add(channel.id)
+        if channel.type == 4 and parent_supplied and next_parent_id is not None:
             raise HTTPException(status_code=400, detail={"code": "INVALID_CHANNEL_PARENT"})
-        if item.parent_id is None:
-            continue
-        parent = by_id.get(item.parent_id)
-        if parent is None or parent.type != 4:
-            raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
-        if parent.id == channel.id:
-            raise HTTPException(status_code=400, detail={"code": "INVALID_CHANNEL_PARENT"})
+        if next_parent_id is None:
+            if item.lock_permissions:
+                raise HTTPException(status_code=400, detail={"code": "CHANNEL_HAS_NO_CATEGORY"})
+        else:
+            parent = by_id.get(next_parent_id)
+            if parent is None or parent.type != 4:
+                raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
+            if parent.id == channel.id:
+                raise HTTPException(status_code=400, detail={"code": "INVALID_CHANNEL_PARENT"})
 
-    changed: list[Channel] = []
-    audit_changes: list[dict[str, object]] = []
-    permission_state_changed = False
-    for item in payload.channels:
-        channel = by_id[item.id]
-        next_parent_domain = settings.domain if item.parent_id is not None else None
-        parent_changed = channel.parent_id != item.parent_id
-        sync_changed = item.sync_permissions and not channel.permissions_synced
-        if channel.position == item.position and not parent_changed and not sync_changed:
-            continue
+        flags_supplied = "flags" in item.model_fields_set and item.flags is not None
+        flags_changed = flags_supplied and item.flags != channel.flags
+        if flags_changed and channel.type != 15:
+            raise HTTPException(status_code=400, detail={"code": "FORUM_FIELDS_FORUM_ONLY"})
+
+        if parent_changed:
+            add_permission_check(
+                channel.id,
+                Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS,
+            )
+            if next_parent_id is not None:
+                add_permission_check(
+                    next_parent_id,
+                    Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS,
+                )
+        elif item.position is not None and channel.parent_id is not None:
+            add_permission_check(channel.parent_id, Permission.MANAGE_CHANNELS)
+        if item.lock_permissions:
+            add_permission_check(channel.id, Permission.MANAGE_ROLES)
+            if next_parent_id is not None:
+                bot_fence_ids.add(next_parent_id)
+        if flags_changed:
+            add_permission_check(channel.id, Permission.MANAGE_CHANNELS)
+
+    if len(parent_changed_ids) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": 40009,
+                "message": "Only one channel can have a parent_id modified at a time",
+            },
+        )
+
+    await require_bot_channel_grant(
+        session,
+        guild,
+        auth.user,
+        *(by_id[channel_id] for channel_id in sorted(bot_fence_ids | set(permission_checks))),
+    )
+
+    locked_channel_ids = requested_ids | set(permission_checks)
+    locked_channels = list(
+        await session.scalars(
+            select(Channel)
+            .where(
+                Channel.guild_id == guild.id,
+                Channel.guild_domain == guild.origin_domain,
+                Channel.origin_domain == guild.origin_domain,
+                Channel.id.in_(locked_channel_ids),
+                Channel.unavailable.is_(False),
+                Channel.type.not_in({10, 11, 12}),
+            )
+            .with_for_update()
+        )
+    )
+    if {channel.id for channel in locked_channels} != locked_channel_ids:
+        raise HTTPException(status_code=409, detail={"code": "CHANNEL_SET_CHANGED"})
+    for channel_id, permissions in sorted(permission_checks.items()):
         await require_permissions(
             session,
             redis,
             guild,
             auth.user,
-            required_permissions("channel.update"),
-            channel=channel,
+            permissions,
+            channel=by_id[channel_id],
         )
+
+    position_groups: dict[int, list[Channel]] = {}
+    for item in payload.channels:
+        if item.position is not None:
+            position_groups.setdefault(item.position, []).append(by_id[item.id])
+    positioned_ids = {channel.id for group in position_groups.values() for channel in group}
+    final_channels = [channel for channel in channels if channel.id not in positioned_ids]
+    previous_group_end = 0
+    for requested_position, group in sorted(position_groups.items()):
+        ordered_group = sorted(group, key=lambda channel: channel.id)
+        insertion_index = min(
+            max(requested_position, previous_group_end),
+            len(final_channels),
+        )
+        final_channels[insertion_index:insertion_index] = ordered_group
+        previous_group_end = insertion_index + len(ordered_group)
+
+    changed: list[Channel] = []
+    audit_changes: list[dict[str, object]] = []
+    permission_state_changed = False
+    permission_changed_ids: set[int] = set()
+    e2ee_policy_channels: list[Channel] = []
+    original_state = {
+        channel.id: (
+            channel.position,
+            channel.parent_id,
+            channel.permissions_synced,
+            channel.flags,
+        )
+        for channel in channels
+    }
+    for item in payload.channels:
+        channel = by_id[item.id]
+        parent_supplied = "parent_id" in item.model_fields_set
+        next_parent_id = next_parent_ids[channel.id]
+        parent_changed = channel.id in parent_changed_ids
+        lock_changed = item.lock_permissions is True and not channel.permissions_synced
+        flags_changed = item.flags is not None and item.flags != channel.flags
+        if not parent_changed and not lock_changed and not flags_changed:
+            continue
         old_sync = channel.permissions_synced
-        if channel.type != 4 and (parent_changed or sync_changed):
-            if item.sync_permissions:
-                if item.parent_id is None:
-                    raise HTTPException(status_code=400, detail={"code": "CHANNEL_HAS_NO_CATEGORY"})
+        if channel.type != 4 and (parent_changed or lock_changed):
+            if item.lock_permissions:
                 await session.execute(
                     delete(ChannelOverwrite).where(
                         ChannelOverwrite.channel_id == channel.id,
@@ -468,33 +690,52 @@ async def reorder_channels(
                     )
                 )
                 channel.permissions_synced = True
-            if channel.encryption_mode == "e2ee" and channel.encryption_state == "active":
-                channel.encryption_state = "rekeying"
             elif parent_changed and channel.permissions_synced:
                 source = await overwrite_source_channel(session, channel)
                 await copy_overwrites(session, source, channel)
                 channel.permissions_synced = False
-            permission_state_changed = permission_state_changed or (
-                old_sync != channel.permissions_synced
-            )
+            channel_permission_changed = parent_changed or (old_sync != channel.permissions_synced)
+            if channel_permission_changed:
+                permission_state_changed = True
+                permission_changed_ids.add(channel.id)
+                if channel.encryption_mode == "e2ee" and channel.encryption_state == "active":
+                    channel.encryption_state = "rekeying"
+                    e2ee_policy_channels.append(channel)
+        if parent_supplied:
+            channel.parent_id = next_parent_id
+            channel.parent_domain = guild.origin_domain if next_parent_id is not None else None
+        if flags_changed:
+            channel.flags = cast(int, item.flags)
+
+    for position, channel in enumerate(final_channels):
+        channel.position = position
+        old_position, old_parent_id, old_sync, old_flags = original_state[channel.id]
+        if (
+            old_position == channel.position
+            and old_parent_id == channel.parent_id
+            and old_sync == channel.permissions_synced
+            and old_flags == channel.flags
+        ):
+            continue
         audit_changes.append(
             {
                 "key": f"{channel.id}@{channel.origin_domain}",
                 "old_value": {
-                    "position": channel.position,
-                    "parent_id": str(channel.parent_id) if channel.parent_id is not None else None,
+                    "position": old_position,
+                    "parent_id": str(old_parent_id) if old_parent_id is not None else None,
                     "permissions_synced": old_sync,
+                    "flags": old_flags,
                 },
                 "new_value": {
-                    "position": item.position,
-                    "parent_id": str(item.parent_id) if item.parent_id is not None else None,
+                    "position": channel.position,
+                    "parent_id": (
+                        str(channel.parent_id) if channel.parent_id is not None else None
+                    ),
                     "permissions_synced": channel.permissions_synced,
+                    "flags": channel.flags,
                 },
             }
         )
-        channel.position = item.position
-        channel.parent_id = item.parent_id
-        channel.parent_domain = next_parent_domain
         changed.append(channel)
 
     if changed:
@@ -509,6 +750,7 @@ async def reorder_channels(
                 "guild.channel.update",
                 {"channel": federation_channel_state(channel)},
                 channel=channel,
+                snapshot_required=channel.id in permission_changed_ids,
             )
         await add_audit_entry(
             session,
@@ -518,6 +760,7 @@ async def reorder_channels(
             11,
             target_type="channel_order",
             target_ref={"guild_id": str(guild.id)},
+            reason=reason,
             changes=audit_changes,
         )
         await session.commit()
@@ -525,7 +768,16 @@ async def reorder_channels(
         for channel in changed:
             await session.refresh(channel)
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(
+            session,
+            redis,
+            settings,
+            e2ee_policy_channels,
+        )
+        e2ee_policy_refs = {(channel.id, channel.origin_domain) for channel in e2ee_policy_channels}
         for channel in changed:
+            if (channel.id, channel.origin_domain) in e2ee_policy_refs:
+                continue
             await publish_dispatch(
                 redis,
                 guild_topic(guild.origin_domain, guild.id),
@@ -533,13 +785,10 @@ async def reorder_channels(
                 channel_payload(channel),
             )
 
-    return [
-        channel_payload(channel)
-        for channel in sorted(channels, key=lambda item: (item.position, item.id))
-    ]
+    return Response(status_code=204)
 
 
-@router.delete("/{guild_id}/channels/{channel_id}", status_code=204)
+@router.delete("/{guild_id}/channels/{channel_id}")
 async def delete_channel(
     guild_id: EntityRef,
     channel_id: EntityRef,
@@ -548,7 +797,23 @@ async def delete_channel(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
-) -> Response:
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
+) -> dict[str, object]:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "channel.delete",
+        {
+            "channel_ref": qualified_management_ref(channel_id, guild_domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     if channel.type in {10, 11, 12}:
@@ -587,6 +852,15 @@ async def delete_channel(
         # non-empty-channel contract and require posts/threads to be removed
         # first.
         raise HTTPException(status_code=409, detail={"code": "CHANNEL_NOT_EMPTY"})
+    if await announcement_dependencies_exist(
+        session,
+        {(channel.id, channel.origin_domain)},
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "CHANNEL_HAS_ANNOUNCEMENT_DEPENDENCIES"},
+        )
+    rendered_deleted = channel_payload(channel)
     await add_audit_entry(
         session,
         snowflake,
@@ -595,6 +869,7 @@ async def delete_channel(
         12,
         target_type="channel",
         target_ref={"id": str(channel.id), "name": channel.name},
+        reason=reason,
     )
     await queue_guild_mutation(
         session,
@@ -604,6 +879,22 @@ async def delete_channel(
         "guild.channel.delete",
         {"channel": {"id": str(channel.id), "origin_domain": channel.origin_domain}},
     )
+    # Guild settings hold composite references to channels. Clear any setting
+    # that points at the channel before deleting it so the database invariant
+    # remains valid and clients do not retain a dead channel reference.
+    for id_field, domain_field in (
+        ("afk_channel_id", "afk_channel_domain"),
+        ("system_channel_id", "system_channel_domain"),
+        ("rules_channel_id", "rules_channel_domain"),
+        ("public_updates_channel_id", "public_updates_channel_domain"),
+        ("safety_alerts_channel_id", "safety_alerts_channel_domain"),
+    ):
+        if (getattr(guild, id_field), getattr(guild, domain_field)) == (
+            channel.id,
+            channel.origin_domain,
+        ):
+            setattr(guild, id_field, None)
+            setattr(guild, domain_field, None)
     await session.delete(channel)
     await session.commit()
     await session.refresh(guild)
@@ -619,7 +910,7 @@ async def delete_channel(
             "guild_domain": guild.origin_domain,
         },
     )
-    return Response(status_code=204)
+    return rendered_deleted
 
 
 @router.patch("/{guild_id}/roles")
@@ -631,7 +922,19 @@ async def reorder_roles(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> list[dict[str, object]]:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "role.reorder",
+        {"data": payload.model_dump(mode="json"), "reason": reason},
+    )
+    if proxied is not None:
+        return cast(list[dict[str, object]], guild_management_list_body(proxied, 200))
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("role.reorder")
@@ -680,6 +983,7 @@ async def reorder_roles(
     if changed:
         e2ee_policy_channels: list[Channel] = []
         guild.permission_generation += 1
+        await materialize_updated_at(session, *changed)
         for role in changed:
             await queue_guild_mutation(
                 session,
@@ -699,6 +1003,7 @@ async def reorder_roles(
             33,
             target_type="role",
             target_ref={"ids": [str(role.id) for role in changed]},
+            reason=reason,
             changes=changes,
         )
         await session.commit()
@@ -728,7 +1033,25 @@ async def update_role(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
     if_match: str | None = Header(default=None, alias="If-Match"),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "role.update",
+        {
+            "resource_ref": qualified_management_ref(role_id, guild_domain),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     actor_permissions = await require_permissions(
         session, redis, guild, auth.user, required_permissions("role.update")
@@ -755,6 +1078,7 @@ async def update_role(
     if changes:
         e2ee_policy_channels: list[Channel] = []
         guild.permission_generation += 1
+        await materialize_updated_at(session, role)
         await queue_guild_mutation(
             session,
             settings,
@@ -773,6 +1097,7 @@ async def update_role(
             31,
             target_type="role",
             target_ref={"id": str(role.id)},
+            reason=reason,
             changes=changes,
         )
         await session.commit()
@@ -798,7 +1123,24 @@ async def delete_role(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> Response:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "role.delete",
+        {
+            "resource_ref": qualified_management_ref(role_id, guild_domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(session, redis, guild, auth.user, required_permissions("role.delete"))
     role_number, role_domain = role_id.resolve(settings.domain)
@@ -816,6 +1158,7 @@ async def delete_role(
         32,
         target_type="role",
         target_ref={"id": str(role.id), "name": role.name},
+        reason=reason,
     )
     guild.permission_generation += 1
     e2ee_policy_channels: list[Channel] = []
@@ -878,7 +1221,25 @@ async def assign_role(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> Response:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.role.assign",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "role_ref": qualified_management_ref(role_id, guild_domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("member.role.update")
@@ -909,6 +1270,9 @@ async def assign_role(
     )
     if inserted is not None:
         e2ee_policy_channels: list[Channel] = []
+        # Discord-style temporary invite memberships become permanent as soon
+        # as the member receives any explicit role.
+        member.temporary = False
         member.member_version += 1
         await queue_guild_mutation(
             session,
@@ -932,6 +1296,7 @@ async def assign_role(
             25,
             target_type="member",
             target_ref={"id": str(user_number), "origin_domain": user_domain},
+            reason=reason,
             changes=[{"key": "roles", "added": str(role.id)}],
         )
         rendered_member = await render_member_update(session, member)
@@ -958,8 +1323,29 @@ async def replace_member_roles(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> dict[str, object]:
     """Atomically replace the explicitly assigned roles for one member."""
+
+    _, guild_domain = guild_id.resolve(settings.domain)
+    remote_data = payload.model_dump(mode="json")
+    remote_data["role_ids"] = [
+        qualified_management_ref(role_ref, guild_domain) for role_ref in payload.role_ids
+    ]
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.role.replace",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "data": remote_data,
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
 
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
@@ -1037,6 +1423,8 @@ async def replace_member_roles(
             )
         )
 
+    if added:
+        member.temporary = False
     member.member_version += 1
     e2ee_policy_channels: list[Channel] = []
     for event_type, refs in (
@@ -1066,6 +1454,7 @@ async def replace_member_roles(
         25,
         target_type="member",
         target_ref={"id": str(user_number), "origin_domain": user_domain},
+        reason=reason,
         changes=[
             {
                 "key": "roles",
@@ -1098,7 +1487,25 @@ async def remove_role(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: Annotated[str | None, Header(alias="X-Audit-Log-Reason", max_length=512)] = None,
 ) -> Response:
+    _, guild_domain = guild_id.resolve(settings.domain)
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.role.remove",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "role_ref": qualified_management_ref(role_id, guild_domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("member.role.update")
@@ -1149,6 +1556,7 @@ async def remove_role(
             25,
             target_type="member",
             target_ref={"id": str(user_number), "origin_domain": user_domain},
+            reason=reason,
             changes=[{"key": "roles", "removed": str(role.id)}],
         )
         rendered_member = await render_member_update(session, member)

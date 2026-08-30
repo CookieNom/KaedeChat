@@ -47,11 +47,15 @@ pub enum GatewayCommand {
         guild_domain: String,
         ranges: Vec<(u32, u32)>,
     },
+    RequestChannelInfo {
+        guild_id: String,
+        guild_domain: String,
+        fields: Vec<String>,
+    },
+    RequestSoundboardSounds {
+        guilds: Vec<(String, String)>,
+    },
     VoiceState {
-        guild_id: Option<String>,
-        guild_domain: Option<String>,
-        channel_id: Option<String>,
-        channel_domain: Option<String>,
         self_mute: bool,
         self_deaf: bool,
     },
@@ -255,17 +259,27 @@ fn command_payload(command: GatewayCommand) -> Value {
                     "ranges": ranges.into_iter().take(3).map(|(start, end)| [start, end.min(start.saturating_add(99))]).collect::<Vec<_>>()},
             })
         }
-        GatewayCommand::VoiceState {
+        GatewayCommand::RequestChannelInfo {
             guild_id,
             guild_domain,
-            channel_id,
-            channel_domain,
+            fields,
+        } => {
+            let guild_ref = gateway_guild_reference(&guild_id, &guild_domain);
+            json!({
+                "op": GatewayOp::RequestChannelInfo as u8,
+                "d": {"guild_id": guild_ref, "fields": fields},
+            })
+        }
+        GatewayCommand::RequestSoundboardSounds { guilds } => json!({
+            "op": GatewayOp::RequestSoundboardSounds as u8,
+            "d": {"guild_ids": guilds.into_iter().map(|(id, domain)| gateway_guild_reference(&id, &domain)).collect::<Vec<_>>()},
+        }),
+        GatewayCommand::VoiceState {
             self_mute,
             self_deaf,
         } => json!({
             "op": GatewayOp::VoiceStateUpdate as u8,
-            "d": {"guild_id": guild_id, "guild_domain": guild_domain, "channel_id": channel_id,
-                "channel_domain": channel_domain, "self_mute": self_mute, "self_deaf": self_deaf},
+            "d": {"self_mute": self_mute || self_deaf, "self_deaf": self_deaf},
         }),
         GatewayCommand::Shutdown => Value::Null,
     }
@@ -344,6 +358,48 @@ mod tests {
         assert_eq!(ranges[1], json!([100, 199]));
         assert_eq!(ranges[2], json!([200, 299]));
         assert_eq!(payload["d"]["guild_id"], "1@home.example");
+    }
+
+    #[test]
+    fn resource_requests_match_channel_info_and_soundboard_gateway_contracts() {
+        let channel_info = command_payload(GatewayCommand::RequestChannelInfo {
+            guild_id: "1".to_owned(),
+            guild_domain: "home.example".to_owned(),
+            fields: vec!["status".to_owned(), "voice_start_time".to_owned()],
+        });
+        assert_eq!(channel_info["op"], GatewayOp::RequestChannelInfo as u8);
+        assert_eq!(
+            channel_info["d"],
+            json!({
+                "guild_id": "1@home.example",
+                "fields": ["status", "voice_start_time"],
+            })
+        );
+
+        let soundboard = command_payload(GatewayCommand::RequestSoundboardSounds {
+            guilds: (1..=101)
+                .map(|id| (id.to_string(), "home.example".to_owned()))
+                .collect(),
+        });
+        assert_eq!(soundboard["op"], GatewayOp::RequestSoundboardSounds as u8);
+        let guild_ids = soundboard["d"]["guild_ids"].as_array().expect("guild IDs");
+        // Invalid oversized requests remain oversized so every transport gets
+        // the same authoritative rejection; callers must never get a partial
+        // native-only result through silent truncation.
+        assert_eq!(guild_ids.len(), 101);
+        assert_eq!(guild_ids[0], "1@home.example");
+        assert_eq!(guild_ids[99], "100@home.example");
+        assert_eq!(guild_ids[100], "101@home.example");
+    }
+
+    #[test]
+    fn voice_state_matches_the_gateway_self_state_contract_exactly() {
+        let payload = command_payload(GatewayCommand::VoiceState {
+            self_mute: false,
+            self_deaf: true,
+        });
+        assert_eq!(payload["op"], GatewayOp::VoiceStateUpdate as u8);
+        assert_eq!(payload["d"], json!({"self_mute": true, "self_deaf": true}));
     }
 
     #[test]

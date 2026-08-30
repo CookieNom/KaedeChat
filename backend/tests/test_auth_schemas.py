@@ -59,6 +59,27 @@ def test_settings_patch_validates_presence_preference() -> None:
         SettingsPatch(presence_preference="busy")  # type: ignore[arg-type]
 
 
+def test_auth_inputs_reject_ambiguous_boolean_and_integer_coercion() -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest.model_validate(
+            {
+                "username": "maple",
+                "password": DERIVED_PASSWORD,
+                "password_kdf": {**PASSWORD_KDF, "version": True},
+            }
+        )
+    with pytest.raises(ValidationError):
+        RegisterRequest.model_validate(
+            {
+                "username": "maple",
+                "password": DERIVED_PASSWORD,
+                "password_kdf": {**PASSWORD_KDF, "iterations": "600000"},
+            }
+        )
+    with pytest.raises(ValidationError):
+        SettingsPatch.model_validate({"age_restricted_dm_commands_enabled": 1})
+
+
 def test_mfa_setup_requires_password_and_bounds_the_current_factor() -> None:
     payload = MfaSetupRequest(
         password=DERIVED_PASSWORD,

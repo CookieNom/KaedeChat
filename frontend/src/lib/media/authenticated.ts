@@ -1,5 +1,6 @@
 import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
 import { apiErrorMessage } from '$lib/api/errors';
+import { parseCanonicalEntityRef } from '$lib/chat/refs';
 
 export interface AuthenticatedMediaSource {
   path: string;
@@ -114,10 +115,92 @@ export function attachmentMediaPath(
   originDomain: string,
   attachmentId: string,
   variant: 'original' | 'thumbnail_128' | 'thumbnail_512' | 'thumbnail_1024' | 'poster',
-  historyMediaUrl?: string | null
+  historyMediaUrl?: string | null,
+  privateMediaUrl?: string | null
 ): string {
-  if (isSafeSameOriginMediaPath(historyMediaUrl)) return historyMediaUrl;
+  const privatePath = privateInteractionAttachmentMediaPath(
+    originDomain,
+    attachmentId,
+    variant,
+    privateMediaUrl
+  );
+  if (privatePath) return privatePath;
+  const historyPath = dmHistoryAttachmentMediaPath(
+    originDomain,
+    attachmentId,
+    variant,
+    historyMediaUrl
+  );
+  if (historyPath) return historyPath;
   return `/media/${encodeURIComponent(originDomain)}/${encodeURIComponent(attachmentId)}/${variant}`;
+}
+
+/**
+ * Accept only the signed, identity-bound DM-history route projected by the
+ * account authority. A federated attachment may not turn an authenticated
+ * media fetch into an arbitrary same-origin GET.
+ */
+export function dmHistoryAttachmentMediaPath(
+  originDomain: string,
+  attachmentId: string,
+  variant: 'original' | 'thumbnail_128' | 'thumbnail_512' | 'thumbnail_1024' | 'poster',
+  value: string | null | undefined
+): string | null {
+  if (!isSafeSameOriginMediaPath(value)) return null;
+  const parsed = new URL(value, 'https://kaede.invalid');
+  const match =
+    /^\/api\/v1\/dms\/([^/]+)\/history-media\/([^/]+)\/([^/]+)\/(original|thumbnail_128|thumbnail_512|thumbnail_1024|poster)$/u.exec(
+      parsed.pathname
+    );
+  if (!match || match[4] !== variant || parsed.hash) return null;
+  const conversation = parseCanonicalEntityRef(match[1]);
+  const message = parseCanonicalEntityRef(match[2]);
+  const attachment = parseCanonicalEntityRef(match[3]);
+  const expires = parsed.searchParams.getAll('expires');
+  const tokens = parsed.searchParams.getAll('token');
+  if (
+    !conversation ||
+    !message ||
+    !attachment ||
+    message.origin_domain !== attachment.origin_domain ||
+    attachment.id !== attachmentId ||
+    attachment.origin_domain !== originDomain ||
+    [...parsed.searchParams.keys()].some((key) => key !== 'expires' && key !== 'token') ||
+    expires.length !== 1 ||
+    !/^[1-9][0-9]*$/u.test(expires[0]) ||
+    tokens.length !== 1 ||
+    !/^[A-Za-z0-9_-]{40,48}$/u.test(tokens[0])
+  ) {
+    return null;
+  }
+  return value;
+}
+
+export function privateInteractionAttachmentMediaPath(
+  originDomain: string,
+  attachmentId: string,
+  variant: 'original' | 'thumbnail_128' | 'thumbnail_512' | 'thumbnail_1024' | 'poster',
+  value: string | null | undefined
+): string | null {
+  if (!isSafeSameOriginMediaPath(value)) return null;
+  const match =
+    /^\/api\/v1\/interactions\/([^/]+)\/responses\/([^/]+)\/attachments\/([^/]+)$/u.exec(value);
+  if (!match) return null;
+  const interaction = parseCanonicalEntityRef(match[1]);
+  const response = parseCanonicalEntityRef(match[2]);
+  const attachment = parseCanonicalEntityRef(match[3]);
+  if (
+    !interaction ||
+    !response ||
+    !attachment ||
+    interaction.origin_domain !== response.origin_domain ||
+    response.origin_domain !== attachment.origin_domain ||
+    attachment.id !== attachmentId ||
+    attachment.origin_domain !== originDomain
+  ) {
+    return null;
+  }
+  return `${value}/${variant}`;
 }
 
 /**
@@ -225,6 +308,44 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
       revokeObjectUrl();
     }
   };
+}
+
+/** Read authenticated same-origin media without ever forwarding session credentials off-origin. */
+export async function authenticatedMediaBlob(
+  source: AuthenticatedMediaSource,
+  maximumBytes = 100 * 1024 * 1024,
+  signal?: AbortSignal
+): Promise<Blob> {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+    throw new TypeError('Authenticated media size limit is invalid.');
+  }
+  if (signal?.aborted) throw new DOMException('Media request cancelled', 'AbortError');
+  if (isNativeDesktop()) {
+    const response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>(
+      'native_media_request',
+      {
+        path: source.path
+      }
+    );
+    const bytes = asBytes(response);
+    if (bytes.byteLength > maximumBytes) {
+      throw new Error('Media response exceeded its safe in-memory limit.');
+    }
+    if (signal?.aborted) throw new DOMException('Media request cancelled', 'AbortError');
+    return new Blob([asBlobPart(bytes)], { type: source.contentType });
+  }
+  const response = await fetch(source.path, {
+    credentials: 'same-origin',
+    headers: { Accept: source.contentType },
+    signal
+  });
+  if (!response.ok) throw new Error('Could not download the authenticated media.');
+  const declared = Number(response.headers.get('content-length') ?? '0');
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    throw new Error('Media response exceeded its safe in-memory limit.');
+  }
+  const bytes = await boundedBytes(response, maximumBytes);
+  return new Blob([asBlobPart(bytes)], { type: source.contentType });
 }
 
 export async function downloadAuthenticatedMedia(

@@ -32,7 +32,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Kaede uses your camera when you choose to share video in a call.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Kaede uses your microphone when you join voice channels or calls.</string>
+	<string>Kaede uses your microphone when you join voice channels or calls, or when you record a voice message.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Kaede lets you choose photos and videos to share in conversations.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

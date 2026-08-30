@@ -1,19 +1,24 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/thread_permissions.dart';
+import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 enum ForumViewMode { list, gallery }
 
@@ -161,7 +166,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
 
   void _searchChanged() {
     _searchDebounce?.cancel();
-    _searchDebounce = Timer(const Duration(milliseconds: 300), _load);
+    _searchDebounce = Timer(Duration(milliseconds: 300), _load);
   }
 
   void _scrollChanged() {
@@ -186,7 +191,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
     if (_loading) return;
     _liveReloadDebounce?.cancel();
     _liveReloadDebounce = Timer(
-      const Duration(milliseconds: 180),
+      Duration(milliseconds: 180),
       () => unawaited(_load(silent: true)),
     );
   }
@@ -269,14 +274,14 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setSheetState) => SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Sort By',
+                Text('Sort By',
                     style: TextStyle(
-                      color: KaedeColors.muted,
+                      color: context.kaede.muted,
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
                     )),
@@ -284,7 +289,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   groupValue: sort,
                   onChanged: (value) =>
                       setSheetState(() => sort = value ?? sort),
-                  child: const Column(
+                  child: Column(
                     children: [
                       RadioListTile<int>(
                         contentPadding: EdgeInsets.zero,
@@ -299,11 +304,11 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                     ],
                   ),
                 ),
-                const Divider(),
-                const SizedBox(height: 8),
-                const Text('View As',
+                Divider(),
+                SizedBox(height: 8),
+                Text('View As',
                     style: TextStyle(
-                      color: KaedeColors.muted,
+                      color: context.kaede.muted,
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
                     )),
@@ -311,7 +316,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   groupValue: view,
                   onChanged: (value) =>
                       setSheetState(() => view = value ?? view),
-                  child: const Column(
+                  child: Column(
                     children: [
                       RadioListTile<ForumViewMode>(
                         contentPadding: EdgeInsets.zero,
@@ -326,11 +331,11 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                     ],
                   ),
                 ),
-                const Divider(),
+                Divider(),
                 TextButton(
                   style: TextButton.styleFrom(
                     alignment: Alignment.centerLeft,
-                    foregroundColor: KaedeColors.text,
+                    foregroundColor: context.kaede.text,
                   ),
                   onPressed: () => Navigator.pop(
                     sheetContext,
@@ -341,12 +346,12 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                           : ForumViewMode.list,
                     ),
                   ),
-                  child: const Text('Reset to default'),
+                  child: Text('Reset to default'),
                 ),
-                const SizedBox(height: 4),
+                SizedBox(height: 4),
                 FilledButton(
                   onPressed: () => Navigator.pop(sheetContext, (sort, view)),
-                  child: const Text('Done'),
+                  child: Text('Done'),
                 ),
               ],
             ),
@@ -368,7 +373,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: KaedeColors.canvas,
+      backgroundColor: context.kaede.canvas,
       builder: (_) => _NewForumPostSheet(channel: widget.channel),
     );
     if (created == null || !mounted) return;
@@ -381,7 +386,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       if (!_selectedTags.remove(tag)) {
         if (_selectedTags.length == 5) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Select up to 5 tags.')),
+            SnackBar(content: Text('Select up to 5 tags.')),
           );
           return;
         }
@@ -405,27 +410,27 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          padding: EdgeInsets.fromLTRB(12, 10, 12, 4),
           child: Row(
             children: [
               Expanded(
                 child: TextField(
-                  key: const ValueKey('forum-search'),
+                  key: ValueKey('forum-search'),
                   controller: _search,
                   textInputAction: TextInputAction.search,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     hintText: 'Search',
                     prefixIcon: Icon(Icons.search_rounded),
                   ),
                 ),
               ),
               if (canPost) ...[
-                const SizedBox(width: 8),
+                SizedBox(width: 8),
                 FilledButton.icon(
-                  key: const ValueKey('forum-new-post'),
+                  key: ValueKey('forum-new-post'),
                   onPressed: _newPost,
-                  icon: const Icon(Icons.chat_bubble_rounded, size: 17),
-                  label: const Text('New Post'),
+                  icon: Icon(Icons.chat_bubble_rounded, size: 17),
+                  label: Text('New Post'),
                 ),
               ],
             ],
@@ -436,9 +441,9 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
             height: 48,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: EdgeInsets.symmetric(horizontal: 12),
               itemCount: widget.channel.availableTags.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 7),
+              separatorBuilder: (_, __) => SizedBox(width: 7),
               itemBuilder: (context, index) {
                 final tag = widget.channel.availableTags[index];
                 return FilterChip(
@@ -455,18 +460,18 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
         Align(
           alignment: Alignment.centerLeft,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
             child: OutlinedButton.icon(
-              key: const ValueKey('forum-sort-view'),
+              key: ValueKey('forum-sort-view'),
               onPressed: _showSortAndView,
-              icon: const Icon(Icons.swap_vert_rounded, size: 18),
-              label: const Text('Sort & View'),
+              icon: Icon(Icons.swap_vert_rounded, size: 18),
+              label: Text('Sort & View'),
             ),
           ),
         ),
-        const Divider(height: 1),
+        Divider(height: 1),
         if ((_loading && _posts.isNotEmpty) || _loadingMore)
-          const LinearProgressIndicator(minHeight: 2),
+          LinearProgressIndicator(minHeight: 2),
         Expanded(child: _buildPosts()),
       ],
     );
@@ -474,18 +479,18 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
 
   Widget _buildPosts() {
     if (_loading && _posts.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
+      return Center(child: CircularProgressIndicator());
     }
     if (_error case final error? when _posts.isEmpty) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(error, textAlign: TextAlign.center),
-              const SizedBox(height: 12),
-              OutlinedButton(onPressed: _load, child: const Text('Retry')),
+              SizedBox(height: 12),
+              OutlinedButton(onPressed: _load, child: Text('Retry')),
             ],
           ),
         ),
@@ -497,7 +502,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
           _search.text.trim().isNotEmpty || _selectedTags.isNotEmpty
               ? 'No posts match your search.'
               : 'No posts yet.',
-          style: const TextStyle(color: KaedeColors.muted),
+          style: TextStyle(color: context.kaede.muted),
         ),
       );
     }
@@ -511,7 +516,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   : 1;
           return GridView.builder(
             controller: _scroll,
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.all(12),
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: columns,
               crossAxisSpacing: 10,
@@ -533,9 +538,9 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       onRefresh: _load,
       child: ListView.separated(
         controller: _scroll,
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.all(12),
         itemCount: _posts.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 10),
+        separatorBuilder: (_, __) => SizedBox(height: 10),
         itemBuilder: (_, index) => _ForumPostCard(
           post: _posts[index],
           forum: widget.channel,
@@ -569,16 +574,16 @@ final class _ForumPostCard extends StatelessWidget {
     final content = starter?.content?.trim() ?? '';
     final date = post.createdAt;
     return Material(
-      color: KaedeColors.panel,
+      color: context.kaede.panel,
       borderRadius: BorderRadius.circular(KaedeRadius.medium),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: Container(
-          padding: const EdgeInsets.all(14),
+          padding: EdgeInsets.all(14),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(KaedeRadius.medium),
-            border: Border.all(color: KaedeColors.border),
+            border: Border.all(color: context.kaede.border),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -587,38 +592,38 @@ final class _ForumPostCard extends StatelessWidget {
               Row(
                 children: [
                   if (post.pinned) ...[
-                    const Icon(Icons.push_pin_rounded,
-                        size: 16, color: KaedeColors.coralText),
-                    const SizedBox(width: 6),
+                    Icon(Icons.push_pin_rounded,
+                        size: 16, color: context.kaede.coralText),
+                    SizedBox(width: 6),
                   ],
                   Expanded(
                     child: Text(
                       post.name ?? 'Untitled post',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
                   ),
                   if (post.encryptionMode == 'e2ee')
-                    const Icon(Icons.lock_rounded,
-                        size: 14, color: KaedeColors.muted),
+                    Icon(Icons.lock_rounded,
+                        size: 14, color: context.kaede.muted),
                 ],
               ),
               if (tags.isNotEmpty) ...[
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 Wrap(
                   spacing: 5,
                   runSpacing: 5,
                   children: [
                     for (final tag in tags)
                       Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 3),
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
-                          color: KaedeColors.raised,
+                          color: context.kaede.raised,
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: ForumTagLabel(
@@ -632,16 +637,16 @@ final class _ForumPostCard extends StatelessWidget {
                 ),
               ],
               if (content.isNotEmpty) ...[
-                const SizedBox(height: 9),
+                SizedBox(height: 9),
                 Text(
                   content,
                   maxLines: gallery ? 6 : 2,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: KaedeColors.textSoft),
+                  style: TextStyle(color: context.kaede.textSoft),
                 ),
               ],
-              if (gallery) const Spacer(),
-              const SizedBox(height: 10),
+              if (gallery) Spacer(),
+              SizedBox(height: 10),
               Row(
                 children: [
                   Expanded(
@@ -649,25 +654,25 @@ final class _ForumPostCard extends StatelessWidget {
                       starter?.author?.name ?? 'Unknown author',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: KaedeColors.muted,
+                      style: TextStyle(
+                        color: context.kaede.muted,
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
-                  const Icon(Icons.chat_bubble_rounded,
-                      size: 13, color: KaedeColors.muted),
-                  const SizedBox(width: 4),
+                  Icon(Icons.chat_bubble_rounded,
+                      size: 13, color: context.kaede.muted),
+                  SizedBox(width: 4),
                   Text('${post.messageCount}',
-                      style: const TextStyle(
-                          color: KaedeColors.muted, fontSize: 12)),
+                      style:
+                          TextStyle(color: context.kaede.muted, fontSize: 12)),
                   if (date != null) ...[
-                    const SizedBox(width: 8),
+                    SizedBox(width: 8),
                     Text(
                       DateFormat.MMMd().format(date.toLocal()),
-                      style: const TextStyle(
-                          color: KaedeColors.muted, fontSize: 12),
+                      style:
+                          TextStyle(color: context.kaede.muted, fontSize: 12),
                     ),
                   ],
                 ],
@@ -696,6 +701,11 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
   final _attachments = <_ForumAttachment>[];
   var _busy = false;
   String? _error;
+  String? _encryptedDraftKey;
+  EncryptedForumThreadReservation? _encryptedReservation;
+  Map<String, Object?>? _encryptedClaimEnvelope;
+  List<EntityRef> _encryptedClaimAttachments = const <EntityRef>[];
+  List<EntityRef> _encryptedClaimMentions = const <EntityRef>[];
 
   bool get _requiresTag => widget.channel.flags & 16 != 0;
 
@@ -742,12 +752,125 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       }
       return;
     }
+    final encryptedStarter = deferThreadStarterUntilE2eeActive(widget.channel);
+    final sortedTags = _selectedTags.toList()..sort();
+    final encryptedDraftKey = jsonEncode(<String, Object?>{
+      'forum': widget.channel.ref.wire,
+      'title': title,
+      'message': message,
+      'tags': sortedTags,
+      'files': _attachments
+          .map((item) => <String, Object?>{
+                'path': item.file.path,
+                'name': item.name,
+                'content_type': item.contentType,
+              })
+          .toList(growable: false),
+    });
+    if (encryptedStarter &&
+        _encryptedDraftKey != null &&
+        _encryptedDraftKey != encryptedDraftKey) {
+      setState(() {
+        _error =
+            'Finish retrying the pending encrypted post before changing its starter.';
+      });
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
+      if (encryptedStarter) {
+        _encryptedDraftKey ??= encryptedDraftKey;
+        _encryptedReservation ??= await controller.reserveEncryptedForumThread(
+          parent: widget.channel,
+          name: title,
+          clientNonce: const Uuid().v4(),
+          appliedTagIds: sortedTags,
+        );
+        var thread = await controller.ensureRequiredThreadEncryption(
+          _encryptedReservation!.channel,
+        );
+        _encryptedReservation = EncryptedForumThreadReservation(
+          channel: thread,
+          clientNonce: _encryptedReservation!.clientNonce,
+          claimed: false,
+        );
+        if (channelEncryptionPaused(thread)) {
+          throw StateError(
+            'Encryption setup is required before the starter can be sent.',
+          );
+        }
+        if (_encryptedClaimEnvelope == null) {
+          final encryptedUploads = <EncryptedMobileUpload>[];
+          for (final attachment in _attachments) {
+            encryptedUploads.add(await uploadEncryptedFile(
+              repository: controller.repository,
+              channel: thread.ref,
+              source: attachment.file,
+              filename: attachment.name,
+              contentType: attachment.contentType,
+            ));
+          }
+          final allowedMentions = <String, Object?>{
+            'parse': const <String>['everyone', 'roles', 'users'],
+            'users': const <String>[],
+            'roles': const <String>[],
+            'replied_user': false,
+          };
+          final intent = mobileRichMessageMentionIntent(<String, Object?>{
+            'content': message.isEmpty ? null : message,
+            'components': const <Object?>[],
+            'allowed_mentions': allowedMentions,
+          });
+          final state = ref.read(mobileControllerProvider);
+          final guildRef = thread.guildRef;
+          final guild = guildRef == null
+              ? null
+              : state.guilds.where((item) => item.ref == guildRef).firstOrNull;
+          if (guild == null || guildRef == null) {
+            throw StateError(
+              'The current guild roster is unavailable for encrypted mentions.',
+            );
+          }
+          _encryptedClaimMentions =
+              expandedMobileEncryptedGuildMentionRecipients(
+            userRefs: intent.userRefs,
+            roleRefs: intent.roleRefs,
+            everyone: intent.everyone,
+            guild: guild,
+            members: state.guildMembers[guildRef] ?? const <GuildMember>[],
+            canMentionEveryone: thread.allows(Permission.administrator) ||
+                thread.allows(Permission.mentionEveryone),
+          );
+          _encryptedClaimAttachments = encryptedUploads
+              .map((item) => item.attachment)
+              .toList(growable: false);
+          _encryptedClaimEnvelope =
+              await (await controller.e2eeClient()).encryptMessage(
+            thread,
+            message,
+            attachments: encryptedUploads
+                .map((item) => item.manifest)
+                .toList(growable: false),
+            mentionUserRefs: _encryptedClaimMentions,
+            rich: MobileEncryptedRichMessageOptions(
+              allowedMentions: allowedMentions,
+            ),
+          );
+        }
+        thread = await controller.claimEncryptedForumStarter(
+          thread: thread,
+          clientNonce: _encryptedReservation!.clientNonce,
+          e2ee: _encryptedClaimEnvelope!,
+          attachments: _encryptedClaimAttachments,
+          mentionUsers: _encryptedClaimMentions,
+        );
+        if (mounted) Navigator.pop(context, thread);
+        return;
+      }
       final uploaded = <EntityRef>[];
       for (final attachment in _attachments) {
         uploaded.add(await controller.repository.uploadAttachmentFile(
@@ -761,7 +884,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
         parent: widget.channel,
         name: title,
         content: message,
-        appliedTagIds: _selectedTags.toList(growable: false),
+        appliedTagIds: sortedTags,
         attachments: uploaded,
       );
       if (mounted) Navigator.pop(context, created);
@@ -781,7 +904,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
     final guidelines = widget.channel.topic?.trim();
     final canAttach = widget.channel.allows(Permission.attachFiles);
     return PopScope(
-      canPop: !_busy,
+      canPop: !_busy && _encryptedReservation == null,
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           16,
@@ -798,10 +921,12 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                 children: [
                   IconButton(
                     tooltip: 'Close',
-                    onPressed: _busy ? null : () => Navigator.pop(context),
-                    icon: const Icon(Icons.close_rounded),
+                    onPressed: _busy || _encryptedReservation != null
+                        ? null
+                        : () => Navigator.pop(context),
+                    icon: Icon(Icons.close_rounded),
                   ),
-                  const Expanded(
+                  Expanded(
                     child: Text('New Post',
                         style: TextStyle(
                             fontSize: 19, fontWeight: FontWeight.w800)),
@@ -823,30 +948,30 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                             ? null
                             : _post,
                         child: _busy
-                            ? const SizedBox.square(
+                            ? SizedBox.square(
                                 dimension: 16,
                                 child:
                                     CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : const Text('Post'),
+                            : Text('Post'),
                       ),
                     ),
                   ),
                 ],
               ),
               if (guidelines?.isNotEmpty == true) ...[
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 Container(
-                  padding: const EdgeInsets.all(14),
+                  padding: EdgeInsets.all(14),
                   decoration: BoxDecoration(
-                    color: KaedeColors.panel,
+                    color: context.kaede.panel,
                     borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                    border: Border.all(color: KaedeColors.border),
+                    border: Border.all(color: context.kaede.border),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Row(
+                      Row(
                         children: [
                           Icon(Icons.fact_check_outlined, size: 18),
                           SizedBox(width: 8),
@@ -854,41 +979,41 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                               style: TextStyle(fontWeight: FontWeight.w800)),
                         ],
                       ),
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                       Text(guidelines!,
-                          style: const TextStyle(color: KaedeColors.textSoft)),
+                          style: TextStyle(color: context.kaede.textSoft)),
                     ],
                   ),
                 ),
               ],
-              const SizedBox(height: 14),
+              SizedBox(height: 14),
               TextField(
-                key: const ValueKey('forum-post-title'),
+                key: ValueKey('forum-post-title'),
                 controller: _title,
                 autofocus: true,
                 maxLength: 100,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: 'Title',
                   counterText: '',
                 ),
               ),
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               TextField(
-                key: const ValueKey('forum-post-message'),
+                key: ValueKey('forum-post-message'),
                 controller: _message,
                 minLines: 5,
                 maxLines: 12,
                 maxLength: 2000,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: 'Enter a message…',
                   counterText: '',
                 ),
               ),
               if (widget.channel.availableTags.isNotEmpty) ...[
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
                 Text(_requiresTag ? 'Tags · Required' : 'Tags',
-                    style: const TextStyle(fontWeight: FontWeight.w700)),
-                const SizedBox(height: 8),
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                SizedBox(height: 8),
                 Wrap(
                   spacing: 7,
                   runSpacing: 7,
@@ -915,12 +1040,12 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                 ),
               ],
               if (_attachments.isNotEmpty) ...[
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
                 for (final attachment in _attachments)
                   ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.insert_drive_file_outlined),
+                    leading: Icon(Icons.insert_drive_file_outlined),
                     title: Text(attachment.name),
                     trailing: IconButton(
                       tooltip: 'Remove attachment',
@@ -928,22 +1053,22 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                           ? null
                           : () =>
                               setState(() => _attachments.remove(attachment)),
-                      icon: const Icon(Icons.close_rounded),
+                      icon: Icon(Icons.close_rounded),
                     ),
                   ),
               ],
               if (canAttach) ...[
-                const SizedBox(height: 10),
+                SizedBox(height: 10),
                 OutlinedButton.icon(
                   onPressed:
                       _busy || _attachments.length >= 10 ? null : _pickFiles,
-                  icon: const Icon(Icons.add_photo_alternate_outlined),
-                  label: const Text('Add files'),
+                  icon: Icon(Icons.add_photo_alternate_outlined),
+                  label: Text('Add files'),
                 ),
               ],
               if (_error case final error?) ...[
-                const SizedBox(height: 12),
-                Text(error, style: const TextStyle(color: KaedeColors.danger)),
+                SizedBox(height: 12),
+                Text(error, style: TextStyle(color: context.kaede.danger)),
               ],
             ],
           ),

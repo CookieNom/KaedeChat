@@ -48,7 +48,7 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
   @override
   void initState() {
     super.initState();
-    requestId = const Uuid().v4().replaceAll('-', '');
+    requestId = Uuid().v4().replaceAll('-', '');
     challengeUri = Uri.https(
       widget.instance.value,
       '/api/v1/auth/native-challenge',
@@ -59,7 +59,7 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
     );
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(KaedeColors.canvas)
+      ..setBackgroundColor(context.kaede.canvas)
       ..addJavaScriptChannel(
         'KaedeChallenge',
         onMessageReceived: _receive,
@@ -133,11 +133,11 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Security check')),
+        appBar: AppBar(title: Text('Security check')),
         body: Stack(
           children: [
             WebViewWidget(controller: controller),
-            if (loading) const Center(child: CircularProgressIndicator()),
+            if (loading) Center(child: CircularProgressIndicator()),
             if (error case final message?)
               Align(
                 alignment: Alignment.bottomCenter,
@@ -153,7 +153,7 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
                           });
                           controller.reload();
                         },
-                        child: const Text('Retry'),
+                        child: Text('Retry'),
                       ),
                     ],
                   ),

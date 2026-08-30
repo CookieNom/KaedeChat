@@ -123,9 +123,6 @@ async def queue_terminal_room_deletion(
     }
     if actor.id < 0 or actor.origin_domain == "":
         raise ValueError("terminal room actor is invalid")
-    if room_kind == "guild" and actor.origin_domain != settings.domain:
-        raise ValueError("guild terminal deletion actor must be local")
-
     await lock_terminal_room(session, room_kind, room_id, room_domain)
     normalized_destinations.update(
         await session.scalars(
@@ -198,9 +195,10 @@ async def queue_terminal_room_deletion(
                 cast(User, actor),
                 _event_content(room_kind, content, destination, generation),
                 context=context,
-                authority_attested_actor=(
-                    room_kind == "group_dm" and actor.origin_domain != settings.domain
-                ),
+                # This helper only emits exact terminal room controls.  The
+                # envelope builder independently restricts remote guild actors
+                # to the exact guild-deleted shape.
+                retained_authority_attested_actor=actor.origin_domain != settings.domain,
             )
             if terminal_room_event_ref(envelope) != (room_kind, room_id, room_domain):
                 raise RuntimeError("generated terminal room envelope is invalid")

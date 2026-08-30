@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api, userErrorMessage } from '$lib/api/client';
+  import { applyTtsPreferences } from '$lib/chat/tts';
   import CommandSwitcher from '$lib/components/CommandSwitcher.svelte';
+  import InteractionOverlay from '$lib/components/InteractionOverlay.svelte';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
   import {
     browserNotifications,
@@ -60,6 +62,7 @@
       authenticatedGateway.client.setPresence(presence_preference);
       developerMode.apply(notification_settings);
       browserNotifications.apply(notification_settings);
+      applyTtsPreferences(notification_settings);
       notificationSettingsLoaded = true;
       browserNotifications.clearHealthIssue('settings');
     } catch (caught) {
@@ -221,6 +224,7 @@
 
 {@render children()}
 <CommandSwitcher />
+<InteractionOverlay />
 
 {#if authenticatedGateway.status.state === 'reconnecting' || authenticatedGateway.status.state === 'offline' || authenticatedGateway.status.state === 'degraded'}
   <aside

@@ -3,15 +3,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import cast
 
-from sqlalchemy import and_, exists, or_, select, tuple_
+from sqlalchemy import and_, exists, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.guild_revision import queue_guild_mutation
-from app.chat.payloads import emoji_payload, role_payload, sticker_payload
+from app.chat.guild_revision import guild_authority_owner, queue_guild_mutation
+from app.chat.payloads import (
+    emoji_payload,
+    role_payload,
+    soundboard_sound_payload,
+    sticker_payload,
+)
 from app.core.settings import Settings
 from app.core.types import MAX_SNOWFLAKE
-from app.db.models import Attachment, Emoji, Guild, MediaTombstoneSource, Role, Sticker, User
-from app.federation.relationships import queue_friend_profile_updates
+from app.db.materialization import materialize_updated_at
+from app.db.models import (
+    Attachment,
+    Emoji,
+    Guild,
+    MediaTombstoneSource,
+    Message,
+    Role,
+    SoundboardSound,
+    Sticker,
+    User,
+    Webhook,
+)
+from app.federation.relationships import queue_profile_updates
 from app.media.digest_revocation import (
     DIGEST_REVOCATION_STATUSES,
     lock_asset_digest,
@@ -27,7 +44,7 @@ class TerminalAssetInvalidation:
     guild: Guild | None = None
     dispatch_type: str | None = None
     dispatch_payload: dict[str, object] | None = None
-    friend_destinations: set[str] = field(default_factory=set)
+    profile_destinations: set[str] = field(default_factory=set)
 
 
 def _binding_id(raw: str) -> int | None:
@@ -66,10 +83,9 @@ async def _locked_guild_nowait(
 
 
 async def _guild_owner(session: AsyncSession, settings: Settings, guild: Guild) -> User:
-    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-    if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-        raise RuntimeError("local guild asset invalidation has no authoritative signer")
-    return owner
+    # Every binding resolver acquires the guild row with NOWAIT before it
+    # reaches this helper, so reusing that lock avoids an inverse wait.
+    return await guild_authority_owner(session, settings, guild, for_update=False)
 
 
 async def _invalidate_user_asset(
@@ -93,8 +109,8 @@ async def _invalidate_user_asset(
         return None
     setattr(user, field_name, None)
     user.profile_version += 1
-    destinations = await queue_friend_profile_updates(session, settings, user)
-    return TerminalAssetInvalidation(user=user, friend_destinations=destinations)
+    destinations = await queue_profile_updates(session, settings, user)
+    return TerminalAssetInvalidation(user=user, profile_destinations=destinations)
 
 
 async def _invalidate_guild_asset(
@@ -221,6 +237,7 @@ async def _invalidate_role_asset(
         return None
     actor = await _guild_owner(session, settings, guild)
     role.icon_hash = None
+    await materialize_updated_at(session, role)
     rendered = role_payload(role)
     await queue_guild_mutation(
         session,
@@ -286,6 +303,128 @@ async def _invalidate_sticker_asset(
     )
 
 
+async def _invalidate_soundboard_asset(
+    session: AsyncSession,
+    settings: Settings,
+    attachment: Attachment,
+    parts: list[str],
+) -> TerminalAssetInvalidation | None:
+    if len(parts) != 3 or parts[1] != settings.domain:
+        return None
+    sound_id = _binding_id(parts[2])
+    if sound_id is None:
+        return None
+    candidate = await session.get(SoundboardSound, (sound_id, parts[1]))
+    if candidate is None:
+        return None
+    guild = await _locked_guild_nowait(session, candidate.guild_id, candidate.guild_domain)
+    if guild is None:
+        return None
+    sound = await session.scalar(
+        select(SoundboardSound)
+        .where(SoundboardSound.id == sound_id, SoundboardSound.origin_domain == parts[1])
+        .with_for_update(nowait=True)
+        .execution_options(populate_existing=True)
+    )
+    if sound is None or (sound.guild_id, sound.guild_domain) != (
+        guild.id,
+        guild.origin_domain,
+    ):
+        return None
+    if attachment.content_sha256 is None or sound.media_hash != attachment.content_sha256:
+        return None
+    actor = await _guild_owner(session, settings, guild)
+    rendered = soundboard_sound_payload(sound)
+    await session.delete(sound)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        actor,
+        "guild.soundboard.sound.delete",
+        {"sound": rendered},
+    )
+    sounds = list(
+        await session.scalars(
+            select(SoundboardSound)
+            .where(
+                SoundboardSound.guild_id == guild.id,
+                SoundboardSound.guild_domain == guild.origin_domain,
+            )
+            .order_by(SoundboardSound.origin_domain, SoundboardSound.id)
+        )
+    )
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        actor,
+        "guild.soundboard.sounds.update",
+        {
+            "guild_id": str(guild.id),
+            "guild_domain": guild.origin_domain,
+            "soundboard_sounds": [soundboard_sound_payload(item) for item in sounds],
+        },
+    )
+    return TerminalAssetInvalidation(
+        guild=guild,
+        dispatch_type="GUILD_SOUNDBOARD_SOUND_DELETE",
+        dispatch_payload=rendered,
+    )
+
+
+async def _invalidate_webhook_avatar(
+    session: AsyncSession,
+    settings: Settings,
+    attachment: Attachment,
+    parts: list[str],
+) -> TerminalAssetInvalidation | None:
+    if len(parts) != 4 or parts[1] != settings.domain or parts[3] != "avatar":
+        return None
+    webhook_id = _binding_id(parts[2])
+    if webhook_id is None:
+        return None
+    candidate = await session.get(Webhook, webhook_id)
+    if candidate is None or candidate.guild_domain != parts[1]:
+        return None
+    guild = await _locked_guild_nowait(session, candidate.guild_id, candidate.guild_domain)
+    if guild is None:
+        return None
+    webhook = await session.scalar(
+        select(Webhook)
+        .where(Webhook.id == webhook_id, Webhook.guild_domain == parts[1])
+        .with_for_update(nowait=True)
+        .execution_options(populate_existing=True)
+    )
+    if (
+        webhook is None
+        or attachment.content_sha256 is None
+        or webhook.avatar_hash != attachment.content_sha256
+    ):
+        return None
+    old_hash = webhook.avatar_hash
+    webhook.avatar_hash = None
+    await session.execute(
+        update(Message)
+        .where(
+            Message.webhook_id == webhook.id,
+            Message.webhook_domain == webhook.guild_domain,
+            Message.webhook_avatar_hash == old_hash,
+        )
+        .values(webhook_avatar_hash=None)
+    )
+    return TerminalAssetInvalidation(
+        guild=guild,
+        dispatch_type="WEBHOOKS_UPDATE",
+        dispatch_payload={
+            "guild_id": str(webhook.guild_id),
+            "guild_domain": webhook.guild_domain,
+            "channel_id": str(webhook.channel_id),
+            "channel_domain": webhook.channel_domain,
+        },
+    )
+
+
 async def _invalidate_one_terminal_asset_binding(
     session: AsyncSession,
     settings: Settings,
@@ -305,6 +444,10 @@ async def _invalidate_one_terminal_asset_binding(
         result = await _invalidate_emoji_asset(session, settings, attachment, parts)
     elif parts[0] == "sticker":
         result = await _invalidate_sticker_asset(session, settings, attachment, parts)
+    elif parts[0] == "soundboard":
+        result = await _invalidate_soundboard_asset(session, settings, attachment, parts)
+    elif parts[0] == "webhook":
+        result = await _invalidate_webhook_avatar(session, settings, attachment, parts)
     else:
         result = None
     # A terminal attachment must never remain publicly bound, including when a

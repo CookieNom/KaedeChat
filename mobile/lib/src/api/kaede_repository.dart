@@ -8,13 +8,157 @@ import 'package:kaede_mobile/src/auth/password_kdf.dart';
 import 'package:kaede_mobile/src/auth/password_vault.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/application_command_permissions.dart';
+import 'package:kaede_mobile/src/domain/application_directory.dart';
+import 'package:kaede_mobile/src/domain/application_installations.dart';
+import 'package:kaede_mobile/src/domain/bot_e2ee_participation.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
+import 'package:kaede_mobile/src/domain/reaction_management.dart';
+import 'package:kaede_mobile/src/domain/rich_content.dart';
 import 'package:uuid/uuid.dart';
 
 List<String> messageAttachmentIds(Iterable<EntityRef> attachments) =>
     attachments.map((reference) => reference.id.value).toList(growable: false);
+
+final class EncryptedForumThreadReservation {
+  const EncryptedForumThreadReservation({
+    required this.channel,
+    required this.clientNonce,
+    required this.claimed,
+  });
+
+  final KaedeChannel channel;
+  final String clientNonce;
+  final bool claimed;
+}
+
+Map<String, Object?> interactionRequestData(
+  Map<String, Object?> plaintext, {
+  Map<String, Object?>? encryptedPayload,
+  List<String> attachmentIds = const <String>[],
+}) {
+  if (encryptedPayload == null) {
+    if (attachmentIds.isNotEmpty) {
+      throw ArgumentError(
+        'Opaque interaction attachments require an encrypted payload.',
+      );
+    }
+    return plaintext;
+  }
+  return <String, Object?>{
+    ...plaintext,
+    'options': const <String, Object?>{},
+    'values': const <String>[],
+    'components': const <Map<String, Object?>>[],
+    'encrypted_payload': encryptedPayload,
+    'attachment_ids': attachmentIds,
+  };
+}
+
+({List<KaedeMessage> items, bool hasMore}) parsePinnedMessagePage(
+  Map<String, Object?> payload, {
+  required EntityRef channel,
+  DateTime? before,
+}) {
+  final rawItems = strictNetworkObjectList(
+    payload['items'],
+    label: 'Pinned message items',
+  );
+  if (rawItems.length > 50 || payload['has_more'] is! bool) {
+    throw const FormatException('Pinned message page is invalid.');
+  }
+  final items = <KaedeMessage>[];
+  final seen = <EntityRef>{};
+  DateTime? previous;
+  for (final rawItem in rawItems) {
+    final rawPinnedAt = rawItem['pinned_at'];
+    final rawMessage = rawItem['message'];
+    if (rawPinnedAt is! String || rawMessage is! Map) {
+      throw const FormatException('Pinned message entry is invalid.');
+    }
+    final pinnedAt = DateTime.tryParse(rawPinnedAt);
+    if (pinnedAt == null ||
+        !rawPinnedAt.contains(RegExp(r'(Z|[+-]\d\d:\d\d)$'))) {
+      throw const FormatException('Pinned message timestamp is invalid.');
+    }
+    final utcPinnedAt = pinnedAt.toUtc();
+    if ((before != null && !utcPinnedAt.isBefore(before.toUtc())) ||
+        (previous != null && utcPinnedAt.isAfter(previous))) {
+      throw const FormatException('Pinned message page is out of order.');
+    }
+    final normalized = Map<String, Object?>.from(rawMessage);
+    normalized['pinned'] = true;
+    normalized['pinned_at'] = utcPinnedAt.toIso8601String();
+    final message = KaedeMessage.fromJson(normalized);
+    if (message.channelRef != channel || !seen.add(message.ref)) {
+      throw const FormatException('Pinned message page linkage is invalid.');
+    }
+    items.add(message);
+    previous = utcPinnedAt;
+  }
+  return (
+    items: List<KaedeMessage>.unmodifiable(items),
+    hasMore: payload['has_more']! as bool,
+  );
+}
+
+Map<String, Object?> _applicationCommandLineageData({
+  required String integrationType,
+  String? dmCapabilityId,
+  String? dmCapabilityRevision,
+}) {
+  final capabilityBound = integrationType == 'dm_capability';
+  if (capabilityBound !=
+          (dmCapabilityId != null && dmCapabilityRevision != null) ||
+      !capabilityBound &&
+          (dmCapabilityId != null || dmCapabilityRevision != null) ||
+      capabilityBound &&
+          (!RegExp(r'^kbdg_[A-Za-z0-9_-]{43}$').hasMatch(dmCapabilityId!) ||
+              !RegExp(r'^[1-9][0-9]{0,18}$').hasMatch(dmCapabilityRevision!) ||
+              BigInt.parse(dmCapabilityRevision) >
+                  BigInt.parse('9223372036854775807'))) {
+    throw ArgumentError(
+      'Bot-DM command capability identity and revision must be supplied together.',
+    );
+  }
+  return <String, Object?>{
+    'integration_type': integrationType,
+    if (dmCapabilityId != null) 'dm_capability_id': dmCapabilityId,
+    if (dmCapabilityRevision != null)
+      'dm_capability_revision': dmCapabilityRevision,
+  };
+}
+
+final class MessageForwardSuccess {
+  const MessageForwardSuccess(
+      {required this.destination, required this.message});
+
+  final EntityRef destination;
+  final KaedeMessage message;
+}
+
+final class MessageForwardFailure {
+  const MessageForwardFailure({
+    required this.destination,
+    required this.status,
+    required this.error,
+  });
+
+  final EntityRef destination;
+  final int status;
+  final Map<String, Object?> error;
+}
+
+final class MessageForwardResult {
+  const MessageForwardResult({required this.forwards, required this.failures});
+
+  final List<MessageForwardSuccess> forwards;
+  final List<MessageForwardFailure> failures;
+}
 
 Map<String, Object?> messageReportRequestData(
   EntityRef message, {
@@ -73,6 +217,13 @@ final class ReactionUserPage {
   final EntityRef? nextAfter;
 }
 
+final class PollVoterPage {
+  const PollVoterPage({required this.items, required this.nextAfter});
+
+  final List<KaedeUser> items;
+  final EntityRef? nextAfter;
+}
+
 /// Completes the two-phase binding required for scanned profile media.
 ///
 /// The first commit queues processing and commonly returns a pending attachment.
@@ -80,22 +231,17 @@ final class ReactionUserPage {
 /// to the user, guild, or emoji record.
 Future<Map<String, Object?>> commitScannedMedia({
   required Future<Map<String, Object?>> Function() commit,
-  required Future<Map<String, Object?>> Function() status,
   Duration pollInterval = const Duration(seconds: 1),
   int maxPollAttempts = 30,
 }) async {
   if (maxPollAttempts < 1) {
     throw ArgumentError.value(maxPollAttempts, 'maxPollAttempts');
   }
-  final initial = await commit();
-  final initialStatus = '${initial['scan_status'] ?? 'pending'}';
-  if (initialStatus == 'clean') return initial;
-  _throwForTerminalMediaStatus(initialStatus);
-
   for (var attempt = 0; attempt < maxPollAttempts; attempt += 1) {
-    final attachment = await status();
-    final scanStatus = '${attachment['scan_status'] ?? 'pending'}';
-    if (scanStatus == 'clean') return commit();
+    final result = await commit();
+    final rawStatus = result['scan_status'];
+    if (rawStatus == null || rawStatus == 'clean') return result;
+    final scanStatus = '$rawStatus';
     _throwForTerminalMediaStatus(scanStatus);
     if (attempt + 1 < maxPollAttempts && pollInterval > Duration.zero) {
       await Future<void>.delayed(pollInterval);
@@ -448,6 +594,13 @@ final class KaedeRepository {
           .toList();
   Future<KaedeGuild> guild(EntityRef ref) async =>
       KaedeGuild.fromJson(await api.getJson('/api/v1/guilds/${ref.wire}'));
+  Future<List<VoiceRegion>> voiceRegions(EntityRef guild) async =>
+      (await api.getList(
+        '/api/v1/voice/regions',
+        query: <String, Object?>{'guild_ref': guild.wire},
+      ))
+          .map(VoiceRegion.fromJson)
+          .toList(growable: false);
   Future<GuildSelfModerationStatus> selfModerationStatus(
           EntityRef guild) async =>
       GuildSelfModerationStatus.fromJson(await api.getJson(
@@ -499,7 +652,7 @@ final class KaedeRepository {
       ));
   Future<void> reorderChannels(
       EntityRef guild, List<Map<String, Object?>> positions) async {
-    await api.sendJsonList(
+    await api.sendJson(
       'PATCH',
       '/api/v1/guilds/${guild.wire}/channels',
       data: <String, Object?>{'channels': positions},
@@ -730,6 +883,75 @@ final class KaedeRepository {
         },
       ));
 
+  Future<EncryptedForumThreadReservation> reserveEncryptedForumThread({
+    required EntityRef parent,
+    required String name,
+    required String clientNonce,
+    int? autoArchiveDuration,
+    List<String> appliedTagIds = const <String>[],
+  }) async {
+    if (!RegExp(r'^[A-Za-z0-9._:-]{1,64}$').hasMatch(clientNonce)) {
+      throw ArgumentError(
+          'Encrypted forum starter reservation nonce is invalid.');
+    }
+    final response = await api.sendJson(
+      'POST',
+      '/api/v1/channels/${parent.wire}/threads',
+      data: <String, Object?>{
+        'name': name.trim(),
+        if (autoArchiveDuration != null)
+          'auto_archive_duration': autoArchiveDuration,
+        if (appliedTagIds.isNotEmpty) 'applied_tag_ids': appliedTagIds,
+        'starter_reservation_nonce': clientNonce,
+      },
+    );
+    if (response['starter_message'] != null ||
+        response['message'] != null ||
+        response['starter_reservation'] is! Map) {
+      throw const FormatException(
+        'Encrypted forum starter reservation response is invalid.',
+      );
+    }
+    final raw = Map<String, Object?>.from(response);
+    final reservation = Map<String, Object?>.from(
+      raw['starter_reservation']! as Map,
+    );
+    if (reservation.length != 2 ||
+        reservation['client_nonce'] != clientNonce ||
+        reservation['claimed'] is! bool) {
+      throw const FormatException(
+        'Encrypted forum starter reservation response is invalid.',
+      );
+    }
+    return EncryptedForumThreadReservation(
+      channel: KaedeChannel.fromJson(raw),
+      clientNonce: clientNonce,
+      claimed: reservation['claimed']! as bool,
+    );
+  }
+
+  Future<KaedeMessage> claimEncryptedForumStarter({
+    required EntityRef thread,
+    required String clientNonce,
+    required Map<String, Object?> e2ee,
+    List<EntityRef> attachments = const <EntityRef>[],
+    List<EntityRef> mentionUsers = const <EntityRef>[],
+  }) async =>
+      KaedeMessage.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${thread.wire}/starter',
+        data: <String, Object?>{
+          'content': null,
+          'e2ee': e2ee,
+          'client_nonce': clientNonce,
+          'attachment_ids': messageAttachmentIds(attachments),
+          'mention_user_ids': mentionUsers
+              .map((reference) => reference.wire)
+              .toSet()
+              .toList(growable: false),
+        },
+      ));
+
   Future<KaedeChannel> createThreadFromMessage({
     required EntityRef parent,
     required EntityRef message,
@@ -900,22 +1122,170 @@ final class KaedeRepository {
     EntityRef? replyTo,
     EntityRef? replyAuthor,
     List<EntityRef> mentionUsers = const <EntityRef>[],
+    List<EntityRef> stickerIds = const <EntityRef>[],
+    RichPollDraft? poll,
+    EntityRef? forwardedMessage,
     String? nonce,
+    bool tts = false,
+    bool voiceMessage = false,
   }) =>
       api.sendJson('POST', '/api/v1/channels/${channel.wire}/messages',
           data: <String, Object?>{
             if (content?.isNotEmpty == true) 'content': content,
             if (e2ee != null) 'e2ee': e2ee,
+            if (tts) 'tts': true,
+            if (voiceMessage) 'voice_message': true,
+            if (stickerIds.isNotEmpty)
+              'sticker_ids': stickerIds.map((item) => item.wire).toList(),
             // Attachments are local to the channel's home instance. Unlike
             // user/message references, MessageCreate expects bare snowflakes.
             'attachment_ids': messageAttachmentIds(attachments),
             if (replyTo != null) 'referenced_message_id': replyTo.wire,
+            if (poll != null) 'poll': poll.toJson(),
+            if (forwardedMessage != null)
+              'forwarded_message_id': forwardedMessage.wire,
             'mention_user_ids': <String>{
               ...mentionUsers.map((ref) => ref.wire),
               if (replyAuthor != null) replyAuthor.wire,
             }.toList(),
             'client_nonce': nonce ?? const Uuid().v4(),
           });
+
+  Future<KaedeMessage> createPollMessage(
+    EntityRef channel,
+    RichPollDraft poll,
+  ) async =>
+      KaedeMessage.fromJson(await sendMessage(channel, poll: poll));
+
+  Future<MessageForwardResult> forwardMessage({
+    required EntityRef sourceChannel,
+    required EntityRef sourceMessage,
+    required List<EntityRef> destinationChannels,
+    String? content,
+  }) async {
+    final response = await api.sendJson(
+      'POST',
+      '/api/v1/channels/${sourceChannel.wire}/messages/${sourceMessage.wire}/forward',
+      data: <String, Object?>{
+        'destination_channel_ids': destinationChannels
+            .map((item) => item.wire)
+            .toList(growable: false),
+        if (content?.trim().isNotEmpty == true) 'content': content!.trim(),
+      },
+    );
+    return _messageForwardResult(
+      response,
+      sourceMessage: sourceMessage,
+      expectedDestinations: destinationChannels.toSet(),
+    );
+  }
+
+  Future<Map<String, Object?>> prepareMessageForward({
+    required EntityRef sourceChannel,
+    required EntityRef sourceMessage,
+    required List<({EntityRef channel, String nonce})> destinations,
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${sourceChannel.wire}/messages/${sourceMessage.wire}/forward/prepare',
+        data: <String, Object?>{
+          'destinations': destinations
+              .map((item) => <String, Object?>{
+                    'channel_id': item.channel.wire,
+                    'client_nonce': item.nonce,
+                  })
+              .toList(growable: false),
+        },
+      );
+
+  Future<MessageForwardResult> submitPreparedMessageForward({
+    required EntityRef sourceChannel,
+    required EntityRef sourceMessage,
+    required List<({EntityRef channel, Map<String, Object?> message})>
+        destinations,
+  }) async =>
+      _messageForwardResult(
+        await api.sendJson(
+          'POST',
+          '/api/v1/channels/${sourceChannel.wire}/messages/${sourceMessage.wire}/forward',
+          data: <String, Object?>{
+            'destinations': destinations
+                .map((item) => <String, Object?>{
+                      'destination_channel_id': item.channel.wire,
+                      'message': item.message,
+                    })
+                .toList(growable: false),
+          },
+        ),
+        sourceMessage: sourceMessage,
+        expectedDestinations: destinations.map((item) => item.channel).toSet(),
+      );
+
+  MessageForwardResult _messageForwardResult(
+    Map<String, Object?> response, {
+    required EntityRef sourceMessage,
+    required Set<EntityRef> expectedDestinations,
+  }) {
+    final forwards = response['forwards'];
+    final failures = response['failures'];
+    if (response.length != 2 ||
+        forwards is! List ||
+        failures is! List ||
+        forwards.any((item) => item is! Map) ||
+        failures.any((item) => item is! Map)) {
+      throw const FormatException('Forward response is invalid.');
+    }
+    final observed = <EntityRef>{};
+    final parsedForwards = forwards.map((raw) {
+      final item = Map<String, Object?>.from(raw as Map);
+      if (item.length != 2 || item['message'] is! Map) {
+        throw const FormatException('Forward response lineage is invalid.');
+      }
+      final destination = EntityRef.fromJson(item['destination_channel_ref']);
+      final message = KaedeMessage.fromJson(
+        Map<String, Object?>.from(item['message']! as Map),
+      );
+      if (!expectedDestinations.contains(destination) ||
+          !observed.add(destination) ||
+          message.channelRef != destination ||
+          message.ref.domain != destination.domain ||
+          message.forwardedMessageRef != sourceMessage) {
+        throw const FormatException('Forward response lineage is invalid.');
+      }
+      return MessageForwardSuccess(destination: destination, message: message);
+    }).toList(growable: false);
+    final parsedFailures = failures.map((raw) {
+      final item = Map<String, Object?>.from(raw as Map);
+      final error = item['error'];
+      final destination = EntityRef.fromJson(item['destination_channel_ref']);
+      final status = item['status'];
+      if (item.length != 3 ||
+          status is! int ||
+          status < 400 ||
+          status > 599 ||
+          error is! Map ||
+          !expectedDestinations.contains(destination) ||
+          !observed.add(destination)) {
+        throw const FormatException('Forward response lineage is invalid.');
+      }
+      return MessageForwardFailure(
+        destination: destination,
+        status: status,
+        error: Map<String, Object?>.from(error),
+      );
+    }).toList(growable: false);
+    if (observed.length != expectedDestinations.length ||
+        !observed.containsAll(expectedDestinations)) {
+      throw const FormatException(
+        'Forward response omitted a requested destination.',
+      );
+    }
+    return MessageForwardResult(
+      forwards: parsedForwards,
+      failures: parsedFailures,
+    );
+  }
+
   Future<KaedeMessage> editMessage(
     EntityRef channel,
     EntityRef message,
@@ -1003,12 +1373,20 @@ final class KaedeRepository {
       api.sendJson(
         'POST',
         '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions',
-        data: <String, Object?>{'emoji': emoji},
+        data: <String, Object?>{'emoji': canonicalReactionEmoji(emoji)},
       );
   Future<void> removeReaction(
           EntityRef channel, EntityRef message, String emoji) =>
       api.sendJson('DELETE',
-          '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(emoji)}');
+          '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(canonicalReactionEmoji(emoji))}/@me');
+  Future<void> clearReactions(EntityRef channel, EntityRef message) =>
+      api.sendJson('DELETE', reactionClearEndpoint(channel, message));
+  Future<void> clearReactionGroup(
+          EntityRef channel, EntityRef message, String emoji) =>
+      api.sendJson(
+        'DELETE',
+        reactionClearEndpoint(channel, message, emoji: emoji),
+      );
   Future<ReactionUserPage> reactionUsers(
     EntityRef channel,
     EntityRef message,
@@ -1016,21 +1394,18 @@ final class KaedeRepository {
     EntityRef? after,
     int limit = 50,
   }) async {
+    final canonicalEmoji = canonicalReactionEmoji(emoji);
     final payload = await api.getJson(
-      '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(emoji)}',
+      '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(canonicalEmoji)}',
       query: <String, Object?>{
         'limit': limit,
         if (after != null) 'after': after.wire,
       },
     );
-    final rawItems = payload['items'];
-    final items = rawItems is List
-        ? rawItems
-            .whereType<Map<Object?, Object?>>()
-            .map((item) => KaedeUser.fromJson(
-                item.map((key, value) => MapEntry('$key', value))))
-            .toList(growable: false)
-        : const <KaedeUser>[];
+    final items = strictNetworkObjectList(
+      payload['items'],
+      label: 'Reaction users',
+    ).map(KaedeUser.fromJson).toList(growable: false);
     final rawNext = payload['next_after'];
     return ReactionUserPage(
       items: items,
@@ -1042,13 +1417,54 @@ final class KaedeRepository {
   }
 
   Future<void> pin(EntityRef channel, EntityRef message) => api.sendJson(
-      'PUT', '/api/v1/channels/${channel.wire}/pins/${message.wire}');
+      'PUT', '/api/v1/channels/${channel.wire}/messages/pins/${message.wire}');
   Future<void> unpin(EntityRef channel, EntityRef message) => api.sendJson(
-      'DELETE', '/api/v1/channels/${channel.wire}/pins/${message.wire}');
-  Future<List<KaedeMessage>> pins(EntityRef channel) async =>
-      (await api.getList('/api/v1/channels/${channel.wire}/pins'))
-          .map(KaedeMessage.fromJson)
-          .toList();
+      'DELETE',
+      '/api/v1/channels/${channel.wire}/messages/pins/${message.wire}');
+  Future<List<KaedeMessage>> pins(EntityRef channel) async {
+    final result = <KaedeMessage>[];
+    final seen = <EntityRef>{};
+    DateTime? before;
+    for (var pageIndex = 0; pageIndex < 5; pageIndex += 1) {
+      final payload = await api.getJson(
+        '/api/v1/channels/${channel.wire}/messages/pins',
+        query: <String, Object?>{
+          'limit': 50,
+          if (before != null) 'before': before.toUtc().toIso8601String(),
+        },
+      );
+      final page = parsePinnedMessagePage(
+        payload,
+        channel: channel,
+        before: before,
+      );
+      for (final message in page.items) {
+        if (!seen.add(message.ref)) {
+          throw const FormatException(
+            'Pinned message pagination repeated a message.',
+          );
+        }
+        result.add(message);
+      }
+      if (!page.hasMore) return List<KaedeMessage>.unmodifiable(result);
+      if (page.items.isEmpty) {
+        throw const FormatException(
+          'Pinned message pagination did not advance.',
+        );
+      }
+      final nextBefore = page.items.last.pinnedAt!;
+      if (before != null && !nextBefore.isBefore(before)) {
+        throw const FormatException(
+          'Pinned message pagination did not advance.',
+        );
+      }
+      before = nextBefore;
+    }
+    throw const FormatException(
+      'Pinned message response exceeds the 250-message channel limit.',
+    );
+  }
+
   Future<void> acknowledge(EntityRef channel, EntityRef message) =>
       api.sendJson(
         'POST',
@@ -1165,11 +1581,21 @@ final class KaedeRepository {
           if (reason != null) 'X-Audit-Log-Reason': reason
         },
       );
-  Future<List<Map<String, Object?>>> auditLog(EntityRef guild,
-          {String? before}) =>
+  Future<List<Map<String, Object?>>> auditLog(
+    EntityRef guild, {
+    String? before,
+    EntityRef? userId,
+    int? actionType,
+    String? targetType,
+    int limit = 50,
+  }) =>
       api.getList('/api/v1/guilds/${guild.wire}/audit-logs',
           query: <String, Object?>{
+            'limit': limit,
             if (before != null) 'before': before,
+            if (userId != null) 'user_id': userId.wire,
+            if (actionType != null) 'action_type': actionType,
+            if (targetType?.isNotEmpty == true) 'target_type': targetType,
           });
 
   Future<KaedeRole> createRole(
@@ -1246,6 +1672,8 @@ final class KaedeRepository {
 
   Future<List<Map<String, Object?>>> invites(EntityRef guild) =>
       api.getList('/api/v1/guilds/${guild.wire}/invites');
+  Future<List<Map<String, Object?>>> channelInvites(EntityRef channel) =>
+      api.getList('/api/v1/channels/${channel.wire}/invites');
   Future<Map<String, Object?>> createInvite(
           EntityRef guild, Map<String, Object?> request) =>
       api.sendJson('POST', '/api/v1/guilds/${guild.wire}/invites',
@@ -1254,13 +1682,17 @@ final class KaedeRepository {
       api.getJson('/api/v1/invites/$code');
   Future<Map<String, Object?>> acceptInvite(String code) =>
       api.sendJson('POST', '/api/v1/invites/$code');
-  Future<void> revokeInvite(String code) =>
-      api.sendJson('DELETE', '/api/v1/invites/$code');
+  Future<void> revokeInvite(String code, {required EntityRef guild}) =>
+      api.sendJson(
+        'DELETE',
+        '/api/v1/invites/${Uri.encodeComponent('$code@${guild.domain.value}')}',
+        query: <String, Object?>{'guild_ref': guild.wire},
+      );
 
   Future<List<Map<String, Object?>>> emojis() =>
       api.getList('/api/v1/users/@me/emojis');
   Future<void> deleteEmoji(EntityRef guild, EntityRef emoji) => api.sendJson(
-      'DELETE', '/api/v1/guilds/${guild.wire}/emojis/${emoji.wire}');
+      'DELETE', '/api/v1/guilds/${guild.wire}/emojis/${emoji.id.value}');
   Future<List<Map<String, Object?>>> stickers() =>
       api.getList('/api/v1/users/@me/stickers');
   Future<void> deleteSticker(EntityRef guild, EntityRef sticker) =>
@@ -1286,7 +1718,15 @@ final class KaedeRepository {
     return commitScannedMedia(
       commit: () => api.sendJson('PUT', path,
           data: <String, Object?>{'attachment_id': attachmentId}),
-      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
+  }
+
+  Future<KaedeUser> removeUserAsset(String kind) async {
+    if (kind != 'avatar' && kind != 'banner') {
+      throw const UserInputException('Choose avatar or banner.');
+    }
+    return KaedeUser.fromJson(
+      await api.sendJson('DELETE', '/api/v1/users/@me/assets/$kind'),
     );
   }
 
@@ -1310,7 +1750,21 @@ final class KaedeRepository {
     return commitScannedMedia(
       commit: () => api.sendJson('PUT', path,
           data: <String, Object?>{'attachment_id': attachmentId}),
-      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
+  }
+
+  Future<KaedeGuild> removeGuildAsset({
+    required EntityRef guild,
+    required String kind,
+  }) async {
+    if (kind != 'icon' && kind != 'banner') {
+      throw const UserInputException('Choose guild icon or banner.');
+    }
+    return KaedeGuild.fromJson(
+      await api.sendJson(
+        'DELETE',
+        '/api/v1/guilds/${guild.wire}/assets/$kind',
+      ),
     );
   }
 
@@ -1334,7 +1788,6 @@ final class KaedeRepository {
     final result = await commitScannedMedia(
       commit: () => api.sendJson('PUT', path,
           data: <String, Object?>{'attachment_id': attachmentId}),
-      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
     );
     return KaedeRole.fromJson(result);
   }
@@ -1371,7 +1824,6 @@ final class KaedeRepository {
             'attachment_id': attachmentId,
             'name': name,
           }),
-      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
     );
   }
 
@@ -1420,7 +1872,6 @@ final class KaedeRepository {
               : null,
         },
       ),
-      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
     );
   }
 
@@ -1433,14 +1884,6 @@ final class KaedeRepository {
         '/api/v1/guilds/${guild.wire}/channels/${channel.wire}/webhooks',
         data: <String, Object?>{'name': name},
       );
-  Future<Map<String, Object?>> updateWebhook(
-          String id, Map<String, Object?> patch) =>
-      api.sendJson('PATCH', '/api/v1/webhooks/$id', data: patch);
-  Future<Map<String, Object?>> rotateWebhook(String id) =>
-      api.sendJson('POST', '/api/v1/webhooks/$id/rotate');
-  Future<void> deleteWebhook(String id) =>
-      api.sendJson('DELETE', '/api/v1/webhooks/$id');
-
   Future<Map<String, Object?>> guildNotificationSettings(EntityRef guild) =>
       api.getJson('/api/v1/guilds/${guild.wire}/notification-settings');
   Future<List<Map<String, Object?>>> guildNotificationSettingsList() =>
@@ -1471,6 +1914,20 @@ final class KaedeRepository {
       );
   Future<Map<String, Object?>> voiceOccupancy(EntityRef channel) =>
       api.getJson('/api/v1/channels/${channel.wire}/voice/occupancy');
+  Future<String?> voiceChannelStatus(EntityRef channel) async {
+    final response =
+        await api.getJson('/api/v1/channels/${channel.wire}/voice-status');
+    return response['status'] as String?;
+  }
+
+  Future<void> setVoiceChannelStatus(EntityRef channel, String? status) async {
+    await api.sendJson(
+      'PUT',
+      '/api/v1/channels/${channel.wire}/voice-status',
+      data: <String, Object?>{'status': status},
+    );
+  }
+
   Future<void> updateMemberVoice(
     EntityRef guild,
     EntityRef user, {
@@ -1578,6 +2035,8 @@ final class KaedeRepository {
     required int size,
     String encryptionMode = 'plaintext',
     String? encryptionProtocol,
+    double? durationSecs,
+    String? waveform,
   }) =>
       api.sendJson('POST', '/api/v1/channels/${channel.wire}/attachments',
           data: <String, Object?>{
@@ -1587,6 +2046,8 @@ final class KaedeRepository {
             'encryption_mode': encryptionMode,
             if (encryptionProtocol != null)
               'encryption_protocol': encryptionProtocol,
+            if (durationSecs != null) 'duration_secs': durationSecs,
+            if (waveform != null) 'waveform': waveform,
           });
 
   Future<Map<String, Object?>> e2eeDeviceChallenge({
@@ -1813,6 +2274,8 @@ final class KaedeRepository {
     required String filename,
     required String contentType,
     required File file,
+    double? durationSecs,
+    String? waveform,
     void Function(int sent, int total)? onProgress,
   }) async {
     final size = await file.length();
@@ -1821,6 +2284,8 @@ final class KaedeRepository {
       filename: filename,
       contentType: contentType,
       size: size,
+      durationSecs: durationSecs,
+      waveform: waveform,
     );
     await api.putPresignedFile(
       ticket['upload_url']! as String,
@@ -1850,6 +2315,7 @@ final class KaedeRepository {
         attachmentMediaPath(
           attachment.ref,
           historyMediaUrl: attachment.historyMediaUrl,
+          privateMediaUrl: attachment.privateMediaUrl,
         ),
         destination,
       );
@@ -1864,29 +2330,499 @@ final class KaedeRepository {
         'limit': 30,
       });
 
-  Future<List<Map<String, Object?>>> applicationCommands(EntityRef guild) =>
-      api.getList('/api/v1/guilds/${guild.wire}/application-commands');
+  Future<List<Map<String, Object?>>> applicationCommands(EntityRef channel) =>
+      api.getList('/api/v1/channels/${channel.wire}/application-commands');
 
-  Future<void> invokeApplicationCommand({
+  Future<MobileDirectoryPage> applicationDirectory({
+    String? query,
+    String? collection,
+    Domain? domain,
+    int limit = 50,
+  }) async {
+    final home = api.tokens?.instance ?? api.selectedInstance;
+    if (home == null) {
+      throw StateError('Application discovery requires an authenticated home.');
+    }
+    final authority = domain ?? home;
+    final normalizedQuery = query?.trim() ?? '';
+    if (normalizedQuery.length > 100 || limit < 1 || limit > 50) {
+      throw ArgumentError('Application Directory request is out of bounds.');
+    }
+    if (collection != null &&
+        !mobileDirectoryCollectionSlugs.contains(collection)) {
+      throw ArgumentError.value(collection, 'collection');
+    }
+    return MobileDirectoryPage.fromJson(
+      await api.getJson(
+        '/api/v1/application-directory',
+        query: <String, Object?>{
+          if (normalizedQuery.isNotEmpty) 'q': normalizedQuery,
+          if (collection != null) 'collection': collection,
+          'domain': authority.value,
+          'limit': limit,
+        },
+      ),
+      expectedOrigin: authority,
+      expectedCollection: collection,
+      requestedLimit: limit,
+    );
+  }
+
+  Future<MobileBotProfileApplication?> botProfileApplication(
+    EntityRef bot,
+  ) async {
+    try {
+      return MobileBotProfileApplication.fromJson(
+        await api.getJson(
+          '/api/v1/application-directory/bot-profiles/${bot.pathSegment}',
+        ),
+        expectedBot: bot,
+      );
+    } on KaedeException catch (error) {
+      if (error.status == 404) return null;
+      rethrow;
+    }
+  }
+
+  Future<List<UserApplicationInstallation>>
+      userApplicationInstallations() async =>
+          (await api.getList('/api/v1/users/@me/application-installations'))
+              .map(UserApplicationInstallation.fromJson)
+              .toList(growable: false);
+
+  Future<ApplicationInstallInvite> resolveApplicationInstallInvite(
+    EntityRef application,
+    String templateSlug,
+  ) async =>
+      ApplicationInstallInvite.fromJson(
+        await api.getJson(
+          '/api/v1/bot-invites/${application.wire}/${Uri.encodeComponent(templateSlug)}',
+        ),
+      );
+
+  Future<void> installGuildApplication(
+    EntityRef guild,
+    EntityRef application,
+    String templateSlug,
+  ) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/guilds/${guild.wire}/integrations/bots',
+        query: <String, Object?>{
+          'application_ref': application.wire,
+          'template_slug': templateSlug,
+        },
+      );
+
+  Future<UserApplicationInstallation> installUserApplication(
+    EntityRef application, {
+    required List<String> scopes,
+    required List<String> contexts,
+    List<String> intents = userApplicationIntents,
+  }) async =>
+      UserApplicationInstallation.fromJson(
+        await api.sendJson(
+          'POST',
+          '/api/v1/users/@me/application-installations',
+          data: <String, Object?>{
+            'application_ref': application.wire,
+            ...userApplicationGrantData(
+              scopes: scopes,
+              contexts: contexts,
+              intents: intents,
+            ),
+          },
+        ),
+      );
+
+  Future<UserApplicationInstallation> updateUserApplicationInstallation(
+    String installationId, {
+    List<String>? scopes,
+    List<String>? contexts,
+    List<String>? intents,
+  }) async =>
+      UserApplicationInstallation.fromJson(
+        await api.sendJson(
+          'PATCH',
+          '/api/v1/users/@me/application-installations/${Uri.encodeComponent(installationId)}',
+          data: <String, Object?>{
+            if (scopes != null) 'scopes': scopes,
+            if (contexts != null) 'contexts': contexts,
+            if (intents != null) 'intents': intents,
+          },
+        ),
+      );
+
+  Future<void> revokeUserApplicationInstallation(String installationId) =>
+      api.sendJson(
+        'DELETE',
+        '/api/v1/users/@me/application-installations/${Uri.encodeComponent(installationId)}',
+      );
+
+  Future<Map<String, Object?>> invokeApplicationCommand({
     required EntityRef channel,
     required EntityRef application,
+    required String commandId,
+    required String integrationType,
+    String? dmCapabilityId,
+    String? dmCapabilityRevision,
     required String name,
     required String type,
     Map<String, Object?> options = const <String, Object?>{},
+    EntityRef? target,
+    Map<String, Object?>? encryptedPayload,
+    List<String> attachmentIds = const <String>[],
   }) =>
       api.sendJson(
         'POST',
         '/api/v1/channels/${channel.wire}/interactions',
-        data: <String, Object?>{
-          'application_ref': application.wire,
-          'command_name': name,
-          'command_type': type,
-          'options': options,
-        },
+        data: interactionRequestData(
+          <String, Object?>{
+            'application_ref': application.wire,
+            'command_id': commandId,
+            ..._applicationCommandLineageData(
+              integrationType: integrationType,
+              dmCapabilityId: dmCapabilityId,
+              dmCapabilityRevision: dmCapabilityRevision,
+            ),
+            'command_name': name,
+            'command_type': type,
+            if (target != null) 'target_ref': target.wire,
+            'options': options,
+          },
+          encryptedPayload: encryptedPayload,
+          attachmentIds: attachmentIds,
+        ),
+      );
+
+  Future<Map<String, Object?>> autocompleteApplicationCommand({
+    required EntityRef channel,
+    required EntityRef application,
+    required String commandId,
+    required String integrationType,
+    String? dmCapabilityId,
+    String? dmCapabilityRevision,
+    required String name,
+    required String type,
+    required Map<String, Object?> options,
+    required String focusedOption,
+    required int generation,
+    Map<String, Object?>? encryptedPayload,
+    List<String> attachmentIds = const <String>[],
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/interactions',
+        data: interactionRequestData(
+          <String, Object?>{
+            'application_ref': application.wire,
+            'command_id': commandId,
+            ..._applicationCommandLineageData(
+              integrationType: integrationType,
+              dmCapabilityId: dmCapabilityId,
+              dmCapabilityRevision: dmCapabilityRevision,
+            ),
+            'interaction_type': 'autocomplete',
+            'command_name': name,
+            'command_type': type,
+            'options': options,
+            'focused_option': focusedOption,
+            'autocomplete_generation': generation,
+          },
+          encryptedPayload: encryptedPayload,
+          attachmentIds: attachmentIds,
+        ),
+      );
+
+  Future<Map<String, Object?>> invokeMessageComponent({
+    required EntityRef channel,
+    required EntityRef message,
+    required EntityRef application,
+    required int viewVersion,
+    required String customId,
+    List<String> values = const <String>[],
+    Map<String, Object?>? encryptedPayload,
+    List<String> attachmentIds = const <String>[],
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/interactions',
+        data: interactionRequestData(
+          <String, Object?>{
+            'application_ref': application.wire,
+            'interaction_type': 'component',
+            'message_ref': message.wire,
+            if (viewVersion > 0) 'view_version': viewVersion,
+            'custom_id': customId,
+            'values': values,
+          },
+          encryptedPayload: encryptedPayload,
+          attachmentIds: attachmentIds,
+        ),
+      );
+
+  Future<Map<String, Object?>> invokeEphemeralComponent({
+    required EntityRef channel,
+    required EntityRef application,
+    required String responseId,
+    required int viewVersion,
+    required String customId,
+    List<String> values = const <String>[],
+    Map<String, Object?>? encryptedPayload,
+    List<String> attachmentIds = const <String>[],
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/interactions',
+        data: interactionRequestData(
+          <String, Object?>{
+            'application_ref': application.wire,
+            'interaction_type': 'component',
+            'response_id': responseId,
+            'view_version': viewVersion,
+            'custom_id': customId,
+            'values': values,
+          },
+          encryptedPayload: encryptedPayload,
+          attachmentIds: attachmentIds,
+        ),
+      );
+
+  Future<Map<String, Object?>> submitInteractionModal({
+    required EntityRef channel,
+    required EntityRef application,
+    required String responseId,
+    required String customId,
+    required List<Map<String, Object?>> components,
+    Map<String, Object?>? encryptedPayload,
+    List<String> attachmentIds = const <String>[],
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/interactions',
+        data: interactionRequestData(
+          <String, Object?>{
+            'application_ref': application.wire,
+            'interaction_type': 'modal_submit',
+            'response_id': responseId,
+            'custom_id': customId,
+            'components': components,
+          },
+          encryptedPayload: encryptedPayload,
+          attachmentIds: attachmentIds,
+        ),
+      );
+
+  Future<void> setPollVote({
+    required EntityRef channel,
+    required EntityRef message,
+    required int answerId,
+    required bool selected,
+  }) =>
+      api.sendJson(
+        selected ? 'PUT' : 'DELETE',
+        '/api/v1/channels/${channel.wire}/messages/${message.wire}/polls/answers/$answerId/@me',
+      );
+
+  Future<PollVoterPage> pollVoters({
+    required EntityRef channel,
+    required EntityRef message,
+    required int answerId,
+    EntityRef? after,
+    int limit = 50,
+  }) async {
+    final response = await api.getJson(
+      '/api/v1/channels/${channel.wire}/messages/${message.wire}/polls/answers/$answerId',
+      query: <String, Object?>{
+        'limit': limit,
+        if (after != null) 'after': after.wire,
+      },
+    );
+    return PollVoterPage(
+      items: strictNetworkObjectList(
+        response['users'],
+        label: 'Poll voters',
+      ).map(KaedeUser.fromJson).toList(growable: false),
+      nextAfter: response['next_after'] == null
+          ? null
+          : EntityRef.fromJson(response['next_after']),
+    );
+  }
+
+  Future<void> setInteractionPollVote({
+    required String interactionId,
+    required String responseId,
+    required int answerId,
+    required bool selected,
+  }) =>
+      api.sendJson(
+        selected ? 'PUT' : 'DELETE',
+        '/api/v1/interactions/$interactionId/responses/$responseId/polls/answers/$answerId/@me',
+      );
+
+  Future<PollVoterPage> interactionPollVoters({
+    required String interactionId,
+    required String responseId,
+    required int answerId,
+    EntityRef? after,
+    int limit = 50,
+  }) async {
+    final response = await api.getJson(
+      '/api/v1/interactions/$interactionId/responses/$responseId/polls/answers/$answerId',
+      query: <String, Object?>{
+        'limit': limit,
+        if (after != null) 'after': after.wire,
+      },
+    );
+    return PollVoterPage(
+      items: strictNetworkObjectList(
+        response['users'],
+        label: 'Interaction poll voters',
+      ).map(KaedeUser.fromJson).toList(growable: false),
+      nextAfter: response['next_after'] == null
+          ? null
+          : EntityRef.fromJson(response['next_after']),
+    );
+  }
+
+  Future<KaedeMessage> finalizePoll({
+    required EntityRef channel,
+    required EntityRef message,
+  }) async =>
+      KaedeMessage.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/messages/${message.wire}/polls/expire',
+      ));
+
+  Future<KaedeMessage> forwardedMessage({
+    required EntityRef destinationChannel,
+    required EntityRef destinationMessage,
+  }) async =>
+      KaedeMessage.fromJson(
+        await api.getJson(
+          '/api/v1/channels/${destinationChannel.wire}/messages/${destinationMessage.wire}/forwarded',
+        ),
       );
 
   Future<List<Map<String, Object?>>> botIntegrations(EntityRef guild) =>
       api.getList('/api/v1/guilds/${guild.wire}/integrations/bots');
+
+  Future<Map<String, Object?>> updateBotIntegrationChannelRestrictions(
+    EntityRef guild,
+    EntityRef application,
+    Iterable<EntityRef> channelRestrictions,
+  ) =>
+      api.sendJson(
+        'PATCH',
+        '/api/v1/guilds/${guild.wire}/integrations/bots/${application.wire}',
+        data: <String, Object?>{
+          'channel_restrictions': channelRestrictions
+              .map((channel) => channel.wire)
+              .toList(growable: false),
+        },
+      );
+
+  String _botE2eeParticipationPath(
+    EntityRef guild,
+    EntityRef channel,
+    EntityRef application,
+  ) =>
+      '/api/v1/guilds/${guild.wire}/channels/${channel.wire}/e2ee/bots/${application.wire}';
+
+  Future<BotE2eeParticipation> botE2eeParticipation({
+    required EntityRef guild,
+    required EntityRef channel,
+    required EntityRef application,
+  }) async =>
+      BotE2eeParticipation.fromJson(await api.getJson(
+        _botE2eeParticipationPath(guild, channel, application),
+      ));
+
+  Future<BotE2eeParticipation> grantBotE2eeParticipation({
+    required EntityRef guild,
+    required EntityRef channel,
+    required EntityRef application,
+    String? reason,
+  }) async =>
+      BotE2eeParticipation.fromJson(await api.sendJson(
+        'PUT',
+        _botE2eeParticipationPath(guild, channel, application),
+        headers: <String, String>{
+          if (reason?.trim().isNotEmpty == true)
+            'X-Audit-Log-Reason': reason!.trim(),
+        },
+      ));
+
+  Future<BotE2eeParticipation> revokeBotE2eeParticipation({
+    required EntityRef guild,
+    required EntityRef channel,
+    required EntityRef application,
+    String? reason,
+  }) async =>
+      BotE2eeParticipation.fromJson(await api.sendJson(
+        'DELETE',
+        _botE2eeParticipationPath(guild, channel, application),
+        headers: <String, String>{
+          if (reason?.trim().isNotEmpty == true)
+            'X-Audit-Log-Reason': reason!.trim(),
+        },
+      ));
+
+  String _dmBotE2eeParticipationPath(
+    EntityRef channel,
+    EntityRef application,
+  ) =>
+      '/api/v1/channels/${channel.wire}/e2ee/bots/${application.wire}';
+
+  Future<DmBotE2eeParticipation> dmBotE2eeParticipation({
+    required EntityRef channel,
+    required EntityRef application,
+  }) async =>
+      DmBotE2eeParticipation.fromJson(await api.getJson(
+        _dmBotE2eeParticipationPath(channel, application),
+      ));
+
+  Future<DmBotE2eeParticipation> consentToDmBotE2eeParticipation({
+    required EntityRef channel,
+    required EntityRef application,
+  }) async =>
+      DmBotE2eeParticipation.fromJson(await api.sendJson(
+        'PUT',
+        _dmBotE2eeParticipationPath(channel, application),
+      ));
+
+  Future<DmBotE2eeParticipation> revokeDmBotE2eeParticipation({
+    required EntityRef channel,
+    required EntityRef application,
+  }) async =>
+      DmBotE2eeParticipation.fromJson(await api.sendJson(
+        'DELETE',
+        _dmBotE2eeParticipationPath(channel, application),
+      ));
+
+  Future<List<ApplicationCommandPermissionScope>> applicationCommandPermissions(
+    EntityRef application,
+    EntityRef guild,
+  ) async =>
+      (await api.getList(
+        '/api/v1/applications/${application.wire}/guilds/${guild.wire}/commands/permissions',
+      ))
+          .map(ApplicationCommandPermissionScope.fromJson)
+          .toList(growable: false);
+
+  Future<ApplicationCommandPermissionScope> updateApplicationCommandPermissions(
+    EntityRef application,
+    EntityRef guild,
+    EntityRef scope,
+    List<ApplicationCommandPermissionEntry> permissions,
+  ) async =>
+      ApplicationCommandPermissionScope.fromJson(
+        await api.sendJson(
+          'PUT',
+          '/api/v1/applications/${application.wire}/guilds/${guild.wire}/commands/${scope.wire}/permissions',
+          data: commandPermissionUpdateData(permissions),
+        ),
+      );
 
   Future<void> removeBotIntegration(
     EntityRef guild,
@@ -2013,8 +2949,9 @@ final class KaedeRepository {
   }
 }
 
-/// Serializes a complete bottom-to-top role ordering for the local guild API.
-/// Role IDs are local snowflakes; every item needs an optimistic-lock version.
+/// Serializes a complete bottom-to-top role ordering for the qualified guild
+/// authority API. Role IDs are authority-local snowflakes; every item needs an
+/// optimistic-lock version.
 List<Map<String, Object?>> guildRolePositionRequest(List<KaedeRole> roles) {
   final positions = <Map<String, Object?>>[];
   for (var index = 0; index < roles.length; index++) {

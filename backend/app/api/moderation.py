@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import secrets
+import time
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from pydantic import ValidationError
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 from redis.asyncio import Redis
 from sqlalchemy import delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -20,17 +25,23 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.guilds import local_guild
+from app.automod.service import AutoModPostCommit, evaluate_member_profile
+from app.bots.e2ee import revoke_bot_e2ee_access
 from app.bots.installations import (
     cleanup_installation_roles,
     publish_deleted_installation_roles,
     revoke_installations_for_guild_instance,
     revoke_installations_for_guild_member,
 )
-from app.chat.audit import add_audit_entry
+from app.chat.audit import add_audit_entry, normalize_audit_reason
+from app.chat.audit_access import filter_restricted_bot_audit_entries
+from app.chat.audit_payloads import AuditLogEntryPayload, audit_log_payload
 from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
+    build_guild_authority_envelope,
     federation_channel_state,
+    guild_authority_owner,
     queue_guild_access_revocation,
     queue_guild_instance_access_revocation,
     queue_guild_mutation,
@@ -44,25 +55,27 @@ from app.chat.hierarchy import (
 )
 from app.chat.moderation_status import guild_self_moderation_status, sanitize_timeout_reason
 from app.chat.payloads import (
-    audit_payload,
     ban_payload,
     channel_payload,
     instance_ban_payload,
     member_payload,
 )
-from app.chat.permissions import require_permissions
+from app.chat.permissions import bot_guild_permission_grant, require_permissions
 from app.chat.schemas import BanCreate, InstanceBanCreate, MemberUpdate
 from app.chat.thread_membership import (
+    RemovedThreadMembers,
     cleanup_guild_member_threads,
     publish_guild_thread_member_cleanup,
 )
+from app.core.model_validation import UnambiguousInputModel
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
-from app.core.types import EntityRef, Snowflake
+from app.core.types import EntityRef, Snowflake, validate_snowflake
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Attachment,
     AuditLogEntry,
@@ -78,19 +91,99 @@ from app.db.models import (
     User,
 )
 from app.federation.client import signed_request
+from app.federation.guild_management import (
+    guild_management_dict_body,
+    guild_management_list_body,
+    proxy_remote_guild_management,
+    qualified_management_ref,
+    require_guild_management_status,
+)
 from app.federation.guild_media_deletions import queue_guild_media_delete_request
 from app.federation.network import (
     FederationNetworkError,
     decode_federation_response_json,
     normalize_domain,
 )
-from app.federation.schemas import GuildSelfModerationStatus
+from app.federation.schemas import (
+    ActorRef,
+    FederationDomain,
+    GuildSelfModerationStatus,
+    SnowflakeString,
+)
+from app.federation.security import (
+    FederationPrincipal,
+    authenticate_federation,
+    enforce_federation_route_rate_limit,
+    require_guild_federation_access,
+    validated_event_envelope,
+)
 from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages
 from app.media.tombstones import lock_media_tombstone_ref, queue_terminal_attachment_tombstone
 from app.tracker.membership import clear_tracker_assignees, wake_tracker_membership_cleanup
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["moderation"])
+federation_router = APIRouter(tags=["audit log federation"])
+
+AUDIT_LOG_FEDERATION_CAPABILITY = "guild-audit-log/1"
+AUDIT_LOG_FEDERATION_EVENT_TYPE = "guild.audit-log.page"
+AUDIT_LOG_FEDERATION_DEADLINE_SECONDS = 15
+AUDIT_LOG_FEDERATION_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class AuditLogFederationQuery(UnambiguousInputModel):
+    """Canonical audit filters echoed inside the authority-signed response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=50, ge=1, le=100)
+    before: SnowflakeString | None = None
+    after: SnowflakeString | None = None
+    user: ActorRef | None = None
+    action_type: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    target_type: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_.-]*$",
+    )
+
+    @model_validator(mode="after")
+    def one_cursor_direction(self) -> AuditLogFederationQuery:
+        if self.before is not None and self.after is not None:
+            raise ValueError("an audit log query cannot use before and after together")
+        return self
+
+
+class AuditLogFederationRequest(UnambiguousInputModel):
+    """Short-lived, requester-bound authorization request to a guild home."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    guild_id: SnowflakeString
+    guild_domain: FederationDomain
+    requester: ActorRef
+    requesting_instance: FederationDomain
+    request_id: str = Field(pattern=r"^kalr_[A-Za-z0-9_-]{32}$")
+    issued_at: int = Field(ge=0)
+    deadline: int = Field(ge=0)
+    query: AuditLogFederationQuery
+
+    @model_validator(mode="after")
+    def short_lived(self) -> AuditLogFederationRequest:
+        lifetime = self.deadline - self.issued_at
+        if not 1 <= lifetime <= AUDIT_LOG_FEDERATION_DEADLINE_SECONDS:
+            raise ValueError("audit log request deadline is outside the allowed window")
+        return self
+
+
+class AuditLogFederationPage(UnambiguousInputModel):
+    """Authority-signed page whose exact request binding prevents substitution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request: AuditLogFederationRequest
+    entries: list[AuditLogEntryPayload] = Field(max_length=100)
 
 
 async def queue_moderation_push(
@@ -117,12 +210,6 @@ async def queue_moderation_push(
     )
 
 
-def audit_reason(value: str | None) -> str | None:
-    if value is not None and len(value) > 512:
-        raise HTTPException(status_code=400, detail={"code": "AUDIT_REASON_TOO_LONG"})
-    return value
-
-
 def future_expiry(value: datetime | None, *, code: str) -> datetime | None:
     if value is None:
         return None
@@ -136,6 +223,96 @@ def future_expiry(value: datetime | None, *, code: str) -> datetime | None:
 
 def active_expiry(column: InstrumentedAttribute[datetime | None]) -> ColumnElement[bool]:
     return or_(column.is_(None), column > datetime.now(UTC))
+
+
+@dataclass(slots=True)
+class MemberModerationPostCommit:
+    """Best-effort projections for a committed kick or ban mutation."""
+
+    guild: Guild
+    user_id: int
+    user_domain: str
+    member_removed: bool
+    deleted_role_refs: list[tuple[int, str]]
+    removed_thread_members: list[RemovedThreadMembers]
+    e2ee_policy_channels: list[Channel]
+    notification_title: str
+    notification_body: str
+    purged_local_attachments: list[Attachment] = dataclass_field(default_factory=list)
+    media_delivery_wakes: set[str] = dataclass_field(default_factory=set)
+    purged_threads: list[Channel] = dataclass_field(default_factory=list)
+
+    async def publish(
+        self,
+        session: AsyncSession,
+        redis: Redis,
+        snowflake: SnowflakeGenerator,
+        settings: Settings,
+    ) -> None:
+        """Run projections only after the owning SQL transaction commits."""
+
+        if self.member_removed:
+            await wake_tracker_membership_cleanup(self.guild)
+        else:
+            await wake_queued_guild_federation(self.guild)
+        await publish_e2ee_policy_updates(
+            session,
+            redis,
+            settings,
+            self.e2ee_policy_channels,
+        )
+        if self.purged_local_attachments or self.media_delivery_wakes:
+            from app.tasks import federation_deliver, media_local_purge
+
+            for attachment in self.purged_local_attachments:
+                await enqueue_best_effort(
+                    media_local_purge,
+                    attachment.id,
+                    attachment.origin_domain,
+                )
+            for destination in sorted(self.media_delivery_wakes):
+                await enqueue_best_effort(federation_deliver, destination)
+        await publish_deleted_installation_roles(redis, self.guild, self.deleted_role_refs)
+        await publish_guild_thread_member_cleanup(
+            redis,
+            self.guild,
+            self.removed_thread_members,
+        )
+        await materialize_updated_at(session, *self.purged_threads)
+        for thread in self.purged_threads:
+            await publish_dispatch(
+                redis,
+                guild_topic(self.guild.origin_domain, self.guild.id),
+                "THREAD_UPDATE",
+                channel_payload(thread),
+            )
+        if self.member_removed:
+            await publish_dispatch(
+                redis,
+                guild_topic(self.guild.origin_domain, self.guild.id),
+                "GUILD_MEMBER_REMOVE",
+                {
+                    "guild_id": str(self.guild.id),
+                    "guild_domain": self.guild.origin_domain,
+                    "user_id": str(self.user_id),
+                    "user_domain": self.user_domain,
+                },
+            )
+            if self.user_domain == settings.domain:
+                await publish_dispatch(
+                    redis,
+                    user_topic(self.user_domain, self.user_id),
+                    "GUILD_DELETE",
+                    {"id": str(self.guild.id), "origin_domain": self.guild.origin_domain},
+                )
+        await queue_moderation_push(
+            user_id=self.user_id,
+            user_domain=self.user_domain,
+            guild=self.guild,
+            event_id=await snowflake.mint(),
+            title=self.notification_title,
+            body=self.notification_body,
+        )
 
 
 @router.get("/{guild_id}/members/@me/moderation-status")
@@ -326,6 +503,22 @@ async def update_member(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> dict[str, object]:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.update",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        return guild_management_dict_body(proxied, 200)
+
+    automod_post_commit = AutoModPostCommit()
     guild = await local_guild(session, settings, guild_id, for_update=True)
     user_number, user_domain = user_id.resolve(settings.domain)
     self_update = (user_number, user_domain) == (auth.user.id, auth.user.origin_domain)
@@ -373,7 +566,7 @@ async def update_member(
             values.get("timeout_until", member.timeout_until)
         )
         values["timeout_reason"] = (
-            sanitize_timeout_reason(audit_reason(reason)) if timed_out else None
+            sanitize_timeout_reason(normalize_audit_reason(reason)) if timed_out else None
         )
     changes: list[dict[str, object]] = []
     for field, value in values.items():
@@ -410,9 +603,20 @@ async def update_member(
             24,
             target_type="member",
             target_ref={"id": str(user_number), "origin_domain": user_domain},
-            reason=audit_reason(reason),
+            reason=normalize_audit_reason(reason),
             changes=changes,
         )
+        target_user = await session.get(User, (user_number, user_domain))
+        if target_user is None:
+            raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+        if any(item["key"] == "nickname" for item in changes):
+            automod_post_commit = await evaluate_member_profile(
+                session,
+                settings,
+                snowflake,
+                guild,
+                target_user,
+            )
         await session.commit()
         await wake_queued_guild_federation(guild)
         await publish_dispatch(
@@ -426,6 +630,7 @@ async def update_member(
                 "user_domain": user_domain,
             },
         )
+        await automod_post_commit.publish(redis)
         if timeout_changed:
             await queue_moderation_push(
                 user_id=user_number,
@@ -458,8 +663,7 @@ async def update_member(
     )
 
 
-@router.delete("/{guild_id}/members/{user_id}", status_code=204)
-async def kick_member(
+async def stage_kick_member(
     guild_id: EntityRef,
     user_id: EntityRef,
     auth: AuthenticatedUser = Depends(require_user),
@@ -468,7 +672,9 @@ async def kick_member(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
-) -> Response:
+    *,
+    record_kick_audit: bool,
+) -> MemberModerationPostCommit:
     guild_number, guild_domain = guild_id.resolve(settings.domain)
     if guild_domain != settings.domain:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
@@ -480,12 +686,21 @@ async def kick_member(
     target_user = await session.get(User, (user_number, user_domain))
     if target_user is None:
         raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+    e2ee_policy_channels: list[Channel] = []
     revoked_installations = await revoke_installations_for_guild_member(
         session,
         guild_id=guild.id,
         guild_domain=guild.origin_domain,
         user_id=user_number,
         user_domain=user_domain,
+    )
+    e2ee_policy_channels.extend(
+        await revoke_bot_e2ee_access(
+            session,
+            redis,
+            settings,
+            installation_ids=(item.id for item in revoked_installations),
+        )
     )
     deleted_role_refs = await cleanup_installation_roles(
         session,
@@ -494,16 +709,17 @@ async def kick_member(
         auth.user,
         revoked_installations,
     )
-    await add_audit_entry(
-        session,
-        snowflake,
-        guild,
-        auth.user,
-        20,
-        target_type="member",
-        target_ref={"id": str(user_number), "origin_domain": user_domain},
-        reason=audit_reason(reason),
-    )
+    if record_kick_audit:
+        await add_audit_entry(
+            session,
+            snowflake,
+            guild,
+            auth.user,
+            20,
+            target_type="member",
+            target_ref={"id": str(user_number), "origin_domain": user_domain},
+            reason=normalize_audit_reason(reason),
+        )
     removed_thread_members = await cleanup_guild_member_threads(
         session,
         settings,
@@ -519,7 +735,6 @@ async def kick_member(
         [(user_number, user_domain)],
     )
     await session.delete(member)
-    e2ee_policy_channels: list[Channel] = []
     await queue_guild_access_revocation(
         session,
         settings,
@@ -539,42 +754,87 @@ async def kick_member(
         e2ee_policy_channels=e2ee_policy_channels,
         pause_e2ee=target_user.account_type != "bot",
     )
-    await session.commit()
-    await wake_tracker_membership_cleanup(guild)
-    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
-    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
-    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
-    await publish_dispatch(
-        redis,
-        guild_topic(guild.origin_domain, guild.id),
-        "GUILD_MEMBER_REMOVE",
-        {
-            "guild_id": str(guild.id),
-            "guild_domain": guild.origin_domain,
-            "user_id": str(user_number),
-            "user_domain": user_domain,
-        },
-    )
-    if user_domain == settings.domain:
-        await publish_dispatch(
-            redis,
-            user_topic(user_domain, user_number),
-            "GUILD_DELETE",
-            {"id": str(guild.id), "origin_domain": guild.origin_domain},
-        )
-    await queue_moderation_push(
+    return MemberModerationPostCommit(
+        guild=guild,
         user_id=user_number,
         user_domain=user_domain,
-        guild=guild,
-        event_id=await snowflake.mint(),
-        title="Removed from guild",
-        body=f"You were removed from {guild.name}.",
+        member_removed=True,
+        deleted_role_refs=deleted_role_refs,
+        removed_thread_members=removed_thread_members,
+        e2ee_policy_channels=e2ee_policy_channels,
+        notification_title="Removed from guild",
+        notification_body=f"You were removed from {guild.name}.",
     )
+
+
+async def kick_member_service(
+    guild_id: EntityRef,
+    user_id: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+    reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
+    *,
+    record_kick_audit: bool,
+) -> Response:
+    postcommit = await stage_kick_member(
+        guild_id,
+        user_id,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+        reason,
+        record_kick_audit=record_kick_audit,
+    )
+    await session.commit()
+    await postcommit.publish(session, redis, snowflake, settings)
     return Response(status_code=204)
 
 
-@router.put("/{guild_id}/bans/{user_id}", status_code=204)
-async def ban_member(
+@router.delete("/{guild_id}/members/{user_id}", status_code=204)
+async def kick_member(
+    guild_id: EntityRef,
+    user_id: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+    reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
+) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.kick",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
+    return await kick_member_service(
+        guild_id,
+        user_id,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+        reason,
+        record_kick_audit=True,
+    )
+
+
+async def stage_ban_member(
     guild_id: EntityRef,
     user_id: EntityRef,
     payload: BanCreate,
@@ -584,7 +844,7 @@ async def ban_member(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
     header_reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
-) -> Response:
+) -> MemberModerationPostCommit:
     guild_number, guild_domain = guild_id.resolve(settings.domain)
     if guild_domain != settings.domain:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
@@ -610,7 +870,7 @@ async def ban_member(
         await require_can_manage_member(session, guild, auth.user, user_number, user_domain)
     elif (user_number, user_domain) == (guild.owner_id, guild.owner_domain):
         raise HTTPException(status_code=403, detail={"code": "OWNER_IMMUNE"})
-    reason = audit_reason(header_reason or payload.reason)
+    reason = normalize_audit_reason(header_reason or payload.reason)
     expires_at = future_expiry(payload.expires_at, code="BAN_EXPIRY")
     revoked_installations = await revoke_installations_for_guild_member(
         session,
@@ -618,6 +878,14 @@ async def ban_member(
         guild_domain=guild.origin_domain,
         user_id=user_number,
         user_domain=user_domain,
+    )
+    e2ee_policy_channels.extend(
+        await revoke_bot_e2ee_access(
+            session,
+            redis,
+            settings,
+            installation_ids=(item.id for item in revoked_installations),
+        )
     )
     deleted_role_refs = await cleanup_installation_roles(
         session,
@@ -849,59 +1117,63 @@ async def ban_member(
         target_ref={"id": str(user_number), "origin_domain": user_domain},
         reason=reason,
     )
-    await session.commit()
-    if member is not None:
-        await wake_tracker_membership_cleanup(guild)
-    else:
-        await wake_queued_guild_federation(guild)
-    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
-    if purged_local_attachments or media_delivery_wakes:
-        from app.tasks import federation_deliver, media_local_purge
-
-        for attachment in purged_local_attachments:
-            await enqueue_best_effort(
-                media_local_purge,
-                attachment.id,
-                attachment.origin_domain,
-            )
-        for destination in sorted(media_delivery_wakes):
-            await enqueue_best_effort(federation_deliver, destination)
-    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
-    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
-    for thread in purged_threads:
-        await publish_dispatch(
-            redis,
-            guild_topic(guild.origin_domain, guild.id),
-            "THREAD_UPDATE",
-            channel_payload(thread),
-        )
-    if member is not None:
-        await publish_dispatch(
-            redis,
-            guild_topic(guild.origin_domain, guild.id),
-            "GUILD_MEMBER_REMOVE",
-            {
-                "guild_id": str(guild.id),
-                "guild_domain": guild.origin_domain,
-                "user_id": str(user_number),
-                "user_domain": user_domain,
-            },
-        )
-        if user_domain == settings.domain:
-            await publish_dispatch(
-                redis,
-                user_topic(user_domain, user_number),
-                "GUILD_DELETE",
-                {"id": str(guild.id), "origin_domain": guild.origin_domain},
-            )
-    await queue_moderation_push(
+    return MemberModerationPostCommit(
+        guild=guild,
         user_id=user_number,
         user_domain=user_domain,
-        guild=guild,
-        event_id=await snowflake.mint(),
-        title="Banned from guild",
-        body=f"You were banned from {guild.name}.",
+        member_removed=member is not None,
+        deleted_role_refs=deleted_role_refs,
+        removed_thread_members=removed_thread_members,
+        e2ee_policy_channels=e2ee_policy_channels,
+        notification_title="Banned from guild",
+        notification_body=f"You were banned from {guild.name}.",
+        purged_local_attachments=purged_local_attachments,
+        media_delivery_wakes=media_delivery_wakes,
+        purged_threads=purged_threads,
     )
+
+
+@router.put("/{guild_id}/bans/{user_id}", status_code=204)
+async def ban_member(
+    guild_id: EntityRef,
+    user_id: EntityRef,
+    payload: BanCreate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+    header_reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
+) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.ban",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "data": payload.model_dump(mode="json"),
+            "reason": header_reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
+    postcommit = await stage_ban_member(
+        guild_id,
+        user_id,
+        payload,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+        header_reason,
+    )
+    await session.commit()
+    await postcommit.publish(session, redis, snowflake, settings)
     return Response(status_code=204)
 
 
@@ -916,6 +1188,21 @@ async def remove_ban(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.unban",
+        {
+            "user_ref": qualified_management_ref(user_id, settings.domain),
+            "reason": reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     user_number, user_domain = user_id.resolve(settings.domain)
     await require_permissions(session, redis, guild, auth.user, required_permissions("ban.remove"))
@@ -946,7 +1233,7 @@ async def remove_ban(
             23,
             target_type="user",
             target_ref={"id": str(user_number), "origin_domain": user_domain},
-            reason=audit_reason(reason),
+            reason=normalize_audit_reason(reason),
         )
         await session.commit()
         await wake_queued_guild_federation(guild)
@@ -963,6 +1250,22 @@ async def list_bans(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, object]]:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "member.ban.list",
+        {
+            "limit": limit,
+            "after": (
+                qualified_management_ref(after, settings.domain) if after is not None else None
+            ),
+        },
+    )
+    if proxied is not None:
+        return cast(list[dict[str, object]], guild_management_list_body(proxied, 200))
+
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(session, redis, guild, auth.user, required_permissions("ban.list"))
     conditions: list[ColumnElement[bool]] = [
@@ -995,6 +1298,17 @@ async def list_instance_bans(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, object]]:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "instance_ban.list",
+        {"limit": limit, "after": after},
+    )
+    if proxied is not None:
+        return cast(list[dict[str, object]], guild_management_list_body(proxied, 200))
+
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("instance_ban.list")
@@ -1027,6 +1341,22 @@ async def ban_instance(
     settings: Settings = Depends(get_settings),
     header_reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "instance_ban.put",
+        {
+            "instance_domain": instance_domain,
+            "data": payload.model_dump(mode="json"),
+            "reason": header_reason,
+        },
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     domain = normalize_domain(instance_domain)
     if domain == settings.domain:
@@ -1035,7 +1365,7 @@ async def ban_instance(
         session, redis, guild, auth.user, required_permissions("instance_ban.put")
     )
     expires_at = future_expiry(payload.expires_at, code="INSTANCE_BAN_EXPIRY")
-    reason = audit_reason(header_reason or payload.reason)
+    reason = normalize_audit_reason(header_reason or payload.reason)
 
     # Serialize this mass membership mutation with other guild administration.
     # The actor must outrank every affected member; a bulk action must not be a
@@ -1108,11 +1438,20 @@ async def ban_instance(
             },
         )
     )
+    e2ee_policy_channels: list[Channel] = []
     revoked_installations = await revoke_installations_for_guild_instance(
         session,
         guild_id=guild.id,
         guild_domain=guild.origin_domain,
         instance_domain=domain,
+    )
+    e2ee_policy_channels.extend(
+        await revoke_bot_e2ee_access(
+            session,
+            redis,
+            settings,
+            installation_ids=(item.id for item in revoked_installations),
+        )
     )
     deleted_role_refs = await cleanup_installation_roles(
         session,
@@ -1161,7 +1500,6 @@ async def ban_instance(
             GuildMember.user_domain == domain,
         )
     )
-    e2ee_policy_channels: list[Channel] = []
     await queue_guild_mutation(
         session,
         settings,
@@ -1235,6 +1573,18 @@ async def remove_instance_ban(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
+    proxied = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth.user,
+        "instance_ban.remove",
+        {"instance_domain": instance_domain, "reason": reason},
+    )
+    if proxied is not None:
+        require_guild_management_status(proxied, 204)
+        return Response(status_code=204)
+
     guild = await local_guild(session, settings, guild_id, for_update=True)
     domain = normalize_domain(instance_domain)
     await require_permissions(
@@ -1258,33 +1608,413 @@ async def remove_instance_ban(
             26,
             target_type="instance",
             target_ref={"domain": domain},
-            reason=audit_reason(reason),
+            reason=normalize_audit_reason(reason),
         )
         await session.commit()
     return Response(status_code=204)
 
 
-@router.get("/{guild_id}/audit-logs")
-async def list_audit_logs(
-    guild_id: EntityRef,
-    limit: int = Query(default=50, ge=1, le=100),
-    before: Snowflake | None = None,
-    auth: AuthenticatedUser = Depends(require_user),
-    session: AsyncSession = Depends(get_session),
-    redis: Redis = Depends(get_redis),
-    settings: Settings = Depends(get_settings),
-) -> list[dict[str, object]]:
-    guild = await local_guild(session, settings, guild_id)
-    await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.audit.list")
-    )
+def require_one_audit_log_cursor(before: int | None, after: int | None) -> None:
+    if before is not None and after is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "AUDIT_LOG_CURSOR_CONFLICT",
+                "message": "Choose either a before cursor or an after cursor, not both.",
+            },
+        )
+
+
+async def query_audit_log_entries(
+    session: AsyncSession,
+    guild: Guild,
+    *,
+    limit: int,
+    before: int | None,
+    after: int | None,
+    actor_ref: tuple[int, str] | None,
+    action_type: int | None,
+    target_type: str | None,
+) -> list[AuditLogEntryPayload]:
+    """Apply one canonical audit query at the guild's authoritative database."""
+
     conditions = [
         AuditLogEntry.guild_id == guild.id,
         AuditLogEntry.guild_domain == guild.origin_domain,
     ]
     if before is not None:
         conditions.append(AuditLogEntry.id < before)
+    if after is not None:
+        conditions.append(AuditLogEntry.id > after)
+    if actor_ref is not None:
+        actor_id, actor_domain = actor_ref
+        conditions.extend(
+            [
+                AuditLogEntry.actor_id == actor_id,
+                AuditLogEntry.actor_domain == actor_domain,
+            ]
+        )
+    if action_type is not None:
+        conditions.append(AuditLogEntry.action_type == action_type)
+    if target_type is not None:
+        conditions.append(AuditLogEntry.target_type == target_type)
+    order = AuditLogEntry.id.asc() if after is not None else AuditLogEntry.id.desc()
     entries = await session.scalars(
-        select(AuditLogEntry).where(*conditions).order_by(AuditLogEntry.id.desc()).limit(limit)
+        select(AuditLogEntry).where(*conditions).order_by(order).limit(limit)
     )
-    return [audit_payload(entry) for entry in entries]
+    return [audit_log_payload(entry) for entry in entries]
+
+
+async def filter_audit_log_entries_for_actor(
+    session: AsyncSession,
+    guild: Guild,
+    actor: User,
+    entries: list[AuditLogEntryPayload],
+) -> list[AuditLogEntryPayload]:
+    """Apply a bot installation's channel boundary without changing human logs."""
+
+    grant = await bot_guild_permission_grant(session, guild, actor)
+    if grant is None:
+        return entries
+    return await filter_restricted_bot_audit_entries(session, guild, grant, entries)
+
+
+def require_fresh_audit_log_request(
+    request: AuditLogFederationRequest,
+    *,
+    now: int,
+    clock_skew_seconds: int,
+) -> None:
+    """Reject expired or implausibly future application-level RPC grants."""
+
+    if request.issued_at > now + clock_skew_seconds or request.deadline <= now:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "KAED_FED_AUDIT_LOG_REQUEST_EXPIRED",
+                "message": "The audit log authorization request has expired.",
+            },
+        )
+
+
+def validate_audit_log_federation_page(
+    page: AuditLogFederationPage,
+    request: AuditLogFederationRequest,
+) -> list[AuditLogEntryPayload]:
+    """Verify request binding, ordering, cursor bounds, and every echoed filter."""
+
+    if page.request.model_dump(mode="json") != request.model_dump(mode="json"):
+        raise ValueError("audit log response is bound to a different request")
+    if len(page.entries) > request.query.limit:
+        raise ValueError("audit log response exceeds the requested page limit")
+
+    before = int(request.query.before) if request.query.before is not None else None
+    after = int(request.query.after) if request.query.after is not None else None
+    expected_user = request.query.user
+    seen: set[int] = set()
+    previous: int | None = None
+    for entry in page.entries:
+        entry_id = validate_snowflake(entry.id)
+        actor_id = validate_snowflake(entry.actor_id)
+        if entry_id in seen:
+            raise ValueError("audit log response contains a duplicate entry")
+        seen.add(entry_id)
+        if entry.guild_id != request.guild_id or entry.guild_domain != request.guild_domain:
+            raise ValueError("audit log response contains an entry for another guild")
+        if normalize_domain(entry.actor_domain) != entry.actor_domain:
+            raise ValueError("audit log response contains an invalid actor domain")
+        if before is not None and entry_id >= before:
+            raise ValueError("audit log response violates its before cursor")
+        if after is not None and entry_id <= after:
+            raise ValueError("audit log response violates its after cursor")
+        if previous is not None and (
+            (after is not None and entry_id <= previous) or (after is None and entry_id >= previous)
+        ):
+            raise ValueError("audit log response has invalid entry ordering")
+        previous = entry_id
+        if expected_user is not None and (
+            actor_id != int(expected_user.id) or entry.actor_domain != expected_user.domain
+        ):
+            raise ValueError("audit log response violates its moderator filter")
+        if request.query.action_type is not None and entry.action_type != request.query.action_type:
+            raise ValueError("audit log response violates its action filter")
+        if request.query.target_type is not None and entry.target_type != request.query.target_type:
+            raise ValueError("audit log response violates its target filter")
+    return page.entries
+
+
+async def request_remote_audit_log_page(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    requester: User,
+    *,
+    limit: int,
+    before: int | None,
+    after: int | None,
+    actor_ref: tuple[int, str] | None,
+    action_type: int | None,
+    target_type: str | None,
+) -> list[AuditLogEntryPayload]:
+    """Fetch and verify one private page directly from the guild authority."""
+
+    issued_at = int(time.time())
+    request = AuditLogFederationRequest(
+        guild_id=str(guild.id),
+        guild_domain=guild.origin_domain,
+        requester={"id": str(requester.id), "domain": requester.origin_domain},
+        requesting_instance=settings.domain,
+        request_id=f"kalr_{secrets.token_urlsafe(24)}",
+        issued_at=issued_at,
+        deadline=issued_at + AUDIT_LOG_FEDERATION_DEADLINE_SECONDS,
+        query=AuditLogFederationQuery(
+            limit=limit,
+            before=str(before) if before is not None else None,
+            after=str(after) if after is not None else None,
+            user=(
+                {"id": str(actor_ref[0]), "domain": actor_ref[1]} if actor_ref is not None else None
+            ),
+            action_type=action_type,
+            target_type=target_type,
+        ),
+    )
+    try:
+        upstream = await signed_request(
+            session,
+            settings,
+            "POST",
+            guild.origin_domain,
+            f"/_kaede/v1/guilds/{guild.id}/audit-logs",
+            payload=request.model_dump(mode="json"),
+            request_timeout=AUDIT_LOG_FEDERATION_DEADLINE_SECONDS,
+            max_response_bytes=AUDIT_LOG_FEDERATION_MAX_RESPONSE_BYTES,
+        )
+    except (FederationNetworkError, RuntimeError):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "FEDERATED_AUDIT_LOG_UNAVAILABLE",
+                "message": "The guild home could not provide its audit log. Try again shortly.",
+            },
+        ) from None
+
+    if upstream.status_code == 403:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "MISSING_PERMISSIONS",
+                "message": "You do not have permission to view this guild's audit log.",
+                "permissions": str(int(required_permissions("guild.audit.list"))),
+            },
+        )
+    if upstream.status_code == 404:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    if upstream.status_code != 200:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "FEDERATED_AUDIT_LOG_UNAVAILABLE",
+                "message": "The guild home could not provide its audit log. Try again shortly.",
+            },
+        )
+
+    try:
+        raw = decode_federation_response_json(
+            upstream,
+            max_response_bytes=AUDIT_LOG_FEDERATION_MAX_RESPONSE_BYTES,
+        )
+        envelope = await validated_event_envelope(
+            session,
+            settings,
+            guild.origin_domain,
+            raw,
+        )
+        if envelope.type != AUDIT_LOG_FEDERATION_EVENT_TYPE:
+            raise ValueError("audit log response has the wrong signed event type")
+        if envelope.context != {
+            "guild_id": str(guild.id),
+            "guild_domain": guild.origin_domain,
+        }:
+            raise ValueError("audit log response has the wrong guild context")
+        response_timestamp_floor = (
+            request.issued_at - settings.federation_clock_skew_seconds
+        ) * 1_000
+        response_timestamp_ceiling = (
+            request.deadline + settings.federation_clock_skew_seconds
+        ) * 1_000
+        if not response_timestamp_floor <= envelope.ts < response_timestamp_ceiling:
+            raise ValueError("audit log response was signed outside its request window")
+        if int(time.time()) >= request.deadline:
+            raise ValueError("audit log response arrived after its request deadline")
+        page = AuditLogFederationPage.model_validate(envelope.content)
+        return validate_audit_log_federation_page(page, request)
+    except (FederationNetworkError, ValidationError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "FEDERATED_AUDIT_LOG_RESPONSE_INVALID",
+                "message": "The guild home returned an invalid audit log response.",
+            },
+        ) from None
+
+
+@router.get("/{guild_id}/audit-logs", response_model_exclude_unset=True)
+async def list_audit_logs(
+    guild_id: EntityRef,
+    limit: int = Query(default=50, ge=1, le=100),
+    before: Snowflake | None = None,
+    after: Snowflake | None = None,
+    user_id: EntityRef | None = None,
+    action_type: int | None = Query(default=None, ge=0, le=2_147_483_647),
+    target_type: str | None = Query(
+        default=None, min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_.-]*$"
+    ),
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> list[AuditLogEntryPayload]:
+    require_one_audit_log_cursor(before, after)
+    guild_id_value, guild_domain = guild_id.resolve(settings.domain)
+    actor_ref = user_id.resolve(settings.domain) if user_id is not None else None
+    if guild_domain == settings.domain:
+        guild = await local_guild(session, settings, guild_id)
+        await require_permissions(
+            session, redis, guild, auth.user, required_permissions("guild.audit.list")
+        )
+        entries = await query_audit_log_entries(
+            session,
+            guild,
+            limit=limit,
+            before=before,
+            after=after,
+            actor_ref=actor_ref,
+            action_type=action_type,
+            target_type=target_type,
+        )
+        return await filter_audit_log_entries_for_actor(
+            session,
+            guild,
+            auth.user,
+            entries,
+        )
+
+    remote_guild = await session.get(Guild, (guild_id_value, guild_domain))
+    member = await session.get(
+        GuildMember,
+        (guild_id_value, guild_domain, auth.user.id, auth.user.origin_domain),
+    )
+    if remote_guild is None or remote_guild.unavailable or member is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    return await request_remote_audit_log_page(
+        session,
+        settings,
+        remote_guild,
+        auth.user,
+        limit=limit,
+        before=before,
+        after=after,
+        actor_ref=actor_ref,
+        action_type=action_type,
+        target_type=target_type,
+    )
+
+
+@federation_router.post("/_kaede/v1/guilds/{guild_id}/audit-logs")
+async def federation_guild_audit_logs(
+    guild_id: Snowflake,
+    payload: AuditLogFederationRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """Authorize and sign one non-replicated audit page at the guild home."""
+
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "guild-audit-log",
+        capacity=120,
+        refill_per_minute=120,
+    )
+    if (
+        payload.requesting_instance != principal.origin
+        or payload.requester.domain != principal.origin
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "KAED_FED_AUDIT_LOG_REQUESTER_MISMATCH"},
+        )
+    if int(payload.guild_id) != guild_id or payload.guild_domain != settings.domain:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    now = int(time.time())
+    require_fresh_audit_log_request(
+        payload,
+        now=now,
+        clock_skew_seconds=settings.federation_clock_skew_seconds,
+    )
+    accepted = await redis.set(
+        f"federation:audit-log-request:{principal.origin}:{payload.request_id}",
+        "1",
+        ex=settings.federation_clock_skew_seconds + AUDIT_LOG_FEDERATION_DEADLINE_SECONDS,
+        nx=True,
+    )
+    if not accepted:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "KAED_FED_AUDIT_LOG_REQUEST_REPLAYED"},
+        )
+
+    guild = await session.get(Guild, (guild_id, settings.domain))
+    requester = await session.get(
+        User,
+        (int(payload.requester.id), payload.requester.domain),
+    )
+    if guild is None or guild.unavailable or requester is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    await require_permissions(
+        session,
+        redis,
+        guild,
+        requester,
+        required_permissions("guild.audit.list"),
+    )
+    entries = await query_audit_log_entries(
+        session,
+        guild,
+        limit=payload.query.limit,
+        before=(int(payload.query.before) if payload.query.before is not None else None),
+        after=(int(payload.query.after) if payload.query.after is not None else None),
+        actor_ref=(
+            (int(payload.query.user.id), payload.query.user.domain)
+            if payload.query.user is not None
+            else None
+        ),
+        action_type=payload.query.action_type,
+        target_type=payload.query.target_type,
+    )
+    entries = await filter_audit_log_entries_for_actor(
+        session,
+        guild,
+        requester,
+        entries,
+    )
+    try:
+        owner = await guild_authority_owner(session, settings, guild)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "KAED_FED_AUDIT_LOG_SIGNER_UNAVAILABLE"},
+        ) from exc
+    page = AuditLogFederationPage(request=payload, entries=entries)
+    return await build_guild_authority_envelope(
+        session,
+        settings,
+        guild,
+        AUDIT_LOG_FEDERATION_EVENT_TYPE,
+        owner,
+        page.model_dump(mode="json"),
+        context={"guild_id": str(guild.id), "guild_domain": guild.origin_domain},
+    )

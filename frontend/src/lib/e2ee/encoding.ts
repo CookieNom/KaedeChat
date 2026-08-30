@@ -48,6 +48,11 @@ export function fromBase64url(value: string, maximum = 4 * 1024 * 1024): Bytes {
   return result;
 }
 
+/** Exact unpadded base64url encoding of 32 bytes (for SHA-256 and random capabilities). */
+export function isCanonicalBase64url32(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u.test(value);
+}
+
 export function concatBytes(...values: readonly Uint8Array<ArrayBufferLike>[]): Bytes {
   const length = values.reduce((total, value) => total + value.length, 0);
   const result = new Uint8Array(length);

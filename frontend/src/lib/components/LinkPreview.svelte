@@ -10,7 +10,11 @@
     media_type: 'image' | 'video' | null;
   }
 
-  let { url }: { url: string } = $props();
+  let {
+    url,
+    mediaOnly = false,
+    compactMedia = false
+  }: { url: string; mediaOnly?: boolean; compactMedia?: boolean } = $props();
   let preview = $state<Preview | null>(null);
   let loadError = $state('');
   let loadAttempt = $state(0);
@@ -42,7 +46,7 @@
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- preview destinations are external URLs returned by the API -->
-{#if loadError}
+{#if loadError && !mediaOnly && !compactMedia}
   <aside class="link-preview link-preview-error" role="alert">
     <p>{loadError}</p>
     <div>
@@ -50,6 +54,15 @@
       <button type="button" onclick={() => (loadAttempt += 1)}>Try again</button>
     </div>
   </aside>
+{:else if preview && compactMedia && preview.media_url && preview.media_type === 'image'}
+  <img class="compact-media" src={preview.media_url} alt="" loading="lazy" />
+{:else if preview && mediaOnly && preview.media_url}
+  {#if preview.media_type === 'image'}
+    <img class="media-only" src={preview.media_url} alt="" loading="lazy" />
+  {:else if preview.media_type === 'video'}
+    <!-- svelte-ignore a11y_media_has_caption -->
+    <video class="media-only" src={preview.media_url} controls preload="metadata"></video>
+  {/if}
 {:else if preview}
   <article class="link-preview">
     {#if preview.media_url && preview.media_type === 'image'}
@@ -98,6 +111,21 @@
     max-height: 340px;
     object-fit: contain;
     background: rgb(0 0 0 / 20%);
+  }
+  .media-only {
+    display: block;
+    width: 100%;
+    max-height: 420px;
+    margin-top: 10px;
+    border-radius: 6px;
+    object-fit: contain;
+  }
+  .compact-media {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    object-fit: cover;
   }
   .link-preview > div {
     display: grid;

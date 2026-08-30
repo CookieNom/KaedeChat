@@ -7,6 +7,7 @@ vi.mock('$lib/api/client', () => ({ api: apiMock }));
 import {
   activeThreadsForParent,
   createThread,
+  deferThreadStarterUntilE2EEActive,
   filterForumPosts,
   forumDefaultLayout,
   forumDefaultReactionPayload,
@@ -113,6 +114,13 @@ describe('thread and forum helpers', () => {
     ).toBe(false);
     expect(threadParentAllowsChildCreation(channel('3', 0))).toBe(true);
     expect(threadParentAllowsChildCreation(channel('4', 15))).toBe(false);
+    expect(deferThreadStarterUntilE2EEActive(channel('1', 0))).toBe(false);
+    expect(
+      deferThreadStarterUntilE2EEActive(
+        channel('2', 0, { encryption_mode: 'e2ee', encryption_state: 'active' })
+      )
+    ).toBe(true);
+    expect(deferThreadStarterUntilE2EEActive(channel('3', 15, { e2ee_required: true }))).toBe(true);
   });
 
   it('nests only active threads under their exact composite parent', () => {
@@ -204,6 +212,7 @@ describe('thread and forum helpers', () => {
   it('preserves a custom forum default reaction until the field is edited or cleared', () => {
     expect(forumDefaultReactionPayload('', '99')).toEqual({ emoji_id: '99' });
     expect(forumDefaultReactionPayload('👍', null)).toEqual({ emoji_name: '👍' });
+    expect(forumDefaultReactionPayload('❤️', null)).toEqual({ emoji_name: '❤' });
     expect(forumDefaultReactionPayload('', null)).toBeNull();
   });
 
@@ -342,6 +351,42 @@ describe('thread and forum helpers', () => {
         auto_archive_duration: 1440
       })
     });
+  });
+
+  it('reserves an encrypted forum shell without sending any starter plaintext', async () => {
+    apiMock.mockResolvedValue({
+      channel: channel('9', 11, {
+        e2ee_required: true,
+        encryption_state: 'plaintext'
+      }),
+      starter_message: null,
+      message: null,
+      starter_reservation: { client_nonce: 'forum-reservation-1', claimed: false }
+    });
+    const created = await createThread(channel('1', 15, { e2ee_required: true }), {
+      name: 'Private release',
+      appliedTagIds: ['7'],
+      starterReservationNonce: 'forum-reservation-1'
+    });
+    expect(created.starter_reservation).toEqual({
+      client_nonce: 'forum-reservation-1',
+      claimed: false
+    });
+    expect(apiMock).toHaveBeenCalledWith('/channels/1%40guild.test/threads', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Private release',
+        applied_tag_ids: ['7'],
+        auto_archive_duration: 1440,
+        starter_reservation_nonce: 'forum-reservation-1'
+      })
+    });
+    expect(() =>
+      parseCreatedThread({
+        channel: channel('9', 11),
+        starter_reservation: { client_nonce: '../bad', claimed: false }
+      })
+    ).toThrow(/reservation/u);
   });
 
   it('renames a thread through the versioned thread update endpoint', async () => {

@@ -1,4 +1,18 @@
 import { entityKey } from '$lib/chat/refs';
+import {
+  applyBulkMessageDelete,
+  tombstoneMessage,
+  type MessageBulkDeleteUpdate
+} from '$lib/chat/message-deletions';
+import { reconcileChannelPinsUpdate, type ChannelPinsUpdate } from '$lib/chat/pins';
+import { applyPollVoteDispatch, type PollVoteDispatchName } from '$lib/chat/poll-state';
+import {
+  applyReactionClear,
+  applyReactionUpdate,
+  reactionClearEmoji,
+  reactionUpdateFromDispatch,
+  type ReactionClearUpdate
+} from '$lib/chat/reaction-state';
 import { isThreadChannel, threadMembersUpdateRemovesUser } from '$lib/chat/threads';
 import type {
   Channel,
@@ -21,6 +35,10 @@ import {
 } from '$lib/notifications/read-state';
 import { chatEntities } from '$lib/stores/entities.svelte';
 import { guildNavigation } from '$lib/stores/guild-navigation.svelte';
+import {
+  interactionResponses,
+  type InteractionResponseEventName
+} from '$lib/chat/interaction-responses.svelte';
 import { GATEWAY_STATUS_EVENT, GatewayClient, type Dispatch, type GatewayStatus } from './client';
 
 type ReadyPayload = {
@@ -55,6 +73,15 @@ function applyOwnPresencePreference(
 }
 
 function applyEntityDispatch(dispatch: Dispatch): void {
+  const eventName = dispatch.t as string;
+  if (
+    eventName === 'INTERACTION_RESPONSE_CREATE' ||
+    eventName === 'INTERACTION_RESPONSE_UPDATE' ||
+    eventName === 'INTERACTION_RESPONSE_DELETE'
+  ) {
+    interactionResponses.apply(eventName as InteractionResponseEventName, dispatch.d);
+    return;
+  }
   switch (dispatch.t) {
     case 'READY': {
       const ready = dispatch.d as ReadyPayload;
@@ -100,17 +127,72 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       );
       return;
     }
-    case 'MESSAGE_UPDATE':
-      chatEntities.messages.upsert(dispatch.d as Message);
+    case 'MESSAGE_REACTION_ADD':
+    case 'MESSAGE_REACTION_REMOVE': {
+      const update = reactionUpdateFromDispatch(dispatch.t, dispatch.d);
+      if (update) {
+        chatEntities.messages.update(entityKey(update), (message) =>
+          applyReactionUpdate(message, update, chatEntities.currentUser)
+        );
+      }
       return;
+    }
+    case 'MESSAGE_REACTION_REMOVE_ALL':
+    case 'MESSAGE_REACTION_REMOVE_EMOJI': {
+      const update = dispatch.d as ReactionClearUpdate;
+      if (typeof update.message_id === 'string' && typeof update.message_domain === 'string') {
+        chatEntities.messages.update(`${update.message_id}@${update.message_domain}`, (message) =>
+          applyReactionClear(message, reactionClearEmoji(update))
+        );
+      }
+      return;
+    }
+    case 'MESSAGE_UPDATE': {
+      const message = dispatch.d as Message;
+      if ('reaction' in message) {
+        const update = reactionUpdateFromDispatch('MESSAGE_UPDATE', dispatch.d);
+        if (update) {
+          chatEntities.messages.update(entityKey(update), (current) =>
+            applyReactionUpdate(current, update, chatEntities.currentUser)
+          );
+        }
+      } else {
+        chatEntities.messages.upsert(message);
+      }
+      return;
+    }
+    case 'MESSAGE_POLL_VOTE_ADD':
+    case 'MESSAGE_POLL_VOTE_REMOVE': {
+      const update = dispatch.d as { message_id?: string; message_domain?: string };
+      if (typeof update.message_id === 'string' && typeof update.message_domain === 'string') {
+        chatEntities.messages.update(`${update.message_id}@${update.message_domain}`, (message) =>
+          applyPollVoteDispatch(
+            message,
+            dispatch.t as PollVoteDispatchName,
+            dispatch.d,
+            chatEntities.currentUser
+          )
+        );
+      }
+      return;
+    }
+    case 'CHANNEL_PINS_UPDATE': {
+      const update = dispatch.d as ChannelPinsUpdate;
+      chatEntities.messages.upsertMany(
+        reconcileChannelPinsUpdate(chatEntities.messages.values, update)
+      );
+      return;
+    }
     case 'MESSAGE_DELETE': {
       const message = dispatch.d as Partial<Message> & { id: string; origin_domain: string };
-      chatEntities.messages.update(entityKey(message), (current) => ({
-        ...current,
-        ...message,
-        content: null,
-        deleted_at: message.deleted_at ?? new Date().toISOString()
-      }));
+      chatEntities.messages.update(entityKey(message), (current) =>
+        tombstoneMessage({ ...current, ...message }, message.deleted_at ?? new Date().toISOString())
+      );
+      return;
+    }
+    case 'MESSAGE_DELETE_BULK': {
+      const update = dispatch.d as MessageBulkDeleteUpdate;
+      chatEntities.messages.replace(applyBulkMessageDelete(chatEntities.messages.values, update));
       return;
     }
     case 'CHANNEL_CREATE':
@@ -288,7 +370,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       }));
       return;
     }
-    case 'GUILD_EMOJI_CREATE': {
+    case 'GUILD_EMOJI_CREATE':
+    case 'GUILD_EMOJI_UPDATE': {
       const emoji = dispatch.d as CustomEmoji;
       chatEntities.guilds.update(`${emoji.guild_id}@${emoji.guild_domain}`, (guild) => ({
         ...guild,
@@ -309,7 +392,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       }));
       return;
     }
-    case 'GUILD_STICKER_CREATE': {
+    case 'GUILD_STICKER_CREATE':
+    case 'GUILD_STICKER_UPDATE': {
       const sticker = dispatch.d as GuildSticker;
       chatEntities.guilds.update(`${sticker.guild_id}@${sticker.guild_domain}`, (guild) => ({
         ...guild,
@@ -393,6 +477,15 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       if (user.id && user.origin_domain) chatEntities.applyUserProfile(user);
       return;
     }
+    case 'VOICE_CHANNEL_EFFECT_SEND': {
+      // Voice docks are route-scoped and own their audio lifecycle. Forward
+      // the authorized, short-lived playback capability without persisting it
+      // in the normalized guild store.
+      globalThis.window?.dispatchEvent(
+        new CustomEvent('kaede:voice-soundboard', { detail: dispatch.d })
+      );
+      return;
+    }
     default:
       return;
   }
@@ -448,6 +541,7 @@ class AuthenticatedGatewayRuntime {
     this.#readStateSync = null;
     this.status = { state: 'connecting', message: '' };
     chatEntities.clearSession();
+    interactionResponses.reset();
   }
 }
 

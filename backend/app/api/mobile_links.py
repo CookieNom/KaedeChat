@@ -11,6 +11,7 @@ LINK_PATHS = [
     "/verify*",
     "/reset-password*",
     "/verify-email-change*",
+    "/applications/*",
     "/g/*",
     "/home/*",
 ]

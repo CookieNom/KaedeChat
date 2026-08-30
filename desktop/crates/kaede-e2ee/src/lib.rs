@@ -547,6 +547,20 @@ impl MlsClient {
             .map_err(|error| MlsError::Group(error.to_string()))
     }
 
+    /// Return the current epoch for an MLS group without exporting key material.
+    ///
+    /// Media clients use this value to prove that their restored MLS state is
+    /// at the exact epoch named by a short-lived media grant before deriving an
+    /// exporter secret.  This prevents a stale local snapshot from silently
+    /// installing an old key into the media transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MlsError::GroupNotFound`] when the group is not present.
+    pub fn group_epoch(&self, group_id: &[u8]) -> Result<u64, MlsError> {
+        Ok(self.load_group(group_id)?.epoch().as_u64())
+    }
+
     fn load_group(&self, group_id: &[u8]) -> Result<MlsGroup, MlsError> {
         MlsGroup::load(self.provider.storage(), &GroupId::from_slice(group_id))
             .map_err(|error| MlsError::Group(error.to_string()))?
@@ -604,6 +618,8 @@ mod tests {
         let pending = alice.add_members(group_id, &[bob.generate_key_package()?])?;
         alice.merge_pending_commit(group_id)?;
         assert_eq!(bob.join_group(&pending.welcome)?, group_id);
+        assert_eq!(alice.group_epoch(group_id)?, 1);
+        assert_eq!(bob.group_epoch(group_id)?, 1);
 
         let ciphertext = alice.encrypt(group_id, b"private hello", b"message-context")?;
         assert_eq!(
@@ -738,6 +754,9 @@ mod tests {
             carol.process(group_id, &removed.commit)?,
             ProcessedMessage::Commit
         );
+        assert_eq!(alice.group_epoch(group_id)?, 2);
+        assert_eq!(bob.group_epoch(group_id)?, 2);
+        assert_eq!(carol.group_epoch(group_id)?, 2);
 
         let alice_epoch_two =
             alice.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;

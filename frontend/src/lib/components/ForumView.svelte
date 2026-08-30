@@ -170,7 +170,12 @@
   }
 
   function preview(post: Channel): string {
-    const content = post.starter_message?.decrypted_content ?? post.starter_message?.content ?? '';
+    const starter = post.starter_message;
+    const content = starter?.e2ee
+      ? starter.e2ee_verified === true
+        ? (starter.decrypted_content ?? '')
+        : ''
+      : (starter?.content ?? '');
     return content.replace(/\s+/g, ' ').trim();
   }
 

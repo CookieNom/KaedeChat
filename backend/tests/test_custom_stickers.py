@@ -4,9 +4,13 @@ from typing import Any, cast
 import pytest
 from fastapi import HTTPException
 
-from app.chat.custom_stickers import custom_sticker_refs, validate_custom_sticker_use
+from app.chat.custom_stickers import (
+    custom_sticker_refs,
+    validate_custom_sticker_use,
+    validate_sticker_items,
+)
 from app.core.permissions import Permission
-from app.media.schemas import StickerTicketRequest
+from app.media.schemas import StickerCommitRequest, StickerTicketRequest
 
 
 def test_custom_sticker_refs_parse_and_deduplicate() -> None:
@@ -28,6 +32,27 @@ def test_sticker_crop_must_stay_inside_image() -> None:
             size=10,
             crop={"x": 0.5, "y": 0, "width": 0.75, "height": 1},
         )
+
+
+def test_discord_sticker_names_allow_meaningful_spaces() -> None:
+    payload = StickerCommitRequest(
+        attachment_id="1",
+        name="  Friendly wave  ",
+        tags=["wave"],
+    )
+    assert payload.name == "Friendly wave"
+    [snapshot] = validate_sticker_items(
+        [
+            {
+                "id": "1",
+                "origin_domain": "alpha.example",
+                "name": "Friendly wave",
+                "format_type": 1,
+                "media_hash": "a" * 64,
+            }
+        ]
+    )
+    assert snapshot["name"] == "Friendly wave"
 
 
 class StickerSession:
@@ -61,4 +86,4 @@ async def test_external_sticker_requires_destination_permission() -> None:
             target_guild=cast(Any, destination),
             target_permissions=Permission.SEND_MESSAGES,
         )
-    assert raised.value.detail == {"code": "USE_EXTERNAL_EMOJIS_REQUIRED"}
+    assert raised.value.detail == {"code": "USE_EXTERNAL_STICKERS_REQUIRED"}

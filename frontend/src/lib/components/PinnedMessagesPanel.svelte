@@ -10,6 +10,7 @@
     error = '',
     onClose,
     onJump,
+    onUnpin,
     onRetry
   }: {
     messages: Message[];
@@ -17,6 +18,7 @@
     error?: string;
     onClose: () => void;
     onJump: (message: Message) => void;
+    onUnpin?: (message: Message) => void;
     onRetry?: () => void;
   } = $props();
 </script>
@@ -46,25 +48,36 @@
       </div>
     {:else}
       {#each messages as message (entityRef(message))}
-        <button class="pinned-message-card" type="button" onclick={() => onJump(message)}>
-          <span class="pinned-message-avatar" aria-hidden="true"
-            >{message.author?.profile_resolved === false
-              ? '•'
-              : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}</span
-          >
-          <span>
-            <strong>{message.author ? userDisplayName(message.author) : 'Unknown author'}</strong>
-            <time datetime={message.created_at}
-              >{new Date(message.created_at).toLocaleString(preferredLocale(), {
-                dateStyle: 'medium',
-                timeStyle: 'short'
-              })}</time
+        <div class="pinned-message-card">
+          <button class="pinned-message-jump" type="button" onclick={() => onJump(message)}>
+            <span class="pinned-message-avatar" aria-hidden="true"
+              >{message.author?.profile_resolved === false
+                ? '•'
+                : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}</span
             >
-            <span class="pinned-message-content"
-              >{message.deleted_at ? 'Message removed' : message.content || 'Attachment'}</span
+            <span>
+              <strong>{message.author ? userDisplayName(message.author) : 'Unknown author'}</strong>
+              <time datetime={message.created_at}
+                >{new Date(message.created_at).toLocaleString(preferredLocale(), {
+                  dateStyle: 'medium',
+                  timeStyle: 'short'
+                })}</time
+              >
+              <span class="pinned-message-content"
+                >{message.deleted_at ? 'Message removed' : message.content || 'Attachment'}</span
+              >
+            </span>
+          </button>
+          {#if onUnpin}
+            <button
+              class="pinned-message-unpin"
+              type="button"
+              aria-label="Unpin message"
+              title="Unpin message"
+              onclick={() => onUnpin?.(message)}>×</button
             >
-          </span>
-        </button>
+          {/if}
+        </div>
       {/each}
     {/if}
   </div>

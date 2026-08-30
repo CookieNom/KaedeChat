@@ -14,6 +14,7 @@ import {
   validRetryAfterMs,
   validTraceId
 } from './errors';
+import { stripNetworkClientState } from './network-boundary';
 
 export { ApiError, userErrorMessage } from './errors';
 
@@ -165,13 +166,21 @@ async function send(path: string, init: RequestInit): Promise<Response> {
       }
     }
     try {
-      const headers = requestHeaders(init);
+      const callerHeaders = new Headers(init.headers);
+      const ifMatch = callerHeaders.get('If-Match');
+      // JSON framing and client identity belong to the native transport. All
+      // remaining caller headers cross the Rust trust boundary, where a small
+      // case-insensitive allowlist rejects anything except audit metadata.
+      callerHeaders.delete('If-Match');
+      callerHeaders.delete('Content-Type');
+      callerHeaders.delete('X-Kaede-Client');
       const result = await nativeInvoke<NativeResponse>('native_api_request', {
         request: {
           method: init.method ?? 'GET',
           path,
           body,
-          if_match: headers.get('If-Match')
+          if_match: ifMatch,
+          headers: Object.fromEntries(callerHeaders.entries())
         }
       });
       return new Response(result.status === 204 ? null : JSON.stringify(result.body), {
@@ -250,7 +259,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (response.status === 204) return undefined as T;
   try {
-    return (await response.json()) as T;
+    return stripNetworkClientState((await response.json()) as T);
   } catch {
     const traceId = validTraceId(response.headers.get('X-Kaede-Trace-Id'));
     const detail: Record<string, unknown> = traceId ? { trace_id: traceId } : {};

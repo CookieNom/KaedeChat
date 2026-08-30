@@ -11,6 +11,30 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 void main() {
+  test('audit-only invite summaries do not invent management metadata', () {
+    expect(
+      inviteSummaryLine(<String, Object?>{'expires_at': null}),
+      'never expires',
+    );
+  });
+
+  test('sticker fields follow Discord length and serialized tag limits', () {
+    expect(validStickerName('Friendly Wave'), isTrue);
+    expect(validStickerName('x'), isFalse);
+    expect(validStickerName(List.filled(31, 'x').join()), isFalse);
+    expect(validStickerDescription(''), isTrue);
+    expect(validStickerDescription('x'), isFalse);
+    expect(validStickerDescription('A friendly wave'), isTrue);
+    expect(normalizedStickerTags('wave\nhello'), ['wave', 'hello']);
+    expect(normalizedStickerTags('wave\nwave'), isNull);
+    expect(
+      normalizedStickerTags(
+        '${List.filled(100, 'x').join()}\n${List.filled(100, 'y').join()}',
+      ),
+      isNull,
+    );
+  });
+
   testWidgets('sticker editor crops and enables optional background removal',
       (tester) async {
     final directory = Directory.systemTemp.createTempSync('kaede-sticker-');
@@ -151,6 +175,60 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('voice Channel Settings uses the authority region catalog',
+        (tester) async {
+      GuildChannelDraft? result;
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('12@guild.example'),
+        guildRef: EntityRef.parse('1@guild.example'),
+        name: 'Lounge',
+        type: ChannelType.voice,
+        position: 0,
+        permissions: BigInt.zero,
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                result = await showGuildChannelEditorSheet(
+                  context,
+                  channel: channel,
+                  loadVoiceRegions: () async => const <VoiceRegion>[
+                    VoiceRegion(
+                      id: 'sydney',
+                      name: 'Sydney',
+                      optimal: true,
+                      deprecated: false,
+                      custom: false,
+                    ),
+                  ],
+                );
+              },
+              child: const Text('Edit voice channel'),
+            ),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('Edit voice channel'));
+      await tester.pumpAndSettle();
+      final selector =
+          find.byKey(const ValueKey('voice-region-override-field'));
+      await tester.ensureVisible(selector);
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      expect(find.text('Sydney — Recommended'), findsOneWidget);
+      await tester.tap(find.text('Sydney — Recommended').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('save-channel-button')));
+      await tester.pumpAndSettle();
+
+      expect(result?.rtcRegion, 'sydney');
+    });
+
     test('includes the selected category in create and edit requests', () {
       final parent = EntityRef(Snowflake('12'), Domain('chat.example'));
       final draft = GuildChannelDraft(
@@ -183,7 +261,27 @@ void main() {
       expect(draft.json, containsPair('rate_limit_per_user', 0));
     });
 
-    test('reorder payload keeps local IDs and every category parent', () {
+    test('age restriction serializes only for supported text surfaces', () {
+      const text = GuildChannelDraft(
+        name: 'adult-chat',
+        topic: '',
+        nsfw: true,
+        type: ChannelType.text,
+        slowModeSeconds: 0,
+      );
+      const voice = GuildChannelDraft(
+        name: 'voice',
+        topic: '',
+        nsfw: true,
+        type: ChannelType.voice,
+        slowModeSeconds: 0,
+      );
+
+      expect(text.json, containsPair('nsfw', true));
+      expect(voice.json, containsPair('nsfw', false));
+    });
+
+    test('reorder payload keeps local IDs and omits unchanged parents', () {
       final category = KaedeChannel(
         ref: EntityRef.parse('11@chat.example'),
         guildRef: EntityRef.parse('1@chat.example'),
@@ -201,17 +299,71 @@ void main() {
       );
 
       expect(
-        guildChannelPositionRequest(<KaedeChannel>[category, child]),
+        guildChannelPositionRequest(
+          <KaedeChannel>[category, child],
+          <KaedeChannel>[child, category],
+        ),
         <Map<String, Object?>>[
-          <String, Object?>{'id': '11', 'position': 0, 'parent_id': null},
-          <String, Object?>{'id': '12', 'position': 1, 'parent_id': '11'},
+          <String, Object?>{'id': '12', 'position': 0},
+          <String, Object?>{'id': '11', 'position': 1},
         ],
       );
     });
 
-    test('invite and webhook pickers include text and announcement channels',
+    test('reorder payload includes only actual parent changes', () {
+      final category = KaedeChannel(
+        ref: EntityRef.parse('11@chat.example'),
+        guildRef: EntityRef.parse('1@chat.example'),
+        type: ChannelType.category,
+        position: 0,
+        permissions: BigInt.zero,
+      );
+      final ungrouped = KaedeChannel(
+        ref: EntityRef.parse('12@chat.example'),
+        guildRef: EntityRef.parse('1@chat.example'),
+        type: ChannelType.text,
+        position: 1,
+        permissions: BigInt.zero,
+      );
+      final moved = KaedeChannel(
+        ref: ungrouped.ref,
+        guildRef: ungrouped.guildRef,
+        parentRef: category.ref,
+        type: ungrouped.type,
+        position: ungrouped.position,
+        permissions: ungrouped.permissions,
+      );
+
+      expect(
+        guildChannelPositionRequest(
+          <KaedeChannel>[category, ungrouped],
+          <KaedeChannel>[category, moved],
+        ),
+        <Map<String, Object?>>[
+          <String, Object?>{'id': '11', 'position': 0},
+          <String, Object?>{'id': '12', 'position': 1, 'parent_id': '11'},
+        ],
+      );
+      expect(
+        guildChannelPositionRequest(
+          <KaedeChannel>[category, moved],
+          <KaedeChannel>[category, ungrouped],
+        ),
+        <Map<String, Object?>>[
+          <String, Object?>{'id': '11', 'position': 0},
+          <String, Object?>{'id': '12', 'position': 1, 'parent_id': null},
+        ],
+      );
+    });
+
+    test('invite and webhook pickers include text, announcement, and forums',
         () {
-      KaedeChannel channel(String id, ChannelType type, int position) =>
+      KaedeChannel channel(
+        String id,
+        ChannelType type,
+        int position, {
+        int permissions = 0,
+      }) =>
           KaedeChannel.fromJson(<String, Object?>{
             'id': id,
             'origin_domain': 'chat.example',
@@ -222,9 +374,11 @@ void main() {
               ChannelType.voice => 2,
               ChannelType.category => 4,
               ChannelType.announcement => 5,
+              ChannelType.forum => 15,
               _ => -1,
             },
             'position': position,
+            'permissions': '$permissions',
             'name': 'channel-$id',
           });
 
@@ -233,10 +387,144 @@ void main() {
         channel('3', ChannelType.announcement, 2),
         channel('4', ChannelType.category, 1),
         channel('5', ChannelType.text, 1),
+        channel('6', ChannelType.forum, 3),
       ]);
 
+      expect(targets.map((channel) => channel.ref.id.value),
+          <String>['5', '3', '6']);
+
+      final creatable = guildInviteCreationTargets(<KaedeChannel>[
+        channel('7', ChannelType.text, 0),
+        channel(
+          '8',
+          ChannelType.announcement,
+          1,
+          permissions: Permission.createInvite,
+        ),
+        channel(
+          '9',
+          ChannelType.forum,
+          2,
+          permissions: Permission.administrator,
+        ),
+      ], isOwner: false);
       expect(
-          targets.map((channel) => channel.ref.id.value), <String>['5', '3']);
+        creatable.map((channel) => channel.ref.id.value),
+        <String>['8', '9'],
+      );
+    });
+  });
+
+  group('webhook management parity', () {
+    KaedeChannel channel(
+      String id,
+      String name,
+      ChannelType type,
+      int position,
+    ) =>
+        KaedeChannel.fromJson(<String, Object?>{
+          'id': id,
+          'origin_domain': 'chat.example',
+          'guild_id': '1',
+          'guild_domain': 'chat.example',
+          'type': switch (type) {
+            ChannelType.text => 0,
+            ChannelType.announcement => 5,
+            ChannelType.forum => 15,
+            _ => -1,
+          },
+          'position': position,
+          'permissions': '0',
+          'name': name,
+        });
+
+    testWidgets('webhook editor can move a webhook into a forum channel',
+        (tester) async {
+      WebhookSettingsDraft? result;
+      final channels = <KaedeChannel>[
+        channel('2', 'general', ChannelType.text, 0),
+        channel('3', 'announcements', ChannelType.announcement, 1),
+        channel('4', 'help', ChannelType.forum, 2),
+      ];
+      await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                result = await showWebhookSettingsEditor(
+                  context,
+                  webhook: <String, Object?>{
+                    'name': 'Release bot',
+                    'channel_id': '2',
+                    'channel_domain': 'chat.example',
+                  },
+                  channels: channels,
+                  fallbackDomain: Domain('chat.example'),
+                );
+              },
+              child: const Text('Edit webhook'),
+            ),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('Edit webhook'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('webhook-name-field')),
+        'Forum helper',
+      );
+      await tester.tap(find.byKey(const Key('webhook-channel-field')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Forum · help').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('save-webhook-settings')));
+      await tester.pumpAndSettle();
+
+      expect(result?.name, 'Forum helper');
+      expect(result?.channel.wire, '4@chat.example');
+    });
+
+    testWidgets('webhook avatar replacement shows a preview and disclosure',
+        (tester) async {
+      final directory = Directory.systemTemp.createTempSync('kaede-webhook-');
+      addTearDown(() => directory.deleteSync(recursive: true));
+      final file = File('${directory.path}/avatar.png');
+      file.writeAsBytesSync(base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      ));
+      bool? accepted;
+      await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                accepted = await showWebhookAvatarPreviewConfirmation(
+                  context,
+                  file: file,
+                  webhookName: 'Release bot',
+                  replacing: true,
+                );
+              },
+              child: const Text('Choose avatar'),
+            ),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('Choose avatar'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('webhook-avatar-preview')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('safety scanning'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('confirm-webhook-avatar')));
+      await tester.pumpAndSettle();
+
+      expect(accepted, isTrue);
     });
   });
 

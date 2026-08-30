@@ -1,6 +1,10 @@
 # Python bot API quickstart
 
-The `kaede-bot` package connects your worker directly to every Kaede instance where your application is installed. The application home only manages identity and configuration. It never proxies traffic.
+The `kaede-bot` package connects your worker directly to each Kaede instance
+that owns a resource. Guild operations go to the guild authority; DM messages,
+calls, voice, and Gateway events go to the deterministic conversation
+authority. The application home manages identity and configuration and
+coordinates DM capability setup, but it never proxies runtime traffic.
 
 ## Create the application
 
@@ -8,7 +12,21 @@ Open **User settings → Developer Portal** and create an application. Pick the 
 
 Message content is a separate scope and intent. Don't request it for a command-only bot.
 
-E2EE channels have two modes you should understand before choosing one. `interaction_only` accepts only encrypted command payloads that a user submits to the bot on purpose. `participant` reserves the permission boundary for Kaede's forthcoming bot-device key protocol; until a verified device is admitted, the SDK receives opaque encrypted envelopes and no plaintext history.
+Kaede also follows Discord's user-install model. A user install exposes an
+application's commands in its approved `guild`, `bot_dm`, and
+`private_channel` contexts, but it does not add the bot user to a guild or
+conversation. Its grant is intentionally limited to `applications.commands`,
+`interactions.respond`, and optional interaction attachment read/write scopes;
+it delivers explicit interactions over the Gateway but does not grant ambient
+channel/DM events, ordinary messages, outbound DMs, calls, or voice. Use a
+guild installation for those runtime features. Users manage this Discord-like
+grant under **User settings → Authorized apps**.
+
+An install template is either `disabled` for E2EE or `participant` capable.
+Participant capability grants no room access by itself. The worker must enroll
+a verified MLS device, keep signed KeyPackages available, and be explicitly
+admitted to each encrypted room. Encrypted commands use that same admission;
+there is no callback-only bypass.
 
 Create a control credential on the application page and store it as
 `KAEDE_BOT_CONTROL_TOKEN`. The token is shown once. It can only enroll workers
@@ -98,16 +116,68 @@ Always keep the full composite reference. Two instances may issue the same numer
 
 ## Rate limits and reconnects
 
-The SDK handles the connection plumbing for you. It reads `Retry-After`, obtains short-lived target tokens, and signs every request with the enrolled worker key. It also sends Gateway heartbeats and resumes from per-topic sequence cursors. Event delivery is at least once, so persistent bots should make their handlers idempotent.
+The SDK handles the connection plumbing for you. It reads `Retry-After`,
+obtains short-lived target tokens, and signs every request with the enrolled
+worker key. After Gateway `Hello`, it sends heartbeats and identifies with its
+last per-topic sequence cursors. A cursor is saved only after all handlers for
+that event finish, so a process failure replays uncompleted work. Delivery is
+therefore at least once and persistent bots should make handlers idempotent.
+
+Every reconnect is a new Identify with the retained cursor map; Kaede does not
+implement Discord's session-ID/Resume opcode. The SDK retries with exponential
+backoff from one to thirty seconds plus jitter. The authority replays its
+bounded per-topic backlog and emits `GAP` when a saved cursor is too old.
 
 Kaede never forwards bot tokens between instances. To cut off a worker, revoke
 it in the Developer Portal; new token issuance stops and connected Gateway
 sessions close promptly at every target.
 
 A Gateway connection that's already open picks up changes too: it reloads the
-current application, worker, token, and exact installation grants. A
-suspension, revocation, or grant revision closes the connection right away and
-requires a fresh identify.
+current application, worker, token, and exact installation or DM-capability
+grant. A suspension, revocation, or authorization revision closes the
+connection with code `4009`. The SDK refreshes affected opaque DM grants and
+then reconnects with a fresh token, proof, Identify, and retained topic
+cursors. An unchanged lease keeps the same cursor namespace; a real
+authorization revision starts a separately fenced capability namespace.
+
+Discord-compatible poll support intentionally excludes app voting. Bots can
+create polls, read voters, receive vote events, and end their own polls, but a
+bot call to `Message.vote()` or `Message.remove_vote()` is rejected with
+`BOT_POLL_VOTE_UNSUPPORTED`.
+
+### Interaction and webhook message ownership
+
+The SDK keeps the credential path that created a `Message`; it does not choose
+an edit route from the channel-message ID alone. A public original interaction
+response has a private, write-once binding to its interaction and `@original`.
+A public follow-up also retains its durable response ID. `Message.edit()`,
+`Message.delete()`, and `Message.end_poll()` therefore use the exact interaction
+response routes, including for commands-only user installs:
+
+- original edit/delete:
+  `/api/v1/bots/interactions/{interaction}/responses/@original`
+- follow-up edit/delete:
+  `/api/v1/bots/interactions/{interaction}/followups/{response_id}`
+- original or follow-up poll finalization:
+  `/api/v1/bots/interactions/{interaction}/responses/{@original|response_id}/polls/expire`
+
+That lifecycle binding is attached only by trusted interaction helpers such as
+`respond()`, `original_response()`, `send_followup()`, and `fetch_followup()`;
+it is never recovered from an unrelated message payload. An ephemeral response
+is not a channel `Message` and remains an isolated dictionary. Use
+`Interaction.edit_original_response()`, `edit_followup()`,
+`delete_original_response()`, `delete_followup()`, `end_original_poll()`, and
+`end_followup_poll()` for that private lifecycle.
+
+Token-authenticated webhook execution with `wait=True`, webhook-message fetch,
+and webhook-message edit return a `Message` with a separate private binding to
+the webhook ID, token, target, and optional thread. Its `edit()` and `delete()`
+methods stay on
+`/api/v1/webhooks/{webhook}/{token}/messages/{message}` and preserve the thread
+parameter. The token is omitted from resource representations and is never sent
+to object storage. Other generic channel actions, including `end_poll()`, fail
+locally because Kaede has no token-scoped webhook poll-finalization route; the
+SDK never borrows an unrelated bot installation for them.
 
 ## Resources and events
 
@@ -125,8 +195,18 @@ stickers = await guild.stickers()
 await channels[0].send_sticker(stickers[0])
 await channels[0].trigger_typing()
 pins = await channels[0].pins()
+page = await channels[0].pin_page(limit=50)
+if pins:
+    await pins[0].unpin(reason="No longer operationally relevant")
 occupancy = await channels[0].voice_occupancy()
 ```
+
+Pins use Discord's modern newest-first page shape: each typed `MessagePin`
+contains `pinned_at` and its `Message`, `has_more` advances with an aware
+`before` timestamp, and `Channel.pins()` safely follows all five possible
+pages under the 250-pin channel cap. `Message.pin()` and `Message.unpin()` use
+the modern `/messages/pins/{message}` paths, accept an optional audit reason,
+and work unchanged when the channel authority is federated.
 
 Management operations use narrow scopes rather than one administrator grant:
 
@@ -217,6 +297,27 @@ Pass `ThreadPage.next_cursor` back unchanged. The older timestamp-based
 `before` argument remains available for compatibility, but cannot be combined
 with `cursor`.
 
+Publish and manage announcement followers with the same qualified references
+used elsewhere:
+
+```python
+follow = await bot.follow_announcement_channel(announcements.ref, updates.ref)
+published = await bot.crosspost_message(announcements.ref, release_message.ref)
+
+for follower in await bot.announcement_follows(announcements.ref):
+    print(follower["id"], follower["target_channel_domain"])
+
+await bot.delete_announcement_follow(
+    announcements.ref,
+    kaede.EntityRef.parse(follow["ref"]),
+)
+```
+
+Grant the source installation `channels.read` and channel visibility. Grant the
+target installation `webhooks.manage` and `MANAGE_WEBHOOKS`. Kaede obtains and
+binds separate worker intents automatically when the application, source and
+target authorities differ; do not proxy worker tokens between instances.
+
 Task tracker channels use typed board resources rather than message history.
 Grant `tasks.read` and `tasks.write`, enable `guild_tasks`, and grant the bot's
 role the corresponding tracker permissions:
@@ -274,26 +375,155 @@ message = await channels[0].send("Artifacts", attachment_ids=[upload.ref.id])
 body = await message.attachments[0].read(max_bytes=1_000_000)
 ```
 
-The SDK uploads directly to the short-lived HTTPS storage URL and never sends
-the bot token or DPoP headers to storage. Kaede accepts the attachment in a
-message only from the installation that reserved its quota, and plaintext media
-passes the normal scan/quarantine pipeline. E2EE uploads are stricter: they
-need an already encrypted `kaede-file-v1` payload with opaque metadata, and the
-SDK never falls back to plaintext. Bot attachment uploads in DMs aren't
-supported yet.
+The SDK uploads directly to the short-lived, authority-bound HTTPS storage URL
+and never sends the bot token or DPoP headers to storage. Kaede accepts the
+attachment in a message only from the installation that reserved its quota,
+and plaintext media passes the normal scan/quarantine pipeline. E2EE uploads
+are stricter: they need an already encrypted `kaede-file-v1` payload with
+opaque metadata, and the SDK never falls back to plaintext. A DM capability
+retains its exact source installation, so DM upload quota and revocation remain
+bound to one consent record.
 
-Outbound DMs bind to an active installation that granted both `dm.send` and
-`messages.send`. Use a fetched guild so the SDK carries that exact installation
-ID into DM creation and later writes:
+DM access starts from an active installation that granted `dm.send` and the
+scope for each requested operation. Use a fetched guild so the SDK selects its
+qualified installation for creation; the returned capability carries that
+source lineage through history, messages, reactions, polls, pins, typing, and
+attachments:
 
 ```python
 dm = await guild.open_dm("alice@chat.example")
 await dm.send("Your scheduled export is ready")
 ```
 
-The resulting `Channel` keeps its `bot_installation_id`. If that installation
-is revoked or loses scopes, another installation of the same application can't
-take its place.
+The resulting `Channel` retains its opaque `dm_capability_id`, authorization
+revision, qualified `installation_ref`, and `installation_type`. Every resource
+created from it inherits that immutable runtime context. If the source
+installation is revoked or loses scopes, another installation of the same
+application cannot silently take its place.
+
+Federated DMs use three authorities. The SDK asks application home A to open or
+refresh the conversation; A obtains installation authority B's original signed
+proof for the qualified source installation; then the returned `Channel`
+targets conversation authority C. The protocol preserves both guild and user
+source lineage, but the current commands-only user-install grant cannot supply
+`dm.send`; public outbound DM opening therefore uses a guild installation. All
+later REST, Gateway, call, and voice traffic goes directly to C with the exact
+capability headers.
+
+The capability lease is at most ten minutes and refreshes automatically. Its
+refresh route accepts only the opaque grant ID; the caller cannot replace the
+source installation, target user, conversation, or authority. A normal refresh
+keeps its stable grant ID and authorization revision, so it does not interrupt
+an active call. A real source grant, scope, intent, restriction, E2EE-mode,
+suspension, or revocation change advances the revision and makes C reject the
+superseded REST, Gateway, call, and media admission immediately.
+
+For a worker enrolled with `dm.send`, `Client.start()` pages on restart
+`GET /api/v1/bots/dm-capabilities?limit=100&after={opaque_cursor}` at A before
+opening Gateways. It validates each opaque `kbdg_` grant, force-refreshes it,
+and starts a separate capability-scoped Gateway and refresh loop at C. The
+worker state does not store or reconstruct B's signed proof. Terminal
+`401`/`403`/`404` refresh failures and expired leases are discarded; transient
+failures are retried only while the current lease remains valid. A commands-only
+worker skips this endpoint and starts its ordinary interaction targets directly.
+
+DM channel payloads use Discord's public channel types: `1` for `DM` and `3`
+for `GROUP_DM`. Kaede may persist both conversation shapes with an internal DM
+channel row, but the wire model and `Channel.is_group_dm` expose type `3` for a
+group conversation. User-installed commands may be invoked in that private
+context; applications cannot start or join group-DM calls, so the SDK's group
+DM call and voice helpers fail before network I/O.
+
+### Enroll a participant device
+
+Participant devices belong to workers, not human sessions. At application home
+the lifecycle is challenge, proof-bearing registration, signed KeyPackage
+upload, inventory replenishment, and explicit revocation:
+
+- `POST /api/v1/bots/e2ee/devices/challenge`
+- `POST /api/v1/bots/e2ee/devices`
+- `GET /api/v1/bots/e2ee/devices`
+- `POST /api/v1/bots/e2ee/devices/{kbe_id}/key-packages`
+- `DELETE /api/v1/bots/e2ee/devices/{kbe_id}`
+
+The SDK exposes the same lifecycle without raw requests:
+
+```python
+credential = kaede.bot_mls_credential(
+    bot.worker_state.application_ref,
+    bot.worker_state.worker_id,
+)
+provider = kaede.NativeOpenMLSProvider.generate(credential)
+
+# Registers this worker's device when needed and keeps 20–50 packages ready.
+device = await bot.replenish_e2ee_key_packages(provider)
+inventory = await bot.e2ee_devices()
+
+status = await bot.e2ee_participation(
+    dm.ref,
+    target=dm.target,
+    dm_capability_id=dm.dm_capability_id,
+)
+
+# This immediately revokes the device and starts room rekeying.
+await bot.revoke_e2ee_device(device.protocol_id)
+```
+
+For explicit control, use `create_e2ee_device_challenge()`,
+`complete_e2ee_device_registration()` (or the combined
+`register_e2ee_device()`), and `upload_e2ee_key_packages()`. Persist
+`provider.export_state()` securely and restore it for the next process; a new
+provider identity is a different device.
+
+Use a real MLS provider and persist its private state in the same protected
+deployment boundary as the worker key. The server receives the public identity,
+credential, signatures, and public KeyPackages, never the MLS private state.
+Room access remains pending until a guild administrator admits the app under
+**Guild settings → Integrations**, or every human in a private conversation
+consents, and an authorized client commits the resulting MLS membership change.
+`GET /api/v1/bots/channels/{channel}/e2ee/participation` reports the exact
+runtime status at the channel authority.
+
+### Encrypted bot voice
+
+Install the optional transport with `kaede-bot[voice]`. A participant-mode bot
+joins encrypted voice only with a verified bot-device MLS context; the worker
+API signing key is never used as a media key:
+
+```python
+group_id = verified_voice_group_id  # Exactly 32 bytes from verified room state.
+voice_e2ee = kaede.VoiceE2EEContext(
+    provider=provider,              # A real MLS provider for the approved device.
+    device_id=approved_device_id,
+    channel_ref=voice_channel.ref,
+    group_id=group_id,
+    epoch=provider.group_epoch(group_id),
+)
+
+voice = await bot.connect_voice(
+    voice_channel.ref,
+    target=voice_channel.target,
+    listen=True,
+    speak=True,
+    e2ee_context=voice_e2ee,
+)
+```
+
+The target still evaluates the exact guild installation or DM capability,
+scopes, live channel permissions, restrictions, and authoritative occupancy.
+Its short-lived grant names the current policy generation, MLS epoch, protocol,
+suite, and a media session bound to the composite channel and local group ID.
+The SDK verifies all of them, rechecks the provider epoch around MLS export,
+and places the exporter key in LiveKit's native E2EE provider before connecting.
+It never joins with missing, stale, or mismatched state and never retries as
+plaintext.
+
+An approved-device revocation calls `voice_e2ee.revoke()`; other control-log
+changes call `voice_e2ee.invalidate(reason)`. Active clients also monitor the
+provider epoch. Any of these conditions disconnects LiveKit and clears the key.
+After an MLS commit, build a new `VoiceE2EEContext` at the new epoch and request
+a fresh voice connection. Do not mutate or reuse the old context, media grant,
+or room across epochs.
 
 Supported listener aliases follow the event families:
 
@@ -315,8 +545,9 @@ waits for a filtered event.
 
 Reaction events use their own `message_reactions` intent, and typing events use
 `guild_typing`, which is disabled by default. Gateway cursors are persisted
-next to the owner-only worker key, so a restarted process resumes each guild
-topic instead of silently starting from the live edge.
+next to the owner-only worker key. A restarted process identifies with those
+cursors for every ordinary target and for each unchanged DM-capability
+revision, rather than silently starting from the live edge.
 
 Moderation helpers (`edit_member`, `kick_member`, `ban_member`, `unban_member`,
 and `bans`) need both the `moderation.members` scope and the matching live
@@ -326,8 +557,13 @@ guild permission. Deleting another author's message and bulk deletion use
 `voice.moderate`. Every one of these still enforces live permissions,
 hierarchy, audit logs, and the authoritative guild/federation target.
 
-Bots fail closed in E2EE-required forums and active E2EE threads. They cannot
-create or reply to an encrypted post until Kaede has a verified bot-device MLS
-participant protocol; plaintext fallback is never attempted. Forum/thread
-titles, tags, counts, membership, and archive/lock state remain visible
-metadata when the installation otherwise has access.
+Bots fail closed in E2EE-required forums and active E2EE threads unless the
+current worker's verified device is active in that exact child room. A required
+forum post is created as a metadata-only child shell with a nonce-bound starter
+reservation. Activate the child room, then claim that reservation with the
+first rich-v2 encrypted message; no plaintext starter is accepted. A thread
+created from a message in an encrypted parent is also an independent child MLS
+room: the source remains under the parent keys and child replies begin only
+after activation. Forum/thread titles, tags, counts, membership, and
+archive/lock state remain visible metadata when the installation otherwise has
+access.

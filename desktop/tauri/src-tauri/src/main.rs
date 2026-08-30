@@ -1,8 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Display,
+    net::IpAddr,
     str::FromStr,
     sync::{
         Arc,
@@ -13,7 +14,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use kaede_api::{ApiClient, ApiClientError, InstanceEndpoint};
+use kaede_api::{ApiClient, ApiClientError, InstanceEndpoint, PublicDownloadPolicy};
 use kaede_audio::{
     AudioError, CaptureSettings, InputMode, NativeCapture, NativePlayback, NoiseSuppression,
     ProcessorChain, SpeechProcessor, VOICE_SAMPLE_RATE, input_devices, output_devices,
@@ -33,10 +34,11 @@ use kaede_voice::{
     screen_source_thumbnail, screen_sources,
 };
 use parking_lot::Mutex as SyncMutex;
-use reqwest::Method;
+use reqwest::{Method, header::HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tauri::{
     AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
     ipc::{InvokeBody, Request, Response},
@@ -44,7 +46,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -84,12 +86,13 @@ struct NativeState {
     gateway_events_tx: mpsc::UnboundedSender<Value>,
     gateway_events_rx: Mutex<mpsc::UnboundedReceiver<Value>>,
     voice: Mutex<Option<VoiceHandle>>,
-    voice_target: RwLock<Option<VoiceTarget>>,
+    voice_target: RwLock<Option<InstalledVoiceTarget>>,
     voice_video: Mutex<Option<mpsc::Receiver<kaede_voice::RemoteVideoFrame>>>,
     voice_install: VoiceInstallFence,
+    voice_restart: mpsc::UnboundedSender<VoiceRestartRequest>,
     voice_ui: RwLock<VoiceUiState>,
-    push_to_talk_sender: Arc<SyncMutex<Option<mpsc::Sender<VoiceCommand>>>>,
-    hotkey: SyncMutex<HotkeyRegistration>,
+    push_to_talk_sender: Arc<SyncMutex<Option<mpsc::UnboundedSender<VoiceCommand>>>>,
+    hotkey: Arc<SyncMutex<HotkeyRegistration>>,
     preferences: RwLock<DesktopPreferences>,
     paths: PlatformPaths,
 }
@@ -133,13 +136,39 @@ impl VoiceInstallFence {
 
     async fn reserve_restart(
         &self,
-        target: &RwLock<Option<VoiceTarget>>,
+        target: &RwLock<Option<InstalledVoiceTarget>>,
     ) -> Option<(u64, VoiceTarget)> {
         let _guard = self.install.lock().await;
-        let target = target.read().await.clone()?;
+        let current = self.generation.load(Ordering::Acquire);
+        let installed = target.read().await.clone()?;
+        if installed.generation != current {
+            return None;
+        }
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        Some((generation, target))
+        Some((generation, installed.target))
     }
+
+    async fn reserve_restart_if_current(
+        &self,
+        expected: u64,
+        target: &RwLock<Option<InstalledVoiceTarget>>,
+    ) -> Option<(u64, VoiceTarget)> {
+        let _guard = self.install.lock().await;
+        if self.generation.load(Ordering::Acquire) != expected {
+            return None;
+        }
+        let installed = target.read().await.clone()?;
+        if installed.generation != expected {
+            return None;
+        }
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        Some((generation, installed.target))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VoiceRestartRequest {
+    generation: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -158,8 +187,22 @@ struct VoiceTarget {
     connection_id: String,
 }
 
+#[derive(Clone, Debug)]
+struct InstalledVoiceTarget {
+    generation: u64,
+    target: VoiceTarget,
+}
+
+#[derive(Clone)]
+struct RegisteredHotkey {
+    configured: String,
+    shortcut: Shortcut,
+}
+
+#[derive(Clone)]
 struct HotkeyRegistration {
-    registered: Option<String>,
+    push_to_talk: Option<RegisteredHotkey>,
+    priority_push_to_talk: Option<RegisteredHotkey>,
     status: String,
 }
 
@@ -206,6 +249,9 @@ impl From<ApiClientError> for NativeError {
                     ApiClientError::UploadLengthMismatch => "UPLOAD_FILE_CHANGED",
                     ApiClientError::ForbiddenUploadHeader => "UNSAFE_UPLOAD_INSTRUCTIONS",
                     ApiClientError::UploadRejected(_) => "UPLOAD_REJECTED",
+                    ApiClientError::DownloadRejected(_) => "MEDIA_DOWNLOAD_REJECTED",
+                    ApiClientError::UnsafeNetworkTarget => "UNSAFE_MEDIA_TARGET",
+                    ApiClientError::Resolve(_) => "MEDIA_RESOLUTION_FAILED",
                     ApiClientError::InvalidRedirect => "INVALID_MEDIA_REDIRECT",
                     ApiClientError::ResponseTooLarge => "MEDIA_TOO_LARGE",
                     ApiClientError::Url(_) => "INVALID_SERVER_URL",
@@ -313,6 +359,58 @@ struct NativeRequest {
     path: String,
     body: Option<Value>,
     if_match: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NativeForwardHeaders {
+    if_match: Option<String>,
+    audit_log_reason: Option<String>,
+}
+
+fn native_forward_headers(request: &NativeRequest) -> Result<NativeForwardHeaders, NativeError> {
+    let invalid = || {
+        NativeError::local(
+            "INVALID_NATIVE_HEADER",
+            "The desktop client blocked an unsupported request header.",
+        )
+    };
+    let mut forwarded = NativeForwardHeaders {
+        if_match: request.if_match.clone(),
+        audit_log_reason: None,
+    };
+    if forwarded
+        .if_match
+        .as_deref()
+        .is_some_and(|value| HeaderValue::from_str(value).is_err())
+    {
+        return Err(invalid());
+    }
+    for (name, value) in &request.headers {
+        if name.eq_ignore_ascii_case("if-match") {
+            if HeaderValue::from_str(value).is_err()
+                || forwarded
+                    .if_match
+                    .as_ref()
+                    .is_some_and(|existing| existing != value)
+            {
+                return Err(invalid());
+            }
+            forwarded.if_match = Some(value.clone());
+        } else if name.eq_ignore_ascii_case("x-audit-log-reason") {
+            if forwarded.audit_log_reason.is_some()
+                || value.len() > 512
+                || HeaderValue::from_str(value).is_err()
+            {
+                return Err(invalid());
+            }
+            forwarded.audit_log_reason = Some(value.clone());
+        } else {
+            return Err(invalid());
+        }
+    }
+    Ok(forwarded)
 }
 
 #[derive(Debug, Serialize)]
@@ -380,6 +478,8 @@ enum VoiceControl {
     Undeafen,
     PushToTalkDown,
     PushToTalkUp,
+    PriorityPushToTalkDown,
+    PriorityPushToTalkUp,
     CameraOn,
     CameraOff,
     ScreenOn,
@@ -1189,6 +1289,7 @@ async fn register_request(body: &Value, state: &NativeState) -> Result<Value, Na
 async fn generic_request(
     api: &ApiClient,
     request: &NativeRequest,
+    headers: &NativeForwardHeaders,
 ) -> Result<NativeResponse, ApiClientError> {
     let method = Method::from_bytes(request.method.as_bytes())
         .map_err(|_| ApiClientError::InvalidEndpoint)?;
@@ -1197,7 +1298,8 @@ async fn generic_request(
             method,
             request.path.trim_start_matches('/'),
             request.body.as_ref(),
-            request.if_match.as_ref(),
+            headers.if_match.as_deref(),
+            headers.audit_log_reason.as_deref(),
         )
         .await?;
     Ok(NativeResponse {
@@ -1214,6 +1316,7 @@ async fn native_api_request(
 ) -> Result<NativeResponse, NativeError> {
     let path = request.path.trim_start_matches('/');
     let body = request.body.as_ref().unwrap_or(&Value::Null);
+    let forwarded_headers = native_forward_headers(&request)?;
     // The native bridge is the last trusted boundary before network I/O. Do
     // not let an old or damaged bundled webview transmit literal passwords
     // while relying on the server to reject their malformed metadata.
@@ -1246,7 +1349,7 @@ async fn native_api_request(
         }
         _ => {
             let api = configured_api(&state).await?;
-            let response = match generic_request(&api, &request).await {
+            let response = match generic_request(&api, &request, &forwarded_headers).await {
                 Ok(response) => response,
                 Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
                     let account = state.account.read().await.clone().ok_or_else(|| {
@@ -1256,7 +1359,7 @@ async fn native_api_request(
                         )
                     })?;
                     account.session.refresh().await.map_err(NativeError::from)?;
-                    generic_request(&api, &request)
+                    generic_request(&api, &request, &forwarded_headers)
                         .await
                         .map_err(NativeError::from)?
                 }
@@ -1286,6 +1389,105 @@ async fn native_api_request(
 }
 
 const NATIVE_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
+const NATIVE_SOUNDBOARD_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Debug)]
+struct ValidatedSoundboardMedia {
+    url: url::Url,
+    network_policy: PublicDownloadPolicy,
+}
+
+fn validate_soundboard_media_url(
+    value: &str,
+    authority_domain: &str,
+    media_origin: &str,
+    configured_authority: &Domain,
+    configured_origin: &url::Url,
+) -> Result<ValidatedSoundboardMedia, NativeError> {
+    let authority = Domain::parse(authority_domain).map_err(|_| {
+        NativeError::local(
+            "INVALID_SOUNDBOARD_SOURCE",
+            "Kaede blocked a guild sound with an invalid source instance.",
+        )
+    })?;
+    let url = url::Url::parse(value).map_err(|_| {
+        NativeError::local(
+            "INVALID_SOUNDBOARD_URL",
+            "Kaede blocked an invalid guild sound link.",
+        )
+    })?;
+    let expected_origin = url::Url::parse(media_origin).map_err(|_| {
+        NativeError::local(
+            "INVALID_SOUNDBOARD_ORIGIN",
+            "Kaede blocked a guild sound with an invalid media origin.",
+        )
+    })?;
+    let canonical_origin = expected_origin.origin().ascii_serialization();
+    if url.scheme() != "https"
+        || expected_origin.scheme() != "https"
+        || expected_origin.path() != "/"
+        || expected_origin.query().is_some()
+        || expected_origin.fragment().is_some()
+        || !expected_origin.username().is_empty()
+        || expected_origin.password().is_some()
+        || media_origin.trim_end_matches('/') != canonical_origin
+        || url.origin().ascii_serialization() != canonical_origin
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(NativeError::local(
+            "UNSAFE_SOUNDBOARD_URL",
+            "Kaede blocked a guild sound link from an unexpected media origin.",
+        ));
+    }
+    let media_host = url.host_str().ok_or_else(|| {
+        NativeError::local(
+            "INVALID_SOUNDBOARD_URL",
+            "Kaede blocked an invalid guild sound link.",
+        )
+    })?;
+    let configured_host = configured_origin.host_str().unwrap_or_default();
+    let configured_loopback = is_explicit_loopback_host(configured_host);
+    let local_media_host = is_explicit_loopback_host(media_host);
+    let authority_media_host = media_host == authority.as_str()
+        || media_host
+            .strip_suffix(authority.as_str())
+            .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1);
+    let allow_loopback_development = authority == *configured_authority
+        && configured_loopback
+        && local_media_host
+        && (media_host == configured_host || authority_media_host);
+    if local_media_host && !allow_loopback_development {
+        return Err(NativeError::local(
+            "UNSAFE_SOUNDBOARD_URL",
+            "Kaede blocked a guild sound link that targets a local or private network.",
+        ));
+    }
+    Ok(ValidatedSoundboardMedia {
+        url,
+        network_policy: if allow_loopback_development {
+            PublicDownloadPolicy::LoopbackDevelopmentOnly
+        } else {
+            PublicDownloadPolicy::PublicOnly
+        },
+    })
+}
+
+fn is_explicit_loopback_host(value: &str) -> bool {
+    value == "localhost"
+        || value.ends_with(".localhost")
+        || value
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
 
 fn validate_attachment_media_path(path: &str) -> Result<&str, NativeError> {
     if path.contains(['#', '\\']) || !path.starts_with('/') || path.starts_with("//") {
@@ -1419,6 +1621,68 @@ async fn native_media_request(
 }
 
 #[tauri::command]
+async fn native_soundboard_media(
+    url: String,
+    authority_domain: String,
+    media_origin: String,
+    expected_sha256: String,
+    state: State<'_, NativeState>,
+) -> Result<Response, NativeError> {
+    if !valid_sha256(&expected_sha256) {
+        return Err(NativeError::local(
+            "INVALID_SOUNDBOARD_DIGEST",
+            "Kaede blocked a guild sound with invalid integrity information.",
+        ));
+    }
+    let api = configured_api(&state).await?;
+    let configured_origin = api.endpoint().public_origin();
+    let target = validate_soundboard_media_url(
+        &url,
+        &authority_domain,
+        &media_origin,
+        api.endpoint().domain(),
+        &configured_origin,
+    )?;
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(10),
+        api.get_public_bytes_no_redirect(
+            &target.url,
+            NATIVE_SOUNDBOARD_MAX_BYTES,
+            target.network_policy,
+        ),
+    )
+    .await
+    .map_err(|error| {
+        NativeError::operation(
+            "SOUNDBOARD_DOWNLOAD_TIMEOUT",
+            "The guild sound download timed out. Ask someone to play it again.",
+            error,
+        )
+    })?
+    .map_err(|error| {
+        NativeError::operation(
+            "SOUNDBOARD_DOWNLOAD_FAILED",
+            "The guild sound could not be downloaded safely. Ask someone to play it again.",
+            error,
+        )
+    })?;
+    if bytes.is_empty() {
+        return Err(NativeError::local(
+            "EMPTY_SOUNDBOARD_MEDIA",
+            "The guild sound response was empty.",
+        ));
+    }
+    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if actual_sha256 != expected_sha256 {
+        return Err(NativeError::local(
+            "SOUNDBOARD_INTEGRITY_FAILED",
+            "Kaede blocked a guild sound that failed its integrity check.",
+        ));
+    }
+    Ok(Response::new(bytes.to_vec()))
+}
+
+#[tauri::command]
 async fn native_upload_object(
     request: Request<'_>,
     state: State<'_, NativeState>,
@@ -1501,54 +1765,7 @@ async fn native_gateway_command(
     payload: Value,
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
-    let command = match command.as_str() {
-        "presence" => GatewayCommand::Presence {
-            status: payload
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("online")
-                .to_owned(),
-            custom_status: payload
-                .get("custom_status")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-        },
-        "request_members" => GatewayCommand::RequestMembers {
-            guild_id: required_string(&payload, "guild_id")?,
-            guild_domain: required_string(&payload, "guild_domain")?,
-            query: payload
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            limit: u16::try_from(
-                payload
-                    .get("limit")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(100)
-                    .min(100),
-            )
-            .unwrap_or(100),
-        },
-        "subscribe_members" => GatewayCommand::SubscribeMemberList {
-            guild_id: required_string(&payload, "guild_id")?,
-            guild_domain: required_string(&payload, "guild_domain")?,
-            ranges: serde_json::from_value(payload.get("ranges").cloned().unwrap_or_default())
-                .map_err(|error| {
-                    NativeError::operation(
-                        "INVALID_GATEWAY_COMMAND",
-                        "Kaede could not request the member list. Close and reopen the guild, then try again.",
-                        error,
-                    )
-                })?,
-        },
-        _ => {
-            return Err(NativeError::local(
-                "INVALID_GATEWAY_COMMAND",
-                "This realtime action is not supported by this version of Kaede. Update the app and try again.",
-            ));
-        }
-    };
+    let command = decode_gateway_command(&command, &payload)?;
     state
         .gateway_commands
         .read()
@@ -1570,6 +1787,205 @@ async fn native_gateway_command(
         })
 }
 
+fn decode_gateway_command(command: &str, payload: &Value) -> Result<GatewayCommand, NativeError> {
+    let decoded = match command {
+        "presence" => GatewayCommand::Presence {
+            status: payload
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("online")
+                .to_owned(),
+            custom_status: payload
+                .get("custom_status")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        },
+        "request_members" => GatewayCommand::RequestMembers {
+            guild_id: required_string(payload, "guild_id")?,
+            guild_domain: required_string(payload, "guild_domain")?,
+            query: payload
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            limit: u16::try_from(
+                payload
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(100)
+                    .min(100),
+            )
+            .unwrap_or(100),
+        },
+        "subscribe_members" => GatewayCommand::SubscribeMemberList {
+            guild_id: required_string(payload, "guild_id")?,
+            guild_domain: required_string(payload, "guild_domain")?,
+            ranges: serde_json::from_value(payload.get("ranges").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    NativeError::operation(
+                        "INVALID_GATEWAY_COMMAND",
+                        "Kaede could not request the member list. Close and reopen the guild, then try again.",
+                        error,
+                    )
+                })?,
+        },
+        "request_channel_info" => {
+            let fields = required_channel_info_fields(payload)?;
+            let (guild_id, guild_domain) = canonical_gateway_guild(payload)?;
+            GatewayCommand::RequestChannelInfo {
+                guild_id,
+                guild_domain,
+                fields,
+            }
+        }
+        "request_soundboard_sounds" => GatewayCommand::RequestSoundboardSounds {
+            guilds: required_gateway_guilds(payload)?,
+        },
+        "voice_state" => {
+            required_gateway_object(
+                payload,
+                &["self_mute", "self_deaf"],
+                "The voice state was invalid. Try those voice controls again.",
+            )?;
+            GatewayCommand::VoiceState {
+                self_mute: required_gateway_bool(
+                    payload,
+                    "self_mute",
+                    "The microphone state was invalid. Try that voice control again.",
+                )?,
+                self_deaf: required_gateway_bool(
+                    payload,
+                    "self_deaf",
+                    "The deafen state was invalid. Try that voice control again.",
+                )?,
+            }
+        }
+        _ => {
+            return Err(NativeError::local(
+                "INVALID_GATEWAY_COMMAND",
+                "This realtime action is not supported by this version of Kaede. Update the app and try again.",
+            ));
+        }
+    };
+    Ok(decoded)
+}
+
+fn required_gateway_guilds(payload: &Value) -> Result<Vec<(String, String)>, NativeError> {
+    required_gateway_object(
+        payload,
+        &["guilds"],
+        "The soundboard guild list was invalid.",
+    )?;
+    let guilds = payload
+        .get("guilds")
+        .and_then(Value::as_array)
+        .filter(|guilds| (1..=100).contains(&guilds.len()))
+        .ok_or_else(|| {
+            NativeError::local(
+                "INVALID_GATEWAY_COMMAND",
+                "The soundboard guild list was invalid.",
+            )
+        })?;
+    let mut seen = BTreeSet::new();
+    guilds
+        .iter()
+        .map(|guild| {
+            let parsed = required_gateway_guild(guild)?;
+            if !seen.insert(format!("{}@{}", parsed.0, parsed.1)) {
+                return Err(NativeError::local(
+                    "INVALID_GATEWAY_COMMAND",
+                    "The soundboard guild list contained a duplicate guild.",
+                ));
+            }
+            Ok(parsed)
+        })
+        .collect()
+}
+
+fn required_channel_info_fields(payload: &Value) -> Result<Vec<String>, NativeError> {
+    required_gateway_object(
+        payload,
+        &["guild_id", "guild_domain", "fields"],
+        "The live voice channel information request was invalid.",
+    )?;
+    let fields = payload
+        .get("fields")
+        .and_then(Value::as_array)
+        .filter(|fields| (1..=2).contains(&fields.len()))
+        .ok_or_else(|| {
+            NativeError::local(
+                "INVALID_GATEWAY_COMMAND",
+                "The live voice channel information fields were invalid.",
+            )
+        })?;
+    let mut seen = BTreeSet::new();
+    let mut rendered = Vec::with_capacity(fields.len());
+    for field in fields {
+        let Some(field) = field.as_str() else {
+            return Err(NativeError::local(
+                "INVALID_GATEWAY_COMMAND",
+                "The live voice channel information fields were invalid.",
+            ));
+        };
+        if !matches!(field, "status" | "voice_start_time") || !seen.insert(field) {
+            return Err(NativeError::local(
+                "INVALID_GATEWAY_COMMAND",
+                "The live voice channel information fields were invalid.",
+            ));
+        }
+        rendered.push(field.to_owned());
+    }
+    Ok(rendered)
+}
+
+fn required_gateway_guild(payload: &Value) -> Result<(String, String), NativeError> {
+    required_gateway_object(
+        payload,
+        &["guild_id", "guild_domain"],
+        "The gateway guild reference was invalid.",
+    )?;
+    canonical_gateway_guild(payload)
+}
+
+fn canonical_gateway_guild(payload: &Value) -> Result<(String, String), NativeError> {
+    let id = required_string(payload, "guild_id")?;
+    let domain = required_string(payload, "guild_domain")?;
+    let wire = format!("{id}@{domain}");
+    let guild = EntityRef::from_str(&wire).map_err(|_| {
+        NativeError::local(
+            "INVALID_GATEWAY_COMMAND",
+            "The gateway guild reference was invalid.",
+        )
+    })?;
+    if guild.to_string() != wire {
+        return Err(NativeError::local(
+            "INVALID_GATEWAY_COMMAND",
+            "The gateway guild reference was not canonical.",
+        ));
+    }
+    Ok((guild.id.to_string(), guild.domain.to_string()))
+}
+
+fn required_gateway_object<'a>(
+    payload: &'a Value,
+    keys: &[&str],
+    message: &str,
+) -> Result<&'a serde_json::Map<String, Value>, NativeError> {
+    payload
+        .as_object()
+        .filter(|object| {
+            object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key))
+        })
+        .ok_or_else(|| NativeError::local("INVALID_GATEWAY_COMMAND", message))
+}
+
+fn required_gateway_bool(payload: &Value, key: &str, message: &str) -> Result<bool, NativeError> {
+    payload
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| NativeError::local("INVALID_GATEWAY_COMMAND", message))
+}
+
 fn required_string(value: &Value, key: &str) -> Result<String, NativeError> {
     let label = match key {
         "guild_id" | "guild_domain" => "guild information",
@@ -1589,48 +2005,145 @@ fn required_string(value: &Value, key: &str) -> Result<String, NativeError> {
         })
 }
 
-fn replace_global_hotkey(
+fn configured_hotkey(
+    configured: Option<&str>,
+    code: &str,
+    label: &str,
+) -> Result<Option<RegisteredHotkey>, NativeError> {
+    let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let shortcut = Shortcut::from_str(configured).map_err(|error| {
+        NativeError::operation(
+            code,
+            format!("That {label} shortcut is invalid. Enter one key with optional modifier keys."),
+            error,
+        )
+    })?;
+    Ok(Some(RegisteredHotkey {
+        configured: configured.to_owned(),
+        shortcut,
+    }))
+}
+
+fn hotkey_status(registration: &HotkeyRegistration) -> String {
+    let status = |registered: Option<&RegisteredHotkey>| {
+        registered.map_or_else(
+            || "disabled".to_owned(),
+            |registered| format!("active globally: {}", registered.configured),
+        )
+    };
+    format!(
+        "Push to talk is {}; priority push to talk is {}.",
+        status(registration.push_to_talk.as_ref()),
+        status(registration.priority_push_to_talk.as_ref())
+    )
+}
+
+fn hotkeys_conflict(
+    push_to_talk: Option<&RegisteredHotkey>,
+    priority_push_to_talk: Option<&RegisteredHotkey>,
+) -> bool {
+    push_to_talk
+        .zip(priority_push_to_talk)
+        .is_some_and(|(normal, priority)| normal.shortcut == priority.shortcut)
+}
+
+fn replace_global_hotkeys(
     app: &AppHandle,
     registration: &mut HotkeyRegistration,
-    configured: Option<&str>,
-) -> Result<(), NativeError> {
-    let replacement = configured
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    if replacement == registration.registered {
-        return Ok(());
-    }
-    let manager = app.global_shortcut();
-    if let Some(next) = replacement.as_deref() {
-        manager.register(next).map_err(|error| {
-            NativeError::operation(
-                "INVALID_PUSH_TO_TALK_HOTKEY",
-                "That push-to-talk shortcut could not be registered. Choose a different key combination; this one may be reserved by your system or another app.",
-                error,
-            )
-        })?;
-    }
-    if let Some(previous) = registration.registered.as_deref()
-        && let Err(error) = manager.unregister(previous)
-    {
-        if let Some(next) = replacement.as_deref() {
-            let _ = manager.unregister(next);
-        }
-        return Err(NativeError::operation(
-            "GLOBAL_HOTKEY_UNAVAILABLE",
-            "Kaede could not replace the previous push-to-talk shortcut. The previous shortcut is still active; choose a different combination and try again.",
-            error,
+    push_to_talk: Option<&str>,
+    priority_push_to_talk: Option<&str>,
+) -> Result<bool, NativeError> {
+    let next_push_to_talk =
+        configured_hotkey(push_to_talk, "INVALID_PUSH_TO_TALK_HOTKEY", "push-to-talk")?;
+    let next_priority = configured_hotkey(
+        priority_push_to_talk,
+        "INVALID_PRIORITY_PUSH_TO_TALK_HOTKEY",
+        "priority push-to-talk",
+    )?;
+    if hotkeys_conflict(next_push_to_talk.as_ref(), next_priority.as_ref()) {
+        return Err(NativeError::local(
+            "PUSH_TO_TALK_HOTKEY_CONFLICT",
+            "Normal and priority push to talk need different shortcuts.",
         ));
     }
-    registration.registered = replacement;
-    registration.status = configured
-        .filter(|value| !value.trim().is_empty())
-        .map_or_else(
-            || "Global push to talk is disabled.".to_owned(),
-            |value| format!("Active globally: {value}"),
-        );
-    Ok(())
+    let same_shortcuts = |left: Option<&RegisteredHotkey>, right: Option<&RegisteredHotkey>| {
+        left.map(|value| value.shortcut) == right.map(|value| value.shortcut)
+    };
+    if same_shortcuts(
+        registration.push_to_talk.as_ref(),
+        next_push_to_talk.as_ref(),
+    ) && same_shortcuts(
+        registration.priority_push_to_talk.as_ref(),
+        next_priority.as_ref(),
+    ) {
+        registration.push_to_talk = next_push_to_talk;
+        registration.priority_push_to_talk = next_priority;
+        registration.status = hotkey_status(registration);
+        return Ok(false);
+    }
+
+    let manager = app.global_shortcut();
+    let previous = registration.clone();
+    let mut removed = Vec::<Shortcut>::new();
+    for registered in [
+        previous.push_to_talk.as_ref(),
+        previous.priority_push_to_talk.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(error) = manager.unregister(registered.shortcut) {
+            for shortcut in removed {
+                let _ = manager.register(shortcut);
+            }
+            return Err(NativeError::operation(
+                "GLOBAL_HOTKEY_UNAVAILABLE",
+                "Kaede could not replace the existing voice shortcuts. The previous shortcuts remain selected; try again.",
+                error,
+            ));
+        }
+        removed.push(registered.shortcut);
+    }
+
+    let mut installed = Vec::<Shortcut>::new();
+    for registered in [next_push_to_talk.as_ref(), next_priority.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Err(error) = manager.register(registered.shortcut) {
+            for shortcut in installed {
+                let _ = manager.unregister(shortcut);
+            }
+            for registered in [
+                previous.push_to_talk.as_ref(),
+                previous.priority_push_to_talk.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let _ = manager.register(registered.shortcut);
+            }
+            return Err(NativeError::operation(
+                "GLOBAL_HOTKEY_UNAVAILABLE",
+                "One of those voice shortcuts is unavailable. The previous shortcuts were restored; choose a different combination and try again.",
+                error,
+            ));
+        }
+        installed.push(registered.shortcut);
+    }
+
+    registration.push_to_talk = next_push_to_talk;
+    registration.priority_push_to_talk = next_priority;
+    registration.status = hotkey_status(registration);
+    Ok(true)
+}
+
+fn release_voice_hotkeys(sender: Option<&mpsc::UnboundedSender<VoiceCommand>>) {
+    let Some(sender) = sender else { return };
+    let _ = sender.send(VoiceCommand::SetPushToTalk(false));
+    let _ = sender.send(VoiceCommand::SetPriorityPushToTalk(false));
 }
 
 #[tauri::command]
@@ -1893,6 +2406,7 @@ async fn join_native_voice(
     join_native_voice_reserved(target, takeover, state, generation).await
 }
 
+#[allow(clippy::too_many_lines)] // One fenced join keeps validation and installation ordered.
 async fn join_native_voice_reserved(
     target: VoiceTarget,
     takeover: bool,
@@ -1933,6 +2447,11 @@ async fn join_native_voice_reserved(
         capture,
         output_device: output,
         publish: media,
+        // A join establishes LiveKit publication before returning its handle.
+        // Keep both media directions closed until the generation fence accepts
+        // the handle and we can reconcile the latest UI state atomically.
+        initially_muted: true,
+        initially_deafened: true,
     };
     let media_key = target
         .e2ee_key
@@ -1982,20 +2501,54 @@ async fn join_native_voice_reserved(
         .await
     }
     .map_err(NativeError::from)?;
+    let grant_stale = handle.grant_stale.clone();
     let Some(install_guard) = state.voice_install.lock_if_current(generation).await else {
         handle.leave().await;
         return Ok(());
     };
+    // Voice controls also take this lock before updating voice_ui. Whichever
+    // operation wins therefore applies the user's latest state to the handle
+    // that remains installed; a control cannot be stranded on the old room.
+    let mut installed_voice = state.voice.lock().await;
+    let voice_ui = state.voice_ui.read().await.clone();
+    if let Some(gate) = handle.input_level.as_ref() {
+        gate.set_muted(voice_ui.muted || voice_ui.deafened);
+    }
+    let _ = handle.commands.send(VoiceCommand::SetMuted(voice_ui.muted));
+    let _ = handle
+        .commands
+        .send(VoiceCommand::SetDeafened(voice_ui.deafened));
     *state.push_to_talk_sender.lock() = Some(handle.commands.clone());
     *state.voice_video.lock().await = handle.video_frames.take();
-    let previous = state.voice.lock().await.replace(handle);
-    *state.voice_target.write().await = Some(target);
-    *state.voice_ui.write().await = VoiceUiState::default();
+    let previous = installed_voice.replace(handle);
+    *state.voice_target.write().await = Some(InstalledVoiceTarget { generation, target });
+    drop(installed_voice);
     drop(install_guard);
+    tauri::async_runtime::spawn(forward_voice_restart(
+        grant_stale,
+        generation,
+        state.voice_restart.clone(),
+    ));
     if let Some(previous) = previous {
         previous.leave().await;
     }
     Ok(())
+}
+
+async fn forward_voice_restart(
+    mut grant_stale: tokio::sync::watch::Receiver<bool>,
+    generation: u64,
+    restart: mpsc::UnboundedSender<VoiceRestartRequest>,
+) {
+    loop {
+        if *grant_stale.borrow_and_update() {
+            let _ = restart.send(VoiceRestartRequest { generation });
+            return;
+        }
+        if grant_stale.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[tauri::command]
@@ -2012,6 +2565,8 @@ async fn native_voice_control(
         VoiceControl::Undeafen => VoiceCommand::SetDeafened(false),
         VoiceControl::PushToTalkDown => VoiceCommand::SetPushToTalk(true),
         VoiceControl::PushToTalkUp => VoiceCommand::SetPushToTalk(false),
+        VoiceControl::PriorityPushToTalkDown => VoiceCommand::SetPriorityPushToTalk(true),
+        VoiceControl::PriorityPushToTalkUp => VoiceCommand::SetPriorityPushToTalk(false),
         VoiceControl::CameraOn => VoiceCommand::SetCamera {
             enabled: true,
             device_id: preferences.camera_device.map(|device| device.id),
@@ -2044,7 +2599,6 @@ async fn native_voice_control(
         })?
         .commands
         .send(command)
-        .await
         .map_err(|_| {
             NativeError::local(
                 "VOICE_DISCONNECTED",
@@ -2181,6 +2735,17 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
             "input_level".to_owned(),
             json!(voice.input_level.as_ref().map_or(0.0, |gate| gate.level())),
         );
+        map.insert(
+            "priority_speakers".to_owned(),
+            json!(
+                voice
+                    .priority_speakers
+                    .borrow()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            ),
+        );
     }
     Ok(value)
 }
@@ -2244,24 +2809,44 @@ async fn native_preferences_set(
         || previous.echo_cancellation != preferences.echo_cancellation
         || previous.automatic_gain_control != preferences.automatic_gain_control
         || previous.audio_quality != preferences.audio_quality;
-    {
+    let hotkey_result = {
         let mut hotkey = state.hotkey.lock();
-        replace_global_hotkey(
+        replace_global_hotkeys(
             &app,
             &mut hotkey,
             preferences.push_to_talk_hotkey.as_deref(),
-        )?;
+            preferences.priority_push_to_talk_hotkey.as_deref(),
+        )
+    };
+    let hotkeys_changed = match hotkey_result {
+        Ok(changed) => changed,
+        Err(error) => {
+            release_voice_hotkeys(state.push_to_talk_sender.lock().as_ref());
+            return Err(error);
+        }
+    };
+    if hotkeys_changed {
+        release_voice_hotkeys(state.push_to_talk_sender.lock().as_ref());
     }
-    preferences
-        .save(&state.paths)
-        .await
-        .map_err(|error| {
-            NativeError::operation(
-                "PREFERENCES_SAVE_FAILED",
-                "Kaede could not save your desktop preferences. Check that the app can write to its settings directory and try again.",
-                error,
-            )
-        })?;
+    if let Err(error) = preferences.save(&state.paths).await {
+        let mut hotkey = state.hotkey.lock();
+        if let Err(rollback_error) = replace_global_hotkeys(
+            &app,
+            &mut hotkey,
+            previous.push_to_talk_hotkey.as_deref(),
+            previous.priority_push_to_talk_hotkey.as_deref(),
+        ) {
+            tracing::error!(
+                ?rollback_error,
+                "failed to restore voice shortcuts after preference-save failure"
+            );
+        }
+        return Err(NativeError::operation(
+            "PREFERENCES_SAVE_FAILED",
+            "Kaede could not save your desktop preferences. Check that the app can write to its settings directory and try again.",
+            error,
+        ));
+    }
     *state.preferences.write().await = preferences;
     let restart = if restart_voice {
         state
@@ -2433,12 +3018,15 @@ fn main() {
         }
     };
     let (gateway_events_tx, gateway_events_rx) = mpsc::unbounded_channel();
-    let push_to_talk_sender = Arc::new(SyncMutex::new(None::<mpsc::Sender<VoiceCommand>>));
+    let (voice_restart_tx, mut voice_restart_rx) = mpsc::unbounded_channel();
+    let push_to_talk_sender = Arc::new(SyncMutex::new(None::<mpsc::UnboundedSender<VoiceCommand>>));
     let event_sender = push_to_talk_sender.clone();
-    let hotkey = HotkeyRegistration {
-        registered: None,
-        status: "Global push to talk is disabled.".to_owned(),
-    };
+    let hotkey = Arc::new(SyncMutex::new(HotkeyRegistration {
+        push_to_talk: None,
+        priority_push_to_talk: None,
+        status: "Push to talk is disabled; priority push to talk is disabled.".to_owned(),
+    }));
+    let event_hotkey = hotkey.clone();
     let state = NativeState {
         instance: RwLock::new(None),
         account: RwLock::new(None),
@@ -2451,9 +3039,10 @@ fn main() {
         voice_target: RwLock::new(None),
         voice_video: Mutex::new(None),
         voice_install: VoiceInstallFence::new(),
+        voice_restart: voice_restart_tx,
         voice_ui: RwLock::new(VoiceUiState::default()),
         push_to_talk_sender,
-        hotkey: SyncMutex::new(hotkey),
+        hotkey,
         preferences: RwLock::new(preferences),
         paths,
     };
@@ -2467,11 +3056,30 @@ fn main() {
         ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |_app, _shortcut, event| {
-                    if let Some(sender) = event_sender.lock().as_ref() {
-                        let _ = sender.try_send(VoiceCommand::SetPushToTalk(
-                            event.state == ShortcutState::Pressed,
-                        ));
+                .with_handler(move |_app, shortcut, event| {
+                    let pressed = event.state == ShortcutState::Pressed;
+                    let command = {
+                        let hotkey = event_hotkey.lock();
+                        if hotkey
+                            .push_to_talk
+                            .as_ref()
+                            .is_some_and(|registered| registered.shortcut == *shortcut)
+                        {
+                            Some(VoiceCommand::SetPushToTalk(pressed))
+                        } else if hotkey
+                            .priority_push_to_talk
+                            .as_ref()
+                            .is_some_and(|registered| registered.shortcut == *shortcut)
+                        {
+                            Some(VoiceCommand::SetPriorityPushToTalk(pressed))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(command) = command
+                        && let Some(sender) = event_sender.lock().as_ref()
+                    {
+                        let _ = sender.send(command);
                     }
                 })
                 .build(),
@@ -2485,6 +3093,30 @@ fn main() {
         ))
         .manage(state)
         .setup(move |app| {
+            let voice_restart_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(request) = voice_restart_rx.recv().await {
+                    let state = voice_restart_handle.state::<NativeState>();
+                    let Some((generation, target)) = state
+                        .voice_install
+                        .reserve_restart_if_current(request.generation, &state.voice_target)
+                        .await
+                    else {
+                        continue;
+                    };
+                    if let Err(error) =
+                        join_native_voice_reserved(target, false, &state, generation).await
+                    {
+                        tracing::warn!(?error, "native voice grant refresh failed");
+                        if let Some(_install_guard) =
+                            state.voice_install.lock_if_current(generation).await
+                            && let Some(voice) = state.voice.lock().await.as_ref()
+                        {
+                            voice.mark_failed(error.message.clone());
+                        }
+                    }
+                }
+            });
             // Warm the persisted account and OS credential vault immediately.
             // The frontend and configured_api also await/retry this same
             // serialized operation, which closes the hard-restart race.
@@ -2516,15 +3148,14 @@ fn main() {
             }
             {
                 let state = app.state::<NativeState>();
-                let configured = state
-                    .preferences
-                    .blocking_read()
-                    .push_to_talk_hotkey
-                    .clone();
+                let preferences = state.preferences.blocking_read().clone();
                 let mut hotkey = state.hotkey.lock();
-                if let Err(error) =
-                    replace_global_hotkey(app.handle(), &mut hotkey, configured.as_deref())
-                {
+                if let Err(error) = replace_global_hotkeys(
+                    app.handle(),
+                    &mut hotkey,
+                    preferences.push_to_talk_hotkey.as_deref(),
+                    preferences.priority_push_to_talk_hotkey.as_deref(),
+                ) {
                     hotkey.status = error.message;
                 }
             }
@@ -2586,6 +3217,7 @@ fn main() {
             native_restore_session,
             native_api_request,
             native_media_request,
+            native_soundboard_media,
             native_upload_object,
             native_gateway_next,
             native_gateway_command,
@@ -2625,16 +3257,82 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, error::Error};
+
     use kaede_api::ApiClientError;
     use kaede_auth::AuthError;
-    use kaede_protocol::ApiError;
+    use kaede_protocol::{ApiError, Domain};
     use reqwest::StatusCode;
+    use serde_json::Value;
 
     use super::{
-        NativeError, VoiceInstallFence, VoiceTarget, is_autostart_launch,
-        submitted_password_kdf_version, validate_attachment_media_path,
-        validate_native_password_request,
+        GatewayCommand, HotkeyRegistration, InstalledVoiceTarget, NativeError, NativeRequest,
+        PublicDownloadPolicy, VoiceCommand, VoiceInstallFence, VoiceRestartRequest, VoiceTarget,
+        configured_hotkey, decode_gateway_command, forward_voice_restart, hotkey_status,
+        hotkeys_conflict, is_autostart_launch, native_forward_headers, release_voice_hotkeys,
+        submitted_password_kdf_version, valid_sha256, validate_attachment_media_path,
+        validate_native_password_request, validate_soundboard_media_url,
     };
+
+    #[test]
+    fn voice_shortcuts_are_distinct_and_report_both_states() {
+        let Ok(normal) = configured_hotkey(
+            Some("Ctrl+Shift+Space"),
+            "INVALID_PUSH_TO_TALK_HOTKEY",
+            "push-to-talk",
+        ) else {
+            panic!("normal shortcut must parse");
+        };
+        let Ok(same) = configured_hotkey(
+            Some("Ctrl+Shift+Space"),
+            "INVALID_PRIORITY_PUSH_TO_TALK_HOTKEY",
+            "priority push-to-talk",
+        ) else {
+            panic!("equivalent priority shortcut must parse");
+        };
+        assert!(hotkeys_conflict(normal.as_ref(), same.as_ref()));
+
+        let Ok(priority) = configured_hotkey(
+            Some("Alt+Shift+Space"),
+            "INVALID_PRIORITY_PUSH_TO_TALK_HOTKEY",
+            "priority push-to-talk",
+        ) else {
+            panic!("priority shortcut must parse");
+        };
+        assert!(!hotkeys_conflict(normal.as_ref(), priority.as_ref()));
+        let registration = HotkeyRegistration {
+            push_to_talk: normal,
+            priority_push_to_talk: priority,
+            status: String::new(),
+        };
+        let status = hotkey_status(&registration);
+        assert!(status.contains("Ctrl+Shift+Space"));
+        assert!(status.contains("Alt+Shift+Space"));
+    }
+
+    #[test]
+    fn voice_shortcut_release_is_not_dropped_by_a_full_queue() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..1_024 {
+            assert!(sender.send(VoiceCommand::SetPushToTalk(true)).is_ok());
+        }
+        release_voice_hotkeys(Some(&sender));
+
+        for _ in 0..1_024 {
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(VoiceCommand::SetPushToTalk(true))
+            ));
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(VoiceCommand::SetPushToTalk(false))
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(VoiceCommand::SetPriorityPushToTalk(false))
+        ));
+    }
 
     fn plaintext_voice_target() -> VoiceTarget {
         VoiceTarget {
@@ -2645,6 +3343,10 @@ mod tests {
                 room: "voice-room".to_owned(),
                 channel_id: "1".to_owned(),
                 channel_domain: "example.com".to_owned(),
+                bitrate: 64_000,
+                user_limit: 0,
+                rtc_region: None,
+                video_quality_mode: 1,
                 encryption_policy_generation: None,
                 encryption_epoch: None,
                 media_protocol: None,
@@ -2684,7 +3386,11 @@ mod tests {
     #[tokio::test]
     async fn voice_restart_snapshot_and_generation_share_the_leave_fence() {
         let fence = VoiceInstallFence::new();
-        let target = tokio::sync::RwLock::new(Some(plaintext_voice_target()));
+        let installed = fence.begin().await;
+        let target = tokio::sync::RwLock::new(Some(InstalledVoiceTarget {
+            generation: installed,
+            target: plaintext_voice_target(),
+        }));
         let Some((restart, _)) = fence.reserve_restart(&target).await else {
             panic!("an active voice target should reserve a restart generation");
         };
@@ -2695,6 +3401,74 @@ mod tests {
 
         assert!(fence.lock_if_current(restart).await.is_none());
         assert!(fence.reserve_restart(&target).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_voice_grant_forwards_one_restart_request() {
+        let (grant_stale, receiver) = tokio::sync::watch::channel(false);
+        let (restart, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let forwarding = tokio::spawn(forward_voice_restart(receiver, 7, restart));
+
+        assert!(grant_stale.send(true).is_ok());
+        assert_eq!(
+            requests.recv().await,
+            Some(VoiceRestartRequest { generation: 7 })
+        );
+        assert!(forwarding.await.is_ok());
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn voice_permission_restart_is_deduplicated_and_room_fenced() {
+        let fence = VoiceInstallFence::new();
+        let installed = fence.begin().await;
+        let target = tokio::sync::RwLock::new(Some(InstalledVoiceTarget {
+            generation: installed,
+            target: plaintext_voice_target(),
+        }));
+        let Some((restart, retained)) = fence.reserve_restart_if_current(installed, &target).await
+        else {
+            panic!("the installed room should reserve one restart");
+        };
+
+        assert_eq!(retained.reference, "1@example.com");
+        assert!(
+            fence
+                .reserve_restart_if_current(installed, &target)
+                .await
+                .is_none()
+        );
+        assert!(fence.lock_if_current(restart).await.is_some());
+
+        let stale_room = restart;
+        let current_room = fence.begin().await;
+        assert!(
+            fence
+                .reserve_restart_if_current(stale_room, &target)
+                .await
+                .is_none()
+        );
+        assert!(
+            fence
+                .reserve_restart_if_current(current_room, &target)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn preference_restart_cannot_supersede_an_explicit_join() {
+        let fence = VoiceInstallFence::new();
+        let installed = fence.begin().await;
+        let target = tokio::sync::RwLock::new(Some(InstalledVoiceTarget {
+            generation: installed,
+            target: plaintext_voice_target(),
+        }));
+
+        let joining = fence.begin().await;
+
+        assert!(fence.reserve_restart(&target).await.is_none());
+        assert!(fence.lock_if_current(joining).await.is_some());
     }
 
     fn password_kdf(include_vault_salt: bool) -> serde_json::Value {
@@ -2730,6 +3504,226 @@ mod tests {
             "--kaede-autostart".to_owned()
         ]));
         assert!(!is_autostart_launch(&["kaede-chat".to_owned()]));
+    }
+
+    #[test]
+    fn gateway_command_decoder_preserves_qualified_soundboard_and_voice_state() {
+        let Ok(GatewayCommand::RequestSoundboardSounds { guilds }) = decode_gateway_command(
+            "request_soundboard_sounds",
+            &serde_json::json!({
+                "guilds": [
+                    {"guild_id": "7", "guild_domain": "alpha.example"},
+                    {"guild_id": "7", "guild_domain": "beta.example"},
+                ],
+            }),
+        ) else {
+            panic!("qualified soundboard guilds should decode");
+        };
+        assert_eq!(
+            guilds,
+            vec![
+                ("7".to_owned(), "alpha.example".to_owned()),
+                ("7".to_owned(), "beta.example".to_owned()),
+            ]
+        );
+
+        let Ok(GatewayCommand::RequestChannelInfo {
+            guild_id,
+            guild_domain,
+            fields,
+        }) = decode_gateway_command(
+            "request_channel_info",
+            &serde_json::json!({
+                "guild_id": "7",
+                "guild_domain": "alpha.example",
+                "fields": ["status", "voice_start_time"],
+            }),
+        )
+        else {
+            panic!("qualified channel info request should decode");
+        };
+        assert_eq!(guild_id, "7");
+        assert_eq!(guild_domain, "alpha.example");
+        assert_eq!(fields, ["status", "voice_start_time"]);
+
+        let Ok(GatewayCommand::VoiceState {
+            self_mute,
+            self_deaf,
+        }) = decode_gateway_command(
+            "voice_state",
+            &serde_json::json!({"self_mute": true, "self_deaf": false}),
+        )
+        else {
+            panic!("voice state should decode");
+        };
+        assert!(self_mute);
+        assert!(!self_deaf);
+    }
+
+    fn assert_invalid_gateway_commands<const N: usize>(cases: [(&str, Value); N]) {
+        for (command, payload) in cases {
+            let Err(error) = decode_gateway_command(command, &payload) else {
+                panic!("ambiguous gateway command should be rejected: {command}");
+            };
+            assert!(matches!(
+                error.code.as_str(),
+                "INVALID_GATEWAY_COMMAND" | "INVALID_NATIVE_ARGUMENT"
+            ));
+        }
+    }
+
+    #[test]
+    fn gateway_decoder_rejects_ambiguous_soundboard_and_voice_payloads() {
+        let oversized_guilds = (1..=101)
+            .map(|id| {
+                serde_json::json!({
+                    "guild_id": id.to_string(),
+                    "guild_domain": "alpha.example",
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_invalid_gateway_commands([
+            (
+                "voice_state",
+                serde_json::json!({"self_mute": 1, "self_deaf": false}),
+            ),
+            (
+                "voice_state",
+                serde_json::json!({"self_mute": false, "self_deaf": false, "extra": true}),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({"guilds": [{"guild_id": "7"}]}),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({"guilds": []}),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({
+                    "guilds": [
+                        {"guild_id": "7", "guild_domain": "alpha.example"},
+                        {"guild_id": "7", "guild_domain": "alpha.example"},
+                    ],
+                }),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({
+                    "guilds": [{"guild_id": "07", "guild_domain": "alpha.example"}],
+                }),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({
+                    "guilds": [{"guild_id": "7", "guild_domain": "Alpha.Example"}],
+                }),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({
+                    "guilds": [{
+                        "guild_id": "7",
+                        "guild_domain": "alpha.example",
+                        "extra": true,
+                    }],
+                }),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({
+                    "guilds": [{"guild_id": "7", "guild_domain": "alpha.example"}],
+                    "extra": true,
+                }),
+            ),
+            (
+                "request_soundboard_sounds",
+                serde_json::json!({"guilds": oversized_guilds}),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn gateway_decoder_rejects_ambiguous_channel_info_payloads() {
+        assert_invalid_gateway_commands([
+            (
+                "request_channel_info",
+                serde_json::json!({
+                    "guild_id": "7",
+                    "guild_domain": "alpha.example",
+                    "fields": [],
+                }),
+            ),
+            (
+                "request_channel_info",
+                serde_json::json!({
+                    "guild_id": "7",
+                    "guild_domain": "alpha.example",
+                    "fields": ["status", "status"],
+                }),
+            ),
+            (
+                "request_channel_info",
+                serde_json::json!({
+                    "guild_id": "7",
+                    "guild_domain": "alpha.example",
+                    "fields": ["unknown"],
+                }),
+            ),
+            (
+                "request_channel_info",
+                serde_json::json!({
+                    "guild_id": "07",
+                    "guild_domain": "alpha.example",
+                    "fields": ["status"],
+                }),
+            ),
+            (
+                "request_channel_info",
+                serde_json::json!({
+                    "guild_id": "7",
+                    "guild_domain": "alpha.example",
+                    "fields": ["status"],
+                    "extra": true,
+                }),
+            ),
+            ("unknown", serde_json::json!({})),
+        ]);
+    }
+
+    #[test]
+    fn native_request_headers_are_case_insensitive_and_fail_closed() {
+        let request = NativeRequest {
+            method: "PATCH".to_owned(),
+            path: "/guilds/1".to_owned(),
+            body: Some(serde_json::json!({"name": "Community"})),
+            if_match: Some("\"version-3\"".to_owned()),
+            headers: BTreeMap::from([(
+                "x-AuDiT-LoG-ReAsOn".to_owned(),
+                "keep the audit trail useful".to_owned(),
+            )]),
+        };
+        let Ok(forwarded) = native_forward_headers(&request) else {
+            panic!("allowlisted headers should be accepted");
+        };
+        assert_eq!(forwarded.if_match.as_deref(), Some("\"version-3\""));
+        assert_eq!(
+            forwarded.audit_log_reason.as_deref(),
+            Some("keep the audit trail useful")
+        );
+
+        let rejected = NativeRequest {
+            headers: BTreeMap::from([(
+                "Authorization".to_owned(),
+                "Bearer attacker-controlled".to_owned(),
+            )]),
+            ..request
+        };
+        let Err(error) = native_forward_headers(&rejected) else {
+            panic!("unknown headers must fail closed");
+        };
+        assert_eq!(error.code, "INVALID_NATIVE_HEADER");
     }
 
     #[test]
@@ -2931,6 +3925,100 @@ mod tests {
                 "{rejected}"
             );
         }
+    }
+
+    #[test]
+    fn soundboard_media_capabilities_are_bound_to_the_exact_guild_authority()
+    -> Result<(), Box<dyn Error>> {
+        let configured_authority = Domain::parse("home.example")?;
+        let configured_origin = url::Url::parse("https://home.example")?;
+        let validate = |value: &str, authority: &str, media_origin: &str| {
+            validate_soundboard_media_url(
+                value,
+                authority,
+                media_origin,
+                &configured_authority,
+                &configured_origin,
+            )
+        };
+        let valid = validate_soundboard_media_url(
+            "https://media.guild.example/sounds/one?signature=opaque",
+            "Guild.Example",
+            "https://media.guild.example",
+            &configured_authority,
+            &configured_origin,
+        );
+        assert!(valid.is_ok());
+        let object_storage = validate(
+            "https://kaede-sounds.s3.example.com/sounds/one?signature=opaque",
+            "guild.example",
+            "https://kaede-sounds.s3.example.com",
+        );
+        assert!(matches!(
+            object_storage,
+            Ok(target) if target.network_policy == PublicDownloadPolicy::PublicOnly
+        ));
+        assert!(
+            validate(
+                "https://media.guild.example:8443/sounds/one",
+                "guild.example",
+                "https://media.guild.example",
+            )
+            .is_err()
+        );
+        for rejected in [
+            "http://media.guild.example/sounds/one",
+            "https://media.guild.example.attacker.test/sounds/one",
+            "https://user@media.guild.example/sounds/one",
+            "https://media.guild.example/sounds/one#replacement",
+        ] {
+            assert!(
+                validate(rejected, "guild.example", "https://media.guild.example",).is_err(),
+                "{rejected}"
+            );
+        }
+        let local_authority = Domain::parse("alpha.localhost")?;
+        let local_origin = url::Url::parse("https://alpha.localhost")?;
+        let local = validate_soundboard_media_url(
+            "https://media.alpha.localhost:18443/sounds/one",
+            "alpha.localhost",
+            "https://media.alpha.localhost:18443",
+            &local_authority,
+            &local_origin,
+        );
+        assert!(matches!(
+            local,
+            Ok(target)
+                if target.network_policy == PublicDownloadPolicy::LoopbackDevelopmentOnly
+        ));
+        assert!(
+            validate(
+                "https://media.alpha.localhost:18443/sounds/one",
+                "alpha.localhost",
+                "https://media.alpha.localhost:18443",
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "https://127.0.0.1/sounds/one",
+                "guild.example",
+                "https://127.0.0.1",
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn soundboard_digest_accepts_only_canonical_lowercase_sha256() {
+        assert!(valid_sha256(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        ));
+        assert!(!valid_sha256("abc"));
+        assert!(!valid_sha256(
+            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
+        ));
     }
 
     #[test]

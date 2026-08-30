@@ -35,6 +35,7 @@ def mint_join_token(
     can_speak: bool,
     can_stream: bool,
     can_subscribe: bool = True,
+    can_publish_data: bool = False,
 ) -> tuple[str, datetime]:
     if settings.voice_api_key is None or settings.voice_api_secret is None:
         raise LiveKitError("LiveKit credentials are not configured")
@@ -62,7 +63,7 @@ def mint_join_token(
                     room=room,
                     can_publish=bool(sources),
                     can_subscribe=can_subscribe,
-                    can_publish_data=False,
+                    can_publish_data=can_publish_data,
                     can_publish_sources=sources,
                     can_update_own_metadata=False,
                 )
@@ -140,23 +141,32 @@ class LiveKitControl:
         can_speak: bool,
         can_stream: bool,
         can_subscribe: bool,
+        can_publish_data: bool,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         sources = publication_sources(can_speak=can_speak, can_stream=can_stream)
         source_values = [source.upper() for source in sources]
         try:
             async with self._client() as client:
-                await client.room.update_participant(
-                    api.UpdateParticipantRequest(
-                        room=room,
-                        identity=identity,
-                        permission=api.ParticipantPermission(
-                            can_subscribe=can_subscribe,
-                            can_publish=bool(sources),
-                            can_publish_data=False,
-                            can_publish_sources=source_values,
-                        ),
-                    )
+                request = api.UpdateParticipantRequest(
+                    room=room,
+                    identity=identity,
+                    permission=api.ParticipantPermission(
+                        can_subscribe=can_subscribe,
+                        can_publish=bool(sources),
+                        can_publish_data=can_publish_data,
+                        can_publish_sources=source_values,
+                    ),
                 )
+                if metadata is not None:
+                    request.metadata = json.dumps(
+                        metadata,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    request.attributes["kaede.generation"] = str(metadata["generation"])
+                    request.attributes["kaede.user_domain"] = str(metadata["user_domain"])
+                await client.room.update_participant(request)
         except Exception as exc:
             raise LiveKitError("LiveKit participant update failed") from exc
 
@@ -192,3 +202,19 @@ def participant_metadata(participant: Any) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise LiveKitError("participant metadata is invalid")
     return cast(dict[str, object], parsed)
+
+
+async def screen_share_is_active(
+    settings: Settings,
+    room: str,
+    identity: str,
+) -> bool:
+    """Confirm that an exact LiveKit participant currently publishes a screen share."""
+
+    participants = await LiveKitControl(settings).list_participants(room)
+    screen_share_source = api.TrackSource.Value("SCREEN_SHARE")
+    return any(
+        str(participant.identity) == identity
+        and any(track.source == screen_share_source for track in participant.tracks)
+        for participant in participants
+    )

@@ -1,0 +1,305 @@
+{
+  "version": 1,
+  "channel": {
+    "id": "30",
+    "origin_domain": "guild.example",
+    "encryption_policy_generation": "3",
+    "encryption_group_id": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c",
+    "encryption_epoch": "7"
+  },
+  "vectors": [
+    {
+      "name": "private_create_lexicographic_attachments",
+      "input": {
+        "authorityDomain": "guild.example",
+        "interactionRef": "90@guild.example",
+        "responseRef": "101@guild.example",
+        "invokerRef": "40@users.example",
+        "channelRef": "30@guild.example",
+        "applicationRef": "10@apps.example",
+        "sequence": 2,
+        "revision": "1",
+        "callbackType": 4,
+        "operation": "CREATE",
+        "attachmentRefs": ["100@guild.example", "9@guild.example"],
+        "senderDeviceId": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "interactionContractDigest": null
+      },
+      "context": {
+        "application_ref": "10@apps.example",
+        "attachment_refs": ["100@guild.example", "9@guild.example"],
+        "authority_domain": "guild.example",
+        "callback_type": 4,
+        "channel_ref": "30@guild.example",
+        "epoch": "7",
+        "group_id": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c",
+        "interaction_ref": "90@guild.example",
+        "interaction_contract_digest": null,
+        "invoker_ref": "40@users.example",
+        "operation": "create",
+        "policy_generation": "3",
+        "response_ref": "101@guild.example",
+        "revision": "1",
+        "sender_device_id": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sequence": "2"
+      },
+      "aad_base64url": "eyJjb250ZXh0Ijp7ImFwcGxpY2F0aW9uX3JlZiI6IjEwQGFwcHMuZXhhbXBsZSIsImF0dGFjaG1lbnRfcmVmcyI6WyIxMDBAZ3VpbGQuZXhhbXBsZSIsIjlAZ3VpbGQuZXhhbXBsZSJdLCJhdXRob3JpdHlfZG9tYWluIjoiZ3VpbGQuZXhhbXBsZSIsImNhbGxiYWNrX3R5cGUiOjQsImNoYW5uZWxfcmVmIjoiMzBAZ3VpbGQuZXhhbXBsZSIsImVwb2NoIjoiNyIsImdyb3VwX2lkIjoiWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJkbloyYyIsImludGVyYWN0aW9uX2NvbnRyYWN0X2RpZ2VzdCI6bnVsbCwiaW50ZXJhY3Rpb25fcmVmIjoiOTBAZ3VpbGQuZXhhbXBsZSIsImludm9rZXJfcmVmIjoiNDBAdXNlcnMuZXhhbXBsZSIsIm9wZXJhdGlvbiI6ImNyZWF0ZSIsInBvbGljeV9nZW5lcmF0aW9uIjoiMyIsInJlc3BvbnNlX3JlZiI6IjEwMUBndWlsZC5leGFtcGxlIiwicmV2aXNpb24iOiIxIiwic2VuZGVyX2RldmljZV9pZCI6ImtiZV9iYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwic2VxdWVuY2UiOiIyIn0sInB1cnBvc2UiOiJrYWVkZS5pbnRlcmFjdGlvbi5yZXNwb25zZS52MSJ9",
+      "data": { "content": "Private file" },
+      "interaction_contract": null
+    },
+    {
+      "name": "private_edit",
+      "input": {
+        "authorityDomain": "guild.example",
+        "interactionRef": "90@guild.example",
+        "responseRef": "101@guild.example",
+        "invokerRef": "40@users.example",
+        "channelRef": "30@guild.example",
+        "applicationRef": "10@apps.example",
+        "sequence": 2,
+        "revision": "3",
+        "callbackType": 7,
+        "operation": "UPDATE",
+        "attachmentRefs": [],
+        "senderDeviceId": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "interactionContractDigest": null
+      },
+      "context": {
+        "application_ref": "10@apps.example",
+        "attachment_refs": [],
+        "authority_domain": "guild.example",
+        "callback_type": 7,
+        "channel_ref": "30@guild.example",
+        "epoch": "7",
+        "group_id": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c",
+        "interaction_ref": "90@guild.example",
+        "interaction_contract_digest": null,
+        "invoker_ref": "40@users.example",
+        "operation": "edit",
+        "policy_generation": "3",
+        "response_ref": "101@guild.example",
+        "revision": "3",
+        "sender_device_id": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sequence": "2"
+      },
+      "aad_base64url": "eyJjb250ZXh0Ijp7ImFwcGxpY2F0aW9uX3JlZiI6IjEwQGFwcHMuZXhhbXBsZSIsImF0dGFjaG1lbnRfcmVmcyI6W10sImF1dGhvcml0eV9kb21haW4iOiJndWlsZC5leGFtcGxlIiwiY2FsbGJhY2tfdHlwZSI6NywiY2hhbm5lbF9yZWYiOiIzMEBndWlsZC5leGFtcGxlIiwiZXBvY2giOiI3IiwiZ3JvdXBfaWQiOiJaMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJjIiwiaW50ZXJhY3Rpb25fY29udHJhY3RfZGlnZXN0IjpudWxsLCJpbnRlcmFjdGlvbl9yZWYiOiI5MEBndWlsZC5leGFtcGxlIiwiaW52b2tlcl9yZWYiOiI0MEB1c2Vycy5leGFtcGxlIiwib3BlcmF0aW9uIjoiZWRpdCIsInBvbGljeV9nZW5lcmF0aW9uIjoiMyIsInJlc3BvbnNlX3JlZiI6IjEwMUBndWlsZC5leGFtcGxlIiwicmV2aXNpb24iOiIzIiwic2VuZGVyX2RldmljZV9pZCI6ImtiZV9iYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwic2VxdWVuY2UiOiIyIn0sInB1cnBvc2UiOiJrYWVkZS5pbnRlcmFjdGlvbi5yZXNwb25zZS52MSJ9",
+      "data": { "content": "Updated" },
+      "interaction_contract": null
+    },
+    {
+      "name": "autocomplete",
+      "input": {
+        "authorityDomain": "guild.example",
+        "interactionRef": "91@guild.example",
+        "responseRef": "102@guild.example",
+        "invokerRef": "40@users.example",
+        "channelRef": "30@guild.example",
+        "applicationRef": "10@apps.example",
+        "sequence": 0,
+        "revision": "1",
+        "callbackType": 8,
+        "operation": "CREATE",
+        "attachmentRefs": [],
+        "senderDeviceId": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "interactionContractDigest": null
+      },
+      "context": {
+        "application_ref": "10@apps.example",
+        "attachment_refs": [],
+        "authority_domain": "guild.example",
+        "callback_type": 8,
+        "channel_ref": "30@guild.example",
+        "epoch": "7",
+        "group_id": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c",
+        "interaction_ref": "91@guild.example",
+        "interaction_contract_digest": null,
+        "invoker_ref": "40@users.example",
+        "operation": "create",
+        "policy_generation": "3",
+        "response_ref": "102@guild.example",
+        "revision": "1",
+        "sender_device_id": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sequence": "0"
+      },
+      "aad_base64url": "eyJjb250ZXh0Ijp7ImFwcGxpY2F0aW9uX3JlZiI6IjEwQGFwcHMuZXhhbXBsZSIsImF0dGFjaG1lbnRfcmVmcyI6W10sImF1dGhvcml0eV9kb21haW4iOiJndWlsZC5leGFtcGxlIiwiY2FsbGJhY2tfdHlwZSI6OCwiY2hhbm5lbF9yZWYiOiIzMEBndWlsZC5leGFtcGxlIiwiZXBvY2giOiI3IiwiZ3JvdXBfaWQiOiJaMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJjIiwiaW50ZXJhY3Rpb25fY29udHJhY3RfZGlnZXN0IjpudWxsLCJpbnRlcmFjdGlvbl9yZWYiOiI5MUBndWlsZC5leGFtcGxlIiwiaW52b2tlcl9yZWYiOiI0MEB1c2Vycy5leGFtcGxlIiwib3BlcmF0aW9uIjoiY3JlYXRlIiwicG9saWN5X2dlbmVyYXRpb24iOiIzIiwicmVzcG9uc2VfcmVmIjoiMTAyQGd1aWxkLmV4YW1wbGUiLCJyZXZpc2lvbiI6IjEiLCJzZW5kZXJfZGV2aWNlX2lkIjoia2JlX2JiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJzZXF1ZW5jZSI6IjAifSwicHVycG9zZSI6ImthZWRlLmludGVyYWN0aW9uLnJlc3BvbnNlLnYxIn0",
+      "data": { "choices": [{ "name": "Kaede", "value": "kaede" }] },
+      "interaction_contract": null
+    },
+    {
+      "name": "modal",
+      "input": {
+        "authorityDomain": "guild.example",
+        "interactionRef": "92@guild.example",
+        "responseRef": "103@guild.example",
+        "invokerRef": "40@users.example",
+        "channelRef": "30@guild.example",
+        "applicationRef": "10@apps.example",
+        "sequence": 0,
+        "revision": "1",
+        "callbackType": 9,
+        "operation": "CREATE",
+        "attachmentRefs": [],
+        "senderDeviceId": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "interactionContractDigest": "6J9Z6lQ9zor_Y49k8xS5kinmFoib7YMuaIgcrtrjvus"
+      },
+      "context": {
+        "application_ref": "10@apps.example",
+        "attachment_refs": [],
+        "authority_domain": "guild.example",
+        "callback_type": 9,
+        "channel_ref": "30@guild.example",
+        "epoch": "7",
+        "group_id": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c",
+        "interaction_ref": "92@guild.example",
+        "interaction_contract_digest": "6J9Z6lQ9zor_Y49k8xS5kinmFoib7YMuaIgcrtrjvus",
+        "invoker_ref": "40@users.example",
+        "operation": "create",
+        "policy_generation": "3",
+        "response_ref": "103@guild.example",
+        "revision": "1",
+        "sender_device_id": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sequence": "0"
+      },
+      "aad_base64url": "eyJjb250ZXh0Ijp7ImFwcGxpY2F0aW9uX3JlZiI6IjEwQGFwcHMuZXhhbXBsZSIsImF0dGFjaG1lbnRfcmVmcyI6W10sImF1dGhvcml0eV9kb21haW4iOiJndWlsZC5leGFtcGxlIiwiY2FsbGJhY2tfdHlwZSI6OSwiY2hhbm5lbF9yZWYiOiIzMEBndWlsZC5leGFtcGxlIiwiZXBvY2giOiI3IiwiZ3JvdXBfaWQiOiJaMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJjIiwiaW50ZXJhY3Rpb25fY29udHJhY3RfZGlnZXN0IjoiNko5WjZsUTl6b3JfWTQ5azh4UzVraW5tRm9pYjdZTXVhSWdjcnRyanZ1cyIsImludGVyYWN0aW9uX3JlZiI6IjkyQGd1aWxkLmV4YW1wbGUiLCJpbnZva2VyX3JlZiI6IjQwQHVzZXJzLmV4YW1wbGUiLCJvcGVyYXRpb24iOiJjcmVhdGUiLCJwb2xpY3lfZ2VuZXJhdGlvbiI6IjMiLCJyZXNwb25zZV9yZWYiOiIxMDNAZ3VpbGQuZXhhbXBsZSIsInJldmlzaW9uIjoiMSIsInNlbmRlcl9kZXZpY2VfaWQiOiJrYmVfYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInNlcXVlbmNlIjoiMCJ9LCJwdXJwb3NlIjoia2FlZGUuaW50ZXJhY3Rpb24ucmVzcG9uc2UudjEifQ",
+      "data": {
+        "title": "Private",
+        "custom_id": "settings",
+        "components": [
+          {
+            "type": 18,
+            "label": "Mode",
+            "component": {
+              "type": 21,
+              "custom_id": "mode",
+              "options": [
+                { "label": "Fast", "value": "⚡" },
+                { "label": "Quiet", "value": "quiet" }
+              ],
+              "required": true
+            }
+          },
+          {
+            "type": 18,
+            "label": "Files",
+            "component": {
+              "type": 19,
+              "custom_id": "files",
+              "required": false,
+              "min_values": 0,
+              "max_values": 2,
+              "file_types": [".pdf", "image/*"]
+            }
+          }
+        ]
+      },
+      "interaction_contract": {
+        "version": 1,
+        "kind": "modal",
+        "custom_id": "settings",
+        "components": [
+          {
+            "type": 18,
+            "component": {
+              "type": 21,
+              "custom_id": "mode",
+              "required": true,
+              "option_value_digests": [
+                "AI8HR_TifIRiuqmRpTgCW8wt0UPnhCLxr7382edXog8",
+                "rwxdqwHYiDfXucy0NQub3Zr9rFGNuEBmXn8GBgykDOY"
+              ]
+            }
+          },
+          {
+            "type": 18,
+            "component": {
+              "type": 19,
+              "custom_id": "files",
+              "required": false,
+              "min_values": 0,
+              "max_values": 2,
+              "file_types": [".pdf", "image/*"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "private_interactive_message",
+      "input": {
+        "authorityDomain": "guild.example",
+        "interactionRef": "93@guild.example",
+        "responseRef": "104@guild.example",
+        "invokerRef": "40@users.example",
+        "channelRef": "30@guild.example",
+        "applicationRef": "10@apps.example",
+        "sequence": 0,
+        "revision": "1",
+        "callbackType": 4,
+        "operation": "CREATE",
+        "attachmentRefs": [],
+        "senderDeviceId": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "interactionContractDigest": "aMejEYXsMvO52TlYiRh6yIPnt2Kl6OiBnfmPt1eyk0k"
+      },
+      "context": {
+        "application_ref": "10@apps.example",
+        "attachment_refs": [],
+        "authority_domain": "guild.example",
+        "callback_type": 4,
+        "channel_ref": "30@guild.example",
+        "epoch": "7",
+        "group_id": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c",
+        "interaction_ref": "93@guild.example",
+        "interaction_contract_digest": "aMejEYXsMvO52TlYiRh6yIPnt2Kl6OiBnfmPt1eyk0k",
+        "invoker_ref": "40@users.example",
+        "operation": "create",
+        "policy_generation": "3",
+        "response_ref": "104@guild.example",
+        "revision": "1",
+        "sender_device_id": "kbe_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sequence": "0"
+      },
+      "aad_base64url": "eyJjb250ZXh0Ijp7ImFwcGxpY2F0aW9uX3JlZiI6IjEwQGFwcHMuZXhhbXBsZSIsImF0dGFjaG1lbnRfcmVmcyI6W10sImF1dGhvcml0eV9kb21haW4iOiJndWlsZC5leGFtcGxlIiwiY2FsbGJhY2tfdHlwZSI6NCwiY2hhbm5lbF9yZWYiOiIzMEBndWlsZC5leGFtcGxlIiwiZXBvY2giOiI3IiwiZ3JvdXBfaWQiOiJaMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJkbloyZG5aMmRuWjJjIiwiaW50ZXJhY3Rpb25fY29udHJhY3RfZGlnZXN0IjoiYU1lakVZWHNNdk81MlRsWWlSaDZ5SVBudDJLbDZPaUJuZm1QdDFleWswayIsImludGVyYWN0aW9uX3JlZiI6IjkzQGd1aWxkLmV4YW1wbGUiLCJpbnZva2VyX3JlZiI6IjQwQHVzZXJzLmV4YW1wbGUiLCJvcGVyYXRpb24iOiJjcmVhdGUiLCJwb2xpY3lfZ2VuZXJhdGlvbiI6IjMiLCJyZXNwb25zZV9yZWYiOiIxMDRAZ3VpbGQuZXhhbXBsZSIsInJldmlzaW9uIjoiMSIsInNlbmRlcl9kZXZpY2VfaWQiOiJrYmVfYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInNlcXVlbmNlIjoiMCJ9LCJwdXJwb3NlIjoia2FlZGUuaW50ZXJhY3Rpb24ucmVzcG9uc2UudjEifQ",
+      "data": {
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 1,
+            "components": [
+              {
+                "type": 3,
+                "custom_id": "choice",
+                "options": [
+                  { "label": "Greek", "value": "βeta" },
+                  { "label": "Accent", "value": "café" },
+                  { "label": "ASCII", "value": "alpha" }
+                ],
+                "min_values": 1,
+                "max_values": 2,
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      },
+      "interaction_contract": {
+        "version": 1,
+        "kind": "message",
+        "view_timeout_seconds": 600,
+        "components": [
+          {
+            "type": 3,
+            "custom_id": "choice",
+            "disabled": false,
+            "min_values": 1,
+            "max_values": 2,
+            "option_value_digests": [
+              "6IjK48e1QClNYvYShd1fxmKRSjKxh58EFtbrXcqwkP8",
+              "hQ99xDkQ_4kPiHnA7Sb-aXyToGetk6fVD0ZqcCipv04",
+              "jtP2rWhblZ6tcCJRjhr3bNgW-OjsfM3aHtQBjo8iI_g"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

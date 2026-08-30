@@ -4,10 +4,19 @@ from redis.asyncio import Redis
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.e2ee import channel_encryption_policy_payload
+from app.chat.e2ee_controls import room_policy_change_context
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.payloads import channel_payload
 from app.core.settings import Settings
+from app.db.bot_models import BotApplication, BotE2EEDevice, BotE2EEParticipation
+from app.db.materialization import materialize_updated_at
 from app.db.models import Channel, DMConversation, DMParticipant, Guild, GuildMember, User
+from app.federation.events import (
+    build_envelope,
+    discard_superseded_latest_state_event,
+    queue_event,
+)
 
 GUILD_E2EE_ACCESS_MUTATION_EVENTS = frozenset(
     {
@@ -112,13 +121,59 @@ async def e2ee_policy_destinations(
     )
 
 
+async def queue_e2ee_policy_federation(
+    session: AsyncSession,
+    settings: Settings,
+    actor: User,
+    channel: Channel,
+    *,
+    destinations: Iterable[str] | None = None,
+    authority_attested_actor: bool = False,
+) -> set[str]:
+    """Queue one compacted, independently ACKed room-policy event per destination."""
+
+    destination_set = set(
+        destinations
+        if destinations is not None
+        else await e2ee_policy_destinations(session, settings, channel)
+    )
+    destination_set.discard(settings.domain)
+    for destination in sorted(destination_set):
+        await discard_superseded_latest_state_event(
+            session,
+            destination=destination,
+            event_type="e2ee.room-policy.changed",
+            channel_ref=(channel.id, channel.origin_domain),
+        )
+        envelope = await build_envelope(
+            session,
+            settings,
+            "e2ee.room-policy.changed",
+            actor,
+            {
+                "channel_id": str(channel.id),
+                "channel_domain": channel.origin_domain,
+                "encryption_policy": channel_encryption_policy_payload(channel),
+            },
+            context=room_policy_change_context(channel, actor),
+            authority_attested_actor=authority_attested_actor,
+        )
+        await queue_event(session, settings, destination, envelope)
+    return destination_set
+
+
 async def publish_e2ee_policy_updates(
     session: AsyncSession,
     redis: Redis,
     settings: Settings,
     channels: Iterable[Channel],
 ) -> None:
-    for channel in channels:
+    materialized_channels = list(channels)
+    # Access changes move these channels out of ``active``. PostgreSQL owns
+    # ``updated_at`` and SQLAlchemy expires it on UPDATE, so materialize all
+    # versions at this shared fanout boundary before synchronous rendering.
+    await materialize_updated_at(session, *materialized_channels)
+    for channel in materialized_channels:
         rendered = channel_payload(channel)
         event_type = "THREAD_UPDATE" if channel.type in {10, 11, 12} else "CHANNEL_UPDATE"
         if channel.guild_id is not None and channel.guild_domain is not None:
@@ -170,6 +225,23 @@ async def pause_local_e2ee_for_device_change(
             DMConversation.authority_domain == settings.domain,
         )
     )
+    bot_participation_refs = (
+        select(
+            BotE2EEParticipation.channel_id,
+            BotE2EEParticipation.channel_domain,
+        )
+        .join(BotE2EEDevice, BotE2EEDevice.id == BotE2EEParticipation.device_id)
+        .join(
+            BotApplication,
+            (BotApplication.id == BotE2EEDevice.application_id)
+            & (BotApplication.origin_domain == BotE2EEDevice.application_domain),
+        )
+        .where(
+            BotApplication.bot_user_id == user.id,
+            BotApplication.bot_user_domain == user.origin_domain,
+            BotE2EEParticipation.status.in_(("pending", "active")),
+        )
+    )
     channels = list(
         await session.scalars(
             select(Channel)
@@ -179,6 +251,7 @@ async def pause_local_e2ee_for_device_change(
                 (
                     tuple_(Channel.guild_id, Channel.guild_domain).in_(guild_refs)
                     | tuple_(Channel.id, Channel.origin_domain).in_(dm_refs)
+                    | tuple_(Channel.id, Channel.origin_domain).in_(bot_participation_refs)
                 ),
             )
             .with_for_update()

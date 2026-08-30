@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/domain/client_preferences.dart';
 import 'package:kaede_mobile/src/features/auth/auth_screen.dart';
 import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
@@ -44,6 +46,7 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
           '/verify-email',
           '/reset-password',
           '/verify-email-change',
+          '/applications/:applicationRef/install/:templateSlug',
           '/g/:guildId/:channelId',
           '/home/:dmId',
         ])
@@ -112,6 +115,7 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
 
   @override
   Widget build(BuildContext context) {
+    final preferences = ref.watch(mobileControllerProvider);
     ref.listen<MobileState>(mobileControllerProvider, (previous, next) {
       final voice = ref.read(voiceSessionProvider);
       if (next.phase == SessionPhase.signedOut &&
@@ -136,12 +140,21 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
     return MaterialApp.router(
       title: 'Kaede Chat',
       debugShowCheckedModeBanner: false,
-      theme: kaedeTheme(),
+      theme: kaedeTheme(brightness: Brightness.light),
+      darkTheme: kaedeTheme(),
+      themeMode: materialThemeMode(preferences.themePreference),
+      locale: parseLocalePreference(preferences.localePreference),
+      supportedLocales: kaedeSupportedLocales,
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       restorationScopeId: 'kaede-mobile',
       routerConfig: _router,
       builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
-        value: kaedeSystemOverlay,
-        child: child ?? const SizedBox.shrink(),
+        value: kaedeSystemOverlayFor(Theme.of(context).brightness),
+        child: child ?? SizedBox.shrink(),
       ),
     );
   }
@@ -164,6 +177,9 @@ final class _DeepLinkGate extends ConsumerWidget {
         notice: link.signInNotice,
       );
     }
+    if (link.kind == MobileLinkKind.applicationInstall) {
+      return ApplicationInstallDeepLinkScreen(link: link);
+    }
     return DeepLinkActionScreen(link: link);
   }
 }
@@ -172,20 +188,20 @@ final class _InvalidLinkScreen extends StatelessWidget {
   const _InvalidLinkScreen();
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Invalid link')),
+        appBar: AppBar(title: Text('Invalid link')),
         body: Center(
           child: Padding(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.all(24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.link_off_rounded, size: 42),
-                const SizedBox(height: 12),
-                const Text('This Kaede link is incomplete or malformed.'),
-                const SizedBox(height: 16),
+                Icon(Icons.link_off_rounded, size: 42),
+                SizedBox(height: 12),
+                Text('This Kaede link is incomplete or malformed.'),
+                SizedBox(height: 16),
                 FilledButton(
                   onPressed: () => context.go('/'),
-                  child: const Text('Open Kaede'),
+                  child: Text('Open Kaede'),
                 ),
               ],
             ),
@@ -204,11 +220,9 @@ final class _SessionGate extends ConsumerWidget {
     return switch (ref.watch(mobileControllerProvider).phase) {
       SessionPhase.restoring => const _LaunchScreen(),
       SessionPhase.locked => const _LockScreen(),
-      SessionPhase.signedOut ||
-      SessionPhase.authenticating =>
-        const AuthScreen(),
+      SessionPhase.signedOut || SessionPhase.authenticating => AuthScreen(),
       SessionPhase.ready => destination == null
-          ? const MobileShell()
+          ? MobileShell()
           : _DestinationGate(destination: destination!),
     };
   }
@@ -251,9 +265,9 @@ final class _LockScreen extends ConsumerWidget {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(28),
+            padding: EdgeInsets.all(28),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
+              constraints: BoxConstraints(maxWidth: 420),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -263,55 +277,55 @@ final class _LockScreen extends ConsumerWidget {
                       width: 64,
                       height: 64,
                       decoration: BoxDecoration(
-                        color: KaedeColors.coralSoft,
+                        color: context.kaede.coralSoft,
                         borderRadius: BorderRadius.circular(KaedeRadius.large),
                       ),
-                      child: const Icon(Icons.lock_rounded,
-                          color: KaedeColors.coralText, size: 30),
+                      child: Icon(Icons.lock_rounded,
+                          color: context.kaede.coralText, size: 30),
                     ),
                   ),
-                  const SizedBox(height: 22),
+                  SizedBox(height: 22),
                   Text(
                     'Kaede is locked',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
-                  const SizedBox(height: 8),
-                  const Text(
+                  SizedBox(height: 8),
+                  Text(
                     'Use your biometrics or device passcode to continue.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: KaedeColors.muted, height: 1.4),
+                    style: TextStyle(color: context.kaede.muted, height: 1.4),
                   ),
                   if (state.error != null) ...[
-                    const SizedBox(height: 16),
+                    SizedBox(height: 16),
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: KaedeColors.dangerSoft,
+                        color: context.kaede.dangerSoft,
                         borderRadius: BorderRadius.circular(KaedeRadius.medium),
                       ),
                       child: Text(
                         state.error!,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: KaedeColors.danger,
+                        style: TextStyle(
+                          color: context.kaede.danger,
                           fontSize: 13,
                         ),
                       ),
                     ),
                   ],
-                  const SizedBox(height: 26),
+                  SizedBox(height: 26),
                   FilledButton.icon(
                     onPressed: () =>
                         ref.read(mobileControllerProvider.notifier).unlock(),
-                    icon: const Icon(Icons.fingerprint_rounded),
-                    label: const Text('Unlock'),
+                    icon: Icon(Icons.fingerprint_rounded),
+                    label: Text('Unlock'),
                   ),
-                  const SizedBox(height: 6),
+                  SizedBox(height: 6),
                   TextButton(
                     onPressed: () =>
                         ref.read(mobileControllerProvider.notifier).logout(),
-                    child: const Text('Sign out instead'),
+                    child: Text('Sign out instead'),
                   ),
                 ],
               ),
@@ -327,7 +341,7 @@ final class _LaunchScreen extends StatelessWidget {
   const _LaunchScreen();
 
   @override
-  Widget build(BuildContext context) => const Scaffold(
+  Widget build(BuildContext context) => Scaffold(
         body: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -364,12 +378,12 @@ final class _BrandMark extends StatelessWidget {
         width: size,
         height: size,
         decoration: BoxDecoration(
-          color: KaedeColors.coral,
+          color: context.kaede.coral,
           borderRadius: BorderRadius.circular(size * .32),
         ),
         child: Icon(
           Icons.forum_rounded,
-          color: KaedeColors.onCoral,
+          color: context.kaede.onCoral,
           size: size * .48,
         ),
       );

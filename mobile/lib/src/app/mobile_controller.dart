@@ -6,6 +6,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:kaede_mobile/src/api/announcement_repository.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
@@ -14,14 +15,22 @@ import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/client_preferences.dart';
+import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
+import 'package:kaede_mobile/src/domain/reaction_management.dart';
+import 'package:kaede_mobile/src/domain/rich_content.dart';
+import 'package:kaede_mobile/src/domain/text_to_speech.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/e2ee/forwarding.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/platform/system_call_service.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:path_provider/path_provider.dart';
@@ -149,7 +158,8 @@ KaedeChannel? resolveInitialConversation({
     // A stale or legacy preference must not prevent session restoration.
   }
   final accessible = <KaedeChannel>[
-    ...dms.where((channel) => channel.type == ChannelType.dm),
+    ...dms.where((channel) =>
+        channel.type == ChannelType.dm || channel.type == ChannelType.groupDm),
     for (final guild in guilds)
       ...([...guild.channels]..sort((a, b) {
               final position = a.position.compareTo(b.position);
@@ -287,6 +297,39 @@ bool messageJumpSelectionIsCurrent({
 }) =>
     expectedGeneration == currentGeneration && expectedChannel == activeChannel;
 
+List<EntityRef> expandedMobileEncryptedGuildMentionRecipients({
+  required List<String> userRefs,
+  required List<String> roleRefs,
+  required bool everyone,
+  required KaedeGuild guild,
+  required List<GuildMember> members,
+  required bool canMentionEveryone,
+  EntityRef? repliedUser,
+}) {
+  final recipients = userRefs.map(EntityRef.parse).toSet();
+  if (everyone && canMentionEveryone) {
+    recipients.addAll(members.map((member) => member.user.ref));
+  }
+  final roles = <EntityRef, KaedeRole>{
+    for (final role in guild.roles) role.ref: role
+  };
+  for (final roleRef in roleRefs.map(EntityRef.parse)) {
+    final role = roles[roleRef];
+    if (role == null || (!role.mentionable && !canMentionEveryone)) continue;
+    final everyoneRole = role.ref == role.guildRef;
+    for (final member in members) {
+      if (everyoneRole ||
+          member.roleIds.contains(role.ref.id.value) ||
+          member.roleIds.contains(role.ref.wire)) {
+        recipients.add(member.user.ref);
+      }
+    }
+  }
+  if (repliedUser != null) recipients.add(repliedUser);
+  return recipients.toList()
+    ..sort((left, right) => left.wire.compareTo(right.wire));
+}
+
 @visibleForTesting
 bool threadMembersUpdateRemovesUser(
   Map<String, Object?> update,
@@ -380,6 +423,20 @@ final class _PendingAcknowledgement {
       );
 }
 
+typedef MobileInteractionRequest = ({
+  EntityRef channel,
+  EntityRef application,
+  String? integrationType,
+  String? interactionContext,
+  KaedeChannel? encryptionChannel,
+});
+
+typedef _PendingInteractionResponse = ({
+  String eventName,
+  Map<String, Object?> event,
+  MobileInteractionResponse response,
+});
+
 final class MobileState {
   const MobileState({
     this.phase = SessionPhase.restoring,
@@ -397,6 +454,9 @@ final class MobileState {
     this.channelsWithOlderMessages = const <EntityRef>{},
     this.outbox = const <OutboxItem>[],
     this.presencePreference = PresenceStatus.online,
+    this.themePreference = KaedeThemePreference.system,
+    this.localePreference = 'en-US',
+    this.developerMode = false,
     this.notificationSettings = const <String, bool>{},
     this.guildNotificationLevels = const <String, String>{},
     this.unreadCounts = const <EntityRef, int>{},
@@ -406,6 +466,8 @@ final class MobileState {
     this.userProfiles = const <EntityRef, KaedeUser>{},
     this.guildMembers = const <EntityRef, List<GuildMember>>{},
     this.selfModerationByGuild = const <EntityRef, GuildSelfModerationStatus>{},
+    this.interactionResponses = const <String, MobileInteractionResponse>{},
+    this.interactionRequests = const <String, MobileInteractionRequest>{},
     this.messageJump,
     this.incomingCall,
     this.pendingCallJoin,
@@ -436,6 +498,9 @@ final class MobileState {
   final Set<EntityRef> channelsWithOlderMessages;
   final List<OutboxItem> outbox;
   final PresenceStatus presencePreference;
+  final KaedeThemePreference themePreference;
+  final String localePreference;
+  final bool developerMode;
   final Map<String, bool> notificationSettings;
   final Map<String, String> guildNotificationLevels;
   final Map<EntityRef, int> unreadCounts;
@@ -445,6 +510,8 @@ final class MobileState {
   final Map<EntityRef, KaedeUser> userProfiles;
   final Map<EntityRef, List<GuildMember>> guildMembers;
   final Map<EntityRef, GuildSelfModerationStatus> selfModerationByGuild;
+  final Map<String, MobileInteractionResponse> interactionResponses;
+  final Map<String, MobileInteractionRequest> interactionRequests;
   final MessageJumpRequest? messageJump;
   final IncomingCall? incomingCall;
   final IncomingCall? pendingCallJoin;
@@ -517,6 +584,9 @@ final class MobileState {
     Set<EntityRef>? channelsWithOlderMessages,
     List<OutboxItem>? outbox,
     PresenceStatus? presencePreference,
+    KaedeThemePreference? themePreference,
+    String? localePreference,
+    bool? developerMode,
     Map<String, bool>? notificationSettings,
     Map<String, String>? guildNotificationLevels,
     Map<EntityRef, int>? unreadCounts,
@@ -526,6 +596,8 @@ final class MobileState {
     Map<EntityRef, KaedeUser>? userProfiles,
     Map<EntityRef, List<GuildMember>>? guildMembers,
     Map<EntityRef, GuildSelfModerationStatus>? selfModerationByGuild,
+    Map<String, MobileInteractionResponse>? interactionResponses,
+    Map<String, MobileInteractionRequest>? interactionRequests,
     MessageJumpRequest? messageJump,
     bool clearMessageJump = false,
     IncomingCall? incomingCall,
@@ -561,6 +633,9 @@ final class MobileState {
             channelsWithOlderMessages ?? this.channelsWithOlderMessages,
         outbox: outbox ?? this.outbox,
         presencePreference: presencePreference ?? this.presencePreference,
+        themePreference: themePreference ?? this.themePreference,
+        localePreference: localePreference ?? this.localePreference,
+        developerMode: developerMode ?? this.developerMode,
         notificationSettings: notificationSettings ?? this.notificationSettings,
         guildNotificationLevels:
             guildNotificationLevels ?? this.guildNotificationLevels,
@@ -572,6 +647,8 @@ final class MobileState {
         guildMembers: guildMembers ?? this.guildMembers,
         selfModerationByGuild:
             selfModerationByGuild ?? this.selfModerationByGuild,
+        interactionResponses: interactionResponses ?? this.interactionResponses,
+        interactionRequests: interactionRequests ?? this.interactionRequests,
         messageJump: clearMessageJump ? null : messageJump ?? this.messageJump,
         incomingCall:
             clearIncomingCall ? null : incomingCall ?? this.incomingCall,
@@ -619,6 +696,24 @@ final class MobileController extends StateNotifier<MobileState> {
   final LocalDatabase database;
   final PushService push;
   final SystemCallService systemCalls = SystemCallService();
+  final StreamController<Map<String, Object?>> _soundboardEvents =
+      StreamController<Map<String, Object?>>.broadcast(sync: true);
+  Stream<Map<String, Object?>> get soundboardEvents => _soundboardEvents.stream;
+  final StreamController<Map<String, Object?>> _stageEvents =
+      StreamController<Map<String, Object?>>.broadcast(sync: true);
+  Stream<Map<String, Object?>> get stageEvents => _stageEvents.stream;
+  final StreamController<Map<String, Object?>> _pinEvents =
+      StreamController<Map<String, Object?>>.broadcast(sync: true);
+  Stream<Map<String, Object?>> get pinEvents => _pinEvents.stream;
+  final StreamController<Map<String, Object?>> _voiceStatusEvents =
+      StreamController<Map<String, Object?>>.broadcast();
+  Stream<Map<String, Object?>> get voiceStatusEvents =>
+      _voiceStatusEvents.stream;
+  final StreamController<Map<String, Object?>> _voiceChannelInfoEvents =
+      StreamController<Map<String, Object?>>.broadcast();
+  Stream<Map<String, Object?>> get voiceChannelInfoEvents =>
+      _voiceChannelInfoEvents.stream;
+  final Set<String> _seenStageNotificationIds = <String>{};
   bool get remotePushAvailable => push.remotePushAvailable;
   bool get usesPushRelay => _pushTransport == 'relay';
   String get pushRelayHost => Uri.parse(_pinnedPushRelayUrl).host;
@@ -645,6 +740,43 @@ final class MobileController extends StateNotifier<MobileState> {
   var _conversationPaneVisible = false;
   DateTime? _backgroundedAt;
   final Map<EntityRef, int> _messageRequestGenerations = <EntityRef, int>{};
+  final Set<String> _presentedInteractionResponses = <String>{};
+  final Set<String> _dismissedInteractionResponses = <String>{};
+  final Map<String, _PendingInteractionResponse> _pendingInteractionResponses =
+      <String, _PendingInteractionResponse>{};
+  final Map<String, BigInt> _interactionResponseRevisions = <String, BigInt>{};
+  final Map<
+      String,
+      ({
+        EntityRef interaction,
+        EntityRef invoker,
+        EntityRef channel,
+        EntityRef application,
+        String responseGrantId,
+        int sequence,
+        int callbackType,
+        bool ephemeral,
+        EntityRef? message,
+        int? autocompleteGeneration,
+        DateTime expiresAt,
+      })> _interactionResponseIdentities = <String,
+      ({
+    EntityRef interaction,
+    EntityRef invoker,
+    EntityRef channel,
+    EntityRef application,
+    String responseGrantId,
+    int sequence,
+    int callbackType,
+    bool ephemeral,
+    EntityRef? message,
+    int? autocompleteGeneration,
+    DateTime expiresAt,
+  })>{};
+  final Set<String> _interactionResponseTombstones = <String>{};
+  final Map<String, Object> _decryptingInteractionResponses =
+      <String, Object>{};
+  var _interactionResponseGeneration = 0;
   var _flushingOutbox = false;
   var _sessionLoadGeneration = 0;
   var _authenticationGeneration = 0;
@@ -655,6 +787,302 @@ final class MobileController extends StateNotifier<MobileState> {
   var _navigationRefreshQueued = false;
   Future<void>? _notificationActivation;
   Future<void> _cacheWriteTail = Future<void>.value();
+
+  /// Keeps an interaction's channel/application authority outside the
+  /// conversation widget so delayed modals and private follow-ups survive
+  /// navigation to another top-level Mobile section.
+  void rememberInteractionRequest(
+    String interactionRef, {
+    required EntityRef channel,
+    required EntityRef application,
+    String? integrationType,
+    String? interactionContext,
+  }) {
+    if (interactionRef.isEmpty) return;
+    state = state.copyWith(
+      interactionRequests: Map<String, MobileInteractionRequest>.unmodifiable(
+        <String, MobileInteractionRequest>{
+          ...state.interactionRequests,
+          interactionRef: (
+            channel: channel,
+            application: application,
+            integrationType: integrationType,
+            interactionContext: interactionContext,
+            encryptionChannel: switch (_channel(channel)) {
+              final value? when value.encryptionMode == 'e2ee' => value,
+              _ => null,
+            },
+          ),
+        },
+      ),
+    );
+    for (final entry in _pendingInteractionResponses.entries.toList()) {
+      if (entry.value.response.interactionRef.wire == interactionRef) {
+        unawaited(_consumePendingInteractionResponse(entry.key));
+      }
+    }
+  }
+
+  /// Claims a concrete response presentation exactly once for the active
+  /// account, even when ChannelView is disposed and rebuilt around it.
+  bool claimInteractionResponse(String responseKey) =>
+      _presentedInteractionResponses.add(responseKey);
+
+  /// Returns a claim that never reached a mounted presenter. A newly mounted
+  /// ChannelView may then claim the delayed response instead of losing it
+  /// during the navigation frame that disposed the previous view.
+  void releaseInteractionResponse(String responseKey) {
+    _presentedInteractionResponses.remove(responseKey);
+  }
+
+  bool interactionResponseDismissed(String responseId) =>
+      _dismissedInteractionResponses.contains(responseId);
+
+  void dismissInteractionResponses(Iterable<String> responseIds) {
+    _dismissedInteractionResponses.addAll(responseIds);
+  }
+
+  void _clearInteractionPresentation() {
+    _interactionResponseGeneration += 1;
+    _presentedInteractionResponses.clear();
+    _dismissedInteractionResponses.clear();
+    _pendingInteractionResponses.clear();
+    _interactionResponseRevisions.clear();
+    _interactionResponseIdentities.clear();
+    _interactionResponseTombstones.clear();
+    _decryptingInteractionResponses.clear();
+  }
+
+  void _acceptInteractionResponseEvent(
+    String eventName,
+    Map<String, Object?> event,
+  ) {
+    MobileInteractionResponse response;
+    try {
+      response = MobileInteractionResponse.fromJson(event);
+    } on FormatException {
+      return;
+    }
+    final expectedOperation =
+        eventName.substring('INTERACTION_RESPONSE_'.length);
+    if (response.operation != expectedOperation ||
+        response.expiresAt.isBefore(
+          DateTime.now().toUtc().subtract(const Duration(seconds: 30)),
+        )) {
+      return;
+    }
+    final key = response.storageKey;
+    final identity = _interactionResponseIdentities[key];
+    if (identity != null &&
+        (identity.interaction != response.interactionRef ||
+            identity.invoker != response.invokerRef ||
+            identity.channel != response.channelRef ||
+            identity.application != response.applicationRef ||
+            identity.responseGrantId != response.responseGrantId ||
+            identity.sequence != response.sequence ||
+            identity.callbackType != response.callbackType ||
+            identity.ephemeral != response.ephemeral ||
+            identity.message != response.messageRef ||
+            identity.autocompleteGeneration !=
+                response.autocompleteGeneration ||
+            identity.expiresAt != response.expiresAt)) {
+      return;
+    }
+    final previousRevision = _interactionResponseRevisions[key];
+    if (previousRevision != null && response.revision <= previousRevision) {
+      return;
+    }
+    _interactionResponseIdentities[key] = (
+      interaction: response.interactionRef,
+      invoker: response.invokerRef,
+      channel: response.channelRef,
+      application: response.applicationRef,
+      responseGrantId: response.responseGrantId,
+      sequence: response.sequence,
+      callbackType: response.callbackType,
+      ephemeral: response.ephemeral,
+      message: response.messageRef,
+      autocompleteGeneration: response.autocompleteGeneration,
+      expiresAt: response.expiresAt,
+    );
+    _interactionResponseRevisions[key] = response.revision;
+    if (eventName == 'INTERACTION_RESPONSE_DELETE') {
+      _interactionResponseTombstones.add(key);
+      _pendingInteractionResponses.remove(key);
+      state = state.copyWith(
+        interactionResponses: applyMobileInteractionResponseEvent(
+          state.interactionResponses,
+          eventName,
+          event,
+        ),
+      );
+      return;
+    }
+    if (_interactionResponseTombstones.contains(key)) return;
+    final isolated = response.ephemeral ||
+        response.callbackType == 8 ||
+        response.callbackType == 9;
+    if (!isolated) {
+      state = state.copyWith(
+        interactionResponses: applyMobileInteractionResponseEvent(
+          state.interactionResponses,
+          eventName,
+          event,
+        ),
+      );
+      return;
+    }
+    _pendingInteractionResponses[key] = (
+      eventName: eventName,
+      event: Map<String, Object?>.unmodifiable(event),
+      response: response,
+    );
+    while (_pendingInteractionResponses.length > 256) {
+      _pendingInteractionResponses
+          .remove(_pendingInteractionResponses.keys.first);
+    }
+    unawaited(_consumePendingInteractionResponse(key));
+  }
+
+  Map<String, Object?> _unavailableInteractionResponse(
+    Map<String, Object?> event,
+  ) =>
+      <String, Object?>{
+        ...event,
+        'data': const <String, Object?>{
+          'content':
+              'This encrypted bot response is unavailable on this device.',
+        },
+        'decryption_unavailable': true,
+      };
+
+  Map<String, Object?>? _encryptedInteractionResponseViewProjection(
+    MobileInteractionResponse response,
+  ) {
+    final data = response.data;
+    final fields = data.keys.toSet();
+    const base = <String>{'attachments', 'e2ee'};
+    if (fields.length == base.length && fields.containsAll(base)) {
+      return const <String, Object?>{};
+    }
+    const interactive = <String>{
+      'attachments',
+      'e2ee',
+      'view_expires_at',
+      'view_persistent',
+      'view_version',
+    };
+    final rawExpiry = data['view_expires_at'];
+    final expiry =
+        rawExpiry is String ? DateTime.tryParse(rawExpiry)?.toUtc() : null;
+    if (fields.length != interactive.length ||
+        !fields.containsAll(interactive) ||
+        !const <int>{4, 7}.contains(response.callbackType) ||
+        data['view_version'] is! int ||
+        (data['view_version']! as int) < 1 ||
+        data['view_persistent'] != false ||
+        expiry == null ||
+        expiry.isAfter(response.expiresAt)) {
+      return null;
+    }
+    return <String, Object?>{
+      'view_expires_at': rawExpiry,
+      'view_persistent': false,
+      'view_version': data['view_version'],
+    };
+  }
+
+  Future<void> _consumePendingInteractionResponse(String responseKey) async {
+    if (_decryptingInteractionResponses.containsKey(responseKey)) return;
+    final pending = _pendingInteractionResponses[responseKey];
+    if (pending == null) return;
+    final request =
+        state.interactionRequests[pending.response.interactionRef.wire];
+    if (request == null) return;
+    final generation = _interactionResponseGeneration;
+    final decryptToken = Object();
+    _decryptingInteractionResponses[responseKey] = decryptToken;
+    _pendingInteractionResponses.remove(responseKey);
+    final revision = pending.response.revision;
+    Map<String, Object?> ready;
+    try {
+      final response = pending.response;
+      final rawData = response.data;
+      if (response.channelRef != request.channel ||
+          response.applicationRef != request.application) {
+        ready = _unavailableInteractionResponse(pending.event);
+      } else if (request.encryptionChannel case final channel?) {
+        final envelope = rawData['e2ee'];
+        final attachments = rawData['attachments'];
+        final viewProjection =
+            _encryptedInteractionResponseViewProjection(response);
+        if (viewProjection == null ||
+            envelope is! Map ||
+            attachments is! List) {
+          ready = _unavailableInteractionResponse(pending.event);
+        } else {
+          final decrypted =
+              await (await e2eeClient()).decryptInteractionResponse(
+            channel,
+            authorityDomain: response.interactionRef.domain.value,
+            interactionRef: response.interactionRef.wire,
+            responseRef: response.responseRef.wire,
+            invokerRef: response.invokerRef.wire,
+            channelRef: response.channelRef.wire,
+            applicationRef: response.applicationRef.wire,
+            sequence: response.sequence,
+            revision: response.revision.toString(),
+            callbackType: response.callbackType,
+            operation: response.operation,
+            envelope: Map<String, Object?>.from(envelope),
+            attachments: List<Object?>.from(attachments),
+          );
+          final interactive =
+              const <int>{4, 7}.contains(decrypted.context['callback_type']) &&
+                  decrypted.context['interaction_contract_digest'] != null;
+          if (interactive != viewProjection.containsKey('view_version')) {
+            ready = _unavailableInteractionResponse(pending.event);
+          } else {
+            ready = <String, Object?>{
+              ...pending.event,
+              'data': <String, Object?>{
+                ...decrypted.data,
+                ...viewProjection,
+              },
+            };
+          }
+        }
+      } else if (rawData.containsKey('e2ee')) {
+        ready = _unavailableInteractionResponse(pending.event);
+      } else {
+        ready = pending.event;
+      }
+    } on Object {
+      ready = _unavailableInteractionResponse(pending.event);
+    } finally {
+      if (identical(
+          _decryptingInteractionResponses[responseKey], decryptToken)) {
+        _decryptingInteractionResponses.remove(responseKey);
+      }
+    }
+    if (_interactionResponseGeneration != generation ||
+        _interactionResponseRevisions[responseKey] != revision ||
+        _interactionResponseTombstones.contains(responseKey) ||
+        state.interactionRequests[pending.response.interactionRef.wire] !=
+            request) {
+      unawaited(_consumePendingInteractionResponse(responseKey));
+      return;
+    }
+    state = state.copyWith(
+      interactionResponses: applyMobileInteractionResponseEvent(
+        state.interactionResponses,
+        pending.eventName,
+        ready,
+        allowClientState: true,
+      ),
+    );
+    unawaited(_consumePendingInteractionResponse(responseKey));
+  }
 
   /// Snapshot groups that changed since the last flush. A flush rewrites only
   /// the dirty groups, so the frequent unread/mention/presence updates stop
@@ -1150,6 +1578,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> _loadSession(SessionTokens tokens) async {
     final generation = ++_sessionLoadGeneration;
     _messageRequestGenerations.clear();
+    _clearInteractionPresentation();
     _pushRegistrationWarning = null;
     _pushRemoteDeliveryWarning = null;
     _pushLocalDisplayWarning = null;
@@ -1200,6 +1629,9 @@ final class MobileController extends StateNotifier<MobileState> {
     final guildSettings = guildSettingsLoad.value;
     final readStates = readStatesLoad.value;
     final rawNotifications = settings['notification_settings'];
+    unawaited(mobileTextToSpeech.applySettings(
+      rawNotifications is Map<Object?, Object?> ? rawNotifications : null,
+    ));
     final notifications = rawNotifications is Map<Object?, Object?>
         ? rawNotifications.map((key, value) => MapEntry('$key', value == true))
         : const <String, bool>{};
@@ -1247,6 +1679,10 @@ final class MobileController extends StateNotifier<MobileState> {
       selectedChannel: initial?.ref,
       relationships: relationships,
       presencePreference: presence,
+      themePreference: parseThemePreference(settings['theme']),
+      localePreference:
+          parseLocalePreference(settings['locale']).toLanguageTag(),
+      developerMode: parseDeveloperMode(rawNotifications),
       notificationSettings: notifications,
       guildNotificationLevels: guildNotificationLevels,
       unreadCounts: badges.unread,
@@ -1637,23 +2073,74 @@ final class MobileController extends StateNotifier<MobileState> {
     return _ensureRequiredThreadEncryption(created);
   }
 
+  Future<EncryptedForumThreadReservation> reserveEncryptedForumThread({
+    required KaedeChannel parent,
+    required String name,
+    required String clientNonce,
+    List<String> appliedTagIds = const <String>[],
+  }) async {
+    final reserved = await repository.reserveEncryptedForumThread(
+      parent: parent.ref,
+      name: name,
+      clientNonce: clientNonce,
+      autoArchiveDuration: parent.defaultAutoArchiveDuration,
+      appliedTagIds: appliedTagIds,
+    );
+    if (reserved.claimed || reserved.channel.starterMessage != null) {
+      throw StateError('The encrypted forum starter reservation is invalid.');
+    }
+    _upsertThread(reserved.channel);
+    final active = await _ensureRequiredThreadEncryption(reserved.channel);
+    return EncryptedForumThreadReservation(
+      channel: active,
+      clientNonce: reserved.clientNonce,
+      claimed: false,
+    );
+  }
+
+  Future<KaedeChannel> ensureRequiredThreadEncryption(KaedeChannel thread) =>
+      _ensureRequiredThreadEncryption(thread);
+
+  Future<KaedeChannel> claimEncryptedForumStarter({
+    required KaedeChannel thread,
+    required String clientNonce,
+    required Map<String, Object?> e2ee,
+    List<EntityRef> attachments = const <EntityRef>[],
+    List<EntityRef> mentionUsers = const <EntityRef>[],
+  }) async {
+    var starter = await repository.claimEncryptedForumStarter(
+      thread: thread.ref,
+      clientNonce: clientNonce,
+      e2ee: e2ee,
+      attachments: attachments,
+      mentionUsers: mentionUsers,
+    );
+    final decrypted =
+        await (await e2eeClient()).decryptMessage(thread, starter);
+    if (decrypted == null) {
+      throw StateError(
+          'The encrypted forum starter could not be verified locally.');
+    }
+    starter = decrypted.applyTo(starter);
+    final updated = thread.copyWith(starterMessage: starter);
+    _upsertThread(updated);
+    return updated;
+  }
+
   Future<KaedeChannel> createThreadFromMessage({
     required KaedeChannel parent,
     required KaedeMessage message,
     required String name,
   }) async {
-    if (parent.encryptionMode == 'e2ee') {
-      throw StateError(
-        'A thread cannot be created from a message in an end-to-end encrypted channel.',
-      );
-    }
-    final created = await repository.createThreadFromMessage(
+    var created = await repository.createThreadFromMessage(
       parent: parent.ref,
       message: message.ref,
       name: name,
       autoArchiveDuration: parent.defaultAutoArchiveDuration,
       rateLimitPerUser: parent.defaultThreadRateLimitPerUser,
     );
+    _upsertThread(created);
+    created = await _ensureRequiredThreadEncryption(created);
     _upsertThread(created);
     return created;
   }
@@ -1806,6 +2293,9 @@ final class MobileController extends StateNotifier<MobileState> {
 
   void applySettings(Map<String, Object?> settings) {
     final rawNotifications = settings['notification_settings'];
+    unawaited(mobileTextToSpeech.applySettings(
+      rawNotifications is Map<Object?, Object?> ? rawNotifications : null,
+    ));
     final notifications = rawNotifications is Map<Object?, Object?>
         ? rawNotifications.map((key, value) => MapEntry('$key', value == true))
         : state.notificationSettings;
@@ -1818,6 +2308,15 @@ final class MobileController extends StateNotifier<MobileState> {
     state = state.copyWith(
       notificationSettings: notifications,
       presencePreference: presence,
+      themePreference: parseThemePreference(
+        settings['theme'] ?? state.themePreference.name,
+      ),
+      localePreference: parseLocalePreference(
+        settings['locale'] ?? state.localePreference,
+      ).toLanguageTag(),
+      developerMode: settings.containsKey('notification_settings')
+          ? parseDeveloperMode(rawNotifications)
+          : state.developerMode,
     );
     _setDegradedWarning(DegradedFeature.accountSettings, null);
   }
@@ -2026,7 +2525,8 @@ final class MobileController extends StateNotifier<MobileState> {
     if (selected.type == ChannelType.text ||
         selected.type == ChannelType.announcement ||
         selected.isThread ||
-        selected.type == ChannelType.dm) {
+        selected.type == ChannelType.dm ||
+        selected.type == ChannelType.groupDm) {
       await loadMessages();
     }
   }
@@ -2321,10 +2821,17 @@ final class MobileController extends StateNotifier<MobileState> {
     EntityRef? replyTo,
     EntityRef? replyAuthor,
     List<EntityRef> mentionUsers = const <EntityRef>[],
+    List<EntityRef> stickerIds = const <EntityRef>[],
+    List<KaedeStickerItem> stickerItems = const <KaedeStickerItem>[],
     List<Map<String, Object?>> encryptedAttachments = const [],
     bool notify = true,
+    bool tts = false,
+    bool voiceMessage = false,
   }) async {
-    if (content.trim().isEmpty && attachments.isEmpty) {
+    if (content.trim().isEmpty &&
+        attachments.isEmpty &&
+        stickerIds.isEmpty &&
+        stickerItems.isEmpty) {
       return;
     }
     final tokens = api.tokens;
@@ -2343,15 +2850,82 @@ final class MobileController extends StateNotifier<MobileState> {
     }
     Map<String, Object?>? e2ee;
     String? wireContent = content.trim().isEmpty ? null : content.trim();
+    var resolvedMentionUsers = List<EntityRef>.of(mentionUsers);
     if (channelState.encryptionMode == 'e2ee') {
+      if (stickerIds.length != stickerItems.length ||
+          !stickerIds.every(
+            (ref) => stickerItems.any((item) => item.ref == ref),
+          )) {
+        throw StateError(
+          'Encrypted sticker metadata must match the selected stickers.',
+        );
+      }
       if (attachments.length != encryptedAttachments.length) {
         throw StateError(
             'Encrypted attachments must be uploaded with their encrypted manifest.');
+      }
+      final repliedUser = notify ? replyAuthor : null;
+      final allowedMentions = <String, Object?>{
+        'parse': channelState.guildRef == null
+            ? const <String>['users']
+            : const <String>['everyone', 'roles', 'users'],
+        'users': const <String>[],
+        'roles': const <String>[],
+        'replied_user': repliedUser != null,
+      };
+      final mentionIntent = mobileRichMessageMentionIntent(
+        <String, Object?>{
+          'content': wireContent,
+          'components': const <Object?>[],
+          'allowed_mentions': allowedMentions,
+        },
+      );
+      final directMentions = mentionUsers.map((item) => item.wire).toSet();
+      if (directMentions.length != mentionIntent.userRefs.length ||
+          !directMentions.containsAll(mentionIntent.userRefs)) {
+        throw StateError(
+          'Encrypted mentions must use exact fully qualified user tokens.',
+        );
+      }
+      if (channelState.guildRef case final EntityRef guildRef) {
+        final guild =
+            state.guilds.where((item) => item.ref == guildRef).firstOrNull;
+        if (guild == null) {
+          throw StateError(
+            'The current guild roster is unavailable for encrypted mentions.',
+          );
+        }
+        resolvedMentionUsers = expandedMobileEncryptedGuildMentionRecipients(
+          userRefs: mentionIntent.userRefs,
+          roleRefs: mentionIntent.roleRefs,
+          everyone: mentionIntent.everyone,
+          guild: guild,
+          members: state.guildMembers[guildRef] ?? const <GuildMember>[],
+          canMentionEveryone: channelState.allows(Permission.administrator) ||
+              channelState.allows(Permission.mentionEveryone),
+          repliedUser: repliedUser,
+        );
+      } else {
+        resolvedMentionUsers = <EntityRef>{
+          ...mentionIntent.userRefs.map(EntityRef.parse),
+          if (repliedUser != null) repliedUser,
+        }.toList()
+          ..sort((left, right) => left.wire.compareTo(right.wire));
       }
       e2ee = await (await e2eeClient()).encryptMessage(
         channelState,
         wireContent ?? '',
         attachments: encryptedAttachments,
+        mentionUserRefs: resolvedMentionUsers,
+        referencedMessage: replyTo,
+        repliedUserRef: repliedUser,
+        rich: MobileEncryptedRichMessageOptions(
+          stickerItems: stickerItems,
+          tts: tts,
+          voiceMessage: voiceMessage,
+          flags: voiceMessage ? 1 << 13 : 0,
+          allowedMentions: allowedMentions,
+        ),
       );
       wireContent = null;
     }
@@ -2361,7 +2935,11 @@ final class MobileController extends StateNotifier<MobileState> {
       'attachments': attachments.map((item) => item.wire).toList(),
       if (replyTo != null) 'reply_to': replyTo.wire,
       if (notify && replyAuthor != null) 'reply_author': replyAuthor.wire,
-      'mention_users': mentionUsers.map((item) => item.wire).toList(),
+      'mention_users': resolvedMentionUsers.map((item) => item.wire).toList(),
+      if (stickerIds.isNotEmpty && e2ee == null)
+        'sticker_ids': stickerIds.map((item) => item.wire).toList(),
+      if (tts) 'tts': true,
+      if (voiceMessage) 'voice_message': true,
     };
     await database.enqueue(
       nonce: nonce,
@@ -2382,6 +2960,141 @@ final class MobileController extends StateNotifier<MobileState> {
       state: 'pending',
       createdAt: DateTime.now(),
     ));
+  }
+
+  Future<KaedeMessage> createPoll(
+    EntityRef channel,
+    RichPollDraft poll,
+  ) async {
+    final target = _channel(channel);
+    if (target == null) {
+      throw StateError('This conversation is unavailable.');
+    }
+    if (target.encryptionMode == 'e2ee') {
+      final client = await e2eeClient();
+      final envelope = await client.encryptMessage(
+        target,
+        '',
+        rich: MobileEncryptedRichMessageOptions(poll: poll.toJson()),
+      );
+      final raw = await repository.sendMessage(channel, e2ee: envelope);
+      var message = KaedeMessage.fromJson(raw);
+      final decrypted = await client.decryptMessage(target, message);
+      if (decrypted == null) {
+        throw StateError('The encrypted poll could not be verified locally.');
+      }
+      message = decrypted.applyTo(message);
+      await _acceptRichMessage(message);
+      return message;
+    }
+    final message = await repository.createPollMessage(channel, poll);
+    await _acceptRichMessage(message);
+    return message;
+  }
+
+  Future<MessageForwardResult> forwardMessage(
+    KaedeMessage source,
+    List<EntityRef> destinationChannels, {
+    String? content,
+    bool discloseEncryptedToPlaintext = false,
+  }) async {
+    if (destinationChannels.isEmpty || destinationChannels.length > 5) {
+      throw StateError('Choose between one and five forwarding destinations.');
+    }
+    final targets = destinationChannels.map(_channel).toList(growable: false);
+    if (targets.any((target) => target == null)) {
+      throw StateError('A forwarding destination is unavailable.');
+    }
+    final sourceChannel = _channel(source.channelRef);
+    final requester = state.user?.ref;
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (sourceChannel == null || requester == null || accountKey == null) {
+      throw StateError('The forward source is unavailable.');
+    }
+    if (sourceChannel.encryptionMode == 'e2ee' &&
+        targets.any((target) => target!.encryptionMode == 'plaintext') &&
+        !discloseEncryptedToPlaintext) {
+      throw StateError(
+        'Confirm before disclosing an encrypted snapshot to a plaintext conversation.',
+      );
+    }
+    final needsEncryption =
+        targets.any((target) => target!.encryptionMode == 'e2ee');
+    final client = needsEncryption ? await e2eeClient() : null;
+    final result = await executeMobilePreparedForward(
+      repository: repository,
+      sourceMessage: source,
+      sourceChannel: sourceChannel,
+      destinationChannels: targets.cast<KaedeChannel>(),
+      requester: requester,
+      e2eeClient: client,
+      note: content,
+    );
+    if (!_sessionIsCurrent(accountKey, generation)) {
+      throw StateError('The active account changed while forwarding.');
+    }
+    for (final forwarded in result.forwards) {
+      var message = forwarded.message;
+      final target = _channel(forwarded.destination);
+      if (target?.encryptionMode == 'e2ee') {
+        final decrypted = await client!.decryptMessage(target!, message);
+        if (decrypted == null) {
+          throw StateError(
+            'A forwarded encrypted snapshot could not be verified locally.',
+          );
+        }
+        message = decrypted.applyTo(message);
+      }
+      if (!_sessionIsCurrent(accountKey, generation)) {
+        throw StateError('The active account changed while forwarding.');
+      }
+      await _acceptRichMessage(message);
+    }
+    return result;
+  }
+
+  Future<KaedeMessage> finalizePoll(KaedeMessage source) async {
+    final message = await repository.finalizePoll(
+      channel: source.channelRef,
+      message: source.ref,
+    );
+    _replaceStoredMessage(message);
+    await _cacheMessage(message);
+    return message;
+  }
+
+  Future<KaedeMessage> publishAnnouncement(KaedeMessage source) async {
+    final message = await repository.publishAnnouncement(
+      source.channelRef,
+      source.ref,
+    );
+    _replaceStoredMessage(message);
+    _markMessageRowsDirty(message.channelRef, {message.ref.wire});
+    await _cacheMessage(message);
+    return message;
+  }
+
+  Future<void> _acceptRichMessage(KaedeMessage message) async {
+    final existing =
+        state.messageStore[message.channelRef] ?? const <KaedeMessage>[];
+    final fast = appendNewestMessage(existing, message);
+    _setChannelMessages(
+      message.channelRef,
+      fast ?? mergeMessages(<KaedeMessage>[...existing, message]),
+    );
+    await _cacheMessage(message);
+  }
+
+  void _replaceStoredMessage(KaedeMessage message) {
+    final existing = state.messageStore[message.channelRef];
+    if (existing == null) return;
+    _setChannelMessages(
+      message.channelRef,
+      existing
+          .map((item) => item.ref == message.ref ? message : item)
+          .toList(growable: false),
+    );
   }
 
   void setDraft(EntityRef channel, String content) {
@@ -2443,11 +3156,26 @@ final class MobileController extends StateNotifier<MobileState> {
     Map<String, Object?>? e2ee;
     String? wireContent = content;
     if (channel.encryptionMode == 'e2ee') {
+      if (!message.clientContentAvailable) {
+        throw StateError(
+          'This encrypted message is unavailable on this device and cannot be edited.',
+        );
+      }
+      final rich = mobileEncryptedRichEditOptions(message);
       e2ee = await (await e2eeClient()).encryptMessage(
         channel,
         content,
         operation: 'edit',
         targetMessage: message.ref,
+        attachments: message.decryptedAttachments,
+        mentionUserRefs: message.mentionUserRefs,
+        referencedMessage: message.reference,
+        repliedUserRef: message.e2ee?['message_replied_user_ref'] == null
+            ? null
+            : EntityRef.parse(
+                message.e2ee!['message_replied_user_ref']! as String,
+              ),
+        rich: rich,
       );
       wireContent = null;
     }
@@ -2458,7 +3186,17 @@ final class MobileController extends StateNotifier<MobileState> {
       e2ee: e2ee,
     );
     if (channel.encryptionMode == 'e2ee') {
-      updated = updated.copyWith(content: content);
+      updated = updated.copyWith(
+        content: content,
+        e2eeVerified: true,
+        decryptedAttachments: message.decryptedAttachments,
+        decryptedAllowedMentions: message.decryptedAllowedMentions,
+        embeds: message.embeds,
+        components: message.components,
+        stickerItems: message.stickerItems,
+        tts: message.tts,
+        flags: message.flags,
+      );
     }
     if (!_sessionIsCurrent(accountKey, generation)) return;
     final messages = state.messageStore[message.channelRef];
@@ -2509,6 +3247,28 @@ final class MobileController extends StateNotifier<MobileState> {
     );
     _markMessageRowsDirty(message.channelRef, {message.ref.wire});
     await _cacheMessages(message.channelRef);
+  }
+
+  Future<void> clearMessageReactions(
+    KaedeMessage message, {
+    String? emoji,
+  }) async {
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
+      return;
+    }
+    if (emoji == null) {
+      await repository.clearReactions(message.channelRef, message.ref);
+    } else {
+      await repository.clearReactionGroup(
+        message.channelRef,
+        message.ref,
+        emoji,
+      );
+    }
+    if (!_sessionIsCurrent(accountKey, generation)) return;
+    _applyReactionClear(message.ref, emoji: emoji);
   }
 
   Future<void> loadAround(EntityRef message) async {
@@ -2662,6 +3422,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
+    _clearInteractionPresentation();
     final accountKey = api.tokens?.accountKey;
     final accountRef = state.user?.ref.wire ?? api.tokens?.userRef?.wire;
     final pushDeviceId = _pushDeviceId;
@@ -3009,16 +3770,19 @@ final class MobileController extends StateNotifier<MobileState> {
       final application =
           await (await e2eeClient()).decryptMessage(channel, message);
       if (application == null) return;
-      final decrypted = message.copyWith(
-        content: application.content,
-        decryptedAttachments: application.attachments,
-      );
+      final decrypted = application.applyTo(message);
       _patchStoredMessage(
         message.ref,
         (_) => decrypted,
       );
       await _cacheMessage(decrypted);
-      if (notify) await _notifyFor(decrypted);
+      if (notify) {
+        mobileTextToSpeech.speak(
+          decrypted,
+          selectedChannel: state.selectedChannel,
+        );
+        await _notifyFor(decrypted);
+      }
     } on Object {
       // Keep the encrypted row visibly locked. A Welcome or rekey received
       // later can make subsequent messages available without exposing bytes.
@@ -3039,7 +3803,10 @@ final class MobileController extends StateNotifier<MobileState> {
     if (cached.isEmpty || !_sessionIsCurrent(accountKey, generation)) {
       return false;
     }
-    _setChannelMessages(channel, cached.map(KaedeMessage.fromJson).toList());
+    _setChannelMessages(
+      channel,
+      cached.map(KaedeMessage.fromTrustedCacheJson).toList(),
+    );
     return true;
   }
 
@@ -3192,6 +3959,10 @@ final class MobileController extends StateNotifier<MobileState> {
         if (message.e2ee != null) {
           unawaited(_decryptIncoming(message, notify: true));
         } else {
+          mobileTextToSpeech.speak(
+            message,
+            selectedChannel: state.selectedChannel,
+          );
           unawaited(_notifyFor(message));
         }
         _removeTyping(message.channelRef, message.authorRef);
@@ -3215,9 +3986,90 @@ final class MobileController extends StateNotifier<MobileState> {
             event.data['message'] is Map ? event.data['message'] : event.data;
         _applyMessageUpdate(Map<String, Object?>.from(raw as Map));
         break;
+      case 'MESSAGE_REACTION_ADD' || 'MESSAGE_REACTION_REMOVE':
+        final raw =
+            event.data['message'] is Map ? event.data['message'] : event.data;
+        _applyMessageUpdate(
+          Map<String, Object?>.from(raw as Map),
+          reactionRemoved: event.name == 'MESSAGE_REACTION_REMOVE',
+        );
+        break;
+      case 'CHANNEL_PINS_UPDATE':
+        final channel = _channelRef(event.data);
+        final rawMessageId = event.data['message_id'];
+        final rawMessageDomain = event.data['message_domain'];
+        final rawPinned = event.data['pinned'];
+        if ((rawMessageId == null) != (rawMessageDomain == null) ||
+            (rawPinned != null && rawPinned is! bool) ||
+            (rawPinned != null && rawMessageId == null)) {
+          throw const FormatException('Channel pins update is invalid.');
+        }
+        if (rawMessageId != null && rawPinned is bool) {
+          final target = _entityRef(rawMessageId, rawMessageDomain);
+          if (target == null || channel == null) {
+            throw const FormatException('Channel pins update is invalid.');
+          }
+          KaedeMessage patch(KaedeMessage message) {
+            if (message.channelRef != channel) {
+              throw const FormatException(
+                'Channel pins update linkage is invalid.',
+              );
+            }
+            return message.copyWith(pinned: rawPinned);
+          }
+
+          _patchStoredMessage(target, patch);
+          _patchThreadStarter(target, patch);
+        }
+        if (!_pinEvents.isClosed) {
+          _pinEvents.add(Map<String, Object?>.unmodifiable(event.data));
+        }
+        break;
       case 'MESSAGE_DELETE':
         final target = _messageRef(event.data);
         if (target != null) _tombstoneMessage(target);
+        break;
+      case 'MESSAGE_DELETE_BULK':
+        final rawIds = event.data['ids'];
+        if (rawIds is! List) {
+          throw const FormatException('Bulk message deletion is invalid.');
+        }
+        for (final raw in rawIds) {
+          if (raw is! Map) {
+            throw const FormatException('Bulk message deletion is invalid.');
+          }
+          final item = Map<String, Object?>.from(raw);
+          final target = _entityRef(item['id'], item['origin_domain']);
+          if (target == null) {
+            throw const FormatException('Bulk message deletion is invalid.');
+          }
+          _tombstoneMessage(target);
+        }
+        break;
+      case 'MESSAGE_REACTION_REMOVE_ALL' || 'MESSAGE_REACTION_REMOVE_EMOJI':
+        final target = _messageRef(event.data);
+        final emoji = event.name == 'MESSAGE_REACTION_REMOVE_EMOJI'
+            ? gatewayReactionEmoji(event.data)
+            : null;
+        if (event.name == 'MESSAGE_REACTION_REMOVE_EMOJI' && emoji == null) {
+          break;
+        }
+        if (target != null) {
+          _applyReactionClear(
+            target,
+            emoji: emoji,
+          );
+        }
+        break;
+      case 'MESSAGE_POLL_VOTE_ADD' || 'MESSAGE_POLL_VOTE_REMOVE':
+        _applyPollVote(
+          event.data,
+          added: event.name == 'MESSAGE_POLL_VOTE_ADD',
+        );
+        break;
+      case 'INTERACTION_RESPONSE_CREATE' || 'INTERACTION_RESPONSE_UPDATE':
+      case 'INTERACTION_RESPONSE_DELETE':
+        _acceptInteractionResponseEvent(event.name, event.data);
         break;
       case 'ATTACHMENT_UPDATE':
         _applyAttachmentUpdate(event.data);
@@ -3517,6 +4369,69 @@ final class MobileController extends StateNotifier<MobileState> {
             'INVALID_SESSION':
         _scheduleNavigationRefresh();
         break;
+      case soundboardGatewayDispatch:
+        if (!_soundboardEvents.isClosed) {
+          _soundboardEvents.add(Map.unmodifiable(event.data));
+        }
+        break;
+      case 'VOICE_CHANNEL_STATUS_UPDATE':
+        if (!_voiceStatusEvents.isClosed) {
+          _voiceStatusEvents.add(Map.unmodifiable(event.data));
+        }
+        break;
+      case 'VOICE_CHANNEL_START_TIME_UPDATE':
+        final channel = _entityRef(
+          event.data['id'],
+          event.data['origin_domain'] ?? event.data['guild_domain'],
+        );
+        final startedAt = event.data['voice_start_time'];
+        if (channel == null ||
+            (startedAt != null && (startedAt is! int || startedAt <= 0))) {
+          throw const FormatException(
+            'Voice channel start-time update is invalid.',
+          );
+        }
+        if (!_voiceChannelInfoEvents.isClosed) {
+          _voiceChannelInfoEvents.add(Map.unmodifiable(event.data));
+        }
+        break;
+      case 'CHANNEL_INFO':
+        if (!_voiceChannelInfoEvents.isClosed) {
+          _voiceChannelInfoEvents.add(Map.unmodifiable(event.data));
+        }
+        final rawChannels = event.data['channels'];
+        if (rawChannels is List && !_voiceStatusEvents.isClosed) {
+          for (final raw in rawChannels) {
+            if (raw is! Map || !raw.containsKey('status')) continue;
+            _voiceStatusEvents.add(Map.unmodifiable(<String, Object?>{
+              'id': raw['id'],
+              'origin_domain': event.data['guild_domain'],
+              'guild_id': event.data['guild_id'],
+              'guild_domain': event.data['guild_domain'],
+              'status': raw['status'],
+            }));
+          }
+        }
+        break;
+      case 'STAGE_INSTANCE_CREATE' ||
+            'STAGE_INSTANCE_UPDATE' ||
+            'STAGE_INSTANCE_DELETE':
+        if (!_stageEvents.isClosed) {
+          final notificationId = '${event.data['notification_id'] ?? ''}';
+          final notifyClient = event.name == 'STAGE_INSTANCE_CREATE' &&
+              event.data['send_start_notification'] == true &&
+              notificationId.isNotEmpty &&
+              _seenStageNotificationIds.add(notificationId);
+          if (_seenStageNotificationIds.length > 256) {
+            _seenStageNotificationIds.remove(_seenStageNotificationIds.first);
+          }
+          _stageEvents.add(Map.unmodifiable(<String, Object?>{
+            'event_type': event.name,
+            'notify_client': notifyClient,
+            ...event.data,
+          }));
+        }
+        break;
       case 'CHANNEL_PERMISSION_UPDATE':
         final threadRef = _entityRef(
           event.data['channel_id'],
@@ -3647,7 +4562,10 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
-  void _applyMessageUpdate(Map<String, Object?> data) {
+  void _applyMessageUpdate(
+    Map<String, Object?> data, {
+    bool? reactionRemoved,
+  }) {
     final target = _messageRef(data);
     if (target == null) return;
     if (data['author_id'] != null && data['created_at'] != null) {
@@ -3681,30 +4599,20 @@ final class MobileController extends StateNotifier<MobileState> {
       if (data.containsKey('pinned')) {
         next = next.copyWith(pinned: data['pinned'] == true);
       }
-      if (data['reaction'] case final reaction?) {
-        final counts = Map<String, int>.of(next.reactionCounts);
-        final reacted = Set<String>.of(next.reactedEmoji);
-        final key = '$reaction';
-        final removed = data['removed'] == true;
-        final count = (counts[key] ?? 0) + (removed ? -1 : 1);
-        if (count <= 0) {
-          counts.remove(key);
-        } else {
-          counts[key] = count;
-        }
+      if (gatewayReactionEmoji(data) case final emoji?) {
         final currentUser = state.user;
-        if (currentUser != null &&
-            '${data['user_id']}' == currentUser.ref.id.value &&
-            '${data['user_domain']}' == currentUser.ref.domain.value) {
-          if (removed) {
-            reacted.remove(key);
-          } else {
-            reacted.add(key);
-          }
-        }
+        final reconciled = reconcileReactionUpdate(
+          next.reactionCounts,
+          next.reactedEmoji,
+          emoji: emoji,
+          removed: reactionRemoved ?? data['removed'] == true,
+          currentUser: currentUser != null &&
+              '${data['user_id']}' == currentUser.ref.id.value &&
+              '${data['user_domain']}' == currentUser.ref.domain.value,
+        );
         next = next.copyWith(
-          reactionCounts: Map.unmodifiable(counts),
-          reactedEmoji: Set.unmodifiable(reacted),
+          reactionCounts: reconciled.counts,
+          reactedEmoji: reconciled.reactedEmoji,
         );
       }
       if (data.containsKey('delivery_status')) {
@@ -3746,6 +4654,23 @@ final class MobileController extends StateNotifier<MobileState> {
       if (!replaced) items.add(attachment);
       return message.copyWith(attachments: List.unmodifiable(items));
     });
+  }
+
+  void _applyReactionClear(EntityRef target, {String? emoji}) {
+    KaedeMessage patch(KaedeMessage message) {
+      final reconciled = reconcileClearedReactions(
+        message.reactionCounts,
+        message.reactedEmoji,
+        emoji: emoji,
+      );
+      return message.copyWith(
+        reactionCounts: reconciled.counts,
+        reactedEmoji: reconciled.reactedEmoji,
+      );
+    }
+
+    _patchStoredMessage(target, patch);
+    _patchThreadStarter(target, patch);
   }
 
   void _patchStoredMessage(
@@ -3802,6 +4727,7 @@ final class MobileController extends StateNotifier<MobileState> {
       return Map<String, Object?>.unmodifiable(raw);
     }).toList(growable: false);
     state = state.copyWith(
+      user: state.user?.ref == user.ref ? user : state.user,
       dms: List<KaedeChannel>.unmodifiable(dms),
       relationships: List<Map<String, Object?>>.unmodifiable(relationships),
       messageStore: Map<EntityRef, List<KaedeMessage>>.unmodifiable(store),
@@ -3817,12 +4743,32 @@ final class MobileController extends StateNotifier<MobileState> {
     _scheduleMetadataCache(const <String>{'dms', 'relationships'});
   }
 
+  void applyUserProfile(KaedeUser user) => _applyUserProfileUpdate(user);
+
   void _tombstoneMessage(EntityRef target) {
     KaedeMessage tombstone(KaedeMessage message) => message.copyWith(
           clearContent: true,
+          stickerItems: const <KaedeStickerItem>[],
+          embeds: const <RichEmbed>[],
+          components: const <RichMessageLayout>[],
+          clearForwardedMessageRef: true,
+          clearForwardedMessage: true,
+          clearForwardSnapshot: true,
+          clearDecryptedForwardSnapshot: true,
+          clearPoll: true,
+          clearPollResult: true,
+          clearEncryptedPollProjection: true,
+          clearE2ee: true,
+          e2eeVerified: false,
           attachments: const <KaedeAttachment>[],
+          decryptedAttachments: const <Json>[],
+          clearDecryptedAllowedMentions: true,
           mentionUserRefs: const <EntityRef>[],
+          mentionRoleRefs: const <EntityRef>[],
+          mentionEveryone: false,
           reactionCounts: const <String, int>{},
+          reactedEmoji: const <String>{},
+          pinned: false,
           deletedAt: DateTime.now().toUtc(),
         );
 
@@ -3854,6 +4800,30 @@ final class MobileController extends StateNotifier<MobileState> {
     final id = data['message_id'] ?? data['id'];
     final domain = data['message_domain'] ?? data['origin_domain'];
     return _entityRef(id, domain);
+  }
+
+  void _applyPollVote(
+    Map<String, Object?> data, {
+    required bool added,
+  }) {
+    final target = _messageRef(data);
+    final voter = _userRef(data);
+    final answerId = _asInt(data['answer_id']);
+    if (target == null || voter == null || answerId < 1) return;
+    KaedeMessage patch(KaedeMessage message) {
+      final poll = message.poll;
+      if (poll == null) return message;
+      return message.copyWith(
+        poll: poll.withVote(
+          answerId: answerId,
+          added: added,
+          isCurrentUser: voter == state.user?.ref,
+        ),
+      );
+    }
+
+    _patchStoredMessage(target, patch);
+    _patchThreadStarter(target, patch);
   }
 
   EntityRef? _channelRef(Map<String, Object?> data) =>
@@ -3965,6 +4935,18 @@ final class MobileController extends StateNotifier<MobileState> {
   void requestGuildMembers(EntityRef guild, {String query = ''}) {
     if (!state.gatewayHealth.isConnected) return;
     gateway.requestMembers(guild.wire, query: query);
+  }
+
+  void requestVoiceChannelInfo(EntityRef guild) {
+    if (!state.gatewayHealth.isConnected) return;
+    gateway.requestChannelInfo(guild.wire);
+  }
+
+  void requestGuildSoundboardSounds(List<EntityRef> guilds) {
+    if (!state.gatewayHealth.isConnected || guilds.isEmpty) return;
+    gateway.requestSoundboardSounds([
+      for (final guild in guilds) guild.wire,
+    ]);
   }
 
   /// The account's own presence is authoritative locally: the gateway does not
@@ -4962,7 +5944,13 @@ final class MobileController extends StateNotifier<MobileState> {
             (payload['mention_users'] as List<Object?>? ?? const <Object?>[])
                 .map(EntityRef.fromJson)
                 .toList(),
+        stickerIds:
+            (payload['sticker_ids'] as List<Object?>? ?? const <Object?>[])
+                .map(EntityRef.fromJson)
+                .toList(),
         nonce: item.nonce,
+        tts: payload['tts'] == true,
+        voiceMessage: payload['voice_message'] == true,
       );
       if (!_sessionIsCurrent(activeAccount, activeGeneration)) return;
       await database.completeOutbox(item.nonce);
@@ -5052,6 +6040,7 @@ final class MobileController extends StateNotifier<MobileState> {
   void dispose() {
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
+    _clearInteractionPresentation();
     _gatewaySubscription?.cancel();
     _pushTokenSubscription?.cancel();
     _pushDestinationSubscription?.cancel();
@@ -5068,12 +6057,18 @@ final class MobileController extends StateNotifier<MobileState> {
     _selfModerationRetryTimer?.cancel();
     _pendingAcknowledgements.clear();
     _acknowledgementsInFlight.clear();
+    _seenStageNotificationIds.clear();
     _gatewayHealthSubscription?.cancel();
     // A synchronous provider disposal cannot await native MLS teardown. The
     // lifecycle queue detaches this controller immediately, then waits for any
     // in-flight E2EE operation before freeing native state and vault material.
     unawaited(_queueE2eeTeardown());
     unawaited(systemCalls.dispose());
+    unawaited(_soundboardEvents.close());
+    unawaited(_stageEvents.close());
+    unawaited(_pinEvents.close());
+    unawaited(_voiceStatusEvents.close());
+    unawaited(_voiceChannelInfoEvents.close());
     super.dispose();
   }
 
@@ -5106,6 +6101,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
+    _clearInteractionPresentation();
     _outboxTimer?.cancel();
     _outboxTimer = null;
     _appLockTimer?.cancel();

@@ -173,6 +173,9 @@ def test_tracker_snapshot_cursor_is_authenticated_and_revision_bound() -> None:
     with pytest.raises(TrackerSnapshotChanged):
         tracker_snapshot_cursor_task_id(config, board, cursor)
 
+    with pytest.raises(ValueError, match="invalid"):
+        tracker_snapshot_cursor_task_id(config, board, "%")
+
 
 class InvalidationSession:
     def __init__(self, channel: Channel, board: TrackerBoard | None = None) -> None:

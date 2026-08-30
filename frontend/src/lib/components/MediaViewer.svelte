@@ -19,7 +19,8 @@
       attachment.origin_domain,
       attachment.id,
       'original',
-      attachment.history_media_url
+      attachment.history_media_url,
+      attachment.private_media_url
     )
   );
   // Media is an authenticated API route rather than a Svelte page. The cast

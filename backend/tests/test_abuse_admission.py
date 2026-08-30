@@ -55,6 +55,7 @@ async def test_typing_limit_runs_before_channel_lookup(monkeypatch: pytest.Monke
         await channel_api.typing(
             cast(Any, "123"),
             Response(),
+            request=cast(Any, object()),
             auth=cast(Any, SimpleNamespace(user=user)),
             session=cast(Any, object()),
             redis=cast(Any, object()),
@@ -203,6 +204,8 @@ async def test_remote_media_cache_hit_skips_fetch_admission(
     attachment = SimpleNamespace(
         message_id=9,
         message_domain="beta.localhost",
+        interaction_id=None,
+        interaction_response_id=None,
         deleted_at=None,
         updated_at=None,
     )

@@ -1,10 +1,41 @@
 import type { GuildMemberSummary, PresenceStatus, Role } from './types';
+import { entityRef } from './refs';
 import { userDisplayName } from './users';
 
 export interface GuildMemberGroups {
   hoisted: Array<{ role: Role; members: GuildMemberSummary[] }>;
   online: GuildMemberSummary[];
   offline: GuildMemberSummary[];
+}
+
+export function guildMemberSearchPath(
+  guildRef: string,
+  query: string,
+  limit = 26,
+  after = ''
+): string {
+  const boundedLimit = Math.min(100, Math.max(1, Math.trunc(limit)));
+  const parameters = new URLSearchParams({ limit: String(boundedLimit) });
+  const cursor = after.trim();
+  if (cursor) parameters.set('after', cursor);
+  const cleaned = query.trim();
+  if (cleaned) parameters.set('query', cleaned);
+  return `/guilds/${encodeURIComponent(guildRef)}/members?${parameters.toString()}`;
+}
+
+export function mergeGuildMemberPage(
+  existing: GuildMemberSummary[],
+  incoming: GuildMemberSummary[],
+  pageSize = 25
+): { members: GuildMemberSummary[]; cursor: string; hasMore: boolean } {
+  const visible = incoming.slice(0, pageSize);
+  const refs = new Set(visible.map((member) => entityRef(member.user)));
+  const members = [...existing.filter((member) => !refs.has(entityRef(member.user))), ...visible];
+  return {
+    members,
+    cursor: visible.length ? entityRef(visible[visible.length - 1].user) : '',
+    hasMore: incoming.length > pageSize
+  };
 }
 
 const presenceOrder: Record<PresenceStatus, number> = {

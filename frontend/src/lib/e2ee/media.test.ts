@@ -2,6 +2,8 @@ import { webcrypto } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { decryptFile, encryptFile, encryptedManifestDigest } from './media';
+import { fromBase64url } from './encoding';
+import fileVector from '../../../static/protocol/kaede-file-v1.json';
 
 beforeAll(() => {
   Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
@@ -23,6 +25,25 @@ describe('encrypted attachments', () => {
     expect(await ciphertext.text()).not.toContain('image/png');
     const restored = new Uint8Array(await (await decryptFile(ciphertext, manifest)).arrayBuffer());
     expect(restored).toEqual(contents);
+    expect(manifest.plaintext_sha256).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  });
+
+  it('decrypts the shared cross-client vector and verifies its plaintext commitment', async () => {
+    const ciphertext = new Blob([fromBase64url(fileVector.ciphertext_base64url)], {
+      type: 'application/octet-stream'
+    });
+    const restored = new Uint8Array(
+      await (
+        await decryptFile(ciphertext, fileVector.manifest as Parameters<typeof decryptFile>[1])
+      ).arrayBuffer()
+    );
+    expect(restored).toEqual(fromBase64url(fileVector.plaintext_base64url));
+    await expect(
+      decryptFile(ciphertext, {
+        ...(fileVector.manifest as Parameters<typeof decryptFile>[1]),
+        plaintext_sha256: 'A'.repeat(43)
+      })
+    ).rejects.toThrow(/plaintext/u);
   });
 
   it('rejects tampering, truncation, and unauthenticated manifest changes', async () => {

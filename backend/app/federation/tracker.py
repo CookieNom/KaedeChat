@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
 import json
@@ -15,6 +13,7 @@ from redis.asyncio import Redis
 from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base64url import decode_base64url, encode_base64url
 from app.core.settings import Settings
 from app.db.models import (
     Channel,
@@ -316,7 +315,7 @@ def tracker_snapshot_cursor(
         separators=(",", ":"),
     ).encode()
     signature = hmac.new(settings.secret_key_bytes, payload, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(payload + signature).rstrip(b"=").decode("ascii")
+    return encode_base64url(payload + signature)
 
 
 def tracker_snapshot_cursor_task_id(
@@ -327,11 +326,11 @@ def tracker_snapshot_cursor_task_id(
     if not 1 <= len(cursor) <= 1024 or not cursor.isascii():
         raise ValueError("tracker snapshot cursor is invalid")
     try:
-        decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        decoded = decode_base64url(cursor)
         payload, signature = decoded[:-32], decoded[-32:]
         expected = hmac.new(settings.secret_key_bytes, payload, hashlib.sha256).digest()
         raw = json.loads(payload)
-    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+    except ValueError:
         raise ValueError("tracker snapshot cursor is invalid") from None
     if len(signature) != 32 or not hmac.compare_digest(signature, expected):
         raise ValueError("tracker snapshot cursor signature is invalid")

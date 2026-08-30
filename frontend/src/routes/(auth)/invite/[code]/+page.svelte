@@ -3,24 +3,24 @@
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { formatDateTime } from '$lib/ui/locale';
-  import { invitedChannel } from '$lib/chat/invite-preview';
+  import {
+    invitedChannel,
+    invitePreviewDetails,
+    type InvitePreview
+  } from '$lib/chat/invite-preview';
   import { entityRef } from '$lib/chat/refs';
+  import { federatedInviteHomeUrl } from '$lib/chat/invites';
   import type { Guild } from '$lib/chat/types';
   import { guildChannelPath } from '$lib/navigation/routes';
-
-  interface InvitePreview {
-    code: string;
-    guild: Guild;
-    uses?: number;
-    max_uses?: number | null;
-    expires_at: string | null;
-    channel_id: string | null;
-  }
 
   const code = $derived(page.params.code ?? '');
   let preview = $state<InvitePreview | null>(null);
   let error = $state('');
   let busy = $state(false);
+  let homeDomain = $state('');
+  let homeError = $state('');
+  const destination = $derived(preview ? invitedChannel(preview.guild, preview.channel_id) : null);
+  const details = $derived(preview ? invitePreviewDetails(preview) : []);
 
   let loadGeneration = 0;
 
@@ -83,6 +83,17 @@
       if (generation === loadGeneration && targetCode === code) busy = false;
     }
   }
+
+  function openOnHome() {
+    if (!preview) return;
+    const target = federatedInviteHomeUrl(preview.code, preview.guild.origin_domain, homeDomain);
+    if (!target) {
+      homeError = 'Enter a valid home instance domain, such as chat.example.';
+      return;
+    }
+    homeError = '';
+    window.location.assign(target);
+  }
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- the typed guild route is resolved before parameters are inserted -->
@@ -100,15 +111,43 @@
     {#if preview}
       <p>
         Hosted by <strong>{preview.guild.origin_domain}</strong>
-        {#if preview.max_uses != null}
-          · {preview.max_uses - (preview.uses ?? 0)} uses remain{/if}
       </p>
       {#if preview.expires_at}
         <p class="field-note">Expires {formatDateTime(preview.expires_at)}</p>
       {/if}
+      {#if destination?.name}<p class="field-note">Destination: {destination.name}</p>{/if}
+      {#each details as detail (detail)}
+        <p class="field-note">{detail}</p>
+      {/each}
       <button class="primary-button" disabled={busy} onclick={accept}>
         {busy ? 'Joining…' : 'Accept invitation'}
       </button>
+      <details>
+        <summary>Use an account from another instance</summary>
+        <form
+          onsubmit={(event) => {
+            event.preventDefault();
+            openOnHome();
+          }}
+        >
+          <label>
+            <span>Your home instance</span>
+            <input
+              bind:value={homeDomain}
+              inputmode="url"
+              autocomplete="url"
+              placeholder="chat.example"
+              maxlength="253"
+              oninput={() => (homeError = '')}
+            />
+          </label>
+          <p class="field-note">
+            You’ll review this same invite on your home instance, where your account is signed in.
+          </p>
+          {#if homeError}<p class="form-error" role="alert">{homeError}</p>{/if}
+          <button class="secondary-button" type="submit">Continue to my instance</button>
+        </form>
+      </details>
     {/if}
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
   </section>

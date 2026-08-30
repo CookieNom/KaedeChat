@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
+  import EphemeralInteractionTray from '$lib/components/EphemeralInteractionTray.svelte';
   import type { GifResult } from '$lib/chat/gifs';
   import {
     customEmojiToken,
@@ -11,11 +12,42 @@
     type CustomEmojiOption,
     type EmojiOption
   } from '$lib/chat/emojis';
-  import { stickerOptions, type StickerOption } from '$lib/chat/stickers';
+  import { stickerItem, stickerOptions, type StickerOption } from '$lib/chat/stickers';
   import { autosizeTextarea } from '$lib/ui/autosize';
   import { firstNavigableChannel } from '$lib/chat/channels';
   import { dmTitle, groupDmSubtitle, isGroupDm, ownsGroupDm } from '$lib/chat/direct-messages';
   import { completionAt, replaceCompletion } from '$lib/chat/completion';
+  import {
+    commandAttachmentOptionIds,
+    applicationCommandRequestIdentity,
+    applicationCommandByIdentity,
+    commandCompletions,
+    resolveCommandInvocation,
+    localizedCommandName,
+    commandOptionPayload,
+    commandOptionsComplete,
+    parseApplicationCommands,
+    type ApplicationCommand,
+    type ApplicationCommandOption,
+    type CommandComposerValues
+  } from '$lib/chat/application-commands';
+  import { rememberAppContextCommand } from '$lib/chat/context-commands';
+  import {
+    commandInteractionRequestContext,
+    createInteraction,
+    interactionFileEncryptionIntent,
+    requestCommandAutocomplete
+  } from '$lib/chat/interactions';
+  import { forwardingDestinations, forwardUnavailableReason } from '$lib/chat/forwarding';
+  import { executePreparedForward } from '$lib/chat/prepared-forwarding';
+  import {
+    channelSupportsMessagePins,
+    loadPinnedMessages,
+    messagePinPath,
+    reconcileChannelPinsUpdate,
+    type ChannelPinsUpdate
+  } from '$lib/chat/pins';
+  import { fileUploadMatches, type PollCreatePayload } from '$lib/chat/rich-content';
   import { mentionsUser } from '$lib/chat/mentions';
   import {
     applyMessageDeliveryUpdate,
@@ -27,7 +59,25 @@
     resolvedReferencedMessage,
     type MessageDeliveryUpdate
   } from '$lib/chat/reconcile';
-  import { applyReactionUpdate, type ReactionUpdate } from '$lib/chat/reaction-state';
+  import { canonicalReactionEmoji } from '$lib/chat/reactions';
+  import {
+    applyReactionDispatch,
+    messageReactionsPath,
+    ownReactionPath,
+    reactionUpdateFromDispatch,
+    type ReactionDispatchName
+  } from '$lib/chat/reaction-state';
+  import { currentTtsPreferences, speakTtsMessage, ttsCommand } from '$lib/chat/tts';
+  import {
+    applyBulkMessageDelete,
+    tombstoneMessage,
+    type MessageBulkDeleteUpdate
+  } from '$lib/chat/message-deletions';
+  import {
+    applyPollVoteDispatch,
+    pollVoteUpdateFromDispatch,
+    type PollVoteDispatchName
+  } from '$lib/chat/poll-state';
   import {
     discardAttachments,
     pendingMessageSend,
@@ -62,6 +112,12 @@
   import ComposerAutocomplete, {
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
+  import CommandOptionComposer from '$lib/components/CommandOptionComposer.svelte';
+  import ApplicationCommandLauncher from '$lib/components/ApplicationCommandLauncher.svelte';
+  import ComposerActionMenu from '$lib/components/ComposerActionMenu.svelte';
+  import CreatePollDialog from '$lib/components/CreatePollDialog.svelte';
+  import DmBotE2eeParticipation from '$lib/components/DmBotE2eeParticipation.svelte';
+  import ForwardMessageDialog from '$lib/components/ForwardMessageDialog.svelte';
   import GuildRail from '$lib/components/GuildRail.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
@@ -76,7 +132,10 @@
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import {
     decryptConversationMessages,
+    encryptedMessageEditBindings,
     initializeE2EE,
+    richMessageMentionIntent,
+    type EncryptedAllowedMentions,
     type KaedeE2EEClient
   } from '$lib/e2ee/client';
   import { acknowledgeEncryptedRoom, confirmEncryptedRoomJoin } from '$lib/e2ee/disclosures';
@@ -182,8 +241,15 @@
   let groupInviteHandle = $state('');
   let groupError = $state('');
   let groupBusy = $state(false);
+  let encryptedAppsOpen = $state(false);
   let e2eeClient = $state<KaedeE2EEClient | null>(null);
   let e2eeSafetyNumber = $state('');
+  let applicationCommands = $state<ApplicationCommand[]>([]);
+  let selectedApplicationCommand = $state<ApplicationCommand | null>(null);
+  let commandOptionValues = $state<CommandComposerValues>({});
+  let commandNotice = $state('');
+  let pollDialogOpen = $state(false);
+  let forwardingMessage = $state<Message | null>(null);
   const uploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const deliveryRecoveries = new SvelteSet<string>();
@@ -278,6 +344,11 @@
   const channel = $derived(
     directMessages.find((item) => matchesEntityRef(dmId, item, localDomain)) ?? null
   );
+  const canCreatePoll = $derived(Boolean(channelReady && channel));
+  const canPinMessages = $derived(Boolean(channel && channelSupportsMessagePins(channel)));
+  const forwardDestinations = $derived(
+    channel ? forwardingDestinations(channel, entities.channels.values) : []
+  );
   const recipient = $derived(channel?.recipients?.[0] ?? null);
   const conversationTitle = $derived(dmTitle(channel));
   const groupConversation = $derived(isGroupDm(channel));
@@ -354,34 +425,36 @@
   }
   const completionQuery = $derived(completionAt(content, composerCursor));
   const completionOptions = $derived(
-    completionQuery?.marker === ':'
-      ? [
-          ...pickerEmojis
-            .filter((emoji) =>
-              emoji.name.toLocaleLowerCase().includes(completionQuery.query.toLocaleLowerCase())
-            )
-            .map((emoji) => ({
-              value: emoji.value,
-              label: `:${emoji.name}:`,
-              detail: emoji.guild_name ?? 'Custom emoji',
-              imageUrl: emoji.url,
-              kind: 'custom-emoji' as const
-            })),
-          ...unicodeEmojiCompletions(unicodeEmojis, completionQuery.query)
-        ]
-      : completionQuery?.marker === '@' &&
-          recipient &&
-          userPublicHandle(recipient)
-            ?.toLocaleLowerCase()
-            .includes(completionQuery.query.toLocaleLowerCase())
+    completionQuery?.marker === '/'
+      ? commandCompletions(applicationCommands, completionQuery.query)
+      : completionQuery?.marker === ':'
         ? [
-            {
-              value: `<@${entityRef(recipient)}>`,
-              label: userDisplayName(recipient),
-              detail: `@${userPublicHandle(recipient)}`
-            }
+            ...pickerEmojis
+              .filter((emoji) =>
+                emoji.name.toLocaleLowerCase().includes(completionQuery.query.toLocaleLowerCase())
+              )
+              .map((emoji) => ({
+                value: emoji.value,
+                label: `:${emoji.name}:`,
+                detail: emoji.guild_name ?? 'Custom emoji',
+                imageUrl: emoji.url,
+                kind: 'custom-emoji' as const
+              })),
+            ...unicodeEmojiCompletions(unicodeEmojis, completionQuery.query)
           ]
-        : []
+        : completionQuery?.marker === '@' &&
+            recipient &&
+            userPublicHandle(recipient)
+              ?.toLocaleLowerCase()
+              .includes(completionQuery.query.toLocaleLowerCase())
+          ? [
+              {
+                value: `<@${entityRef(recipient)}>`,
+                label: userDisplayName(recipient),
+                detail: `@${userPublicHandle(recipient)}`
+              }
+            ]
+          : []
   );
 
   $effect(() => {
@@ -503,17 +576,49 @@
     }
   }
 
+  function reconcileReactionMutation(eventName: ReactionDispatchName, payload: unknown) {
+    if (!reactionUpdateFromDispatch(eventName, payload)) return;
+    const patch = (message: Message) =>
+      applyReactionDispatch(message, eventName, payload, currentUser);
+    setMessages(messages.map(patch));
+    pinnedMessages = pinnedMessages.map(patch);
+  }
+
+  function reconcilePollVote(eventName: PollVoteDispatchName, payload: unknown) {
+    if (!pollVoteUpdateFromDispatch(payload)) return;
+    const patch = (message: Message) =>
+      applyPollVoteDispatch(message, eventName, payload, currentUser);
+    setMessages(messages.map(patch));
+    pinnedMessages = pinnedMessages.map(patch);
+  }
+
   function applyDispatch(dispatch: Dispatch) {
     if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
       if (isCurrentChannel(message.channel_id, message.channel_domain)) {
         if (message.e2ee && channel && e2eeClient) {
-          void decryptConversationMessages(e2eeClient, channel, [message]).then(([decrypted]) =>
-            reconcile(decrypted)
-          );
-        } else reconcile(message);
+          void decryptConversationMessages(e2eeClient, channel, [message]).then(([decrypted]) => {
+            speakTtsMessage(decrypted, entityRef(channel));
+            reconcile(decrypted);
+          });
+        } else {
+          speakTtsMessage(message, channel ? entityRef(channel) : null);
+          reconcile(message);
+        }
         if (document.visibilityState === 'visible' && timelineAtBottom) void acknowledge(message);
       } else {
+        const target = entities.channels.values.find(
+          (candidate) =>
+            candidate.id === message.channel_id &&
+            candidate.origin_domain === message.channel_domain
+        );
+        if (message.e2ee && target?.encryption_mode === 'e2ee' && e2eeClient) {
+          void decryptConversationMessages(e2eeClient, target, [message]).then(([decrypted]) =>
+            speakTtsMessage(decrypted, channel ? entityRef(channel) : null)
+          );
+        } else if (!message.e2ee) {
+          speakTtsMessage(message, channel ? entityRef(channel) : null);
+        }
         setReadStates(
           readStates.map((state) =>
             state.channel_id === message.channel_id &&
@@ -528,8 +633,32 @@
           )
         );
       }
+    } else if (dispatch.t === 'MESSAGE_REACTION_ADD' || dispatch.t === 'MESSAGE_REACTION_REMOVE') {
+      reconcileReactionMutation(dispatch.t, dispatch.d);
+    } else if (
+      dispatch.t === 'MESSAGE_POLL_VOTE_ADD' ||
+      dispatch.t === 'MESSAGE_POLL_VOTE_REMOVE'
+    ) {
+      reconcilePollVote(dispatch.t, dispatch.d);
+    } else if (dispatch.t === 'CHANNEL_PINS_UPDATE') {
+      const update = dispatch.d as ChannelPinsUpdate;
+      if (
+        channel &&
+        update.channel_id === channel.id &&
+        update.channel_domain === channel.origin_domain
+      ) {
+        setMessages(reconcileChannelPinsUpdate(messages, update));
+        pinnedMessages = reconcileChannelPinsUpdate(pinnedMessages, update).filter(
+          (message) => message.pinned !== false
+        );
+        if (pinsOpen) void loadPins();
+      }
     } else if (dispatch.t === 'MESSAGE_UPDATE') {
       const update = dispatch.d as Message;
+      if ('reaction' in update) {
+        reconcileReactionMutation('MESSAGE_UPDATE', dispatch.d);
+        return;
+      }
       if (update.e2ee && channel && e2eeClient) {
         void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) =>
           applyDispatch({ ...dispatch, d: { ...decrypted, e2ee: null } })
@@ -538,11 +667,7 @@
       }
       setMessages(
         messages.map((item) =>
-          entityKey(item) === entityKey(update)
-            ? 'reaction' in update
-              ? applyReactionUpdate(item, update as unknown as ReactionUpdate, currentUser)
-              : { ...item, ...update }
-            : item
+          entityKey(item) === entityKey(update) ? { ...item, ...update } : item
         )
       );
     } else if (dispatch.t === 'ATTACHMENT_UPDATE') {
@@ -574,12 +699,28 @@
         channel_domain: string;
       };
       if (isCurrentChannel(deleted.channel_id, deleted.channel_domain)) {
+        const deletedAt = new Date().toISOString();
         setMessages(
           messages.map((item) =>
             item.id === deleted.id && item.origin_domain === deleted.origin_domain
-              ? { ...item, content: null, deleted_at: new Date().toISOString() }
+              ? tombstoneMessage(item, deletedAt)
               : item
           )
+        );
+        pinnedMessages = pinnedMessages.filter(
+          (item) => item.id !== deleted.id || item.origin_domain !== deleted.origin_domain
+        );
+      }
+    } else if (dispatch.t === 'MESSAGE_DELETE_BULK') {
+      const update = dispatch.d as MessageBulkDeleteUpdate;
+      if (
+        channel &&
+        update.channel_id === channel.id &&
+        update.channel_domain === channel.origin_domain
+      ) {
+        setMessages(applyBulkMessageDelete(messages, update));
+        pinnedMessages = applyBulkMessageDelete(pinnedMessages, update).filter(
+          (message) => message.deleted_at === null
         );
       }
     } else if (dispatch.t === 'MESSAGE_DELIVERY_UPDATE') {
@@ -784,11 +925,23 @@
     });
   }
 
-  function chooseSticker(value: string) {
+  function chooseSticker(sticker: StickerOption) {
     if (busy || !channelReady || !channel || editingMessage) return;
     emojiPickerOpen = false;
     gifPickerOpen = false;
-    void send(pendingMessageSend(value, [], []));
+    void send(
+      pendingMessageSend(
+        null,
+        [],
+        [],
+        crypto.randomUUID(),
+        null,
+        [],
+        false,
+        [sticker.value],
+        [stickerItem(sticker)]
+      )
+    );
   }
 
   $effect(() => {
@@ -805,6 +958,10 @@
       composerDraftBeforeEdit = null;
       content = '';
       composerCursor = 0;
+      applicationCommands = [];
+      selectedApplicationCommand = null;
+      commandOptionValues = {};
+      commandNotice = '';
       resetTyping();
       replyingMessage = null;
       pinnedMessages = [];
@@ -872,7 +1029,8 @@
         loadedCall,
         loadedEmojis,
         loadedStickers,
-        loadedPins
+        loadedPins,
+        loadedCommands
       ] = await Promise.all([
         api<Channel[]>('/users/@me/channels'),
         api<Guild[]>('/users/@me/guilds'),
@@ -889,7 +1047,10 @@
         ),
         api<CustomEmoji[]>('/users/@me/emojis'),
         api<GuildSticker[]>('/users/@me/stickers'),
-        api<Message[]>(`/channels/${encodeURIComponent(targetRef)}/pins`).catch(() => [])
+        loadPinnedMessages(targetRef).catch(() => []),
+        api<unknown>(`/channels/${encodeURIComponent(targetRef)}/application-commands`)
+          .then(parseApplicationCommands)
+          .catch(() => [])
       ]);
       if (
         routeGeneration !== loadGeneration ||
@@ -903,6 +1064,7 @@
       availableEmojis = loadedEmojis;
       availableStickers = loadedStickers;
       pinnedMessages = loadedPins;
+      applicationCommands = loadedCommands;
       entities.ingestCurrentUser(loadedCurrentUser);
       const preferredPresence = myPresencePreference();
       presencePreference = preferredPresence;
@@ -1186,6 +1348,8 @@
       const generation = loadGeneration;
       busy = true;
       try {
+        const editBindings =
+          channel?.encryption_mode === 'e2ee' ? encryptedMessageEditBindings(editing) : null;
         const encrypted =
           channel?.encryption_mode === 'e2ee'
             ? await (
@@ -1193,7 +1357,8 @@
               )?.encryptMessage(channel, text, {
                 operation: 'edit',
                 targetMessage: entityRef(editing),
-                attachments: editing.decrypted_attachments ?? []
+                attachments: editing.decrypted_attachments ?? [],
+                ...(editBindings ?? {})
               })
             : null;
         if (channel?.encryption_mode === 'e2ee' && !encrypted)
@@ -1210,8 +1375,10 @@
           encrypted
             ? {
                 ...saved,
+                e2ee_verified: true,
                 decrypted_content: text,
-                decrypted_attachments: editing.decrypted_attachments ?? []
+                decrypted_attachments: editing.decrypted_attachments ?? [],
+                decrypted_allowed_mentions: editing.decrypted_allowed_mentions
               }
             : saved
         );
@@ -1225,29 +1392,175 @@
       return;
     }
     if (busy || !channelReady || !channel) return;
+    if (selectedApplicationCommand && !retry) {
+      const selected = selectedApplicationCommand;
+      if (!commandOptionsComplete(selected, commandOptionValues)) return;
+      const commandAttachmentIds = commandAttachmentOptionIds(selected, commandOptionValues);
+      busy = true;
+      error = '';
+      commandNotice = '';
+      try {
+        await createInteraction(
+          await commandInteractionRequestContext(channel, selected, currentUser, e2eeClient),
+          {
+            ...applicationCommandRequestIdentity(selected),
+            options: commandOptionPayload(selected, commandOptionValues)
+          },
+          channel.encryption_mode === 'e2ee'
+            ? interactionFileEncryptionIntent(commandAttachmentIds, uploads)
+            : {}
+        );
+        clearSubmittedUploads(commandAttachmentIds);
+        selectedApplicationCommand = null;
+        commandOptionValues = {};
+        content = '';
+        composerCursor = 0;
+        commandNotice = `/${selected.name} sent to ${selected.application_name}.`;
+      } catch (caught) {
+        error = userErrorMessage(caught, 'The bot command could not be delivered.');
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+    const ttsInvocation = retry ? { matched: false, content: '' } : ttsCommand(text);
+    const tts = retry?.tts ?? ttsInvocation.matched;
+    if (!retry && ttsInvocation.matched && !ttsInvocation.content) {
+      error = 'Enter a message after /tts.';
+      return;
+    }
+    if (tts) {
+      if (!currentTtsPreferences().enabled) {
+        error = 'Enable “Allow playback and usage of /tts command” in Accessibility first.';
+        return;
+      }
+    }
+    const outgoingText = tts ? (retry?.content ?? ttsInvocation.content) : text;
+    const commandResolution =
+      !retry && !tts
+        ? resolveCommandInvocation(text, applicationCommands)
+        : { kind: 'none' as const };
+    if (commandResolution.kind === 'ambiguous') {
+      error = `More than one app provides /${commandResolution.commands[0]?.name ?? 'command'}. Choose the app from the command list or Apps launcher.`;
+      return;
+    }
+    const invocation = commandResolution.kind === 'resolved' ? commandResolution : null;
+    if (invocation) {
+      if (invocation.command.options?.length) {
+        selectedApplicationCommand = invocation.command;
+        commandOptionValues = {};
+        content = '';
+        composerCursor = 0;
+        error = invocation.options.raw
+          ? 'Choose the command options in the typed fields. Free-form command arguments are not sent.'
+          : '';
+        return;
+      }
+      busy = true;
+      error = '';
+      commandNotice = '';
+      try {
+        await createInteraction(
+          await commandInteractionRequestContext(
+            channel,
+            invocation.command,
+            currentUser,
+            e2eeClient
+          ),
+          {
+            ...applicationCommandRequestIdentity(invocation.command),
+            options: invocation.options
+          }
+        );
+        content = '';
+        composerCursor = 0;
+        commandNotice = `/${invocation.command.name} sent to ${invocation.command.application_name}.`;
+      } catch (caught) {
+        error = userErrorMessage(caught, 'The bot command could not be delivered.');
+      } finally {
+        busy = false;
+      }
+      return;
+    }
     const attachmentIds = retry
       ? retry.attachmentIds
       : uploads
           .filter((item) => item.status === 'ready' && item.attachmentId)
           .map((item) => item.attachmentId as string);
     if (!retry && uploads.some((item) => item.status === 'uploading')) return;
-    const mentionUserIds = retry
-      ? retry.mentionUserIds
-      : recipient && mentionsUser(text, recipient, localDomain)
-        ? [entityRef(recipient)]
-        : [];
-    if (!retry && !text && !attachmentIds.length) return;
-    const draft =
-      retry ??
-      pendingMessageSend(
-        text || null,
-        attachmentIds,
-        mentionUserIds,
-        crypto.randomUUID(),
-        replyingMessage ? entityRef(replyingMessage) : null,
-        uploads.flatMap((item) => (item.encryptedManifest ? [item.encryptedManifest] : []))
-      );
-    if (!draft.content && !draft.attachmentIds.length) {
+    let mentionUserIds: string[];
+    let encryptedAllowedMentions: EncryptedAllowedMentions | null;
+    let repliedUserRef: string | null;
+    if (retry) {
+      mentionUserIds = retry.mentionUserIds;
+      repliedUserRef = retry.repliedUserRef;
+      encryptedAllowedMentions =
+        retry.encryptedAllowedMentions ??
+        (channel.encryption_mode === 'e2ee'
+          ? {
+              parse: ['users'],
+              users: [],
+              roles: [],
+              replied_user: repliedUserRef !== null
+            }
+          : null);
+    } else {
+      repliedUserRef =
+        replyingMessage &&
+        (replyingMessage.author_id !== currentUser?.id ||
+          replyingMessage.author_domain !== currentUser?.origin_domain)
+          ? `${replyingMessage.author_id}@${replyingMessage.author_domain}`
+          : null;
+      if (channel.encryption_mode === 'e2ee') {
+        encryptedAllowedMentions = {
+          parse: ['users'],
+          users: [],
+          roles: [],
+          replied_user: repliedUserRef !== null
+        };
+        try {
+          const intent = richMessageMentionIntent({
+            content: outgoingText || null,
+            components: [],
+            allowed_mentions: encryptedAllowedMentions
+          });
+          mentionUserIds = [
+            ...new Set([...intent.userRefs, ...(repliedUserRef ? [repliedUserRef] : [])])
+          ].sort();
+        } catch (caught) {
+          error = userErrorMessage(
+            caught,
+            'Encrypted mentions must use a fully qualified user token.'
+          );
+          return;
+        }
+      } else {
+        encryptedAllowedMentions = null;
+        mentionUserIds = [
+          ...(channel.recipients ?? [])
+            .filter((user) => mentionsUser(outgoingText, user, localDomain))
+            .map(entityRef),
+          ...(repliedUserRef ? [repliedUserRef] : [])
+        ].filter((value, index, values) => values.indexOf(value) === index);
+      }
+    }
+    if (!retry && !outgoingText && !attachmentIds.length) return;
+    const draft = retry
+      ? { ...retry, encryptedAllowedMentions, repliedUserRef }
+      : pendingMessageSend(
+          outgoingText || null,
+          attachmentIds,
+          mentionUserIds,
+          crypto.randomUUID(),
+          replyingMessage ? entityRef(replyingMessage) : null,
+          uploads.flatMap((item) => (item.encryptedManifest ? [item.encryptedManifest] : [])),
+          tts,
+          [],
+          [],
+          encryptedAllowedMentions,
+          repliedUserRef
+        );
+    if (!draft.content && !draft.attachmentIds.length && !draft.stickerIds.length) {
       error = 'Reattach this message’s files before retrying.';
       return;
     }
@@ -1269,9 +1582,16 @@
           author_domain: currentUser?.origin_domain ?? localDomain,
           author: currentUser,
           content: draft.content,
+          sticker_items: draft.stickerItems,
+          tts: draft.tts,
+          e2ee_verified: channel.encryption_mode === 'e2ee' ? true : undefined,
           decrypted_content: channel.encryption_mode === 'e2ee' ? draft.content : undefined,
           decrypted_attachments:
             channel.encryption_mode === 'e2ee' ? draft.encryptedAttachments : undefined,
+          decrypted_allowed_mentions:
+            channel.encryption_mode === 'e2ee'
+              ? (draft.encryptedAllowedMentions ?? undefined)
+              : undefined,
           message_type: 0,
           flags: 0,
           client_nonce: nonce,
@@ -1310,7 +1630,15 @@
           ? await (
               e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null)
             )?.encryptMessage(channel, draft.content ?? '', {
-              attachments: draft.encryptedAttachments
+              attachments: draft.encryptedAttachments,
+              mentionUserRefs: draft.mentionUserIds,
+              repliedUserRef: draft.repliedUserRef,
+              referencedMessageRef: draft.referencedMessageId,
+              rich: {
+                stickerItems: draft.stickerItems,
+                tts: draft.tts,
+                allowedMentions: draft.encryptedAllowedMentions ?? undefined
+              }
             })
           : null;
       if (channel.encryption_mode === 'e2ee' && !encrypted)
@@ -1323,7 +1651,9 @@
           client_nonce: nonce,
           attachment_ids: draft.attachmentIds,
           mention_user_ids: draft.mentionUserIds,
-          referenced_message_id: draft.referencedMessageId
+          referenced_message_id: draft.referencedMessageId,
+          sticker_ids: encrypted ? [] : draft.stickerIds,
+          tts: draft.tts
         })
       });
       if (generation !== loadGeneration || routeRef !== dmId) return;
@@ -1331,8 +1661,12 @@
         encrypted
           ? {
               ...saved,
+              e2ee_verified: true,
               decrypted_content: draft.content,
-              decrypted_attachments: draft.encryptedAttachments
+              decrypted_attachments: draft.encryptedAttachments,
+              decrypted_allowed_mentions: draft.encryptedAllowedMentions ?? undefined,
+              sticker_items: draft.stickerItems,
+              tts: draft.tts
             }
           : saved
       );
@@ -1357,12 +1691,19 @@
     }
   }
 
-  async function queueFiles(files: FileList | File[]) {
+  async function queueFiles(
+    files: FileList | File[],
+    commandTarget?: { path: string; fileTypes?: string[]; command: ApplicationCommand }
+  ) {
     if (!channel || busy || uploads.length >= 10) return;
     const target = entityRef(channel);
     const generation = loadGeneration;
     const routeRef = dmId;
     for (const file of Array.from(files).slice(0, 10 - uploads.length)) {
+      if (commandTarget && !fileUploadMatches(commandTarget.fileTypes, file.name, file.type)) {
+        error = `“${file.name}” is not an accepted file type for this command option.`;
+        continue;
+      }
       const key = crypto.randomUUID();
       const controller = new AbortController();
       uploadControllers.set(key, controller);
@@ -1382,17 +1723,24 @@
         .then((ticket) => {
           uploadControllers.delete(key);
           if (generation !== loadGeneration || routeRef !== dmId) return;
+          const attachmentId = 'ticket' in ticket ? ticket.ticket.id : ticket.id;
           uploads = uploads.map((item) =>
             item.key === key
               ? {
                   ...item,
                   progress: 100,
                   status: 'ready',
-                  attachmentId: 'ticket' in ticket ? ticket.ticket.id : ticket.id,
+                  attachmentId,
                   encryptedManifest: 'manifest' in ticket ? ticket.manifest : undefined
                 }
               : item
           );
+          if (commandTarget && selectedApplicationCommand === commandTarget.command) {
+            commandOptionValues = {
+              ...commandOptionValues,
+              [commandTarget.path]: attachmentId
+            };
+          }
         })
         .catch((caught: unknown) => {
           uploadControllers.delete(key);
@@ -1602,7 +1950,7 @@
     )
       return;
     const confirmed = window.confirm(
-      'Turn on end-to-end encryption for this conversation? This cannot be turned off and protects only new content; existing history stays readable to the server. New messages, files, and supported calls will be encrypted. Search, link and GIF previews, bots, webhooks, file previews, malware and PhotoDNA scanning, call recording, and transcription will stop; unsupported clients cannot participate. Notifications become generic, while participants, timing, message-size, track, and traffic metadata remain visible. Anyone can still record content on their own device. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members keep content they already received.'
+      'Turn on end-to-end encryption for this conversation? This cannot be turned off and protects only new content; existing history stays readable to the server. New messages, files, and supported calls will be encrypted. Search, link and GIF previews, server-side file previews, malware and PhotoDNA scanning, call recording, and transcription will stop; unsupported clients cannot participate. Webhooks receive no access automatically; a verified webhook device can receive only future content after every person grants access and the room establishes a rekey and history floor. Participant-mode apps follow the same future-only consent rule. Notifications become generic, while participants, timing, message-size, track, and traffic metadata remain visible. Anyone can still record content on their own device. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members, apps, and webhooks keep content they already received.'
     );
     if (!confirmed) return;
     groupBusy = true;
@@ -1716,12 +2064,16 @@
   }
 
   function startEditing(message: Message) {
+    if (message.e2ee && message.e2ee_verified !== true) {
+      error = 'This encrypted message is unavailable on this device and cannot be edited.';
+      return;
+    }
     replyingMessage = null;
     if (!editingMessage) {
       composerDraftBeforeEdit = { content, cursor: composerCursor };
     }
     editingMessage = message;
-    content = message.decrypted_content ?? message.content ?? '';
+    content = message.e2ee ? (message.decrypted_content ?? '') : (message.content ?? '');
     composerCursor = content.length;
     void tick().then(() => {
       composerInput?.focus();
@@ -1745,9 +2097,7 @@
     pinsLoading = true;
     pinsError = '';
     try {
-      pinnedMessages = await api<Message[]>(
-        `/channels/${encodeURIComponent(entityRef(channel))}/pins`
-      );
+      pinnedMessages = await loadPinnedMessages(entityRef(channel));
     } catch (caught) {
       pinsError = userErrorMessage(
         caught,
@@ -1764,12 +2114,12 @@
   }
 
   async function togglePinnedMessage(message: Message, shouldPin: boolean) {
-    if (!channel) return;
+    if (!channel || !canPinMessages) return;
+    if (!window.confirm(shouldPin ? 'Pin this message?' : 'Unpin this message?')) return;
     try {
-      await api(
-        `/channels/${encodeURIComponent(entityRef(channel))}/pins/${encodeURIComponent(entityRef(message))}`,
-        { method: shouldPin ? 'PUT' : 'DELETE' }
-      );
+      await api(messagePinPath(entityRef(channel), entityRef(message)), {
+        method: shouldPin ? 'PUT' : 'DELETE'
+      });
       pinnedMessages = shouldPin
         ? [message, ...pinnedMessages.filter((item) => entityKey(item) !== entityKey(message))]
         : pinnedMessages.filter((item) => entityKey(item) !== entityKey(message));
@@ -1780,12 +2130,18 @@
 
   async function toggleMessageReaction(message: Message, emoji: string, remove: boolean) {
     if (!channel) return;
-    const channelRef = encodeURIComponent(entityRef(channel));
-    const messageRef = encodeURIComponent(entityRef(message));
+    const canonical = canonicalReactionEmoji(emoji);
+    if (!canonical) return;
+    const channelRef = entityRef(channel);
+    const messageRef = entityRef(message);
     try {
       await api(
-        `/channels/${channelRef}/messages/${messageRef}/reactions${remove ? `/${encodeURIComponent(emoji)}` : ''}`,
-        remove ? { method: 'DELETE' } : { method: 'POST', body: JSON.stringify({ emoji }) }
+        remove
+          ? ownReactionPath(channelRef, messageRef, canonical)
+          : messageReactionsPath(channelRef, messageRef),
+        remove
+          ? { method: 'DELETE' }
+          : { method: 'POST', body: JSON.stringify({ emoji: canonical }) }
       );
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not update that reaction. Try again.');
@@ -1854,8 +2210,25 @@
     editingMessage = null;
     composerDraftBeforeEdit = null;
     if (message.delivery_status === 'failed') {
+      if (message.sticker_items?.length) {
+        void send(
+          pendingMessageSend(
+            null,
+            [],
+            [],
+            crypto.randomUUID(),
+            null,
+            [],
+            false,
+            message.sticker_items.map((item) => `${item.id}@${item.origin_domain}`),
+            message.sticker_items
+          )
+        );
+        return;
+      }
       if (message.attachments?.length || !message.content) {
-        content = message.content ?? '';
+        content =
+          message.tts && message.content ? `/tts ${message.content}` : (message.content ?? '');
         composerCursor = content.length;
         error = 'Reattach this message’s files before retrying.';
         void tick().then(() => composerInput?.focus());
@@ -1869,7 +2242,9 @@
           crypto.randomUUID(),
           message.referenced_message_id && message.referenced_message_domain
             ? `${message.referenced_message_id}@${message.referenced_message_domain}`
-            : null
+            : null,
+          [],
+          message.tts === true
         )
       );
       return;
@@ -1885,13 +2260,20 @@
           replacements,
           draft.mentionUserIds,
           draft.clientNonce,
-          draft.referencedMessageId
+          draft.referencedMessageId,
+          draft.encryptedAttachments,
+          draft.tts,
+          draft.stickerIds,
+          draft.stickerItems,
+          draft.encryptedAllowedMentions,
+          draft.repliedUserRef
         );
         pendingSends.set(draft.clientNonce, draft);
       }
     }
     if (!draft) {
-      content = message.content ?? '';
+      content =
+        message.tts && message.content ? `/tts ${message.content}` : (message.content ?? '');
       composerCursor = content.length;
       if (!content) error = 'Reattach this message’s files before retrying.';
       void tick().then(() => composerInput?.focus());
@@ -1902,6 +2284,16 @@
 
   function chooseCompletion(completion: Completion) {
     if (!completionQuery) return;
+    if (completion.kind === 'application-command') {
+      const selected = applicationCommandByIdentity(
+        applicationCommands,
+        completion.applicationCommand
+      );
+      if (selected) {
+        selectApplicationCommand(selected);
+        return;
+      }
+    }
     const cursor = completionQuery.start + completion.value.length + 1;
     content = replaceCompletion(content, completionQuery, completion.value);
     composerCursor = cursor;
@@ -1909,6 +2301,172 @@
       composerInput?.focus();
       composerInput?.setSelectionRange(cursor, cursor);
     });
+  }
+
+  function selectApplicationCommand(command: ApplicationCommand) {
+    selectedApplicationCommand = command;
+    commandOptionValues = {};
+    content = '';
+    composerCursor = 0;
+    gifPickerOpen = false;
+    emojiPickerOpen = false;
+  }
+
+  function cancelCommandComposer() {
+    selectedApplicationCommand = null;
+    commandOptionValues = {};
+    content = '';
+    composerCursor = 0;
+    void tick().then(() => composerInput?.focus());
+  }
+
+  async function createPollMessage(poll: PollCreatePayload) {
+    const target = channel;
+    if (!target || !canCreatePoll) {
+      throw new Error('Polls are unavailable in this conversation.');
+    }
+    const generation = loadGeneration;
+    const client =
+      target.encryption_mode === 'e2ee'
+        ? (e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null))
+        : null;
+    const encrypted = client
+      ? await client.encryptMessage(target, '', { rich: { poll: { ...poll } } })
+      : null;
+    if (target.encryption_mode === 'e2ee' && !encrypted) {
+      throw new Error('Encryption is unavailable on this device.');
+    }
+    const saved = await api<Message>(
+      `/channels/${encodeURIComponent(entityRef(target))}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify(encrypted ? { e2ee: encrypted } : { poll })
+      }
+    );
+    if (generation !== loadGeneration) return;
+    const verified = client
+      ? (await decryptConversationMessages(client, target, [saved]))[0]
+      : saved;
+    if (!verified || (client && !verified.poll)) {
+      throw new Error('The encrypted poll could not be verified locally.');
+    }
+    reconcile(verified);
+    pollDialogOpen = false;
+    await acknowledge(verified);
+  }
+
+  function requestForward(message: Message) {
+    const unavailable = forwardUnavailableReason(message);
+    if (unavailable) {
+      error = unavailable;
+      return;
+    }
+    forwardingMessage = message;
+  }
+
+  async function submitForward(targets: Channel[], note: string) {
+    const source = forwardingMessage;
+    if (!source) return;
+    const sourceChannel = channel;
+    if (!sourceChannel) return;
+    if (!currentUser) throw new Error('Your forwarding identity is unavailable.');
+    const requiresEncryption = targets.some((target) => target.encryption_mode === 'e2ee');
+    const client = requiresEncryption
+      ? (e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null))
+      : e2eeClient;
+    if (requiresEncryption && !client) {
+      throw new Error('Encryption is unavailable for a selected destination.');
+    }
+    if (client && !e2eeClient) e2eeClient = client;
+    const result = await executePreparedForward({
+      source,
+      sourceChannel,
+      destinations: targets,
+      requesterRef: entityRef(currentUser),
+      note,
+      e2eeClient: client
+    });
+    if (!result.forwards.length) {
+      throw new Error('The message could not be forwarded to any selected destination.');
+    }
+    const target = channel;
+    if (target) {
+      for (const forwarded of result.forwards) {
+        if (forwarded.destination_channel_ref !== entityRef(target)) continue;
+        reconcile(forwarded.message);
+        await acknowledge(forwarded.message);
+      }
+    }
+    forwardingMessage = null;
+    commandNotice = result.failures.length
+      ? `Forwarded to ${result.forwards.length} destination${result.forwards.length === 1 ? '' : 's'}; ${result.failures.length} failed.`
+      : `Message forwarded to ${result.forwards.length} destination${result.forwards.length === 1 ? '' : 's'}.`;
+  }
+
+  async function executeContextCommand(command: ApplicationCommand, target: Message | UserSummary) {
+    const targetChannel = channel;
+    if (!targetChannel) return;
+    error = '';
+    try {
+      await createInteraction(
+        await commandInteractionRequestContext(targetChannel, command, currentUser, e2eeClient),
+        {
+          ...applicationCommandRequestIdentity(command),
+          target_ref: entityRef(target)
+        }
+      );
+      if (currentUser) rememberAppContextCommand(entityRef(currentUser), command);
+      commandNotice = `${command.name} sent to ${command.application_name}.`;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'The context command could not be delivered.');
+    }
+  }
+
+  async function componentInteractionRequest(applicationRef: string) {
+    const targetChannel = channel;
+    if (!targetChannel) throw new Error('This conversation is no longer available.');
+    if (targetChannel.encryption_mode !== 'e2ee') {
+      return { channelRef: entityRef(targetChannel), applicationRef };
+    }
+    const authority = applicationCommands.find(
+      (command) => command.application_ref === applicationRef
+    );
+    if (!authority) {
+      throw new Error(
+        'Refresh this conversation before using this encrypted app control. Its installation authority is not available.'
+      );
+    }
+    return commandInteractionRequestContext(targetChannel, authority, currentUser, e2eeClient);
+  }
+
+  async function autocompleteCommandOption(
+    option: ApplicationCommandOption,
+    value: string,
+    generation: number,
+    path: string
+  ) {
+    const selected = selectedApplicationCommand;
+    const targetChannel = channel;
+    if (!selected || !targetChannel || !option.autocomplete) return [];
+    const draftValues = {
+      ...commandOptionValues,
+      [path]: value
+    };
+    const options = commandOptionPayload(selected, draftValues);
+    const attachmentIds = commandAttachmentOptionIds(selected, draftValues);
+    return requestCommandAutocomplete(
+      await commandInteractionRequestContext(targetChannel, selected, currentUser, e2eeClient),
+      {
+        ...applicationCommandRequestIdentity(selected),
+        interaction_type: 'autocomplete',
+        options,
+        focused_option: path,
+        autocomplete_generation: generation
+      },
+      targetChannel.encryption_mode === 'e2ee'
+        ? interactionFileEncryptionIntent(attachmentIds, uploads)
+        : {}
+    );
   }
 
   function timelineBottomChanged(value: boolean) {
@@ -2114,6 +2672,17 @@
             {/if}
           </button>
         {/if}
+        {#if channel?.encryption_mode === 'e2ee'}
+          <button
+            class="icon-button"
+            type="button"
+            aria-label="Manage apps in this encrypted conversation"
+            title="Encrypted apps"
+            onclick={() => (encryptedAppsOpen = true)}
+          >
+            <Icon name="shield" size={18} />
+          </button>
+        {/if}
         {#if groupConversation}
           <button
             class="icon-button"
@@ -2248,6 +2817,7 @@
                   message={item.message}
                   compact={item.compact}
                   mentionUsers={entities.users.values}
+                  componentChannels={directMessages}
                   referencedMessage={referencedMessage(item.message)}
                   pinned={pinnedMessages.some(
                     (pinned) => entityKey(pinned) === entityKey(item.message)
@@ -2262,8 +2832,23 @@
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
                   onReply={startReply}
+                  onForward={forwardDestinations.length &&
+                  forwardUnavailableReason(item.message) === null
+                    ? requestForward
+                    : undefined}
+                  forwardUnavailableReason={forwardUnavailableReason(item.message)}
+                  {applicationCommands}
+                  contextCommandAccountRef={currentUser ? entityRef(currentUser) : null}
+                  onApplicationCommand={executeContextCommand}
+                  resolveInteractionRequest={componentInteractionRequest}
                   onJumpToReference={jumpToReply}
-                  onTogglePin={togglePinnedMessage}
+                  onTogglePin={canPinMessages ? togglePinnedMessage : undefined}
+                  canClosePoll={Boolean(
+                    item.message.poll &&
+                    item.message.author_id === currentUser?.id &&
+                    item.message.author_domain === currentUser?.origin_domain
+                  )}
+                  onMessageUpdate={reconcile}
                   canReact
                   customEmojis={pickerEmojis}
                   reactionUserKey={currentUser ? entityKey(currentUser) : ''}
@@ -2273,10 +2858,14 @@
             {/snippet}
           </VirtualMessageList>
         {/key}
+        {#if channel}
+          <EphemeralInteractionTray channelRef={entityRef(channel)} />
+        {/if}
       </div>
     </div>
     <footer class="composer-wrap">
       <span class="typing-line">{typing}</span>
+      {#if commandNotice}<span class="typing-line" role="status">{commandNotice}</span>{/if}
       {#if replyingMessage}
         <div class="reply-banner">
           <span>
@@ -2323,42 +2912,81 @@
             target.value = '';
           }}
         />
-        <button
-          class="attach-button"
-          type="button"
-          disabled={busy || !channelReady || !channel || Boolean(editingMessage)}
-          onclick={() => fileInput?.click()}
-          aria-label="Attach files"
-          title="Attach files"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m9.5 12.5 5.8-5.8a3 3 0 1 1 4.2 4.3l-8.2 8.1a5 5 0 0 1-7.1-7L12 4.3" />
-          </svg>
-        </button>
-        <textarea
-          use:autosizeTextarea={{ value: content, maxHeight: 180 }}
-          bind:this={composerInput}
-          bind:value={content}
-          oninput={composerChanged}
-          onselect={syncComposerCursor}
-          onclick={syncComposerCursor}
-          onkeyup={syncComposerCursor}
-          onkeydown={composerKeydown}
-          onpaste={composerPaste}
-          disabled={!channelReady || !channel}
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={completionOpen}
-          aria-controls={completionOpen ? 'dm-message-suggestions' : undefined}
-          aria-activedescendant={completionOpen
-            ? `dm-message-suggestions-option-${completionActive}`
-            : undefined}
-          aria-label="Direct message"
-          placeholder={`Message ${conversationTitle}`}
-          rows="1"
-          maxlength="4000"
-        ></textarea>
-        {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage}
+        <ComposerActionMenu
+          canAttach={!editingMessage && !selectedApplicationCommand}
+          canPoll={canCreatePoll && !editingMessage && !selectedApplicationCommand}
+          disabled={busy ||
+            !channelReady ||
+            !channel ||
+            Boolean(editingMessage || selectedApplicationCommand)}
+          onAttach={() => fileInput?.click()}
+          onPoll={() => {
+            gifPickerOpen = false;
+            emojiPickerOpen = false;
+            pollDialogOpen = true;
+          }}
+        />
+        {#if selectedApplicationCommand}
+          <CommandOptionComposer
+            commandName={selectedApplicationCommand.name}
+            commandDisplayName={localizedCommandName(selectedApplicationCommand)}
+            applicationName={selectedApplicationCommand.application_name}
+            options={selectedApplicationCommand.options ?? []}
+            values={commandOptionValues}
+            users={[currentUser, ...(channel?.recipients ?? [])].filter(
+              (user): user is UserSummary => Boolean(user)
+            )}
+            channels={directMessages}
+            attachments={uploads.flatMap((upload) =>
+              upload.status === 'ready' && upload.attachmentId
+                ? [
+                    {
+                      id: upload.attachmentId,
+                      label: upload.file.name,
+                      filename: upload.file.name,
+                      contentType: upload.file.type
+                    }
+                  ]
+                : []
+            )}
+            disabled={busy}
+            onValueChange={(name, value) =>
+              (commandOptionValues = { ...commandOptionValues, [name]: value })}
+            onAttachmentFiles={(option, path, files) =>
+              void queueFiles(files, {
+                path,
+                fileTypes: option.file_types,
+                command: selectedApplicationCommand!
+              })}
+            onAutocomplete={autocompleteCommandOption}
+            onCancel={cancelCommandComposer}
+          />
+        {:else}
+          <textarea
+            use:autosizeTextarea={{ value: content, maxHeight: 180 }}
+            bind:this={composerInput}
+            bind:value={content}
+            oninput={composerChanged}
+            onselect={syncComposerCursor}
+            onclick={syncComposerCursor}
+            onkeyup={syncComposerCursor}
+            onkeydown={composerKeydown}
+            onpaste={composerPaste}
+            disabled={!channelReady || !channel}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={completionOpen}
+            aria-controls={completionOpen ? 'dm-message-suggestions' : undefined}
+            aria-activedescendant={completionOpen
+              ? `dm-message-suggestions-option-${completionActive}`
+              : undefined}
+            aria-label="Direct message"
+            placeholder={`Message ${conversationTitle}`}
+            rows="1"
+            maxlength="4000"
+          ></textarea>
+        {/if}
+        {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !selectedApplicationCommand}
           <button
             class="gif-button"
             class:active={gifPickerOpen}
@@ -2373,7 +3001,7 @@
             }}>GIF</button
           >
         {/if}
-        {#if !editingMessage}
+        {#if !editingMessage && !selectedApplicationCommand}
           <button
             class="emoji-button"
             class:active={emojiPickerOpen}
@@ -2388,16 +3016,28 @@
             }}>☺</button
           >
         {/if}
-        <small class="composer-count">{content.length}/4000</small>
+        {#if !editingMessage && !selectedApplicationCommand}
+          <ApplicationCommandLauncher
+            commands={applicationCommands}
+            accountRef={currentUser ? entityRef(currentUser) : null}
+            disabled={busy || !channelReady || !channel}
+            onSelect={selectApplicationCommand}
+          />
+        {/if}
+        <small class="composer-count"
+          >{selectedApplicationCommand ? '' : `${content.length}/4000`}</small
+        >
         <button
           class="send-button"
           disabled={busy ||
             !channelReady ||
             !channel ||
             uploads.some((item) => item.status === 'uploading') ||
-            (editingMessage
-              ? !content.trim()
-              : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
+            (selectedApplicationCommand
+              ? !commandOptionsComplete(selectedApplicationCommand, commandOptionValues)
+              : editingMessage
+                ? !content.trim()
+                : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
           aria-label="Send message"
           title="Send message"
         >
@@ -2441,6 +3081,7 @@
         error={pinsError}
         onClose={() => (pinsOpen = false)}
         onJump={jumpToPinnedMessage}
+        onUnpin={canPinMessages ? (message) => void togglePinnedMessage(message, false) : undefined}
         onRetry={() => void loadPins()}
       />
     {/if}
@@ -2448,6 +3089,23 @@
 </main>
 
 <NewMessageDialog bind:open={newMessageOpen} />
+
+{#if pollDialogOpen}
+  <CreatePollDialog
+    customEmojis={pickerEmojis}
+    onCreate={createPollMessage}
+    onClose={() => (pollDialogOpen = false)}
+  />
+{/if}
+
+{#if forwardingMessage}
+  <ForwardMessageDialog
+    message={forwardingMessage}
+    channels={forwardDestinations}
+    onForward={submitForward}
+    onClose={() => (forwardingMessage = null)}
+  />
+{/if}
 
 {#if profile}
   <UserProfileCard
@@ -2457,6 +3115,9 @@
     y={profile.y}
     isSelf={Boolean(currentUser && entityKey(currentUser) === entityKey(profile.user))}
     onClose={() => (profile = null)}
+    {applicationCommands}
+    contextCommandAccountRef={currentUser ? entityRef(currentUser) : null}
+    onApplicationCommand={executeContextCommand}
   />
 {/if}
 
@@ -2515,9 +3176,10 @@
           {#if e2eeSafetyNumber}<code class="e2ee-safety-number">{e2eeSafetyNumber}</code>{/if}
         {:else}
           <small>
-            Optional and permanent. Disables server message search, previews, bots, webhooks, and
-            file scanning. Losing the synchronized account vault, all trusted local state, and the
-            recovery backup loses message access.
+            Optional and permanent. Disables server message search, previews, and file scanning.
+            Bots and webhooks receive no access automatically; verified devices require an explicit
+            future-only grant and rekey. Losing the synchronized account vault, all trusted local
+            state, and the recovery backup loses message access.
           </small>
         {/if}
       </div>
@@ -2534,6 +3196,16 @@
           type="button"
           disabled={groupBusy}
           onclick={rekeyEncryption}>Secure changes</button
+        >
+      {/if}
+      {#if channel?.encryption_mode === 'e2ee'}
+        <button
+          class="secondary-button"
+          type="button"
+          onclick={() => {
+            groupDialog?.close();
+            encryptedAppsOpen = true;
+          }}>Manage apps</button
         >
       {/if}
     </section>
@@ -2590,3 +3262,12 @@
     </footer>
   </form>
 </dialog>
+
+{#if channel}
+  <DmBotE2eeParticipation
+    open={encryptedAppsOpen}
+    channelRef={entityRef(channel)}
+    channelName={conversationTitle}
+    onClose={() => (encryptedAppsOpen = false)}
+  />
+{/if}

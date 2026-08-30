@@ -19,6 +19,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.json_limits import strict_json_loads
+from app.core.permissions import PERMISSION_SCHEMA, PERMISSION_SCHEMA_CAPABILITY
 from app.core.settings import DOMAIN_RE, Settings
 from app.db.models import Instance, PeerKey
 from app.federation.schemas import KEY_ID_RE
@@ -369,6 +370,7 @@ async def ensure_peer(
         instance is not None
         and known_key is not None
         and not peer_key_needs_refresh(known_key, now)
+        and PERMISSION_SCHEMA_CAPABILITY in instance.capabilities
         and not force
     ):
         return instance
@@ -413,6 +415,7 @@ async def _refresh_peer(
         instance is not None
         and known_key is not None
         and not peer_key_needs_refresh(known_key, now)
+        and PERMISSION_SCHEMA_CAPABILITY in instance.capabilities
         and not force
     ):
         return instance
@@ -448,6 +451,11 @@ async def _refresh_peer(
                 ):
                     raise FederationNetworkError("peer capability list is invalid")
                 capabilities = sorted(set(raw_capabilities))
+                if (
+                    discovery_payload.get("permission_schema") != PERMISSION_SCHEMA
+                    or PERMISSION_SCHEMA_CAPABILITY not in capabilities
+                ):
+                    raise FederationNetworkError("peer permission schema is unsupported")
                 server = normalize_domain(str(discovery_payload.get("server", "")))
                 if server != domain:
                     raise FederationNetworkError("delegated federation hosts are not enabled in M3")

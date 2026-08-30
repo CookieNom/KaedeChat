@@ -84,6 +84,33 @@ cp .env.example .env
 chmod 600 .env
 ```
 
+## Public landing and operator policies
+
+`KAEDE_LANDING_PAGE=default` keeps the project homepage. With no operator legal
+configuration, direct visits to `/terms` and `/privacy` show an explicit
+non-policy notice; Kaede does not publish template placeholders as though they
+were operative terms.
+
+Set `KAEDE_LANDING_PAGE=custom` only after the operator has reviewed the policy
+copy for its jurisdiction and supplied all six public build-time fields:
+
+- `KAEDE_LEGAL_INSTANCE_NAME` — the instance name users recognize;
+- `KAEDE_LEGAL_OPERATOR_NAME` — the operator's real legal identity;
+- `KAEDE_LEGAL_CONTACT_EMAIL` — a monitored address for legal, privacy, and
+  account-closure requests;
+- `KAEDE_LEGAL_EFFECTIVE_DATE` — a real `YYYY-MM-DD` policy date;
+- `KAEDE_LEGAL_MINIMUM_AGE` — an integer from 1 through 120; and
+- `KAEDE_LEGAL_JURISDICTION` — the governing jurisdiction selected by the
+  operator and its counsel.
+
+These values are embedded into the public static frontend and are not secrets.
+A custom build fails if any field is absent or malformed; a partially filled
+policy also fails under the default landing. Changing the landing variant or
+any legal field requires rebuilding `frontend-build`. Kaede currently has no
+self-service account-deletion control, so the supplied policy directs closure
+and deletion requests to `KAEDE_LEGAL_CONTACT_EMAIL`. Do not claim a settings
+workflow unless the deployment actually adds and verifies one.
+
 Before starting any service, validate both the file itself and the effective
 application environment:
 
@@ -717,7 +744,8 @@ admin API is authenticated with `KAEDE_ADMIN_TOKEN`; send the token in a
 protected header and never put it in a URL.
 `GET /api/v1/admin/federation/blocks/export` produces Mastodon-compatible
 CSV, and `POST /api/v1/admin/federation/blocks/import` accepts a bounded CSV
-body. A `silence` block holds non-security traffic; a `suspend` block holds
+body. A `silence` block holds guild snapshots, guild events, and remote guild-write
+proxies while permitting DM and user-identity federation; a `suspend` block holds
 all peer traffic. Security reconciliation events stay durable either way.
 Export before bulk changes, review subdomain inclusion, and keep the export
 with the deployment revision. Removing a block schedules authoritative

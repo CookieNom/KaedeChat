@@ -12,8 +12,14 @@ async def test_account_presence_broadcast_includes_private_preference_only(
 ) -> None:
     published: list[tuple[str, dict[str, object], int]] = []
 
-    async def set_state(_redis: object, _user: User, status: str) -> int:
+    async def set_state(
+        _redis: object,
+        _user: User,
+        status: str,
+        **projection: object,
+    ) -> int:
         assert status == "invisible"
+        assert projection == {"activities": [], "since": None, "afk": False}
         return 17
 
     async def publish(
@@ -60,13 +66,25 @@ async def test_account_presence_broadcast_includes_private_preference_only(
                 "user_id": "7",
                 "user_domain": "alpha.test",
                 "status": "offline",
+                "activities": [],
+                "since": None,
+                "afk": False,
+                "client_status": {},
                 "preference": "invisible",
             },
             17,
         ),
         (
             "guild:alpha.test:42",
-            {"user_id": "7", "user_domain": "alpha.test", "status": "offline"},
+            {
+                "user_id": "7",
+                "user_domain": "alpha.test",
+                "status": "offline",
+                "activities": [],
+                "since": None,
+                "afk": False,
+                "client_status": {},
+            },
             17,
         ),
     ]

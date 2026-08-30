@@ -66,6 +66,7 @@
                 <data android:pathPrefix="/verify" />
                 <data android:pathPrefix="/reset-password" />
                 <data android:pathPrefix="/verify-email-change" />
+                <data android:pathPrefix="/applications/" />
                 <data android:pathPrefix="/g/" />
                 <data android:pathPrefix="/home/" />
             </intent-filter>
@@ -97,6 +98,9 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

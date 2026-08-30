@@ -1,0 +1,24 @@
+{
+  "ciphertext_base64url": "S0FFRgEAAQAAAAAAAAAAAB0QERITFBUWFxgZGhscHR4fAAECAwQFBgcAAAAtdFgDBlkkCUB9mbHkPdIIhU5_KaDoIRDUfvtdlwDWt73Bse_0pLkPNADYBeIm",
+  "entropy": {
+    "file_id": "AAECAwQFBgcICQoLDA0ODw",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "nonce_prefix": "AAECAwQFBgc",
+    "salt": "EBESExQVFhcYGRobHB0eHw"
+  },
+  "manifest": {
+    "chunk_size": 65536,
+    "ciphertext_sha256": "iEe-Qwq3lhXb852ah3AIVFg6ekm-HyKnWycPo0sDWD8",
+    "ciphertext_size": 90,
+    "content_type": "text/plain",
+    "file_id": "AAECAwQFBgcICQoLDA0ODw",
+    "filename": "hello.txt",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "plaintext_size": 29,
+    "plaintext_sha256": "LOMAlJdCv2T81wWSPItluDKHinvIkb78LiC4XGW2c70",
+    "protocol": "kaede-file-v1",
+    "version": 1
+  },
+  "plaintext_base64url": "S2FlZGUgZmVkZXJhdGlvbiBmaWxlIHZlY3Rvcgo",
+  "version": 1
+}

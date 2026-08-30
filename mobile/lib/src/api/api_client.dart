@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 
 final class KaedeApiClient {
@@ -67,6 +68,7 @@ final class KaedeApiClient {
   }
 
   SessionTokens? get tokens => _tokens;
+  Domain? get selectedInstance => _selectedInstance;
   bool get signedIn => _tokens != null;
   Stream<void> get sessionExpired => _sessionExpired.stream;
 
@@ -340,7 +342,11 @@ final class KaedeApiClient {
 
   /// Streams authenticated media to [destination] without forwarding a Kaede
   /// bearer token if the API redirects to object storage on another origin.
-  Future<File> downloadToFile(String path, File destination) async {
+  Future<File> downloadToFile(
+    String path,
+    File destination, {
+    Map<String, Object?>? query,
+  }) async {
     final session = _tokens;
     final generation = _sessionGeneration;
     if (session == null) {
@@ -351,7 +357,13 @@ final class KaedeApiClient {
       );
     }
     final client = _fileHttpClient();
-    var uri = Uri.https(session.instance.value, path);
+    var uri = Uri.https(
+      session.instance.value,
+      path,
+      query?.map(
+        (key, value) => MapEntry(key, value == null ? null : '$value'),
+      ),
+    );
     try {
       for (var redirects = 0; redirects <= 5; redirects += 1) {
         if (_sessionGeneration != generation ||
@@ -659,16 +671,16 @@ bool shouldAttachKaedeAuthorization(Uri uri, Domain instance) =>
     _origin(uri) == 'https://${instance.value}' && isKaedeApiPath(uri.path);
 
 Map<String, Object?> _jsonObject(Object? value) {
-  if (value case final Map<Object?, Object?> map) {
-    return map.map((key, item) => MapEntry('$key', item));
-  }
+  final sanitized = stripNetworkClientState(value);
+  if (sanitized is Map<String, Object?>) return sanitized;
   throw const FormatException('Expected a JSON object');
 }
 
 List<Map<String, Object?>> _jsonList(Object? value) {
-  if (value is! List) throw const FormatException('Expected a JSON array');
-  return value
-      .whereType<Map<Object?, Object?>>()
-      .map((item) => item.map((key, value) => MapEntry('$key', value)))
-      .toList();
+  final sanitized = stripNetworkClientState(value);
+  if (sanitized is! List ||
+      sanitized.any((item) => item is! Map<String, Object?>)) {
+    throw const FormatException('Expected a JSON object array');
+  }
+  return sanitized.cast<Map<String, Object?>>();
 }

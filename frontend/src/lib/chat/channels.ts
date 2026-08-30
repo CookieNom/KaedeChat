@@ -10,6 +10,12 @@ export interface ChannelGroup {
 
 export type ChannelDropPlacement = 'before' | 'after' | 'inside' | 'ungrouped';
 
+export interface ChannelPositionRequest {
+  id: string;
+  position: number;
+  parent_id?: string | null;
+}
+
 function compareChannels(left: Channel, right: Channel): number {
   return left.position - right.position || compareEntityRefs(left, right);
 }
@@ -86,6 +92,28 @@ function normalized(channels: Channel[]): Channel[] {
   return channels.map((channel, position) =>
     channel.position === position ? channel : { ...channel, position }
   );
+}
+
+export function channelPositionRequest(
+  previous: Channel[],
+  next: Channel[]
+): ChannelPositionRequest[] {
+  const previousByKey = new Map(previous.map((channel) => [entityKey(channel), channel]));
+  return next.map((channel) => {
+    const before = previousByKey.get(entityKey(channel));
+    const request: ChannelPositionRequest = {
+      id: channel.id,
+      position: channel.position
+    };
+    if (
+      !before ||
+      channel.parent_id !== before.parent_id ||
+      channel.parent_domain !== before.parent_domain
+    ) {
+      request.parent_id = channel.parent_id;
+    }
+    return request;
+  });
 }
 
 export function moveChannel(

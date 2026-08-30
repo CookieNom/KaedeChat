@@ -431,7 +431,7 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
             encryption_policy_generation=0,
         ),
     )
-    access = SimpleNamespace(channel=channel)
+    access = SimpleNamespace(channel=channel, guild=SimpleNamespace())
     payload = RoomProposalRequest(
         operation_id=OPERATION_ID,
         sender_device_id=DEVICE_ID,
@@ -459,7 +459,7 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[operation, operation]),
+        scalar=AsyncMock(side_effect=[None, None, operation, operation]),
         get=AsyncMock(return_value=user),
         commit=AsyncMock(),
     )
@@ -490,6 +490,53 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
 
     assert response["status"] == "prepared"
     assert session.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_announcement_channel_rejects_e2ee_before_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = cast(
+        object,
+        SimpleNamespace(id=7, origin_domain="alpha.localhost", is_local=True),
+    )
+    channel = cast(
+        Channel,
+        SimpleNamespace(
+            id=10,
+            origin_domain="alpha.localhost",
+            type=5,
+            encryption_mode="plaintext",
+            encryption_state="plaintext",
+            encryption_policy_generation=0,
+        ),
+    )
+    access = SimpleNamespace(channel=channel, guild=SimpleNamespace())
+    monkeypatch.setattr(
+        e2ee_api,
+        "lock_local_channel_mutation",
+        AsyncMock(return_value=access),
+    )
+    monkeypatch.setattr(e2ee_api, "require_room_policy_authority", AsyncMock())
+    monkeypatch.setattr(e2ee_api, "require_active_sender_device", AsyncMock())
+    session = SimpleNamespace(scalar=AsyncMock())
+
+    with pytest.raises(HTTPException) as caught:
+        await e2ee_api._propose_room_operation(
+            "activate",
+            access,
+            RoomProposalRequest(
+                operation_id=OPERATION_ID,
+                sender_device_id=DEVICE_ID,
+            ),
+            SimpleNamespace(user=user),
+            session,
+            SimpleNamespace(),
+            SimpleNamespace(domain="alpha.localhost"),
+        )
+
+    assert caught.value.detail == {"code": "E2EE_CROSSPOST_UNSUPPORTED"}
+    session.scalar.assert_not_awaited()
 
 
 @pytest.mark.asyncio

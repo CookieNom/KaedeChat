@@ -5,10 +5,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.model_validation import UnambiguousInputModel
 from app.push.relay import OPAQUE_TOKEN_PATTERN, RELAY_SUBSCRIPTION_PATTERN
 
 
-class PushDeviceCreate(BaseModel):
+class PushDeviceCreate(UnambiguousInputModel):
     installation_id: UUID
     platform: Literal["android", "ios"]
     token: str = Field(min_length=20, max_length=4096)
@@ -32,14 +33,14 @@ class PushDeviceResponse(BaseModel):
     relay_origin: str | None = None
 
 
-class PushRelayEnrollmentCreate(BaseModel):
+class PushRelayEnrollmentCreate(UnambiguousInputModel):
     installation_id: UUID
     platform: Literal["android", "ios"]
     route_id: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
     app_id: str = Field(min_length=3, max_length=160, pattern=r"^[A-Za-z][A-Za-z0-9_.-]+$")
 
 
-class PushRelayEnrollmentComplete(BaseModel):
+class PushRelayEnrollmentComplete(UnambiguousInputModel):
     installation_id: UUID
     platform: Literal["android", "ios"]
     route_id: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
@@ -48,7 +49,7 @@ class PushRelayEnrollmentComplete(BaseModel):
     device_name: str | None = Field(default=None, max_length=100)
 
 
-class PushRelaySubscriptionCreate(BaseModel):
+class PushRelaySubscriptionCreate(UnambiguousInputModel):
     grant: dict[str, object]
     provider_token: str = Field(min_length=20, max_length=4096)
     management_secret: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
@@ -61,7 +62,7 @@ class PushRelaySubscriptionCreate(BaseModel):
         return value
 
 
-class PushRelayWakeCreate(BaseModel):
+class PushRelayWakeCreate(UnambiguousInputModel):
     version: Literal[2]
     request_id: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
     subscription_id: str = Field(min_length=36, max_length=64, pattern=RELAY_SUBSCRIPTION_PATTERN)
@@ -73,7 +74,7 @@ class PushRelayWakeCreate(BaseModel):
     wake_mac: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
 
 
-class PushNotificationRedeem(BaseModel):
+class PushNotificationRedeem(UnambiguousInputModel):
     installation_id: UUID
     event_token: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
 

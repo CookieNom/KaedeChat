@@ -25,6 +25,7 @@ def member(**overrides: object) -> SimpleNamespace:
         "timeout_until": datetime.now(UTC) + timedelta(hours=2),
         "timeout_indefinite": False,
         "timeout_reason": "  repeated\n  spam  ",
+        "temporary": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

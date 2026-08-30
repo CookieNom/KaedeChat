@@ -83,7 +83,9 @@ final class _BootstrapFailure extends StatelessWidget {
                       SelectableText(
                         userFacingError(error),
                         textAlign: TextAlign.center,
-                        style: const TextStyle(color: KaedeColors.muted),
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ],
                   ),

@@ -27,6 +27,33 @@ def _canonical_snowflake(value: object) -> bool:
         return False
 
 
+def e2ee_control_record_payload(record: E2EEControlRecord) -> dict[str, object] | None:
+    """Render one authenticated durable MLS control record.
+
+    Both human clients and bot workers recover from this same minimal wire
+    contract.  Keep the projection centralized so one surface cannot silently
+    omit the authority or apply-mode binding enforced by the other.
+    """
+
+    envelope = record.envelope if isinstance(record.envelope, dict) else None
+    if envelope is None or envelope.get("operation") not in {"welcome", "commit"}:
+        return None
+    return {
+        "id": str(record.id),
+        "origin_domain": record.origin_domain,
+        "channel_id": str(record.channel_id),
+        "channel_domain": record.channel_domain,
+        "author_id": str(record.author_id),
+        "author_domain": record.author_domain,
+        "e2ee": envelope,
+        "encryption_policy_generation": str(record.policy_generation),
+        "encryption_epoch": str(record.epoch),
+        "apply": record.apply_mode != "audit",
+        "room_operation_id": record.room_operation_id,
+        "room_operation_domain": record.room_operation_domain,
+    }
+
+
 def room_policy_change_context(channel: Any, actor: Any) -> dict[str, object]:
     """Render the signed context for a device-change room-policy update."""
 

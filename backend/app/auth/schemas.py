@@ -15,13 +15,14 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.model_validation import UnambiguousInputModel
 from app.core.types import EntityRef
 
 USERNAME_RE = re.compile(r"^[a-z0-9_.]{2,32}$")
 PASSWORD_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 
-class PasswordKdfBase(BaseModel):
+class PasswordKdfBase(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[2]
@@ -34,11 +35,11 @@ class PasswordKdfRegistration(PasswordKdfBase):
     vault_salt: str = Field(pattern=r"^[A-Za-z0-9_-]{22}$")
 
 
-class PasswordKdfLookupRequest(BaseModel):
+class PasswordKdfLookupRequest(UnambiguousInputModel):
     identifier: str = Field(min_length=2, max_length=320)
 
 
-class RegisterRequest(BaseModel):
+class RegisterRequest(UnambiguousInputModel):
     username: str
     email: EmailStr | None = None
     password: str = Field(min_length=10, max_length=256)
@@ -60,7 +61,7 @@ class RegisterRequest(BaseModel):
         return self
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     identifier: str = Field(min_length=2, max_length=320)
@@ -79,29 +80,29 @@ class TokenResponse(BaseModel):
     mfa_ticket: str | None = None
 
 
-class TokenRequest(BaseModel):
+class TokenRequest(UnambiguousInputModel):
     token: str = Field(min_length=16, max_length=256)
 
 
-class VerificationResendRequest(BaseModel):
+class VerificationResendRequest(UnambiguousInputModel):
     email: EmailStr
 
 
-class RefreshRequest(BaseModel):
+class RefreshRequest(UnambiguousInputModel):
     refresh_token: str | None = Field(default=None, min_length=16, max_length=256)
 
 
-class MfaLoginRequest(BaseModel):
+class MfaLoginRequest(UnambiguousInputModel):
     ticket: str = Field(min_length=16, max_length=256)
     code: str = Field(min_length=6, max_length=32)
     device_name: str | None = Field(default=None, max_length=100)
 
 
-class PasswordForgotRequest(BaseModel):
+class PasswordForgotRequest(UnambiguousInputModel):
     email: EmailStr
 
 
-class PasswordResetRequest(BaseModel):
+class PasswordResetRequest(UnambiguousInputModel):
     token: str = Field(min_length=16, max_length=256)
     password: str = Field(min_length=10, max_length=256)
     password_kdf: PasswordKdfBase
@@ -113,11 +114,11 @@ class PasswordResetRequest(BaseModel):
         return self
 
 
-class MfaCodeRequest(BaseModel):
+class MfaCodeRequest(UnambiguousInputModel):
     code: str = Field(min_length=6, max_length=32)
 
 
-class MfaSetupRequest(BaseModel):
+class MfaSetupRequest(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     password: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]{43}$")
@@ -132,7 +133,7 @@ class MfaDisableRequest(MfaCodeRequest):
     password_kdf_version: Literal[2]
 
 
-class EmailChangeRequest(BaseModel):
+class EmailChangeRequest(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     email: EmailStr
@@ -164,14 +165,14 @@ def guild_navigation_reference(value: object) -> object:
 GuildNavigationRef = Annotated[EntityRef, BeforeValidator(guild_navigation_reference)]
 
 
-class GuildNavigationGuildItem(BaseModel):
+class GuildNavigationGuildItem(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["guild"]
     guild: GuildNavigationRef
 
 
-class GuildNavigationGroupItem(BaseModel):
+class GuildNavigationGroupItem(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["group"]
@@ -195,7 +196,7 @@ GuildNavigationItem = Annotated[
 ]
 
 
-class GuildNavigationUpdate(BaseModel):
+class GuildNavigationUpdate(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[GuildNavigationItem] = Field(default_factory=list, max_length=200)
@@ -222,10 +223,11 @@ class GuildNavigationUpdate(BaseModel):
         return self
 
 
-class SettingsPatch(BaseModel):
+class SettingsPatch(UnambiguousInputModel):
     locale: str | None = Field(default=None, min_length=2, max_length=16)
     theme: Literal["system", "light", "dark"] | None = None
     dm_privacy: Literal["everyone", "shared_guild", "friends"] | None = None
+    age_restricted_dm_commands_enabled: bool | None = None
     presence_preference: Literal["online", "idle", "dnd", "invisible"] | None = None
     notification_settings: dict[str, object] | None = None
 

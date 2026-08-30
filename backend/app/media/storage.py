@@ -7,12 +7,12 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote, urlsplit
 
 import httpx
 
-from app.core.settings import Settings
+from app.core.settings import Settings, valid_url_host
 
 S3_SERVICE = "s3"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -24,6 +24,54 @@ class StorageError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
+
+
+def _normalized_url_origin(value: str, *, allow_http: bool) -> tuple[str, str, int | None]:
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("media capability contains an invalid port") from exc
+    allowed_schemes = {"http", "https"} if allow_http else {"https"}
+    if (
+        parsed.scheme not in allowed_schemes
+        or not valid_url_host(parsed.hostname)
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+    ):
+        raise ValueError("media capability contains an unsafe URL")
+    if (parsed.scheme, port) in {("https", 443), ("http", 80)}:
+        port = None
+    return parsed.scheme, cast(str, parsed.hostname), port
+
+
+def media_url_origin(value: str, *, allow_http: bool = False) -> str:
+    """Return the canonical exact origin of one trusted presigned media URL."""
+
+    scheme, host, port = _normalized_url_origin(value, allow_http=allow_http)
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{rendered_host}{f':{port}' if port is not None else ''}"
+
+
+def validate_media_url_origin(
+    value: str,
+    media_origin: str,
+    *,
+    allow_http: bool = False,
+) -> None:
+    """Require a capability URL to remain on its canonical signed origin."""
+
+    parsed_origin = urlsplit(media_origin)
+    if (
+        parsed_origin.path not in {"", "/"}
+        or bool(parsed_origin.query)
+        or bool(parsed_origin.fragment)
+        or media_url_origin(media_origin, allow_http=allow_http) != media_origin.rstrip("/")
+        or _normalized_url_origin(value, allow_http=allow_http)
+        != _normalized_url_origin(media_origin, allow_http=allow_http)
+    ):
+        raise ValueError("media capability URL escaped its signed origin")
 
 
 def _retryable_status(status_code: int) -> bool:

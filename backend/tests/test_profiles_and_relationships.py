@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -26,7 +26,8 @@ from app.federation.network import FederationInstanceQuotaExceeded, FederationNe
 from app.federation.relationships import (
     acceptance_matches,
     apply_relationship_event,
-    queue_friend_profile_updates,
+    queue_profile_updates,
+    validated_guild_profile_source,
 )
 from app.federation.schemas import EventEnvelope, RelationshipEventContent, RemoteUserProfile
 from app.federation.users import (
@@ -773,20 +774,36 @@ async def test_profile_update_is_ignored_after_friendship_ends(
 
 
 @pytest.mark.asyncio
-async def test_profile_updates_are_queued_only_for_remote_friends(
+async def test_profile_updates_are_queued_for_remote_friends_and_guild_authorities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Rows:
         def all(self) -> list[tuple[int, str]]:
             return [(42, "remote.example"), (43, "remote.example")]
 
+    class GuildRows:
+        def all(self) -> list[tuple[int, str]]:
+            return [(70, "guild.example")]
+
+    class EmptyMembershipRows:
+        def all(self) -> list[tuple[object, object]]:
+            return []
+
     class FakeSession:
-        async def execute(self, _statement: object) -> Rows:
-            return Rows()
+        calls = 0
+
+        async def execute(self, _statement: object) -> Rows | GuildRows | EmptyMembershipRows:
+            self.calls += 1
+            if self.calls == 1:
+                return Rows()
+            if self.calls == 2:
+                return GuildRows()
+            return EmptyMembershipRows()
 
     actor = SimpleNamespace(
         id=7,
         origin_domain="local.example",
+        account_type="human",
         username="maple",
         display_name="Maple",
         avatar_hash="a" * 64,
@@ -800,12 +817,150 @@ async def test_profile_updates_are_queued_only_for_remote_friends(
     monkeypatch.setattr("app.federation.relationships.build_envelope", build)
     monkeypatch.setattr("app.federation.relationships.queue_event", queue)
 
-    destinations = await queue_friend_profile_updates(
+    destinations = await queue_profile_updates(
         cast(Any, FakeSession()),
         cast(Any, SimpleNamespace(domain="local.example")),
         cast(Any, actor),
     )
 
-    assert destinations == {"remote.example"}
-    assert build.await_count == 2
-    assert queue.await_count == 2
+    assert destinations == {"remote.example", "guild.example"}
+    assert build.await_count == 3
+    assert queue.await_count == 3
+    assert build.await_args_list[-1].args[2] == "guild.member.profile"
+    assert build.await_args_list[-1].kwargs["context"] == {
+        "guild_id": "70",
+        "guild_domain": "guild.example",
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_guild_profile_update_is_direct_home_event_and_gateway_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = SimpleNamespace(
+        id=7,
+        origin_domain="local.example",
+        is_local=True,
+        account_type="human",
+        username="maple",
+        display_name="Maple",
+        avatar_hash=None,
+        banner_hash=None,
+        bio="about",
+        custom_status="working",
+        profile_version=4,
+        e2ee_device_generation=2,
+    )
+    guild = SimpleNamespace(id=70, origin_domain="local.example", unavailable=False)
+    member = SimpleNamespace()
+
+    class Rows:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def all(self) -> list[object]:
+            return self.values
+
+    session = SimpleNamespace(
+        execute=AsyncMock(
+            side_effect=[
+                Rows([]),
+                Rows([]),
+                Rows([(guild, member)]),
+            ]
+        ),
+        scalars=AsyncMock(side_effect=[["member-home.example"], [5, 9]]),
+    )
+    source = {"event_id": "kcfe_profile_source"}
+    build = AsyncMock(return_value=source)
+    queue = AsyncMock()
+    postcommit = Mock()
+    monkeypatch.setattr("app.federation.relationships.build_envelope", build)
+    monkeypatch.setattr("app.federation.relationships.queue_event", queue)
+    monkeypatch.setattr(
+        "app.federation.relationships.member_payload", Mock(return_value={"ok": True})
+    )
+    monkeypatch.setattr("app.federation.relationships.queue_postcommit_dispatch", postcommit)
+
+    local_settings = SimpleNamespace(domain="local.example")
+    destinations = await queue_profile_updates(
+        cast(Any, session),
+        cast(Any, local_settings),
+        cast(Any, actor),
+    )
+
+    assert destinations == {"member-home.example"}
+    queue.assert_awaited_once_with(
+        session,
+        local_settings,
+        "member-home.example",
+        source,
+        discover_destination=False,
+    )
+    postcommit.assert_called_once_with(
+        session,
+        "guild:local.example:70",
+        "GUILD_MEMBER_UPDATE",
+        {"ok": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_guild_profile_relay_preserves_exact_user_home_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_source = {
+        "event_id": "kcfe_abcdefghijklmnop",
+        "origin": "member.example",
+        "type": "guild.member.profile",
+        "ts": 1,
+        "actor": {"id": "42", "domain": "member.example"},
+        "context": {"guild_id": "70", "guild_domain": "guild.example"},
+        "content": {
+            "actor": {
+                "id": "42",
+                "origin_domain": "member.example",
+                "username": "maple",
+                "profile_version": 3,
+            }
+        },
+        "signatures": {"member.example": {"ed25519:test": "signature"}},
+    }
+    verified = EventEnvelope.model_validate(raw_source)
+    validator = AsyncMock(return_value=verified)
+    monkeypatch.setattr("app.federation.relationships.validated_event_envelope", validator)
+
+    profile = await validated_guild_profile_source(
+        cast(Any, object()),
+        cast(Any, SimpleNamespace()),
+        raw_source,
+        guild_ref=(70, "guild.example"),
+    )
+
+    assert (profile.id, profile.origin_domain, profile.profile_version) == (
+        "42",
+        "member.example",
+        3,
+    )
+    assert validator.await_args.args[2] == "member.example"
+
+    validator.return_value = EventEnvelope.model_validate(
+        {
+            **raw_source,
+            "content": {
+                "actor": {
+                    "id": "43",
+                    "origin_domain": "member.example",
+                    "username": "maple",
+                    "profile_version": 3,
+                }
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="actor"):
+        await validated_guild_profile_source(
+            cast(Any, object()),
+            cast(Any, SimpleNamespace()),
+            raw_source,
+            guild_ref=(70, "guild.example"),
+        )

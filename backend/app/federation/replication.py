@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
@@ -20,7 +20,14 @@ from app.chat.e2ee import (
 )
 from app.chat.e2ee_controls import apply_e2ee_control_metadata
 from app.chat.events import publish_dispatch, user_topic
+from app.chat.message_flags import MESSAGE_FLAG_HAS_SNAPSHOT
+from app.chat.message_references import validate_message_reference_projection
 from app.chat.payloads import dm_channel_payload, render_message_payload
+from app.chat.pins import PIN_NOTICE_MESSAGE_TYPE, message_is_pinnable
+from app.chat.poll_results import (
+    POLL_RESULT_MESSAGE_TYPE,
+    validate_poll_result_wire_body,
+)
 from app.chat.privacy import require_can_direct_message
 from app.core.dm import (
     GROUP_DM_MEMBER_ADDED,
@@ -32,6 +39,7 @@ from app.core.dm import (
 )
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
+from app.db.bot_models import BotApplication
 from app.db.models import (
     Attachment,
     Channel,
@@ -41,6 +49,8 @@ from app.db.models import (
     MediaTombstoneSource,
     Message,
     MessageProjection,
+    MessageView,
+    Poll,
     RemoteMediaTombstone,
     TerminalRoomDeletion,
     User,
@@ -57,9 +67,16 @@ from app.federation.dm_storage import (
 )
 from app.federation.events import retained_media_delete_events
 from app.federation.identity_storage import admit_remote_user_identity
+from app.federation.message_content import (
+    add_poll_projection,
+    stored_poll_matches_projection,
+    stored_view_matches_projection,
+    validate_replicated_rich_projection,
+)
 from app.federation.network import ensure_remote_instance_record, normalize_domain
 from app.federation.schemas import MAX_DATABASE_SNOWFLAKE, RemoteUserProfile
 from app.media.processing import normalize_declared_type, sanitize_filename
+from app.media.schemas import validate_voice_attachment_metadata
 
 
 def database_snowflake(value: object, field: str) -> int:
@@ -93,9 +110,29 @@ def replicated_message_create_fingerprint(
     referenced_message_id: int | None,
     referenced_message_domain: str | None,
     mention_user_refs: list[dict[str, Any]],
+    mention_role_refs: list[dict[str, Any]] | None = None,
+    mention_everyone: bool = False,
     created_at: datetime,
+    tts: bool = False,
     webhook_name: str | None = None,
+    webhook_id: int | None = None,
+    webhook_domain: str | None = None,
     webhook_avatar_hash: str | None = None,
+    webhook_avatar_url: str | None = None,
+    embeds: list[dict[str, Any]] | None = None,
+    components: list[dict[str, Any]] | None = None,
+    application_id: int | None = None,
+    application_domain: str | None = None,
+    interaction_metadata: dict[str, Any] | None = None,
+    view_version: int = 0,
+    forwarded_message_id: int | None = None,
+    forwarded_message_domain: str | None = None,
+    forwarded_channel_id: int | None = None,
+    forwarded_channel_domain: str | None = None,
+    forward_snapshot: dict[str, Any] | None = None,
+    poll_result: dict[str, Any] | None = None,
+    sticker_items: list[dict[str, Any]] | None = None,
+    message_reference: dict[str, Any] | None = None,
 ) -> tuple[object, ...]:
     """Bind immutable create fields, including opaque E2EE ciphertext."""
 
@@ -107,13 +144,33 @@ def replicated_message_create_fingerprint(
         content,
         e2ee,
         message_type,
+        tts,
         flags,
         client_nonce,
         referenced_message_id,
         referenced_message_domain,
+        message_reference,
         mention_user_refs,
+        mention_role_refs or [],
+        mention_everyone,
         webhook_name,
+        webhook_id,
+        webhook_domain,
         webhook_avatar_hash,
+        webhook_avatar_url,
+        embeds or [],
+        components or [],
+        application_id,
+        application_domain,
+        interaction_metadata,
+        view_version,
+        forwarded_message_id,
+        forwarded_message_domain,
+        forwarded_channel_id,
+        forwarded_channel_domain,
+        forward_snapshot,
+        poll_result,
+        sticker_items or [],
         created_at,
     )
 
@@ -277,6 +334,7 @@ async def _resolve_unresolved_remote_profile(
     try:
         async with session.begin_nested():
             user.username = profile.username
+            user.account_type = profile.account_type
             user.profile_resolved = True
             user.profile_version = profile.profile_version
             user.e2ee_device_generation = profile.e2ee_device_generation
@@ -321,6 +379,7 @@ async def upsert_remote_user(
                 origin_domain=profile.origin_domain,
                 is_local=False,
                 username=profile.username,
+                account_type=profile.account_type,
                 display_name=profile.display_name,
                 avatar_hash=profile.avatar_hash,
                 banner_hash=profile.banner_hash,
@@ -350,6 +409,8 @@ async def upsert_remote_user(
         return user
     if user.username != profile.username:
         raise ValueError("remote user profile changed an immutable identity")
+    if user.account_type != profile.account_type:
+        raise ValueError("remote user profile changed an immutable account type")
     user.e2ee_device_generation = max(
         user.e2ee_device_generation,
         profile.e2ee_device_generation,
@@ -486,6 +547,18 @@ def sanitized_remote_variants(raw: object, *, max_bytes: int) -> dict[str, Any]:
             or not 1 <= processing_version <= 2_147_483_647
         ):
             raise ValueError("attachment variant processing version is invalid")
+        animated = metadata.get("animated")
+        if animated is not None and not isinstance(animated, bool):
+            raise ValueError("attachment variant animation state is invalid")
+        duration_ms = metadata.get("duration_ms")
+        if duration_ms is not None and (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or not 1 <= duration_ms <= 3_600_000
+        ):
+            raise ValueError("attachment variant duration is invalid")
+        if duration_ms is not None and animated is not True:
+            raise ValueError("attachment variant duration requires animation")
         rendered[name] = {
             "content_type": content_type,
             "size": size,
@@ -494,6 +567,8 @@ def sanitized_remote_variants(raw: object, *, max_bytes: int) -> dict[str, Any]:
             **(
                 {"processing_version": processing_version} if processing_version is not None else {}
             ),
+            **({"animated": animated} if animated is not None else {}),
+            **({"duration_ms": duration_ms} if duration_ms is not None else {}),
         }
     return rendered
 
@@ -515,6 +590,7 @@ def profile_from_user(user: User) -> dict[str, object]:
     return {
         "id": str(user.id),
         "origin_domain": user.origin_domain,
+        "account_type": user.account_type,
         "username": user.username,
         "display_name": user.display_name,
         "avatar_hash": user.avatar_hash,
@@ -526,17 +602,33 @@ def profile_from_user(user: User) -> dict[str, object]:
     }
 
 
+def client_user_payload_from_profile(profile: RemoteUserProfile) -> dict[str, object]:
+    """Project a strict federation profile onto the public client user shape."""
+
+    return {
+        **profile.model_dump(mode="json"),
+        "profile_version": str(profile.profile_version),
+        "e2ee_device_generation": str(profile.e2ee_device_generation),
+        "profile_resolved": True,
+        "handle": f"{profile.username}@{profile.origin_domain}",
+        "bot": profile.account_type == "bot",
+    }
+
+
 async def replicate_message_attachments(
     session: AsyncSession,
     settings: Settings,
     message: Message,
     author: User,
     raw_attachments: object,
+    *,
+    allowed_attachment_origins: set[str] | None = None,
 ) -> list[Attachment]:
     """Validate stable remote attachment references without trusting scan claims or URLs."""
 
     if not isinstance(raw_attachments, list) or len(raw_attachments) > 10:
         raise ValueError("message attachment list is invalid")
+    allowed_origins = allowed_attachment_origins or {author.origin_domain}
     seen: set[tuple[int, str]] = set()
     rendered: list[Attachment] = []
     for raw in raw_attachments:
@@ -544,8 +636,8 @@ async def replicate_message_attachments(
             raise ValueError("message attachment is invalid")
         attachment_id = database_snowflake(raw.get("id"), "attachment id")
         origin = normalize_domain(str(raw.get("origin_domain", "")))
-        if origin != author.origin_domain:
-            raise ValueError("attachment origin does not match the message author")
+        if origin not in allowed_origins:
+            raise ValueError("attachment origin is not authorized for the message")
         ref = (attachment_id, origin)
         if ref in seen:
             raise ValueError("message attachment IDs must be unique")
@@ -560,15 +652,23 @@ async def replicate_message_attachments(
         content_type = normalize_declared_type(content_type_raw)
         encryption_mode = raw.get("encryption_mode", "plaintext")
         encryption_protocol = raw.get("encryption_protocol")
+        content_sha256 = raw.get("content_sha256")
         if encryption_mode == "e2ee":
             if (
                 encryption_protocol != "kaede-file-v1"
                 or filename_raw != "encrypted-file"
                 or content_type != "application/octet-stream"
+                or content_sha256 is not None
             ):
                 raise ValueError("encrypted attachment metadata is invalid")
             replicated_scan_status = "encrypted"
         elif encryption_mode == "plaintext" and encryption_protocol is None:
+            if content_sha256 is not None and (
+                not isinstance(content_sha256, str)
+                or len(content_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in content_sha256)
+            ):
+                raise ValueError("plaintext attachment integrity digest is invalid")
             replicated_scan_status = "clean"
         else:
             raise ValueError("attachment encryption policy is invalid")
@@ -580,6 +680,24 @@ async def replicate_message_attachments(
             raise ValueError("attachment size is invalid")
         width, height = remote_media_dimensions(raw)
         blurhash = sanitized_remote_blurhash(raw.get("blurhash"))
+        duration_secs_raw = raw.get("duration_secs")
+        duration_secs = (
+            float(duration_secs_raw)
+            if isinstance(duration_secs_raw, (int, float))
+            and not isinstance(duration_secs_raw, bool)
+            else None
+        )
+        waveform = raw.get("waveform")
+        if waveform is not None and not isinstance(waveform, str):
+            raise ValueError("attachment waveform is invalid")
+        if duration_secs_raw is not None and duration_secs is None:
+            raise ValueError("attachment duration is invalid")
+        validate_voice_attachment_metadata(
+            content_type=content_type,
+            encryption_mode=encryption_mode,
+            duration_secs=duration_secs,
+            waveform=waveform,
+        )
         variants = sanitized_remote_variants(
             raw.get("variants", {}),
             max_bytes=settings.media_max_attachment_bytes,
@@ -615,6 +733,8 @@ async def replicate_message_attachments(
                 object_key=f"remote/{origin}/{attachment_id}/original",
                 width=width,
                 height=height,
+                duration_secs=duration_secs,
+                waveform=waveform,
                 blurhash=blurhash,
                 scan_status=replicated_scan_status,
                 encryption_mode=encryption_mode,
@@ -622,6 +742,7 @@ async def replicate_message_attachments(
                 purpose="attachment",
                 finalized_at=message.created_at,
                 variants=variants,
+                content_sha256=content_sha256,
             )
             session.add(existing)
         else:
@@ -633,6 +754,9 @@ async def replicate_message_attachments(
                 existing.size,
                 existing.encryption_mode,
                 existing.encryption_protocol,
+                existing.duration_secs,
+                existing.waveform,
+                existing.content_sha256,
             ) != (
                 author.id,
                 author.origin_domain,
@@ -641,6 +765,9 @@ async def replicate_message_attachments(
                 size,
                 encryption_mode,
                 encryption_protocol,
+                duration_secs,
+                waveform,
+                content_sha256,
             ):
                 raise ValueError("attachment identity conflicts with stored metadata")
             if existing.message_id is not None and (
@@ -912,6 +1039,7 @@ async def replicate_group_notice(
         or raw_message.get("attachments", []) != []
         or raw_message.get("referenced_message_id") is not None
         or raw_message.get("referenced_message_domain") is not None
+        or raw_message.get("message_reference") is not None
         or raw_message.get("client_nonce") is not None
         or raw_message.get("edited_at") is not None
         or raw_message.get("deleted_at") is not None
@@ -919,7 +1047,11 @@ async def replicate_group_notice(
     ):
         raise ValueError("group DM notice fields are invalid")
     raw_mentions = raw_message.get("mention_user_refs")
-    if raw_mentions != []:
+    if (
+        raw_mentions != []
+        or raw_message.get("mention_role_refs", []) != []
+        or raw_message.get("mention_everyone", False) is not False
+    ):
         raise ValueError("group DM notice target is invalid")
     raw_target = raw_notice.get("target")
     if not isinstance(raw_target, dict):
@@ -1059,6 +1191,28 @@ async def replicate_group_notice(
     return message
 
 
+def dm_message_origin_is_authorized(
+    *,
+    message_origin: str,
+    author_domain: str,
+    event_origin: str,
+    conversation_type: str,
+    conversation_authority: str,
+    authority_control: bool,
+) -> bool:
+    """Preserve author-minted IDs except for closed authority-owned DM events."""
+
+    return (
+        message_origin == author_domain
+        or authority_control
+        or (
+            conversation_type == "group"
+            and event_origin == conversation_authority
+            and message_origin == conversation_authority
+        )
+    )
+
+
 async def replicate_dm_message(
     session: AsyncSession,
     settings: Settings,
@@ -1090,13 +1244,14 @@ async def replicate_dm_message(
         raise ValueError("DM message content is invalid")
     if message_content is not None and e2ee is not None:
         raise ValueError("DM message mixes plaintext and encrypted content")
-    if message_content is None and e2ee is None and not raw_attachments:
-        raise ValueError("DM message requires content, encrypted content, or an attachment")
     message_type = raw.get("message_type", 0)
+    tts = raw.get("tts", False)
     flags = raw.get("flags", 0)
     client_nonce = raw.get("client_nonce")
     if isinstance(message_type, bool) or not isinstance(message_type, int) or message_type < 0:
         raise ValueError("DM message type is invalid")
+    if not isinstance(tts, bool):
+        raise ValueError("DM message TTS marker is invalid")
     if isinstance(flags, bool) or not isinstance(flags, int) or flags < 0:
         raise ValueError("DM message flags are invalid")
     if client_nonce is not None and (
@@ -1105,6 +1260,58 @@ async def replicate_dm_message(
         raise ValueError("DM message client nonce is invalid")
     if raw.get("edited_at") is not None or raw.get("deleted_at") is not None:
         raise ValueError("DM create event contains mutation timestamps")
+    created_at = datetime.fromisoformat(str(raw["created_at"]))
+    rich = validate_replicated_rich_projection(
+        raw,
+        message_id=message_id,
+        message_origin=origin_domain,
+        message_created_at=created_at,
+        e2ee=e2ee,
+        message_type=message_type,
+        label="DM message",
+    )
+    application_ref = rich.application_ref
+    forwarded_ref = rich.forwarded_ref
+    forwarded_channel_ref = rich.forwarded_channel_ref
+    forward_snapshot = rich.forward_snapshot
+    if bool(flags & MESSAGE_FLAG_HAS_SNAPSHOT) != (
+        forward_snapshot is not None or rich.has_encrypted_forward
+    ):
+        raise ValueError("DM message snapshot flag does not match its forward projection")
+    if (
+        message_content is None
+        and e2ee is None
+        and not raw_attachments
+        and not rich.embeds
+        and not rich.components
+        and not rich.sticker_items
+        and rich.poll is None
+        and forwarded_ref is None
+        and message_type != PIN_NOTICE_MESSAGE_TYPE
+    ):
+        raise ValueError(
+            "DM message requires content, encrypted content, an attachment, "
+            "rich content, or a forward"
+        )
+    if forwarded_ref is not None and rich.poll is not None:
+        raise ValueError("DM poll messages cannot be forwarded")
+    if rich.poll is not None:
+        raw_poll = raw.get("poll")
+        raw_results = raw_poll.get("results") if isinstance(raw_poll, dict) else None
+        raw_counts = raw_results.get("answer_counts") if isinstance(raw_results, dict) else None
+        if (
+            not isinstance(raw_results, dict)
+            or raw_results.get("is_finalized") is not False
+            or raw_poll.get("finalized_at") is not None
+            or not isinstance(raw_counts, list)
+            or any(
+                not isinstance(item, dict)
+                or item.get("count") != 0
+                or item.get("me_voted") is not False
+                for item in raw_counts
+            )
+        ):
+            raise ValueError("DM message create contains mutable poll results")
     raw_mention_refs = raw.get("mention_user_refs", [])
     if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 5_000:
         raise ValueError("DM message mention list is invalid")
@@ -1119,7 +1326,11 @@ async def replicate_dm_message(
             )
         )
     mention_pairs = list(dict.fromkeys(mention_pairs))
-    created_at = datetime.fromisoformat(str(raw["created_at"]))
+    raw_role_mentions = raw.get("mention_role_refs", [])
+    mention_everyone = raw.get("mention_everyone", False)
+    if raw_role_mentions != [] or mention_everyone is not False:
+        raise ValueError("DM message cannot contain role or everyone mentions")
+    mention_role_refs: list[dict[str, Any]] = []
     validate_snowflake_timestamp(
         message_id,
         created_at,
@@ -1142,7 +1353,48 @@ async def replicate_dm_message(
     )
     if is_control and not authority_control:
         raise ValueError("DM E2EE control did not originate at its conversation authority")
-    if origin_domain != author.origin_domain and not authority_control:
+    authority_poll_result = bool(
+        message_type == POLL_RESULT_MESSAGE_TYPE
+        and rich.poll_result is not None
+        and origin_domain == event_origin == conversation.authority_domain
+    )
+    authority_pin_notice = bool(
+        message_type == PIN_NOTICE_MESSAGE_TYPE
+        and origin_domain == event_origin == conversation.authority_domain
+    )
+    if message_type == PIN_NOTICE_MESSAGE_TYPE and not authority_pin_notice:
+        raise ValueError("DM pin notice did not originate at its conversation authority")
+    if authority_pin_notice and (
+        message_content is not None
+        or e2ee is not None
+        or raw_attachments
+        or rich.embeds
+        or rich.components
+        or rich.sticker_items
+        or rich.poll is not None
+        or forwarded_ref is not None
+        or application_ref is not None
+        or rich.interaction_metadata is not None
+        or tts
+        or flags != 0
+        or client_nonce is not None
+        or raw_mention_refs
+    ):
+        raise ValueError("DM pin notice fields are invalid")
+    if authority_poll_result:
+        validate_poll_result_wire_body(
+            raw,
+            author_ref=(author.id, author.origin_domain),
+            channel_ref=(channel.id, channel.origin_domain),
+        )
+    if not dm_message_origin_is_authorized(
+        message_origin=origin_domain,
+        author_domain=author.origin_domain,
+        event_origin=event_origin,
+        conversation_type=conversation.type,
+        conversation_authority=conversation.authority_domain,
+        authority_control=authority_control or authority_poll_result or authority_pin_notice,
+    ):
         raise ValueError("DM message snowflake was not minted by its author instance")
     await lock_federated_dm_authority(session, conversation.authority_domain)
     raw_policy = content.get("encryption_policy")
@@ -1164,15 +1416,16 @@ async def replicate_dm_message(
         channel.encryption_epoch = encryption_policy["epoch"]
         if channel.encryption_mode == "e2ee" and channel.encryption_activated_at is None:
             channel.encryption_activated_at = created_at
-    validate_message_encryption_policy(
-        channel.encryption_mode,
-        content=message_content,
-        e2ee=e2ee,
-        attachment_count=len(raw_attachments),
-        policy_generation=channel.encryption_policy_generation,
-        policy_epoch=channel.encryption_epoch,
-        policy_group_id=channel.encryption_group_id,
-    )
+    if not authority_poll_result and not authority_pin_notice:
+        validate_message_encryption_policy(
+            channel.encryption_mode,
+            content=message_content,
+            e2ee=e2ee,
+            attachment_count=len(raw_attachments),
+            policy_generation=channel.encryption_policy_generation,
+            policy_epoch=channel.encryption_epoch,
+            policy_group_id=channel.encryption_group_id,
+        )
     if e2ee is not None and e2ee.get("operation") not in {"welcome", "commit"}:
         validate_e2ee_message_projection(
             e2ee,
@@ -1186,6 +1439,15 @@ async def replicate_dm_message(
     )
     if author_participates is None:
         raise ValueError("DM author is not a conversation participant")
+    if application_ref is not None:
+        application = await session.get(BotApplication, application_ref)
+        if (
+            application is None
+            or application.status != "active"
+            or (application.bot_user_id, application.bot_user_domain)
+            != (author.id, author.origin_domain)
+        ):
+            raise ValueError("DM message application is not bound to its bot author")
     participant_refs = set(
         (
             await session.execute(
@@ -1214,23 +1476,82 @@ async def replicate_dm_message(
         if (referenced_id, referenced_domain) >= (message_id, origin_domain):
             raise ValueError("DM message reference must precede the message")
         referenced = await session.get(Message, (referenced_id, referenced_domain))
+        if authority_pin_notice and (
+            referenced is None
+            or (referenced.channel_id, referenced.channel_domain)
+            != (channel.id, channel.origin_domain)
+            or not message_is_pinnable(referenced)
+        ):
+            raise ValueError("DM pin notice source binding is invalid")
+        if authority_poll_result:
+            poll_result_projection = rich.poll_result
+            if poll_result_projection is None:
+                raise RuntimeError("validated DM poll result lost its projection")
+            source_poll = (
+                await session.get(Poll, (referenced.id, referenced.origin_domain))
+                if referenced is not None
+                else None
+            )
+            if (
+                referenced is None
+                or source_poll is None
+                or (referenced.channel_id, referenced.channel_domain)
+                != (channel.id, channel.origin_domain)
+                or (referenced.author_id, referenced.author_domain)
+                != (author.id, author.origin_domain)
+                or ("e2ee" if referenced.e2ee is not None else "plaintext")
+                != poll_result_projection["source_encryption_mode"]
+            ):
+                raise ValueError("DM poll result source binding is invalid")
+            if source_poll.finalized_at is None:
+                # The dedicated finalization delta is ordered before type 46,
+                # but this convergence fence also closes a source restored from
+                # history after that short-lived delta was compacted.
+                source_poll.finalized_at = created_at
+            elif source_poll.finalized_at > created_at:
+                raise ValueError("DM poll result predates source finalization")
         if referenced is not None and (
             referenced.channel_id,
             referenced.channel_domain,
         ) != (channel.id, channel.origin_domain):
             raise ValueError("DM message reference is not in the conversation")
-        if referenced is None and not opaque_dm_history_ref_allowed(
-            conversation,
-            (referenced_id, referenced_domain),
-            participant_domains={domain for _identifier, domain in participant_refs},
-            local_domain=settings.domain,
-            remote_available=await dm_authority_history_available(
-                session,
+        if (
+            referenced is None
+            and not authority_pin_notice
+            and not opaque_dm_history_ref_allowed(
                 conversation,
+                (referenced_id, referenced_domain),
+                participant_domains={domain for _identifier, domain in participant_refs},
                 local_domain=settings.domain,
-            ),
+                remote_available=await dm_authority_history_available(
+                    session,
+                    conversation,
+                    local_domain=settings.domain,
+                ),
+            )
         ):
             raise ValueError("DM message reference is not in the conversation")
+    elif authority_pin_notice:
+        raise ValueError("DM pin notice is missing its source message")
+    if forwarded_ref is not None and referenced_id is not None:
+        raise ValueError("DM forward cannot also be a reply")
+    if message_type in {12, 18}:
+        raise ValueError("DM message type cannot contain a guild channel reference")
+    message_reference = validate_message_reference_projection(
+        raw.get("message_reference"),
+        message_type=message_type,
+        channel_ref=(channel.id, channel.origin_domain),
+        guild_ref=None,
+        referenced_message_ref=(
+            (referenced_id, referenced_domain)
+            if referenced_id is not None and referenced_domain is not None
+            else None
+        ),
+        forwarded_message_ref=forwarded_ref,
+        forwarded_channel_ref=forwarded_channel_ref,
+        has_forward_snapshot=bool(forward_snapshot is not None or rich.has_encrypted_forward),
+        label="DM message",
+    )
     local_recipients = list(
         await session.scalars(
             select(User)
@@ -1260,13 +1581,36 @@ async def replicate_dm_message(
             content=message_content,
             e2ee=e2ee,
             mention_user_refs=mention_refs,
+            mention_role_refs=mention_role_refs,
+            mention_everyone=False,
             attachments=raw_attachments,
             client_nonce=client_nonce,
+            forwarded_message_ref=forwarded_ref,
+            forward_snapshot=forward_snapshot,
+            poll_result=rich.poll_result,
+            embeds=rich.embeds,
+            components=rich.components,
+            sticker_items=rich.sticker_items,
+            poll=(raw.get("poll") if rich.poll is not None else None),
+            application_ref=application_ref,
+            interaction_metadata=rich.interaction_metadata,
+            view_version=rich.view_version,
+            view_persistent=rich.view_persistent,
+            view_expires_at=rich.view_expires_at,
         ),
         protected_refs=(
-            {(referenced_id, referenced_domain)}
-            if referenced_id is not None and referenced_domain is not None
-            else None
+            {
+                reference
+                for reference in (
+                    (
+                        (referenced_id, referenced_domain)
+                        if referenced_id is not None and referenced_domain is not None
+                        else None
+                    ),
+                )
+                if reference is not None
+            }
+            or None
         ),
     )
     inserted = await session.scalar(
@@ -1280,14 +1624,35 @@ async def replicate_dm_message(
             author_domain=author_domain,
             content=message_content,
             e2ee=e2ee,
+            embeds=rich.embeds,
+            components=rich.components,
+            sticker_items=rich.sticker_items,
+            application_id=application_ref[0] if application_ref is not None else None,
+            application_domain=application_ref[1] if application_ref is not None else None,
+            interaction_metadata=rich.interaction_metadata,
+            view_version=rich.view_version,
             encryption_policy_generation=channel.encryption_policy_generation,
             encryption_epoch=channel.encryption_epoch,
             message_type=message_type,
+            tts=tts,
             flags=flags,
             client_nonce=client_nonce,
             referenced_message_id=referenced_id,
             referenced_message_domain=referenced_domain,
+            message_reference=message_reference,
+            forwarded_message_id=forwarded_ref[0] if forwarded_ref is not None else None,
+            forwarded_message_domain=forwarded_ref[1] if forwarded_ref is not None else None,
+            forwarded_channel_id=(
+                forwarded_channel_ref[0] if forwarded_channel_ref is not None else None
+            ),
+            forwarded_channel_domain=(
+                forwarded_channel_ref[1] if forwarded_channel_ref is not None else None
+            ),
+            forward_snapshot=forward_snapshot,
+            poll_result=rich.poll_result,
             mention_user_refs=mention_refs,
+            mention_role_refs=mention_role_refs,
+            mention_everyone=False,
             created_at=created_at,
         )
         .on_conflict_do_nothing(index_elements=["id", "origin_domain"])
@@ -1295,34 +1660,77 @@ async def replicate_dm_message(
     )
     if inserted is None:
         existing = await session.get(Message, (message_id, origin_domain))
-        if existing is None or replicated_message_create_fingerprint(
-            channel_id=existing.channel_id,
-            channel_domain=existing.channel_domain,
-            author_id=existing.author_id,
-            author_domain=existing.author_domain,
-            content=existing.content,
-            e2ee=existing.e2ee,
-            message_type=existing.message_type,
-            flags=existing.flags,
-            client_nonce=existing.client_nonce,
-            referenced_message_id=existing.referenced_message_id,
-            referenced_message_domain=existing.referenced_message_domain,
-            mention_user_refs=existing.mention_user_refs,
-            created_at=existing.created_at,
-        ) != replicated_message_create_fingerprint(
-            channel_id=channel.id,
-            channel_domain=channel.origin_domain,
-            author_id=author.id,
-            author_domain=author.origin_domain,
-            content=message_content,
-            e2ee=e2ee,
-            message_type=message_type,
-            flags=flags,
-            client_nonce=client_nonce,
-            referenced_message_id=referenced_id,
-            referenced_message_domain=referenced_domain,
-            mention_user_refs=mention_refs,
-            created_at=created_at,
+        if (
+            existing is None
+            or replicated_message_create_fingerprint(
+                channel_id=existing.channel_id,
+                channel_domain=existing.channel_domain,
+                author_id=existing.author_id,
+                author_domain=existing.author_domain,
+                content=existing.content,
+                e2ee=existing.e2ee,
+                message_type=existing.message_type,
+                tts=bool(existing.tts),
+                flags=existing.flags,
+                client_nonce=existing.client_nonce,
+                referenced_message_id=existing.referenced_message_id,
+                referenced_message_domain=existing.referenced_message_domain,
+                message_reference=existing.message_reference,
+                forwarded_message_id=existing.forwarded_message_id,
+                forwarded_message_domain=existing.forwarded_message_domain,
+                forwarded_channel_id=existing.forwarded_channel_id,
+                forwarded_channel_domain=existing.forwarded_channel_domain,
+                forward_snapshot=existing.forward_snapshot,
+                mention_user_refs=existing.mention_user_refs,
+                mention_role_refs=existing.mention_role_refs,
+                mention_everyone=bool(existing.mention_everyone),
+                embeds=list(existing.embeds or []),
+                components=list(existing.components or []),
+                sticker_items=list(existing.sticker_items or []),
+                application_id=existing.application_id,
+                application_domain=existing.application_domain,
+                interaction_metadata=existing.interaction_metadata,
+                view_version=int(existing.view_version or 0),
+                created_at=existing.created_at,
+            )
+            != replicated_message_create_fingerprint(
+                channel_id=channel.id,
+                channel_domain=channel.origin_domain,
+                author_id=author.id,
+                author_domain=author.origin_domain,
+                content=message_content,
+                e2ee=e2ee,
+                message_type=message_type,
+                tts=tts,
+                flags=flags,
+                client_nonce=client_nonce,
+                referenced_message_id=referenced_id,
+                referenced_message_domain=referenced_domain,
+                message_reference=message_reference,
+                forwarded_message_id=forwarded_ref[0] if forwarded_ref is not None else None,
+                forwarded_message_domain=forwarded_ref[1] if forwarded_ref is not None else None,
+                forwarded_channel_id=(
+                    forwarded_channel_ref[0] if forwarded_channel_ref is not None else None
+                ),
+                forwarded_channel_domain=(
+                    forwarded_channel_ref[1] if forwarded_channel_ref is not None else None
+                ),
+                forward_snapshot=forward_snapshot,
+                poll_result=rich.poll_result,
+                mention_user_refs=mention_refs,
+                mention_role_refs=mention_role_refs,
+                mention_everyone=False,
+                embeds=rich.embeds,
+                components=rich.components,
+                sticker_items=rich.sticker_items,
+                application_id=application_ref[0] if application_ref is not None else None,
+                application_domain=application_ref[1] if application_ref is not None else None,
+                interaction_metadata=rich.interaction_metadata,
+                view_version=rich.view_version,
+                created_at=created_at,
+            )
+            or not await stored_poll_matches_projection(session, existing, rich.poll)
+            or not await stored_view_matches_projection(session, existing, rich)
         ):
             raise ValueError("DM message snowflake conflicts with another message")
         await apply_e2ee_control_metadata(
@@ -1337,6 +1745,24 @@ async def replicate_dm_message(
     message = await session.get(Message, (message_id, origin_domain))
     if message is None:
         raise RuntimeError("replicated message disappeared")
+    if rich.poll is not None:
+        add_poll_projection(session, message, rich.poll, created_at=created_at)
+    if (rich.components or rich.has_encrypted_controls) and application_ref is not None:
+        session.add(
+            MessageView(
+                message_id=message.id,
+                message_domain=message.origin_domain,
+                application_id=application_ref[0],
+                application_domain=application_ref[1],
+                integration_type=cast(str, rich.interaction_integration_type),
+                installation_id=cast(tuple[int, str], rich.interaction_installation_ref)[0],
+                installation_domain=cast(tuple[int, str], rich.interaction_installation_ref)[1],
+                installation_revision=cast(int, rich.interaction_installation_revision),
+                version=rich.view_version,
+                persistent=rich.view_persistent,
+                expires_at=rich.view_expires_at,
+            )
+        )
     await apply_e2ee_control_metadata(
         session,
         message,

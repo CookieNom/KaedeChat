@@ -8,30 +8,143 @@ import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-enum ComposerAction { attach, media }
+enum ComposerAction { attach, media, poll }
+
+const defaultComposerEmojiCategories = <String, List<String>>{
+  'Recent': <String>[],
+  'Smileys': <String>[
+    '😀',
+    '😃',
+    '😄',
+    '😁',
+    '😂',
+    '🤣',
+    '😊',
+    '😍',
+    '🥰',
+    '😘',
+    '😎',
+    '🤩',
+    '🥳',
+    '😏',
+    '😢',
+    '😭',
+    '😤',
+    '😡',
+    '🤯',
+    '😱',
+    '🤔',
+    '🫡',
+    '🫠',
+    '👀'
+  ],
+  'People': <String>[
+    '👍',
+    '👎',
+    '👏',
+    '🙌',
+    '🙏',
+    '🤝',
+    '💪',
+    '👌',
+    '✌️',
+    '🤞',
+    '🤟',
+    '🤘',
+    '👋',
+    '🫶',
+    '💅',
+    '🧠'
+  ],
+  'Nature': <String>[
+    '🐶',
+    '🐱',
+    '🐭',
+    '🐹',
+    '🐰',
+    '🦊',
+    '🐻',
+    '🐼',
+    '🐸',
+    '🐵',
+    '🦄',
+    '🐝',
+    '🌸',
+    '🌻',
+    '🌈',
+    '⭐'
+  ],
+  'Food': <String>[
+    '🍎',
+    '🍓',
+    '🍉',
+    '🍕',
+    '🍔',
+    '🍟',
+    '🌮',
+    '🍿',
+    '🍪',
+    '🎂',
+    '☕',
+    '🍺'
+  ],
+  'Activities': <String>[
+    '⚽',
+    '🏀',
+    '🏈',
+    '🎮',
+    '🎲',
+    '🎨',
+    '🎵',
+    '🎉',
+    '🏆',
+    '🚀',
+    '💡',
+    '📌'
+  ],
+  'Symbols': <String>[
+    '❤️',
+    '🧡',
+    '💛',
+    '💚',
+    '💙',
+    '💜',
+    '🖤',
+    '🤍',
+    '💯',
+    '🔥',
+    '✨',
+    '✅',
+    '❌',
+    '⚠️',
+    '❓',
+    '‼️'
+  ],
+};
 
 sealed class ComposerMediaSelection {
-  const ComposerMediaSelection();
+  ComposerMediaSelection();
 }
 
 final class ComposerEmojiSelection extends ComposerMediaSelection {
-  const ComposerEmojiSelection(this.value);
+  ComposerEmojiSelection(this.value);
 
   final String value;
 }
 
 final class ComposerStickerSelection extends ComposerMediaSelection {
-  const ComposerStickerSelection(this.sticker);
+  ComposerStickerSelection(this.sticker);
 
   final ComposerSticker sticker;
 }
 
 final class ComposerGifSelection extends ComposerMediaSelection {
-  const ComposerGifSelection(this.gif);
+  ComposerGifSelection(this.gif);
 
   final ComposerGif gif;
 }
@@ -73,7 +186,7 @@ bool composerAllowsGifs(KaedeChannel channel) =>
     channel.encryptionMode != 'e2ee';
 
 final class ComposerCustomEmoji {
-  const ComposerCustomEmoji({
+  ComposerCustomEmoji({
     required this.ref,
     required this.name,
     required this.animated,
@@ -167,6 +280,36 @@ final class CustomEmojiImage extends StatelessWidget {
       );
 }
 
+/// Renders either a canonical Unicode reaction or its qualified custom asset.
+final class ReactionEmojiGlyph extends StatelessWidget {
+  const ReactionEmojiGlyph({
+    required this.emoji,
+    this.size = 20,
+    super.key,
+  });
+
+  final String emoji;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final parsed = tryParseReactionEmoji(emoji);
+    if (parsed?.customRef case final ref?) {
+      return CustomEmojiImage(
+        key: ValueKey('reaction-emoji-${parsed!.value}'),
+        ref: ref,
+        label: parsed.label,
+        size: size,
+      );
+    }
+    return Text(
+      parsed == null ? emoji : reactionEmojiPresentation(parsed.value),
+      key: ValueKey('reaction-emoji-${parsed?.value ?? emoji}'),
+      style: TextStyle(fontSize: size),
+    );
+  }
+}
+
 EntityRef? customEmojiRef(String? rawId, Domain originDomain) {
   final id = rawId?.trim();
   if (id == null || id.isEmpty) return null;
@@ -208,10 +351,10 @@ final class ForumTagLabel extends StatelessWidget {
             label: ':${tag.name}:',
             size: emojiSize,
           ),
-          const SizedBox(width: 4),
+          SizedBox(width: 4),
         ] else if (unicode?.isNotEmpty == true) ...[
           Text(unicode!, style: TextStyle(fontSize: fontSize)),
-          const SizedBox(width: 4),
+          SizedBox(width: 4),
         ],
         Text(tag.name, style: TextStyle(fontSize: fontSize)),
       ],
@@ -248,7 +391,7 @@ List<ComposerCustomEmoji> composerCustomEmojis(
 }
 
 final class ComposerSticker {
-  const ComposerSticker({
+  ComposerSticker({
     required this.ref,
     required this.guildRef,
     required this.guildName,
@@ -310,7 +453,7 @@ bool customStickerAvailableInChannel(
 ) {
   final guild = channel.guildRef;
   if (guild == null || sticker.guildRef == guild) return true;
-  return channel.allows(Permission.useExternalEmojis);
+  return channel.allows(Permission.useExternalStickers);
 }
 
 List<ComposerSticker> composerStickers(
@@ -355,8 +498,7 @@ final class StickerImage extends StatelessWidget {
           fit: BoxFit.contain,
           placeholder: (_, __) => SizedBox.square(
             dimension: size,
-            child:
-                const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
           ),
           errorWidget: (_, __, ___) => SizedBox.square(
             dimension: size,
@@ -374,7 +516,7 @@ final class StickerImage extends StatelessWidget {
 }
 
 final class ComposerGif {
-  const ComposerGif({
+  ComposerGif({
     required this.id,
     required this.title,
     required this.url,
@@ -495,7 +637,7 @@ ComposerGif? composerGifFromMessage(String? content) {
 }
 
 final class ComposerGifPage {
-  const ComposerGifPage({
+  ComposerGifPage({
     required this.items,
     required this.page,
     required this.nextPage,
@@ -536,6 +678,7 @@ Future<ComposerAction?> showComposerActionPicker(
   BuildContext context, {
   required bool canAttach,
   required bool gifsAllowed,
+  required bool canCreatePoll,
 }) =>
     showModalBottomSheet<ComposerAction>(
       context: context,
@@ -547,9 +690,9 @@ Future<ComposerAction?> showComposerActionPicker(
             mainAxisSize: MainAxisSize.min,
             children: [
               ListTile(
-                key: const ValueKey('composer-action-attach'),
-                leading: const Icon(Icons.attach_file_rounded),
-                title: const Text('Attach files'),
+                key: ValueKey('composer-action-attach'),
+                leading: Icon(Icons.attach_file_rounded),
+                title: Text('Attach files'),
                 subtitle: Text(canAttach
                     ? 'Upload images, video, audio, or documents'
                     : 'You do not have permission to attach files'),
@@ -559,27 +702,41 @@ Future<ComposerAction?> showComposerActionPicker(
                     : null,
               ),
               ListTile(
-                key: const ValueKey('composer-action-media'),
-                leading: const Icon(Icons.emoji_emotions_outlined),
-                title: const Text('GIFs, stickers, and emoji'),
+                key: ValueKey('composer-action-media'),
+                leading: Icon(Icons.emoji_emotions_outlined),
+                title: Text('GIFs, stickers, and emoji'),
                 subtitle: Text(gifsAllowed
                     ? 'Open the media picker'
                     : 'GIFs are unavailable here; stickers and emoji work'),
                 onTap: () => Navigator.pop(context, ComposerAction.media),
               ),
-              const SizedBox(height: 4),
+              ListTile(
+                key: ValueKey('composer-action-poll'),
+                leading: Icon(Icons.poll_outlined),
+                title: Text('Create a poll'),
+                subtitle: Text(canCreatePoll
+                    ? 'Ask up to 10 choices with an optional emoji'
+                    : 'Polls are unavailable here or you lack permission'),
+                enabled: canCreatePoll,
+                onTap: canCreatePoll
+                    ? () => Navigator.pop(context, ComposerAction.poll)
+                    : null,
+              ),
+              SizedBox(height: 4),
             ],
           ),
         ),
       ),
     );
 
-Future<String?> showComposerEmojiPicker(
+Future<String?> _showEmojiPicker(
   BuildContext context, {
   required KaedeRepository repository,
   required KaedeChannel channel,
   required Map<String, List<String>> categories,
+  required String semanticAction,
   List<String> recent = const <String>[],
+  bool canonicalizeReactions = false,
 }) =>
     showModalBottomSheet<String>(
       context: context,
@@ -591,7 +748,42 @@ Future<String?> showComposerEmojiPicker(
         channel: channel,
         categories: categories,
         recent: recent,
+        semanticAction: semanticAction,
+        canonicalizeReactions: canonicalizeReactions,
       ),
+    );
+
+Future<String?> showComposerEmojiPicker(
+  BuildContext context, {
+  required KaedeRepository repository,
+  required KaedeChannel channel,
+  required Map<String, List<String>> categories,
+  List<String> recent = const <String>[],
+}) =>
+    _showEmojiPicker(
+      context,
+      repository: repository,
+      channel: channel,
+      categories: categories,
+      recent: recent,
+      semanticAction: 'Insert',
+    );
+
+Future<String?> showReactionEmojiPicker(
+  BuildContext context, {
+  required KaedeRepository repository,
+  required KaedeChannel channel,
+  required Map<String, List<String>> categories,
+  List<String> recent = const <String>[],
+}) =>
+    _showEmojiPicker(
+      context,
+      repository: repository,
+      channel: channel,
+      categories: categories,
+      recent: recent,
+      semanticAction: 'React with',
+      canonicalizeReactions: true,
     );
 
 Future<ComposerGif?> showComposerGifPicker(
@@ -689,9 +881,9 @@ final class _ComposerMediaPickerState extends State<ComposerMediaPicker> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
               child: SegmentedButton<_ComposerMediaMode>(
-                key: const ValueKey('composer-media-tabs'),
+                key: ValueKey('composer-media-tabs'),
                 showSelectedIcon: false,
                 segments: const [
                   ButtonSegment(
@@ -715,7 +907,7 @@ final class _ComposerMediaPickerState extends State<ComposerMediaPicker> {
                     setState(() => _mode = selection.single),
               ),
             ),
-            const Divider(height: 1),
+            Divider(height: 1),
             Expanded(
               child: IndexedStack(
                 index: _mode.index,
@@ -835,21 +1027,21 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
       groups.putIfAbsent(item.guildRef, () => <ComposerSticker>[]).add(item);
     }
     final content = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+      padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
       child: Column(
         children: [
           TextField(
-            key: const ValueKey('composer-sticker-search'),
+            key: ValueKey('composer-sticker-search'),
             controller: _search,
             textInputAction: TextInputAction.search,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               hintText: 'Search stickers',
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),
             onChanged: (_) => setState(() {}),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8),
           Expanded(
             child: _loading
                 ? const _PickerStatus(
@@ -868,7 +1060,7 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
                             message: 'No stickers found.',
                           )
                         : ListView.builder(
-                            key: const ValueKey('composer-sticker-groups'),
+                            key: ValueKey('composer-sticker-groups'),
                             keyboardDismissBehavior:
                                 ScrollViewKeyboardDismissBehavior.onDrag,
                             itemCount: groups.length,
@@ -876,27 +1068,26 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
                               final stickers = groups.values.elementAt(index);
                               final guildName = stickers.first.guildName;
                               return Padding(
-                                padding: const EdgeInsets.only(bottom: 14),
+                                padding: EdgeInsets.only(bottom: 14),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Padding(
-                                      padding: const EdgeInsets.symmetric(
+                                      padding: EdgeInsets.symmetric(
                                           horizontal: 4, vertical: 6),
                                       child: Text(
                                         guildName,
-                                        style: const TextStyle(
-                                          color: KaedeColors.muted,
+                                        style: TextStyle(
+                                          color: context.kaede.muted,
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
                                     ),
                                     GridView.builder(
                                       shrinkWrap: true,
-                                      physics:
-                                          const NeverScrollableScrollPhysics(),
+                                      physics: NeverScrollableScrollPhysics(),
                                       gridDelegate:
-                                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                                          SliverGridDelegateWithMaxCrossAxisExtent(
                                         maxCrossAxisExtent: 112,
                                         mainAxisExtent: 116,
                                         mainAxisSpacing: 6,
@@ -930,8 +1121,8 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
                                                   maxLines: 1,
                                                   overflow:
                                                       TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                      fontSize: 11),
+                                                  style:
+                                                      TextStyle(fontSize: 11),
                                                 ),
                                               ],
                                             ),
@@ -960,6 +1151,8 @@ final class ComposerEmojiPicker extends StatefulWidget {
     required this.channel,
     required this.categories,
     this.recent = const <String>[],
+    this.semanticAction = 'Insert',
+    this.canonicalizeReactions = false,
     this.embedded = false,
     this.onSelected,
   });
@@ -968,6 +1161,8 @@ final class ComposerEmojiPicker extends StatefulWidget {
   final KaedeChannel channel;
   final Map<String, List<String>> categories;
   final List<String> recent;
+  final String semanticAction;
+  final bool canonicalizeReactions;
   final bool embedded;
   final ValueChanged<String>? onSelected;
 
@@ -1023,29 +1218,29 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
   @override
   Widget build(BuildContext context) {
     final content = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+      padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
       child: _KeyboardResponsivePickerBody(
         expandedBreakpoint: 170,
         compactBodyHeight: 140,
         header: [
           TextField(
-            key: const ValueKey('composer-emoji-search'),
+            key: ValueKey('composer-emoji-search'),
             controller: _search,
             textInputAction: TextInputAction.search,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               hintText: 'Search emoji',
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),
             onChanged: (_) => setState(() {}),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8),
           SizedBox(
             height: 38,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: widget.categories.length + 1,
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              separatorBuilder: (_, __) => SizedBox(width: 6),
               itemBuilder: (context, index) {
                 final name = index == widget.categories.length
                     ? 'Custom'
@@ -1061,7 +1256,7 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
               },
             ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8),
         ],
         body: _buildChoices(context),
       ),
@@ -1087,30 +1282,61 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
       }
     }
 
+    final customByToken = <String, ComposerCustomEmoji>{
+      for (final emoji in _custom) emoji.token: emoji,
+    };
+    _ComposerEmojiChoice? choiceForValue(String value) {
+      if (!widget.canonicalizeReactions) {
+        final custom = customByToken[value];
+        return custom == null
+            ? _ComposerEmojiChoice.unicode(value)
+            : _ComposerEmojiChoice.custom(custom);
+      }
+      final parsed = tryParseReactionEmoji(value);
+      if (parsed == null) return null;
+      final custom = customByToken[parsed.value];
+      if (custom != null) return _ComposerEmojiChoice.custom(custom);
+      return _ComposerEmojiChoice.reaction(parsed);
+    }
+
     final choices = <_ComposerEmojiChoice>[];
+    final choiceValues = <String>{};
+    void addChoices(Iterable<_ComposerEmojiChoice> candidates) {
+      for (final choice in candidates) {
+        if (choiceValues.add(choice.value)) choices.add(choice);
+      }
+    }
+
     if (query.isNotEmpty) {
       final unicode = <String>{
         ...widget.recent,
         ...widget.categories.values.expand((items) => items),
       };
-      choices.addAll(unicode
-          .where((emoji) => emoji.toLowerCase().contains(query))
-          .map(_ComposerEmojiChoice.unicode));
-      choices.addAll(_custom
-          .where((emoji) => emoji.name.toLowerCase().contains(query))
-          .map(_ComposerEmojiChoice.custom));
+      addChoices(
+        unicode
+            .where((emoji) => emoji.toLowerCase().contains(query))
+            .map(choiceForValue)
+            .whereType<_ComposerEmojiChoice>(),
+      );
+      addChoices(
+        _custom
+            .where((emoji) => emoji.name.toLowerCase().contains(query))
+            .map(_ComposerEmojiChoice.custom),
+      );
     } else if (_category == 'Custom') {
-      choices.addAll(_custom.map(_ComposerEmojiChoice.custom));
+      addChoices(_custom.map(_ComposerEmojiChoice.custom));
     } else {
       final unicode = _category == 'Recent'
           ? widget.recent
           : widget.categories[_category] ?? const <String>[];
-      choices.addAll(unicode.map(_ComposerEmojiChoice.unicode));
+      addChoices(
+        unicode.map(choiceForValue).whereType<_ComposerEmojiChoice>(),
+      );
     }
 
     if (choices.isEmpty) {
       return _PickerStatus(
-        icon: const Icon(Icons.emoji_emotions_outlined),
+        icon: Icon(Icons.emoji_emotions_outlined),
         message: query.isEmpty && _category == 'Recent'
             ? 'Recently used emoji will appear here.'
             : 'No emoji found.',
@@ -1119,7 +1345,7 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
     return LayoutBuilder(builder: (context, constraints) {
       final columns = max(5, min(8, (constraints.maxWidth / 52).floor()));
       return GridView.builder(
-        key: const ValueKey('composer-emoji-grid'),
+        key: ValueKey('composer-emoji-grid'),
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: columns,
@@ -1131,7 +1357,7 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
           final choice = choices[index];
           return Semantics(
             button: true,
-            label: 'Insert ${choice.label}',
+            label: '${widget.semanticAction} ${choice.label}',
             child: ExcludeSemantics(
               child: Tooltip(
                 message: choice.label,
@@ -1161,6 +1387,7 @@ final class _ComposerEmojiChoice {
     required this.label,
     this.emoji,
     this.customEmoji,
+    this.reactionEmoji,
   });
 
   factory _ComposerEmojiChoice.unicode(String emoji) =>
@@ -1173,10 +1400,18 @@ final class _ComposerEmojiChoice {
         customEmoji: emoji,
       );
 
+  factory _ComposerEmojiChoice.reaction(ReactionEmoji emoji) =>
+      _ComposerEmojiChoice._(
+        value: emoji.value,
+        label: emoji.label,
+        reactionEmoji: emoji,
+      );
+
   final String value;
   final String label;
   final String? emoji;
   final ComposerCustomEmoji? customEmoji;
+  final ReactionEmoji? reactionEmoji;
 
   Widget build() {
     if (customEmoji case final custom?) {
@@ -1186,7 +1421,10 @@ final class _ComposerEmojiChoice {
         size: 34,
       );
     }
-    return Text(emoji!, style: const TextStyle(fontSize: 25));
+    if (reactionEmoji != null) {
+      return ReactionEmojiGlyph(emoji: value, size: 34);
+    }
+    return Text(emoji!, style: TextStyle(fontSize: 25));
   }
 }
 
@@ -1258,7 +1496,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
       _loadingMore = false;
       _error = null;
     });
-    _debounce = Timer(const Duration(milliseconds: 300), () {
+    _debounce = Timer(Duration(milliseconds: 300), () {
       if (mounted) unawaited(_load(page: 1, append: false));
     });
   }
@@ -1313,16 +1551,16 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   @override
   Widget build(BuildContext context) {
     final content = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: EdgeInsets.fromLTRB(12, 0, 12, 8),
       child: _KeyboardResponsivePickerBody(
         expandedBreakpoint: 160,
         compactBodyHeight: 180,
         header: [
           TextField(
-            key: const ValueKey('composer-gif-search'),
+            key: ValueKey('composer-gif-search'),
             controller: _search,
             textInputAction: TextInputAction.search,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               hintText: 'Search GIFs',
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
@@ -1334,16 +1572,16 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
             },
           ),
           if (_searchPending || (_loading && _items.isNotEmpty))
-            const LinearProgressIndicator(minHeight: 2),
-          const SizedBox(height: 8),
+            LinearProgressIndicator(minHeight: 2),
+          SizedBox(height: 8),
         ],
         body: _buildResults(),
-        footer: const [
+        footer: [
           SizedBox(height: 5),
           Text(
             'Powered by KLIPY',
             textAlign: TextAlign.center,
-            style: TextStyle(color: KaedeColors.muted, fontSize: 11),
+            style: TextStyle(color: context.kaede.muted, fontSize: 11),
           ),
         ],
       ),
@@ -1378,7 +1616,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
           child: LayoutBuilder(builder: (context, constraints) {
             final columns = constraints.maxWidth >= 520 ? 3 : 2;
             return GridView.builder(
-              key: const ValueKey('composer-gif-grid'),
+              key: ValueKey('composer-gif-grid'),
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: columns,
@@ -1407,18 +1645,18 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(12),
                           child: ColoredBox(
-                            color: KaedeColors.raised,
+                            color: context.kaede.raised,
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
                                 CachedNetworkImage(
                                   imageUrl: gif.previewUrl.toString(),
                                   fit: BoxFit.cover,
-                                  placeholder: (_, __) => const Center(
+                                  placeholder: (_, __) => Center(
                                     child: CircularProgressIndicator(
                                         strokeWidth: 2),
                                   ),
-                                  errorWidget: (_, __, ___) => const Center(
+                                  errorWidget: (_, __, ___) => Center(
                                     child: Icon(Icons.broken_image_outlined),
                                   ),
                                 ),
@@ -1448,17 +1686,17 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
           }),
         ),
         if (_error case final error?) ...[
-          const SizedBox(height: 6),
+          SizedBox(height: 6),
           Text(
             userFacingError(error, summary: 'Could not load more GIFs'),
             textAlign: TextAlign.center,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: KaedeColors.danger, fontSize: 12),
+            style: TextStyle(color: context.kaede.danger, fontSize: 12),
           ),
         ],
         if (_loadingMore)
-          const Padding(
+          Padding(
             padding: EdgeInsets.all(10),
             child: SizedBox.square(
               dimension: 22,
@@ -1467,9 +1705,9 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
           )
         else if (_nextPage case final page?)
           TextButton.icon(
-            key: const ValueKey('composer-gif-load-more'),
+            key: ValueKey('composer-gif-load-more'),
             onPressed: () => _load(page: page, append: true),
-            icon: const Icon(Icons.expand_more_rounded),
+            icon: Icon(Icons.expand_more_rounded),
             label: Text(_error == null ? 'Load more' : 'Retry load more'),
           ),
       ],
@@ -1506,7 +1744,7 @@ final class _KeyboardResponsivePickerBody extends StatelessWidget {
             );
           }
           return ListView(
-            key: const ValueKey('composer-picker-compact-scroll'),
+            key: ValueKey('composer-picker-compact-scroll'),
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             children: [
               ...header,
@@ -1539,7 +1777,7 @@ final class _KeyboardSafePickerSheet extends StatelessWidget {
           12,
     );
     return AnimatedPadding(
-      duration: const Duration(milliseconds: 180),
+      duration: Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
       padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
       child: SizedBox(
@@ -1559,16 +1797,16 @@ final class _PickerStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
-          padding: const EdgeInsets.all(20),
+          padding: EdgeInsets.all(20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               SizedBox.square(dimension: 28, child: Center(child: icon)),
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               Text(
                 message,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: KaedeColors.muted),
+                style: TextStyle(color: context.kaede.muted),
               ),
             ],
           ),
@@ -1585,18 +1823,18 @@ final class _PickerError extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
-          padding: const EdgeInsets.all(20),
+          padding: EdgeInsets.all(20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.cloud_off_outlined, color: KaedeColors.danger),
-              const SizedBox(height: 10),
+              Icon(Icons.cloud_off_outlined, color: context.kaede.danger),
+              SizedBox(height: 10),
               Text(message, textAlign: TextAlign.center),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               OutlinedButton.icon(
                 onPressed: () => unawaited(onRetry()),
-                icon: const Icon(Icons.refresh_rounded),
-                label: const Text('Retry'),
+                icon: Icon(Icons.refresh_rounded),
+                label: Text('Retry'),
               ),
             ],
           ),

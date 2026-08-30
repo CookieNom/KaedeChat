@@ -42,7 +42,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 VIDEO_TYPES = {"video/mp4", "video/webm"}
-IMAGE_PIPELINE_VERSION = 2
+IMAGE_PIPELINE_VERSION = 4
 
 
 class MediaValidationError(ValueError):
@@ -56,6 +56,8 @@ class Derivative:
     content_type: str
     width: int
     height: int
+    animated: bool = False
+    duration_ms: int | None = None
 
 
 def sanitize_filename(value: str) -> str:
@@ -217,6 +219,9 @@ def image_derivatives(
     page_height = int(image.get("page-height")) if image.get_typeof("page-height") else image.height
     height = int(page_height)
     pages = max(1, image.height // page_height)
+    raw_delays = image.get("delay") if image.get_typeof("delay") else None
+    frame_delays = [int(delay) for delay in raw_delays] if isinstance(raw_delays, list) else None
+    animation_duration_ms = sum(frame_delays) if pages > 1 and frame_delays else None
     if width <= 0 or height <= 0 or width * height * pages > 100_000_000:
         raise MediaValidationError("image dimensions exceed the processing limit")
     image = image.autorot()
@@ -249,13 +254,12 @@ def image_derivatives(
                 image.crop(left, (frame * page_height) + top, crop_pixel_width, crop_pixel_height)
                 for frame in range(pages)
             ]
-            delays = image.get("delay") if image.get_typeof("delay") else None
             loop = int(image.get("loop")) if image.get_typeof("loop") else None
             image = frames[0] if pages == 1 else pyvips.Image.arrayjoin(frames, across=1)
             if pages > 1:
                 image.set_type(pyvips.GValue.gint_type, "page-height", crop_pixel_height)
-                if isinstance(delays, list):
-                    image.set_type(pyvips.GValue.array_int_type, "delay", delays)
+                if frame_delays is not None:
+                    image.set_type(pyvips.GValue.array_int_type, "delay", frame_delays)
                 if loop is not None:
                     image.set_type(pyvips.GValue.gint_type, "loop", loop)
             width = crop_pixel_width
@@ -281,6 +285,11 @@ def image_derivatives(
                 page_height = height
             except (TypeError, ValueError, pyvips.Error) as exc:
                 raise MediaValidationError("background removal failed") from exc
+    if transform and transform.get("sticker"):
+        if (width, height) != (320, 320):
+            raise MediaValidationError("sticker images must be 320 by 320 pixels")
+        if pages > 1 and (animation_duration_ms is None or animation_duration_ms > 5_000):
+            raise MediaValidationError("animated stickers cannot exceed 5 seconds")
     derivatives: list[Derivative] = []
     encoded_outputs: dict[tuple[int, int], bytes] = {}
     for size in sizes:
@@ -309,6 +318,8 @@ def image_derivatives(
                 content_type="image/webp",
                 width=output_dimensions[0],
                 height=resized_page_height,
+                animated=pages > 1,
+                duration_ms=animation_duration_ms,
             )
         )
     # Hash what people initially see, not libvips' stacked animation sheet.

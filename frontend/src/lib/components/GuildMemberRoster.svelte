@@ -7,7 +7,7 @@
     roleColorCss
   } from '$lib/chat/members';
   import type { GuildMemberSummary, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
-  import { userPublicHandle } from '$lib/chat/users';
+  import { isApplicationUser, userPublicHandle } from '$lib/chat/users';
   import Icon from './Icon.svelte';
 
   let {
@@ -49,7 +49,8 @@
     </span>
     <span class="roster-member-copy">
       <span class="roster-name" style:color={nameColor}
-        ><strong>{displayName}</strong>{#if member.user.bot}<small class="bot-badge">BOT</small
+        ><strong>{displayName}</strong>{#if isApplicationUser(member.user)}<small class="app-badge"
+            >APP</small
           >{/if}</span
       >
       {#if member.user.custom_status?.trim()}
@@ -267,7 +268,7 @@
     gap: 0.35rem;
   }
 
-  .bot-badge {
+  .app-badge {
     border-radius: 4px;
     padding: 0.08rem 0.28rem;
     color: var(--on-accent, white);

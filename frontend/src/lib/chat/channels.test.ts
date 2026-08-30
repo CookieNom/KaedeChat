@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { entityKey } from './refs';
-import { firstNavigableChannel, groupChannels, moveChannel } from './channels';
+import {
+  channelPositionRequest,
+  firstNavigableChannel,
+  groupChannels,
+  moveChannel
+} from './channels';
 import type { Channel } from './types';
 
 function channel(id: string, position: number, type = 0, parent: Channel | null = null): Channel {
@@ -62,6 +67,25 @@ describe('channel grouping and reordering', () => {
     expect(moved.map((item) => item.id)).toEqual(['20', '40', '30']);
     expect(moved[1].parent_id).toBe('20');
     expect(moved.map((item) => item.position)).toEqual([0, 1, 2]);
+    expect(channelPositionRequest([category, first, second], moved)).toEqual([
+      { id: '20', position: 0 },
+      { id: '40', position: 1 },
+      { id: '30', position: 2 }
+    ]);
+  });
+
+  it('sends parent_id only for the channel whose category actually changed', () => {
+    const category = channel('20', 1, 4);
+    const child = channel('30', 2, 0, category);
+    const ungrouped = channel('10', 0);
+    const previous = [ungrouped, category, child];
+    const moved = moveChannel(previous, entityKey(ungrouped), entityKey(category), 'inside');
+
+    expect(channelPositionRequest(previous, moved)).toEqual([
+      { id: '20', position: 0 },
+      { id: '30', position: 1 },
+      { id: '10', position: 2, parent_id: '20' }
+    ]);
   });
 
   it('moves a category together with its children', () => {

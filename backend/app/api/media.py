@@ -7,11 +7,11 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path as FilePath
-from typing import cast
+from typing import Any, cast
 
 import anyio
 from anyio import CapacityLimiter, WouldBlock
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response, status
 from fastapi.responses import RedirectResponse
 from redis.asyncio import Redis
 from sqlalchemy import delete, exists, func, select, text
@@ -27,8 +27,13 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.guilds import local_guild
-from app.chat.channel_access import load_channel_access
+from app.chat.audit import add_audit_entry, normalize_audit_reason
+from app.chat.channel_access import ChannelAccess, load_channel_access
 from app.chat.events import guild_topic, publish_dispatch, user_topic
+from app.chat.expression_events import (
+    publish_guild_emojis_update,
+    publish_guild_stickers_update,
+)
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.hierarchy import guild_role, require_can_manage_role
 from app.chat.payloads import (
@@ -38,7 +43,7 @@ from app.chat.payloads import (
     sticker_payload,
     user_payload,
 )
-from app.chat.permissions import require_permissions
+from app.chat.permissions import require_can_manage_expression, require_permissions
 from app.core.metrics import increment_metric
 from app.core.permission_contract import required_permissions
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
@@ -46,13 +51,20 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference, Snowflake
-from app.db.bot_models import AbuseReport
+from app.db.bot_models import (
+    AbuseReport,
+    ApplicationEmoji,
+    BotInstallation,
+    BotInteraction,
+    BotInteractionResponse,
+)
 from app.db.models import (
     Attachment,
     Channel,
     DMConversation,
     DMParticipant,
     Emoji,
+    EmojiRoleRestriction,
     Guild,
     GuildMember,
     MediaTombstoneSource,
@@ -67,8 +79,16 @@ from app.db.models import (
 )
 from app.federation.client import signed_request, signed_stream_request
 from app.federation.dm_history import history_media_capability_status, history_media_path
-from app.federation.network import FederationNetworkError, normalize_domain
-from app.federation.relationships import queue_friend_profile_updates
+from app.federation.guild_management import (
+    GuildManagementOperation,
+    GuildManagementResult,
+    proxy_remote_guild_management,
+)
+from app.federation.network import (
+    FederationNetworkError,
+    normalize_domain,
+)
+from app.federation.relationships import queue_profile_updates
 from app.media.digest_revocation import (
     DIGEST_REVOCATION_STATUSES,
     lock_asset_digest,
@@ -94,9 +114,15 @@ from app.media.schemas import (
 )
 from app.media.service import (
     attachment_payload,
+    attachment_variant_is_animated,
     bind_asset,
     create_upload_ticket,
     finalize_attachment,
+    media_redirect_response,
+    require_image_type,
+    require_sticker_asset,
+    require_sticker_type,
+    ticket_payload,
 )
 from app.media.storage import S3Storage, StorageError
 from app.tasks import federation_deliver, media_cache_gc, media_local_purge, media_process
@@ -109,6 +135,33 @@ PRIVATE_MEDIA_CAPABILITY_SECONDS = 60
 PUBLIC_MEDIA_CAPABILITY_SECONDS = 5 * 60
 PUBLIC_MEDIA_REDIRECT_CACHE_SECONDS = 60
 remote_media_fetch_limiter = CapacityLimiter(REMOTE_MEDIA_FETCH_CONCURRENCY)
+
+
+def _federated_authority_auth(auth: object, settings: Settings) -> bool:
+    if not isinstance(auth, AuthenticatedUser):
+        return False
+    return (
+        not auth.access_token
+        and auth.grant is None
+        and auth.user.origin_domain != settings.domain
+        and not auth.user.is_local
+    )
+
+
+async def _proxy_guild_management(
+    session: AsyncSession,
+    settings: Settings,
+    guild_ref: EntityRef,
+    auth: AuthenticatedUser,
+    operation: GuildManagementOperation,
+    payload: dict[str, Any],
+) -> tuple[bool, GuildManagementResult | None]:
+    result = await proxy_remote_guild_management(
+        session, settings, guild_ref, auth.user, operation, payload
+    )
+    return result is not None, result
+
+
 REMOTE_MEDIA_RESERVATION_TTL_MS = 300_000
 REMOTE_MEDIA_RESERVE_LUA = """
 local function cleanup(zset_key, hash_key, total_key, now)
@@ -287,25 +340,68 @@ def copy_rate_limit_headers(source: Response, destination: Response) -> None:
             destination.headers[name] = value
 
 
-def require_image_type(content_type: str | None) -> None:
-    if content_type not in IMAGE_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail={"code": "IMAGE_ASSET_TYPE_REQUIRED"},
+async def require_channel_attachment_access(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    user: User,
+    channel_ref: EntityRef,
+    payload: UploadTicketRequest,
+) -> ChannelAccess:
+    """Authorize a channel upload at the channel's current authority."""
+
+    access = await load_channel_access(session, settings, user, channel_ref)
+    if access.guild is not None:
+        await require_permissions(
+            session,
+            redis,
+            access.guild,
+            user,
+            required_permissions("attachment.create"),
+            channel=access.channel,
         )
+    expected_mode = "e2ee" if access.channel.encryption_mode == "e2ee" else "plaintext"
+    if expected_mode == "e2ee" and access.channel.encryption_state != "active":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
+    if payload.encryption_mode != expected_mode:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": (
+                    "E2EE_ATTACHMENT_REQUIRED" if expected_mode == "e2ee" else "E2EE_NOT_ENABLED"
+                )
+            },
+        )
+    return access
 
 
-def ticket_payload(attachment: Attachment, upload_url: str) -> dict[str, object]:
-    return {
-        **attachment_payload(attachment),
-        "upload_url": upload_url,
-        "upload_method": "PUT",
-        "expires_at": (
-            attachment.upload_expires_at.isoformat()
-            if attachment.upload_expires_at is not None
-            else None
-        ),
-    }
+async def issue_channel_attachment_ticket(
+    session: AsyncSession,
+    settings: Settings,
+    snowflake: SnowflakeGenerator,
+    user: User,
+    access: ChannelAccess,
+    payload: UploadTicketRequest,
+) -> dict[str, object]:
+    """Create a ticket with immutable channel provenance for later binding."""
+
+    attachment, upload_url = await create_upload_ticket(
+        session,
+        settings,
+        snowflake,
+        user,
+        filename=payload.filename,
+        content_type=payload.content_type,
+        size=payload.size,
+        encryption_mode=payload.encryption_mode,
+        encryption_protocol=payload.encryption_protocol,
+        duration_secs=payload.duration_secs,
+        waveform=payload.waveform,
+    )
+    attachment.upload_channel_id = access.channel.id
+    attachment.upload_channel_domain = access.channel.origin_domain
+    await session.commit()
+    return ticket_payload(attachment, upload_url)
 
 
 @router.post(
@@ -329,38 +425,70 @@ async def create_channel_attachment_ticket(
         user_id=auth.user.id,
         user_domain=auth.user.origin_domain,
     )
-    access = await load_channel_access(session, settings, auth.user, channel_id)
-    if access.guild is not None:
-        await require_permissions(
-            session,
-            redis,
-            access.guild,
-            auth.user,
-            required_permissions("attachment.create"),
-            channel=access.channel,
-        )
-    expected_mode = "e2ee" if access.channel.encryption_mode == "e2ee" else "plaintext"
-    if expected_mode == "e2ee" and access.channel.encryption_state != "active":
-        raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
-    if payload.encryption_mode != expected_mode:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": (
-                    "E2EE_ATTACHMENT_REQUIRED" if expected_mode == "e2ee" else "E2EE_NOT_ENABLED"
-                )
-            },
-        )
-    attachment, upload_url = await create_upload_ticket(
+    access = await require_channel_attachment_access(
+        session,
+        redis,
+        settings,
+        auth.user,
+        channel_id,
+        payload,
+    )
+    # Message attachments are owned and finalized at the sender's home before
+    # their immutable metadata is replicated to a remote guild or DM
+    # authority.  Minting this ticket at the channel authority would return an
+    # ID that the home cannot finalize and would bypass its storage ledger.
+    # Keep the remote channel reference on the local row as a capability fence.
+    return await issue_channel_attachment_ticket(
         session,
         settings,
         snowflake,
         auth.user,
+        access,
+        payload,
+    )
+
+
+async def issue_image_asset_ticket(
+    session: AsyncSession,
+    redis: Redis,
+    snowflake: SnowflakeGenerator,
+    settings: Settings,
+    user: User,
+    payload: UploadTicketRequest,
+    response: Response,
+    *,
+    purpose: str,
+    bot_installation: BotInstallation | None = None,
+    federated_guild_upload: bool = False,
+    max_bytes: int | None = None,
+    too_large_code: str = "ATTACHMENT_TOO_LARGE",
+) -> dict[str, object]:
+    require_image_type(payload.content_type)
+    if payload.encryption_mode != "plaintext":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_NOT_ENABLED"})
+    if max_bytes is not None and payload.size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": too_large_code, "max_bytes": max_bytes},
+        )
+    await enforce_client_rate_limit(
+        redis,
+        response,
+        CLIENT_RATE_LIMITS["upload_ticket"],
+        user_id=user.id,
+        user_domain=user.origin_domain,
+    )
+    attachment, upload_url = await create_upload_ticket(
+        session,
+        settings,
+        snowflake,
+        user,
         filename=payload.filename,
         content_type=payload.content_type,
         size=payload.size,
-        encryption_mode=payload.encryption_mode,
-        encryption_protocol=payload.encryption_protocol,
+        purpose=purpose,
+        bot_installation=bot_installation,
+        federated_guild_upload=federated_guild_upload,
     )
     await session.commit()
     return ticket_payload(attachment, upload_url)
@@ -377,26 +505,16 @@ async def create_user_asset_ticket(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
-    require_image_type(payload.content_type)
-    await enforce_client_rate_limit(
-        redis,
-        response,
-        CLIENT_RATE_LIMITS["upload_ticket"],
-        user_id=auth.user.id,
-        user_domain=auth.user.origin_domain,
-    )
-    attachment, upload_url = await create_upload_ticket(
+    return await issue_image_asset_ticket(
         session,
-        settings,
+        redis,
         snowflake,
+        settings,
         auth.user,
-        filename=payload.filename,
-        content_type=payload.content_type,
-        size=payload.size,
+        payload,
+        response,
         purpose=kind,
     )
-    await session.commit()
-    return ticket_payload(attachment, upload_url)
 
 
 @router.put("/api/v1/users/@me/assets/{kind}")
@@ -435,7 +553,7 @@ async def commit_user_asset(
     field = "avatar_hash" if kind == "avatar" else "banner_hash"
     setattr(user, field, attachment.content_sha256)
     user.profile_version += 1
-    destinations = await queue_friend_profile_updates(session, settings, user)
+    destinations = await queue_profile_updates(session, settings, user)
     await session.commit()
     rendered = attachment_payload(attachment)
     await publish_dispatch(
@@ -451,6 +569,48 @@ async def commit_user_asset(
     return rendered
 
 
+@router.delete("/api/v1/users/@me/assets/{kind}")
+async def delete_user_asset(
+    kind: AssetKind,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    user = await session.scalar(
+        select(User)
+        .where(User.id == auth.user.id, User.origin_domain == auth.user.origin_domain)
+        .with_for_update()
+    )
+    if user is None:
+        raise HTTPException(status_code=401, detail={"code": "AUTHENTICATION_REQUIRED"})
+    binding = f"user:{settings.domain}:{user.id}:{kind}"
+    attachment = await session.scalar(
+        select(Attachment).where(Attachment.asset_binding == binding).with_for_update()
+    )
+    field = "avatar_hash" if kind == "avatar" else "banner_hash"
+    if getattr(user, field) is None and attachment is None:
+        return user_payload(user)
+    setattr(user, field, None)
+    if attachment is not None:
+        attachment.asset_binding = None
+    user.profile_version += 1
+    destinations = await queue_profile_updates(session, settings, user)
+    await session.commit()
+    rendered = user_payload(user)
+    await publish_dispatch(
+        redis,
+        user_topic(settings.domain, user.id),
+        "USER_UPDATE",
+        rendered,
+    )
+    for destination in destinations:
+        await enqueue_best_effort(federation_deliver, destination)
+    if attachment is not None:
+        await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
+    return rendered
+
+
 @router.post("/api/v1/guilds/{guild_id}/assets/{kind}", status_code=201)
 async def create_guild_asset_ticket(
     guild_id: EntityRef,
@@ -463,31 +623,35 @@ async def create_guild_asset_ticket(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
-    require_image_type(payload.content_type)
-    await enforce_client_rate_limit(
-        redis,
-        response,
-        CLIENT_RATE_LIMITS["upload_ticket"],
-        user_id=auth.user.id,
-        user_domain=auth.user.origin_domain,
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "guild_asset.ticket",
+        {
+            "kind": kind,
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+        },
     )
+    if proxied:
+        return cast(dict[str, object], result.body if result is not None else None)
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("guild.asset.manage")
     )
     purpose = "guild_icon" if kind == "icon" else "guild_banner"
-    attachment, upload_url = await create_upload_ticket(
+    return await issue_image_asset_ticket(
         session,
-        settings,
+        redis,
         snowflake,
+        settings,
         auth.user,
-        filename=payload.filename,
-        content_type=payload.content_type,
-        size=payload.size,
+        payload,
+        response,
         purpose=purpose,
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
-    await session.commit()
-    return ticket_payload(attachment, upload_url)
 
 
 @router.put("/api/v1/guilds/{guild_id}/assets/{kind}")
@@ -501,13 +665,34 @@ async def commit_guild_asset(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "guild_asset.commit",
+        {
+            "kind": kind,
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+        },
+    )
+    if proxied:
+        if result is None:
+            raise RuntimeError("missing federated guild asset response")
+        response.status_code = result.status_code
+        return cast(dict[str, object], result.body)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("guild.asset.manage")
     )
     purpose = "guild_icon" if kind == "icon" else "guild_banner"
     attachment = await finalize_attachment(
-        session, settings, auth.user, int(payload.attachment_id), required_purpose=purpose
+        session,
+        settings,
+        auth.user,
+        int(payload.attachment_id),
+        required_purpose=purpose,
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
     if attachment.scan_status != "clean":
         await session.commit()
@@ -553,6 +738,63 @@ async def commit_guild_asset(
     return attachment_payload(attachment)
 
 
+@router.delete("/api/v1/guilds/{guild_id}/assets/{kind}")
+async def delete_guild_asset(
+    guild_id: EntityRef,
+    kind: GuildAssetKind,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "guild_asset.delete",
+        {"kind": kind},
+    )
+    if proxied:
+        return cast(dict[str, object], result.body if result is not None else None)
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    await require_permissions(
+        session, redis, guild, auth.user, required_permissions("guild.asset.manage")
+    )
+    binding = f"guild:{guild.origin_domain}:{guild.id}:{kind}"
+    attachment = await session.scalar(
+        select(Attachment).where(Attachment.asset_binding == binding).with_for_update()
+    )
+    field = "icon_hash" if kind == "icon" else "banner_hash"
+    if getattr(guild, field) is None and attachment is None:
+        return guild_payload(guild)
+    setattr(guild, field, None)
+    if attachment is not None:
+        attachment.asset_binding = None
+    await session.flush()
+    await session.refresh(guild)
+    rendered = guild_payload(guild)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.update",
+        {"guild": rendered},
+    )
+    await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_UPDATE",
+        rendered,
+    )
+    if attachment is not None:
+        await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
+    return rendered
+
+
 async def local_manageable_role(
     session: AsyncSession,
     settings: Settings,
@@ -582,34 +824,35 @@ async def create_role_icon_ticket(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
-    require_image_type(payload.content_type)
-    if payload.size > settings.media_max_emoji_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail={"code": "ROLE_ICON_TOO_LARGE", "max_bytes": settings.media_max_emoji_bytes},
-        )
-    await enforce_client_rate_limit(
-        redis,
-        response,
-        CLIENT_RATE_LIMITS["upload_ticket"],
-        user_id=auth.user.id,
-        user_domain=auth.user.origin_domain,
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "role_icon.ticket",
+        {
+            "resource_ref": str(role_id),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+        },
     )
+    if proxied:
+        return cast(dict[str, object], result.body if result is not None else None)
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(session, redis, guild, auth.user, required_permissions("role.update"))
     await local_manageable_role(session, settings, guild, auth.user, role_id)
-    attachment, upload_url = await create_upload_ticket(
+    return await issue_image_asset_ticket(
         session,
-        settings,
+        redis,
         snowflake,
+        settings,
         auth.user,
-        filename=payload.filename,
-        content_type=payload.content_type,
-        size=payload.size,
+        payload,
+        response,
         purpose="role_icon",
+        federated_guild_upload=_federated_authority_auth(auth, settings),
+        max_bytes=settings.media_max_emoji_bytes,
+        too_large_code="ROLE_ICON_TOO_LARGE",
     )
-    await session.commit()
-    return ticket_payload(attachment, upload_url)
 
 
 @router.put("/api/v1/guilds/{guild_id}/roles/{role_id}/icon")
@@ -623,11 +866,32 @@ async def commit_role_icon(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "role_icon.commit",
+        {
+            "resource_ref": str(role_id),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+        },
+    )
+    if proxied:
+        if result is None:
+            raise RuntimeError("missing federated role icon response")
+        response.status_code = result.status_code
+        return cast(dict[str, object], result.body)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(session, redis, guild, auth.user, required_permissions("role.update"))
     role = await local_manageable_role(session, settings, guild, auth.user, role_id)
     attachment = await finalize_attachment(
-        session, settings, auth.user, int(payload.attachment_id), required_purpose="role_icon"
+        session,
+        settings,
+        auth.user,
+        int(payload.attachment_id),
+        required_purpose="role_icon",
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
     if attachment.scan_status != "clean":
         await session.commit()
@@ -677,6 +941,16 @@ async def delete_role_icon(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "role_icon.delete",
+        {"resource_ref": str(role_id)},
+    )
+    if proxied:
+        return cast(dict[str, object], result.body if result is not None else None)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(session, redis, guild, auth.user, required_permissions("role.update"))
     role = await local_manageable_role(session, settings, guild, auth.user, role_id)
@@ -726,6 +1000,16 @@ async def create_emoji_ticket(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "emoji.ticket",
+        {"data": payload.model_dump(mode="json", exclude_unset=True)},
+    )
+    if proxied:
+        return cast(dict[str, object], result.body if result is not None else None)
     require_image_type(payload.content_type)
     if payload.size > settings.media_max_emoji_bytes:
         raise HTTPException(
@@ -744,7 +1028,7 @@ async def create_emoji_ticket(
     )
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+        session, redis, guild, auth.user, required_permissions("guild.expression.create")
     )
     attachment, upload_url = await create_upload_ticket(
         session,
@@ -755,6 +1039,7 @@ async def create_emoji_ticket(
         content_type=payload.content_type,
         size=payload.size,
         purpose="emoji",
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
     await session.commit()
     return ticket_payload(attachment, upload_url)
@@ -770,13 +1055,36 @@ async def create_emoji(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "emoji.create",
+        {
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "reason": normalize_audit_reason(reason),
+        },
+    )
+    if proxied:
+        if result is not None:
+            response.status_code = result.status_code
+            return cast(dict[str, object], result.body)
+        raise RuntimeError("missing federated emoji response")
+    reason = normalize_audit_reason(reason)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+        session, redis, guild, auth.user, required_permissions("guild.expression.create")
     )
     attachment = await finalize_attachment(
-        session, settings, auth.user, int(payload.attachment_id), required_purpose="emoji"
+        session,
+        settings,
+        auth.user,
+        int(payload.attachment_id),
+        required_purpose="emoji",
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
     if attachment.scan_status != "clean":
         await session.commit()
@@ -796,6 +1104,20 @@ async def create_emoji(
         raise HTTPException(status_code=409, detail={"code": "EMOJI_LIMIT_REACHED"})
     if any(item.name.casefold() == payload.name.casefold() for item in existing):
         raise HTTPException(status_code=409, detail={"code": "EMOJI_NAME_TAKEN"})
+    restriction_roles: list[Role] = []
+    for role_ref in payload.role_ids:
+        role_id, role_domain = role_ref.resolve(settings.domain)
+        if role_domain != guild.origin_domain or role_id == guild.id:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "EMOJI_ROLE_INVALID",
+                    "message": "Emoji restrictions must reference roles in this guild.",
+                },
+            )
+        role = await guild_role(session, guild, role_id)
+        await require_can_manage_role(session, guild, auth.user, role)
+        restriction_roles.append(role)
     variant = attachment.variants.get("thumbnail_128")
     object_key = variant.get("object_key") if isinstance(variant, dict) else None
     if not isinstance(object_key, str):
@@ -808,7 +1130,7 @@ async def create_emoji(
         name=payload.name,
         object_key=object_key,
         media_hash=attachment.content_sha256,
-        animated=attachment.detected_content_type in {"image/gif", "image/webp"},
+        animated=attachment_variant_is_animated(attachment, "thumbnail_128"),
         creator_id=auth.user.id,
         creator_domain=auth.user.origin_domain,
     )
@@ -819,7 +1141,20 @@ async def create_emoji(
     )
     session.add(emoji)
     await session.flush()
-    rendered = emoji_payload(emoji)
+    for role in restriction_roles:
+        session.add(
+            EmojiRoleRestriction(
+                emoji_id=emoji.id,
+                emoji_domain=emoji.origin_domain,
+                role_id=role.id,
+                role_domain=role.origin_domain,
+                guild_id=guild.id,
+                guild_domain=guild.origin_domain,
+            )
+        )
+    rendered = emoji_payload(
+        emoji, [f"{role.id}@{role.origin_domain}" for role in restriction_roles]
+    )
     await queue_guild_mutation(
         session,
         settings,
@@ -827,6 +1162,27 @@ async def create_emoji(
         auth.user,
         "guild.emoji.create",
         {"emoji": rendered},
+    )
+    await add_audit_entry(
+        session,
+        snowflake,
+        guild,
+        auth.user,
+        60,
+        target_type="emoji",
+        target_ref={
+            "id": str(emoji.id),
+            "origin_domain": emoji.origin_domain,
+            "name": emoji.name,
+        },
+        reason=reason,
+        changes=[
+            {"key": "name", "new_value": emoji.name},
+            {
+                "key": "roles",
+                "new_value": [f"{role.id}@{role.origin_domain}" for role in restriction_roles],
+            },
+        ],
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
@@ -836,6 +1192,7 @@ async def create_emoji(
         "GUILD_EMOJI_CREATE",
         rendered,
     )
+    await publish_guild_emojis_update(session, redis, guild)
     return rendered
 
 
@@ -846,18 +1203,36 @@ async def delete_emoji(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
-    guild = await local_guild(session, settings, guild_id, for_update=True)
-    await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+    proxied, _ = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "emoji.delete",
+        {"resource_id": int(emoji_id), "reason": normalize_audit_reason(reason)},
     )
+    if proxied:
+        return Response(status_code=204)
+    reason = normalize_audit_reason(reason)
+    guild = await local_guild(session, settings, guild_id, for_update=True)
     emoji = await session.get(Emoji, (int(emoji_id), settings.domain))
     if emoji is None or (emoji.guild_id, emoji.guild_domain) != (
         guild.id,
         guild.origin_domain,
     ):
         raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    await require_can_manage_expression(
+        session,
+        redis,
+        guild,
+        auth.user,
+        creator_id=emoji.creator_id,
+        creator_domain=emoji.creator_domain,
+    )
     attachment = await session.scalar(
         select(Attachment)
         .where(Attachment.asset_binding == f"emoji:{emoji.origin_domain}:{emoji.id}")
@@ -872,6 +1247,21 @@ async def delete_emoji(
         "guild.emoji.delete",
         {"emoji": rendered},
     )
+    await add_audit_entry(
+        session,
+        snowflake,
+        guild,
+        auth.user,
+        62,
+        target_type="emoji",
+        target_ref={
+            "id": str(emoji.id),
+            "origin_domain": emoji.origin_domain,
+            "name": emoji.name,
+        },
+        reason=reason,
+        changes=[{"key": "name", "old_value": emoji.name}],
+    )
     await session.delete(emoji)
     if attachment is not None:
         attachment.asset_binding = None
@@ -883,6 +1273,7 @@ async def delete_emoji(
         "GUILD_EMOJI_DELETE",
         rendered,
     )
+    await publish_guild_emojis_update(session, redis, guild)
     if attachment is not None:
         await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
     return Response(status_code=204)
@@ -929,7 +1320,17 @@ async def create_sticker_ticket(
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
-    require_image_type(payload.content_type)
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "sticker.ticket",
+        {"data": payload.model_dump(mode="json", exclude_unset=True)},
+    )
+    if proxied:
+        return cast(dict[str, object], result.body if result is not None else None)
+    require_sticker_type(payload.content_type)
     if payload.size > settings.media_max_sticker_bytes:
         raise HTTPException(
             status_code=413,
@@ -948,9 +1349,12 @@ async def create_sticker_ticket(
     )
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+        session, redis, guild, auth.user, required_permissions("guild.expression.create")
     )
-    transform: dict[str, object] = {"remove_background": payload.remove_background}
+    transform: dict[str, object] = {
+        "sticker": True,
+        "remove_background": payload.remove_background,
+    }
     if payload.crop is not None:
         transform["crop"] = payload.crop.model_dump()
     attachment, upload_url = await create_upload_ticket(
@@ -963,6 +1367,7 @@ async def create_sticker_ticket(
         size=payload.size,
         purpose="sticker",
         media_transform=transform,
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
     await session.commit()
     return ticket_payload(attachment, upload_url)
@@ -978,20 +1383,43 @@ async def create_sticker(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> dict[str, object]:
+    proxied, result = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "sticker.create",
+        {
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "reason": normalize_audit_reason(reason),
+        },
+    )
+    if proxied:
+        if result is not None:
+            response.status_code = result.status_code
+            return cast(dict[str, object], result.body)
+        raise RuntimeError("missing federated sticker response")
+    reason = normalize_audit_reason(reason)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+        session, redis, guild, auth.user, required_permissions("guild.expression.create")
     )
     attachment = await finalize_attachment(
-        session, settings, auth.user, int(payload.attachment_id), required_purpose="sticker"
+        session,
+        settings,
+        auth.user,
+        int(payload.attachment_id),
+        required_purpose="sticker",
+        federated_guild_upload=_federated_authority_auth(auth, settings),
     )
     if attachment.scan_status != "clean":
         await session.commit()
         await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
         response.status_code = status.HTTP_202_ACCEPTED
         return attachment_payload(attachment)
-    require_image_type(attachment.detected_content_type)
+    require_sticker_asset(attachment)
     existing = list(
         await session.scalars(
             select(Sticker)
@@ -1014,7 +1442,8 @@ async def create_sticker(
         name=payload.name,
         description=payload.description.strip() if payload.description else None,
         media_hash=attachment.content_sha256,
-        animated=attachment.detected_content_type in {"image/gif", "image/webp"},
+        animated=attachment_variant_is_animated(attachment, "thumbnail_512"),
+        tags=payload.tags or [payload.name.casefold()],
         creator_id=auth.user.id,
         creator_domain=auth.user.origin_domain,
     )
@@ -1030,11 +1459,31 @@ async def create_sticker(
         "guild.sticker.create",
         {"sticker": rendered},
     )
+    await add_audit_entry(
+        session,
+        snowflake,
+        guild,
+        auth.user,
+        90,
+        target_type="sticker",
+        target_ref={
+            "id": str(sticker.id),
+            "origin_domain": sticker.origin_domain,
+            "name": sticker.name,
+        },
+        reason=reason,
+        changes=[
+            {"key": "name", "new_value": sticker.name},
+            {"key": "description", "new_value": sticker.description},
+            {"key": "tags", "new_value": sticker.tags},
+        ],
+    )
     await session.commit()
     await wake_queued_guild_federation(guild)
     await publish_dispatch(
         redis, guild_topic(guild.origin_domain, guild.id), "GUILD_STICKER_CREATE", rendered
     )
+    await publish_guild_stickers_update(session, redis, guild)
     return rendered
 
 
@@ -1045,18 +1494,36 @@ async def delete_sticker(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
-    guild = await local_guild(session, settings, guild_id, for_update=True)
-    await require_permissions(
-        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+    proxied, _ = await _proxy_guild_management(
+        session,
+        settings,
+        guild_id,
+        auth,
+        "sticker.delete",
+        {"resource_id": int(sticker_id), "reason": normalize_audit_reason(reason)},
     )
+    if proxied:
+        return Response(status_code=204)
+    reason = normalize_audit_reason(reason)
+    guild = await local_guild(session, settings, guild_id, for_update=True)
     sticker = await session.get(Sticker, (int(sticker_id), settings.domain))
     if sticker is None or (sticker.guild_id, sticker.guild_domain) != (
         guild.id,
         guild.origin_domain,
     ):
         raise HTTPException(status_code=404, detail={"code": "STICKER_NOT_FOUND"})
+    await require_can_manage_expression(
+        session,
+        redis,
+        guild,
+        auth.user,
+        creator_id=sticker.creator_id,
+        creator_domain=sticker.creator_domain,
+    )
     attachment = await session.scalar(
         select(Attachment)
         .where(Attachment.asset_binding == f"sticker:{sticker.origin_domain}:{sticker.id}")
@@ -1071,6 +1538,21 @@ async def delete_sticker(
         "guild.sticker.delete",
         {"sticker": rendered},
     )
+    await add_audit_entry(
+        session,
+        snowflake,
+        guild,
+        auth.user,
+        92,
+        target_type="sticker",
+        target_ref={
+            "id": str(sticker.id),
+            "origin_domain": sticker.origin_domain,
+            "name": sticker.name,
+        },
+        reason=reason,
+        changes=[{"key": "name", "old_value": sticker.name}],
+    )
     await session.delete(sticker)
     if attachment is not None:
         attachment.asset_binding = None
@@ -1079,6 +1561,7 @@ async def delete_sticker(
     await publish_dispatch(
         redis, guild_topic(guild.origin_domain, guild.id), "GUILD_STICKER_DELETE", rendered
     )
+    await publish_guild_stickers_update(session, redis, guild)
     if attachment is not None:
         await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
     return Response(status_code=204)
@@ -1170,7 +1653,7 @@ def redirect_to_object(
         )
     except StorageError as exc:
         raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
-    response = RedirectResponse(url, status_code=302)
+    response = media_redirect_response(url)
     response.headers["Cache-Control"] = (
         f"public, max-age={PUBLIC_MEDIA_REDIRECT_CACHE_SECONDS}, must-revalidate"
         if public
@@ -1240,31 +1723,64 @@ async def public_emoji(
     settings: Settings = Depends(get_settings),
 ) -> RedirectResponse:
     emoji = await session.get(Emoji, (int(emoji_id), settings.domain))
-    if emoji is None:
+    application_emoji = (
+        await session.scalar(
+            select(ApplicationEmoji).where(
+                ApplicationEmoji.id == int(emoji_id),
+                ApplicationEmoji.application_domain == settings.domain,
+            )
+        )
+        if emoji is None
+        else None
+    )
+    if emoji is not None:
+        digest = emoji.media_hash
+    elif application_emoji is not None:
+        digest = application_emoji.media_hash
+    else:
         raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
-    digest = emoji.media_hash
     if not valid_content_digest(digest):
         raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
     # Emoji IDs do not expose the digest in the URL. Read the immutable hash,
     # take its fence before any Attachment lock, then revalidate the Emoji and
     # exact binding under the fence before minting a capability.
     await lock_asset_digest(session, digest)
-    emoji = await session.scalar(
-        select(Emoji)
-        .where(
-            Emoji.id == int(emoji_id),
-            Emoji.origin_domain == settings.domain,
-            Emoji.media_hash == digest,
+    if emoji is not None:
+        emoji = await session.scalar(
+            select(Emoji)
+            .where(
+                Emoji.id == int(emoji_id),
+                Emoji.origin_domain == settings.domain,
+                Emoji.media_hash == digest,
+                Emoji.available.is_(True),
+            )
+            .execution_options(populate_existing=True)
         )
-        .execution_options(populate_existing=True)
-    )
-    if emoji is None:
-        raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+        if emoji is None:
+            raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+        asset_binding = f"emoji:{emoji.origin_domain}:{emoji.id}"
+    else:
+        application_emoji = await session.scalar(
+            select(ApplicationEmoji)
+            .where(
+                ApplicationEmoji.id == int(emoji_id),
+                ApplicationEmoji.application_domain == settings.domain,
+                ApplicationEmoji.media_hash == digest,
+                ApplicationEmoji.available.is_(True),
+            )
+            .execution_options(populate_existing=True)
+        )
+        if application_emoji is None:
+            raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+        asset_binding = (
+            f"application:{application_emoji.application_domain}:"
+            f"{application_emoji.application_id}:emoji:{application_emoji.id}"
+        )
     terminal_duplicate = aliased(Attachment)
     attachment = await session.scalar(
         select(Attachment)
         .where(
-            Attachment.asset_binding == f"emoji:{emoji.origin_domain}:{emoji.id}",
+            Attachment.asset_binding == asset_binding,
             Attachment.origin_domain == settings.domain,
             Attachment.content_sha256 == digest,
             Attachment.scan_status == "clean",
@@ -1631,6 +2147,7 @@ async def cache_remote_media(
     snowflake: SnowflakeGenerator | None = None,
     message_ref: tuple[int, str] | None = None,
     uploader_ref: tuple[int, str] | None = None,
+    guild_context: bool = False,
 ) -> RemoteMediaCache:
     if (
         await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None
@@ -1668,6 +2185,7 @@ async def cache_remote_media(
                 query=federation_query,
                 request_timeout=REMOTE_MEDIA_FETCH_DEADLINE_SECONDS,
                 max_response_bytes=settings.media_max_attachment_bytes,
+                guild_context=guild_context,
             ) as remote:
                 if remote.status_code == 404:
                     raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
@@ -2032,12 +2550,81 @@ async def authorized_attachment(
     except FederationNetworkError:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"}) from None
     attachment = await session.get(Attachment, (int(attachment_id), origin_domain))
-    if (
-        attachment is None
-        or attachment.deleted_at is not None
-        or attachment.message_id is None
-        or attachment.message_domain is None
-    ):
+    if attachment is None or attachment.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    if attachment.interaction_id is not None:
+        if origin_domain != settings.domain:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        private_interaction = await session.scalar(
+            select(BotInteraction)
+            .where(
+                BotInteraction.id == attachment.interaction_id,
+                BotInteraction.user_id == auth.user.id,
+                BotInteraction.user_domain == auth.user.origin_domain,
+                BotInteraction.expires_at > datetime.now(UTC),
+            )
+            .with_for_update(read=True)
+        )
+        if private_interaction is None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        locked_attachment = await session.scalar(
+            select(Attachment)
+            .where(
+                Attachment.id == int(attachment_id),
+                Attachment.origin_domain == settings.domain,
+                Attachment.interaction_id == private_interaction.id,
+                Attachment.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        if locked_attachment is None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        locked_attachment.updated_at = datetime.now(UTC)
+        private_redirect = redirect_to_object(settings, locked_attachment, variant, public=False)
+        await session.commit()
+        return private_redirect
+    if attachment.interaction_response_id is not None:
+        if origin_domain != settings.domain:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        private_response = (
+            await session.execute(
+                select(BotInteractionResponse, BotInteraction)
+                .join(
+                    BotInteraction,
+                    BotInteraction.id == BotInteractionResponse.interaction_id,
+                )
+                .where(
+                    BotInteractionResponse.id == attachment.interaction_response_id,
+                    BotInteractionResponse.ephemeral.is_(True),
+                    BotInteractionResponse.deleted_at.is_(None),
+                    BotInteraction.user_id == auth.user.id,
+                    BotInteraction.user_domain == auth.user.origin_domain,
+                    BotInteraction.expires_at > datetime.now(UTC),
+                )
+                .with_for_update(read=True, of=(BotInteractionResponse, BotInteraction))
+            )
+        ).one_or_none()
+        if private_response is None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        locked_attachment = await session.scalar(
+            select(Attachment)
+            .where(
+                Attachment.id == int(attachment_id),
+                Attachment.origin_domain == settings.domain,
+                Attachment.interaction_response_id == attachment.interaction_response_id,
+                Attachment.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        if locked_attachment is None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        locked_attachment.updated_at = datetime.now(UTC)
+        private_redirect = redirect_to_object(settings, locked_attachment, variant, public=False)
+        await session.commit()
+        return private_redirect
+    if attachment.message_id is None or attachment.message_domain is None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     message = await session.get(Message, (attachment.message_id, attachment.message_domain))
     if message is None or message.deleted_at is not None:
@@ -2190,6 +2777,7 @@ async def authorized_attachment(
                         snowflake=snowflake,
                         message_ref=(attachment.message_id, attachment.message_domain),
                         uploader_ref=(attachment.uploader_id, attachment.uploader_domain),
+                        guild_context=access.guild is not None,
                     )
     if cached is None:
         raise RuntimeError("remote media cache write did not converge")
@@ -2217,7 +2805,7 @@ async def authorized_attachment(
     except StorageError as exc:
         raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
     await session.commit()
-    response = RedirectResponse(url, status_code=302)
+    response = media_redirect_response(url)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Authorization, Cookie"
     copy_rate_limit_headers(response_status, response)
@@ -2374,7 +2962,7 @@ async def authorized_dm_history_media(
     except StorageError as exc:
         raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
     await session.commit()
-    response = RedirectResponse(url, status_code=302)
+    response = media_redirect_response(url)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Authorization, Cookie"
     if capability_status == "renewable":

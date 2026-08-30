@@ -6,12 +6,19 @@ from redis.asyncio import Redis
 from sqlalchemy import and_, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
+from app.api.dependencies import (
+    AuthenticatedUser,
+    get_redis,
+    get_session,
+    get_snowflake,
+    require_user,
+)
 from app.auth.schemas import (
     GuildNavigationGuildItem,
     GuildNavigationUpdate,
     SettingsPatch,
 )
+from app.automod.service import evaluate_member_profile
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.payloads import user_payload
 from app.chat.permissions import get_permissions
@@ -21,6 +28,7 @@ from app.chat.schemas import ProfilePatch
 from app.core.guild_navigation import normalize_guild_navigation, parse_stored_guild_navigation
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
+from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityReference, validate_entity_reference
 from app.db.models import (
@@ -33,7 +41,7 @@ from app.db.models import (
     User,
     UserSettings,
 )
-from app.federation.relationships import queue_friend_profile_updates
+from app.federation.relationships import queue_profile_updates
 from app.federation.users import resolve_handle
 from app.tasks import federation_deliver, federation_presence_fanout
 
@@ -70,6 +78,7 @@ async def get_me(auth: AuthenticatedUser = Depends(require_user)) -> dict[str, o
         "email": user.email,
         "email_verified": user.email_verified_at is not None,
         "mfa_enabled": user.totp_secret_encrypted is not None,
+        "age_assurance_state": getattr(user, "age_assurance_state", "unknown"),
     }
 
 
@@ -79,6 +88,7 @@ async def patch_me(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     user = await session.scalar(
@@ -93,10 +103,30 @@ async def patch_me(
         raise HTTPException(status_code=401, detail={"code": "AUTHENTICATION_REQUIRED"})
     values = payload.model_dump(exclude_unset=True)
     if any(getattr(user, field) != value for field, value in values.items()):
+        profile_rule_guild_refs: list[tuple[int, str]] = []
+        if "display_name" in values:
+            profile_rule_guild_refs = list(
+                (
+                    await session.execute(
+                        select(Guild.id, Guild.origin_domain)
+                        .join(
+                            GuildMember,
+                            (GuildMember.guild_id == Guild.id)
+                            & (GuildMember.guild_domain == Guild.origin_domain),
+                        )
+                        .where(
+                            Guild.origin_domain == settings.domain,
+                            GuildMember.user_id == user.id,
+                            GuildMember.user_domain == user.origin_domain,
+                        )
+                        .order_by(Guild.id)
+                    )
+                ).tuples()
+            )
         for field, value in values.items():
             setattr(user, field, value)
         user.profile_version += 1
-        destinations = await queue_friend_profile_updates(session, settings, user)
+        destinations = await queue_profile_updates(session, settings, user)
         await session.commit()
         await publish_dispatch(
             redis,
@@ -106,6 +136,35 @@ async def patch_me(
         )
         for destination in destinations:
             await enqueue_best_effort(federation_deliver, destination)
+        # Evaluate each authoritative guild in its own short guild-locked
+        # transaction. Holding every guild row while changing a global profile
+        # would create a large lock fan-out for well-connected accounts.
+        for guild_id, guild_domain in profile_rule_guild_refs:
+            guild = await session.scalar(
+                select(Guild)
+                .where(Guild.id == guild_id, Guild.origin_domain == guild_domain)
+                .with_for_update()
+            )
+            if guild is None:
+                await session.rollback()
+                continue
+            current_user = await session.get(
+                User,
+                (user.id, user.origin_domain),
+                populate_existing=True,
+            )
+            if current_user is None:
+                await session.rollback()
+                continue
+            automod_post_commit = await evaluate_member_profile(
+                session,
+                settings,
+                snowflake,
+                guild,
+                current_user,
+            )
+            await session.commit()
+            await automod_post_commit.publish(redis)
     return await get_me(auth)
 
 
@@ -134,6 +193,9 @@ def settings_payload(settings: UserSettings) -> dict[str, object]:
         "locale": settings.locale,
         "theme": settings.theme,
         "dm_privacy": settings.dm_privacy,
+        "age_restricted_dm_commands_enabled": bool(
+            getattr(settings, "age_restricted_dm_commands_enabled", False)
+        ),
         "presence_preference": presence_preference,
         "notification_settings": notification_settings,
     }

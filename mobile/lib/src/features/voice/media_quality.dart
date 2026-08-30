@@ -149,13 +149,26 @@ final class MobileMediaQuality {
     await _iosBroadcastChannel.invokeMethod<void>('stopBroadcast');
   }
 
-  AudioPublishOptions get audioPublishOptions => AudioPublishOptions(
-        audioBitrate: audio.bitrate,
+  AudioPublishOptions get audioPublishOptions =>
+      audioPublishOptionsForChannel(384000);
+
+  AudioPublishOptions audioPublishOptionsForChannel(int channelBitrate) =>
+      AudioPublishOptions(
+        audioBitrate:
+            audio.bitrate < channelBitrate ? audio.bitrate : channelBitrate,
         dtx: !audio.continuousTransmission,
         red: true,
       );
 
-  VideoPublishOptions get videoPublishOptions => VideoPublishOptions(
+  VideoPublishOptions get videoPublishOptions =>
+      videoPublishOptionsForCameraMode(1);
+
+  VideoPublishOptions videoPublishOptionsForCameraMode(
+    int videoQualityMode,
+  ) =>
+      VideoPublishOptions(
+        videoEncoding:
+            cameraCaptureOptionsForMode(videoQualityMode).params.encoding,
         screenShareEncoding: screen.profile.parameters.encoding,
         simulcast: true,
         degradationPreference: screen == ScreenShareQuality.smooth
@@ -172,6 +185,16 @@ final class MobileMediaQuality {
         maxFrameRate: screen.profile.frameRate.toDouble(),
       );
 }
+
+/// Automatic mode uses a smaller adaptive camera working set; full mode uses
+/// Discord's explicit 720p camera target. Screen-share capture remains tied to
+/// the independent [ScreenShareQuality] preference.
+CameraCaptureOptions cameraCaptureOptionsForMode(int videoQualityMode) =>
+    CameraCaptureOptions(
+      params: videoQualityMode == 2
+          ? VideoParametersPresets.h720_169
+          : VideoParametersPresets.h360_169,
+    );
 
 T _enumByName<T extends Enum>(List<T> values, String? name, T fallback) {
   for (final value in values) {

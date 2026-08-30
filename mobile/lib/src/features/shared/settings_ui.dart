@@ -2,17 +2,18 @@
 // section headers, hover rows and Discord-style toggles. The palette stays
 // Kaede's, so these read as the same product on every surface.
 import 'package:flutter/material.dart';
-import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
-/// Flat page background for settings panes. Matches the shell section
-/// screens, so pushed settings read as one continuous surface.
-const kSettingsSurface = KaedeColors.sidebar;
+/// Theme-aware layers shared by every settings surface. These deliberately use
+/// Material color roles so a stored light preference changes custom panes as
+/// well as stock controls.
+Color settingsSurface(BuildContext context) =>
+    Theme.of(context).colorScheme.surfaceContainerLow;
 
-/// Hover/press fill for settings rows: one step above the surface, flat.
-const kSettingsRowHover = KaedeColors.hover;
+Color settingsRowHover(BuildContext context) =>
+    Theme.of(context).colorScheme.surfaceContainerHighest;
 
-/// Hairline used between list rows.
-const kSettingsDividerColor = KaedeColors.border;
+Color settingsDividerColor(BuildContext context) =>
+    Theme.of(context).colorScheme.outlineVariant;
 
 /// Uppercase section header, the way Discord labels each settings group.
 class SettingsSectionHeader extends StatelessWidget {
@@ -24,34 +25,37 @@ class SettingsSectionHeader extends StatelessWidget {
   final double top;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: EdgeInsets.fromLTRB(4, top, 4, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(4, top, 4, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title.toUpperCase(),
+            style: TextStyle(
+              color: colors.onSurfaceVariant,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.05,
+            ),
+          ),
+          if (subheading case final note?) ...[
+            const SizedBox(height: 4),
             Text(
-              title.toUpperCase(),
-              style: const TextStyle(
-                color: KaedeColors.muted,
-                fontSize: 11.5,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.05,
+              note,
+              style: TextStyle(
+                color: colors.onSurfaceVariant,
+                fontSize: 12.5,
+                height: 1.4,
               ),
             ),
-            if (subheading case final note?) ...[
-              const SizedBox(height: 4),
-              Text(
-                note,
-                style: const TextStyle(
-                  color: KaedeColors.muted,
-                  fontSize: 12.5,
-                  height: 1.4,
-                ),
-              ),
-            ],
           ],
-        ),
-      );
+        ],
+      ),
+    );
+  }
 }
 
 /// Muted guidance paragraph inside a settings section.
@@ -66,8 +70,8 @@ class SettingsInfo extends StatelessWidget {
         padding: padding ?? const EdgeInsets.fromLTRB(4, 2, 4, 10),
         child: Text(
           text,
-          style: const TextStyle(
-            color: KaedeColors.muted,
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
             fontSize: 12.5,
             height: 1.45,
           ),
@@ -75,8 +79,113 @@ class SettingsInfo extends StatelessWidget {
       );
 }
 
+/// Reusable inline result state for settings and administration pages.
+/// Keeping retry/error styling here avoids each resource screen inventing a
+/// subtly different card for the same request lifecycle.
+class SettingsStatusPanel extends StatelessWidget {
+  const SettingsStatusPanel.error({
+    required this.message,
+    required this.onRetry,
+    super.key,
+  }) : isError = true;
+
+  const SettingsStatusPanel.notice({
+    required this.message,
+    super.key,
+  })  : isError = false,
+        onRetry = null;
+
+  final String message;
+  final VoidCallback? onRetry;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Card(
+      color: isError ? colors.errorContainer : colors.secondaryContainer,
+      child: ListTile(
+        leading: Icon(
+          isError ? Icons.error_outline : Icons.check_circle_outline,
+          color: isError ? colors.onErrorContainer : null,
+        ),
+        title: Text(message),
+        trailing: onRetry == null
+            ? null
+            : TextButton(onPressed: onRetry, child: const Text('Retry')),
+      ),
+    );
+  }
+}
+
+Future<String?> showSettingsTextDialog(
+  BuildContext context, {
+  required String title,
+  required String label,
+  String initialValue = '',
+  int? maxLength,
+}) async {
+  final input = TextEditingController(text: initialValue);
+  try {
+    return await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: input,
+          autofocus: true,
+          maxLength: maxLength,
+          decoration: InputDecoration(labelText: label),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: input,
+            builder: (context, value, child) => FilledButton(
+              onPressed: value.text.trim().isEmpty
+                  ? null
+                  : () => Navigator.pop(dialogContext, value.text.trim()),
+              child: const Text('Save'),
+            ),
+          ),
+        ],
+      ),
+    );
+  } finally {
+    input.dispose();
+  }
+}
+
+Future<bool> showSettingsConfirmation(
+  BuildContext context, {
+  required String message,
+  String title = 'Confirm',
+  String actionLabel = 'Continue',
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(actionLabel),
+          ),
+        ],
+      ),
+    ) ??
+    false;
+
 /// One flat settings row: leading glyph, title, optional subtitle and a
-/// trailing control. Pressed rows fill flat with [kSettingsRowHover],
+/// trailing control. Pressed rows use the theme's highest container layer,
 /// Discord style, instead of sitting in a bordered card.
 class SettingsRow extends StatelessWidget {
   const SettingsRow({
@@ -114,6 +223,7 @@ class SettingsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     final hasSubtitle = subtitle?.isNotEmpty == true;
     final row = InkWell(
       onTap: onTap,
@@ -139,7 +249,7 @@ class SettingsRow extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: danger ? KaedeColors.danger : KaedeColors.text,
+                          color: danger ? colors.error : colors.onSurface,
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
                         ),
@@ -150,8 +260,8 @@ class SettingsRow extends StatelessWidget {
                           subtitle!,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: KaedeColors.muted,
+                          style: TextStyle(
+                            color: colors.onSurfaceVariant,
                             fontSize: 12.5,
                             height: 1.35,
                           ),
@@ -175,12 +285,12 @@ class SettingsRow extends StatelessWidget {
       children: [
         row,
         if (divider)
-          const Padding(
+          Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),
             child: SizedBox(
               height: 1,
               child: DecoratedBox(
-                decoration: BoxDecoration(color: kSettingsDividerColor),
+                decoration: BoxDecoration(color: colors.outlineVariant),
               ),
             ),
           ),
@@ -205,6 +315,7 @@ class _DiscordSwitchState extends State<DiscordSwitch> {
   @override
   Widget build(BuildContext context) {
     final on = widget.value;
+    final colors = Theme.of(context).colorScheme;
     return InkWell(
       onTap: widget.onChanged == null ? null : () => widget.onChanged!(!on),
       borderRadius: BorderRadius.circular(14),
@@ -215,9 +326,9 @@ class _DiscordSwitchState extends State<DiscordSwitch> {
         height: 24,
         padding: const EdgeInsets.all(3),
         decoration: BoxDecoration(
-          color: on ? KaedeColors.text : KaedeColors.raised,
+          color: on ? colors.primary : colors.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(14),
-          border: on ? null : Border.all(color: KaedeColors.borderStrong),
+          border: on ? null : Border.all(color: colors.outline),
         ),
         child: Align(
           alignment: on ? Alignment.centerRight : Alignment.centerLeft,
@@ -227,7 +338,7 @@ class _DiscordSwitchState extends State<DiscordSwitch> {
             width: 16,
             height: 16,
             decoration: BoxDecoration(
-              color: on ? KaedeColors.canvas : KaedeColors.muted,
+              color: on ? colors.onPrimary : colors.onSurfaceVariant,
               shape: BoxShape.circle,
             ),
           ),
@@ -303,8 +414,8 @@ Future<String?> showSettingsChoiceSheet(
               const SizedBox(height: 6),
               Text(
                 note,
-                style: const TextStyle(
-                  color: KaedeColors.muted,
+                style: TextStyle(
+                  color: Theme.of(sheetContext).colorScheme.onSurfaceVariant,
                   fontSize: 13,
                   height: 1.4,
                 ),
@@ -363,8 +474,9 @@ class _ChoiceTile extends StatelessWidget {
                         const SizedBox(height: 2),
                         Text(
                           note,
-                          style: const TextStyle(
-                            color: KaedeColors.muted,
+                          style: TextStyle(
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
                             fontSize: 12.5,
                             height: 1.35,
                           ),
@@ -377,7 +489,9 @@ class _ChoiceTile extends StatelessWidget {
                   selected
                       ? Icons.check_circle_rounded
                       : Icons.radio_button_unchecked_rounded,
-                  color: selected ? KaedeColors.coralText : KaedeColors.muted,
+                  color: selected
+                      ? Theme.of(context).colorScheme.primary
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ],
             ),
@@ -416,24 +530,31 @@ class SettingsChoiceRow extends StatelessWidget {
         subtitle: subtitle,
         leading: leading,
         divider: divider,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Text(
-                display,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: KaedeColors.muted,
-                  fontSize: 13.5,
+        trailing: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 148),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Expanded(
+                child: Text(
+                  display,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.end,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontSize: 13.5,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 2),
-            const Icon(Icons.chevron_right_rounded,
-                size: 18, color: KaedeColors.muted),
-          ],
+              const SizedBox(width: 2),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 18,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ],
+          ),
         ),
         onTap: () => onSelected(value),
       );
@@ -478,7 +599,7 @@ class SettingsDangerButton extends StatelessWidget {
         child: TextButton(
           onPressed: onPressed,
           style: TextButton.styleFrom(
-            foregroundColor: KaedeColors.danger,
+            foregroundColor: Theme.of(context).colorScheme.error,
             minimumSize: const Size(0, 44),
           ),
           child: Text(label,
@@ -524,8 +645,8 @@ class SettingsField extends StatelessWidget {
         children: [
           Text(
             label,
-            style: const TextStyle(
-              color: KaedeColors.textSoft,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
               fontSize: 12.5,
               fontWeight: FontWeight.w600,
             ),
@@ -535,7 +656,9 @@ class SettingsField extends StatelessWidget {
             controller: controller,
             decoration: InputDecoration(
               hintText: hint,
-              hintStyle: const TextStyle(color: KaedeColors.muted),
+              hintStyle: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
             maxLines: maxLines == 1 ? null : maxLines,
             maxLength: maxLength,
@@ -568,7 +691,7 @@ class SettingsImageOverlayButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-        color: KaedeColors.canvas.withValues(alpha: .78),
+        color: Theme.of(context).colorScheme.surfaceDim.withValues(alpha: .86),
         borderRadius: BorderRadius.circular(size / 2),
         child: InkWell(
           onTap: onPressed,
@@ -578,7 +701,11 @@ class SettingsImageOverlayButton extends StatelessWidget {
               padding: EdgeInsets.all(size * .24),
               child: Tooltip(
                 message: tooltip,
-                child: Icon(icon, size: size * .5, color: KaedeColors.text),
+                child: Icon(
+                  icon,
+                  size: size * .5,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
             ),
           ),

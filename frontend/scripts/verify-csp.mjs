@@ -32,6 +32,17 @@ if (/script-src[^;]*unsafe-inline/.test(policy)) {
 if (!policy.includes('https://challenges.cloudflare.com')) {
   throw new Error('generated CSP does not authorize Cloudflare Turnstile');
 }
+const framePolicy = normalizedPolicy
+  .split(';')
+  .map((directive) => directive.trim())
+  .find((directive) => directive === 'frame-src' || directive.startsWith('frame-src '));
+const frameTokens = new Set(framePolicy?.split(/\s+/).slice(1) ?? []);
+if (!frameTokens.has('https://www.youtube-nocookie.com')) {
+  throw new Error('generated frame-src does not authorize the privacy-enhanced YouTube player');
+}
+if (frameTokens.has('https:') || frameTokens.has('*') || frameTokens.has('https://youtube.com')) {
+  throw new Error('generated frame-src authorizes an overly broad video origin');
+}
 if (/style-src(?:-attr)?[^;]*unsafe-inline/.test(policy)) {
   throw new Error('generated style policy unexpectedly permits unsafe-inline');
 }
@@ -121,6 +132,14 @@ if (!tauriScriptTokens.has("'wasm-unsafe-eval'")) {
 }
 if (tauriScriptTokens.has("'unsafe-eval'")) {
   throw new Error('Tauri script-src broadly permits JavaScript unsafe-eval');
+}
+const tauriFramePolicy = tauriPolicy
+  .split(';')
+  .map((directive) => directive.trim())
+  .find((directive) => directive === 'frame-src' || directive.startsWith('frame-src '));
+const tauriFrameTokens = new Set(tauriFramePolicy?.split(/\s+/).slice(1) ?? []);
+if (tauriFrameTokens.size !== 1 || !tauriFrameTokens.has('https://www.youtube-nocookie.com')) {
+  throw new Error('Tauri frame-src must allow only the privacy-enhanced YouTube player');
 }
 
 process.stdout.write(`CSP verification passed (${inlineScripts.length} inline script hash)\n`);

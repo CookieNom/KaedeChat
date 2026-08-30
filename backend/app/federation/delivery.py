@@ -10,12 +10,14 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.selectable import Exists
 
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import user_payload
 from app.chat.privacy import lock_relationship_pair, relationship
 from app.core.dm import dm_pair_key
 from app.core.federation import (
+    DURABLE_LATEST_STATE_EVENTS,
     POLICY_HELD_OUTBOX_PREFIX,
     canonical_json,
     durable_guild_media_delete_request,
@@ -127,6 +129,25 @@ def without_event_id_collisions(
     return selected
 
 
+def due_ordered_prefix(
+    rows: Iterable[FederationOutbox],
+    now: datetime,
+) -> list[FederationOutbox]:
+    """Return only the due prefix of one destination's total-order stream.
+
+    A retry delay on the head row is a delivery barrier. Selecting only due
+    rows in SQL would let a later pending mutation overtake that barrier and
+    can invert reaction, pin, edit, or deletion state at the replica.
+    """
+
+    selected: list[FederationOutbox] = []
+    for row in rows:
+        if row.next_retry_at > now:
+            break
+        selected.append(row)
+    return selected
+
+
 def group_state_rejection_is_upgrade_retryable(
     event: FederationEvent,
     row: FederationOutbox,
@@ -148,16 +169,16 @@ def group_state_rejection_is_upgrade_retryable(
     )
 
 
-def retry_rejected_media_delete(
+def retry_rejected_durable_event(
     event: FederationEvent | None,
     row: FederationOutbox,
     code: str,
     now: datetime,
 ) -> bool:
-    """Keep authoritative media invalidation retryable across peer upgrades."""
+    """Keep authoritative reconciliation state retryable across peer upgrades."""
 
     if event is None or (
-        event.event_type != "media.delete"
+        event.event_type not in DURABLE_LATEST_STATE_EVENTS | {"media.delete"}
         and not durable_terminal_room_event(event.envelope)
         and not durable_guild_media_delete_request(event.envelope)
     ):
@@ -169,6 +190,17 @@ def retry_rejected_media_delete(
     )
     row.last_error = code
     return True
+
+
+def bound_delivered_projection_retention(
+    event: FederationEvent,
+    settings: Settings,
+    now: datetime,
+) -> None:
+    """Return acknowledged latest-state projections to ordinary retention."""
+
+    if event.event_type in DURABLE_LATEST_STATE_EVENTS:
+        event.expires_at = now + timedelta(days=settings.federation_event_retention_days)
 
 
 async def enforce_queue_limits(session: AsyncSession, destination: str) -> None:
@@ -330,6 +362,7 @@ async def publish_terminal_outbox_failure(
     dm_open = dm_open_failure_target(settings, event, code)
     if dm_open is not None:
         actor_id, actor_domain, payload = dm_open
+        payload["authority_domain"] = destination
         await publish_dispatch(
             redis,
             user_topic(actor_domain, actor_id),
@@ -369,13 +402,13 @@ async def drain_destination(
                 .where(
                     FederationOutbox.destination == destination,
                     FederationOutbox.status.in_(("pending", "retry", "circuit")),
-                    FederationOutbox.next_retry_at <= now,
                 )
                 .order_by(FederationOutbox.id)
                 .limit(MAX_BATCH_EVENTS)
                 .with_for_update(skip_locked=True)
             )
         )
+        rows = due_ordered_prefix(rows, now)
         if not rows:
             return 0
         rows = without_event_id_collisions(rows)
@@ -408,6 +441,9 @@ async def drain_destination(
                             or federation_policy_holds_event(
                                 block.level,
                                 by_ref[(row.event_origin_domain, row.event_id)].event_type,
+                                context=by_ref[
+                                    (row.event_origin_domain, row.event_id)
+                                ].envelope.get("context"),
                             )
                         )
                     )
@@ -418,7 +454,7 @@ async def drain_destination(
                 row.next_retry_at = policy_held_retry_at(now)
                 row.last_error = f"{POLICY_HELD_OUTBOX_PREFIX} {block.level}"
                 event = by_ref.get((row.event_origin_domain, row.event_id))
-                if event is not None:
+                if event is not None and event.event_type != "bot.interaction.response":
                     event.expires_at = None
             held_ids = {row.id for row in held_rows}
             rows = [row for row in rows if row.id not in held_ids]
@@ -537,6 +573,7 @@ async def drain_destination(
                 delivered += 1
                 event = by_ref.get((row.event_origin_domain, row.event_id))
                 if event is not None:
+                    bound_delivered_projection_retention(event, settings, now)
                     delivery_updates.append((event, "delivered", None))
                     if durable_terminal_room_event(event.envelope):
                         terminal_room_acks.append((row.destination, event.envelope))
@@ -546,7 +583,7 @@ async def drain_destination(
                 await increment_metric(redis, "federation_delivery_failures")
                 event = by_ref.get((row.event_origin_domain, row.event_id))
                 rejection_code = str((result or {}).get("code") or "peer rejected event")[:500]
-                if retry_rejected_media_delete(event, row, rejection_code, now):
+                if retry_rejected_durable_event(event, row, rejection_code, now):
                     # A peer can reject this event while running an older
                     # protocol build or while a recoverable tombstone quota is
                     # full. Terminal invalidation must survive that rolling
@@ -652,11 +689,32 @@ async def drain_destination(
 
 
 async def due_destinations(session: AsyncSession) -> list[str]:
-    durable_invalidation = exists(
+    durable_outbox_event = _durable_outbox_event_exists()
+    return list(
+        await session.scalars(
+            select(FederationOutbox.destination)
+            .where(
+                FederationOutbox.status.in_(("pending", "retry", "circuit")),
+                FederationOutbox.next_retry_at <= datetime.now(UTC),
+                or_(
+                    FederationOutbox.created_at >= datetime.now(UTC) - MAX_QUEUE_AGE,
+                    durable_outbox_event,
+                ),
+            )
+            .distinct()
+        )
+    )
+
+
+def _durable_outbox_event_exists() -> Exists:
+    """Match queue state that must survive the ordinary delivery cutoff."""
+
+    return exists(
         select(FederationEvent.event_id).where(
             FederationEvent.origin_domain == FederationOutbox.event_origin_domain,
             FederationEvent.event_id == FederationOutbox.event_id,
             or_(
+                FederationEvent.event_type.in_(DURABLE_LATEST_STATE_EVENTS),
                 FederationEvent.event_type == "media.delete",
                 FederationEvent.event_type == "guild.media.delete.request",
                 (
@@ -672,20 +730,6 @@ async def due_destinations(session: AsyncSession) -> list[str]:
                     )
                 ),
             ),
-        )
-    )
-    return list(
-        await session.scalars(
-            select(FederationOutbox.destination)
-            .where(
-                FederationOutbox.status.in_(("pending", "retry", "circuit")),
-                FederationOutbox.next_retry_at <= datetime.now(UTC),
-                or_(
-                    FederationOutbox.created_at >= datetime.now(UTC) - MAX_QUEUE_AGE,
-                    durable_invalidation,
-                ),
-            )
-            .distinct()
         )
     )
 
@@ -838,35 +882,14 @@ async def expire_stale_outbox(
     redis: Redis | None = None,
 ) -> int:
     cutoff = datetime.now(UTC) - MAX_QUEUE_AGE
-    durable_invalidation = exists(
-        select(FederationEvent.event_id).where(
-            FederationEvent.origin_domain == FederationOutbox.event_origin_domain,
-            FederationEvent.event_id == FederationOutbox.event_id,
-            or_(
-                FederationEvent.event_type == "media.delete",
-                FederationEvent.event_type == "guild.media.delete.request",
-                (
-                    (FederationEvent.event_type == "guild.instance_access.revoked")
-                    & (FederationEvent.envelope["content"]["reason"].as_string() == "guild_deleted")
-                ),
-                (
-                    (FederationEvent.event_type == "dm.group.state")
-                    & (
-                        FederationEvent.envelope["content"]["conversation"]["deleted"]
-                        .as_boolean()
-                        .is_(True)
-                    )
-                ),
-            ),
-        )
-    )
+    durable_outbox_event = _durable_outbox_event_exists()
     stale_destinations = list(
         await session.scalars(
             select(FederationOutbox.destination)
             .where(
                 FederationOutbox.status.in_(("pending", "retry", "circuit")),
                 FederationOutbox.created_at < cutoff,
-                ~durable_invalidation,
+                ~durable_outbox_event,
                 or_(
                     FederationOutbox.last_error.is_(None),
                     ~FederationOutbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX),
@@ -887,7 +910,7 @@ async def expire_stale_outbox(
                 FederationOutbox.destination.in_(stale_destinations),
                 FederationOutbox.status.in_(("pending", "retry", "circuit")),
                 FederationOutbox.created_at < cutoff,
-                ~durable_invalidation,
+                ~durable_outbox_event,
                 or_(
                     FederationOutbox.last_error.is_(None),
                     ~FederationOutbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX),
@@ -936,7 +959,11 @@ async def expire_stale_outbox(
 
     if settings is not None:
         # Import lazily: events imports this module's queue-limit helper.
-        from app.federation.events import build_envelope, queue_event
+        from app.chat.guild_revision import (
+            build_guild_authority_envelope,
+            guild_authority_owner,
+        )
+        from app.federation.events import queue_event
 
         for destination, guild_id, guild_domain in sorted(resync_targets):
             guild = await session.get(Guild, (guild_id, guild_domain))
@@ -953,12 +980,11 @@ async def expire_stale_outbox(
             )
             if still_participating is None:
                 continue
-            owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-            if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-                raise RuntimeError("local guild owner cannot sign delivery-expiry reconciliation")
-            marker = await build_envelope(
+            owner = await guild_authority_owner(session, settings, guild)
+            marker = await build_guild_authority_envelope(
                 session,
                 settings,
+                guild,
                 "guild.resync.required",
                 owner,
                 {"reason": "delivery_window_expired"},

@@ -5,13 +5,16 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi.testclient import TestClient
 
 import app.api.auth as auth_api
+import app.gateway as gateway_api
+from app.chat.presence import PRESENCE_TTL_SECONDS, decode_presence_state
 from app.core.gateway_ops import GatewayOp
 from app.core.settings import get_settings
+from app.db.models import User
 from app.email.backends import OutboundEmail
 from app.email.outbox import drain_email_outbox
 from app.gateway import app as gateway_app
@@ -30,6 +33,7 @@ from scripts.verification import (
 PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
 AUTH_SALT = bytes(range(16))
 VAULT_SALT = bytes(reversed(range(16)))
+REACTION_EMOJI = "🍁"
 
 
 def register(
@@ -97,6 +101,24 @@ def versioned_headers(auth_headers: dict[str, str], resource: dict[str, Any]) ->
     return {**auth_headers, "If-Match": version}
 
 
+def string_field(resource: dict[str, Any], field: str, context: str) -> str:
+    value = resource.get(field)
+    if not isinstance(value, str) or not value:
+        raise VerificationFailure(
+            f"{context} expected {field} as a non-empty JSON string; received {value!r}"
+        )
+    return value
+
+
+def decimal_string_field(resource: dict[str, Any], field: str, context: str) -> str:
+    value = string_field(resource, field, context)
+    if not value.isdecimal():
+        raise VerificationFailure(
+            f"{context} expected {field} as a decimal JSON string; received {value!r}"
+        )
+    return value
+
+
 def websocket_cookie_headers(token: str) -> dict[str, str]:
     app_url = urlparse(get_settings().app_url)
     return {
@@ -116,9 +138,39 @@ def verify() -> None:
     async def suppress_immediate_wake() -> None:
         """Prevent the separately running worker from winning the test claim."""
 
+    def suppress_presence_fanout(user: User, status: str, generation: int) -> None:
+        """Avoid sharing Taskiq's loop-bound broker across the dual TestClients."""
+
+        del user, status, generation
+
     auth_api.wake_email_outbox = suppress_immediate_wake
+    # Federation presence fanout is exercised separately by federation acceptance.
+    gateway_api.schedule_presence_fanout = suppress_presence_fanout
 
     with TestClient(api_app) as api, TestClient(gateway_app) as gateway:
+
+        async def cached_presence(
+            user_id: str,
+        ) -> tuple[str, int, list[dict[str, object]], int | None, bool] | None:
+            raw = await gateway_app.state.redis.get(f"presence:schema.localhost:{user_id}")
+            return decode_presence_state(raw)
+
+        def read_cached_presence(
+            user_id: str,
+        ) -> tuple[str, int, list[dict[str, object]], int | None, bool] | None:
+            portal = gateway.portal
+            if portal is None:
+                raise VerificationFailure(
+                    "FastAPI's test portal is unavailable; verify the Gateway lifespan started"
+                )
+            return portal.call(cached_presence, user_id)
+
+        async def claim_cached_presence(user_id: str) -> int:
+            return await gateway_api.claim_expired_presence(
+                gateway_app.state.redis,
+                f"schema.localhost:{user_id}",
+                int(time.time()) + PRESENCE_TTL_SECONDS + 1,
+            )
 
         async def drain_mail() -> None:
             await drain_email_outbox(
@@ -147,15 +199,15 @@ def verify() -> None:
         alice_me = api.get("/api/v1/users/@me", headers=alice_headers).json()
         bob_me = api.get("/api/v1/users/@me", headers=bob_headers).json()
         charlie_me = api.get("/api/v1/users/@me", headers=charlie_headers).json()
-        alice_id = alice_me["id"]
-        bob_id = bob_me["id"]
-        charlie_id = charlie_me["id"]
+        alice_id = decimal_string_field(alice_me, "id", "Alice profile")
+        bob_id = decimal_string_field(bob_me, "id", "Bob profile")
+        charlie_id = decimal_string_field(charlie_me, "id", "Charlie profile")
 
         created = api.post("/api/v1/guilds", headers=alice_headers, json={"name": "Maple House"})
         require(created.status_code == 201, f"guild create failed: {created.text}")
         guild = created.json()
-        guild_id = guild["id"]
-        channel_id = guild["channels"][0]["id"]
+        guild_id = decimal_string_field(guild, "id", "guild create")
+        channel_id = decimal_string_field(guild["channels"][0], "id", "default channel")
 
         category_created = api.post(
             f"/api/v1/guilds/{guild_id}/channels",
@@ -166,7 +218,7 @@ def verify() -> None:
             category_created.status_code == 201,
             f"category create failed: {category_created.text}",
         )
-        category_id = category_created.json()["id"]
+        category_id = decimal_string_field(category_created.json(), "id", "category create")
         child_created = api.post(
             f"/api/v1/guilds/{guild_id}/channels",
             headers=alice_headers,
@@ -176,7 +228,7 @@ def verify() -> None:
             child_created.status_code == 201,
             f"category child create failed: {child_created.text}",
         )
-        child_id = child_created.json()["id"]
+        child_id = decimal_string_field(child_created.json(), "id", "category child create")
         reordered = api.patch(
             f"/api/v1/guilds/{guild_id}/channels",
             headers=alice_headers,
@@ -188,19 +240,55 @@ def verify() -> None:
                 ]
             },
         )
-        require(reordered.status_code == 200, f"channel reorder failed: {reordered.text}")
-        require(
-            [item["id"] for item in reordered.json()] == [category_id, child_id, channel_id],
-            "channel reorder was not persisted deterministically",
-        )
+        require(reordered.status_code == 204, f"channel reorder failed: {reordered.text}")
+        require(not reordered.content, "channel reorder returned a body with HTTP 204")
         guild_after_reorder = api.get(f"/api/v1/guilds/{guild_id}", headers=alice_headers)
         require(
             guild_after_reorder.status_code == 200,
             "guild reload after reorder expected HTTP 200; received "
             f"HTTP {guild_after_reorder.status_code}: {guild_after_reorder.text}",
         )
+        reordered_channels = guild_after_reorder.json().get("channels")
+        reordered_channel_items = (
+            [item for item in reordered_channels if isinstance(item, dict)]
+            if isinstance(reordered_channels, list)
+            else []
+        )
         require(
-            bool(int(guild_after_reorder.json()["permissions"]) & (1 << 4)),
+            isinstance(reordered_channels, list)
+            and len(reordered_channel_items) == len(reordered_channels)
+            and [
+                decimal_string_field(item, "id", "reordered guild channel")
+                for item in reordered_channel_items
+            ]
+            == [category_id, child_id, channel_id],
+            "channel reorder was not persisted deterministically",
+        )
+        reordered_child = next(
+            (item for item in reordered_channel_items if item.get("id") == child_id),
+            None,
+        )
+        require(
+            reordered_child is not None
+            and decimal_string_field(
+                reordered_child,
+                "parent_id",
+                "reordered category child",
+            )
+            == category_id,
+            "channel reorder lost the child's category parent",
+        )
+        require(
+            bool(
+                int(
+                    decimal_string_field(
+                        guild_after_reorder.json(),
+                        "permissions",
+                        "guild permissions",
+                    )
+                )
+                & (1 << 4)
+            ),
             "guild response omitted the actor's manage-channels permission",
         )
 
@@ -209,18 +297,18 @@ def verify() -> None:
             headers=alice_headers,
             json={"channel_id": channel_id, "max_uses": 1},
         )
-        require(invite.status_code == 201, f"invite create failed: {invite.text}")
-        joined = api.post(f"/api/v1/invites/{invite.json()['code']}", headers=bob_headers)
+        require(invite.status_code == 200, f"invite create failed: {invite.text}")
+        invite_code = string_field(invite.json(), "code", "invite create")
+        joined = api.post(f"/api/v1/invites/{invite_code}", headers=bob_headers)
         require(joined.status_code == 200, f"invite accept failed: {joined.text}")
         repeat_invite = api.post(
             f"/api/v1/guilds/{guild_id}/invites",
             headers=alice_headers,
             json={"channel_id": channel_id},
         )
-        require(repeat_invite.status_code == 201, "repeat invite creation failed")
-        repeat_join = api.post(
-            f"/api/v1/invites/{repeat_invite.json()['code']}", headers=bob_headers
-        )
+        require(repeat_invite.status_code == 200, "repeat invite creation failed")
+        repeat_invite_code = string_field(repeat_invite.json(), "code", "repeat invite")
+        repeat_join = api.post(f"/api/v1/invites/{repeat_invite_code}", headers=bob_headers)
         require(
             repeat_join.status_code == 200 and repeat_join.json()["id"] == guild_id,
             f"existing-member invite acceptance was not idempotent: {repeat_join.text}",
@@ -231,9 +319,9 @@ def verify() -> None:
             headers=alice_headers,
             json={"channel_id": channel_id, "max_uses": 1},
         )
-        charlie_joined = api.post(
-            f"/api/v1/invites/{charlie_invite.json()['code']}", headers=charlie_headers
-        )
+        require(charlie_invite.status_code == 200, "Charlie invite creation failed")
+        charlie_invite_code = string_field(charlie_invite.json(), "code", "Charlie invite")
+        charlie_joined = api.post(f"/api/v1/invites/{charlie_invite_code}", headers=charlie_headers)
         require(charlie_joined.status_code == 200, "Charlie could not join")
 
         friend_request = api.post(
@@ -277,15 +365,15 @@ def verify() -> None:
             headers=bob_headers,
             json={"handle": alice_me["handle"]},
         )
-        require(opened_dm.status_code == 201, f"direct message open failed: {opened_dm.text}")
-        dm_id = opened_dm.json()["id"]
+        require(opened_dm.status_code == 200, f"direct message open failed: {opened_dm.text}")
+        dm_id = decimal_string_field(opened_dm.json(), "id", "direct message open")
         reopened_dm = api.post(
             "/api/v1/users/@me/channels",
             headers=alice_headers,
             json={"handle": bob_me["handle"]},
         )
         require(
-            reopened_dm.status_code == 201 and reopened_dm.json()["id"] == dm_id,
+            reopened_dm.status_code == 200 and reopened_dm.json()["id"] == dm_id,
             "direct-message pair was not idempotent",
         )
         outsider_history = api.get(f"/api/v1/channels/{dm_id}/messages", headers=charlie_headers)
@@ -301,15 +389,15 @@ def verify() -> None:
                 ),
             },
         )
-        require(moderator.status_code == 201, f"moderator role failed: {moderator.text}")
-        moderator_id = moderator.json()["id"]
+        require(moderator.status_code == 200, f"moderator role failed: {moderator.text}")
+        moderator_id = decimal_string_field(moderator.json(), "id", "moderator role")
         helper = api.post(
             f"/api/v1/guilds/{guild_id}/roles",
             headers=alice_headers,
             json={"name": "Helper", "permissions": str(1 << 6)},
         )
-        require(helper.status_code == 201, f"helper role failed: {helper.text}")
-        helper_id = helper.json()["id"]
+        require(helper.status_code == 200, f"helper role failed: {helper.text}")
+        helper_id = decimal_string_field(helper.json(), "id", "helper role")
         reordered = api.patch(
             f"/api/v1/guilds/{guild_id}/roles",
             headers=alice_headers,
@@ -444,6 +532,11 @@ def verify() -> None:
                 and presence["d"]["status"] == "online",
                 "presence publication failed",
             )
+            stored_presence = read_cached_presence(bob_id)
+            require(
+                stored_presence is not None and stored_presence[2] == [],
+                "Dragonfly changed the local empty activities array during presence SET",
+            )
 
             typing = api.post(
                 f"/api/v1/channels/{channel_id}@schema.localhost/typing",
@@ -464,25 +557,56 @@ def verify() -> None:
                 headers=alice_headers,
                 json={"content": "The lantern is lit.", "client_nonce": "m2-acceptance-1"},
             )
-            require(sent.status_code == 201, f"message create failed: {sent.text}")
+            require(sent.status_code == 200, f"message create failed: {sent.text}")
+            sent_id = decimal_string_field(sent.json(), "id", "message create")
             dispatch = socket.receive_json()
             require(dispatch["t"] == "MESSAGE_CREATE", "message dispatch missing")
-            require(dispatch["d"]["content"] == "The lantern is lit.", "dispatch mismatch")
+            require(
+                dispatch["d"]["id"] == sent_id
+                and dispatch["d"]["content"] == "The lantern is lit.",
+                "dispatch mismatch",
+            )
 
             socket.send_json({"op": GatewayOp.HEARTBEAT, "d": dispatch["s"]})
             ack = socket.receive_json()
             require(ack["op"] == GatewayOp.HEARTBEAT_ACK, "heartbeat ACK missing")
+            renewed_presence = read_cached_presence(bob_id)
+            require(
+                renewed_presence is not None and renewed_presence[2] == [],
+                "Dragonfly changed the local empty activities array during presence renewal",
+            )
+            portal = gateway.portal
+            if portal is None:
+                raise VerificationFailure(
+                    "FastAPI's test portal is unavailable; verify the Gateway lifespan started"
+                )
+            claimed_generation = portal.call(claim_cached_presence, bob_id)
+            claimed_presence = read_cached_presence(bob_id)
+            require(
+                claimed_generation > 0
+                and claimed_presence is not None
+                and claimed_presence[1] == claimed_generation
+                and claimed_presence[2] == [],
+                "Dragonfly changed the local empty activities array during presence claim",
+            )
+            socket.send_json({"op": GatewayOp.HEARTBEAT, "d": dispatch["s"]})
+            require(
+                socket.receive_json()["op"] == GatewayOp.HEARTBEAT_ACK,
+                "post-claim heartbeat ACK missing",
+            )
 
             dm_sent = api.post(
                 f"/api/v1/channels/{dm_id}/messages",
                 headers=alice_headers,
                 json={"content": "A private paper lantern.", "client_nonce": "m2-dm-1"},
             )
-            require(dm_sent.status_code == 201, f"direct message send failed: {dm_sent.text}")
+            require(dm_sent.status_code == 200, f"direct message send failed: {dm_sent.text}")
+            dm_sent_id = decimal_string_field(dm_sent.json(), "id", "direct message send")
             dm_dispatch = socket.receive_json()
             require(dm_dispatch["t"] == "MESSAGE_CREATE", "direct-message dispatch missing")
             require(
-                dm_dispatch["d"]["channel_id"] == dm_id
+                dm_dispatch["d"]["id"] == dm_sent_id
+                and dm_dispatch["d"]["channel_id"] == dm_id
                 and dm_dispatch["d"]["content"] == "A private paper lantern.",
                 "direct-message dispatch mismatch",
             )
@@ -498,7 +622,7 @@ def verify() -> None:
         acked = api.post(
             f"/api/v1/channels/{channel_id}/ack",
             headers=bob_headers,
-            json={"message_id": sent.json()["id"]},
+            json={"message_id": sent_id},
         )
         require(acked.status_code == 204, f"read acknowledgement failed: {acked.text}")
         dm_history = api.get(f"/api/v1/channels/{dm_id}/messages", headers=bob_headers)
@@ -520,8 +644,11 @@ def verify() -> None:
             },
         )
         require(
-            offline_message.status_code == 201,
+            offline_message.status_code == 200,
             f"offline message failed: {offline_message.text}",
+        )
+        offline_message_id = decimal_string_field(
+            offline_message.json(), "id", "offline message create"
         )
         with gateway.websocket_connect(
             "/gateway?v=1&encoding=json",
@@ -551,8 +678,7 @@ def verify() -> None:
             require(
                 any(
                     event.get("t") == "MESSAGE_CREATE"
-                    and cast(dict[str, object], event["d"]).get("id")
-                    == offline_message.json()["id"]
+                    and cast(dict[str, object], event["d"]).get("id") == offline_message_id
                     for event in replayed
                 ),
                 "gateway resume did not replay the missed message",
@@ -577,46 +703,51 @@ def verify() -> None:
             f"received {mention_state!r}",
         )
 
-        reacted = api.post(
-            f"/api/v1/channels/{channel_id}/messages/{sent.json()['id']}/reactions",
+        reaction_path = quote(REACTION_EMOJI, safe="")
+        reacted = api.put(
+            f"/api/v1/channels/{channel_id}/messages/{sent_id}/reactions/{reaction_path}/@me",
             headers=bob_headers,
-            json={"emoji": "maple"},
         )
         require(reacted.status_code == 204, f"reaction create failed: {reacted.text}")
         reaction_removed = api.delete(
-            f"/api/v1/channels/{channel_id}/messages/{sent.json()['id']}/reactions/maple/{bob_id}",
+            f"/api/v1/channels/{channel_id}/messages/{sent_id}/reactions/{reaction_path}/{bob_id}",
             headers=alice_headers,
         )
         require(
             reaction_removed.status_code == 204,
             f"moderated reaction removal failed: {reaction_removed.text}",
         )
-        reacted_again = api.post(
-            f"/api/v1/channels/{channel_id}/messages/{sent.json()['id']}/reactions",
+        reacted_again = api.put(
+            f"/api/v1/channels/{channel_id}/messages/{sent_id}/reactions/{reaction_path}/@me",
             headers=bob_headers,
-            json={"emoji": "maple"},
+        )
+        forbidden_group_clear = api.delete(
+            f"/api/v1/channels/{channel_id}/messages/{sent_id}/reactions/{reaction_path}",
+            headers=bob_headers,
         )
         own_reaction_removed = api.delete(
-            f"/api/v1/channels/{channel_id}/messages/{sent.json()['id']}/reactions/maple",
+            f"/api/v1/channels/{channel_id}/messages/{sent_id}/reactions/{reaction_path}/@me",
             headers=bob_headers,
         )
         require(
-            reacted_again.status_code == 204 and own_reaction_removed.status_code == 204,
+            reacted_again.status_code == 204
+            and forbidden_group_clear.status_code == 403
+            and own_reaction_removed.status_code == 204,
             "own reaction removal failed",
         )
 
         pinned = api.put(
-            f"/api/v1/channels/{channel_id}/pins/{sent.json()['id']}",
+            f"/api/v1/channels/{channel_id}/pins/{sent_id}",
             headers=alice_headers,
         )
         require(pinned.status_code == 204, f"pin create failed: {pinned.text}")
         pins = api.get(f"/api/v1/channels/{channel_id}/pins", headers=bob_headers)
         require(
-            pins.status_code == 200 and pins.json()[0]["id"] == sent.json()["id"],
+            pins.status_code == 200 and pins.json()[0]["id"] == sent_id,
             "pin list failed",
         )
         unpinned = api.delete(
-            f"/api/v1/channels/{channel_id}/pins/{sent.json()['id']}",
+            f"/api/v1/channels/{channel_id}/pins/{sent_id}",
             headers=alice_headers,
         )
         empty_pins = api.get(f"/api/v1/channels/{channel_id}/pins", headers=bob_headers)
@@ -636,11 +767,13 @@ def verify() -> None:
             for index in (1, 2)
         ]
         require(
-            all(item.status_code == 201 for item in bulk_messages),
-            "bulk-delete fixtures expected HTTP 201; received statuses "
+            all(item.status_code == 200 for item in bulk_messages),
+            "bulk-delete fixtures expected HTTP 200; received statuses "
             f"{[item.status_code for item in bulk_messages]}",
         )
-        bulk_ids = [item.json()["id"] for item in bulk_messages]
+        bulk_ids = [
+            decimal_string_field(item.json(), "id", "bulk-delete fixture") for item in bulk_messages
+        ]
         bulk_deleted = api.post(
             f"/api/v1/channels/{channel_id}/messages/bulk-delete",
             headers=alice_headers,
@@ -660,8 +793,8 @@ def verify() -> None:
             headers=alice_headers,
             json={"channel_id": channel_id},
         )
-        require(managed_invite.status_code == 201, "managed invite could not be created")
-        managed_code = managed_invite.json()["code"]
+        require(managed_invite.status_code == 200, "managed invite could not be created")
+        managed_code = string_field(managed_invite.json(), "code", "managed invite")
         denied_invite_list = api.get(f"/api/v1/guilds/{guild_id}/invites", headers=bob_headers)
         require(denied_invite_list.status_code == 403, "non-manager listed guild invites")
         invite_list = api.get(f"/api/v1/guilds/{guild_id}/invites", headers=alice_headers)
@@ -672,14 +805,33 @@ def verify() -> None:
         )
         revoked_invite = api.delete(f"/api/v1/invites/{managed_code}", headers=alice_headers)
         unavailable_invite = api.get(f"/api/v1/invites/{managed_code}")
+        raw_revoked_invite = revoked_invite.json() if revoked_invite.status_code == 200 else None
+        revoked_invite_body = raw_revoked_invite if isinstance(raw_revoked_invite, dict) else {}
+        raw_revoked_guild = revoked_invite_body.get("guild")
+        revoked_guild = raw_revoked_guild if isinstance(raw_revoked_guild, dict) else {}
         require(
-            revoked_invite.status_code == 204 and unavailable_invite.status_code == 404,
+            revoked_invite.status_code == 200
+            and string_field(revoked_invite_body, "code", "revoked invite") == managed_code
+            and decimal_string_field(
+                revoked_guild,
+                "id",
+                "revoked invite guild",
+            )
+            == guild_id
+            and isinstance(revoked_invite_body.get("revoked_at"), str)
+            and bool(revoked_invite_body["revoked_at"])
+            and unavailable_invite.status_code == 404,
             "invite revocation failed",
         )
 
         after_message = api.get(f"/api/v1/guilds/{guild_id}", headers=alice_headers).json()
         require(
-            before["permission_generation"] == after_message["permission_generation"],
+            decimal_string_field(before, "permission_generation", "guild before messages")
+            == decimal_string_field(
+                after_message,
+                "permission_generation",
+                "guild after messages",
+            ),
             "message creation changed permission generation",
         )
         denied = api.put(
@@ -724,7 +876,7 @@ def verify() -> None:
             headers=alice_headers,
             json={"content": "Owners still bypass overwrites."},
         )
-        require(owner_send.status_code == 201, "owner did not bypass channel overwrite")
+        require(owner_send.status_code == 200, "owner did not bypass channel overwrite")
 
         banned = api.put(
             f"/api/v1/guilds/{guild_id}/bans/{charlie_id}",
@@ -736,21 +888,35 @@ def verify() -> None:
         )
         require(banned.status_code == 204, f"ban failed: {banned.text}")
         bans = api.get(f"/api/v1/guilds/{guild_id}/bans", headers=bob_headers)
+        charlie_ban = (
+            next(
+                (item for item in bans.json() if item.get("user", {}).get("id") == charlie_id),
+                None,
+            )
+            if bans.status_code == 200
+            else None
+        )
         require(
             bans.status_code == 200
-            and bans.json()[0]["user"]["id"] == charlie_id
-            and bans.json()[0]["expires_at"] is not None,
+            and charlie_ban is not None
+            and charlie_ban["expires_at"] is not None,
             "ban list failed",
         )
         blocked_invite = api.post(
             f"/api/v1/guilds/{guild_id}/invites", headers=alice_headers, json={}
-        ).json()["code"]
-        blocked_join = api.post(f"/api/v1/invites/{blocked_invite}", headers=charlie_headers)
+        )
+        require(blocked_invite.status_code == 200, "ban-check invite could not be created")
+        blocked_invite_code = string_field(blocked_invite.json(), "code", "ban-check invite")
+        blocked_join = api.post(f"/api/v1/invites/{blocked_invite_code}", headers=charlie_headers)
         require(blocked_join.status_code == 403, "banned member rejoined")
         unbanned = api.delete(f"/api/v1/guilds/{guild_id}/bans/{charlie_id}", headers=bob_headers)
         require(unbanned.status_code == 204, "unban failed")
-        rejoined = api.post(f"/api/v1/invites/{blocked_invite}", headers=charlie_headers)
-        require(rejoined.status_code == 200, "unbanned member could not rejoin")
+        rejoined = api.post(f"/api/v1/invites/{blocked_invite_code}", headers=charlie_headers)
+        require(
+            rejoined.status_code == 200
+            and decimal_string_field(rejoined.json(), "id", "unbanned invite join") == guild_id,
+            "unbanned member could not rejoin",
+        )
         kicked = api.delete(
             f"/api/v1/guilds/{guild_id}/members/{charlie_id}",
             headers={**bob_headers, "X-Audit-Log-Reason": "Acceptance test complete"},
@@ -764,18 +930,24 @@ def verify() -> None:
         )
         require(lifecycle_created.status_code == 201, "lifecycle guild creation failed")
         lifecycle_guild = lifecycle_created.json()
-        lifecycle_id = lifecycle_guild["id"]
-        lifecycle_channel_id = lifecycle_guild["channels"][0]["id"]
+        lifecycle_id = decimal_string_field(lifecycle_guild, "id", "lifecycle guild")
+        lifecycle_channel_id = decimal_string_field(
+            lifecycle_guild["channels"][0],
+            "id",
+            "lifecycle default channel",
+        )
         lifecycle_invite = api.post(
             f"/api/v1/guilds/{lifecycle_id}/invites",
             headers=bob_headers,
             json={"channel_id": lifecycle_channel_id},
         )
-        lifecycle_join = api.post(
-            f"/api/v1/invites/{lifecycle_invite.json()['code']}", headers=alice_headers
-        )
+        require(lifecycle_invite.status_code == 200, "lifecycle invite creation failed")
+        lifecycle_invite_code = string_field(lifecycle_invite.json(), "code", "lifecycle invite")
+        lifecycle_join = api.post(f"/api/v1/invites/{lifecycle_invite_code}", headers=alice_headers)
         require(
-            lifecycle_invite.status_code == 201 and lifecycle_join.status_code == 200,
+            lifecycle_join.status_code == 200
+            and decimal_string_field(lifecycle_join.json(), "id", "lifecycle invite join")
+            == lifecycle_id,
             "lifecycle guild invite or join failed",
         )
         owner_leave = api.delete(f"/api/v1/guilds/{lifecycle_id}/members/@me", headers=bob_headers)
@@ -788,7 +960,8 @@ def verify() -> None:
         )
         require(
             ownership_transfer.status_code == 200
-            and ownership_transfer.json()["owner_id"] == alice_id,
+            and ownership_transfer.json()["owner_id"] == alice_id
+            and ownership_transfer.json()["owner_domain"] == "schema.localhost",
             f"guild ownership transfer failed: {ownership_transfer.text}",
         )
         lifecycle_audit = api.get(

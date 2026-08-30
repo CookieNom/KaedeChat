@@ -48,27 +48,30 @@ OUTBOUND_FEDERATION_REQUEST_LIMITER = anyio.CapacityLimiter(4)
 
 
 def silence_blocks_path(path: str) -> bool:
+    """Return whether the URL itself proves the request is guild-scoped.
+
+    User/profile discovery and application runtime routes intentionally remain
+    available so ordinary DMs and user-installed apps keep working. Callers of
+    shared channel routes must pass ``guild_context=True`` to ``signed_request``.
+    """
+
+    if path == "/_kaede/v1/invites/resolve":
+        return True
     if path in {
-        "/_kaede/v1/users/lookup",
-        "/_kaede/v1/users/profile",
-        "/_kaede/v1/e2ee/key-packages/claim",
-        "/_kaede/v1/e2ee/rooms/propose",
-        "/_kaede/v1/e2ee/rooms/activate",
-        "/_kaede/v1/e2ee/rooms/rekey/propose",
-        "/_kaede/v1/e2ee/rooms/rekey/activate",
-        "/_kaede/v1/e2ee/rooms/operations/status",
-        "/_kaede/v1/invites/resolve",
+        "/_kaede/v1/voice/move",
+        "/_kaede/v1/voice/self-state",
+        "/_kaede/v1/voice/soundboard-effect",
+        "/_kaede/v1/voice/state",
+        "/_kaede/v1/voice/token",
     }:
         return True
-    return path.startswith("/_kaede/v1/guilds/") and path.rsplit("/", 1)[-1] in {
-        "snapshot",
-        "events",
-        "proxy",
-        "proxy-pin",
-        "proxy-reaction",
-        "proxy-thread",
-        "join",
-    }
+    if path.startswith("/_kaede/v1/guilds/"):
+        return True
+    if path.startswith("/_kaede/v1/application-directory/"):
+        return True
+    if path.startswith("/_kaede/v1/applications/") and "/guilds/" in path:
+        return True
+    return path.startswith("/_kaede/v1/channels/") and "/announcement-" in path
 
 
 async def federation_signing_headers(
@@ -120,6 +123,8 @@ async def signed_request(
     request_timeout: float = 10,
     hop: int = 1,
     max_response_bytes: int = MAX_FEDERATION_RESPONSE_BYTES,
+    allow_json_floats: bool = False,
+    guild_context: bool = False,
 ) -> httpx.Response:
     try:
         OUTBOUND_FEDERATION_REQUEST_LIMITER.acquire_nowait()
@@ -137,6 +142,8 @@ async def signed_request(
                 query=query,
                 request_timeout=request_timeout,
                 hop=hop,
+                allow_json_floats=allow_json_floats,
+                guild_context=guild_context,
             )
             async with client:
                 return await bounded_http_request(
@@ -166,6 +173,8 @@ async def _prepare_signed_request(
     query: dict[str, str] | None,
     request_timeout: float,
     hop: int,
+    allow_json_floats: bool = False,
+    guild_context: bool = False,
 ) -> tuple[str, httpx.AsyncClient, str, bytes, dict[str, str]]:
     destination = normalize_domain(destination)
     if not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path:
@@ -184,10 +193,14 @@ async def _prepare_signed_request(
     block = await matching_block(session, destination)
     if block is not None and block.level == "suspend":
         raise FederationNetworkError("federation with this destination is suspended")
-    if block is not None and block.level == "silence" and silence_blocks_path(path):
+    if (
+        block is not None
+        and block.level == "silence"
+        and (guild_context or silence_blocks_path(path))
+    ):
         raise FederationNetworkError("this federation surface is silenced for the destination")
     await ensure_peer(session, settings, destination)
-    body = canonical_json(payload) if payload is not None else b""
+    body = canonical_json(payload, allow_floats=allow_json_floats) if payload is not None else b""
     query_text = urlencode(sorted((query or {}).items()))
     target = canonical_request_target(path, query_text)
     headers = await federation_signing_headers(
@@ -210,6 +223,7 @@ async def signed_stream_request(
     request_timeout: float = 30,
     hop: int = 1,
     max_response_bytes: int = MAX_FEDERATION_RESPONSE_BYTES,
+    guild_context: bool = False,
 ) -> AsyncIterator[httpx.Response]:
     """Yield one signed response stream with encoded-body and size guards."""
     try:
@@ -228,6 +242,7 @@ async def signed_stream_request(
                 query=query,
                 request_timeout=request_timeout,
                 hop=hop,
+                guild_context=guild_context,
             )
             headers = {**headers, "Accept-Encoding": "identity"}
             async with (

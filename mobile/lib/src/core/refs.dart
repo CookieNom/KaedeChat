@@ -1,3 +1,8 @@
+/// Exact unpadded base64url encoding of 32 bytes.
+bool isCanonicalBase64url32(Object? value) =>
+    value is String &&
+    RegExp(r'^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$').hasMatch(value);
+
 final class Snowflake {
   Snowflake(String value) : value = _validate(value);
 
@@ -109,6 +114,11 @@ final class EntityRef {
   final String key;
 
   String get wire => key;
+
+  /// Percent-encoded representation for use as a single HTTP path segment.
+  /// Keeping this beside [wire] prevents repositories from inconsistently
+  /// encoding qualified federated identities.
+  String get pathSegment => Uri.encodeComponent(wire);
 
   @override
   bool operator ==(Object other) => other is EntityRef && key == other.key;

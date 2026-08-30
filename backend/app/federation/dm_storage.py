@@ -196,8 +196,22 @@ def dm_message_storage_delta(
     content: str | None,
     e2ee: dict[str, Any] | None,
     mention_user_refs: list[dict[str, Any]],
+    mention_role_refs: list[dict[str, Any]] | None = None,
+    mention_everyone: bool = False,
     attachments: list[Attachment] | list[dict[str, Any]],
     client_nonce: str | None = None,
+    forwarded_message_ref: tuple[int, str] | None = None,
+    embeds: list[dict[str, Any]] | None = None,
+    components: list[dict[str, Any]] | None = None,
+    sticker_items: list[dict[str, Any]] | None = None,
+    poll: dict[str, Any] | None = None,
+    application_ref: tuple[int, str] | None = None,
+    interaction_metadata: dict[str, Any] | None = None,
+    view_version: int = 0,
+    view_persistent: bool = False,
+    view_expires_at: datetime | None = None,
+    forward_snapshot: dict[str, Any] | None = None,
+    poll_result: dict[str, Any] | None = None,
 ) -> FederatedDMStorageDelta:
     message_bytes = max(
         MESSAGE_MINIMUM_CHARGE,
@@ -205,7 +219,23 @@ def dm_message_storage_delta(
         + _text_bytes(content)
         + _json_bytes(e2ee)
         + _json_bytes(mention_user_refs)
-        + _text_bytes(client_nonce),
+        + _json_bytes(mention_role_refs or [])
+        + _text_bytes("1" if mention_everyone else None)
+        + _text_bytes(client_nonce)
+        + _text_bytes(str(forwarded_message_ref[0]) if forwarded_message_ref else None)
+        + _text_bytes(forwarded_message_ref[1] if forwarded_message_ref else None)
+        + _json_bytes(embeds or [])
+        + _json_bytes(components or [])
+        + _json_bytes(sticker_items or [])
+        + _json_bytes(poll)
+        + _text_bytes(str(application_ref[0]) if application_ref else None)
+        + _text_bytes(application_ref[1] if application_ref else None)
+        + _json_bytes(interaction_metadata)
+        + _text_bytes(str(view_version) if view_version else None)
+        + _text_bytes("1" if view_persistent else None)
+        + _text_bytes(view_expires_at.isoformat() if view_expires_at is not None else None)
+        + _json_bytes(forward_snapshot)
+        + _json_bytes(poll_result),
     )
     attachment_bytes = sum(_attachment_charge(item) for item in attachments)
     return FederatedDMStorageDelta(

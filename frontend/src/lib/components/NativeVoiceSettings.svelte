@@ -301,6 +301,17 @@
               access.</small
             >
             <input bind:value={preferences.push_to_talk_hotkey} placeholder="Ctrl+Shift+Space" />
+          </label>
+          <label class="form-field">
+            <span>Priority push-to-talk shortcut</span>
+            <small>
+              Available while using push to talk when your role has Priority Speaker permission.
+              Other speakers are temporarily reduced while you talk.
+            </small>
+            <input
+              bind:value={preferences.priority_push_to_talk_hotkey}
+              placeholder="Ctrl+Alt+Space"
+            />
             <small>{hotkeyStatus}</small>
           </label>
         {/if}

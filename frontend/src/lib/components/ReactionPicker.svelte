@@ -6,6 +6,7 @@
     type CustomEmojiOption,
     type EmojiOption
   } from '$lib/chat/emojis';
+  import { canonicalReactionEmoji } from '$lib/chat/reactions';
   import { onMount } from 'svelte';
 
   let {
@@ -43,6 +44,11 @@
     )
   );
   const customGroups = $derived(groupCustomEmojis(custom));
+
+  function selectReaction(value: string) {
+    const canonical = canonicalReactionEmoji(value);
+    if (canonical) onSelect(canonical);
+  }
 
   onMount(async () => {
     try {
@@ -95,7 +101,7 @@
             <button
               type="button"
               title={`:${emoji.name}: — ${group.name}`}
-              onclick={() => onSelect(emoji.value)}
+              onclick={() => selectReaction(emoji.value)}
             >
               <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
             </button>
@@ -108,7 +114,7 @@
     {:else if category !== 'custom' || needle}
       <div class="grid">
         {#each unicode as emoji (emoji.value)}
-          <button type="button" title={emoji.name} onclick={() => onSelect(emoji.value)}>
+          <button type="button" title={emoji.name} onclick={() => selectReaction(emoji.value)}>
             {emoji.value}
           </button>
         {/each}

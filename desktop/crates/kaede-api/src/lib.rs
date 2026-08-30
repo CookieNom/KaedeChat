@@ -6,7 +6,12 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use kaede_protocol::{ApiError, Domain, ResourceVersion};
@@ -32,6 +37,15 @@ pub struct JsonResponse {
     pub status: StatusCode,
     pub headers: HashMap<String, String>,
     pub body: serde_json::Value,
+}
+
+/// Network scope allowed for a credential-free public capability download.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicDownloadPolicy {
+    /// Resolve and pin only globally routable addresses.
+    PublicOnly,
+    /// Resolve and pin only loopback addresses for an explicitly configured local authority.
+    LoopbackDevelopmentOnly,
 }
 
 #[derive(Clone, Debug)]
@@ -272,14 +286,36 @@ impl ApiClient {
         method: Method,
         path: &str,
         body: Option<&serde_json::Value>,
-        version: Option<&ResourceVersion>,
+        if_match: Option<&str>,
+        audit_log_reason: Option<&str>,
     ) -> Result<JsonResponse, ApiClientError> {
         let response = self
-            .build_request(method, path, body, version)
+            .build_json_bridge_request(method, path, body, if_match, audit_log_reason)
             .await?
             .send()
             .await?;
         decode_json_response(response).await
+    }
+
+    async fn build_json_bridge_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        if_match: Option<&str>,
+        audit_log_reason: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, ApiClientError> {
+        let mut request = self.build_request(method, path, body, None).await?;
+        // These are raw HTTP header values from the shared UI bridge. Unlike
+        // ResourceVersion helpers, If-Match is already quoted when required
+        // and must be forwarded byte-for-byte.
+        if let Some(if_match) = if_match {
+            request = request.header(header::IF_MATCH, if_match);
+        }
+        if let Some(reason) = audit_log_reason {
+            request = request.header("X-Audit-Log-Reason", reason);
+        }
+        Ok(request)
     }
 
     pub async fn delete_with_version<T: DeserializeOwned>(
@@ -399,6 +435,71 @@ impl ApiClient {
         Ok(body)
     }
 
+    /// Downloads a public capability without credentials or redirects while
+    /// enforcing the byte limit as the body streams in.
+    pub async fn get_public_bytes_no_redirect(
+        &self,
+        url: &Url,
+        max_bytes: usize,
+        network_policy: PublicDownloadPolicy,
+    ) -> Result<Bytes, ApiClientError> {
+        if url.scheme() != "https" && !is_loopback_url(url) {
+            return Err(ApiClientError::InsecureEndpoint);
+        }
+        let host = url.host_str().ok_or(ApiClientError::InvalidEndpoint)?;
+        let port = url
+            .port_or_known_default()
+            .ok_or(ApiClientError::InvalidEndpoint)?;
+        let addresses = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(ApiClientError::Resolve)?
+            .collect::<Vec<_>>();
+        validate_public_download_addresses(&addresses, network_policy)?;
+
+        // Pin the already-vetted answers into a one-shot, credential-free
+        // client. The request cannot resolve the name a second time after the
+        // private-network check (DNS rebinding), follow a redirect, or inherit
+        // a proxy capable of resolving the target independently.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .user_agent(concat!("KaedeDesktop/", env!("CARGO_PKG_VERSION")))
+            .no_proxy()
+            .resolve_to_addrs(host, &addresses)
+            .build()?;
+        let mut response = client.get(url.clone()).send().await?;
+        if response.status().is_redirection() {
+            return Err(ApiClientError::InvalidRedirect);
+        }
+        if !response.status().is_success() {
+            return Err(ApiClientError::DownloadRejected(response.status()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(ApiClientError::ResponseTooLarge);
+        }
+        let initial_capacity = response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or_default()
+            .min(max_bytes);
+        let mut body = Vec::with_capacity(initial_capacity);
+        while let Some(chunk) = response.chunk().await? {
+            if body
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|length| length > max_bytes)
+            {
+                return Err(ApiClientError::ResponseTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(body))
+    }
+
     async fn request<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         method: Method,
@@ -480,6 +581,74 @@ fn is_loopback_url(url: &Url) -> bool {
         url.host_str(),
         Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
     )
+}
+
+fn validate_public_download_addresses(
+    addresses: &[SocketAddr],
+    policy: PublicDownloadPolicy,
+) -> Result<(), ApiClientError> {
+    let allowed = |address: &SocketAddr| match policy {
+        PublicDownloadPolicy::PublicOnly => is_globally_routable(address.ip()),
+        PublicDownloadPolicy::LoopbackDevelopmentOnly => is_loopback(address.ip()),
+    };
+    if addresses.is_empty() || addresses.iter().any(|address| !allowed(address)) {
+        return Err(ApiClientError::UnsafeNetworkTarget);
+    }
+    Ok(())
+}
+
+fn is_loopback(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_loopback(),
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map_or_else(|| address.is_loopback(), |mapped| mapped.is_loopback()),
+    }
+}
+
+fn is_globally_routable(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_globally_routable_v4(address),
+        IpAddr::V6(address) => {
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return is_globally_routable_v4(mapped);
+            }
+            let segments = address.segments();
+            let is_well_known_nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
+            if is_well_known_nat64 {
+                let [first, second] = segments[6].to_be_bytes();
+                let [third, fourth] = segments[7].to_be_bytes();
+                return is_globally_routable_v4(Ipv4Addr::new(first, second, third, fourth));
+            }
+
+            // Today, assigned global unicast space is 2000::/3. Keep future
+            // and transition ranges fail-closed, including 2001::/23 special
+            // assignments and deprecated 6to4.
+            segments[0] & 0xe000 == 0x2000
+                && !(segments[0] == 0x2001 && segments[1] < 0x0200)
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+                && segments[0] != 0x2002
+                && !(segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
+        }
+    }
+}
+
+fn is_globally_routable_v4(address: Ipv4Addr) -> bool {
+    let [first, second, third, _] = address.octets();
+    first != 0 // current network 0.0.0.0/8
+        && !address.is_private()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_broadcast()
+        && !address.is_multicast()
+        && !(first == 100 && (64..=127).contains(&second)) // shared address space
+        && !(first == 192 && second == 0 && third == 0) // IETF protocol assignments
+        && !(first == 192 && second == 0 && third == 2) // documentation
+        && !(first == 192 && second == 88 && third == 99) // deprecated 6to4 relay anycast
+        && !(first == 198 && matches!(second, 18 | 19)) // benchmarking
+        && !(first == 198 && second == 51 && third == 100) // documentation
+        && !(first == 203 && second == 0 && third == 113) // documentation
+        && first < 240 // reserved
 }
 
 async fn decode_response<T: DeserializeOwned>(
@@ -595,6 +764,12 @@ pub enum ApiClientError {
     ForbiddenUploadHeader,
     #[error("object storage rejected the upload with {0}")]
     UploadRejected(StatusCode),
+    #[error("object storage rejected the download with {0}")]
+    DownloadRejected(StatusCode),
+    #[error("media host resolved to a local or private network address")]
+    UnsafeNetworkTarget,
+    #[error("media host could not be resolved: {0}")]
+    Resolve(std::io::Error),
     #[error("server returned an invalid redirect")]
     InvalidRedirect,
     #[error("response exceeded the configured limit")]
@@ -649,6 +824,15 @@ impl ApiClientError {
             }
             Self::UploadRejected(_) =>
                 "The upload service rejected the file. Select it again or retry in a moment."
+                    .to_owned(),
+            Self::DownloadRejected(_) =>
+                "The media link expired or the file is unavailable. Ask for it to be sent again."
+                    .to_owned(),
+            Self::UnsafeNetworkTarget =>
+                "Kaede blocked a media link that targets a local or private network."
+                    .to_owned(),
+            Self::Resolve(_) =>
+                "Kaede could not find the media host. Ask for the file to be sent again."
                     .to_owned(),
             Self::InvalidRedirect =>
                 "The media link is invalid or expired. Retry the download or ask the sender to upload it again."
@@ -924,13 +1108,53 @@ fn is_safe_server_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{error::Error, net::SocketAddr};
 
-    use kaede_protocol::{ApiError, Domain, ValidationIssue};
-    use reqwest::StatusCode;
+    use kaede_protocol::{ApiError, Domain, Snowflake, ValidationIssue};
+    use reqwest::{Method, StatusCode, header};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use url::Url;
 
-    use super::{ApiClientError, InstanceEndpoint, decode_api_error};
+    use super::{
+        ApiClient, ApiClientError, InstanceEndpoint, PublicDownloadPolicy, decode_api_error,
+        validate_public_download_addresses,
+    };
+    use crate::service::ChannelPositionPatch;
+
+    #[test]
+    fn channel_position_patch_distinguishes_omitted_and_null_parent() -> Result<(), Box<dyn Error>>
+    {
+        let id = Snowflake::new(12)?;
+        assert_eq!(
+            serde_json::to_value(ChannelPositionPatch {
+                id,
+                position: Some(3),
+                parent_id: None,
+                lock_permissions: None,
+                flags: None,
+            })?,
+            serde_json::json!({"id": "12", "position": 3})
+        );
+        assert_eq!(
+            serde_json::to_value(ChannelPositionPatch {
+                id,
+                position: None,
+                parent_id: Some(None),
+                lock_permissions: Some(false),
+                flags: Some(16),
+            })?,
+            serde_json::json!({
+                "id": "12",
+                "parent_id": null,
+                "lock_permissions": false,
+                "flags": 16,
+            })
+        );
+        Ok(())
+    }
 
     #[test]
     fn production_endpoint_is_same_origin_https_and_wss() -> Result<(), Box<dyn Error>> {
@@ -956,6 +1180,119 @@ mod tests {
             local.gateway_url().as_str(),
             "ws://127.0.0.1:18081/gateway?v=1&encoding=json"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn public_capability_addresses_reject_private_and_mixed_dns_answers()
+    -> Result<(), Box<dyn Error>> {
+        let public: SocketAddr = "1.1.1.1:443".parse()?;
+        assert!(
+            validate_public_download_addresses(&[public], PublicDownloadPolicy::PublicOnly).is_ok()
+        );
+        for public in [
+            "[2606:4700:4700::1111]:443",
+            "[::ffff:1.1.1.1]:443",
+            "[64:ff9b::101:101]:443",
+        ] {
+            let public: SocketAddr = public.parse()?;
+            assert!(
+                validate_public_download_addresses(&[public], PublicDownloadPolicy::PublicOnly)
+                    .is_ok()
+            );
+        }
+
+        for private in [
+            "0.1.2.3:443",
+            "127.0.0.1:443",
+            "10.0.0.1:443",
+            "169.254.169.254:443",
+            "[::1]:443",
+            "[fd00::1]:443",
+            "[fe80::1]:443",
+            "[::ffff:10.0.0.1]:443",
+            "[64:ff9b::a00:1]:443",
+            "[64:ff9b:1::1]:443",
+            "[100::1]:443",
+            "[2001:db8::1]:443",
+            "[3fff::1]:443",
+        ] {
+            let private: SocketAddr = private.parse()?;
+            assert!(matches!(
+                validate_public_download_addresses(&[private], PublicDownloadPolicy::PublicOnly),
+                Err(ApiClientError::UnsafeNetworkTarget)
+            ));
+        }
+
+        let private: SocketAddr = "127.0.0.1:443".parse()?;
+        assert!(matches!(
+            validate_public_download_addresses(
+                &[public, private],
+                PublicDownloadPolicy::PublicOnly
+            ),
+            Err(ApiClientError::UnsafeNetworkTarget)
+        ));
+        for loopback in ["127.0.0.1:443", "[::1]:443", "[::ffff:127.0.0.1]:443"] {
+            let loopback: SocketAddr = loopback.parse()?;
+            assert!(
+                validate_public_download_addresses(
+                    &[loopback],
+                    PublicDownloadPolicy::LoopbackDevelopmentOnly
+                )
+                .is_ok()
+            );
+        }
+        let private: SocketAddr = "10.0.0.1:443".parse()?;
+        assert!(matches!(
+            validate_public_download_addresses(
+                &[private],
+                PublicDownloadPolicy::LoopbackDevelopmentOnly
+            ),
+            Err(ApiClientError::UnsafeNetworkTarget)
+        ));
+        assert!(matches!(
+            validate_public_download_addresses(
+                &[public, "127.0.0.1:443".parse()?],
+                PublicDownloadPolicy::LoopbackDevelopmentOnly
+            ),
+            Err(ApiClientError::UnsafeNetworkTarget)
+        ));
+        assert!(matches!(
+            validate_public_download_addresses(&[], PublicDownloadPolicy::PublicOnly),
+            Err(ApiClientError::UnsafeNetworkTarget)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pinned_public_capability_download_does_not_follow_redirects()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 1_024];
+            let _ = stream.read(&mut request).await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            Ok::<(), std::io::Error>(())
+        });
+        let origin = Url::parse(&format!("http://{address}/"))?;
+        let endpoint = InstanceEndpoint::development(Domain::parse("dev.example")?, &origin)?;
+        let api = ApiClient::new(endpoint)?;
+
+        let result = api
+            .get_public_bytes_no_redirect(
+                &origin.join("sound")?,
+                512 * 1_024,
+                PublicDownloadPolicy::LoopbackDevelopmentOnly,
+            )
+            .await;
+        assert!(matches!(result, Err(ApiClientError::InvalidRedirect)));
+        server.await??;
         Ok(())
     }
 
@@ -991,6 +1328,38 @@ mod tests {
         );
         assert!(endpoint.root_url("../admin").is_err());
         assert!(endpoint.root_url("https://evil.example/file").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_bridge_preserves_raw_version_and_audit_reason_headers()
+    -> Result<(), Box<dyn Error>> {
+        let endpoint = InstanceEndpoint::development(
+            Domain::parse("dev.example")?,
+            &Url::parse("http://127.0.0.1:18081")?,
+        )?;
+        let api = ApiClient::new(endpoint)?;
+        let request = api
+            .build_json_bridge_request(
+                Method::PATCH,
+                "guilds/1",
+                Some(&serde_json::json!({"name": "Community"})),
+                Some("\"version-3\""),
+                Some("keep the audit trail useful"),
+            )
+            .await?
+            .build()?;
+
+        assert_eq!(
+            request.headers().get(header::IF_MATCH),
+            Some(&header::HeaderValue::from_static("\"version-3\""))
+        );
+        assert_eq!(
+            request.headers().get("X-Audit-Log-Reason"),
+            Some(&header::HeaderValue::from_static(
+                "keep the audit trail useful"
+            ))
+        );
         Ok(())
     }
 

@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -437,6 +437,8 @@ async def process_attachment_record(
                 "size": len(derivative.content),
                 "width": derivative.width,
                 "height": derivative.height,
+                "animated": derivative.animated,
+                "duration_ms": derivative.duration_ms,
                 "processing_version": IMAGE_PIPELINE_VERSION,
             }
         if reprocessing:
@@ -774,6 +776,35 @@ async def purge_local_attachment(
     already_deleted = attachment.deleted_at is not None
     storage = S3Storage(settings)
     now = datetime.now(UTC)
+    source_ref = (
+        (attachment.source_attachment_id, attachment.source_attachment_domain)
+        if attachment.source_attachment_id is not None
+        and attachment.source_attachment_domain is not None
+        else (attachment.id, attachment.origin_domain)
+    )
+    retained_by_announcement = bool(
+        await session.scalar(
+            select(
+                exists().where(
+                    Attachment.deleted_at.is_(None),
+                    or_(
+                        and_(
+                            Attachment.id == source_ref[0],
+                            Attachment.origin_domain == source_ref[1],
+                        ),
+                        and_(
+                            Attachment.source_attachment_id == source_ref[0],
+                            Attachment.source_attachment_domain == source_ref[1],
+                        ),
+                    ),
+                    ~and_(
+                        Attachment.id == attachment.id,
+                        Attachment.origin_domain == attachment.origin_domain,
+                    ),
+                )
+            )
+        )
+    )
     if attachment.staging_object_key is None and attachment.upload_expires_at is not None:
         # Recover the deterministic key even for rows processed by an older
         # release that cleared it after one deletion.
@@ -784,8 +815,9 @@ async def purge_local_attachment(
     for raw in attachment.variants.values():
         if isinstance(raw, dict) and isinstance(raw.get("object_key"), str):
             objects.add((settings.media_derived_bucket, raw["object_key"]))
-    for bucket, key in sorted(objects):
-        await storage.delete(bucket, key)
+    if not retained_by_announcement:
+        for bucket, key in sorted(objects):
+            await storage.delete(bucket, key)
     if not already_deleted:
         await discard_attachment(session, settings, attachment)
     # Clear only strictly after the fixed post-expiry completion grace. At the

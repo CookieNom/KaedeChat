@@ -12,13 +12,19 @@ from app.chat.e2ee_membership import (
     pause_guild_e2ee_for_membership_change,
 )
 from app.chat.payloads import materialize_channel_created_at
+from app.core.federation import (
+    guild_crosspost_authority_event_ref,
+    guild_message_authority_event_refs,
+)
 from app.core.settings import Settings
 from app.core.task_wake import enqueue_best_effort
+from app.db.materialization import materialize_updated_at
 from app.db.models import Channel, Guild, GuildMember, User
 from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import (
     SNAPSHOT_NEUTRAL_GUILD_EVENTS,
     assign_guild_sequence,
+    lock_current_guild,
     remote_destinations_with_channel_access,
     store_guild_event,
 )
@@ -68,6 +74,7 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
         "guild_id": str(channel.guild_id) if channel.guild_id is not None else None,
         "guild_domain": channel.guild_domain,
         "type": channel.type,
+        "nsfw": bool(getattr(channel, "nsfw", False)),
         "name": channel.name,
         "topic": channel.topic,
         "position": channel.position,
@@ -75,6 +82,10 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
         "parent_domain": channel.parent_domain,
         "permissions_synced": bool(channel.permissions_synced),
         "rate_limit_per_user": channel.rate_limit_per_user,
+        "bitrate": channel.bitrate,
+        "user_limit": channel.user_limit,
+        "rtc_region": channel.rtc_region,
+        "video_quality_mode": channel.video_quality_mode,
         # SQLAlchemy applies these defaults during INSERT. Guild mutations are
         # rendered before queue_guild_mutation flushes a newly-created channel,
         # so materialize the wire defaults here instead of emitting null.
@@ -144,6 +155,7 @@ async def queue_guild_mutation(
 
     if guild.origin_domain != settings.domain:
         raise RuntimeError("only a guild home may emit guild mutations")
+    guild = await lock_current_guild(session, guild)
     signer = await guild_mutation_signer(session, settings, guild, actor)
     if pause_e2ee and event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
         paused = await pause_guild_e2ee_for_membership_change(session, guild)
@@ -155,8 +167,27 @@ async def queue_guild_mutation(
     snapshot_changed = event_type not in SNAPSHOT_NEUTRAL_GUILD_EVENTS
     if snapshot_changed:
         guild.snapshot_generation = int(getattr(guild, "snapshot_generation", 1) or 1) + 1
-    await session.flush()
     seq = await assign_guild_sequence(session, guild)
+    if event_type in {"guild.channel.create", "guild.channel.update"}:
+        raw_channel = content.get("channel")
+        if channel is None or not isinstance(raw_channel, dict):
+            raise RuntimeError("channel mutations require their authoritative channel state")
+        if (str(raw_channel.get("id")), raw_channel.get("origin_domain")) != (
+            str(channel.id),
+            channel.origin_domain,
+        ):
+            raise RuntimeError("channel mutation content does not match its authoritative row")
+        # Channel state is commonly rendered before a newly-created row has
+        # been flushed. Materialize the database-managed timestamp here, once,
+        # so every producer signs the same version exposed by authority REST.
+        await materialize_updated_at(session, channel)
+        content = {
+            **content,
+            "channel": {
+                **raw_channel,
+                "version": channel.updated_at.isoformat(),
+            },
+        }
     context: dict[str, Any] = {
         "guild_id": str(guild.id),
         "guild_domain": guild.origin_domain,
@@ -177,9 +208,10 @@ async def queue_guild_mutation(
         # Carry the durable generation as well so direct replay and older
         # peers cannot retain a permission cache under the previous fence.
         context["permission_generation"] = str(guild.permission_generation)
-    envelope = await build_envelope(
+    envelope = await build_guild_authority_envelope(
         session,
         settings,
+        guild,
         event_type,
         signer,
         content,
@@ -206,13 +238,12 @@ async def queue_guild_mutation(
             discover_destination=False,
         )
     if hidden_destinations:
-        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-        if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-            raise RuntimeError("local guild owner cannot sign a redacted mutation")
+        owner = await guild_authority_owner(session, settings, guild)
         redacted_context = dict(context)
-        redacted = await build_envelope(
+        redacted = await build_guild_authority_envelope(
             session,
             settings,
+            guild,
             "guild.event.redacted",
             owner,
             {"original_type": event_type},
@@ -230,29 +261,130 @@ async def queue_guild_mutation(
     return seq
 
 
+async def guild_authority_owner(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    *,
+    for_update: bool = True,
+) -> User:
+    """Resolve the exact current owner used for guild-authority attestations."""
+
+    if guild.origin_domain != settings.domain:
+        raise RuntimeError("only a guild home may resolve its authority owner")
+    if for_update:
+        guild = await lock_current_guild(session, guild)
+        owner = await session.scalar(
+            select(User)
+            .where(
+                User.id == guild.owner_id,
+                User.origin_domain == guild.owner_domain,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    else:
+        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+    if owner is None or owner.is_local != (owner.origin_domain == settings.domain):
+        raise RuntimeError("guild authority owner identity is unavailable")
+    return owner
+
+
+async def build_guild_authority_envelope(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    event_type: str,
+    signer: User,
+    content: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a guild event with an exact current-owner authority attestation."""
+
+    envelope_context = dict(context or {})
+    authority_message_author: GuildMember | None = None
+    message_refs = guild_message_authority_event_refs(
+        event_type,
+        content,
+        envelope_context,
+        expected_authority=settings.domain,
+    )
+    owner_signed_crosspost = guild_crosspost_authority_event_ref(
+        event_type,
+        content,
+        envelope_context,
+        expected_authority=settings.domain,
+    ) == (guild.id, guild.origin_domain)
+    raw_message = content.get("message")
+    crosspost_flag = bool(
+        isinstance(raw_message, dict)
+        and isinstance(raw_message.get("flags"), int)
+        and not isinstance(raw_message.get("flags"), bool)
+        and raw_message["flags"] & (1 << 1)
+    )
+    if crosspost_flag and not owner_signed_crosspost:
+        raise ValueError("announcement copy authority binding is invalid")
+    if owner_signed_crosspost and (signer.id, signer.origin_domain) != (
+        guild.owner_id,
+        guild.owner_domain,
+    ):
+        raise ValueError("announcement copy must be signed by the current guild owner")
+    if (
+        message_refs is not None
+        and (signer.id, signer.origin_domain) == (guild.owner_id, guild.owner_domain)
+        and not owner_signed_crosspost
+    ):
+        if message_refs[:2] != (guild.id, guild.origin_domain):
+            raise RuntimeError("guild message context does not match its authority")
+        authority_message_author = await session.get(
+            GuildMember,
+            (
+                guild.id,
+                guild.origin_domain,
+                message_refs[2],
+                message_refs[3],
+            ),
+        )
+        if authority_message_author is None:
+            raise RuntimeError("guild message author is not an authority member")
+    if "seq" in envelope_context:
+        # Sequence/snapshot bookkeeping updates the Guild row for every event.
+        # Sign the resulting authority timestamp so replica-local receipt time
+        # can never become the public If-Match token.
+        await materialize_updated_at(session, guild)
+        envelope_context["guild_version"] = guild.updated_at.isoformat()
+    return await build_envelope(
+        session,
+        settings,
+        event_type,
+        signer,
+        content,
+        context=envelope_context,
+        authority_attested_guild=guild,
+        authority_attested_guild_message_author=authority_message_author,
+    )
+
+
 async def guild_mutation_signer(
     session: AsyncSession,
     settings: Settings,
     guild: Guild,
     actor: User,
 ) -> User:
-    """Return the local signer for an authoritative guild mutation.
+    """Return the signer for an authoritative guild mutation.
 
     Ordinary mutations are signed by their local actor. A signed federation
-    proxy may act for a remote guild member, but an instance must never sign as
-    that remote identity. In that case the local guild owner attests the
-    authoritative result while the service keeps the remote actor for
-    permission checks and audit attribution.
+    proxy may act for a remote guild member; in that case the exact current
+    guild owner is authority-attested while the service keeps the remote actor
+    for permission checks and audit attribution.
     """
 
     if guild.origin_domain != settings.domain:
         raise RuntimeError("only a guild home may sign guild mutations")
     if actor.is_local and actor.origin_domain == settings.domain:
         return actor
-    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-    if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-        raise RuntimeError("local guild owner cannot sign a proxied mutation")
-    return owner
+    return await guild_authority_owner(session, settings, guild)
 
 
 async def queue_guild_access_revocation(
@@ -268,12 +400,11 @@ async def queue_guild_access_revocation(
 
     if user_domain == settings.domain:
         return set()
-    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-    if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-        raise RuntimeError("local guild owner cannot sign an access revocation")
-    revoked = await build_envelope(
+    owner = await guild_authority_owner(session, settings, guild)
+    revoked = await build_guild_authority_envelope(
         session,
         settings,
+        guild,
         "guild.access.revoked",
         owner,
         {
@@ -308,12 +439,11 @@ async def queue_guild_instance_access_revocation(
 
     if instance_domain == settings.domain:
         raise ValueError("the local instance cannot be revoked from its own guild")
-    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-    if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
-        raise RuntimeError("local guild owner cannot sign an instance access revocation")
-    revoked = await build_envelope(
+    owner = await guild_authority_owner(session, settings, guild)
+    revoked = await build_guild_authority_envelope(
         session,
         settings,
+        guild,
         "guild.instance_access.revoked",
         owner,
         {"target_domain": instance_domain, "reason": reason},

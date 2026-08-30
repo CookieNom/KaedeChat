@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import decrypt_secret, encrypt_secret
+from app.core.base64url import decode_base64url, encode_base64url
 from app.core.federation import sign_envelope, verify_envelope
 from app.core.settings import Settings
 from app.db.models import PeerKey
@@ -54,7 +55,7 @@ def stable_wake_identifier(
         f"push-wake-v2\n{purpose}\n{device_id}\n{message_id}\n{message_domain}\n{kind}"
     ).encode()
     digest = hmac.digest(settings.secret_key_bytes, canonical, "sha256")
-    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return encode_base64url(digest)
 
 
 def wake_mac(
@@ -66,8 +67,8 @@ def wake_mac(
     expires_at: int,
 ) -> str:
     canonical = f"2\n{route_id}\n{event_token}\n{delivery_id}\n{expires_at}".encode("ascii")
-    key = base64.urlsafe_b64decode(secret + "=" * (-len(secret) % 4))
-    return base64.urlsafe_b64encode(hmac.digest(key, canonical, "sha256")).decode().rstrip("=")
+    key = decode_base64url(secret)
+    return encode_base64url(hmac.digest(key, canonical, "sha256"))
 
 
 def encrypt_wake_secret(value: str, settings: Settings) -> bytes:

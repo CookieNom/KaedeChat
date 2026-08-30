@@ -259,14 +259,14 @@
         {#if showAddMember && !selected.personal}
           <form class="add-member" onsubmit={addMember}>
             <label>
-              Local username
+              Federated username or account ID
               <input
                 bind:value={memberIdentity}
-                placeholder="username@this-instance"
+                placeholder="developer@remote.example"
                 autocomplete="off"
                 required
               />
-              <small>You can also paste a complete account ID.</small>
+              <small>Use a handle from any trusted instance or paste a qualified account ID.</small>
             </label>
             <label>
               Role

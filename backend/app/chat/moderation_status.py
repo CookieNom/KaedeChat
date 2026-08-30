@@ -17,6 +17,29 @@ def sanitize_timeout_reason(value: str | None) -> str | None:
     return sanitize_single_line_text(value, max_characters=512)
 
 
+def member_timeout_error_detail(
+    member: GuildMember,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object] | None:
+    """Return the shared user-facing denial for an active guild timeout."""
+
+    current = now or datetime.now(UTC)
+    timeout_until = member.timeout_until
+    active = bool(member.timeout_indefinite) or bool(
+        timeout_until is not None and timeout_until > current
+    )
+    if not active:
+        return None
+    return {
+        "code": "MEMBER_TIMED_OUT",
+        "message": "You are currently timed out in this guild.",
+        "timeout_until": timeout_until.isoformat() if timeout_until is not None else None,
+        "timeout_indefinite": bool(member.timeout_indefinite),
+        "reason": sanitize_timeout_reason(member.timeout_reason),
+    }
+
+
 def guild_self_moderation_status(
     member: GuildMember,
     *,

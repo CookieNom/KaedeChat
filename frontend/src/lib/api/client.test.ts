@@ -216,6 +216,37 @@ describe('API session recovery', () => {
     });
   });
 
+  it('strips client-only decrypted state from recursive network responses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          id: '1',
+          mention_role_refs: [{ id: '3', origin_domain: 'chat.example' }],
+          mention_everyone: true,
+          e2ee_verified: true,
+          decrypted_content: 'peer-injected plaintext',
+          attachments: [
+            {
+              id: '2',
+              encrypted_manifest: { key: 'peer-injected-secret' }
+            }
+          ],
+          nested: { decrypted_attachments: [{ key: 'peer-injected-secret' }] }
+        })
+      )
+    );
+    const { api } = await import('./client');
+
+    await expect(api('/channels/1/messages')).resolves.toEqual({
+      id: '1',
+      mention_role_refs: [{ id: '3', origin_domain: 'chat.example' }],
+      mention_everyone: true,
+      attachments: [{ id: '2' }],
+      nested: {}
+    });
+  });
+
   it('preserves retry timing and the trace reference from a current error envelope', async () => {
     vi.stubGlobal(
       'fetch',
@@ -281,6 +312,46 @@ describe('API session recovery', () => {
       status: 503,
       message: 'Secure credential storage is locked. Unlock your keyring and try again.'
     });
+  });
+
+  it('forwards desktop audit reasons and raw If-Match through the native allowlist boundary', async () => {
+    const requests: unknown[] = [];
+    const invoke = vi.fn(async (command: string, args?: unknown) => {
+      if (command === 'native_restore_session') return { instance: null, authenticated: true };
+      if (command === 'native_api_request') {
+        requests.push(args);
+        return { status: 204, body: null, headers: {} };
+      }
+      throw new Error('Unexpected native command');
+    });
+    vi.stubGlobal('window', {
+      __TAURI__: { core: { invoke } },
+      dispatchEvent: vi.fn()
+    });
+    const { api } = await import('./client');
+
+    await api('/guilds/1', {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Community' }),
+      headers: {
+        'iF-MaTcH': '"version-3"',
+        'x-AuDiT-LoG-ReAsOn': 'keep the audit trail useful',
+        'Content-Type': 'application/json',
+        'X-Kaede-Client': 'untrusted-webview-value'
+      }
+    });
+
+    expect(requests).toEqual([
+      {
+        request: {
+          method: 'PATCH',
+          path: '/guilds/1',
+          body: { name: 'Community' },
+          if_match: '"version-3"',
+          headers: { 'x-audit-log-reason': 'keep the audit trail useful' }
+        }
+      }
+    ]);
   });
 
   it('filters unstructured native rejection text instead of trusting it as user copy', async () => {

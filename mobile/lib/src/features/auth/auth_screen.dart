@@ -53,17 +53,17 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     try {
       final domain = _domain();
       if (password.text.isEmpty) {
-        throw const UserInputException('Enter your password.');
+        throw UserInputException('Enter your password.');
       }
       if (register) {
         if (password.text != confirmation.text) {
-          throw const UserInputException('Passwords do not match.');
+          throw UserInputException('Passwords do not match.');
         }
         if (username.text.trim().isEmpty) {
-          throw const UserInputException('Choose a username.');
+          throw UserInputException('Choose a username.');
         }
       } else if (identifier.text.trim().isEmpty) {
-        throw const UserInputException(
+        throw UserInputException(
           'Enter your username or email address.',
         );
       }
@@ -72,7 +72,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
       if (register) {
         if (serverConfig['email_required'] == true &&
             email.text.trim().isEmpty) {
-          throw const UserInputException(
+          throw UserInputException(
             'This server requires an email address.',
           );
         }
@@ -99,8 +99,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           await _verificationDialog(domain);
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text('Account created. You can sign in now.')),
+            SnackBar(content: Text('Account created. You can sign in now.')),
           );
         }
         if (mounted) setState(() => register = false);
@@ -179,7 +178,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     try {
       return Domain(instance.text);
     } on FormatException {
-      throw const UserInputException(
+      throw UserInputException(
         'Enter a valid server hostname, such as kaede.chat.',
       );
     }
@@ -207,7 +206,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
       final domain = _domain();
       final serverConfig = await _config(domain);
       if (serverConfig['password_recovery_enabled'] != true) {
-        throw const UserInputException(
+        throw UserInputException(
             'Password recovery is not enabled on this server.');
       }
       if (!mounted) return;
@@ -225,18 +224,18 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: const Text('Reset password and encryption vault?'),
-          content: const Text(
+          title: Text('Reset password and encryption vault?'),
+          content: Text(
             'Resetting your password rotates the account-vault key and deletes the remote encrypted vault. Encrypted history may be recoverable only from an enrolled client that still has it or from a recovery backup.',
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
+              child: Text('Cancel'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Reset password'),
+              child: Text('Reset password'),
             ),
           ],
         ),
@@ -246,7 +245,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           .read(repositoryProvider)
           .resetPassword(domain, token, replacement);
       final localStateRebased =
-          await const MobileE2EEStore().rebaseAfterPasswordReset(accountRef);
+          await MobileE2EEStore().rebaseAfterPasswordReset(accountRef);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -285,8 +284,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(context), child: Text('Cancel')),
           FilledButton(
               onPressed: () {
                 final value = secret ? controller.text : controller.text.trim();
@@ -298,7 +296,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                 }
                 Navigator.pop(context, value);
               },
-              child: const Text('Continue')),
+              child: Text('Continue')),
         ],
       ),
     );
@@ -328,15 +326,15 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         width: 42,
                         height: 42,
                         decoration: BoxDecoration(
-                          color: KaedeColors.coral,
+                          color: context.kaede.coral,
                           borderRadius:
                               BorderRadius.circular(KaedeRadius.medium),
                         ),
-                        child: const Icon(Icons.forum_rounded,
-                            color: KaedeColors.onCoral, size: 21),
+                        child: Icon(Icons.forum_rounded,
+                            color: context.kaede.onCoral, size: 21),
                       ),
-                      const SizedBox(width: 12),
-                      const Text(
+                      SizedBox(width: 12),
+                      Text(
                         'Kaede Chat',
                         style: TextStyle(
                           fontSize: 19,
@@ -346,18 +344,18 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 34),
+                  SizedBox(height: 34),
                   if (widget.notice case final notice?) ...[
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: KaedeColors.coralSoft,
+                        color: context.kaede.coralSoft,
                         borderRadius: BorderRadius.circular(KaedeRadius.medium),
                       ),
                       child: Text(notice,
-                          style: const TextStyle(color: KaedeColors.coralText)),
+                          style: TextStyle(color: context.kaede.coralText)),
                     ),
-                    const SizedBox(height: 18),
+                    SizedBox(height: 18),
                   ],
                   SegmentedButton<bool>(
                     segments: const [
@@ -371,44 +369,44 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         : (selection) =>
                             setState(() => register = selection.first),
                   ),
-                  const SizedBox(height: 26),
+                  SizedBox(height: 26),
                   Text(
                     register ? 'Create your account.' : 'Welcome back.',
                     style: Theme.of(context).textTheme.displaySmall,
                   ),
-                  const SizedBox(height: 10),
+                  SizedBox(height: 10),
                   Text(
                     register
                         ? 'Choose the server that will own your identity. You '
                             'can still join communities across the fediverse.'
                         : 'Sign in through your home server — the server where '
                             'your account was created.',
-                    style: const TextStyle(
-                      color: KaedeColors.muted,
+                    style: TextStyle(
+                      color: context.kaede.muted,
                       fontSize: 15,
                       height: 1.45,
                     ),
                   ),
-                  const SizedBox(height: 28),
+                  SizedBox(height: 28),
                   const _Label('Home server'),
                   TextField(
                     controller: instance,
                     keyboardType: TextInputType.url,
                     textInputAction: TextInputAction.next,
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       hintText: 'kaede.chat',
                       helperText:
                           'Not sure? kaede.chat is the recommended public server.',
                       prefixIcon: Icon(Icons.language_rounded),
                     ),
                   ),
-                  const SizedBox(height: 18),
+                  SizedBox(height: 18),
                   if (register) ...[
                     const _Label('Username'),
                     TextField(
                         controller: username,
                         textInputAction: TextInputAction.next),
-                    const SizedBox(height: 18),
+                    SizedBox(height: 18),
                     const _Label('Email'),
                     TextField(
                         controller: email,
@@ -420,7 +418,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         controller: identifier,
                         textInputAction: TextInputAction.next),
                   ],
-                  const SizedBox(height: 18),
+                  SizedBox(height: 18),
                   const _Label('Password'),
                   TextField(
                     controller: password,
@@ -438,7 +436,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     ),
                   ),
                   if (register) ...[
-                    const SizedBox(height: 18),
+                    SizedBox(height: 18),
                     const _Label('Confirm password'),
                     TextField(
                         controller: confirmation,
@@ -447,24 +445,24 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         onSubmitted: (_) => submit()),
                   ],
                   if (state.error case final error?) ...[
-                    const SizedBox(height: 18),
+                    SizedBox(height: 18),
                     Container(
-                      padding: const EdgeInsets.all(13),
+                      padding: EdgeInsets.all(13),
                       decoration: BoxDecoration(
-                        color: KaedeColors.dangerSoft,
+                        color: context.kaede.dangerSoft,
                         borderRadius: BorderRadius.circular(KaedeRadius.medium),
                       ),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(Icons.error_outline_rounded,
-                              size: 17, color: KaedeColors.danger),
-                          const SizedBox(width: 10),
+                          Icon(Icons.error_outline_rounded,
+                              size: 17, color: context.kaede.danger),
+                          SizedBox(width: 10),
                           Expanded(
                             child: Text(
                               error,
-                              style: const TextStyle(
-                                color: KaedeColors.danger,
+                              style: TextStyle(
+                                color: context.kaede.danger,
                                 fontSize: 13,
                                 height: 1.35,
                               ),
@@ -474,7 +472,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                       ),
                     ),
                   ],
-                  const SizedBox(height: 26),
+                  SizedBox(height: 26),
                   FilledButton.icon(
                     onPressed: state.phase == SessionPhase.authenticating ||
                             _submitting
@@ -482,7 +480,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         : submit,
                     icon: state.phase == SessionPhase.authenticating ||
                             _submitting
-                        ? const SizedBox.square(
+                        ? SizedBox.square(
                             dimension: 18,
                             child: CircularProgressIndicator(strokeWidth: 2))
                         : Icon(register
@@ -491,11 +489,11 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     label: Text(register ? 'Create account' : 'Sign in'),
                   ),
                   if (!register) ...[
-                    const SizedBox(height: 6),
+                    SizedBox(height: 6),
                     Center(
                       child: TextButton(
                         onPressed: _forgotPassword,
-                        child: const Text('Forgot password?'),
+                        child: Text('Forgot password?'),
                       ),
                     ),
                   ],
@@ -554,7 +552,7 @@ final class _EmailVerificationDialogState
         await widget.repository.resendVerification(widget.email);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Verification email requested.')),
+            SnackBar(content: Text('Verification email requested.')),
           );
         }
       });
@@ -562,7 +560,7 @@ final class _EmailVerificationDialogState
   Future<void> _verify() => _run(() async {
         final value = widget.token.text.trim();
         if (value.isEmpty) {
-          throw const UserInputException('Enter the verification token.');
+          throw UserInputException('Enter the verification token.');
         }
         await widget.repository.verifyEmail(value);
         if (mounted) Navigator.pop(context);
@@ -570,45 +568,44 @@ final class _EmailVerificationDialogState
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: const Text('Verify your email'),
+        title: Text('Verify your email'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               'We sent a verification link to your email. Open it, or paste its token below.',
             ),
-            const SizedBox(height: 14),
+            SizedBox(height: 14),
             TextField(
               controller: widget.token,
               enabled: !_busy,
-              decoration:
-                  const InputDecoration(labelText: 'Verification token'),
+              decoration: InputDecoration(labelText: 'Verification token'),
               onSubmitted: (_) => _verify(),
             ),
             if (_error case final error?) ...[
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               Text(error,
                   style: TextStyle(color: Theme.of(context).colorScheme.error)),
             ],
             if (_busy) ...[
-              const SizedBox(height: 12),
-              const LinearProgressIndicator(),
+              SizedBox(height: 12),
+              LinearProgressIndicator(),
             ],
           ],
         ),
         actions: [
           TextButton(
             onPressed: _busy ? null : _resend,
-            child: const Text('Resend'),
+            child: Text('Resend'),
           ),
           TextButton(
             onPressed: _busy ? null : () => Navigator.pop(context),
-            child: const Text('Verify later'),
+            child: Text('Verify later'),
           ),
           FilledButton(
             onPressed: _busy ? null : _verify,
-            child: const Text('Verify'),
+            child: Text('Verify'),
           ),
         ],
       );
@@ -619,11 +616,11 @@ final class _Label extends StatelessWidget {
   final String text;
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 7),
+        padding: EdgeInsets.only(bottom: 7),
         child: Text(
           text,
-          style: const TextStyle(
-            color: KaedeColors.textSoft,
+          style: TextStyle(
+            color: context.kaede.textSoft,
             fontSize: 12.5,
             fontWeight: FontWeight.w600,
           ),
@@ -641,23 +638,22 @@ final class _MfaDialogState extends State<_MfaDialog> {
   final controller = TextEditingController();
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: const Text('Two-factor authentication'),
+        title: Text('Two-factor authentication'),
         content: TextField(
             controller: controller,
             autofocus: true,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(
-                hintText: '6-digit code or recovery code')),
+            decoration:
+                InputDecoration(hintText: '6-digit code or recovery code')),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(context), child: Text('Cancel')),
           FilledButton(
               onPressed: () {
                 final value = controller.text.trim();
                 if (value.isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
+                    SnackBar(
                       content: Text(
                         'Enter an authentication or recovery code.',
                       ),
@@ -667,7 +663,7 @@ final class _MfaDialogState extends State<_MfaDialog> {
                 }
                 Navigator.pop(context, value);
               },
-              child: const Text('Continue')),
+              child: Text('Continue')),
         ],
       );
 }

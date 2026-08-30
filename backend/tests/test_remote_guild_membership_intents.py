@@ -1,13 +1,14 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 from fastapi import HTTPException, Response
 from sqlalchemy.dialects import postgresql
 
+import app.federation.guilds as guild_federation
 from app.api import invites
 from app.db.models import Guild, RemoteGuildMembershipIntent, User
 from app.federation.guilds import (
@@ -235,6 +236,23 @@ async def test_remote_invite_commits_join_intent_before_authority_request(
     session = AsyncMock()
     begin_join = AsyncMock(return_value=True)
     apply_snapshot = AsyncMock(return_value=guild)
+    remote_guild_payload: dict[str, object] = {
+        "id": "10",
+        "origin_domain": "remote.example",
+        "name": "Remote guild",
+        "description": None,
+        "icon_hash": None,
+        "banner_hash": None,
+        "owner_id": "9",
+        "owner_domain": "remote.example",
+        "permission_generation": "1",
+        "federated_history_policy": "disabled",
+        "history_policy_generation": "1",
+        "unavailable": False,
+        "sync_status": "ready",
+        "sync_error_code": None,
+        "version": "2026-08-29T00:00:00+00:00",
+    }
 
     async def signed_request(
         _session: object,
@@ -242,37 +260,59 @@ async def test_remote_invite_commits_join_intent_before_authority_request(
         _method: str,
         _domain: str,
         path: str,
-        **_kwargs: object,
+        **kwargs: object,
     ) -> httpx.Response:
         if path == "/_kaede/v1/invites/resolve":
-            return httpx.Response(200, json={"guild": {"id": "10"}})
+            assert kwargs["payload"] == {"code": "Abcd1234", "viewer_id": "42"}
+            return httpx.Response(
+                200,
+                json={
+                    "code": "Abcd1234",
+                    "guild": remote_guild_payload,
+                    "channel_id": "20",
+                    "target_type": None,
+                    "target_user_id": None,
+                    "scheduled_event_id": None,
+                    "role_ids": [],
+                    "target_user_count": 0,
+                },
+            )
         assert path == "/_kaede/v1/guilds/10/join"
         assert session.commit.await_count == 1
-        return httpx.Response(200, json={"guild": {"id": "10"}})
+        return httpx.Response(
+            200,
+            json={"guild": remote_guild_payload, "snapshot_seq": "1"},
+        )
 
     monkeypatch.setattr(invites, "enforce_client_rate_limit", AsyncMock())
     monkeypatch.setattr(invites, "begin_remote_guild_join", begin_join)
     monkeypatch.setattr(invites, "signed_request", signed_request)
-    monkeypatch.setattr(invites, "fetch_guild_snapshot", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        invites,
+        "fetch_guild_snapshot",
+        AsyncMock(return_value={"snapshot_seq": "1"}),
+    )
     monkeypatch.setattr(invites, "apply_guild_snapshot", apply_snapshot)
     monkeypatch.setattr(invites, "wake_queued_guild_federation", AsyncMock())
     monkeypatch.setattr(invites, "enqueue_best_effort", AsyncMock())
     monkeypatch.setattr(invites, "publish_dispatch", AsyncMock())
     monkeypatch.setattr(invites, "guild_payload", lambda _guild: {"id": "10"})
 
+    settings = SimpleNamespace(domain="local.example")
     result = await invites.accept_invite(
-        "invite@remote.example",
+        "Abcd1234@remote.example",
         Response(),
         SimpleNamespace(user=user),  # type: ignore[arg-type]
         session,
         AsyncMock(),
-        SimpleNamespace(domain="local.example"),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        settings,  # type: ignore[arg-type]
     )
 
     assert result == {"id": "10"}
     begin_join.assert_awaited_once_with(
         session,
-        SimpleNamespace(domain="local.example"),
+        settings,
         guild_id=10,
         guild_domain="remote.example",
         user_id=42,
@@ -371,6 +411,68 @@ async def test_unsolicited_first_member_add_is_consumed_without_durable_state() 
     assert applied is None
     assert guild.last_event_seq == 5
     session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_member_add_atomically_replicates_invite_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = Guild(
+        id=10,
+        origin_domain="remote.example",
+        name="Remote guild",
+        owner_id=9,
+        owner_domain="remote.example",
+        last_event_seq=4,
+        next_event_seq=5,
+        snapshot_generation=1,
+        sync_status="ready",
+    )
+    user = User(
+        id=42,
+        origin_domain="people.example",
+        username="remote_user",
+        is_local=False,
+    )
+    session = AsyncMock()
+    session.add = Mock()
+    session.scalar.return_value = guild
+    session.get.return_value = None
+    session.execute.side_effect = [[(91, "remote.example")], SimpleNamespace()]
+    monkeypatch.setattr(
+        guild_federation,
+        "resolve_delegated_profile",
+        AsyncMock(return_value=user),
+    )
+    event = {
+        "seq": "5",
+        "type": "guild.member.add",
+        "actor": {"id": "9", "domain": "remote.example"},
+        "content": {
+            "user": {
+                "id": "42",
+                "origin_domain": "people.example",
+                "username": "remote_user",
+            },
+            "joined_at": datetime(2026, 8, 12, tzinfo=UTC).isoformat(),
+            "temporary": False,
+            "role_ids": [{"id": "91", "origin_domain": "remote.example"}],
+        },
+        "context": {"guild_id": "10", "guild_domain": "remote.example"},
+    }
+
+    applied = await apply_guild_member_event(
+        session,
+        SimpleNamespace(domain="local.example"),  # type: ignore[arg-type]
+        guild,
+        event,
+    )
+
+    assert applied == (user, True)
+    assert session.execute.await_count == 2
+    insert_statement = session.execute.await_args_list[1].args[0]
+    assert "INSERT INTO member_roles" in str(insert_statement)
+    assert guild.last_event_seq == 5
 
 
 @pytest.mark.asyncio

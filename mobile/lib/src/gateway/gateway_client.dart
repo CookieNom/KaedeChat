@@ -3,10 +3,49 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 typedef GatewaySocketConnector = WebSocketChannel Function(Uri uri);
+
+Map<String, Object?> selfVoiceStatePayload({
+  required bool selfMute,
+  required bool selfDeaf,
+}) =>
+    <String, Object?>{
+      'self_mute': selfMute || selfDeaf,
+      'self_deaf': selfDeaf,
+    };
+
+Map<String, Object?> channelInfoRequestPayload(
+  String guildRef,
+  List<String> fields,
+) {
+  const supported = <String>{'status', 'voice_start_time'};
+  if (guildRef.isEmpty ||
+      fields.isEmpty ||
+      fields.length != fields.toSet().length ||
+      fields.any((field) => !supported.contains(field))) {
+    throw ArgumentError('Invalid voice channel info request');
+  }
+  return <String, Object?>{
+    'guild_id': guildRef,
+    'fields': List<String>.unmodifiable(fields),
+  };
+}
+
+Map<String, Object?> soundboardSoundsRequestPayload(List<String> guildRefs) {
+  if (guildRefs.isEmpty ||
+      guildRefs.length > 100 ||
+      guildRefs.any((guild) => guild.isEmpty) ||
+      guildRefs.length != guildRefs.toSet().length) {
+    throw ArgumentError('Soundboard requests require 1 to 100 unique guilds');
+  }
+  return <String, Object?>{
+    'guild_ids': List<String>.unmodifiable(guildRefs),
+  };
+}
 
 final class GatewayEvent {
   const GatewayEvent(this.name, this.data, this.sequence);
@@ -180,7 +219,7 @@ GatewayEnvelope decodeGatewayEnvelope(Object? raw) {
   }
   return GatewayEnvelope(
     op: op,
-    data: data,
+    data: stripNetworkClientState(data),
     sequence: sequence,
     eventName: name,
   );
@@ -402,8 +441,43 @@ final class GatewayClient {
       GatewayOp.subscribeMemberList,
       <String, Object?>{'guild_id': guildRef, 'ranges': ranges});
 
-  void voiceState(Map<String, Object?> state) =>
-      _send(GatewayOp.voiceStateUpdate, state);
+  void requestChannelInfo(
+    String guildRef, {
+    List<String> fields = const <String>['status', 'voice_start_time'],
+  }) =>
+      _send(
+        GatewayOp.requestChannelInfo,
+        channelInfoRequestPayload(guildRef, fields),
+      );
+
+  void requestSoundboardSounds(List<String> guildRefs) => _send(
+      GatewayOp.requestSoundboardSounds,
+      soundboardSoundsRequestPayload(guildRefs));
+
+  Future<void> setSelfVoiceState({
+    required bool selfMute,
+    required bool selfDeaf,
+  }) async {
+    final socket = _socket;
+    if (_closed || !_health.isConnected || socket == null) {
+      throw StateError(
+        'Realtime updates are offline. Your voice state was not shared.',
+      );
+    }
+    final payload = jsonEncode(<String, Object?>{
+      'op': GatewayOp.voiceStateUpdate.value,
+      'd': selfVoiceStatePayload(selfMute: selfMute, selfDeaf: selfDeaf),
+    });
+    try {
+      socket.sink.add(payload);
+    } on Object {
+      unawaited(_reconnect(
+        _generation,
+        reason: 'Could not send a realtime voice update. Reconnecting…',
+      ));
+      rethrow;
+    }
+  }
 
   Future<void> close() async {
     _closed = true;

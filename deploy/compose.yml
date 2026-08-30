@@ -110,9 +110,9 @@ x-backend-base: &backend-base
     KAEDE_MEDIA_REMOTE_CACHE_TTL_DAYS: ${KAEDE_MEDIA_REMOTE_CACHE_TTL_DAYS:-30}
     KAEDE_MEDIA_RETENTION_DAYS: ${KAEDE_MEDIA_RETENTION_DAYS:-}
     KAEDE_MEDIA_EMOJI_LIMIT: ${KAEDE_MEDIA_EMOJI_LIMIT:-100}
-    KAEDE_MEDIA_MAX_EMOJI_BYTES: ${KAEDE_MEDIA_MAX_EMOJI_BYTES:-524288}
+    KAEDE_MEDIA_MAX_EMOJI_BYTES: ${KAEDE_MEDIA_MAX_EMOJI_BYTES:-262144}
     KAEDE_MEDIA_STICKER_LIMIT: ${KAEDE_MEDIA_STICKER_LIMIT:-60}
-    KAEDE_MEDIA_MAX_STICKER_BYTES: ${KAEDE_MEDIA_MAX_STICKER_BYTES:-2097152}
+    KAEDE_MEDIA_MAX_STICKER_BYTES: ${KAEDE_MEDIA_MAX_STICKER_BYTES:-524288}
     KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED: ${KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED:-false}
     KAEDE_VOICE_ENABLED: ${KAEDE_VOICE_ENABLED:-false}
     KAEDE_VOICE_PUBLIC_URL: ${KAEDE_VOICE_PUBLIC_URL:-wss://${KAEDE_DOMAIN:?set KAEDE_DOMAIN}/livekit}
@@ -250,9 +250,9 @@ x-backend-core-environment: &backend-core-environment
   KAEDE_MEDIA_REMOTE_CACHE_TTL_DAYS: ${KAEDE_MEDIA_REMOTE_CACHE_TTL_DAYS:-30}
   KAEDE_MEDIA_RETENTION_DAYS: ${KAEDE_MEDIA_RETENTION_DAYS:-}
   KAEDE_MEDIA_EMOJI_LIMIT: ${KAEDE_MEDIA_EMOJI_LIMIT:-100}
-  KAEDE_MEDIA_MAX_EMOJI_BYTES: ${KAEDE_MEDIA_MAX_EMOJI_BYTES:-524288}
+  KAEDE_MEDIA_MAX_EMOJI_BYTES: ${KAEDE_MEDIA_MAX_EMOJI_BYTES:-262144}
   KAEDE_MEDIA_STICKER_LIMIT: ${KAEDE_MEDIA_STICKER_LIMIT:-60}
-  KAEDE_MEDIA_MAX_STICKER_BYTES: ${KAEDE_MEDIA_MAX_STICKER_BYTES:-2097152}
+  KAEDE_MEDIA_MAX_STICKER_BYTES: ${KAEDE_MEDIA_MAX_STICKER_BYTES:-524288}
   KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED: ${KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED:-false}
   KAEDE_VOICE_ENABLED: ${KAEDE_VOICE_ENABLED:-false}
   KAEDE_VOICE_PUBLIC_URL: ${KAEDE_VOICE_PUBLIC_URL:-wss://${KAEDE_DOMAIN:?set KAEDE_DOMAIN}/livekit}
@@ -801,6 +801,13 @@ services:
         KAEDE_MEDIA_PUBLIC_BASE_URL: ${KAEDE_MEDIA_PUBLIC_BASE_URL:-https://media.${KAEDE_DOMAIN:?set KAEDE_DOMAIN}}
         KAEDE_MEDIA_S3_ADDRESSING_STYLE: ${KAEDE_MEDIA_S3_ADDRESSING_STYLE:-path}
         KAEDE_MEDIA_ATTACHMENTS_BUCKET: ${KAEDE_MEDIA_ATTACHMENTS_BUCKET:-kaede-attachments}
+        KAEDE_LANDING_PAGE: ${KAEDE_LANDING_PAGE:-default}
+        KAEDE_LEGAL_INSTANCE_NAME: ${KAEDE_LEGAL_INSTANCE_NAME:-}
+        KAEDE_LEGAL_OPERATOR_NAME: ${KAEDE_LEGAL_OPERATOR_NAME:-}
+        KAEDE_LEGAL_CONTACT_EMAIL: ${KAEDE_LEGAL_CONTACT_EMAIL:-}
+        KAEDE_LEGAL_EFFECTIVE_DATE: ${KAEDE_LEGAL_EFFECTIVE_DATE:-}
+        KAEDE_LEGAL_MINIMUM_AGE: ${KAEDE_LEGAL_MINIMUM_AGE:-}
+        KAEDE_LEGAL_JURISDICTION: ${KAEDE_LEGAL_JURISDICTION:-}
     restart: "no"
     user: "0:0"
     network_mode: none
@@ -837,6 +844,7 @@ services:
       - "../frontend:/frontend:ro"
       - "../desktop:/desktop:ro"
       - "../mobile:/mobile:ro"
+      - "../sdk/python:/sdk/python:ro"
       - "../.env.example:/repository/.env.example:ro"
       - "../.env.s3.example:/repository/.env.s3.example:ro"
       - "./reference.env.example:/repository/deploy/reference.env.example:ro"
@@ -855,6 +863,7 @@ services:
       - "../frontend:/frontend:ro"
       - "../desktop:/desktop:ro"
       - "../mobile:/mobile:ro"
+      - "../sdk/python:/sdk/python:ro"
       - "../.env.example:/repository/.env.example:ro"
       - "../.env.s3.example:/repository/.env.s3.example:ro"
       - "./reference.env.example:/repository/deploy/reference.env.example:ro"
@@ -904,6 +913,27 @@ services:
         python -m scripts.verify_migration_guards verify-thread-permissions &&
         python -m scripts.verify_migration_guards cleanup-thread-permissions &&
         python -m scripts.verify_schema &&
+        alembic downgrade fb7c3e9a1d42 &&
+        python -m scripts.verify_migration_guards prepare-bot-permissions &&
+        alembic upgrade head &&
+        python -m scripts.verify_migration_guards verify-bot-permissions-upgrade &&
+        python -m scripts.verify_migration_guards prepare-bot-permissions-downgrade &&
+        alembic downgrade fb7c3e9a1d42 &&
+        python -m scripts.verify_migration_guards verify-bot-permissions-downgrade &&
+        alembic upgrade head &&
+        python -m scripts.verify_migration_guards verify-bot-permissions-upgrade &&
+        python -m scripts.verify_migration_guards cleanup-bot-permissions &&
+        python -m scripts.verify_migration_guards prepare-foundation-feature &&
+        if downgrade_output="$$(alembic downgrade fb7c3e9a1d42 2>&1)"; then
+          echo 'unsafe foundation-feature downgrade unexpectedly succeeded' >&2;
+          exit 1;
+        fi &&
+        case "$$downgrade_output" in
+          *'cannot downgrade fc9a4b7d2e10 while Stage or new channel settings exist'*) ;;
+          *) printf '%s\n' "$$downgrade_output" >&2; exit 1 ;;
+        esac &&
+        python -m scripts.verify_migration_guards verify-foundation-feature &&
+        python -m scripts.verify_migration_guards cleanup-foundation-feature &&
         alembic downgrade b46d9a1f2c73 &&
         python -m scripts.verify_migration_guards prepare-federation &&
         if downgrade_output="$$(alembic downgrade a35c8d2e7f41 2>&1)"; then
@@ -927,9 +957,17 @@ services:
         esac &&
         python -m scripts.verify_migration_guards verify-guild &&
         python -m scripts.verify_migration_guards cleanup-guild &&
-        alembic upgrade head &&
         alembic downgrade base &&
         alembic upgrade head &&
+        KAEDE_BULK_MODERATION_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
+        KAEDE_INTERACTION_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
+        KAEDE_GUILD_AUTHORITY_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
+        KAEDE_REACTION_MIGRATION_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
+        pytest -q
+        tests/test_bulk_moderation_postgres.py
+        tests/test_interaction_atomicity_postgres.py
+        tests/test_guild_owner_authority_postgres.py
+        tests/test_reaction_emoji_migration_postgres.py &&
         alembic check
 
   identity-check:

@@ -26,7 +26,7 @@ from app.chat.permissions import calculate_permissions
 from app.core.federation import canonical_json
 from app.core.permissions import Permission
 from app.core.settings import Settings
-from app.db.bot_models import BotInstallation
+from app.db.bot_models import BotInstallation, BotUserInstallation
 from app.db.models import (
     Attachment,
     AttachmentFederationRecipient,
@@ -69,17 +69,19 @@ class MediaDeleteSignerRef:
     origin_domain: str
 
 
-async def _locked_local_user(
+async def _locked_user(
     session: AsyncSession,
     settings: Settings,
     user_id: int,
     user_domain: str,
 ) -> User | None:
-    if user_domain != settings.domain:
-        return None
     user = await session.scalar(
         select(User)
-        .where(User.id == user_id, User.origin_domain == user_domain, User.is_local.is_(True))
+        .where(
+            User.id == user_id,
+            User.origin_domain == user_domain,
+            User.is_local.is_(user_domain == settings.domain),
+        )
         # Tombstone preparation commonly already owns media-ref and Attachment
         # locks. Ordinary asset mutation owns User/Guild before Attachment, so
         # never wait here and form the inverse cycle; the enclosing worker or
@@ -95,15 +97,15 @@ async def resolve_media_delete_signer(
     attachment: Attachment,
     guild: Guild | None,
 ) -> User:
-    """Choose a truthful local actor for an attachment-home tombstone.
+    """Choose the truthful retained actor for an attachment-home tombstone.
 
-    Human uploads are normally signed by their uploader. A locally hosted
-    attachment can also belong to a remotely-owned bot identity, however. For
-    a local guild, its owner is the authoritative local signer; otherwise the
-    local installer who granted the bot access is the durable fallback.
+    The attachment origin, rather than the uploader's home, authorizes byte
+    invalidation. Prefer the exact uploader even when remote; local owner and
+    installer fallbacks exist for legacy rows whose uploader projection is no
+    longer available.
     """
 
-    uploader = await _locked_local_user(
+    uploader = await _locked_user(
         session,
         settings,
         attachment.uploader_id,
@@ -113,7 +115,7 @@ async def resolve_media_delete_signer(
         return uploader
 
     if guild is not None and guild.origin_domain == settings.domain:
-        owner = await _locked_local_user(
+        owner = await _locked_user(
             session,
             settings,
             guild.owner_id,
@@ -123,18 +125,32 @@ async def resolve_media_delete_signer(
             return owner
 
     if attachment.bot_installation_id is not None:
-        installation = await session.get(BotInstallation, attachment.bot_installation_id)
-        if installation is not None:
-            installer = await _locked_local_user(
+        guild_installation = await session.get(BotInstallation, attachment.bot_installation_id)
+        if guild_installation is not None:
+            installer = await _locked_user(
                 session,
                 settings,
-                installation.installer_id,
-                installation.installer_domain,
+                guild_installation.installer_id,
+                guild_installation.installer_domain,
             )
             if installer is not None:
                 return installer
 
-    raise RuntimeError("terminal local attachment has no authorized local tombstone signer")
+    if attachment.bot_user_installation_id is not None:
+        user_installation = await session.get(
+            BotUserInstallation, attachment.bot_user_installation_id
+        )
+        if user_installation is not None:
+            installer = await _locked_user(
+                session,
+                settings,
+                user_installation.user_id,
+                user_installation.user_domain,
+            )
+            if installer is not None:
+                return installer
+
+    raise RuntimeError("terminal local attachment has no retained tombstone actor")
 
 
 async def terminal_attachment_destinations(
@@ -467,7 +483,7 @@ async def queue_media_delete_tombstone(
         envelope = current_event.envelope
     else:
         if signer is None and source is None:
-            raise RuntimeError("initial media tombstone requires a local signer")
+            raise RuntimeError("initial media tombstone requires a signer")
         if signer is None:
             if source is None:  # pragma: no cover - guarded above
                 raise RuntimeError("media tombstone source disappeared")
@@ -476,8 +492,6 @@ async def queue_media_delete_tombstone(
                 origin_domain=source.signer_domain,
             )
         signer_ref: User | MediaDeleteSignerRef = signer
-        if signer_ref.origin_domain != settings.domain:
-            raise RuntimeError("media tombstone signer is not local")
         prior_generation = source.generation if source is not None else 0
         if prior_generation >= (1 << 63) - 1:
             raise RuntimeError("media tombstone generation is exhausted")
@@ -491,6 +505,7 @@ async def queue_media_delete_tombstone(
                 "origin_domain": attachment_domain,
                 "generation": str(prior_generation + 1),
             },
+            retained_authority_attested_actor=signer_ref.origin_domain != settings.domain,
         )
         await _retain_media_delete_event(session, envelope)
 
@@ -615,6 +630,7 @@ async def build_media_delete_envelope(
             "origin_domain": attachment.origin_domain,
             "generation": str(prior_generation + 1),
         },
+        retained_authority_attested_actor=signer.origin_domain != settings.domain,
     )
     return envelope
 

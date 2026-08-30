@@ -32,7 +32,13 @@
     </header>
     <p class="starter">
       <strong>{userDisplayName(message.author)}</strong>
-      <span>{message.decrypted_content ?? message.content ?? 'Message'}</span>
+      <span
+        >{message.e2ee
+          ? message.e2ee_verified === true
+            ? (message.decrypted_content ?? 'Message')
+            : 'Encrypted message'
+          : (message.content ?? 'Message')}</span
+      >
     </p>
     <form
       onsubmit={(event) => {

@@ -24,6 +24,11 @@ export interface PendingUpload {
   error?: string;
 }
 
+export interface VoiceUploadMetadata {
+  durationSecs: number;
+  waveform: string;
+}
+
 function uploadStatusMessage(status: number): string {
   if (status === 401 || status === 403) {
     return 'Media storage rejected the upload authorization. Choose the file again and retry.';
@@ -100,7 +105,8 @@ export async function uploadChannelFile(
   channelRef: string,
   file: File,
   onProgress: (progress: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  voice?: VoiceUploadMetadata
 ): Promise<UploadTicket> {
   const ticket = await api<UploadTicket>(
     `/channels/${encodeURIComponent(channelRef)}/attachments`,
@@ -110,7 +116,8 @@ export async function uploadChannelFile(
       body: JSON.stringify({
         filename: file.name || 'upload',
         content_type: file.type || 'application/octet-stream',
-        size: file.size
+        size: file.size,
+        ...(voice ? { duration_secs: voice.durationSecs, waveform: voice.waveform } : {})
       })
     }
   );

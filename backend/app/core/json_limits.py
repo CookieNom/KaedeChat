@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
@@ -33,6 +34,7 @@ def validate_json_tree(
     *,
     limits: JsonTreeLimits,
     label: str = "JSON value",
+    allow_floats: bool = False,
 ) -> None:
     """Validate JSON shape iteratively before canonicalization or persistence.
 
@@ -91,6 +93,8 @@ def validate_json_tree(
                 raise ValueError(f"{label} integer is outside the supported range")
             continue
         if isinstance(item, float):
+            if allow_floats and math.isfinite(item):
+                continue
             # Python and JavaScript do not serialize integral/exponential
             # floating-point values identically. Federation signatures and
             # future E2EE AAD therefore use integers or strings exclusively.
@@ -103,6 +107,7 @@ def strict_json_loads(
     *,
     limits: JsonTreeLimits = FEDERATION_JSON_LIMITS,
     label: str = "federation JSON",
+    allow_floats: bool = False,
 ) -> object:
     """Decode interoperable JSON while rejecting ambiguous duplicate names."""
 
@@ -125,7 +130,7 @@ def strict_json_loads(
         )
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise ValueError(f"{label} is invalid") from exc
-    validate_json_tree(decoded, limits=limits, label=label)
+    validate_json_tree(decoded, limits=limits, label=label, allow_floats=allow_floats)
     return decoded
 
 

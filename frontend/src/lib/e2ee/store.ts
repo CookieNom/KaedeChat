@@ -85,6 +85,10 @@ export interface CachedPlaintextMessage {
   plaintext: string;
   authorRef: string;
   messageRef: string | null;
+  /** Authenticated app attribution. Missing is accepted only for legacy human-message cache rows. */
+  applicationRef?: string | null;
+  /** Authenticated webhook attribution. Missing is accepted only for legacy non-webhook rows. */
+  webhookRef?: string | null;
 }
 
 export interface PendingRoomOperation {
@@ -537,10 +541,20 @@ function validateMessageCache(value: Record<string, CachedPlaintextMessage> | un
       !entry ||
       typeof entry !== 'object' ||
       Array.isArray(entry) ||
-      Object.keys(entry).sort().join('\0') !== 'authorRef\0messageRef\0plaintext' ||
+      ![
+        'authorRef\0messageRef\0plaintext',
+        'applicationRef\0authorRef\0messageRef\0plaintext',
+        'applicationRef\0authorRef\0messageRef\0plaintext\0webhookRef'
+      ].includes(Object.keys(entry).sort().join('\0')) ||
       typeof entry.plaintext !== 'string' ||
       typeof entry.authorRef !== 'string' ||
       !canonicalEntityRef(entry.authorRef) ||
+      (entry.applicationRef !== undefined &&
+        entry.applicationRef !== null &&
+        (typeof entry.applicationRef !== 'string' || !canonicalEntityRef(entry.applicationRef))) ||
+      (entry.webhookRef !== undefined &&
+        entry.webhookRef !== null &&
+        (typeof entry.webhookRef !== 'string' || !canonicalEntityRef(entry.webhookRef))) ||
       (entry.messageRef !== null &&
         (typeof entry.messageRef !== 'string' || !canonicalEntityRef(entry.messageRef)))
     ) {

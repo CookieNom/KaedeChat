@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -15,7 +16,7 @@ from app.chat.events import (
     publish_ephemeral,
     publish_presence,
 )
-from app.db.models import User
+from app.db.models import Channel, Guild, User
 
 
 class LimiterRedis:
@@ -41,6 +42,53 @@ class LimiterRedis:
         self.counts[client_key] = self.counts.get(client_key, 0) + 1
         self.counts[global_key] = self.counts.get(global_key, 0) + 1
         return [1, 0, int(global_burst) - self.counts[global_key]]
+
+
+@pytest.mark.asyncio
+async def test_private_interaction_replay_rechecks_expiry_at_send_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    valid = {
+        "t": "INTERACTION_RESPONSE_CREATE",
+        "d": {"expires_at": (now + timedelta(minutes=1)).isoformat()},
+        "ephemeral": True,
+    }
+    expired = {
+        "t": "INTERACTION_RESPONSE_UPDATE",
+        "d": {"expires_at": (now - timedelta(seconds=1)).isoformat()},
+        "ephemeral": True,
+    }
+    monkeypatch.setattr(
+        gateway,
+        "interaction_response_replay_events",
+        AsyncMock(return_value=[valid, expired]),
+    )
+
+    class SessionContext:
+        async def __aenter__(self) -> SimpleNamespace:
+            return SimpleNamespace()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    websocket = SimpleNamespace(send_json=AsyncMock())
+    sequence, delivered = await gateway.replay_private_interaction_responses(
+        websocket,
+        lambda: SessionContext(),  # type: ignore[arg-type]
+        SimpleNamespace(id=30, origin_domain="home.example"),
+        7,
+    )
+
+    assert (sequence, delivered) == (8, 1)
+    websocket.send_json.assert_awaited_once_with(
+        {
+            "op": gateway.GatewayOp.DISPATCH,
+            "t": "INTERACTION_RESPONSE_CREATE",
+            "d": valid["d"],
+            "s": 8,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -377,12 +425,20 @@ class PresenceRedis:
     async def eval(self, script: str, numkeys: int, *args: str) -> int:
         if script == gateway.SET_PRESENCE_SCRIPT:
             assert numkeys == 3
-            generation_key, state_key, _expiration_key, status, raw_expiry, handle = args
+            (
+                generation_key,
+                state_key,
+                _expiration_key,
+                encoded_state,
+                raw_expiry,
+                handle,
+            ) = args
             generation = int(self.values.get(generation_key, "0")) + 1
             self.values[generation_key] = str(generation)
-            self.values[state_key] = json.dumps(
-                {"status": status, "generation": generation, "expires_at": int(raw_expiry)}
-            )
+            state = json.loads(encoded_state)
+            state["generation"] = generation
+            state["expires_at"] = int(raw_expiry)
+            self.values[state_key] = json.dumps(state)
             self.scores[handle] = int(raw_expiry)
             return generation
         if script == gateway.RENEW_PRESENCE_SCRIPT:
@@ -447,6 +503,17 @@ def test_gateway_progress_snapshot_round_trips_redis_text_and_bytes() -> None:
 
     assert gateway.decode_gateway_progress(encoded) == (cursors, topics)
     assert gateway.decode_gateway_progress(encoded.encode()) == (cursors, topics)
+
+
+def test_guild_topics_require_canonical_positive_composite_identity() -> None:
+    assert str(gateway.parse_guild_topic("guild:alpha.test:42")) == "42@alpha.test"
+    for malformed in (
+        "guild:alpha.test:0",
+        "guild:alpha.test:042",
+        "guild:Alpha.Test:42",
+        "guild:alpha.test:9223372036854775808",
+    ):
+        assert gateway.parse_guild_topic(malformed) is None
 
 
 @pytest.mark.parametrize(
@@ -570,6 +637,22 @@ def test_connection_op_limiter_uses_a_sliding_window() -> None:
     assert limiter.admit(110)
 
 
+def test_local_presence_lua_never_reencodes_python_json() -> None:
+    """Empty activity arrays must survive every atomic presence transition."""
+
+    for script in (
+        gateway.SET_PRESENCE_SCRIPT,
+        gateway.RENEW_PRESENCE_SCRIPT,
+        gateway.CLAIM_EXPIRED_PRESENCE_SCRIPT,
+    ):
+        assert "cjson.encode" not in script
+    assert "string.sub(ARGV[1], 1, -2)" in gateway.SET_PRESENCE_SCRIPT
+    assert "string.find(raw, ',\"generation\":', 1, true)" in gateway.RENEW_PRESENCE_SCRIPT
+    assert "string.find(raw, ',\"generation\":', 1, true)" in (
+        gateway.CLAIM_EXPIRED_PRESENCE_SCRIPT
+    )
+
+
 @pytest.mark.asyncio
 async def test_presence_heartbeat_atomically_supersedes_old_expiration(
     monkeypatch: pytest.MonkeyPatch,
@@ -584,10 +667,23 @@ async def test_presence_heartbeat_atomically_supersedes_old_expiration(
         password_hash="hash",
     )
     monkeypatch.setattr(gateway.time, "time", lambda: 1000.0)
-    assert await gateway.set_presence_state(redis, user, "online") == 1  # type: ignore[arg-type]
+    activities: list[dict[str, object]] = []
+    assert (
+        await gateway.set_presence_state(  # type: ignore[arg-type]
+            redis,
+            user,
+            "online",
+            activities=activities,
+        )
+        == 1
+    )
+    stored = gateway.decode_presence_state(redis.values["presence:alpha.test:7"])
+    assert stored is not None and stored[2] == activities
 
     monkeypatch.setattr(gateway.time, "time", lambda: 1050.0)
     assert await gateway.renew_presence_state(redis, user) == 2  # type: ignore[arg-type]
+    renewed = gateway.decode_presence_state(redis.values["presence:alpha.test:7"])
+    assert renewed is not None and renewed[1:3] == (2, activities)
     assert (
         await gateway.claim_expired_presence(  # type: ignore[arg-type]
             redis, "alpha.test:7", 1090
@@ -600,6 +696,8 @@ async def test_presence_heartbeat_atomically_supersedes_old_expiration(
         )
         == 3
     )
+    claimed = gateway.decode_presence_state(redis.values["presence:alpha.test:7"])
+    assert claimed is not None and claimed[1:3] == (3, activities)
     assert await gateway.finalize_expired_presence(  # type: ignore[arg-type]
         redis, "alpha.test:7", 3, 1140
     )
@@ -776,6 +874,158 @@ async def test_guild_delivery_fails_closed_after_lost_membership_dispatch(
     assert (42, "alpha.test") not in summary.guilds
     assert (42, "alpha.test") not in summary.channels
     assert (42, "alpha.test") not in summary.acl_fences
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permissions", "expected_visible"),
+    [
+        (gateway.Permission.MANAGE_GUILD, True),
+        (gateway.Permission.VIEW_CHANNEL, False),
+    ],
+)
+async def test_automod_execution_requires_current_manage_guild_for_human_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    permissions: gateway.Permission,
+    expected_visible: bool,
+) -> None:
+    monkeypatch.setattr(gateway, "current_acl_fence", AsyncMock(return_value=(3, 7)))
+    monkeypatch.setattr(gateway, "get_permissions", AsyncMock(return_value=permissions))
+    guild = Guild(
+        id=42,
+        origin_domain="alpha.test",
+        owner_id=1,
+        owner_domain="alpha.test",
+        name="Guild",
+    )
+
+    class Session:
+        get = AsyncMock(return_value=guild)
+
+    class SessionContext:
+        async def __aenter__(self) -> Session:
+            return Session()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+    summary = gateway.VisibilitySummary(
+        {(42, "alpha.test")},
+        {(42, "alpha.test"): set()},
+        {(42, "alpha.test"): (3, 7)},
+    )
+
+    visible, member = await gateway.event_visibility(
+        lambda: SessionContext(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        user,
+        summary,
+        "guild:alpha.test:42",
+        {
+            "t": "AUTO_MODERATION_ACTION_EXECUTION",
+            "d": {
+                "guild_id": "42",
+                "guild_domain": "alpha.test",
+                "rule_id": "9",
+                "rule_domain": "alpha.test",
+            },
+        },
+    )
+
+    assert visible is expected_visible
+    assert member
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permissions", "expected_visible"),
+    [
+        (gateway.Permission.MANAGE_CHANNELS | gateway.Permission.VIEW_CHANNEL, True),
+        (gateway.Permission.VIEW_CHANNEL, False),
+    ],
+)
+async def test_invite_events_require_manage_channels_on_the_event_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    permissions: gateway.Permission,
+    expected_visible: bool,
+) -> None:
+    monkeypatch.setattr(gateway, "current_acl_fence", AsyncMock(return_value=(3, 7)))
+    permission_check = AsyncMock(return_value=permissions)
+    monkeypatch.setattr(gateway, "get_permissions", permission_check)
+    guild = Guild(
+        id=42,
+        origin_domain="alpha.test",
+        owner_id=1,
+        owner_domain="alpha.test",
+        name="Guild",
+    )
+    channel = Channel(
+        id=99,
+        origin_domain="alpha.test",
+        guild_id=42,
+        guild_domain="alpha.test",
+        type=0,
+        name="general",
+    )
+
+    class Session:
+        async def get(self, model: object, key: object) -> object | None:
+            if model is Guild and key == (42, "alpha.test"):
+                return guild
+            if model is Channel and key == (99, "alpha.test"):
+                return channel
+            return None
+
+    class SessionContext:
+        async def __aenter__(self) -> Session:
+            return Session()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+    summary = gateway.VisibilitySummary(
+        {(42, "alpha.test")},
+        {(42, "alpha.test"): {(99, "alpha.test")}},
+        {(42, "alpha.test"): (3, 7)},
+    )
+
+    visible, member = await gateway.event_visibility(
+        lambda: SessionContext(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        user,
+        summary,
+        "guild:alpha.test:42",
+        {
+            "t": "INVITE_CREATE",
+            "d": {
+                "guild_id": "42",
+                "guild_domain": "alpha.test",
+                "channel_id": "99",
+                "channel_domain": "alpha.test",
+                "code": "Ab12Cd34",
+            },
+        },
+    )
+
+    assert visible is expected_visible
+    assert member
+    assert permission_check.await_args.kwargs == {"channel": channel}
 
 
 @pytest.mark.asyncio
@@ -1009,3 +1259,84 @@ async def test_gateway_subscription_overflow_is_explicit() -> None:
     subscription.deliver({"type": "message", "data": "second"})
 
     assert await subscription.get_message(timeout=0.1) == {"type": "overflow"}
+
+
+def test_channel_info_request_accepts_canonical_federated_guild_refs() -> None:
+    from app.voice.channel_info import validate_channel_info_request
+
+    assert validate_channel_info_request(
+        {
+            "guild_id": "42@guild.example",
+            "fields": ["status", "voice_start_time"],
+        }
+    ) == ("42@guild.example", ("status", "voice_start_time"))
+    for guild_id in ("042@guild.example", "42@Guild.example", "42@guild.example.", True):
+        with pytest.raises(ValueError, match="channel info guild"):
+            validate_channel_info_request({"guild_id": guild_id, "fields": ["status"]})
+
+
+@pytest.mark.asyncio
+async def test_remote_channel_info_request_is_authority_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = Guild(
+        id=42,
+        origin_domain="guild.example",
+        name="Guild",
+        owner_id=7,
+        owner_domain="people.example",
+        unavailable=False,
+    )
+    user = User(
+        id=7,
+        origin_domain="people.example",
+        username="maple",
+        is_local=True,
+    )
+    session = object()
+
+    class Context:
+        async def __aenter__(self) -> object:
+            return session
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    socket = SimpleNamespace(send_json=AsyncMock())
+    proxy = AsyncMock(
+        return_value=SimpleNamespace(
+            body={
+                "guild_id": "42",
+                "guild_domain": "guild.example",
+                "channels": [{"id": "99", "status": "Pairing", "voice_start_time": 1_777_777_777}],
+            }
+        )
+    )
+    monkeypatch.setattr(gateway, "_gateway_guild_for_user", AsyncMock(return_value=guild))
+    monkeypatch.setattr(
+        "app.federation.guild_management.proxy_remote_guild_management",
+        proxy,
+    )
+
+    sequence = await gateway.handle_channel_info_request(
+        socket,
+        lambda: Context(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        user,
+        {"guild_id": "42@guild.example", "fields": ["status", "voice_start_time"]},
+        4,
+    )
+
+    assert sequence == 5
+    assert proxy.await_args.args[4:] == (
+        "voice_channel_info.get",
+        {"fields": ["status", "voice_start_time"]},
+    )
+    socket.send_json.assert_awaited_once_with(
+        {
+            "op": gateway.GatewayOp.DISPATCH,
+            "t": "CHANNEL_INFO",
+            "s": 5,
+            "d": proxy.return_value.body,
+        }
+    )

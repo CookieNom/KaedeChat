@@ -11,6 +11,15 @@ export interface CompletionOption {
   imageUrl?: string;
   color?: string;
   kind?: 'user' | 'role' | 'channel' | 'unicode-emoji' | 'custom-emoji' | 'application-command';
+  applicationCommand?: ApplicationCommandCompletionIdentity;
+}
+
+/** Stable authority-selected identity retained when command names collide. */
+export interface ApplicationCommandCompletionIdentity {
+  id: string;
+  applicationRef: string;
+  integrationType: 'guild_install' | 'user_install' | 'dm_capability';
+  interactionContext: 'guild' | 'bot_dm' | 'private_channel';
 }
 
 export interface CompletionQuery {

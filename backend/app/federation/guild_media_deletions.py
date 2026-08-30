@@ -7,6 +7,7 @@ from typing import cast
 from sqlalchemy import delete, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.guild_revision import build_guild_authority_envelope, guild_authority_owner
 from app.core.federation import guild_media_delete_request_ref
 from app.core.settings import Settings
 from app.db.models import (
@@ -86,7 +87,6 @@ async def queue_guild_media_delete_request(
     message: Message,
     attachment: Attachment,
     deleted_at: datetime,
-    actor: User | GuildMediaDeletionActorRef | None = None,
 ) -> str | None:
     """Queue one durable authority request to a departed attachment home."""
 
@@ -122,10 +122,11 @@ async def queue_guild_media_delete_request(
     instance = await session.get(Instance, settings.domain)
     if instance is None or not instance.is_self or not instance.current_key_id:
         raise RuntimeError("local federation signing identity is unavailable")
-    if actor is None:
-        actor = await session.get(User, (guild.owner_id, guild.owner_domain))
-    if actor is None or actor.origin_domain != settings.domain:
-        raise RuntimeError("guild media deletion authority is unavailable")
+    signer: User | GuildMediaDeletionActorRef
+    if row is None:
+        signer = await guild_authority_owner(session, settings, guild)
+    else:
+        signer = GuildMediaDeletionActorRef(id=row.actor_id, origin_domain=row.actor_domain)
     current_event = (
         await session.get(FederationEvent, (settings.domain, row.event_id))
         if row is not None and row.key_id == instance.current_key_id
@@ -156,21 +157,34 @@ async def queue_guild_media_delete_request(
         generation = (row.generation if row is not None else 0) + 1
         if generation > (1 << 63) - 1:
             raise RuntimeError("guild media deletion request generation is exhausted")
-        envelope = await build_envelope(
-            session,
-            settings,
-            "guild.media.delete.request",
-            cast(User, actor),
-            _content(
-                row,
-                guild=guild,
-                message=message,
-                attachment=attachment,
-                deleted_at=deleted_at,
-                generation=generation,
-            ),
-            context={},
+        content = _content(
+            row,
+            guild=guild,
+            message=message,
+            attachment=attachment,
+            deleted_at=deleted_at,
+            generation=generation,
         )
+        if row is None:
+            envelope = await build_guild_authority_envelope(
+                session,
+                settings,
+                guild,
+                "guild.media.delete.request",
+                cast(User, signer),
+                content,
+                context={},
+            )
+        else:
+            envelope = await build_envelope(
+                session,
+                settings,
+                "guild.media.delete.request",
+                cast(User, signer),
+                content,
+                context={},
+                retained_authority_attested_actor=signer.origin_domain != settings.domain,
+            )
         if guild_media_delete_request_ref(envelope) is None:
             raise RuntimeError("generated guild media deletion request is invalid")
     await queue_event(session, settings, attachment.origin_domain, envelope)
@@ -185,8 +199,8 @@ async def queue_guild_media_delete_request(
             attachment_domain=attachment.origin_domain,
             message_id=message.id,
             message_domain=message.origin_domain,
-            actor_id=actor.id,
-            actor_domain=actor.origin_domain,
+            actor_id=signer.id,
+            actor_domain=signer.origin_domain,
             deleted_at=deleted_at,
             event_id=event_id,
             key_id=key_id,
@@ -351,10 +365,6 @@ async def rotate_guild_media_delete_requests(
             message=message,
             attachment=attachment,
             deleted_at=row.deleted_at,
-            actor=GuildMediaDeletionActorRef(
-                id=row.actor_id,
-                origin_domain=row.actor_domain,
-            ),
         )
         if destination is not None:
             wakes.add(destination)

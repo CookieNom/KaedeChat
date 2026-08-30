@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import structlog
@@ -19,3 +20,15 @@ async def enqueue_best_effort(task: Any, *args: object, **kwargs: object) -> boo
         )
         return False
     return True
+
+
+async def wake_federation_destinations(destinations: Iterable[str]) -> None:
+    """Wake each durable federation destination once in deterministic order."""
+
+    unique = sorted(set(destinations))
+    if not unique:
+        return
+    from app.tasks import federation_deliver
+
+    for destination in unique:
+        await enqueue_best_effort(federation_deliver, destination)

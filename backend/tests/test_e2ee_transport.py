@@ -314,9 +314,10 @@ def test_message_schemas_never_mix_plaintext_and_ciphertext() -> None:
     envelope = {"version": 1, "ciphertext": "opaque"}
     assert MessageCreate(e2ee=envelope).e2ee == envelope
     assert MessageEdit(e2ee=envelope).e2ee == envelope
+    assert MessageEdit(e2ee=envelope, attachment_ids=["41"]).attachment_ids == [41]
     with pytest.raises(ValueError, match="plaintext and encrypted"):
         MessageCreate(content="visible", e2ee=envelope)
-    with pytest.raises(ValueError, match="plaintext or encrypted"):
+    with pytest.raises(ValueError, match="rich plaintext"):
         MessageEdit(content="visible", e2ee=envelope)
 
 
@@ -566,6 +567,7 @@ async def test_local_e2ee_writes_require_an_active_device_owned_by_the_author() 
         session,
         user,
         {"sender_device_id": "ked_owned"},
+        authority_domain="alpha.localhost",
     )
 
     for invalid in (
@@ -583,6 +585,7 @@ async def test_local_e2ee_writes_require_an_active_device_owned_by_the_author() 
                 session,
                 user,
                 {"sender_device_id": "ked_invalid"},
+                authority_domain="alpha.localhost",
             )
         assert caught.value.detail == {"code": "E2EE_SENDER_DEVICE_INVALID"}
 

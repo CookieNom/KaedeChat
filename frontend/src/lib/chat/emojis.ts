@@ -1,3 +1,6 @@
+import { canonicalReactionEmoji } from './reactions';
+import { parseCanonicalEntityRef } from './refs';
+
 export type EmojiCategory =
   'people' | 'nature' | 'food' | 'activity' | 'travel' | 'objects' | 'symbols' | 'flags';
 
@@ -46,38 +49,28 @@ export function groupCustomEmojis(emojis: CustomEmojiOption[]): CustomEmojiGroup
   return [...groups.values()];
 }
 
-const FEDERATED_DOMAIN =
-  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
-const SNOWFLAKE = /^[1-9][0-9]{0,18}$/;
-const MAX_SNOWFLAKE = 9223372036854775807n;
-const CUSTOM_NAME = /^[A-Za-z0-9_]{2,32}$/;
-
 export function customEmojiToken(emoji: {
   id: string;
   origin_domain: string;
   name: string;
   animated?: boolean;
 }): string {
-  if (
-    !validSnowflake(emoji.id) ||
-    !FEDERATED_DOMAIN.test(emoji.origin_domain) ||
-    !CUSTOM_NAME.test(emoji.name)
-  )
-    return '';
-  return `<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}@${emoji.origin_domain.toLowerCase()}>`;
+  return (
+    canonicalReactionEmoji(
+      `<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}@${emoji.origin_domain}>`
+    ) ?? ''
+  );
 }
 
 export function customEmojiUrl(id: string, domain: string, variant = 'thumbnail_128'): string {
-  if (!validSnowflake(id) || !FEDERATED_DOMAIN.test(domain)) return '';
+  const canonicalDomain = domain.toLowerCase().replace(/\.+$/u, '');
+  const ref = parseCanonicalEntityRef(`${id}@${canonicalDomain}`);
+  if (!ref) return '';
   const safeVariant =
     variant === 'original' || variant === 'thumbnail_512' ? variant : 'thumbnail_128';
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname.toLowerCase();
-  const path = `/media/emojis/${id}/${safeVariant}`;
-  return domain.toLowerCase() === localDomain ? path : `https://${domain.toLowerCase()}${path}`;
-}
-
-function validSnowflake(value: string): boolean {
-  return SNOWFLAKE.test(value) && BigInt(value) <= MAX_SNOWFLAKE;
+  const path = `/media/emojis/${ref.id}/${safeVariant}`;
+  return ref.origin_domain === localDomain ? path : `https://${ref.origin_domain}${path}`;
 }
 
 interface EmojiRecord {

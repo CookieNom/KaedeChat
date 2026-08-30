@@ -168,8 +168,8 @@ impl KaedeService {
     pub async fn reorder_channels(
         &self,
         guild: &EntityRef,
-        positions: &[PositionPatch],
-    ) -> Result<Vec<Channel>, ApiClientError> {
+        positions: &[ChannelPositionPatch],
+    ) -> Result<(), ApiClientError> {
         self.api
             .patch(
                 &format!("guilds/{guild}/channels"),
@@ -776,6 +776,19 @@ pub struct ChannelCreate {
     pub topic: Option<String>,
     #[serde(default)]
     pub rate_limit_per_user: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChannelPositionPatch {
+    pub id: Snowflake,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Option<Snowflake>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_permissions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flags: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]

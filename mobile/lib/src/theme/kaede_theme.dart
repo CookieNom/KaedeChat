@@ -64,6 +64,58 @@ abstract final class KaedeColors {
   static const focus = Color(0xFF78B7FF);
 }
 
+/// Semantic Kaede palette resolved from the active Material color scheme.
+/// Custom chat and administration widgets use this instead of dark-only
+/// constants so account/system appearance applies to every reachable pane.
+@immutable
+final class KaedePalette {
+  const KaedePalette(this.scheme);
+
+  final ColorScheme scheme;
+
+  Color get canvas => scheme.surfaceDim;
+  Color get rail => scheme.surfaceContainerLowest;
+  Color get sidebar => scheme.surfaceContainerLow;
+  Color get panel => scheme.surface;
+  Color get raised => scheme.surfaceContainerHigh;
+  Color get hover => scheme.surfaceContainerHighest;
+  Color get selected => scheme.primaryContainer;
+  Color get border => scheme.outlineVariant;
+  Color get borderStrong => scheme.outline;
+  Color get text => scheme.onSurface;
+  Color get textSoft => scheme.onSurfaceVariant;
+  Color get muted => scheme.onSurfaceVariant;
+  Color get coral => scheme.primary;
+  Color get coralBright => scheme.primary;
+  Color get coralSoft => scheme.primaryContainer;
+  Color get coralText => scheme.onPrimaryContainer;
+  Color get onCoral => scheme.onPrimary;
+  Color get coralDark => scheme.primaryContainer;
+  Color get mint => scheme.secondary;
+  Color get mintSoft => scheme.secondaryContainer;
+  Color get purple => scheme.tertiary;
+  Color get onPurple => scheme.onTertiary;
+  Color get purpleSoft => scheme.tertiaryContainer;
+  Color get warning => scheme.brightness == Brightness.dark
+      ? KaedeColors.warning
+      : const Color(0xFF765A00);
+  Color get warningSoft => scheme.brightness == Brightness.dark
+      ? KaedeColors.warningSoft
+      : const Color(0xFFFFE08A);
+  Color get danger => scheme.error;
+  Color get dangerSoft => scheme.errorContainer;
+  Color get focus => scheme.primary;
+}
+
+extension KaedeThemeContext on BuildContext {
+  KaedePalette get kaede => KaedePalette(Theme.of(this).colorScheme);
+}
+
+Color readableForeground(Color background) =>
+    ThemeData.estimateBrightnessForColor(background) == Brightness.dark
+        ? Colors.white
+        : Colors.black87;
+
 /// Corner radii, kept in one place so panels, sheets and controls agree.
 abstract final class KaedeRadius {
   static const small = 8.0;
@@ -81,6 +133,18 @@ const kaedeSystemOverlay = SystemUiOverlayStyle(
   systemNavigationBarIconBrightness: Brightness.light,
   systemNavigationBarDividerColor: Colors.transparent,
 );
+
+SystemUiOverlayStyle kaedeSystemOverlayFor(Brightness brightness) =>
+    brightness == Brightness.dark
+        ? kaedeSystemOverlay
+        : const SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.dark,
+            statusBarBrightness: Brightness.light,
+            systemNavigationBarColor: Color(0xFFF5F2ED),
+            systemNavigationBarIconBrightness: Brightness.dark,
+            systemNavigationBarDividerColor: Colors.transparent,
+          );
 
 const _fontFamily = 'Inter';
 const _fontFallback = <String>['Roboto', 'SF Pro Text', 'sans-serif'];
@@ -178,6 +242,7 @@ TextTheme _textTheme() => const TextTheme(
     );
 
 ThemeData kaedeTheme({Brightness brightness = Brightness.dark}) {
+  if (brightness == Brightness.light) return _kaedeLightTheme();
   final scheme = _scheme(brightness);
   final textTheme = _textTheme()
       .apply(
@@ -558,6 +623,116 @@ ThemeData kaedeTheme({Brightness brightness = Brightness.dark}) {
         TargetPlatform.android: CupertinoPageTransitionsBuilder(),
         TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
       },
+    ),
+  );
+}
+
+ThemeData _kaedeLightTheme() {
+  const canvas = Color(0xFFF5F2ED);
+  const panel = Color(0xFFFFFCF8);
+  const raised = Color(0xFFECE6DF);
+  const text = Color(0xFF261E1A);
+  const muted = Color(0xFF6F625A);
+  const border = Color(0xFFD8CFC6);
+  const coral = Color(0xFFB84331);
+  final scheme = ColorScheme.fromSeed(
+    seedColor: coral,
+    brightness: Brightness.light,
+    surface: panel,
+  ).copyWith(
+    primary: coral,
+    onPrimary: Colors.white,
+    primaryContainer: const Color(0xFFFFDAD2),
+    onPrimaryContainer: const Color(0xFF5F170D),
+    secondary: const Color(0xFF397761),
+    secondaryContainer: const Color(0xFFC2EBD8),
+    onSecondaryContainer: const Color(0xFF0D392B),
+    tertiary: const Color(0xFF72549A),
+    tertiaryContainer: const Color(0xFFEBDDFF),
+    error: const Color(0xFFBA1A1A),
+    errorContainer: const Color(0xFFFFDAD6),
+    surfaceDim: canvas,
+    surfaceContainerLowest: Colors.white,
+    surfaceContainerLow: const Color(0xFFF8F4EF),
+    surfaceContainer: panel,
+    surfaceContainerHigh: raised,
+    surfaceContainerHighest: const Color(0xFFE2DBD3),
+    onSurface: text,
+    onSurfaceVariant: muted,
+    outline: const Color(0xFF81746C),
+    outlineVariant: border,
+    surfaceTint: Colors.transparent,
+  );
+  final textTheme = _textTheme().apply(
+    fontFamily: _fontFamily,
+    fontFamilyFallback: _fontFallback,
+    bodyColor: text,
+    displayColor: text,
+  );
+  return ThemeData(
+    useMaterial3: true,
+    brightness: Brightness.light,
+    colorScheme: scheme,
+    fontFamily: _fontFamily,
+    fontFamilyFallback: _fontFallback,
+    textTheme: textTheme,
+    scaffoldBackgroundColor: canvas,
+    canvasColor: canvas,
+    dividerColor: border,
+    appBarTheme: AppBarTheme(
+      backgroundColor: canvas,
+      foregroundColor: text,
+      elevation: 0,
+      scrolledUnderElevation: 1,
+      surfaceTintColor: Colors.transparent,
+      titleTextStyle: textTheme.titleLarge,
+      systemOverlayStyle: kaedeSystemOverlayFor(Brightness.light),
+    ),
+    cardTheme: const CardThemeData(
+      color: panel,
+      elevation: 0,
+      margin: EdgeInsets.zero,
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: raised,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
+        borderSide: const BorderSide(color: border),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
+        borderSide: const BorderSide(color: border),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
+        borderSide: const BorderSide(color: coral, width: 1.6),
+      ),
+    ),
+    dividerTheme: const DividerThemeData(color: border, thickness: 1),
+    bottomSheetTheme: const BottomSheetThemeData(
+      backgroundColor: panel,
+      modalBackgroundColor: panel,
+      showDragHandle: true,
+    ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(KaedeRadius.large),
+      ),
+    ),
+    navigationBarTheme: const NavigationBarThemeData(
+      backgroundColor: Color(0xFFF8F4EF),
+      indicatorColor: Color(0xFFFFDAD2),
+    ),
+    navigationRailTheme: const NavigationRailThemeData(
+      backgroundColor: Color(0xFFF8F4EF),
+      indicatorColor: Color(0xFFFFDAD2),
+    ),
+    snackBarTheme: const SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: Color(0xFF342A25),
+      contentTextStyle: TextStyle(color: Colors.white),
     ),
   );
 }

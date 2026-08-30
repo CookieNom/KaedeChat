@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 from collections.abc import Mapping
@@ -8,10 +7,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from app.chat.custom_emojis import canonical_reaction_emoji
 from app.chat.e2ee import validate_e2ee_envelope, validate_e2ee_message_projection
+from app.chat.message_flags import MESSAGE_FLAG_HAS_SNAPSHOT
+from app.chat.message_references import validate_message_reference_projection
+from app.chat.pins import PIN_NOTICE_MESSAGE_TYPE
+from app.core.base64url import encode_base64url
 from app.core.settings import Settings
+from app.federation.message_content import validate_replicated_rich_projection
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.replication import (
+    client_user_payload_from_profile,
     database_snowflake,
     remote_media_dimensions,
     sanitized_remote_blurhash,
@@ -20,9 +26,11 @@ from app.federation.replication import (
 )
 from app.federation.schemas import RemoteUserProfile
 from app.media.processing import normalize_declared_type, sanitize_filename
+from app.media.schemas import validate_voice_attachment_metadata
 
 MAX_DM_HISTORY_RESPONSE_BYTES = 2 * 1024 * 1024
 DM_HISTORY_MEDIA_CAPABILITY_SECONDS = 15 * 60
+MAX_DM_HISTORY_REACTIONS_PER_MESSAGE = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,14 +88,6 @@ def dm_history_page_is_complete(
     )
 
 
-def _profile_payload(profile: RemoteUserProfile) -> dict[str, object]:
-    return {
-        **profile.model_dump(mode="json"),
-        "profile_resolved": True,
-        "handle": f"{profile.username}@{profile.origin_domain}",
-    }
-
-
 def _optional_timestamp(value: object, field: str) -> str | None:
     if value is None:
         return None
@@ -100,6 +100,52 @@ def _optional_timestamp(value: object, field: str) -> str | None:
     if parsed.tzinfo is None:
         raise FederationNetworkError(f"DM history {field} must include a timezone")
     return parsed.isoformat()
+
+
+def _validated_reaction_summary(
+    raw_counts: object,
+    raw_reacted: object,
+) -> tuple[dict[str, int], list[str]]:
+    """Canonicalize one signed DM history reaction summary after verification."""
+
+    if (
+        not isinstance(raw_counts, dict)
+        or len(raw_counts) > MAX_DM_HISTORY_REACTIONS_PER_MESSAGE
+        or not isinstance(raw_reacted, list)
+        or len(raw_reacted) > MAX_DM_HISTORY_REACTIONS_PER_MESSAGE
+    ):
+        raise FederationNetworkError("DM history reaction summary is invalid")
+    counts: dict[str, int] = {}
+    total = 0
+    try:
+        for raw_emoji, raw_count in raw_counts.items():
+            if (
+                not isinstance(raw_emoji, str)
+                or not 1 <= len(raw_emoji) <= 320
+                or isinstance(raw_count, bool)
+                or not isinstance(raw_count, int)
+                or raw_count < 1
+            ):
+                raise ValueError
+            emoji = canonical_reaction_emoji(raw_emoji)
+            counts[emoji] = counts.get(emoji, 0) + raw_count
+            total += raw_count
+            if total > MAX_DM_HISTORY_REACTIONS_PER_MESSAGE:
+                raise ValueError
+        reacted: list[str] = []
+        seen: set[str] = set()
+        for raw_emoji in raw_reacted:
+            if not isinstance(raw_emoji, str) or not 1 <= len(raw_emoji) <= 320:
+                raise ValueError
+            emoji = canonical_reaction_emoji(raw_emoji)
+            if emoji not in counts:
+                raise ValueError
+            if emoji not in seen:
+                seen.add(emoji)
+                reacted.append(emoji)
+    except (TypeError, ValueError):
+        raise FederationNetworkError("DM history reaction summary is invalid") from None
+    return counts, reacted
 
 
 def _history_media_signature(
@@ -124,7 +170,7 @@ def _history_media_signature(
         )
     ).encode("utf-8")
     digest = hmac.new(settings.secret_key_bytes, body, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return encode_base64url(digest)
 
 
 def history_media_path(
@@ -260,6 +306,28 @@ def _validated_attachment(
         raise FederationNetworkError("DM history attachment metadata is invalid") from exc
     encryption_mode = raw.get("encryption_mode", "plaintext")
     encryption_protocol = raw.get("encryption_protocol")
+    duration_raw = raw.get("duration_secs")
+    duration_secs = (
+        float(duration_raw)
+        if isinstance(duration_raw, (int, float)) and not isinstance(duration_raw, bool)
+        else None
+    )
+    waveform = raw.get("waveform")
+    if (
+        duration_raw is not None
+        and duration_secs is None
+        or (waveform is not None and not isinstance(waveform, str))
+    ):
+        raise FederationNetworkError("DM history voice metadata is invalid")
+    try:
+        validate_voice_attachment_metadata(
+            content_type=content_type,
+            encryption_mode=str(encryption_mode),
+            duration_secs=duration_secs,
+            waveform=waveform,
+        )
+    except ValueError as exc:
+        raise FederationNetworkError("DM history voice metadata is invalid") from exc
     if encryption_mode == "e2ee":
         if (
             encryption_protocol != "kaede-file-v1"
@@ -284,6 +352,8 @@ def _validated_attachment(
         "size": size,
         "width": width,
         "height": height,
+        "duration_secs": duration_secs,
+        "waveform": waveform,
         "blurhash": blurhash,
         "scan_status": rendered_scan_status,
         "encryption_mode": encryption_mode,
@@ -338,6 +408,13 @@ def validate_dm_history_page(
     for raw in raw_messages:
         if not isinstance(raw, dict):
             raise FederationNetworkError("DM history authority returned an invalid message")
+        message_type = raw.get("message_type", 0)
+        if (
+            isinstance(message_type, bool)
+            or not isinstance(message_type, int)
+            or not 0 <= message_type <= 2_147_483_647
+        ):
+            raise FederationNetworkError("DM history message type is invalid")
         try:
             reference = (
                 database_snowflake(raw.get("id"), "DM history message id"),
@@ -360,7 +437,13 @@ def validate_dm_history_page(
             or reference in seen
             or channel_ref != conversation_ref
             or author_ref not in participant_refs
-            or reference[1] != author_ref[1]
+            or (
+                reference[1] != author_ref[1]
+                and not (
+                    message_type in {PIN_NOTICE_MESSAGE_TYPE, 46}
+                    and reference[1] == authority_domain
+                )
+            )
         ):
             raise FederationNetworkError("DM history authority returned mismatched references")
         # The authority orders the conversation, but it is not authoritative
@@ -405,19 +488,63 @@ def validate_dm_history_page(
         raw_attachments = raw.get("attachments", [])
         if not isinstance(raw_attachments, list) or len(raw_attachments) > 10:
             raise FederationNetworkError("DM history attachment list is invalid")
-        if content is None and e2ee is None and not raw_attachments and deleted_at is None:
-            raise FederationNetworkError("DM history message has no content")
-        message_type = raw.get("message_type", 0)
+        created_at_raw = raw.get("created_at")
+        if not isinstance(created_at_raw, str) or not 1 <= len(created_at_raw) <= 64:
+            raise FederationNetworkError("DM history creation timestamp is invalid")
+        tts = raw.get("tts", False)
         flags = raw.get("flags", 0)
         if (
-            isinstance(message_type, bool)
-            or not isinstance(message_type, int)
-            or not 0 <= message_type <= 2_147_483_647
-            or isinstance(flags, bool)
+            isinstance(flags, bool)
             or not isinstance(flags, int)
             or not 0 <= flags <= 2_147_483_647
+            or not isinstance(tts, bool)
         ):
             raise FederationNetworkError("DM history message flags are invalid")
+        try:
+            created_at = datetime.fromisoformat(created_at_raw)
+            if created_at.tzinfo is None:
+                raise ValueError("DM history timestamp is missing a timezone")
+            validate_snowflake_timestamp(
+                reference[0],
+                created_at,
+                "DM history message",
+                event_timestamp_ms=int(created_at.timestamp() * 1_000),
+            )
+            rich = validate_replicated_rich_projection(
+                raw,
+                message_id=reference[0],
+                message_origin=reference[1],
+                message_created_at=created_at,
+                e2ee=e2ee,
+                message_type=message_type,
+                label="DM history message",
+            )
+        except (ValueError, OverflowError) as exc:
+            raise FederationNetworkError("DM history rich content is invalid") from exc
+        if bool(flags & MESSAGE_FLAG_HAS_SNAPSHOT) != (
+            rich.forward_snapshot is not None or rich.has_encrypted_forward
+        ):
+            raise FederationNetworkError(
+                "DM history snapshot flag does not match its forward projection"
+            )
+        forwarded_ref = rich.forwarded_ref
+        if (
+            content is None
+            and e2ee is None
+            and not raw_attachments
+            and not rich.embeds
+            and not rich.components
+            and not rich.sticker_items
+            and rich.poll is None
+            and deleted_at is None
+            and forwarded_ref is None
+            and message_type != PIN_NOTICE_MESSAGE_TYPE
+        ):
+            raise FederationNetworkError("DM history message has no content")
+        if forwarded_ref is not None and (
+            deleted_at is not None or e2ee is not None or raw_attachments
+        ):
+            raise FederationNetworkError("DM history forward is invalid")
         client_nonce = raw.get("client_nonce")
         if client_nonce is not None and (
             not isinstance(client_nonce, str) or not 1 <= len(client_nonce) <= 64
@@ -454,21 +581,50 @@ def validate_dm_history_page(
                 referenced_domain = normalize_domain(str(ref_domain_raw))
             except (ValueError, FederationNetworkError) as exc:
                 raise FederationNetworkError("DM history reply reference is invalid") from exc
-        created_at_raw = raw.get("created_at")
-        if not isinstance(created_at_raw, str) or not 1 <= len(created_at_raw) <= 64:
-            raise FederationNetworkError("DM history creation timestamp is invalid")
-        try:
-            created_at = datetime.fromisoformat(created_at_raw)
-            if created_at.tzinfo is None:
-                raise ValueError("DM history timestamp is missing a timezone")
-            validate_snowflake_timestamp(
-                reference[0],
-                created_at,
-                "DM history message",
-                event_timestamp_ms=int(created_at.timestamp() * 1_000),
+        if forwarded_ref is not None and referenced_id is not None:
+            raise FederationNetworkError("DM history forward cannot also be a reply")
+        if message_type in {12, 18}:
+            raise FederationNetworkError(
+                "DM history message type cannot contain a guild channel reference"
             )
-        except (ValueError, OverflowError) as exc:
-            raise FederationNetworkError("DM history creation timestamp is invalid") from exc
+        try:
+            message_reference = validate_message_reference_projection(
+                raw.get("message_reference"),
+                message_type=message_type,
+                channel_ref=conversation_ref,
+                guild_ref=None,
+                referenced_message_ref=(
+                    (int(referenced_id), referenced_domain)
+                    if referenced_id is not None and referenced_domain is not None
+                    else None
+                ),
+                forwarded_message_ref=forwarded_ref,
+                forwarded_channel_ref=rich.forwarded_channel_ref,
+                has_forward_snapshot=bool(
+                    rich.forward_snapshot is not None or rich.has_encrypted_forward
+                ),
+                label="DM history message",
+            )
+        except ValueError as exc:
+            raise FederationNetworkError("DM history message reference is invalid") from exc
+        if message_type == PIN_NOTICE_MESSAGE_TYPE and (
+            reference[1] != authority_domain
+            or content is not None
+            or e2ee is not None
+            or raw_attachments
+            or rich.embeds
+            or rich.components
+            or rich.sticker_items
+            or rich.poll is not None
+            or forwarded_ref is not None
+            or rich.application_ref is not None
+            or rich.interaction_metadata is not None
+            or tts
+            or flags != 0
+            or client_nonce is not None
+            or mention_refs
+        ):
+            raise FederationNetworkError("DM history pin notice fields are invalid")
         edited_at = _optional_timestamp(raw.get("edited_at"), "edited timestamp")
         if deleted_at is None:
             try:
@@ -492,6 +648,10 @@ def validate_dm_history_page(
             )
             for item in raw_attachments
         ]
+        reaction_counts, reacted_emoji = _validated_reaction_summary(
+            raw.get("reaction_counts", {}),
+            raw.get("reacted_emoji", []),
+        )
         result.append(
             {
                 "id": str(reference[0]),
@@ -500,16 +660,81 @@ def validate_dm_history_page(
                 "channel_domain": conversation_ref[1],
                 "author_id": str(author_ref[0]),
                 "author_domain": author_ref[1],
-                "author": _profile_payload(profile),
+                "author": client_user_payload_from_profile(profile),
                 "content": None if deleted_at is not None else content,
                 "e2ee": None if deleted_at is not None else e2ee,
+                "embeds": [] if deleted_at is not None else rich.embeds,
+                "components": [] if deleted_at is not None else rich.components,
+                "sticker_items": [] if deleted_at is not None else rich.sticker_items,
+                "application_id": (
+                    str(rich.application_ref[0])
+                    if deleted_at is None and rich.application_ref is not None
+                    else None
+                ),
+                "application_domain": (
+                    rich.application_ref[1]
+                    if deleted_at is None and rich.application_ref is not None
+                    else None
+                ),
+                "interaction_metadata": (rich.interaction_metadata if deleted_at is None else None),
+                "view_version": rich.view_version if deleted_at is None else 0,
+                "view_persistent": rich.view_persistent if deleted_at is None else False,
+                "view_expires_at": (
+                    rich.view_expires_at.isoformat()
+                    if deleted_at is None and rich.view_expires_at is not None
+                    else None
+                ),
+                "interaction_integration_type": (
+                    rich.interaction_integration_type if deleted_at is None else None
+                ),
+                "interaction_installation_ref": (
+                    (
+                        f"{rich.interaction_installation_ref[0]}@"
+                        f"{rich.interaction_installation_ref[1]}"
+                    )
+                    if deleted_at is None and rich.interaction_installation_ref is not None
+                    else None
+                ),
+                "interaction_installation_revision": (
+                    str(rich.interaction_installation_revision)
+                    if deleted_at is None and rich.interaction_installation_revision is not None
+                    else None
+                ),
+                "poll": None if deleted_at is not None else raw.get("poll"),
                 "message_type": message_type,
+                "tts": tts,
                 "flags": flags,
                 "client_nonce": client_nonce,
                 "referenced_message_id": referenced_id,
                 "referenced_message_domain": referenced_domain,
+                "forwarded_message_id": (
+                    str(forwarded_ref[0])
+                    if forwarded_ref is not None and rich.forward_snapshot is None
+                    else None
+                ),
+                "forwarded_message_domain": (
+                    forwarded_ref[1]
+                    if forwarded_ref is not None and rich.forward_snapshot is None
+                    else None
+                ),
+                "forwarded_message_ref": (
+                    f"{forwarded_ref[0]}@{forwarded_ref[1]}"
+                    if forwarded_ref is not None and rich.forward_snapshot is None
+                    else None
+                ),
+                "forwarded_channel_id": None,
+                "forwarded_channel_domain": None,
+                "forward_snapshot": None,
+                "message_snapshots": (
+                    [{"message": rich.forward_snapshot}]
+                    if rich.forward_snapshot is not None
+                    else []
+                ),
+                "message_reference": message_reference,
                 "mention_user_refs": mention_refs,
                 "attachments": attachments,
+                "reaction_counts": reaction_counts,
+                "reacted_emoji": reacted_emoji,
                 "webhook_id": None,
                 "webhook": None,
                 "edited_at": edited_at,

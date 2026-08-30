@@ -2,15 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.events import guild_topic
+from app.chat.payloads import member_payload
+from app.chat.postcommit import queue_postcommit_dispatch
 from app.chat.privacy import lock_relationship_pair, relationship
 from app.core.settings import Settings
-from app.db.models import Relationship, User
+from app.db.models import Guild, GuildMember, MemberRole, Relationship, User
 from app.federation.events import build_envelope, queue_event
 from app.federation.replication import database_snowflake, profile_from_user, upsert_remote_user
-from app.federation.schemas import EventEnvelope, RelationshipEventContent
+from app.federation.schemas import (
+    EventEnvelope,
+    RelationshipEventContent,
+    RemoteUserProfile,
+)
+from app.federation.security import validated_event_envelope
+
+GUILD_PROFILE_RELAY_EVENT = "guild.member.profile.relay"
 
 
 class RelationshipQuotaExceeded(ValueError):
@@ -133,12 +143,12 @@ def relationship_event_content(
     return content
 
 
-async def queue_friend_profile_updates(
+async def queue_profile_updates(
     session: AsyncSession,
     settings: Settings,
     actor: User,
 ) -> set[str]:
-    """Queue an authoritative profile update for every accepted remote friend."""
+    """Queue one authoritative profile revision to every entitled remote peer."""
 
     targets = (
         await session.execute(
@@ -170,7 +180,166 @@ async def queue_friend_profile_updates(
             discover_destination=False,
         )
         destinations.add(target_domain)
+
+    guilds = (
+        await session.execute(
+            select(Guild.id, Guild.origin_domain)
+            .join(
+                GuildMember,
+                (GuildMember.guild_id == Guild.id)
+                & (GuildMember.guild_domain == Guild.origin_domain),
+            )
+            .where(
+                GuildMember.user_id == actor.id,
+                GuildMember.user_domain == actor.origin_domain,
+                Guild.origin_domain != settings.domain,
+            )
+            .order_by(Guild.origin_domain, Guild.id)
+        )
+    ).all()
+    for guild_id, guild_domain in guilds:
+        envelope = await build_envelope(
+            session,
+            settings,
+            "guild.member.profile",
+            actor,
+            {"actor": profile_from_user(actor)},
+            context={"guild_id": str(guild_id), "guild_domain": guild_domain},
+        )
+        await queue_event(
+            session,
+            settings,
+            guild_domain,
+            envelope,
+            discover_destination=False,
+        )
+        destinations.add(guild_domain)
+
+    local_memberships = (
+        await session.execute(
+            select(Guild, GuildMember)
+            .join(
+                GuildMember,
+                (GuildMember.guild_id == Guild.id)
+                & (GuildMember.guild_domain == Guild.origin_domain),
+            )
+            .where(
+                GuildMember.user_id == actor.id,
+                GuildMember.user_domain == actor.origin_domain,
+                Guild.origin_domain == settings.domain,
+                Guild.unavailable.is_(False),
+            )
+            .order_by(Guild.id)
+        )
+    ).all()
+    for guild, member in local_memberships:
+        source = await build_envelope(
+            session,
+            settings,
+            "guild.member.profile",
+            actor,
+            {"actor": profile_from_user(actor)},
+            context={"guild_id": str(guild.id), "guild_domain": guild.origin_domain},
+        )
+        remote_destinations = set(
+            await session.scalars(
+                select(distinct(GuildMember.user_domain)).where(
+                    GuildMember.guild_id == guild.id,
+                    GuildMember.guild_domain == guild.origin_domain,
+                    GuildMember.user_domain != settings.domain,
+                )
+            )
+        )
+        for destination in sorted(remote_destinations):
+            await queue_event(
+                session,
+                settings,
+                destination,
+                source,
+                discover_destination=False,
+            )
+        destinations.update(remote_destinations)
+        role_ids = list(
+            await session.scalars(
+                select(MemberRole.role_id)
+                .where(
+                    MemberRole.guild_id == guild.id,
+                    MemberRole.guild_domain == guild.origin_domain,
+                    MemberRole.user_id == actor.id,
+                    MemberRole.user_domain == actor.origin_domain,
+                )
+                .order_by(MemberRole.role_id)
+            )
+        )
+        queue_postcommit_dispatch(
+            session,
+            guild_topic(guild.origin_domain, guild.id),
+            "GUILD_MEMBER_UPDATE",
+            member_payload(member, actor, role_ids),
+        )
     return destinations
+
+
+async def validated_guild_profile_source(
+    session: AsyncSession,
+    settings: Settings,
+    raw_source: object,
+    *,
+    guild_ref: tuple[int, str],
+) -> RemoteUserProfile:
+    """Verify the preserved user-home signature inside an authority relay."""
+
+    try:
+        preliminary = EventEnvelope.model_validate(raw_source)
+    except ValueError as exc:
+        raise ValueError("guild profile relay source is invalid") from exc
+    source = await validated_event_envelope(
+        session,
+        settings,
+        preliminary.origin,
+        raw_source,
+    )
+    if (
+        source.type != "guild.member.profile"
+        or set(source.context) != {"guild_id", "guild_domain"}
+        or set(source.content) != {"actor"}
+        or source.context.get("guild_id") != str(guild_ref[0])
+        or source.context.get("guild_domain") != guild_ref[1]
+    ):
+        raise ValueError("guild profile relay source scope is invalid")
+    profile = RemoteUserProfile.model_validate(source.content["actor"])
+    if source.origin != profile.origin_domain or (source.actor.id, source.actor.domain) != (
+        profile.id,
+        profile.origin_domain,
+    ):
+        raise ValueError("guild profile relay source actor is invalid")
+    return profile
+
+
+async def guild_profile_member_payload(
+    session: AsyncSession,
+    guild: Guild,
+    user: User,
+) -> dict[str, object]:
+    member = await session.get(
+        GuildMember,
+        (guild.id, guild.origin_domain, user.id, user.origin_domain),
+    )
+    if member is None:
+        raise ValueError("guild profile update references a non-member")
+    role_ids = list(
+        await session.scalars(
+            select(MemberRole.role_id)
+            .where(
+                MemberRole.guild_id == guild.id,
+                MemberRole.guild_domain == guild.origin_domain,
+                MemberRole.user_id == user.id,
+                MemberRole.user_domain == user.origin_domain,
+            )
+            .order_by(MemberRole.role_id)
+        )
+    )
+    return member_payload(member, user, role_ids)
 
 
 async def apply_relationship_event(

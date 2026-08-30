@@ -245,14 +245,16 @@ user home sends a signed, bounded query to the authoritative guild or DM
 instance, and only when that instance advertises `message-search/1`. The
 authority applies its own permissions and returns a minimal bounded result
 projection. The user home validates and re-authorizes each result against local
-channel state before showing it. Cached local matches remain available when a
-peer is offline and are labeled as incomplete.
+channel state before showing it. Unavailable authorities are reported explicitly
+rather than silently replaced with cached partial history.
 
 A channel-scoped DM search contacts that conversation's deterministic
-authority. Account-wide DM search stays within the user's bounded recent
-replica cache instead of broadcasting sensitive terms to every instance
-the account has ever contacted. Clients label that coverage and offer complete
-authority search when the user opens a specific conversation.
+authority. Account-wide DM search snapshots the user's active conversation
+authorities, fans out concurrently with independent signed authorization and
+timeouts, and merges each authority's opaque pagination deterministically. A
+short-lived actor-and-query-bound server-side cursor prevents the client token
+from growing with the number of authorities. The fan-out is capped at 256
+active authorities and fails explicitly if that safety bound is exceeded.
 
 Channels marked `e2ee` are excluded at indexing, query, SQL hydration, and
 federation boundaries. The UI explains why search is disabled. A later E2EE

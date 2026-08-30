@@ -24,7 +24,7 @@ from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings
 from app.core.snowflake import SnowflakeGenerator
-from app.core.types import EntityReferenceLike
+from app.core.types import EntityRef, EntityReferenceLike
 from app.db.models import (
     Channel,
     GuildMember,
@@ -32,6 +32,10 @@ from app.db.models import (
     TrackerLane,
     TrackerTask,
     User,
+)
+from app.federation.guild_management import (
+    GuildManagementOperation,
+    proxy_remote_guild_management,
 )
 from app.federation.tracker import hydrate_replicated_tracker
 from app.tracker.federation import queue_tracker_federation_invalidation
@@ -75,6 +79,68 @@ class TrackerContext:
 class PositionedTrackerResource(Protocol):
     position: int
     updated_at: datetime
+
+
+async def proxy_remote_tracker_mutation(
+    session: AsyncSession,
+    settings: Settings,
+    auth: AuthenticatedUser,
+    channel_ref: EntityReferenceLike,
+    operation: GuildManagementOperation,
+    payload: dict[str, object],
+    *,
+    returns_body: bool = True,
+) -> tuple[bool, dict[str, object]]:
+    """Route a human mutation to the tracker channel's guild authority.
+
+    Bot requests are deliberately not relayed: their token and DPoP proof are
+    target-audience bound, so bot clients must address the qualified channel's
+    authority directly. Human requests use the signed guild-management RPC and
+    are authorized again against authoritative guild state at the destination.
+    """
+
+    _channel_id, channel_domain = channel_ref.resolve(settings.domain)
+    if channel_domain == settings.domain:
+        return False, {}
+    if auth.user.account_type == "bot":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "BOT_RESOURCE_AUTHORITY_REQUIRED",
+                "resource_ref": str(channel_ref),
+                "authority_domain": channel_domain,
+            },
+        )
+    access = await load_channel_access(session, settings, auth.user, channel_ref)
+    if access.channel.type != TRACKER_CHANNEL_TYPE or access.guild is None:
+        raise HTTPException(status_code=404, detail={"code": "TRACKER_NOT_FOUND"})
+    guild_ref = EntityRef(f"{access.guild.id}@{access.guild.origin_domain}")
+    result = await proxy_remote_guild_management(
+        session,
+        settings,
+        guild_ref,
+        auth.user,
+        operation,
+        {
+            "channel_ref": f"{access.channel.id}@{access.channel.origin_domain}",
+            **payload,
+        },
+    )
+    if result is None:
+        raise RuntimeError("remote tracker mutation resolved to a local guild")
+    if not returns_body:
+        if result.body is not None:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "FEDERATED_GUILD_MANAGEMENT_RESPONSE_INVALID"},
+            )
+        return True, {}
+    if not isinstance(result.body, dict):
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "FEDERATED_GUILD_MANAGEMENT_RESPONSE_INVALID"},
+        )
+    return True, result.body
 
 
 def default_key_prefix(name: str, channel_id: int) -> str:
@@ -176,7 +242,12 @@ async def tracker_context(
         if access.guild is None or access.guild.origin_domain != settings.domain:
             raise HTTPException(
                 status_code=409,
-                detail={"code": "FEDERATED_WRITE_UNSUPPORTED"},
+                detail={
+                    "code": "TRACKER_AUTHORITY_REQUIRED",
+                    "authority_domain": (
+                        access.guild.origin_domain if access.guild is not None else None
+                    ),
+                },
             )
     query = select(TrackerBoard).where(
         TrackerBoard.channel_id == access.channel.id,
@@ -384,6 +455,19 @@ async def update_board(
     payload: TrackerBoardUpdate,
     if_match: str | None,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.board.update",
+        {
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+        },
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -467,6 +551,16 @@ async def create_lane(
     channel_ref: EntityReferenceLike,
     payload: TrackerLaneCreate,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.lane.create",
+        {"data": payload.model_dump(mode="json", exclude_unset=True)},
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -537,6 +631,20 @@ async def update_lane(
     payload: TrackerLaneUpdate,
     if_match: str | None,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.lane.update",
+        {
+            "resource_ref": str(lane_ref),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+        },
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -621,6 +729,20 @@ async def move_lane(
     payload: TrackerLaneMove,
     if_match: str | None,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.lane.move",
+        {
+            "resource_ref": str(lane_ref),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+        },
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -692,6 +814,17 @@ async def delete_lane(
     lane_ref: EntityReferenceLike,
     if_match: str | None,
 ) -> None:
+    proxied, _body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.lane.delete",
+        {"resource_ref": str(lane_ref), "if_match": if_match},
+        returns_body=False,
+    )
+    if proxied:
+        return
     context = await tracker_context(
         session,
         redis,
@@ -855,6 +988,16 @@ async def create_task(
     channel_ref: EntityReferenceLike,
     payload: TrackerTaskCreate,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.task.create",
+        {"data": payload.model_dump(mode="json", exclude_unset=True)},
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -972,6 +1115,20 @@ async def update_task(
     payload: TrackerTaskUpdate,
     if_match: str | None,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.task.update",
+        {
+            "resource_ref": str(task_ref),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+        },
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -1044,6 +1201,20 @@ async def move_task(
     payload: TrackerTaskMove,
     if_match: str | None,
 ) -> dict[str, object]:
+    proxied, body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.task.move",
+        {
+            "resource_ref": str(task_ref),
+            "data": payload.model_dump(mode="json", exclude_unset=True),
+            "if_match": if_match,
+        },
+    )
+    if proxied:
+        return body
     context = await tracker_context(
         session,
         redis,
@@ -1141,6 +1312,17 @@ async def delete_task(
     task_ref: EntityReferenceLike,
     if_match: str | None,
 ) -> None:
+    proxied, _body = await proxy_remote_tracker_mutation(
+        session,
+        settings,
+        auth,
+        channel_ref,
+        "tracker.task.delete",
+        {"resource_ref": str(task_ref), "if_match": if_match},
+        returns_body=False,
+    )
+    if proxied:
+        return
     context = await tracker_context(
         session,
         redis,

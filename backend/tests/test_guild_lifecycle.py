@@ -34,6 +34,7 @@ def make_user(identifier: int, domain: str = "chat.example") -> User:
         username=f"user-{identifier}",
         is_local=domain == "chat.example",
         account_type="human",
+        profile_resolved=True,
     )
 
 
@@ -46,6 +47,62 @@ def test_owner_checks_use_the_full_federated_identity() -> None:
 
     assert guild_lifecycle._is_owner(guild, make_user(1))
     assert not guild_lifecycle._is_owner(guild, make_user(1, "remote.example"))
+
+
+@pytest.mark.asyncio
+async def test_final_disconnect_expires_roleless_temporary_membership(monkeypatch) -> None:
+    guild = make_guild()
+    user = make_user(2)
+    member = GuildMember(
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=user.id,
+        user_domain=user.origin_domain,
+        joined_at=datetime.now(UTC),
+        temporary=True,
+    )
+    discovery = AsyncMock()
+    discovery.execute.return_value = SimpleNamespace(all=lambda: [(guild.id, guild.origin_domain)])
+    removal = AsyncMock()
+    removal.get.side_effect = [member, user]
+    removal.scalar.return_value = None
+    sessions = iter((discovery, removal))
+
+    class Context:
+        def __init__(self, session: AsyncMock) -> None:
+            self.session = session
+
+        async def __aenter__(self) -> AsyncMock:
+            return self.session
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def sessionmaker() -> Context:
+        return Context(next(sessions))
+
+    remove = AsyncMock()
+    redis = AsyncMock()
+    configured = SimpleNamespace(domain="chat.example")
+    monkeypatch.setattr(guild_lifecycle, "_locked_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(guild_lifecycle, "_remove_guild_membership", remove)
+
+    await guild_lifecycle.expire_temporary_memberships(
+        redis,
+        sessionmaker,  # type: ignore[arg-type]
+        configured,  # type: ignore[arg-type]
+        user_id=user.id,
+        user_domain=user.origin_domain,
+    )
+
+    remove.assert_awaited_once_with(
+        removal,
+        redis,
+        configured,
+        guild,
+        user,
+        member,
+    )
 
 
 @pytest.mark.asyncio
@@ -77,26 +134,175 @@ async def test_owner_must_transfer_or_delete_instead_of_leaving(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_ownership_transfer_rejects_a_remote_instance_target(monkeypatch) -> None:
+async def test_ownership_transfer_accepts_an_active_remote_human_member(monkeypatch) -> None:
     guild = make_guild()
     owner = make_user(1)
+    target = make_user(2, "remote.example")
+    member = GuildMember(
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=target.id,
+        user_domain=target.origin_domain,
+        joined_at=datetime.now(UTC),
+    )
+    session = AsyncMock()
+    session.get.side_effect = [target, member]
+    queued = AsyncMock()
+    audited = AsyncMock()
+    published = AsyncMock()
     monkeypatch.setattr(guild_lifecycle, "_locked_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(guild_lifecycle, "queue_guild_mutation", queued)
+    monkeypatch.setattr(guild_lifecycle, "add_audit_entry", audited)
+    monkeypatch.setattr(guild_lifecycle, "wake_queued_guild_federation", AsyncMock())
+    monkeypatch.setattr(guild_lifecycle, "publish_dispatch", published)
     payload = GuildOwnershipTransfer(owner_id="2@remote.example")
 
-    with pytest.raises(HTTPException) as caught:
+    rendered = await guild_lifecycle.transfer_guild_ownership(
+        EntityRef("10"),
+        payload,
+        auth(owner),  # type: ignore[arg-type]
+        session,
+        AsyncMock(),
+        AsyncMock(),
+        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+        guild.updated_at.isoformat(),
+        "planned handoff",
+    )
+
+    assert (guild.owner_id, guild.owner_domain) == (2, "remote.example")
+    assert rendered["owner_id"] == "2"
+    assert rendered["owner_domain"] == "remote.example"
+    queued.assert_awaited_once()
+    audited.assert_awaited_once()
+    assert audited.await_args.kwargs["reason"] == "planned handoff"
+    session.commit.assert_awaited_once()
+    published.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ownership_transfer_rejects_an_unresolved_remote_identity(monkeypatch) -> None:
+    guild = make_guild()
+    owner = make_user(1)
+    target = make_user(2, "remote.example")
+    target.profile_resolved = False
+    member = GuildMember(
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=target.id,
+        user_domain=target.origin_domain,
+        joined_at=datetime.now(UTC),
+    )
+    session = AsyncMock()
+    session.get.side_effect = [target, member]
+    queued = AsyncMock()
+    monkeypatch.setattr(guild_lifecycle, "_locked_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(guild_lifecycle, "queue_guild_mutation", queued)
+
+    with pytest.raises(HTTPException) as rejected:
         await guild_lifecycle.transfer_guild_ownership(
             EntityRef("10"),
-            payload,
+            GuildOwnershipTransfer(owner_id="2@remote.example"),
             auth(owner),  # type: ignore[arg-type]
-            AsyncMock(),
+            session,
             AsyncMock(),
             AsyncMock(),
             SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
             guild.updated_at.isoformat(),
         )
 
-    assert caught.value.status_code == 400
-    assert caught.value.detail == {"code": "OWNER_TRANSFER_REQUIRES_LOCAL_MEMBER"}
+    assert rejected.value.status_code == 404
+    assert rejected.value.detail == {"code": "GUILD_MEMBER_NOT_FOUND"}
+    queued.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_owner_can_delete_authority_guild_after_transfer(monkeypatch) -> None:
+    guild = make_guild()
+    original_owner = make_user(1)
+    remote_owner = make_user(2, "remote.example")
+    remote_membership = GuildMember(
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=remote_owner.id,
+        user_domain=remote_owner.origin_domain,
+        joined_at=datetime.now(UTC),
+    )
+    session = AsyncMock()
+    session.get.side_effect = [remote_owner, remote_membership]
+    session.scalars.return_value = [remote_owner]
+    channel_result = Mock()
+    channel_result.tuples.return_value = []
+    session.execute.return_value = channel_result
+    monkeypatch.setattr(guild_lifecycle, "_locked_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(guild_lifecycle, "queue_guild_mutation", AsyncMock())
+    monkeypatch.setattr(guild_lifecycle, "add_audit_entry", AsyncMock())
+    monkeypatch.setattr(
+        guild_lifecycle,
+        "announcement_dependencies_exist",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(guild_lifecycle, "wake_queued_guild_federation", AsyncMock())
+    monkeypatch.setattr(guild_lifecycle, "publish_dispatch", AsyncMock())
+    monkeypatch.setattr(
+        guild_lifecycle,
+        "_prepare_guild_content_deletion",
+        AsyncMock(return_value=([], set(), set())),
+    )
+    terminal = AsyncMock(return_value=set())
+    monkeypatch.setattr(guild_lifecycle, "queue_terminal_room_deletion", terminal)
+    configured = SimpleNamespace(domain="chat.example")
+
+    await guild_lifecycle.transfer_guild_ownership(
+        EntityRef("10"),
+        GuildOwnershipTransfer(owner_id="2@remote.example"),
+        auth(original_owner),  # type: ignore[arg-type]
+        session,
+        AsyncMock(),
+        AsyncMock(),
+        configured,  # type: ignore[arg-type]
+        guild.updated_at.isoformat(),
+    )
+    response = await guild_lifecycle.delete_guild(
+        EntityRef("10"),
+        auth(remote_owner),  # type: ignore[arg-type]
+        session,
+        AsyncMock(),
+        configured,  # type: ignore[arg-type]
+        guild.updated_at.isoformat(),
+    )
+
+    assert response.status_code == 204
+    assert (guild.owner_id, guild.owner_domain) == (2, "remote.example")
+    assert terminal.await_args.kwargs["actor"] is remote_owner
+    session.delete.assert_awaited_once_with(guild)
+
+
+@pytest.mark.asyncio
+async def test_guild_delete_rejects_live_announcement_dependencies(monkeypatch) -> None:
+    guild = make_guild()
+    owner = make_user(1)
+    session = AsyncMock()
+    channel_result = Mock()
+    channel_result.tuples.return_value = [(30, "chat.example")]
+    session.execute.return_value = channel_result
+    monkeypatch.setattr(guild_lifecycle, "_locked_guild", AsyncMock(return_value=guild))
+    dependencies = AsyncMock(return_value=True)
+    monkeypatch.setattr(guild_lifecycle, "announcement_dependencies_exist", dependencies)
+
+    with pytest.raises(HTTPException) as caught:
+        await guild_lifecycle.delete_guild(
+            EntityRef("10"),
+            auth(owner),  # type: ignore[arg-type]
+            session,
+            AsyncMock(),
+            SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+            guild.updated_at.isoformat(),
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {"code": "GUILD_HAS_ANNOUNCEMENT_DEPENDENCIES"}
+    dependencies.assert_awaited_once_with(session, {(30, "chat.example")})
+    session.delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -273,7 +479,7 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
         auth(bot),  # type: ignore[arg-type]
         session,
         AsyncMock(),
-        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+        SimpleNamespace(domain="chat.example", voice_enabled=False),  # type: ignore[arg-type]
     )
 
     assert response.status_code == 204
@@ -286,14 +492,14 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
     )
     cleanup.assert_awaited_once_with(
         session,
-        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+        SimpleNamespace(domain="chat.example", voice_enabled=False),  # type: ignore[arg-type]
         guild,
         bot,
         [installation],
     )
     clear_assignees.assert_awaited_once_with(
         session,
-        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+        SimpleNamespace(domain="chat.example", voice_enabled=False),  # type: ignore[arg-type]
         guild,
         bot,
         [(bot.id, bot.origin_domain)],
@@ -315,14 +521,22 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
     )
     session = AsyncMock()
 
-    async def get_model(_model: object, key: object) -> object | None:
-        if key == (guild.id, guild.origin_domain, remote.id, remote.origin_domain):
+    async def get_model(model: object, key: object) -> object | None:
+        if model is GuildMember and key == (
+            guild.id,
+            guild.origin_domain,
+            remote.id,
+            remote.origin_domain,
+        ):
             return member
-        if key == (guild.owner_id, guild.owner_domain):
+        if model is User and key == (guild.owner_id, guild.owner_domain):
             return owner
+        if model is User and key == (remote.id, remote.origin_domain):
+            return remote
         return None
 
     session.get.side_effect = get_model
+    session.scalar.side_effect = [guild, owner]
     queue_revocation = AsyncMock()
     queue_mutation = AsyncMock()
     installation = BotInstallation(

@@ -64,7 +64,7 @@
         {:else}{invite.application.name.slice(0, 1).toUpperCase()}{/if}
       </span>
       <span
-        ><small>BOT INVITATION</small><strong>{invite.application.name}</strong><em
+        ><small>APP AUTHORIZATION</small><strong>{invite.application.name}</strong><em
           >{invite.application.origin_domain}</em
         ></span
       >

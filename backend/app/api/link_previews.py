@@ -9,10 +9,11 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Response
-from pydantic import BaseModel, Field
+from pydantic import Field
 from redis.asyncio import Redis
 
 from app.api.dependencies import AuthenticatedUser, get_redis, require_user
+from app.core.model_validation import UnambiguousInputModel
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.federation.network import (
@@ -33,7 +34,7 @@ MEDIA_CAPABILITY_SECONDS = 24 * 60 * 60
 MEDIA_PATH_PATTERN = r"^[a-f0-9]{48}$"
 
 
-class PreviewRequest(BaseModel):
+class PreviewRequest(UnambiguousInputModel):
     url: str = Field(min_length=1, max_length=MAX_URL_LENGTH)
 
 

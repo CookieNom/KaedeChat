@@ -55,6 +55,7 @@ from app.federation.dm_storage import (
     sweep_federated_dm_replica_cache,
 )
 from app.federation.network import FederationNetworkError
+from app.federation.schemas import RemoteUserProfile
 from app.federation.security import FederationPrincipal
 
 from .test_settings import settings
@@ -65,10 +66,17 @@ def snowflake_at(value: datetime, sequence: int = 0) -> int:
     return (timestamp << (WORKER_BITS + SEQUENCE_BITS)) | sequence
 
 
-def profile(user_id: int, domain: str, username: str) -> dict[str, object]:
+def profile(
+    user_id: int,
+    domain: str,
+    username: str,
+    *,
+    account_type: str = "human",
+) -> dict[str, object]:
     return {
         "id": str(user_id),
         "origin_domain": domain,
+        "account_type": account_type,
         "username": username,
         "display_name": username.title(),
         "avatar_hash": None,
@@ -76,6 +84,7 @@ def profile(user_id: int, domain: str, username: str) -> dict[str, object]:
         "bio": None,
         "custom_status": None,
         "profile_version": 1,
+        "e2ee_device_generation": 4,
     }
 
 
@@ -87,6 +96,7 @@ def message(
     author_id: int,
     username: str,
     created_at: datetime,
+    account_type: str = "human",
 ) -> dict[str, object]:
     return {
         "id": str(message_id),
@@ -95,7 +105,7 @@ def message(
         "channel_domain": channel_ref[1],
         "author_id": str(author_id),
         "author_domain": origin,
-        "author": profile(author_id, origin, username),
+        "author": profile(author_id, origin, username, account_type=account_type),
         "content": "hello",
         "e2ee": None,
         "message_type": 0,
@@ -111,7 +121,10 @@ def message(
     }
 
 
-def test_history_page_ignores_authority_local_body_and_marks_completion() -> None:
+@pytest.mark.parametrize("account_type", ["human", "bot"])
+def test_history_page_ignores_authority_local_body_and_marks_completion(
+    account_type: str,
+) -> None:
     configured = settings()
     authority = "authority.example"
     local = configured.domain
@@ -137,7 +150,17 @@ def test_history_page_ignores_authority_local_body_and_marks_completion() -> Non
         author_id=remote_user_id,
         username="remote",
         created_at=now - timedelta(seconds=1),
+        account_type=account_type,
     )
+    remote_message["reaction_counts"] = {
+        "❤️": 1,
+        "❤": 2,
+        "<:lantern:75512661369970689@HOME.EXAMPLE.>": 3,
+    }
+    remote_message["reacted_emoji"] = [
+        "❤️",
+        "<:lantern:75512661369970689@HOME.EXAMPLE.>",
+    ]
     body = {
         "conversation_id": str(conversation_ref[0]),
         "conversation_domain": conversation_ref[1],
@@ -160,6 +183,67 @@ def test_history_page_ignores_authority_local_body_and_marks_completion() -> Non
     assert page.messages[0]["origin_domain"] == authority
     assert page.ignored_local_refs == {(newest, local)}
     assert page.messages[0]["history_page_complete"] is True
+    rendered_author = cast(dict[str, object], page.messages[0]["author"])
+    assert rendered_author["profile_version"] == "1"
+    assert rendered_author["e2ee_device_generation"] == "4"
+    assert rendered_author["account_type"] == account_type
+    assert rendered_author["bot"] is (account_type == "bot")
+    assert page.messages[0]["reaction_counts"] == {
+        "❤": 3,
+        "<:lantern:75512661369970689@home.example>": 3,
+    }
+    assert page.messages[0]["reacted_emoji"] == [
+        "❤",
+        "<:lantern:75512661369970689@home.example>",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reaction_counts", "reacted_emoji"),
+    [
+        ({"lantern": 1}, []),
+        ({"🏮🔥": 1}, []),
+        ({"🏮": 1}, ["lantern"]),
+    ],
+)
+def test_dm_history_rejects_invalid_reaction_summaries(
+    reaction_counts: dict[str, int],
+    reacted_emoji: list[str],
+) -> None:
+    configured = settings()
+    authority = "authority.example"
+    now = datetime.now(UTC) - timedelta(minutes=1)
+    conversation_ref = (snowflake_at(now - timedelta(days=1)), authority)
+    author_id = snowflake_at(now - timedelta(days=2))
+    message_id = snowflake_at(now)
+    raw = message(
+        message_id=message_id,
+        origin=authority,
+        channel_ref=conversation_ref,
+        author_id=author_id,
+        username="remote",
+        created_at=now,
+    )
+    raw["reaction_counts"] = reaction_counts
+    raw["reacted_emoji"] = reacted_emoji
+
+    with pytest.raises(FederationNetworkError, match="reaction summary is invalid"):
+        validate_dm_history_page(
+            {
+                "conversation_id": str(conversation_ref[0]),
+                "conversation_domain": conversation_ref[1],
+                "messages": [raw],
+                "complete": True,
+                "next_before": None,
+            },
+            settings=configured,
+            conversation_ref=conversation_ref,
+            authority_domain=authority,
+            participant_refs={(author_id, authority)},
+            trusted_profiles={},
+            before=(snowflake_at(now + timedelta(seconds=1)), authority),
+            limit=50,
+        )
 
 
 def test_history_merge_preserves_local_body_and_attachments() -> None:
@@ -221,7 +305,7 @@ async def test_authority_dm_history_filters_controls_before_spanning_page_limit(
         account_type="human",
     )
     captured: list[object] = []
-    scalar_batches: list[list[object]] = [messages, [author], []]
+    scalar_batches: list[list[object]] = [messages, [author], [], [], []]
 
     async def get(model: object, key: object) -> object | None:
         if model is DMConversation and key == (100, configured.domain):
@@ -244,6 +328,16 @@ async def test_authority_dm_history_filters_controls_before_spanning_page_limit(
         federation_api,
         "enforce_federation_route_rate_limit",
         AsyncMock(),
+    )
+    reaction_summaries = AsyncMock(
+        return_value={
+            (500, configured.domain): ({"❤": 2}, ["❤"]),
+        }
+    )
+    monkeypatch.setattr(
+        federation_api,
+        "reaction_payloads_for_messages",
+        reaction_summaries,
     )
 
     result = await federation_dm_history_page(
@@ -276,6 +370,91 @@ async def test_authority_dm_history_filters_controls_before_spanning_page_limit(
         "origin_domain": configured.domain,
     }
     assert result["complete"] is False
+    rendered_author = cast(list[dict[str, Any]], result["messages"])[0]["author"]
+    strict_author = RemoteUserProfile.model_validate(rendered_author)
+    assert strict_author.profile_version == 1
+    assert strict_author.e2ee_device_generation == 0
+    assert cast(list[dict[str, Any]], result["messages"])[0]["reaction_counts"] == {"❤": 2}
+    assert cast(list[dict[str, Any]], result["messages"])[0]["reacted_emoji"] == ["❤"]
+    reaction_summaries.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dm_open_projection_materializes_channel_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    conversation = SimpleNamespace(
+        id=100,
+        origin_domain="home.example",
+        pair_key="a" * 64,
+        authority_domain="home.example",
+    )
+    channel = SimpleNamespace(
+        id=100,
+        origin_domain="home.example",
+        updated_at=now,
+    )
+    local = SimpleNamespace(id=1, origin_domain="home.example", username="local")
+    remote = SimpleNamespace(id=2, origin_domain="remote.example", username="remote")
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.committed = False
+            self.refreshed: list[object] = []
+
+        async def flush(self) -> None:
+            assert not self.committed
+
+        async def refresh(self, value: object) -> None:
+            assert not self.committed
+            self.refreshed.append(value)
+
+        async def scalars(self, _statement: object) -> list[object]:
+            assert not self.committed
+            return [local, remote]
+
+    session = FakeSession()
+
+    def render_channel(value: object) -> dict[str, object]:
+        assert not session.committed
+        return {"version": cast(Any, value).updated_at.isoformat()}
+
+    def render_dm_channel(
+        value: object,
+        recipients: list[object],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert not session.committed
+        return {
+            "version": cast(Any, value).updated_at.isoformat(),
+            "recipients": [cast(Any, item).username for item in recipients],
+        }
+
+    def render_profile(value: object) -> dict[str, object]:
+        assert not session.committed
+        return {"id": str(cast(Any, value).id)}
+
+    monkeypatch.setattr(federation_api, "channel_payload", render_channel)
+    monkeypatch.setattr(federation_api, "dm_channel_payload", render_dm_channel)
+    monkeypatch.setattr(federation_api, "profile_from_user", render_profile)
+
+    projection = await federation_api.materialize_dm_open_projection(
+        cast(Any, session),
+        cast(Any, conversation),
+        cast(Any, channel),
+        local_recipient_ref=(local.id, local.origin_domain),
+        created=True,
+    )
+    session.committed = True
+
+    assert session.refreshed == [conversation, channel]
+    assert projection.channel == {"version": now.isoformat()}
+    assert projection.created_channel == {
+        "version": now.isoformat(),
+        "recipients": ["remote"],
+    }
+    assert projection.participants == ({"id": "1"}, {"id": "2"})
 
 
 def test_minimal_eviction_prefix_keeps_every_recent_row_that_fits() -> None:

@@ -20,6 +20,33 @@ class ChannelAccess:
     participants: list[User]
 
 
+async def effective_channel_nsfw(
+    session: AsyncSession,
+    channel: Channel,
+) -> bool | None:
+    """Return a channel's effective NSFW state, resolving thread inheritance.
+
+    ``None`` means the thread parent cannot be authoritatively resolved. Callers
+    that guard content disclosure must reject that state; discovery callers can
+    safely treat it as unavailable.
+    """
+
+    if channel.guild_id is None:
+        return False
+    if channel.type not in {10, 11, 12}:
+        return bool(getattr(channel, "nsfw", False))
+    if channel.parent_id is None or channel.parent_domain is None:
+        return None
+    parent = await session.get(Channel, (channel.parent_id, channel.parent_domain))
+    if (
+        parent is None
+        or parent.unavailable
+        or (parent.guild_id, parent.guild_domain) != (channel.guild_id, channel.guild_domain)
+    ):
+        return None
+    return bool(getattr(parent, "nsfw", False))
+
+
 async def load_channel_access(
     session: AsyncSession,
     settings: Settings,

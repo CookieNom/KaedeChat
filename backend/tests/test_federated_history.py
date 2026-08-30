@@ -11,6 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.chat.guild_revision import federation_channel_state
 from app.chat.schemas import ChannelUpdate, GuildUpdate
+from app.core.permissions import Permission
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import Channel, Guild
 from app.federation import history as history_module
@@ -25,9 +26,11 @@ from app.federation.history import (
     _merge_history_import_batch,
     _reconcile_history_delta,
     _validate_history_message,
+    _validate_manifest,
     cleanup_history_transfers,
     effective_history_policy,
     ensure_history_export_capacity,
+    history_channel_allowed,
     history_response_error,
     lock_history_export_capacity,
     unresolved_history_username,
@@ -37,6 +40,195 @@ from app.federation.history import (
 def snowflake_at(value: datetime, sequence: int = 0) -> int:
     timestamp = int(value.timestamp() * 1000) - EPOCH_MS
     return (timestamp << (WORKER_BITS + SEQUENCE_BITS)) | sequence
+
+
+def history_message_with_reaction(emoji: str) -> tuple[dict[str, object], int]:
+    created_at = datetime.now(UTC)
+    message_id = snowflake_at(created_at, 10)
+    return (
+        {
+            "id": str(message_id),
+            "origin_domain": "home.example",
+            "channel_id": "30",
+            "channel_domain": "home.example",
+            "author_id": "20",
+            "author_domain": "home.example",
+            "content": "retained reaction",
+            "message_type": 0,
+            "flags": 0,
+            "mention_user_refs": [],
+            "attachments": [],
+            "reactions": [
+                {
+                    "user_id": "20",
+                    "user_domain": "home.example",
+                    "emoji": emoji,
+                    "created_at": created_at.isoformat(),
+                }
+            ],
+            "pin": None,
+            "created_at": created_at.isoformat(),
+            "edited_at": None,
+            "deleted_at": None,
+            "history_author": {
+                "id": "20",
+                "origin_domain": "home.example",
+                "username": "member",
+                "display_name": None,
+                "avatar_hash": None,
+                "banner_hash": None,
+                "bio": None,
+                "custom_status": None,
+                "profile_version": 1,
+            },
+        },
+        message_id,
+    )
+
+
+def test_history_manifest_is_exact_and_channel_ordered() -> None:
+    guild = SimpleNamespace(id=10, origin_domain="guild.example")
+    user = SimpleNamespace(id=20, origin_domain="member.example")
+    manifest: dict[str, object] = {
+        "available": True,
+        "export_id": "30",
+        "guild_id": "10",
+        "guild_domain": "guild.example",
+        "requester_user": {"id": "20", "domain": "member.example"},
+        "baseline_seq": "40",
+        "requester_member_version": "2",
+        "permission_generation": "3",
+        "history_policy_generation": "4",
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        "channels": [
+            {"id": "50", "origin_domain": "guild.example", "upper_bound_id": "500"},
+            {"id": "60", "origin_domain": "guild.example", "upper_bound_id": "600"},
+        ],
+    }
+
+    assert _validate_manifest(manifest, guild, user)[-1] == [(50, 500), (60, 600)]
+    with pytest.raises(ValueError):
+        _validate_manifest(manifest | {"private": True}, guild, user)
+    with pytest.raises(ValueError):
+        _validate_manifest(
+            manifest | {"channels": list(reversed(manifest["channels"]))},  # type: ignore[arg-type]
+            guild,
+            user,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_type", ["human", "bot"])
+async def test_history_export_author_uses_strict_federation_profile_wire_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    account_type: str,
+) -> None:
+    created_at = datetime.now(UTC)
+    message_id = snowflake_at(created_at, 7)
+    export = SimpleNamespace(id=40)
+    parent = SimpleNamespace(id=10, origin_domain="home.example")
+    requester = SimpleNamespace(id=20, origin_domain="member.example")
+    grant = SimpleNamespace(upper_bound_id=message_id)
+    child = SimpleNamespace(id=30, origin_domain="home.example", type=0)
+    author = SimpleNamespace(
+        id=21,
+        origin_domain="home.example",
+        account_type=account_type,
+        username=f"{account_type}_author",
+        display_name=None,
+        avatar_hash=None,
+        banner_hash=None,
+        bio=None,
+        custom_status=None,
+        profile_version=3,
+        e2ee_device_generation=4,
+        profile_resolved=True,
+    )
+    message = SimpleNamespace(
+        id=message_id,
+        origin_domain="home.example",
+        channel_id=30,
+        channel_domain="home.example",
+        author_id=21,
+        author_domain="home.example",
+        content="retained message",
+        e2ee=None,
+        embeds=[],
+        components=[],
+        sticker_items=[],
+        application_id=None,
+        application_domain=None,
+        interaction_metadata=None,
+        view_version=0,
+        forwarded_message_id=None,
+        forwarded_message_domain=None,
+        forwarded_channel_id=None,
+        forwarded_channel_domain=None,
+        forward_snapshot=None,
+        poll_result=None,
+        encryption_policy_generation=0,
+        encryption_epoch=None,
+        message_type=0,
+        tts=False,
+        flags=0,
+        client_nonce="history-author-wire",
+        referenced_message_id=None,
+        referenced_message_domain=None,
+        message_reference=None,
+        mention_user_refs=[],
+        mention_role_refs=[],
+        mention_everyone=False,
+        webhook_id=None,
+        webhook_domain=None,
+        webhook_name=None,
+        webhook_avatar_hash=None,
+        webhook_avatar_url=None,
+        published_at=None,
+        edited_at=None,
+        deleted_at=None,
+        created_at=created_at,
+    )
+    session = AsyncMock()
+    session.get.side_effect = [grant, child]
+    session.scalars.side_effect = [[message], [author], [], [], [], []]
+    monkeypatch.setattr(
+        history_module,
+        "_active_export",
+        AsyncMock(return_value=(export, parent, requester)),
+    )
+    monkeypatch.setattr(
+        history_module,
+        "history_channel_allowed",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(history_module, "render_poll_payload", AsyncMock(return_value=None))
+
+    page = await history_module.history_export_page(
+        session,
+        SimpleNamespace(
+            federation_history_page_messages=100,
+            federation_history_page_bytes=512 * 1024,
+        ),
+        export.id,
+        "member.example",
+        child.id,
+    )
+
+    raw = page["messages"][0]
+    profile = raw["history_author"]
+    assert raw["author"] == profile
+    assert profile["account_type"] == account_type
+    assert profile["profile_version"] == 3
+    assert profile["e2ee_device_generation"] == 4
+    _validate_history_message(
+        raw,
+        guild_origin="home.example",
+        guild_id=parent.id,
+        channel_id=child.id,
+        channel_type=child.type,
+        after=0,
+        upper_bound=message_id,
+    )
 
 
 def history_settings(**overrides: object) -> SimpleNamespace:
@@ -153,10 +345,70 @@ def channel(policy: str = "inherit") -> Channel:
     )
 
 
+def test_historical_follow_notice_survives_source_channel_rename() -> None:
+    source = Channel(
+        id=7,
+        origin_domain="source.example",
+        guild_id=3,
+        guild_domain="source.example",
+        type=5,
+        name="renamed-after-follow",
+    )
+
+    history_module._validate_historical_channel_follow_source(
+        source,
+        source_channel_ref=(7, "source.example"),
+        source_guild_ref=(3, "source.example"),
+    )
+
+    source.type = 0
+    with pytest.raises(ValueError, match="does not match"):
+        history_module._validate_historical_channel_follow_source(
+            source,
+            source_channel_ref=(7, "source.example"),
+            source_guild_ref=(3, "source.example"),
+        )
+
+
 def test_history_policy_defaults_to_disabled_and_supports_channel_overrides() -> None:
     parent = guild()
     child = channel()
     assert effective_history_policy(parent, child) == "disabled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_type", [0, 2, 5, 10, 11, 12, 13])
+async def test_history_accepts_every_message_capable_guild_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    channel_type: int,
+) -> None:
+    parent = guild("full_retained")
+    child = channel()
+    child.type = channel_type
+    monkeypatch.setattr(
+        history_module,
+        "calculate_permissions",
+        AsyncMock(
+            return_value=(
+                int(Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY),
+                object(),
+            )
+        ),
+    )
+
+    assert await history_channel_allowed(AsyncMock(), parent, object(), child) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_type", [1, 3, 4, 15, 17])
+async def test_history_rejects_non_message_guild_channels(
+    channel_type: int,
+) -> None:
+    parent = guild("full_retained")
+    child = channel()
+    child.type = channel_type
+
+    assert await history_channel_allowed(AsyncMock(), parent, object(), child) is False
     parent.federated_history_policy = "full_retained"
     assert effective_history_policy(parent, child) == "full_retained"
     child.federated_history_policy = "disabled"
@@ -210,9 +462,14 @@ def test_history_delta_registry_contains_only_mutations_needed_for_reconciliatio
     assert {
         "guild.message.update",
         "guild.message.delete",
+        "guild.message.bulk_delete",
         "guild.message.purge",
         "guild.reaction.add",
         "guild.reaction.remove",
+        "guild.reaction.clear",
+        "guild.poll.vote.add",
+        "guild.poll.vote.remove",
+        "guild.poll.finalize",
         "guild.pin.add",
         "guild.pin.remove",
     } == HISTORY_EVENT_TYPES
@@ -285,6 +542,275 @@ def test_history_message_validation_binds_author_channel_and_range() -> None:
             after=0,
             upper_bound=message_snowflake,
         )
+
+
+@pytest.mark.parametrize(
+    "emoji",
+    [
+        "lantern",
+        "🏮🔥",
+        "\ufe0f",
+    ],
+)
+def test_history_message_rejects_invalid_reaction_emoji(emoji: str) -> None:
+    raw, message_id = history_message_with_reaction(emoji)
+
+    with pytest.raises(ValueError, match="historical reaction emoji is invalid"):
+        _validate_history_message(
+            raw,
+            guild_origin="home.example",
+            channel_id=30,
+            after=0,
+            upper_bound=message_id,
+        )
+
+
+@pytest.mark.parametrize(
+    ("emoji", "canonical"),
+    [
+        ("🏮", "🏮"),
+        ("❤️", "❤"),
+        (
+            "<:lantern:75512661369970689@HOME.EXAMPLE.>",
+            "<:lantern:75512661369970689@home.example>",
+        ),
+    ],
+)
+def test_history_message_canonicalizes_reaction_emoji(
+    emoji: str,
+    canonical: str,
+) -> None:
+    raw, message_id = history_message_with_reaction(emoji)
+
+    _, validated = _validate_history_message(
+        raw,
+        guild_origin="home.example",
+        channel_id=30,
+        after=0,
+        upper_bound=message_id,
+    )
+
+    assert validated["reactions"][0]["emoji"] == canonical
+    assert raw["reactions"][0]["emoji"] == emoji
+
+
+def test_history_message_merges_canonical_reaction_alias_collisions() -> None:
+    raw, message_id = history_message_with_reaction("❤️")
+    first = raw["reactions"][0]
+    later = datetime.fromisoformat(str(first["created_at"])) + timedelta(milliseconds=1)
+    raw["reactions"].append(
+        {
+            **first,
+            "emoji": "❤",
+            "created_at": later.isoformat(),
+        }
+    )
+
+    _, validated = _validate_history_message(
+        raw,
+        guild_origin="home.example",
+        channel_id=30,
+        after=0,
+        upper_bound=message_id,
+        timestamp_upper_bound_ms=int(later.timestamp() * 1000),
+    )
+
+    assert validated["reactions"] == [{**first, "emoji": "❤"}]
+
+
+@pytest.mark.asyncio
+async def test_history_delta_rejects_invalid_reaction_before_noop() -> None:
+    staged = SimpleNamespace(payload={"reactions": []})
+    session = AsyncMock()
+    session.get.return_value = staged
+
+    with pytest.raises(ValueError, match="historical reaction emoji is invalid"):
+        await history_module._apply_history_delta_event(
+            session,
+            history_settings(),  # type: ignore[arg-type]
+            SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
+            {
+                "type": "guild.reaction.remove",
+                "ts": int(datetime.now(UTC).timestamp() * 1000),
+                "content": {
+                    "message": {"id": "30", "origin_domain": "home.example"},
+                    "user": {"id": "20", "origin_domain": "home.example"},
+                    "emoji": "🏮🔥",
+                },
+            },
+        )
+
+    assert staged.payload == {"reactions": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("emoji", "canonical"),
+    [
+        ("❤️", "❤"),
+        (
+            "<:lantern:75512661369970689@HOME.EXAMPLE.>",
+            "<:lantern:75512661369970689@home.example>",
+        ),
+    ],
+)
+async def test_history_delta_canonicalizes_reaction_before_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    emoji: str,
+    canonical: str,
+) -> None:
+    staged = SimpleNamespace(payload={"reactions": []})
+    session = AsyncMock()
+    session.get.return_value = staged
+    revalidate = AsyncMock(return_value=staged.payload)
+    monkeypatch.setattr(history_module, "_revalidate_staged_history_message", revalidate)
+
+    await history_module._apply_history_delta_event(
+        session,
+        history_settings(),  # type: ignore[arg-type]
+        SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
+        {
+            "type": "guild.reaction.add",
+            "ts": int(datetime.now(UTC).timestamp() * 1000),
+            "content": {
+                "message": {"id": "30", "origin_domain": "home.example"},
+                "user": {"id": "20", "origin_domain": "home.example"},
+                "emoji": emoji,
+            },
+        },
+    )
+
+    assert staged.payload["reactions"][0]["emoji"] == canonical
+    revalidate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_history_delta_removes_a_legacy_alias_from_staged_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged = SimpleNamespace(
+        payload={
+            "reactions": [
+                {
+                    "user_id": "20",
+                    "user_domain": "home.example",
+                    "emoji": "❤️",
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            ]
+        }
+    )
+    session = AsyncMock()
+    session.get.return_value = staged
+    revalidate = AsyncMock(return_value=staged.payload)
+    monkeypatch.setattr(history_module, "_revalidate_staged_history_message", revalidate)
+
+    await history_module._apply_history_delta_event(
+        session,
+        history_settings(),  # type: ignore[arg-type]
+        SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
+        {
+            "type": "guild.reaction.remove",
+            "ts": int(datetime.now(UTC).timestamp() * 1000),
+            "content": {
+                "message": {"id": "30", "origin_domain": "home.example"},
+                "user": {"id": "20", "origin_domain": "home.example"},
+                "emoji": "❤",
+            },
+        },
+    )
+
+    assert staged.payload["reactions"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("emoji", "remaining"),
+    [
+        (None, []),
+        (
+            "❤",
+            [
+                {
+                    "user_id": "21",
+                    "user_domain": "home.example",
+                    "emoji": "🔥",
+                }
+            ],
+        ),
+    ],
+)
+async def test_history_delta_applies_aggregate_reaction_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    emoji: str | None,
+    remaining: list[dict[str, str]],
+) -> None:
+    staged = SimpleNamespace(
+        payload={
+            "reactions": [
+                {
+                    "user_id": "20",
+                    "user_domain": "home.example",
+                    "emoji": "❤️",
+                },
+                {
+                    "user_id": "21",
+                    "user_domain": "home.example",
+                    "emoji": "🔥",
+                },
+            ]
+        }
+    )
+    session = AsyncMock()
+    session.get.return_value = staged
+    revalidate = AsyncMock(return_value=staged.payload)
+    monkeypatch.setattr(history_module, "_revalidate_staged_history_message", revalidate)
+    content: dict[str, object] = {
+        "message": {"id": "30", "origin_domain": "home.example"},
+    }
+    if emoji is not None:
+        content["emoji"] = emoji
+
+    await history_module._apply_history_delta_event(
+        session,
+        history_settings(),  # type: ignore[arg-type]
+        SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
+        {
+            "type": "guild.reaction.clear",
+            "ts": int(datetime.now(UTC).timestamp() * 1000),
+            "content": content,
+        },
+    )
+
+    assert staged.payload["reactions"] == remaining
+    revalidate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_history_delta_applies_one_aggregate_bulk_delete() -> None:
+    first = SimpleNamespace()
+    second = SimpleNamespace()
+    session = AsyncMock()
+    session.get.side_effect = [first, second]
+
+    await history_module._apply_history_delta_event(
+        session,
+        history_settings(),  # type: ignore[arg-type]
+        SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
+        {
+            "type": "guild.message.bulk_delete",
+            "ts": int(datetime.now(UTC).timestamp() * 1000),
+            "content": {
+                "messages": [
+                    {"id": "30", "origin_domain": "home.example"},
+                    {"id": "31", "origin_domain": "member.example"},
+                ],
+                "deleted_at": datetime.now(UTC).isoformat(),
+            },
+        },
+    )
+
+    assert [item.args[0] for item in session.delete.await_args_list] == [first, second]
 
 
 def test_encrypted_history_operation_matches_the_message_projection() -> None:

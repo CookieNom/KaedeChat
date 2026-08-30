@@ -951,6 +951,17 @@ class EvidenceUploadSession:
     async def scalar(self, _statement: object) -> object | None:
         return self.existing
 
+    async def flush(self) -> None:
+        return None
+
+    async def refresh(
+        self,
+        _row: object,
+        *,
+        attribute_names: tuple[str, ...],
+    ) -> None:
+        assert attribute_names == ("updated_at",)
+
     async def commit(self) -> None:
         self.committed = True
 
@@ -1140,6 +1151,40 @@ async def test_committing_decrypted_evidence_marks_report_as_reporter_disclosed(
     assert cast(dict[str, Any], result["evidence"])["scan_status"] == "pending"
     assert session.committed is True
     wake.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_federated_evidence_commit_rate_limit_precedes_report_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rejected = HTTPException(status_code=429, detail={"code": "RATE_LIMITED"})
+    rate_limit = AsyncMock(side_effect=rejected)
+    session = SimpleNamespace(get=AsyncMock())
+    redis = SimpleNamespace()
+    monkeypatch.setattr(admin_portal, "enforce_federation_route_rate_limit", rate_limit)
+
+    with pytest.raises(HTTPException) as caught:
+        await admin_portal.commit_federated_report_attachment_evidence(
+            44,
+            ReportAttachmentEvidenceCommit(
+                attachment_id="81",
+                disclosure_acknowledged=True,
+            ),
+            FederationPrincipal("beta.localhost", "ed25519:test", silenced=True),
+            cast(Any, session),
+            cast(Any, redis),
+            cast(Any, SimpleNamespace(domain="alpha.localhost")),
+        )
+
+    assert caught.value is rejected
+    rate_limit.assert_awaited_once_with(
+        redis,
+        "beta.localhost",
+        "abuse-report-evidence",
+        capacity=20,
+        refill_per_minute=2,
+    )
+    session.get.assert_not_awaited()
 
 
 @pytest.mark.asyncio

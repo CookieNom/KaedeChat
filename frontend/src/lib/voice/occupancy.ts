@@ -10,6 +10,9 @@ export interface VoiceOccupant {
   self_deaf: boolean;
   server_mute: boolean;
   server_deaf: boolean;
+  can_speak?: boolean;
+  suppressed?: boolean;
+  request_to_speak_timestamp?: string | null;
 }
 
 export interface VoiceStateUpdate extends Partial<VoiceOccupant> {
@@ -22,6 +25,10 @@ export interface VoiceStateUpdate extends Partial<VoiceOccupant> {
 
 type Occupancy = Record<string, VoiceOccupant[]>;
 
+function isVoiceLike(channel: Channel): boolean {
+  return channel.type === 2 || channel.type === 13;
+}
+
 function sameUser(
   occupant: VoiceOccupant,
   update: Pick<VoiceStateUpdate, 'user_id' | 'user_domain'>
@@ -32,7 +39,7 @@ function sameUser(
 function targetChannel(channels: Channel[], update: VoiceStateUpdate): Channel | undefined {
   return channels.find(
     (channel) =>
-      channel.type === 2 &&
+      isVoiceLike(channel) &&
       channel.id === update.channel_id &&
       (!update.channel_domain || channel.origin_domain === update.channel_domain)
   );
@@ -67,7 +74,7 @@ export function applyVoiceStateUpdate(
     let next = occupancy;
     for (const represented of new Set(update.participants.map((occupant) => occupant.channel_id))) {
       const representedChannel = channels.find(
-        (candidate) => candidate.type === 2 && candidate.id === represented
+        (candidate) => isVoiceLike(candidate) && candidate.id === represented
       );
       if (representedChannel) {
         next = {

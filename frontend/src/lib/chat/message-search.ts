@@ -2,6 +2,8 @@ import { entityRef } from './refs';
 import type { UserSummary } from './types';
 
 export type MessageSearchOperator = 'from' | 'mentions' | 'has';
+export const MESSAGE_SEARCH_AUTHOR_TYPES = ['user', 'bot', 'webhook'] as const;
+export type MessageSearchAuthorType = (typeof MESSAGE_SEARCH_AUTHOR_TYPES)[number];
 
 export type MessageSearchOperatorMatch = {
   operator: MessageSearchOperator;

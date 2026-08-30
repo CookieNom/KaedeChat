@@ -1,7 +1,7 @@
 import base64
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,6 +14,7 @@ from fastapi import HTTPException, Request
 from livekit import api
 from pydantic import ValidationError
 
+from app.api.bot_voice import bot_disconnect_voice
 from app.api.calls import call_voice_token
 from app.api.voice import (
     channel_voice_token,
@@ -24,10 +25,18 @@ from app.api.voice import (
 from app.core.permissions import Permission
 from app.core.settings import Settings
 from app.core.types import EntityRef
+from app.db.bot_models import BotInstallation, BotWorker
+from app.db.models import User
 from app.federation.security import FederationPrincipal
 from app.voice.background import _publish_local_room_snapshot
 from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
-from app.voice.livekit import LiveKitError, mint_join_token, publication_sources, receive_webhook
+from app.voice.livekit import (
+    LiveKitError,
+    mint_join_token,
+    publication_sources,
+    receive_webhook,
+    screen_share_is_active,
+)
 from app.voice.rooms import (
     dm_room_name,
     guild_room_name,
@@ -36,6 +45,7 @@ from app.voice.rooms import (
     participant_identity,
 )
 from app.voice.schemas import (
+    BotVoiceDisconnectRequest,
     CallAction,
     VoiceBrokerRequest,
     VoiceMoveFederationRequest,
@@ -45,30 +55,101 @@ from app.voice.schemas import (
 from app.voice.service import (
     MEDIA_E2EE_PROTOCOL,
     MEDIA_E2EE_SUITE,
+    authoritative_guild_token,
+    effective_voice_user_limit,
     federated_voice_grant_matches,
     media_session_id,
     parse_minted_metadata,
     require_e2ee_voice_device,
+    update_authoritative_occupant_grant,
     valid_federated_voice_url,
     voice_metadata_matches_policy,
 )
 from app.voice.state import (
     ACTIVATE_FEDERATED_VOICE_SESSION_LUA,
+    ADMIT_OCCUPANT_LUA,
     ADVANCE_FEDERATED_VOICE_SESSION_LUA,
     CALL_TRANSITION_LUA,
     FederatedVoiceSession,
     Occupant,
     activate_federated_voice_home_session,
+    admit_occupant,
     advance_federated_voice_home_session,
     begin_federated_voice_home_session,
     discard_all_federated_voice_home_sessions,
     federated_voice_pending_key,
     federated_voice_session_key,
     occupancy_snapshot,
+    public_occupant_state,
+    voice_room_registry_key,
+    voice_user_room_key,
 )
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
+
+
+@pytest.mark.asyncio
+async def test_screen_share_lookup_binds_exact_participant_and_track_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    participants = [
+        SimpleNamespace(
+            identity="42@people.example",
+            tracks=[SimpleNamespace(source=api.TrackSource.Value("SCREEN_SHARE"))],
+        ),
+        SimpleNamespace(
+            identity="43@people.example",
+            tracks=[SimpleNamespace(source=api.TrackSource.Value("CAMERA"))],
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.voice.livekit.LiveKitControl.list_participants",
+        AsyncMock(return_value=participants),
+    )
+
+    assert await screen_share_is_active(
+        cast(Any, SimpleNamespace(voice_api_key=object(), voice_api_secret=object())),
+        "g.10.20",
+        "42@people.example",
+    )
+    assert not await screen_share_is_active(
+        cast(Any, SimpleNamespace(voice_api_key=object(), voice_api_secret=object())),
+        "g.10.20",
+        "43@people.example",
+    )
+
+
 LIVEKIT_SECRET = "livekit-test-secret-000000000000000000000000000000000000000"
+
+
+@pytest.mark.asyncio
+async def test_active_voice_scheduled_event_caps_room_at_99() -> None:
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="alpha.localhost",
+        type=2,
+        user_limit=0,
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value=91))
+
+    assert await effective_voice_user_limit(session, channel) == 99
+    statement = session.scalar.await_args.args[0]
+    rendered = str(statement.compile(compile_kwargs={"literal_binds": True}))
+    assert "guild_scheduled_events.status = 2" in rendered
+    assert "guild_scheduled_events.entity_type = 2" in rendered
+    assert "guild_scheduled_events.channel_id = 34" in rendered
+
+    channel.user_limit = 40
+    assert await effective_voice_user_limit(session, channel) == 40
+    session.scalar.return_value = None
+    channel.user_limit = 0
+    assert await effective_voice_user_limit(session, channel) == 0
+
+    channel.type = 13
+    channel.user_limit = 10_000
+    session.scalar.reset_mock()
+    assert await effective_voice_user_limit(session, channel) == 10_000
+    session.scalar.assert_not_awaited()
 
 
 def settings(**overrides: object) -> Settings:
@@ -95,6 +176,121 @@ def test_room_and_participant_identifiers_are_canonical_and_round_trip() -> None
     assert parse_room_name("g.12.34") == ("g", 12, 34)
     assert participant_identity(78, "ALPHA.LOCALHOST.") == "78@alpha.localhost"
     assert parse_participant_identity("78@alpha.localhost") == (78, "alpha.localhost")
+
+
+def test_voice_redis_indexes_isolate_identical_snowflakes_by_authority() -> None:
+    identity = "78@users.localhost"
+
+    assert voice_room_registry_key("ALPHA.LOCALHOST.") == "voice:v2:rooms:alpha.localhost"
+    assert voice_room_registry_key("alpha.localhost") != voice_room_registry_key("beta.localhost")
+    assert (
+        voice_user_room_key("ALPHA.LOCALHOST.", identity)
+        == "voice:v2:user-room:alpha.localhost:78@users.localhost"
+    )
+    assert voice_user_room_key("alpha.localhost", identity) != voice_user_room_key(
+        "beta.localhost", identity
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_disconnect_releases_its_claim_when_livekit_is_unavailable(
+    monkeypatch: Any,
+) -> None:
+    channel = SimpleNamespace(
+        id=34,
+        type=2,
+        guild_id=12,
+        origin_domain="alpha.localhost",
+        guild_domain="alpha.localhost",
+    )
+    connection_id = "c" * 43
+    events: list[str] = []
+    installation = BotInstallation(
+        id=1,
+        application_id=70,
+        application_domain="alpha.localhost",
+        grant_revision=1,
+    )
+    worker = SimpleNamespace(id=2)
+
+    async def record(name: str, *_args: object, **_kwargs: object) -> None:
+        events.append(name)
+
+    monkeypatch.setattr(
+        "app.api.bot_voice.installation_for_channel",
+        AsyncMock(return_value=(channel, installation)),
+    )
+    monkeypatch.setattr("app.api.bot_voice.voice_connection_matches", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.api.bot_voice.occupant_in_room",
+        AsyncMock(
+            return_value=Occupant(
+                identity="78@alpha.localhost",
+                user_id="78",
+                user_domain="alpha.localhost",
+                room="g.12.34",
+                guild_id="12",
+                channel_id="34",
+                joined_at=1,
+                connection_id=connection_id,
+                client_kind="bot",
+                participant_metadata={
+                    "bot_application_id": "70",
+                    "bot_application_domain": "alpha.localhost",
+                    "bot_worker_id": 2,
+                    "bot_installation_id": 1,
+                    "bot_installation_revision": 1,
+                },
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.bot_voice.bump_generation",
+        lambda *args, **kwargs: record("fenced", *args, **kwargs),
+    )
+
+    async def failed_control(*_args: object, **_kwargs: object) -> None:
+        events.append("control")
+        raise LiveKitError("unavailable")
+
+    monkeypatch.setattr("app.api.bot_voice.LiveKitControl.remove_participant", failed_control)
+    monkeypatch.setattr(
+        "app.api.bot_voice.remove_occupant_connection",
+        lambda *args, **kwargs: record("occupant", *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        "app.api.bot_voice.release_voice_connection",
+        lambda *args, **kwargs: record("claim", *args, **kwargs),
+    )
+    session = AsyncMock()
+    session.get.return_value = SimpleNamespace(
+        id=12,
+        origin_domain="alpha.localhost",
+        unavailable=False,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await bot_disconnect_voice(
+            EntityRef("34@alpha.localhost"),
+            BotVoiceDisconnectRequest(connection_id=connection_id, generation=4),
+            cast(
+                Any,
+                SimpleNamespace(
+                    user=SimpleNamespace(id=78, origin_domain="alpha.localhost"),
+                    worker=worker,
+                ),
+            ),
+            session,
+            cast(Any, SimpleNamespace()),
+            settings(),
+        )
+
+    assert caught.value.status_code == 503
+    assert caught.value.detail == {
+        "code": "VOICE_HOME_UNREACHABLE",
+        "retry_after_ms": 2000,
+    }
+    assert events == ["fenced", "control", "occupant", "claim"]
 
 
 @pytest.mark.parametrize(
@@ -148,6 +344,183 @@ def test_publication_sources_follow_speak_and_stream_independently() -> None:
     ]
     permission = api.ParticipantPermission(can_publish_sources=protobuf_sources)
     assert list(permission.can_publish_sources) == [2, 1, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_failed_voice_token_mint_releases_connection_claim(monkeypatch: Any) -> None:
+    actor = SimpleNamespace(
+        id=78,
+        origin_domain="alpha.localhost",
+        username="bot",
+        display_name="Bot",
+        profile_resolved=True,
+        account_type="human",
+    )
+    guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="alpha.localhost",
+        encryption_mode="plaintext",
+        encryption_state="disabled",
+        encryption_policy_generation=0,
+        encryption_epoch=None,
+        bitrate=96_000,
+        user_limit=0,
+        rtc_region=None,
+        video_quality_mode=2,
+    )
+    member = SimpleNamespace(voice_flags=0)
+    session = AsyncMock()
+    session.get.return_value = member
+    redis = AsyncMock()
+    control = SimpleNamespace(
+        ensure_room=AsyncMock(),
+        remove_participant=AsyncMock(),
+    )
+    release = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.voice.service.LiveKitControl", lambda _settings: control)
+    monkeypatch.setattr(
+        "app.voice.service.require_permissions",
+        AsyncMock(
+            return_value=(
+                Permission.CONNECT | Permission.SPEAK | Permission.STREAM | Permission.USE_VAD
+            )
+        ),
+    )
+    monkeypatch.setattr("app.voice.service.require_e2ee_voice_device", AsyncMock())
+    monkeypatch.setattr(
+        "app.voice.service.claim_voice_connection",
+        AsyncMock(return_value=(True, 7, "", "")),
+    )
+    monkeypatch.setattr("app.voice.service.release_voice_connection", release)
+    monkeypatch.setattr(
+        "app.voice.service.mint_join_token",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(LiveKitError("mint failed")),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await authoritative_guild_token(
+            session,
+            redis,
+            settings(),
+            channel=channel,
+            guild=guild,
+            actor=actor,
+            connection_id="c" * 43,
+            client_kind="web",
+        )
+
+    assert caught.value.status_code == 503
+    release.assert_awaited_once_with(
+        redis,
+        "alpha.localhost",
+        "78@alpha.localhost",
+        "c" * 43,
+        room="g.12.34",
+        client_kind="web",
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_channel_full_is_rejected_before_claiming_connection(
+    monkeypatch: Any,
+) -> None:
+    actor = SimpleNamespace(id=78, origin_domain="alpha.localhost", account_type="human")
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="alpha.localhost",
+        encryption_mode="plaintext",
+        encryption_state="disabled",
+        encryption_policy_generation=0,
+        encryption_epoch=None,
+        bitrate=64_000,
+        user_limit=1,
+        rtc_region=None,
+        video_quality_mode=1,
+    )
+    guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
+    session = AsyncMock()
+    session.get.return_value = SimpleNamespace(voice_flags=0)
+    claim = AsyncMock()
+    monkeypatch.setattr(
+        "app.voice.service.require_permissions",
+        AsyncMock(return_value=Permission.CONNECT),
+    )
+    monkeypatch.setattr("app.voice.service.require_e2ee_voice_device", AsyncMock())
+    monkeypatch.setattr(
+        "app.voice.service.room_occupants",
+        AsyncMock(
+            return_value=[
+                Occupant(
+                    identity="79@alpha.localhost",
+                    user_id="79",
+                    user_domain="alpha.localhost",
+                    room="g.12.34",
+                    guild_id="12",
+                    channel_id="34",
+                    joined_at=1,
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.voice.service.claim_voice_connection", claim)
+
+    with pytest.raises(HTTPException) as caught:
+        await authoritative_guild_token(
+            session,
+            AsyncMock(),
+            settings(),
+            channel=channel,
+            guild=guild,
+            actor=actor,
+            connection_id="c" * 43,
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "code": "VOICE_CHANNEL_FULL",
+        "message": "This voice channel has reached its user limit.",
+        "user_limit": 1,
+    }
+    claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_admission_enforces_limit_atomically() -> None:
+    occupant = Occupant(
+        identity="78@alpha.localhost",
+        user_id="78",
+        user_domain="alpha.localhost",
+        room="g.12.34",
+        guild_id="12",
+        channel_id="34",
+        joined_at=1,
+    )
+    redis = AsyncMock()
+    redis.eval.return_value = 0
+
+    assert not await admit_occupant(
+        redis,
+        "alpha.localhost",
+        occupant,
+        user_limit=1,
+        bypass_limit=False,
+    )
+    assert redis.eval.await_args.args[0] == ADMIT_OCCUPANT_LUA
+    assert redis.eval.await_args.args[3:5] == (
+        "voice:v2:rooms:alpha.localhost",
+        "voice:v2:user-room:alpha.localhost:78@alpha.localhost",
+    )
+    assert redis.eval.await_args.args[-2:] == ("1", "0")
+    redis.eval.return_value = 1
+    assert await admit_occupant(
+        redis,
+        "alpha.localhost",
+        occupant,
+        user_limit=1,
+        bypass_limit=True,
+    )
+    assert redis.eval.await_args.args[-2:] == ("1", "1")
 
 
 def test_signed_webhook_body_hash_is_verified() -> None:
@@ -319,7 +692,7 @@ async def test_voice_coordinator_publishes_scoped_local_snapshots(monkeypatch: A
                 "guild_id": "12",
                 "channel_id": "34",
                 "channel_domain": "alpha.localhost",
-                "participants": [asdict(participant)],
+                "participants": [public_occupant_state(participant)],
                 "generated_at": 123,
                 "heartbeat": True,
             },
@@ -423,7 +796,11 @@ def test_encrypted_voice_context_is_complete_and_policy_bound() -> None:
 
 @pytest.mark.asyncio
 async def test_encrypted_voice_requires_an_active_owned_device() -> None:
-    actor = SimpleNamespace(id=78, origin_domain="alpha.localhost")
+    actor = SimpleNamespace(
+        id=78,
+        origin_domain="alpha.localhost",
+        account_type="human",
+    )
     channel = SimpleNamespace(encryption_mode="e2ee", encryption_state="active")
     session = SimpleNamespace(scalar=AsyncMock(return_value=None))
     with pytest.raises(HTTPException) as missing:
@@ -850,6 +1227,8 @@ class FederatedVoiceRedis:
                     "room": args[3],
                     "generation": int(args[4]),
                     "move_session_id": args[0],
+                    "connection_id": args[6],
+                    "client_kind": args[7],
                     "ready": True,
                     "active": False,
                 }
@@ -945,6 +1324,8 @@ async def test_federated_voice_move_requires_current_source_and_rejects_replay()
         guild_id="12",
         room="g.12.34",
         generation=4,
+        connection_id="c" * 43,
+        client_kind="desktop",
     )
     assert (
         await advance_federated_voice_home_session(
@@ -961,6 +1342,8 @@ async def test_federated_voice_move_requires_current_source_and_rejects_replay()
         == "inactive"
     )
     current = json.loads(redis.values[federated_voice_session_key("home", identity)])
+    assert current["connection_id"] == "c" * 43
+    assert current["client_kind"] == "desktop"
     current["active"] = True
     redis.values[federated_voice_session_key("home", identity)] = json.dumps(current)
     assert (
@@ -1064,6 +1447,8 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
             e2ee=False,
             channel_id="35",
             channel_domain="beta.localhost",
+            guild_id="12",
+            guild_domain="beta.localhost",
             move_session_id=move_session_id,
         ),
     )
@@ -1078,12 +1463,26 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
                     id=35,
                     origin_domain="beta.localhost",
                     encryption_mode="plaintext",
+                    type=2,
                 ),
                 SimpleNamespace(id=12, origin_domain="beta.localhost"),
             )
         ),
     )
     monkeypatch.setattr("app.api.voice.get_permissions", AsyncMock(return_value=Permission.CONNECT))
+    active_session = FederatedVoiceSession(
+        authority_domain="beta.localhost",
+        guild_id="12",
+        room="g.12.34",
+        generation=4,
+        move_session_id=move_session_id,
+        ready=True,
+        active=True,
+        connection_id="c" * 43,
+        client_kind="desktop",
+    )
+    active = AsyncMock(return_value=active_session)
+    monkeypatch.setattr("app.api.voice.get_federated_voice_session", active)
     advance = AsyncMock(return_value="missing")
     publish = AsyncMock()
     monkeypatch.setattr("app.api.voice.advance_federated_voice_home_session", advance)
@@ -1116,6 +1515,27 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
         "VOICE_TOKEN",
     ]
 
+    priority_grant = VoiceTokenResponse.model_validate(
+        payload.grant.model_dump() | {"can_priority_speak": True}
+    )
+    priority_payload = payload.model_copy(update={"grant": priority_grant})
+    for client_kind in ("web", "mobile"):
+        active.return_value = replace(active_session, client_kind=client_kind)
+        advance.reset_mock()
+        publish.reset_mock()
+        with pytest.raises(HTTPException) as priority_error:
+            await federation_voice_move(
+                priority_payload,
+                FederationPrincipal(origin="beta.localhost", key_id="test"),
+                cast(Any, session),
+                redis,
+                settings(),
+            )
+        assert priority_error.value.status_code == 400
+        assert priority_error.value.detail == {"code": "KAED_VOICE_INVALID_STATE"}
+        advance.assert_not_awaited()
+        publish.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_remote_move_rejection_preserves_the_source_voice_session(
@@ -1123,8 +1543,21 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
 ) -> None:
     guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
     source_channel = SimpleNamespace(id=34, origin_domain="alpha.localhost")
-    target_channel = SimpleNamespace(id=35, origin_domain="alpha.localhost")
-    target_user = SimpleNamespace(id=78, origin_domain="beta.localhost")
+    target_channel = SimpleNamespace(
+        id=35,
+        origin_domain="alpha.localhost",
+        guild_id=12,
+        guild_domain="alpha.localhost",
+        unavailable=False,
+        parent_id=None,
+        parent_domain=None,
+        type=2,
+    )
+    target_user = SimpleNamespace(
+        id=78,
+        origin_domain="beta.localhost",
+        account_type="human",
+    )
     moderator = SimpleNamespace(id=1, origin_domain="alpha.localhost")
     move_session_id = "abcdefghijklmnopqrstuvwxyz0123456789_AB"
     move_session = FederatedVoiceSession(
@@ -1135,6 +1568,7 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
         generation=4,
         ready=True,
         active=True,
+        connection_id="c" * 43,
     )
     grant = VoiceTokenResponse(
         token="x" * 32,
@@ -1154,6 +1588,10 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
     session.get.return_value = target_user
     redis = AsyncMock()
     redis.get.return_value = b"g.12.34"
+    monkeypatch.setattr(
+        "app.api.voice.voice_user_room",
+        AsyncMock(return_value="g.12.34"),
+    )
     monkeypatch.setattr("app.api.guilds.local_guild", AsyncMock(return_value=guild))
     monkeypatch.setattr("app.api.voice.require_can_manage_member", AsyncMock())
     monkeypatch.setattr(
@@ -1163,6 +1601,23 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
     monkeypatch.setattr("app.api.voice.get_permissions", AsyncMock(return_value=Permission.CONNECT))
     monkeypatch.setattr("app.api.voice.require_permissions", AsyncMock())
     monkeypatch.setattr("app.api.voice.current_generation", AsyncMock(return_value=4))
+    monkeypatch.setattr(
+        "app.api.voice.room_occupants",
+        AsyncMock(
+            return_value=[
+                Occupant(
+                    identity="78@beta.localhost",
+                    user_id="78",
+                    user_domain="beta.localhost",
+                    room="g.12.34",
+                    guild_id="12",
+                    channel_id="34",
+                    joined_at=1,
+                    connection_id="c" * 43,
+                )
+            ]
+        ),
+    )
     monkeypatch.setattr(
         "app.api.voice.get_federated_voice_session",
         AsyncMock(return_value=move_session),
@@ -1197,6 +1652,229 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
     session.commit.assert_not_awaited()
     bump.assert_not_awaited()
     remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_bot_move_stays_at_guild_authority_and_preserves_lineage(
+    monkeypatch: Any,
+) -> None:
+    guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
+    source_channel = SimpleNamespace(id=34, origin_domain="alpha.localhost")
+    target_channel = SimpleNamespace(
+        id=35,
+        origin_domain="alpha.localhost",
+        guild_id=12,
+        guild_domain="alpha.localhost",
+        unavailable=False,
+        parent_id=None,
+        parent_domain=None,
+        type=2,
+    )
+    target_user = SimpleNamespace(
+        id=78,
+        origin_domain="apps.example",
+        account_type="bot",
+    )
+    moderator = SimpleNamespace(id=1, origin_domain="alpha.localhost")
+    installation = BotInstallation(
+        id=90,
+        application_id=70,
+        application_domain="apps.example",
+        bot_user_id=78,
+        bot_user_domain="apps.example",
+        guild_id=12,
+        guild_domain="alpha.localhost",
+        status="active",
+        grant_revision=6,
+        granted_scopes=["voice.connect", "voice.listen"],
+        channel_restrictions=[],
+    )
+    worker = BotWorker(
+        id=80,
+        application_id=70,
+        application_domain="apps.example",
+        name="voice worker",
+        public_key=b"w" * 32,
+        scopes=["voice.connect", "voice.listen"],
+        intents=["guild_voice_states"],
+        target_domains=["alpha.localhost"],
+    )
+    occupant = Occupant(
+        identity="78@apps.example",
+        user_id="78",
+        user_domain="apps.example",
+        room="g.12.34",
+        guild_id="12",
+        channel_id="34",
+        joined_at=1,
+        connection_id="c" * 43,
+        client_kind="bot",
+        self_mute=True,
+        allow_listen=True,
+        allow_speak=False,
+        allow_stream=False,
+        participant_metadata={
+            "generation": 4,
+            "bot_application_id": "70",
+            "bot_application_domain": "apps.example",
+            "bot_worker_id": 80,
+            "bot_installation_id": 90,
+            "bot_installation_revision": 6,
+            "bot_e2ee_device_id": "kbe_" + "d" * 43,
+        },
+    )
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://alpha.localhost/livekit",
+        room="g.12.35",
+        generation=1,
+        connection_id="c" * 43,
+        expires_at="2026-08-11T12:00:00+00:00",
+        can_listen=True,
+        can_speak=False,
+        can_stream=False,
+        e2ee=False,
+        channel_id="35",
+        channel_domain="alpha.localhost",
+    )
+
+    async def get(model: object, _key: object) -> object | None:
+        if model is User:
+            return target_user
+        if model is BotWorker:
+            return worker
+        return None
+
+    session = AsyncMock()
+    session.get = AsyncMock(side_effect=get)
+    redis = AsyncMock()
+    redis.get.return_value = b"g.12.34"
+    monkeypatch.setattr(
+        "app.api.voice.voice_user_room",
+        AsyncMock(return_value="g.12.34"),
+    )
+    monkeypatch.setattr("app.api.voice.proxy_remote_guild_management", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.api.guilds.local_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr("app.api.voice.require_can_manage_member", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.voice.load_voice_channel",
+        AsyncMock(side_effect=[(target_channel, guild), (source_channel, guild)]),
+    )
+    monkeypatch.setattr("app.api.voice.get_permissions", AsyncMock(return_value=Permission.CONNECT))
+    monkeypatch.setattr("app.api.voice.require_permissions", AsyncMock())
+    monkeypatch.setattr("app.api.voice.current_generation", AsyncMock(return_value=4))
+    monkeypatch.setattr("app.api.voice.room_occupants", AsyncMock(return_value=[occupant]))
+    monkeypatch.setattr("app.api.voice.voice_connection_matches", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.api.voice.active_bot_guild_voice_installation",
+        AsyncMock(return_value=installation),
+    )
+    monkeypatch.setattr("app.api.voice.add_audit_entry", AsyncMock())
+    mint = AsyncMock(return_value=grant)
+    monkeypatch.setattr("app.api.voice.authoritative_guild_token", mint)
+    publish = AsyncMock()
+    monkeypatch.setattr("app.api.voice.publish_dispatch", publish)
+    federation = AsyncMock()
+    monkeypatch.setattr("app.api.voice.signed_request", federation)
+    bump = AsyncMock()
+    monkeypatch.setattr("app.api.voice.bump_generation", bump)
+    monkeypatch.setattr("app.api.voice.remove_occupant", AsyncMock())
+
+    response = await move_member_voice(
+        EntityRef("12@alpha.localhost"),
+        EntityRef("78@apps.example"),
+        VoiceMoveRequest(channel_id=EntityRef("35@alpha.localhost")),
+        SimpleNamespace(user=moderator),  # type: ignore[arg-type]
+        session,
+        redis,
+        AsyncMock(),
+        settings(),
+        None,
+    )
+
+    assert response.status_code == 204
+    federation.assert_not_awaited()
+    bump.assert_not_awaited()
+    assert [call.args[2] for call in publish.await_args_list] == [
+        "VOICE_CHANNEL_MOVE",
+        "VOICE_TOKEN",
+    ]
+    assert all(call.args[1] == "user:apps.example:78" for call in publish.await_args_list)
+    assert mint.await_args.kwargs == {
+        "channel": target_channel,
+        "guild": guild,
+        "actor": target_user,
+        "move_session_id": None,
+        "disconnect_previous": True,
+        "sender_device_id": "kbe_" + "d" * 43,
+        "bot_installation": installation,
+        "bot_worker": worker,
+        "connection_id": "c" * 43,
+        "takeover": True,
+        "client_kind": "bot",
+        "allow_listen": True,
+        "allow_speak": False,
+        "allow_stream": False,
+        "self_mute": True,
+        "self_deaf": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_bot_moderation_rotation_dispatches_private_generation_fence(
+    monkeypatch: Any,
+) -> None:
+    occupant = Occupant(
+        identity="78@apps.example",
+        user_id="78",
+        user_domain="apps.example",
+        room="g.12.34",
+        guild_id="12",
+        channel_id="34",
+        joined_at=1,
+        connection_id="c" * 43,
+        client_kind="bot",
+        participant_metadata={
+            "generation": 4,
+            "channel_domain": "alpha.localhost",
+        },
+    )
+    monkeypatch.setattr(
+        "app.voice.service.claim_voice_grant_transition",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr("app.voice.service.release_voice_grant_transition", AsyncMock())
+    monkeypatch.setattr("app.voice.service.current_generation", AsyncMock(return_value=4))
+    monkeypatch.setattr("app.voice.service.LiveKitControl.update_participant", AsyncMock())
+    monkeypatch.setattr("app.voice.service.rotate_occupant_grant", AsyncMock(return_value=5))
+    monkeypatch.setattr(
+        "app.voice.service.get_federated_voice_session",
+        AsyncMock(return_value=None),
+    )
+    publish = AsyncMock()
+    monkeypatch.setattr("app.voice.service.publish_dispatch", publish)
+
+    updated = await update_authoritative_occupant_grant(
+        AsyncMock(),
+        settings(),
+        occupant,
+        can_speak=False,
+        can_stream=False,
+        server_mute=True,
+        server_deaf=True,
+    )
+
+    assert updated.participant_metadata["generation"] == 5
+    assert updated.server_mute and updated.server_deaf
+    assert publish.await_args.args[1:3] == (
+        "user:apps.example:78",
+        "VOICE_STATE_UPDATE",
+    )
+    private_state = publish.await_args.args[3]
+    assert private_state["connection_id"] == "c" * 43
+    assert private_state["generation"] == 5
+    assert private_state["server_mute"] is True
+    assert private_state["server_deaf"] is True
 
 
 async def test_occupancy_staleness_is_explicit_not_silently_empty() -> None:

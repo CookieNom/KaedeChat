@@ -10,7 +10,12 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 import app.api.federation as federation_api
-from app.api.dms import publish_local_group_state
+from app.api.dms import publish_local_group_state, validate_group_mutation_result
+from app.chat.e2ee import (
+    E2EE_PROTOCOL_MLS_10,
+    E2EE_SUITE_MLS_128,
+    channel_encryption_policy_payload,
+)
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
     group_conversation_content,
@@ -27,7 +32,7 @@ from app.core.dm import (
 )
 from app.core.settings import Settings
 from app.db.models import Channel, DMConversation, User
-from app.federation.replication import replicate_group_notice
+from app.federation.replication import profile_from_user, replicate_group_notice
 from app.federation.schemas import DMGroupMutationRequest
 from app.federation.security import FederationPrincipal
 from app.voice.schemas import CallResponse
@@ -41,7 +46,307 @@ def user(identifier: int, domain: str = "alpha.localhost") -> User:
         username=f"user{identifier}",
         password_hash="hash" if domain == "alpha.localhost" else None,
         email=f"user{identifier}@alpha.localhost" if domain == "alpha.localhost" else None,
+        account_type="human",
+        profile_version=1,
+        e2ee_device_generation=0,
     )
+
+
+_NOTICE_MISSING = object()
+
+
+def remote_group(
+    owner: User,
+    *,
+    name: str | None = "Trip",
+    state_version: int = 7,
+    encryption_mode: str = "plaintext",
+) -> tuple[DMConversation, Channel]:
+    authority = "home.example"
+    conversation = DMConversation(
+        id=100,
+        origin_domain=authority,
+        pair_key=group_dm_key(authority, 100),
+        type="group",
+        authority_domain=authority,
+        owner_id=owner.id,
+        owner_domain=owner.origin_domain,
+        state_version=state_version,
+    )
+    channel = Channel(
+        id=100,
+        origin_domain=authority,
+        type=1,
+        name=name,
+        created_floor_id=100,
+        encryption_mode=encryption_mode,
+        encryption_state="active" if encryption_mode == "e2ee" else "plaintext",
+        encryption_policy_generation=1 if encryption_mode == "e2ee" else 0,
+        encryption_protocol=E2EE_PROTOCOL_MLS_10 if encryption_mode == "e2ee" else None,
+        encryption_suite=E2EE_SUITE_MLS_128 if encryption_mode == "e2ee" else None,
+        encryption_group_id="group-1" if encryption_mode == "e2ee" else None,
+        encryption_epoch=1 if encryption_mode == "e2ee" else None,
+    )
+    return conversation, channel
+
+
+def remote_group_mutation_payload(
+    conversation: DMConversation,
+    channel: Channel,
+    participants: list[User],
+    *,
+    owner: User,
+    name: str | None = "Trip",
+    state_version: int | str | None = None,
+    deleted: object = False,
+    notice: object = _NOTICE_MISSING,
+    policy_state: str | None = None,
+) -> dict[str, object]:
+    policy = channel_encryption_policy_payload(channel)
+    if policy_state is not None:
+        policy["state"] = policy_state
+    payload: dict[str, object] = {
+        "conversation": {
+            "id": str(conversation.id),
+            "origin_domain": conversation.origin_domain,
+            "pair_key": conversation.pair_key,
+            "type": "group",
+            "authority_domain": conversation.authority_domain,
+            "owner": {"id": str(owner.id), "origin_domain": owner.origin_domain},
+            "name": name,
+            "state_version": str(
+                conversation.state_version + 1 if state_version is None else state_version
+            ),
+            "deleted": deleted,
+            "encryption_policy": policy,
+        },
+        "participants": [profile_from_user(participant) for participant in participants],
+    }
+    if notice is not _NOTICE_MISSING:
+        payload["notice"] = notice
+    return payload
+
+
+def validate_remote_group_mutation(
+    payload: dict[str, object],
+    conversation: DMConversation,
+    channel: Channel,
+    before: list[User],
+    actor: User,
+    *,
+    action: str,
+    target: User | None = None,
+    name: str | None = None,
+) -> None:
+    validate_group_mutation_result(
+        payload,
+        conversation=conversation,
+        channel=channel,
+        before=before,
+        actor=actor,
+        action=action,
+        target=target,
+        name=name,
+    )
+
+
+def test_remote_group_rename_requires_an_exact_state_echo() -> None:
+    owner = user(1)
+    peer = user(2, "peer.example")
+    conversation, channel = remote_group(owner)
+    before = [owner, peer]
+    payload = remote_group_mutation_payload(
+        conversation,
+        channel,
+        before,
+        owner=owner,
+        name="Renamed",
+    )
+
+    validate_remote_group_mutation(
+        payload,
+        conversation,
+        channel,
+        before,
+        owner,
+        action="rename",
+        name="Renamed",
+    )
+
+    cast(dict[str, object], payload["conversation"])["name"] = "Authority chose this"
+    with pytest.raises(ValueError, match="does not match the request"):
+        validate_remote_group_mutation(
+            payload,
+            conversation,
+            channel,
+            before,
+            owner,
+            action="rename",
+            name="Renamed",
+        )
+
+
+@pytest.mark.parametrize("state_version", ["7", "9"])
+def test_remote_group_mutation_requires_exactly_the_next_state_version(
+    state_version: str,
+) -> None:
+    owner = user(1)
+    peer = user(2, "peer.example")
+    conversation, channel = remote_group(owner)
+    payload = remote_group_mutation_payload(
+        conversation,
+        channel,
+        [owner, peer],
+        owner=owner,
+        name="Renamed",
+        state_version=state_version,
+    )
+
+    with pytest.raises(ValueError, match="identity is invalid"):
+        validate_remote_group_mutation(
+            payload,
+            conversation,
+            channel,
+            [owner, peer],
+            owner,
+            action="rename",
+            name="Renamed",
+        )
+
+
+def test_remote_group_add_and_remove_cannot_change_unrelated_state() -> None:
+    owner = user(1)
+    peer = user(2, "peer.example")
+    target = user(3, "target.example")
+    conversation, channel = remote_group(owner)
+
+    added = remote_group_mutation_payload(
+        conversation,
+        channel,
+        [owner, peer, target],
+        owner=owner,
+        name="Silently renamed",
+        notice={},
+    )
+    with pytest.raises(ValueError, match="does not match the request"):
+        validate_remote_group_mutation(
+            added,
+            conversation,
+            channel,
+            [owner, peer],
+            owner,
+            action="add",
+            target=target,
+        )
+
+    removed = remote_group_mutation_payload(
+        conversation,
+        channel,
+        [owner, target],
+        owner=target,
+        notice={},
+    )
+    with pytest.raises(ValueError, match="does not match the request"):
+        validate_remote_group_mutation(
+            removed,
+            conversation,
+            channel,
+            [owner, peer, target],
+            owner,
+            action="remove",
+            target=peer,
+        )
+
+
+@pytest.mark.parametrize("malformation", ["identity", "deleted_type"])
+def test_remote_terminal_group_leave_binds_identity_and_strict_deleted(
+    malformation: str,
+) -> None:
+    owner = user(1)
+    conversation, channel = remote_group(owner)
+    payload = remote_group_mutation_payload(
+        conversation,
+        channel,
+        [],
+        owner=owner,
+        deleted=True,
+    )
+    raw_conversation = cast(dict[str, object], payload["conversation"])
+    if malformation == "identity":
+        raw_conversation["id"] = "101"
+    else:
+        raw_conversation["deleted"] = "true"
+
+    with pytest.raises(ValueError):
+        validate_remote_group_mutation(
+            payload,
+            conversation,
+            channel,
+            [owner],
+            owner,
+            action="leave",
+        )
+
+
+def test_remote_group_mutation_notice_cardinality_follows_room_policy() -> None:
+    owner = user(1)
+    peer = user(2, "peer.example")
+    target = user(3, "target.example")
+    conversation, channel = remote_group(owner)
+    plaintext_add = remote_group_mutation_payload(
+        conversation,
+        channel,
+        [owner, peer, target],
+        owner=owner,
+    )
+    with pytest.raises(ValueError, match="notice is missing"):
+        validate_remote_group_mutation(
+            plaintext_add,
+            conversation,
+            channel,
+            [owner, peer],
+            owner,
+            action="add",
+            target=target,
+        )
+
+    encrypted_conversation, encrypted_channel = remote_group(owner, encryption_mode="e2ee")
+    encrypted_add = remote_group_mutation_payload(
+        encrypted_conversation,
+        encrypted_channel,
+        [owner, peer, target],
+        owner=owner,
+        notice={},
+        policy_state="rekeying",
+    )
+    with pytest.raises(ValueError, match="notice is unexpected"):
+        validate_remote_group_mutation(
+            encrypted_add,
+            encrypted_conversation,
+            encrypted_channel,
+            [owner, peer],
+            owner,
+            action="add",
+            target=target,
+        )
+
+    terminal = remote_group_mutation_payload(
+        conversation,
+        channel,
+        [],
+        owner=owner,
+        deleted=True,
+        notice={},
+    )
+    with pytest.raises(ValueError, match="notice is unexpected"):
+        validate_remote_group_mutation(
+            terminal,
+            conversation,
+            channel,
+            [owner],
+            owner,
+            action="leave",
+        )
 
 
 def test_group_create_requires_distinct_friends_and_accepts_an_optional_name() -> None:
@@ -107,6 +412,7 @@ def test_group_payload_exposes_owner_and_full_state_version() -> None:
         },
     }
     rendered = dm_channel_payload(channel, [peer], conversation=conversation)
+    assert rendered["type"] == 3
     assert rendered["conversation_type"] == "group"
     assert rendered["owner_id"] == "1"
     assert rendered["owner_domain"] == "alpha.localhost"

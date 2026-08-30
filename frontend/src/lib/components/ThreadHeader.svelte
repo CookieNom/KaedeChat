@@ -1,6 +1,7 @@
 <script lang="ts">
   import { entityKey } from '$lib/chat/refs';
   import type { CustomEmojiOption } from '$lib/chat/emojis';
+  import { canonicalReactionEmoji, messageHasOwnReaction } from '$lib/chat/reactions';
   import { isForumChannel, isPinnedForumPost } from '$lib/chat/threads';
   import type {
     Channel,
@@ -90,6 +91,7 @@
   let renameOpen = $state(false);
   let renameName = $state('');
   const forumPost = $derived(isForumChannel(parent));
+  const selectedReaction = $derived(canonicalReactionEmoji(reactionEmoji) ?? '');
   const notificationOptions: Array<{
     value: NonNullable<ThreadMember['notification_level']>;
     label: string;
@@ -128,11 +130,11 @@
   }
 
   function reactToPost() {
-    if (!starterMessage || !reactionEmoji || thread.archived || !canReact) return;
+    if (!starterMessage || !selectedReaction || thread.archived || !canReact) return;
     void onReaction(
       starterMessage,
-      reactionEmoji,
-      Boolean(starterMessage.reacted_emoji?.includes(reactionEmoji))
+      selectedReaction,
+      messageHasOwnReaction(starterMessage, selectedReaction)
     );
   }
 
@@ -370,16 +372,16 @@
       </div>
     </div>
   {/if}
-  {#if forumPost && starterMessage && reactionEmoji && !starterMessage.deleted_at && !starterMessage.content_unavailable}
+  {#if forumPost && starterMessage && selectedReaction && !starterMessage.deleted_at && !starterMessage.content_unavailable}
     <div class="forum-post-actions">
       <button
         class="post-reaction-action"
-        class:active={starterMessage.reacted_emoji?.includes(reactionEmoji)}
+        class:active={messageHasOwnReaction(starterMessage, selectedReaction)}
         type="button"
         disabled={busy || thread.archived || !canReact}
         onclick={reactToPost}
       >
-        <ReactionEmoji value={reactionEmoji} />React to Post
+        <ReactionEmoji value={selectedReaction} />React to Post
       </button>
     </div>
   {/if}

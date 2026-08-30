@@ -3,13 +3,26 @@
   import Icon from '$lib/components/Icon.svelte';
   import { Permission } from '$lib/generated/permissions';
   import { onDestroy, onMount } from 'svelte';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { isNativeDesktop } from '$lib/platform/native';
   import { initializeE2EE } from '$lib/e2ee/client';
-  import { entityKey } from '$lib/chat/refs';
+  import { base64url, randomBytes } from '$lib/e2ee/encoding';
+  import { entityKey, entityRef } from '$lib/chat/refs';
+  import { userDisplayName } from '$lib/chat/users';
   import type { Channel } from '$lib/chat/types';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
+  import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
   import ScreenShareDialog from './ScreenShareDialog.svelte';
   import type { MediaQualityPreferences } from './quality';
+  import {
+    loadSoundboardMedia,
+    soundboardChannelSupported,
+    soundboardPlaybackUnavailableReason,
+    soundboardSourceAllowed
+  } from './soundboard';
+  import { formatVoiceElapsed } from './elapsed';
+  import type { VoiceOccupant } from './occupancy';
+  import { canManageStageChannel } from './stage-permissions';
 
   import {
     attachVideo,
@@ -22,24 +35,69 @@
   let {
     channelRef,
     callRef,
-    permissions = null
-  }: { channelRef?: string; callRef?: string; permissions?: string | null } = $props();
-  const voice = new VoiceSession();
+    permissions = null,
+    occupants = [],
+    startedAt = null,
+    onApps
+  }: {
+    channelRef?: string;
+    callRef?: string;
+    permissions?: string | null;
+    occupants?: VoiceOccupant[];
+    startedAt?: number | null;
+    onApps?: () => void;
+  } = $props();
+  const voice = new VoiceSession(undefined, (state) =>
+    authenticatedGateway.client.setSelfVoiceState(state.self_mute, state.self_deaf)
+  );
   let revision = $state(0);
+  let elapsedClock = $state(Date.now());
   let error = $state('');
   let takeoverPrompt = $state<string | null>(null);
   let screenShareOpen = $state(false);
+  let soundboardOpen = $state(false);
+  let soundboardLoading = $state(false);
+  let soundboardBusy = $state('');
+  interface SoundboardSound {
+    id: string;
+    origin_domain: string;
+    guild_id: string | null;
+    guild_domain: string | null;
+    name: string;
+    version: string;
+    emoji_name?: string | null;
+  }
+  interface SoundboardGroup {
+    key: string;
+    label: string;
+    sounds: SoundboardSound[];
+  }
+  interface StageInstance {
+    id: string;
+    origin_domain: string;
+    guild_id: string;
+    guild_domain: string;
+    channel_id: string;
+    channel_domain: string;
+    topic: string;
+    privacy_level: 2;
+    discoverable_disabled: boolean;
+    guild_scheduled_event_id: string | null;
+    guild_scheduled_event_domain: string | null;
+  }
+  let soundboardGroups = $state<SoundboardGroup[]>([]);
+  let stageInstance = $state<StageInstance | null>(null);
+  let stageLoading = $state(false);
+  let stageLoaded = $state(false);
+  let stageVoiceBusy = $state('');
+  let stageVoiceOverrides = $state<Record<string, Partial<VoiceOccupant>>>({});
   let audioHost = $state<HTMLElement | null>(null);
   let detachAudio: (() => void) | null = null;
+  const activeSoundboardAudio = new SvelteSet<HTMLAudioElement>();
+  const soundboardObjectUrls = new SvelteMap<HTMLAudioElement, string>();
   let mounted = false;
   const connectionFence = new VoiceConnectionFence();
-  let connectionId = (() => {
-    const bytes = crypto.getRandomValues(new Uint8Array(32));
-    return btoa(String.fromCharCode(...bytes))
-      .replaceAll('+', '-')
-      .replaceAll('/', '_')
-      .replaceAll('=', '');
-  })();
+  let connectionId = base64url(randomBytes(32));
   let joinController: AbortController | null = null;
   const permissionBits = $derived.by(() => {
     if (callRef || permissions === null) return null;
@@ -53,13 +111,54 @@
     permissionBits === null ||
       Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.CONNECT))
   );
+  const isStageChannel = $derived(selectedChannel()?.type === 13);
+  const canManageStage = $derived(
+    isStageChannel && permissions !== null && canManageStageChannel({ type: 13, permissions })
+  );
+  const canNotifyStage = $derived(
+    isStageChannel &&
+      permissionBits !== null &&
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.MENTION_EVERYONE))
+  );
+  // Discord exposes the participant moderation controls to Stage moderators,
+  // which are defined by the same complete three-permission set as lifecycle
+  // controls. The lower-level API still honors MUTE_MEMBERS for bot parity.
+  const canModerateStage = $derived(canManageStage);
+  const canRequestToSpeak = $derived(
+    isStageChannel &&
+      permissionBits !== null &&
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.REQUEST_TO_SPEAK))
+  );
+  const canJoinVoice = $derived(
+    canConnect && (!isStageChannel || (stageLoaded && stageInstance !== null))
+  );
   const permittedToSpeak = $derived(
     permissionBits === null ||
+      isStageChannel ||
       Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.SPEAK))
   );
   const permittedToStream = $derived(
     permissionBits === null ||
       Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.STREAM))
+  );
+  const permittedToUseSoundboard = $derived(
+    soundboardChannelSupported(selectedChannel()?.type, Boolean(callRef)) &&
+      permissionBits !== null &&
+      (Boolean(permissionBits & Permission.ADMINISTRATOR) ||
+        (permissionBits &
+          (Permission.VIEW_CHANNEL |
+            Permission.CONNECT |
+            Permission.SPEAK |
+            Permission.USE_SOUNDBOARD)) ===
+          (Permission.VIEW_CHANNEL |
+            Permission.CONNECT |
+            Permission.SPEAK |
+            Permission.USE_SOUNDBOARD))
+  );
+  const canUseExternalSounds = $derived(
+    !callRef &&
+      permissionBits !== null &&
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.USE_EXTERNAL_SOUNDS))
   );
   const voiceCapabilitySummary = $derived(
     !canConnect
@@ -82,14 +181,110 @@
       connecting: voice.connecting,
       encrypted: voice.encrypted,
       microphone: voice.microphone,
+      deafened: voice.deafened,
       camera: voice.camera,
       screen: voice.screen,
       canSpeak: voice.canSpeak,
       canStream: voice.canStream,
       participants: voice.participants(),
+      prioritySpeakers: voice.prioritySpeakers(),
       tiles: voice.tiles()
     };
   });
+  const elapsedVoiceTime = $derived(formatVoiceElapsed(startedAt, elapsedClock));
+  $effect(() => {
+    if (startedAt === null || !Number.isSafeInteger(startedAt) || startedAt <= 0) return;
+    elapsedClock = Date.now();
+    const timer = window.setInterval(() => (elapsedClock = Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  });
+  const stageOccupants = $derived(
+    occupants.map((occupant) => ({
+      ...occupant,
+      ...(stageVoiceOverrides[`${occupant.user_id}@${occupant.user_domain}`] ?? {})
+    }))
+  );
+  const participantCards = $derived.by(() => {
+    if (!isNativeDesktop() || !view.connected || occupants.length === 0) {
+      return view.participants.map((participant) => ({
+        ...participant,
+        priority: view.prioritySpeakers.has(participant.identity)
+      }));
+    }
+    const localParticipant = view.participants.find((participant) => participant.local);
+    return occupants.map((occupant) => {
+      const local =
+        entities.currentUser?.id === occupant.user_id &&
+        entities.currentUser?.origin_domain === occupant.user_domain;
+      const priority = view.prioritySpeakers.has(occupant.identity);
+      return {
+        key: occupant.identity,
+        identity: occupant.identity,
+        name: stageOccupantName(occupant),
+        local,
+        speaking: priority || (local && (localParticipant?.speaking ?? false)),
+        microphone:
+          occupant.can_speak !== false &&
+          !occupant.self_mute &&
+          !occupant.self_deaf &&
+          !occupant.server_mute &&
+          !occupant.server_deaf,
+        camera: local && (localParticipant?.camera ?? false),
+        screen: local && (localParticipant?.screen ?? false),
+        priority
+      };
+    });
+  });
+  const activePriorityCards = $derived(
+    participantCards.filter((participant) => participant.priority)
+  );
+  const currentStageVoiceState = $derived(
+    stageOccupants.find(
+      (occupant) =>
+        entities.currentUser?.id === occupant.user_id &&
+        entities.currentUser?.origin_domain === occupant.user_domain
+    ) ?? null
+  );
+  const targetSoundboardGuildRef = $derived.by(() => {
+    const channel = selectedChannel();
+    return channel?.guild_id && channel.guild_domain
+      ? `${channel.guild_id}@${channel.guild_domain}`
+      : null;
+  });
+  const soundboardUnavailableReason = $derived(
+    soundboardPlaybackUnavailableReason({
+      connected: view.connected,
+      canSpeak: view.canSpeak && currentStageVoiceState?.can_speak !== false,
+      selfMuted: !view.microphone || currentStageVoiceState?.self_mute === true,
+      selfDeafened: view.deafened,
+      serverMuted: currentStageVoiceState?.server_mute,
+      serverDeafened: currentStageVoiceState?.server_deaf,
+      suppressed: currentStageVoiceState?.suppressed
+    })
+  );
+  const canPlaySoundboard = $derived(
+    permittedToUseSoundboard && soundboardUnavailableReason === null
+  );
+  const visibleSoundboardGroups = $derived(
+    soundboardGroups.filter((group) =>
+      soundboardSourceAllowed(
+        targetSoundboardGuildRef,
+        group.key === 'default' ? null : group.key,
+        canUseExternalSounds
+      )
+    )
+  );
+  const stageSpeakers = $derived(
+    stageOccupants.filter((occupant) => occupant.suppressed === false)
+  );
+  const stageRequesting = $derived(
+    stageOccupants.filter(
+      (occupant) => occupant.suppressed && Boolean(occupant.request_to_speak_timestamp)
+    )
+  );
+  const stageAudience = $derived(
+    stageOccupants.filter((occupant) => occupant.suppressed && !occupant.request_to_speak_timestamp)
+  );
 
   const changed = () => {
     revision += 1;
@@ -99,6 +294,64 @@
   function selectedChannel(reference = channelRef) {
     if (!reference) return null;
     return entities.channels.values.find((item) => entityKey(item) === reference) ?? null;
+  }
+
+  function stageOccupantName(occupant: VoiceOccupant): string {
+    return userDisplayName(entities.users.get(`${occupant.user_id}@${occupant.user_domain}`));
+  }
+
+  function isCurrentStageOccupant(occupant: VoiceOccupant): boolean {
+    return (
+      entities.currentUser?.id === occupant.user_id &&
+      entities.currentUser?.origin_domain === occupant.user_domain
+    );
+  }
+
+  async function updateStageVoiceState(
+    occupant: VoiceOccupant | null,
+    patch: {
+      suppress?: boolean;
+      request_to_speak_timestamp?: string | null;
+    }
+  ) {
+    const channel = selectedChannel();
+    if (!channel?.guild_id || !channel.guild_domain || stageVoiceBusy) return;
+    const self = occupant === null;
+    const userRef = self
+      ? entities.currentUser
+        ? entityRef(entities.currentUser)
+        : ''
+      : `${occupant.user_id}@${occupant.user_domain}`;
+    if (!userRef) return;
+    stageVoiceBusy = userRef;
+    error = '';
+    try {
+      const result = await api<Partial<VoiceOccupant>>(
+        `/guilds/${encodeURIComponent(`${channel.guild_id}@${channel.guild_domain}`)}/voice-states/${self ? '@me' : encodeURIComponent(userRef)}`,
+        { method: 'PATCH', body: JSON.stringify(patch) }
+      );
+      stageVoiceOverrides = {
+        ...stageVoiceOverrides,
+        [userRef]: { ...(stageVoiceOverrides[userRef] ?? {}), ...patch, ...result }
+      };
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update this Stage participant.');
+    } finally {
+      stageVoiceBusy = '';
+    }
+  }
+
+  function toggleRequestToSpeak() {
+    if (
+      !currentStageVoiceState?.suppressed ||
+      (!currentStageVoiceState.request_to_speak_timestamp && !canRequestToSpeak)
+    )
+      return;
+    void updateStageVoiceState(null, {
+      request_to_speak_timestamp: currentStageVoiceState.request_to_speak_timestamp
+        ? null
+        : new Date().toISOString()
+    });
   }
 
   async function senderDeviceId(channel: Channel): Promise<string | null> {
@@ -147,11 +400,89 @@
     })();
   };
 
+  const soundboardPlayed = (event: Event) => {
+    const detail = (
+      event as CustomEvent<{
+        channel_id?: string;
+        channel_domain?: string;
+        download_url?: string;
+        media_authority?: string;
+        media_origin?: string;
+        effective_volume?: number;
+        sound?: { name?: string; media_hash?: string; content_type?: string };
+      }>
+    ).detail;
+    if (
+      !voice.connected ||
+      !channelRef ||
+      `${detail.channel_id}@${detail.channel_domain}` !== channelRef
+    )
+      return;
+    const expectedChannelRef = channelRef;
+    void (async () => {
+      try {
+        const blob = await loadSoundboardMedia({
+          downloadUrl: detail.download_url ?? '',
+          authorityDomain: detail.media_authority ?? '',
+          mediaOrigin: detail.media_origin ?? '',
+          expectedSha256: detail.sound?.media_hash ?? '',
+          contentType: detail.sound?.content_type ?? ''
+        });
+        if (!mounted || !voice.connected || channelRef !== expectedChannelRef) return;
+        const objectUrl = URL.createObjectURL(blob);
+        const audio = new Audio(objectUrl);
+        audio.preload = 'auto';
+        audio.volume = Math.min(1, Math.max(0, Number(detail.effective_volume ?? 1)));
+        activeSoundboardAudio.add(audio);
+        soundboardObjectUrls.set(audio, objectUrl);
+        let disposed = false;
+        const dispose = () => {
+          if (disposed) return;
+          disposed = true;
+          activeSoundboardAudio.delete(audio);
+          soundboardObjectUrls.delete(audio);
+          audio.removeAttribute('src');
+          audio.load();
+          URL.revokeObjectURL(objectUrl);
+        };
+        audio.addEventListener('ended', dispose, { once: true });
+        audio.addEventListener('error', dispose, { once: true });
+        await audio.play().catch((caught) => {
+          dispose();
+          throw caught;
+        });
+      } catch (caught) {
+        if (mounted && voice.connected && channelRef === expectedChannelRef) {
+          error = userErrorMessage(
+            caught,
+            `Could not play ${detail.sound?.name ? `“${detail.sound.name}”` : 'the guild sound'}. Check this app's audio permissions.`
+          );
+        }
+      }
+    })();
+  };
+
+  const stageChanged = (event: Event) => {
+    const detail = (
+      event as CustomEvent<{
+        eventType: 'STAGE_INSTANCE_CREATE' | 'STAGE_INSTANCE_UPDATE' | 'STAGE_INSTANCE_DELETE';
+        stage: StageInstance;
+      }>
+    ).detail;
+    if (!channelRef || `${detail.stage.channel_id}@${detail.stage.channel_domain}` !== channelRef)
+      return;
+    stageInstance = detail.eventType === 'STAGE_INSTANCE_DELETE' ? null : detail.stage;
+    stageLoaded = true;
+  };
+
   onMount(() => {
     mounted = true;
     voice.addEventListener('change', changed);
     window.addEventListener('kaede:voice-token', moved);
+    window.addEventListener('kaede:voice-soundboard', soundboardPlayed);
+    window.addEventListener('kaede:stage-instance', stageChanged);
     if (audioHost) detachAudio = voice.attachAudio(audioHost);
+    if (selectedChannel()?.type === 13) void loadStageInstance();
   });
 
   async function mediaKey(grant: VoiceToken, channel: Channel): Promise<ArrayBuffer | undefined> {
@@ -181,6 +512,17 @@
     joinController = null;
     voice.removeEventListener('change', changed);
     window.removeEventListener('kaede:voice-token', moved);
+    window.removeEventListener('kaede:voice-soundboard', soundboardPlayed);
+    window.removeEventListener('kaede:stage-instance', stageChanged);
+    for (const audio of activeSoundboardAudio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      const objectUrl = soundboardObjectUrls.get(audio);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
+    activeSoundboardAudio.clear();
+    soundboardObjectUrls.clear();
     detachAudio?.();
     void voice.disconnect();
   });
@@ -194,8 +536,10 @@
 
   async function join(takeover = false) {
     if (!mounted) return;
-    if (!canConnect) {
-      error = 'You do not have permission to join this voice channel.';
+    if (!canJoinVoice) {
+      error = isStageChannel
+        ? 'This Stage has not started yet.'
+        : 'You do not have permission to join this voice channel.';
       return;
     }
     const generation = connectionFence.begin();
@@ -291,34 +635,279 @@
     }
   }
 
+  async function toggleSoundboard() {
+    if (!canPlaySoundboard) {
+      soundboardOpen = false;
+      return;
+    }
+    soundboardOpen = !soundboardOpen;
+    if (!soundboardOpen || soundboardGroups.length || soundboardLoading) return;
+    const channel = selectedChannel();
+    if (!channel?.guild_id || !channel.guild_domain) return;
+    soundboardLoading = true;
+    try {
+      const guilds = [...entities.guilds.values]
+        .filter((guild) =>
+          soundboardSourceAllowed(
+            `${channel.guild_id}@${channel.guild_domain}`,
+            entityRef(guild),
+            canUseExternalSounds
+          )
+        )
+        .sort((left, right) => {
+          const leftCurrent =
+            left.id === channel.guild_id && left.origin_domain === channel.guild_domain;
+          const rightCurrent =
+            right.id === channel.guild_id && right.origin_domain === channel.guild_domain;
+          if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1;
+          return left.name.localeCompare(right.name);
+        });
+      const [defaultResult, ...guildResults] = await Promise.allSettled([
+        api<SoundboardSound[]>('/soundboard-default-sounds'),
+        ...guilds.map((guild) =>
+          api<{ items: SoundboardSound[] }>(
+            `/guilds/${encodeURIComponent(entityRef(guild))}/soundboard-sounds`
+          )
+        )
+      ]);
+      if (
+        defaultResult.status === 'rejected' &&
+        guildResults.every((result) => result.status === 'rejected')
+      ) {
+        throw defaultResult.reason;
+      }
+      const groups: SoundboardGroup[] = [];
+      if (defaultResult.status === 'fulfilled' && defaultResult.value.length) {
+        groups.push({ key: 'default', label: 'Discord Sounds', sounds: defaultResult.value });
+      }
+      guildResults.forEach((result, index) => {
+        if (result.status !== 'fulfilled' || !result.value.items.length) return;
+        const source = guilds[index];
+        groups.push({
+          key: entityRef(source),
+          label:
+            source.id === channel.guild_id && source.origin_domain === channel.guild_domain
+              ? `${source.name} · Current server`
+              : source.name,
+          sounds: result.value.items
+        });
+      });
+      soundboardGroups = groups;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not load available soundboard sounds.');
+      soundboardOpen = false;
+    } finally {
+      soundboardLoading = false;
+    }
+  }
+
+  async function sendSoundboardSound(sound: SoundboardSound) {
+    const sourceGuildRef =
+      sound.guild_id && sound.guild_domain ? `${sound.guild_id}@${sound.guild_domain}` : null;
+    if (
+      !channelRef ||
+      soundboardBusy ||
+      !canPlaySoundboard ||
+      !soundboardSourceAllowed(targetSoundboardGuildRef, sourceGuildRef, canUseExternalSounds)
+    )
+      return;
+    soundboardBusy = entityRef(sound);
+    try {
+      await api(`/channels/${encodeURIComponent(channelRef)}/send-soundboard-sound`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sound_id: entityRef(sound),
+          sound_version: sound.version,
+          ...(sound.guild_id && sound.guild_domain
+            ? { source_guild_id: `${sound.guild_id}@${sound.guild_domain}` }
+            : {})
+        })
+      });
+      soundboardOpen = false;
+    } catch (caught) {
+      error = userErrorMessage(caught, `Could not play “${sound.name}” in voice.`);
+    } finally {
+      soundboardBusy = '';
+    }
+  }
+
+  async function loadStageInstance() {
+    if (!channelRef || stageLoading) return;
+    stageLoading = true;
+    try {
+      stageInstance = await api<StageInstance>(
+        `/stage-instances/${encodeURIComponent(channelRef)}`
+      );
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 404) {
+        stageInstance = null;
+      } else {
+        error = userErrorMessage(caught, 'Could not load this Stage.');
+      }
+    } finally {
+      stageLoading = false;
+      stageLoaded = true;
+    }
+  }
+
+  async function startStage() {
+    if (!channelRef || !canManageStage || stageLoading) return;
+    const topic = prompt('What is this Stage about?', stageInstance?.topic ?? '')?.trim();
+    if (!topic) return;
+    if (topic.length > 120) {
+      error = 'Stage topics can be at most 120 characters.';
+      return;
+    }
+    stageLoading = true;
+    error = '';
+    try {
+      const sendStartNotification =
+        canNotifyStage && confirm('Notify everyone in this server that the Stage is starting?');
+      stageInstance = await api<StageInstance>('/stage-instances', {
+        method: 'POST',
+        body: JSON.stringify({
+          channel_id: channelRef,
+          topic,
+          privacy_level: 2,
+          send_start_notification: sendStartNotification
+        })
+      });
+      stageLoaded = true;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not start this Stage.');
+    } finally {
+      stageLoading = false;
+    }
+  }
+
+  async function editStageTopic() {
+    if (!channelRef || !stageInstance || !canManageStage || stageLoading) return;
+    const topic = prompt('Stage topic', stageInstance.topic)?.trim();
+    if (!topic || topic === stageInstance.topic) return;
+    if (topic.length > 120) {
+      error = 'Stage topics can be at most 120 characters.';
+      return;
+    }
+    stageLoading = true;
+    error = '';
+    try {
+      stageInstance = await api<StageInstance>(
+        `/stage-instances/${encodeURIComponent(channelRef)}`,
+        { method: 'PATCH', body: JSON.stringify({ topic }) }
+      );
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update the Stage topic.');
+    } finally {
+      stageLoading = false;
+    }
+  }
+
+  async function endStage() {
+    if (
+      !channelRef ||
+      !stageInstance ||
+      !canManageStage ||
+      stageLoading ||
+      !confirm('End this Stage for everyone?')
+    )
+      return;
+    stageLoading = true;
+    error = '';
+    try {
+      await api(`/stage-instances/${encodeURIComponent(channelRef)}`, { method: 'DELETE' });
+      stageInstance = null;
+      stageLoaded = true;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not end this Stage.');
+    } finally {
+      stageLoading = false;
+    }
+  }
+
   async function startScreenShare(preferences: MediaQualityPreferences, sourceId: string | null) {
     await voice.startScreenShare(preferences, sourceId);
   }
 </script>
+
+{#snippet stageGroup(title: string, people: VoiceOccupant[])}
+  {#if people.length}
+    <section class="stage-participant-group" aria-label={title}>
+      <h3>{title} — {people.length}</h3>
+      <div class="stage-participant-list">
+        {#each people as occupant (`${occupant.user_id}@${occupant.user_domain}`)}
+          {@const self = isCurrentStageOccupant(occupant)}
+          <article class="stage-participant">
+            <span class="stage-participant-avatar" aria-hidden="true">
+              {stageOccupantName(occupant).slice(0, 1).toUpperCase()}
+            </span>
+            <div>
+              <strong>{stageOccupantName(occupant)}</strong>
+              {#if self}<small>You</small>{/if}
+            </div>
+            {#if canModerateStage && !self}
+              <button
+                class="secondary"
+                disabled={Boolean(stageVoiceBusy)}
+                onclick={() =>
+                  void updateStageVoiceState(occupant, { suppress: !occupant.suppressed })}
+              >
+                {occupant.suppressed ? 'Invite to speak' : 'Move to audience'}
+              </button>
+            {/if}
+          </article>
+        {/each}
+      </div>
+    </section>
+  {/if}
+{/snippet}
 
 <section class="voice-panel" aria-label="Voice channel">
   <header class="voice-heading">
     <div class="voice-status">
       <span class:connected={view.connected} class="status-dot" aria-hidden="true"></span>
       <div>
-        <strong>{view.connected ? 'Voice connected' : 'Voice channel'}</strong>
+        <strong>
+          {isStageChannel
+            ? (stageInstance?.topic ?? 'Stage channel')
+            : view.connected
+              ? 'Voice connected'
+              : 'Voice channel'}
+        </strong>
         <span>
-          {view.connected
-            ? `${view.participants.length} ${view.participants.length === 1 ? 'participant' : 'participants'} · ${view.encrypted ? 'End-to-end encrypted' : 'Not end-to-end encrypted'}`
-            : voiceCapabilitySummary}
+          {isStageChannel && !stageLoaded
+            ? 'Loading Stage…'
+            : isStageChannel && !stageInstance
+              ? 'The Stage has not started'
+              : view.connected
+                ? `${participantCards.length} ${participantCards.length === 1 ? 'participant' : 'participants'} · ${view.encrypted ? 'End-to-end encrypted' : 'Not end-to-end encrypted'}${elapsedVoiceTime ? ` · ${elapsedVoiceTime}` : ''}`
+                : elapsedVoiceTime
+                  ? `Active for ${elapsedVoiceTime} · ${voiceCapabilitySummary}`
+                  : voiceCapabilitySummary}
         </span>
       </div>
     </div>
-    {#if !view.connected}
-      <button
-        class="primary"
-        disabled={view.connecting || !canConnect}
-        title={!canConnect ? 'You do not have permission to join this voice channel.' : undefined}
-        onclick={() => join()}
-      >
-        {view.connecting ? 'Connecting…' : 'Join voice'}
-      </button>
-    {/if}
+    <div class="voice-heading-actions">
+      {#if canManageStage && stageLoaded}
+        {#if stageInstance}
+          <button class="secondary" disabled={stageLoading} onclick={editStageTopic}
+            >Edit topic</button
+          >
+          <button class="danger" disabled={stageLoading} onclick={endStage}>End Stage</button>
+        {:else}
+          <button class="primary" disabled={stageLoading} onclick={startStage}>Start Stage</button>
+        {/if}
+      {/if}
+      {#if !view.connected && (!isStageChannel || stageInstance)}
+        <button
+          class="primary"
+          disabled={view.connecting || !canJoinVoice}
+          title={!canConnect ? 'You do not have permission to join this voice channel.' : undefined}
+          onclick={() => join()}
+        >
+          {view.connecting ? 'Connecting…' : isStageChannel ? 'Join audience' : 'Join voice'}
+        </button>
+      {/if}
+    </div>
   </header>
 
   <div class="audio-host" bind:this={audioHost}></div>
@@ -338,22 +927,69 @@
         </div>
       </div>
     {:else if view.connected}
-      {#if view.tiles.length > 0}
+      {#if isStageChannel}
+        <div class="stage-roster">
+          {@render stageGroup('Speakers', stageSpeakers)}
+          {@render stageGroup('Requested to speak', stageRequesting)}
+          {@render stageGroup('Audience', stageAudience)}
+          {#if !stageOccupants.length}
+            <div class="join-prompt">
+              <strong>No one else is here yet</strong>
+              <p>Stage participants will appear here as they join.</p>
+            </div>
+          {/if}
+        </div>
+      {:else if view.tiles.length > 0}
         <div
           class="video-grid"
           class:has-screen={view.tiles.some((tile) => tile.source === 'screen_share')}
         >
+          {#if activePriorityCards.length}
+            <div class="priority-speaker-roster" role="status">
+              <Icon name="megaphone" size={17} />
+              <span>
+                {activePriorityCards.map((participant) => participant.name).join(', ')}
+                {activePriorityCards.length === 1 ? ' is' : ' are'} speaking with priority
+              </span>
+            </div>
+          {/if}
           {#each view.tiles as tile (tile.key)}
-            <article class:screen-tile={tile.source === 'screen_share'} class="video-tile">
+            <article
+              class:screen-tile={tile.source === 'screen_share'}
+              class:priority-speaker={view.prioritySpeakers.has(tile.identity)}
+              class="video-tile"
+            >
+              {#if view.prioritySpeakers.has(tile.identity)}
+                <span
+                  class="priority-speaker-cue"
+                  title="Priority speaker"
+                  aria-label="Priority speaker"
+                >
+                  <Icon name="megaphone" size={17} />
+                </span>
+              {/if}
               <div class="video-host" use:attachVideo={tile}></div>
-              <span>{tile.name}{tile.local ? ' (you)' : ''}</span>
+              <span class="video-tile-name">{tile.name}{tile.local ? ' (you)' : ''}</span>
             </article>
           {/each}
         </div>
       {:else}
         <div class="participant-grid">
-          {#each view.participants as participant (participant.key)}
-            <article class:speaking={participant.speaking} class="participant-card">
+          {#each participantCards as participant (participant.key)}
+            <article
+              class:speaking={participant.speaking}
+              class:priority-speaker={participant.priority}
+              class="participant-card"
+            >
+              {#if participant.priority}
+                <span
+                  class="priority-speaker-cue"
+                  title="Priority speaker"
+                  aria-label="Priority speaker"
+                >
+                  <Icon name="megaphone" size={17} />
+                </span>
+              {/if}
               <div class="participant-avatar" aria-hidden="true">
                 {participant.name.slice(0, 1).toUpperCase()}
               </div>
@@ -372,6 +1008,19 @@
           {/each}
         </div>
       {/if}
+    {:else if isStageChannel && stageLoaded && !stageInstance}
+      <div class="join-prompt">
+        <span><Icon name="microphone" size={28} /></span>
+        <strong>This Stage hasn’t started yet</strong>
+        <p>
+          {canManageStage
+            ? 'Start the Stage when you are ready to bring the audience in.'
+            : 'Check back when a moderator starts the Stage.'}
+        </p>
+        {#if canManageStage}
+          <button class="primary" disabled={stageLoading} onclick={startStage}>Start Stage</button>
+        {/if}
+      </div>
     {:else if !canConnect}
       <div class="join-prompt permission-prompt">
         <span><Icon name="lock" size={26} /></span>
@@ -388,9 +1037,37 @@
   </main>
 
   {#if view.connected}
+    {#if isStageChannel && currentStageVoiceState}
+      <div class="stage-self-actions" role="status">
+        {#if currentStageVoiceState.suppressed}
+          <button
+            class="secondary"
+            disabled={(!currentStageVoiceState.request_to_speak_timestamp && !canRequestToSpeak) ||
+              Boolean(stageVoiceBusy)}
+            title={!currentStageVoiceState.request_to_speak_timestamp && !canRequestToSpeak
+              ? 'You do not have permission to request to speak.'
+              : undefined}
+            onclick={toggleRequestToSpeak}
+          >
+            {currentStageVoiceState.request_to_speak_timestamp
+              ? 'Cancel request'
+              : 'Request to speak'}
+          </button>
+        {:else}
+          <button
+            class="secondary"
+            disabled={Boolean(stageVoiceBusy)}
+            onclick={() => void updateStageVoiceState(null, { suppress: true })}
+            >Move to audience</button
+          >
+        {/if}
+      </div>
+    {/if}
     {#if !view.canSpeak || !view.canStream}
       <div class="voice-permission-notice" role="status">
-        {#if !view.canSpeak && !view.canStream}
+        {#if isStageChannel && currentStageVoiceState?.suppressed}
+          You are listening from the audience. A Stage moderator can invite you to speak.
+        {:else if !view.canSpeak && !view.canStream}
           You can listen, but your roles do not allow speaking, camera, or screen sharing here.
         {:else if !view.canSpeak}
           You can listen and share video, but your roles do not allow speaking here.
@@ -400,21 +1077,6 @@
       </div>
     {/if}
     <footer class="voice-dock" aria-label="Voice controls">
-      <button
-        class:off={!view.microphone}
-        class="control-button"
-        disabled={!view.canSpeak}
-        aria-pressed={view.microphone}
-        aria-label={view.microphone ? 'Mute microphone' : 'Unmute microphone'}
-        title={!view.canSpeak
-          ? 'You do not have permission to speak in this channel.'
-          : view.microphone
-            ? 'Mute'
-            : 'Unmute'}
-        onclick={() => safely(() => voice.toggleMicrophone())}
-      >
-        <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
-      </button>
       <button
         class:active={view.camera}
         class="control-button"
@@ -448,11 +1110,87 @@
       >
         <Icon name="screen" size={21} />
       </button>
+      {#if onApps}
+        <button
+          class="control-button"
+          type="button"
+          aria-label="Open Apps"
+          aria-haspopup="dialog"
+          title="Apps"
+          onclick={onApps}
+        >
+          <Icon name="sparkles" size={20} />
+        </button>
+      {/if}
+      <button
+        class:off={!view.microphone}
+        class="control-button"
+        disabled={!view.canSpeak}
+        aria-pressed={view.microphone}
+        aria-label={view.microphone ? 'Mute microphone' : 'Unmute microphone'}
+        title={!view.canSpeak
+          ? 'You do not have permission to speak in this channel.'
+          : view.microphone
+            ? 'Mute'
+            : 'Unmute'}
+        onclick={() => safely(() => voice.toggleMicrophone())}
+      >
+        <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
+      </button>
+      <button
+        class:off={view.deafened}
+        class="control-button"
+        aria-pressed={view.deafened}
+        aria-label={view.deafened ? 'Undeafen' : 'Deafen'}
+        title={view.deafened ? 'Undeafen' : 'Deafen'}
+        onclick={() => safely(() => voice.toggleDeafen())}
+      >
+        <Icon name={view.deafened ? 'headphones-off' : 'headphones'} size={20} />
+      </button>
+      {#if permittedToUseSoundboard}
+        <div class="soundboard-control">
+          <button
+            class:active={soundboardOpen}
+            class="control-button"
+            disabled={!canPlaySoundboard}
+            aria-expanded={soundboardOpen && canPlaySoundboard}
+            aria-label="Open soundboard"
+            title={soundboardUnavailableReason ?? 'Soundboard'}
+            onclick={() => void toggleSoundboard()}
+          >
+            <Icon name="music" size={20} />
+          </button>
+          {#if soundboardOpen && canPlaySoundboard}
+            <div class="soundboard-popover" aria-label="Soundboard sounds">
+              <strong>Soundboard</strong>
+              {#if soundboardLoading}
+                <span>Loading sounds…</span>
+              {:else if visibleSoundboardGroups.length}
+                {#each visibleSoundboardGroups as group (group.key)}
+                  <h4>{group.label}</h4>
+                  {#each group.sounds as sound (entityRef(sound))}
+                    <button
+                      type="button"
+                      disabled={Boolean(soundboardBusy)}
+                      onclick={() => void sendSoundboardSound(sound)}
+                    >
+                      <span aria-hidden="true">{sound.emoji_name || '♫'}</span>
+                      {sound.name}
+                    </button>
+                  {/each}
+                {/each}
+              {:else}
+                <span>No soundboard sounds are available.</span>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
       <span class="control-divider" aria-hidden="true"></span>
       <button
         class="control-button danger"
-        aria-label="Leave voice"
-        title="Leave voice"
+        aria-label={isStageChannel ? 'Exit Quietly' : 'Leave voice'}
+        title={isStageChannel ? 'Exit Quietly' : 'Leave voice'}
         onclick={() => safely(leave)}
       >
         <Icon name="phone-off" size={21} />
@@ -473,6 +1211,62 @@
     gap: 0;
     overflow: hidden;
     background: var(--paper);
+  }
+
+  .soundboard-control {
+    position: relative;
+  }
+
+  .soundboard-popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 0.65rem);
+    z-index: 4;
+    display: grid;
+    width: min(19rem, calc(100vw - 2rem));
+    max-height: 18rem;
+    gap: 0.35rem;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    padding: 0.65rem;
+    background: var(--paper-raised);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .soundboard-popover > strong,
+  .soundboard-popover > span {
+    padding: 0.3rem 0.4rem;
+    font-size: 0.76rem;
+  }
+
+  .soundboard-popover > span {
+    color: var(--text-muted);
+  }
+
+  .soundboard-popover > h4 {
+    margin: 0.35rem 0.4rem 0.1rem;
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .soundboard-popover > button {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    border: 0;
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+    color: var(--ink);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .soundboard-popover > button:hover:not(:disabled) {
+    background: var(--surface-subtle);
   }
 
   .voice-permission-notice {
@@ -504,6 +1298,30 @@
     min-width: 0;
     align-items: center;
     gap: 0.7rem;
+  }
+
+  .voice-heading-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .voice-heading-actions .danger {
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+    border-radius: 9px;
+    padding: 0.52rem 0.78rem;
+    color: var(--danger);
+    background: transparent;
+    font: inherit;
+    font-size: 0.74rem;
+    font-weight: 750;
+    cursor: pointer;
+  }
+
+  .voice-heading-actions button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 
   .voice-status > div {
@@ -612,6 +1430,20 @@
     grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
   }
 
+  .priority-speaker-roster {
+    display: flex;
+    grid-column: 1 / -1;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--maple) 50%, var(--line));
+    border-radius: 10px;
+    padding: 0.55rem 0.75rem;
+    color: var(--ink);
+    background: color-mix(in srgb, var(--maple) 12%, var(--paper-raised));
+    font-size: 0.76rem;
+    font-weight: 700;
+  }
+
   .video-tile {
     position: relative;
     min-height: 210px;
@@ -625,6 +1457,11 @@
   .video-tile.screen-tile {
     grid-row: span 2;
     min-height: min(420px, 48vh);
+  }
+
+  .video-tile.priority-speaker {
+    border-color: var(--maple);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--maple) 55%, transparent);
   }
 
   .video-host {
@@ -650,7 +1487,7 @@
     object-fit: contain;
   }
 
-  .video-tile > span {
+  .video-tile-name {
     position: absolute;
     left: 0.7rem;
     bottom: 0.7rem;
@@ -669,6 +1506,80 @@
     grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 280px));
     justify-content: center;
     gap: 0.8rem;
+  }
+
+  .stage-roster {
+    display: grid;
+    width: min(100%, 58rem);
+    gap: 1.25rem;
+    align-self: start;
+  }
+
+  .stage-participant-group {
+    display: grid;
+    gap: 0.55rem;
+  }
+
+  .stage-participant-group h3 {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .stage-participant-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+    gap: 0.55rem;
+  }
+
+  .stage-participant {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.65rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.65rem;
+    background: color-mix(in srgb, var(--paper-raised) 72%, var(--paper));
+  }
+
+  .stage-participant-avatar {
+    display: grid;
+    width: 2.25rem;
+    height: 2.25rem;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--on-accent);
+    background: var(--maple);
+    font-weight: 800;
+  }
+
+  .stage-participant > div {
+    display: grid;
+    min-width: 0;
+    gap: 0.1rem;
+  }
+
+  .stage-participant strong {
+    overflow: hidden;
+    font-size: 0.78rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stage-participant small {
+    color: var(--ink-soft);
+    font-size: 0.65rem;
+  }
+
+  .stage-self-actions {
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid var(--line-soft);
+    padding: 0.6rem 1rem;
+    background: color-mix(in srgb, var(--surface-subtle) 82%, transparent);
   }
 
   .participant-card {
@@ -692,6 +1603,25 @@
   .participant-card.speaking {
     border-color: var(--pine);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--pine) 50%, transparent);
+  }
+
+  .participant-card.priority-speaker {
+    border-color: var(--maple);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--maple) 55%, transparent);
+  }
+
+  .priority-speaker-cue {
+    position: absolute;
+    top: 0.8rem;
+    right: 0.8rem;
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border-radius: 999px;
+    color: var(--on-accent);
+    background: var(--maple);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 18%);
   }
 
   .participant-avatar {

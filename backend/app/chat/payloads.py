@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.e2ee import channel_encryption_policy_payload
+from app.chat.message_flags import MESSAGE_FLAG_IS_CROSSPOST
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import (
     Attachment,
@@ -18,8 +19,13 @@ from app.db.models import (
     GuildMember,
     MemberRole,
     Message,
+    MessageView,
+    Poll,
+    PollAnswer,
+    PollVote,
     Relationship,
     Role,
+    SoundboardSound,
     Sticker,
     ThreadMember,
     User,
@@ -68,8 +74,8 @@ def user_payload(user: User) -> dict[str, object]:
         "banner_hash": user.banner_hash,
         "bio": user.bio,
         "custom_status": user.custom_status,
-        "profile_version": str(user.profile_version),
-        "e2ee_device_generation": str(getattr(user, "e2ee_device_generation", 0)),
+        "profile_version": str(getattr(user, "profile_version", None) or 1),
+        "e2ee_device_generation": str(getattr(user, "e2ee_device_generation", None) or 0),
         "profile_resolved": user.profile_resolved,
         "handle": f"{user.username}@{user.origin_domain}",
         "account_type": user.account_type,
@@ -100,7 +106,7 @@ def guild_payload(guild: Guild) -> dict[str, object]:
     }
 
 
-def emoji_payload(emoji: Emoji) -> dict[str, object]:
+def emoji_payload(emoji: Emoji, role_ids: list[str] | None = None) -> dict[str, object]:
     return {
         "id": str(emoji.id),
         "origin_domain": emoji.origin_domain,
@@ -108,7 +114,11 @@ def emoji_payload(emoji: Emoji) -> dict[str, object]:
         "guild_domain": emoji.guild_domain,
         "name": emoji.name,
         "animated": emoji.animated,
+        "available": True if emoji.available is None else emoji.available,
+        "roles": role_ids or [],
         "media_hash": emoji.media_hash,
+        "creator_id": str(emoji.creator_id),
+        "creator_domain": emoji.creator_domain,
         "version": resource_version(emoji),
     }
 
@@ -122,8 +132,33 @@ def sticker_payload(sticker: Sticker) -> dict[str, object]:
         "name": sticker.name,
         "description": sticker.description,
         "animated": sticker.animated,
+        "available": True if sticker.available is None else sticker.available,
+        "tags": sticker.tags or [],
         "media_hash": sticker.media_hash,
+        "creator_id": str(sticker.creator_id),
+        "creator_domain": sticker.creator_domain,
         "version": resource_version(sticker),
+    }
+
+
+def soundboard_sound_payload(sound: SoundboardSound) -> dict[str, object]:
+    return {
+        "id": str(sound.id),
+        "origin_domain": sound.origin_domain,
+        "guild_id": str(sound.guild_id),
+        "guild_domain": sound.guild_domain,
+        "name": sound.name,
+        "media_hash": sound.media_hash,
+        "content_type": sound.content_type,
+        "volume": sound.volume,
+        "emoji_id": str(sound.emoji_id) if sound.emoji_id is not None else None,
+        "emoji_domain": sound.emoji_domain,
+        "emoji_name": sound.emoji_name,
+        "available": sound.available,
+        "duration_ms": sound.duration_ms,
+        "created_by_id": str(sound.created_by_id),
+        "created_by_domain": sound.created_by_domain,
+        "version": str(sound.version),
     }
 
 
@@ -134,6 +169,7 @@ def channel_payload(channel: Channel) -> dict[str, object]:
         "guild_id": str(channel.guild_id) if channel.guild_id is not None else None,
         "guild_domain": channel.guild_domain,
         "type": channel.type,
+        "nsfw": bool(getattr(channel, "nsfw", False)),
         "created_at": materialize_channel_created_at(channel).isoformat(),
         "name": channel.name,
         "topic": channel.topic,
@@ -142,6 +178,10 @@ def channel_payload(channel: Channel) -> dict[str, object]:
         "parent_domain": channel.parent_domain,
         "permissions_synced": channel.permissions_synced,
         "rate_limit_per_user": channel.rate_limit_per_user,
+        "bitrate": channel.bitrate,
+        "user_limit": channel.user_limit,
+        "rtc_region": channel.rtc_region,
+        "video_quality_mode": channel.video_quality_mode,
         "flags": channel.flags,
         "owner_id": str(channel.owner_id) if channel.owner_id is not None else None,
         "owner_domain": channel.owner_domain,
@@ -312,6 +352,8 @@ def thread_source_starter_payload(
         },
         "referenced_message": None if source.get("deleted_at") is not None else source,
         "mention_user_refs": [],
+        "mention_role_refs": [],
+        "mention_everyone": False,
         "attachments": [],
         "embeds": [],
         "components": [],
@@ -355,6 +397,7 @@ def member_payload(
         "user": user_payload(user),
         "nickname": member.nickname,
         "joined_at": member.joined_at.isoformat(),
+        "temporary": member.temporary,
         "timeout_until": member.timeout_until.isoformat() if member.timeout_until else None,
         "timeout_indefinite": member.timeout_indefinite,
         # Legacy replicas may still contain authority-only voice flags. Never
@@ -428,9 +471,13 @@ def dm_channel_payload(
     }
     if conversation is not None:
         owner_id = getattr(conversation, "owner_id", None)
+        conversation_type = str(getattr(conversation, "type", "direct"))
         payload.update(
             {
-                "conversation_type": str(getattr(conversation, "type", "direct")),
+                # Persist both DM shapes as type 1 internally, but expose the
+                # Discord-compatible GROUP_DM channel type on the wire.
+                "type": 3 if conversation_type == "group" else 1,
+                "conversation_type": conversation_type,
                 "owner_id": str(owner_id) if owner_id is not None else None,
                 "owner_domain": getattr(conversation, "owner_domain", None),
             }
@@ -448,16 +495,71 @@ def message_payload(
     message: Message,
     author: User | None = None,
     attachments: list[Attachment] | None = None,
+    *,
+    poll: dict[str, object] | None = None,
+    view: MessageView | None = None,
+    include_forward_source: bool = False,
 ) -> dict[str, object]:
     webhook = (
         {
             "id": str(message.webhook_id) if message.webhook_id is not None else None,
+            "origin_domain": message.webhook_domain,
+            "ref": (
+                f"{message.webhook_id}@{message.webhook_domain}"
+                if message.webhook_id is not None and message.webhook_domain is not None
+                else None
+            ),
             "name": message.webhook_name,
             "avatar_hash": message.webhook_avatar_hash,
+            "avatar_url": message.webhook_avatar_url,
         }
-        if message.webhook_name is not None
+        if message.webhook_id is not None
         else None
     )
+    deleted = message.deleted_at is not None
+    forward_snapshot = (
+        dict(message.forward_snapshot)
+        if not deleted and isinstance(message.forward_snapshot, dict)
+        else None
+    )
+    is_crosspost = bool(int(message.flags or 0) & MESSAGE_FLAG_IS_CROSSPOST)
+    encrypted_forward = bool(
+        not deleted
+        and isinstance(message.e2ee, dict)
+        and message.e2ee.get("forward_snapshot_digest") is not None
+    )
+    expose_live_forward = forward_snapshot is None
+    expose_forward_channel = include_forward_source or is_crosspost
+    stored_message_reference = getattr(message, "message_reference", None)
+    message_reference: dict[str, object] | None = (
+        dict(stored_message_reference) if isinstance(stored_message_reference, dict) else None
+    )
+    if message_reference is None and (forward_snapshot is not None or encrypted_forward):
+        message_reference = {"type": 1}
+    elif message_reference is None and (
+        message.referenced_message_id is not None and message.referenced_message_domain is not None
+    ):
+        message_reference = {
+            "type": 0,
+            "message_id": str(message.referenced_message_id),
+            "message_domain": message.referenced_message_domain,
+            "channel_id": str(message.channel_id),
+            "channel_domain": message.channel_domain,
+        }
+    elif message_reference is None and (
+        is_crosspost
+        and message.forwarded_message_id is not None
+        and message.forwarded_message_domain is not None
+        and message.forwarded_channel_id is not None
+        and message.forwarded_channel_domain is not None
+    ):
+        message_reference = {
+            "type": 0,
+            "message_id": str(message.forwarded_message_id),
+            "message_domain": message.forwarded_message_domain,
+            "channel_id": str(message.forwarded_channel_id),
+            "channel_domain": message.forwarded_channel_domain,
+        }
     return {
         "id": str(message.id),
         "origin_domain": message.origin_domain,
@@ -466,13 +568,81 @@ def message_payload(
         "author_id": str(message.author_id),
         "author_domain": message.author_domain,
         "author": user_payload(author) if author is not None and webhook is None else None,
-        "content": None if message.deleted_at is not None else message.content,
-        "e2ee": None if message.deleted_at is not None else message.e2ee,
+        "content": None if deleted else message.content,
+        "e2ee": None if deleted else message.e2ee,
+        "embeds": [] if deleted else list(message.embeds or []),
+        "components": [] if deleted else list(message.components or []),
+        "sticker_items": [] if deleted else list(message.sticker_items or []),
+        "application_id": (
+            str(message.application_id)
+            if not deleted and message.application_id is not None
+            else None
+        ),
+        "application_domain": message.application_domain if not deleted else None,
+        "interaction_metadata": (
+            dict(message.interaction_metadata)
+            if not deleted and isinstance(message.interaction_metadata, dict)
+            else None
+        ),
+        "view_version": int(message.view_version or 0) if not deleted else 0,
+        "view_persistent": bool(view.persistent) if view is not None and not deleted else False,
+        "view_expires_at": (
+            view.expires_at.isoformat()
+            if view is not None and view.expires_at is not None and not deleted
+            else None
+        ),
+        "interaction_integration_type": (
+            view.integration_type if view is not None and not deleted else None
+        ),
+        "interaction_installation_ref": (
+            f"{view.installation_id}@{view.installation_domain}"
+            if view is not None and not deleted
+            else None
+        ),
+        "interaction_installation_revision": (
+            str(view.installation_revision) if view is not None and not deleted else None
+        ),
+        "forwarded_message_id": (
+            str(message.forwarded_message_id)
+            if not deleted
+            and message.forwarded_message_id is not None
+            and (expose_live_forward or include_forward_source)
+            else None
+        ),
+        "forwarded_message_domain": (
+            message.forwarded_message_domain
+            if not deleted and (expose_live_forward or include_forward_source)
+            else None
+        ),
+        "forwarded_message_ref": (
+            f"{message.forwarded_message_id}@{message.forwarded_message_domain}"
+            if not deleted
+            and message.forwarded_message_id is not None
+            and message.forwarded_message_domain is not None
+            and expose_live_forward
+            else None
+        ),
+        "forwarded_channel_id": (
+            str(message.forwarded_channel_id)
+            if expose_forward_channel and message.forwarded_channel_id is not None
+            else None
+        ),
+        "forwarded_channel_domain": (
+            message.forwarded_channel_domain if expose_forward_channel else None
+        ),
+        "forward_snapshot": forward_snapshot if include_forward_source else None,
+        "message_snapshots": (
+            [{"message": forward_snapshot}] if forward_snapshot is not None else []
+        ),
+        "message_reference": message_reference,
+        "poll": None if deleted else poll,
+        "poll_result": None if deleted else message.poll_result,
         "encryption_policy_generation": str(message.encryption_policy_generation),
         "encryption_epoch": (
             str(message.encryption_epoch) if message.encryption_epoch is not None else None
         ),
         "message_type": message.message_type,
+        "tts": bool(message.tts),
         "flags": message.flags,
         "client_nonce": message.client_nonce,
         "referenced_message_id": (
@@ -482,9 +652,12 @@ def message_payload(
         ),
         "referenced_message_domain": message.referenced_message_domain,
         "mention_user_refs": message.mention_user_refs,
+        "mention_role_refs": [] if deleted else list(message.mention_role_refs or []),
+        "mention_everyone": bool(message.mention_everyone) if not deleted else False,
         "attachments": [attachment_payload(item) for item in (attachments or [])],
         "webhook_id": str(message.webhook_id) if message.webhook_id is not None else None,
         "webhook": webhook,
+        "published_at": message.published_at.isoformat() if message.published_at else None,
         "edited_at": message.edited_at.isoformat() if message.edited_at else None,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
         "created_at": message.created_at.isoformat(),
@@ -495,6 +668,9 @@ async def render_message_payload(
     session: AsyncSession,
     message: Message,
     author: User | None = None,
+    *,
+    viewer: User | None = None,
+    include_forward_source: bool = False,
 ) -> dict[str, object]:
     """Render a stored message with its complete, ordered attachment set."""
 
@@ -511,19 +687,119 @@ async def render_message_payload(
             .order_by(Attachment.id)
         )
     )
-    rendered = message_payload(message, author, attachments)
-    if message.flags & (1 << 5) or message.message_type == 18:
+    rendered = message_payload(
+        message,
+        author,
+        attachments,
+        poll=(
+            await render_poll_payload(session, message, viewer=viewer or author)
+            if message.deleted_at is None
+            else None
+        ),
+        view=await session.get(MessageView, (message.id, message.origin_domain)),
+        include_forward_source=include_forward_source,
+    )
+    flags = int(message.flags or 0)
+    message_type = int(message.message_type or 0)
+    if flags & (1 << 5) or message_type == 18:
         thread = await session.get(Channel, (message.id, message.origin_domain))
         if thread is not None and thread.type in {10, 11, 12} and not thread.unavailable:
             rendered["thread"] = channel_payload(thread)
-            if message.message_type == 18:
+            if message_type == 18 and rendered.get("message_reference") is None:
                 rendered["message_reference"] = {
                     "type": 0,
-                    "message_id": None,
-                    "message_domain": None,
                     "channel_id": str(thread.id),
                     "channel_domain": thread.origin_domain,
                     "guild_id": str(thread.guild_id),
                     "guild_domain": thread.guild_domain,
                 }
     return rendered
+
+
+async def render_poll_payload(
+    session: AsyncSession,
+    message: Message,
+    *,
+    viewer: User | None = None,
+) -> dict[str, object] | None:
+    """Render the complete poll and aggregate result projection for a message."""
+
+    poll = await session.get(Poll, (message.id, message.origin_domain))
+    if poll is None:
+        return None
+    answers = list(
+        await session.scalars(
+            select(PollAnswer)
+            .where(
+                PollAnswer.message_id == message.id,
+                PollAnswer.message_domain == message.origin_domain,
+            )
+            .order_by(PollAnswer.answer_id)
+        )
+    )
+    count_rows = (
+        await session.execute(
+            select(PollVote.answer_id, func.count())
+            .where(
+                PollVote.message_id == message.id,
+                PollVote.message_domain == message.origin_domain,
+            )
+            .group_by(PollVote.answer_id)
+        )
+    ).all()
+    counts: dict[int, int] = {
+        int(answer_id): int(vote_count) for answer_id, vote_count in count_rows
+    }
+    viewer_answers: set[int] = set()
+    if viewer is not None:
+        viewer_answers = set(
+            await session.scalars(
+                select(PollVote.answer_id).where(
+                    PollVote.message_id == message.id,
+                    PollVote.message_domain == message.origin_domain,
+                    PollVote.user_id == viewer.id,
+                    PollVote.user_domain == viewer.origin_domain,
+                )
+            )
+        )
+    results = {
+        "is_finalized": poll.finalized_at is not None or poll.expires_at <= datetime.now(UTC),
+        "answer_counts": [
+            {
+                "id": answer.answer_id,
+                "count": int(counts.get(answer.answer_id, 0)),
+                "me_voted": answer.answer_id in viewer_answers,
+            }
+            for answer in answers
+        ],
+    }
+    if poll.question == {"encrypted": True, "version": 1}:
+        return {
+            "encrypted": True,
+            "answer_ids": [answer.answer_id for answer in answers],
+            "expiry": poll.expires_at.isoformat(),
+            "allow_multiselect": poll.allow_multiselect,
+            "layout_type": poll.layout_type,
+            "finalized_at": (
+                poll.finalized_at.isoformat() if poll.finalized_at is not None else None
+            ),
+            "results": results,
+        }
+    return {
+        "question": dict(poll.question),
+        "answers": [
+            {
+                "answer_id": answer.answer_id,
+                "poll_media": {
+                    **({"text": answer.text} if answer.text is not None else {}),
+                    **({"emoji": answer.emoji} if answer.emoji is not None else {}),
+                },
+            }
+            for answer in answers
+        ],
+        "expiry": poll.expires_at.isoformat(),
+        "allow_multiselect": poll.allow_multiselect,
+        "layout_type": poll.layout_type,
+        "finalized_at": (poll.finalized_at.isoformat() if poll.finalized_at is not None else None),
+        "results": results,
+    }

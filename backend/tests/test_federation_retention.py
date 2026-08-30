@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from inspect import unwrap
 from types import SimpleNamespace
 from typing import cast
@@ -22,6 +23,23 @@ from app.media import tombstones as media_tombstones
 
 LOCAL_DOMAIN = "alpha.localhost"
 REMOTE_DOMAIN = "beta.localhost"
+
+
+def test_guild_event_retention_preserves_message_owned_proxy_receipts() -> None:
+    statement = tasks.prunable_guild_events_statement(datetime(2026, 8, 1, tzinfo=UTC))
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "DELETE FROM guild_events" in sql
+    assert "messages.proxy_commit_seq = guild_events.seq" in sql
+    assert "messages.origin_domain = guild_events.guild_domain" in sql
+    assert "channels.guild_id = guild_events.guild_id" in sql
+    assert "channels.guild_domain = guild_events.guild_domain" in sql
+    assert "NOT (EXISTS" in sql
 
 
 def config() -> Settings:

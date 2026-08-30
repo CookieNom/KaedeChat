@@ -9,18 +9,24 @@ import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/announcements.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/role_colors.dart';
+import 'package:kaede_mobile/src/domain/stage_permissions.dart';
 import 'package:kaede_mobile/src/domain/thread_permissions.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/chat/dm_bot_e2ee_participation_screen.dart';
 import 'package:kaede_mobile/src/features/chat/forum_channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
+import 'package:kaede_mobile/src/features/guild/announcement_management_tab.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
+import 'package:kaede_mobile/src/features/guild/scheduled_events_tab.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
+import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
@@ -53,8 +59,11 @@ String conversationHeaderTitle(KaedeChannel channel) {
       (names.length > 3 ? ' +${names.length - 3}' : '');
 }
 
+bool _isVoiceLikeChannel(KaedeChannel channel) => channel.type.isVoiceLike;
+
 bool supportsPinnedMessages(KaedeChannel channel) =>
     channel.type == ChannelType.dm ||
+    channel.type == ChannelType.groupDm ||
     channel.type == ChannelType.text ||
     channel.type == ChannelType.announcement ||
     channel.isThread;
@@ -120,7 +129,7 @@ Future<void> _showE2eeRoomSettings(
         }
 
         return AlertDialog(
-          title: const Row(children: [
+          title: Row(children: [
             Icon(Icons.lock_rounded),
             SizedBox(width: 10),
             Expanded(child: Text('End-to-end encryption')),
@@ -134,62 +143,61 @@ Future<void> _showE2eeRoomSettings(
                 children: [
                   Text(
                     active
-                        ? channel.type == ChannelType.voice
+                        ? _isVoiceLikeChannel(channel)
                             ? 'Encryption is active for microphone, camera, screen video, and screen audio.'
                             : 'Encryption is active for new messages, files, and supported calls in this channel.'
                         : needsRekey
                             ? 'Encrypted activity is paused until a member rotates the room keys.'
                             : encrypted
                                 ? 'Encryption is being prepared. Messaging remains paused until setup completes.'
-                                : channel.type == ChannelType.voice
+                                : _isVoiceLikeChannel(channel)
                                     ? 'Encryption is optional and cannot be turned off after it is enabled for this voice channel.'
                                     : 'Encryption is optional and cannot be turned off after it is enabled for this conversation.',
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
+                  SizedBox(height: 12),
+                  Text(
                     'Identity verification',
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
+                  SizedBox(height: 6),
+                  Text(
                     'Until participants compare the safety number through a separate trusted channel, content is encrypted but identities are unverified. Comparing it is what detects first-contact or active-instance key substitution.',
                   ),
-                  const SizedBox(height: 12),
+                  SizedBox(height: 12),
                   if (!encrypted) ...[
-                    const Text(
+                    Text(
                       'Before enabling:',
                       style: TextStyle(fontWeight: FontWeight.w800),
                     ),
-                    const SizedBox(height: 6),
+                    SizedBox(height: 6),
                     Text(
-                      channel.type == ChannelType.voice
+                      _isVoiceLikeChannel(channel)
                           ? '• Server recording, transcription, and media moderation will be unavailable.\n'
                               '• Unsupported clients cannot join.\n'
                               '• Participants, timing, track types, and traffic metadata remain visible.\n'
                               '• Anyone can still record media on their own device.'
-                          : '• Server message search, link previews, bots, webhooks, server-side file previews and malware scanning will be unavailable.\n'
+                          : '• Server message search, link previews, server-side file previews and malware scanning will be unavailable. Webhooks receive no access automatically; a verified webhook device can receive only future content after an explicit grant, rekey, and history floor. Verified participant-mode apps follow the same future-only admission rule.\n'
                               '• Notification wakes contain no message content.\n'
                               '• Existing history stays plaintext; new content is encrypted.\n'
                               '• Metadata such as participants, timing, and message size remains visible.\n'
                               '• Losing the synchronized encrypted vault, every trusted client’s local state, and the recovery backup permanently loses encrypted history.\n'
-                              '• Removed members retain content already received.',
+                              '• Removed members, apps, and webhooks retain content already received.',
                     ),
                   ],
                   if (safetyNumber != null) ...[
-                    const SizedBox(height: 14),
-                    const Text('Conversation safety number',
+                    SizedBox(height: 14),
+                    Text('Conversation safety number',
                         style: TextStyle(fontWeight: FontWeight.w800)),
-                    const SizedBox(height: 6),
+                    SizedBox(height: 6),
                     SelectableText(safetyNumber!),
-                    const SizedBox(height: 6),
-                    const Text(
+                    SizedBox(height: 6),
+                    Text(
                       'Compare this number with the other participants through a trusted channel. It changes when membership or devices change.',
                     ),
                   ],
                   if (error != null) ...[
-                    const SizedBox(height: 12),
-                    Text(error!,
-                        style: const TextStyle(color: KaedeColors.coral)),
+                    SizedBox(height: 12),
+                    Text(error!, style: TextStyle(color: context.kaede.coral)),
                   ],
                 ],
               ),
@@ -198,7 +206,7 @@ Future<void> _showE2eeRoomSettings(
           actions: [
             TextButton(
               onPressed: busy ? null : () => Navigator.pop(dialogContext),
-              child: const Text('Done'),
+              child: Text('Done'),
             ),
             if (active)
               FilledButton.tonal(
@@ -211,7 +219,7 @@ Future<void> _showE2eeRoomSettings(
                             setDialogState(() => safetyNumber = value);
                           }
                         }),
-                child: const Text('Verify safety number'),
+                child: Text('Verify safety number'),
               ),
             if (canManage && (!encrypted || needsRekey))
               FilledButton.icon(
@@ -251,6 +259,20 @@ Future<void> _showE2eeRoomSettings(
     ),
   );
 }
+
+Future<void> _showDmBotE2eeParticipation(
+  BuildContext context,
+  WidgetRef ref,
+  KaedeChannel channel,
+) =>
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DmBotE2eeParticipationScreen(
+          channel: channel,
+          repository: ref.read(mobileControllerProvider.notifier).repository,
+        ),
+      ),
+    );
 
 final class MobileShell extends ConsumerStatefulWidget {
   const MobileShell({super.key});
@@ -343,7 +365,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
               _ShellSection.settings => _SectionScreen(
                   title: 'Settings',
                   onBack: () => _showSection(_ShellSection.messages),
-                  child: const SettingsScreen(),
+                  child: SettingsScreen(),
                 ),
             },
           ),
@@ -413,15 +435,13 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
   void _openConversation() {
     if (!_pages.hasClients) return;
     _pages.animateToPage(1,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic);
+        duration: Duration(milliseconds: 220), curve: Curves.easeOutCubic);
   }
 
   void _openNavigation() {
     if (!_pages.hasClients) return;
     _pages.animateToPage(0,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic);
+        duration: Duration(milliseconds: 220), curve: Curves.easeOutCubic);
   }
 
   void _openMembers() {
@@ -450,18 +470,18 @@ final class _IncomingCallBanner extends ConsumerWidget {
     final call = ref.watch(
       mobileControllerProvider.select((state) => state.incomingCall),
     );
-    if (call == null) return const SizedBox.shrink();
+    if (call == null) return SizedBox.shrink();
     final controller = ref.read(mobileControllerProvider.notifier);
     return SafeArea(
       bottom: false,
       child: Material(
-        color: KaedeColors.sidebar,
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
+          padding: EdgeInsets.fromLTRB(14, 8, 10, 8),
           child: Row(
             children: [
-              const Icon(Icons.call_rounded, color: KaedeColors.mint),
-              const SizedBox(width: 10),
+              Icon(Icons.call_rounded, color: context.kaede.mint),
+              SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -471,23 +491,22 @@ final class _IncomingCallBanner extends ConsumerWidget {
                       call.callerName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w800),
+                      style: TextStyle(fontWeight: FontWeight.w800),
                     ),
-                    const Text('Incoming call'),
+                    Text('Incoming call'),
                   ],
                 ),
               ),
               IconButton.filledTonal(
                 tooltip: 'Decline',
                 onPressed: controller.declineIncomingCall,
-                icon: const Icon(Icons.call_end_rounded,
-                    color: KaedeColors.coral),
+                icon: Icon(Icons.call_end_rounded, color: context.kaede.coral),
               ),
-              const SizedBox(width: 6),
+              SizedBox(width: 6),
               IconButton.filled(
                 tooltip: 'Answer',
                 onPressed: controller.answerIncomingCall,
-                icon: const Icon(Icons.call_rounded),
+                icon: Icon(Icons.call_rounded),
               ),
             ],
           ),
@@ -510,13 +529,13 @@ final class _SectionScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ColoredBox(
-        color: KaedeColors.sidebar,
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
         child: Column(
           children: [
             ConversationCompactHeader(
               leading: IconButton(
                 onPressed: onBack,
-                icon: const Icon(Icons.arrow_back_rounded),
+                icon: Icon(Icons.arrow_back_rounded),
               ),
               title: title,
             ),
@@ -632,26 +651,26 @@ final class _ConversationScreenState
       }
       final kind = channel.guildRef == null
           ? EncryptedRoomKind.conversation
-          : channel.type == ChannelType.voice
+          : _isVoiceLikeChannel(channel)
               ? EncryptedRoomKind.media
               : EncryptedRoomKind.messages;
       final accepted = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
         builder: (dialogContext) => AlertDialog(
-          icon: const Icon(Icons.lock_rounded),
-          title: const Text('Encrypted room'),
+          icon: Icon(Icons.lock_rounded),
+          title: Text('Encrypted room'),
           content: SingleChildScrollView(
             child: Text(encryptedRoomJoinWarning(kind)),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Go back'),
+              child: Text('Go back'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Continue'),
+              child: Text('Continue'),
             ),
           ],
         ),
@@ -672,7 +691,10 @@ final class _ConversationScreenState
   }
 
   Future<void> _loadCall() async {
-    if (widget.channel.type != ChannelType.dm) return;
+    if (widget.channel.type != ChannelType.dm &&
+        widget.channel.type != ChannelType.groupDm) {
+      return;
+    }
     try {
       final result = await ref
           .read(mobileControllerProvider.notifier)
@@ -737,7 +759,13 @@ final class _ConversationScreenState
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _GroupDmSettings(channel: widget.channel),
+      builder: (_) => _GroupDmSettings(
+        channel: widget.channel,
+        onPins: () {
+          Navigator.of(context).pop();
+          unawaited(_showPinnedMessages());
+        },
+      ),
     );
   }
 
@@ -747,6 +775,32 @@ final class _ConversationScreenState
         showDragHandle: true,
         builder: (_) => _PinnedMessagesSheet(channel: widget.channel),
       );
+
+  Future<void> _showAnnouncementFollow() async {
+    final state = ref.read(mobileControllerProvider);
+    final guild = state.activeGuild;
+    if (guild == null ||
+        !canReadAnnouncementChannel(guild, widget.channel, state.user)) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: .72,
+        child: AnnouncementManagementTab(
+          guild: guild,
+          guilds: state.guilds,
+          currentUser: state.user,
+          repository: ref.read(mobileControllerProvider.notifier).repository,
+          sourceChannel: widget.channel,
+          createOnly: true,
+        ),
+      ),
+    );
+  }
 
   Future<void> _showThreadMembers() => showModalBottomSheet<void>(
         context: context,
@@ -829,11 +883,7 @@ final class _ConversationScreenState
     if (widget.channel.guildRef != null) {
       final state = ref.read(mobileControllerProvider);
       final guild = state.activeGuild;
-      final controller = ref.read(mobileControllerProvider.notifier);
-      final localGuild =
-          controller.api.tokens?.instance == widget.channel.guildRef!.domain;
       final canManage = guild != null &&
-          localGuild &&
           (state.user?.ref == guild.ownerRef ||
               guild.allows(Permission.manageChannels));
       if (widget.channel.isThread) {
@@ -845,6 +895,10 @@ final class _ConversationScreenState
           builder: (_) => _ThreadDetailsSheet(
             thread: widget.channel,
             canManage: canManageThreads(widget.channel),
+            onPins: () {
+              Navigator.of(context).pop();
+              unawaited(_showPinnedMessages());
+            },
           ),
         );
         return;
@@ -858,6 +912,10 @@ final class _ConversationScreenState
           channel: widget.channel,
           guild: guild,
           canManageChannels: canManage,
+          onPins: () {
+            Navigator.of(context).pop();
+            unawaited(_showPinnedMessages());
+          },
         ),
       );
       return;
@@ -871,24 +929,33 @@ final class _ConversationScreenState
       isScrollControlled: true,
       useSafeArea: true,
       showDragHandle: true,
-      builder: (_) => _DirectMessageDetailsSheet(channel: widget.channel),
+      builder: (_) => _DirectMessageDetailsSheet(
+        channel: widget.channel,
+        onPins: () {
+          Navigator.of(context).pop();
+          unawaited(_showPinnedMessages());
+        },
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final mobile = ref.watch(mobileControllerProvider);
+    final activeGuild = mobile.activeGuild;
     final recipient = widget.channel.recipients.isEmpty
         ? null
         : widget.channel.recipients.first;
     final width = MediaQuery.sizeOf(context).width;
     final compactHeader = width <= 400;
     final callUsesOverflow = conversationCallUsesOverflow(width);
-    final isDm = widget.channel.type == ChannelType.dm;
+    final isDm = widget.channel.type == ChannelType.dm ||
+        widget.channel.type == ChannelType.groupDm;
     final supportsThreads = widget.channel.type == ChannelType.text ||
         widget.channel.type == ChannelType.announcement;
     final overflowItems = <PopupMenuEntry<String>>[
       if (supportsPinnedMessages(widget.channel))
-        const PopupMenuItem(
+        PopupMenuItem(
           value: 'pins',
           child: ListTile(
             dense: true,
@@ -910,7 +977,7 @@ final class _ConversationScreenState
           ),
         ),
       if (supportsThreads && compactHeader)
-        const PopupMenuItem(
+        PopupMenuItem(
           value: 'threads',
           child: ListTile(
             dense: true,
@@ -921,7 +988,7 @@ final class _ConversationScreenState
         ),
       if ((widget.onMembers != null || widget.channel.isThread) &&
           compactHeader)
-        const PopupMenuItem(
+        PopupMenuItem(
           value: 'members',
           child: ListTile(
             dense: true,
@@ -935,7 +1002,7 @@ final class _ConversationScreenState
         child: ListTile(
           dense: true,
           contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.settings_outlined),
+          leading: Icon(Icons.settings_outlined),
           title: Text(widget.channel.isThread
               ? 'Thread settings'
               : widget.channel.guildRef != null
@@ -951,7 +1018,7 @@ final class _ConversationScreenState
         ConversationCompactHeader(
           leading: IconButton(
             onPressed: widget.onBack,
-            icon: const Icon(Icons.arrow_back_rounded),
+            icon: Icon(Icons.arrow_back_rounded),
           ),
           avatar: recipient == null || _isGroup
               ? null
@@ -970,12 +1037,24 @@ final class _ConversationScreenState
                             .watch(mobileControllerProvider)
                             .presenceByUser[recipient.ref] ??
                         recipient.presence,
-                    ringColor: KaedeColors.canvas,
+                    ringColor: context.kaede.canvas,
                   ),
                 ),
           title: _title,
           subtitle: _subtitle,
           actions: [
+            if (activeGuild != null &&
+                widget.channel.type == ChannelType.announcement &&
+                canReadAnnouncementChannel(
+                  activeGuild,
+                  widget.channel,
+                  mobile.user,
+                ))
+              IconButton(
+                tooltip: 'Follow announcements',
+                onPressed: _showAnnouncementFollow,
+                icon: Icon(Icons.notifications_none_rounded),
+              ),
             if (isDm && !callUsesOverflow)
               IconButton(
                 tooltip: _activeCall == null ? 'Start call' : 'Join call',
@@ -1002,14 +1081,14 @@ final class _ConversationScreenState
               IconButton(
                 tooltip: 'Threads',
                 onPressed: _showThreads,
-                icon: const Icon(Icons.forum_outlined),
+                icon: Icon(Icons.forum_outlined),
               ),
             if (!widget.channel.isForum &&
                 widget.channel.type != ChannelType.tracker)
               IconButton(
                 tooltip: 'Search this conversation',
                 onPressed: _showMessageSearch,
-                icon: const Icon(Icons.search_rounded),
+                icon: Icon(Icons.search_rounded),
               ),
             if ((widget.onMembers != null || widget.channel.isThread) &&
                 !compactHeader)
@@ -1019,12 +1098,12 @@ final class _ConversationScreenState
                 onPressed: widget.channel.isThread
                     ? _showThreadMembers
                     : widget.onMembers,
-                icon: const Icon(Icons.people_alt_outlined),
+                icon: Icon(Icons.people_alt_outlined),
               ),
             PopupMenuButton<String>(
               tooltip: 'More options',
               position: PopupMenuPosition.under,
-              icon: const Icon(Icons.more_vert_rounded),
+              icon: Icon(Icons.more_vert_rounded),
               onSelected: (action) {
                 switch (action) {
                   case 'pins':
@@ -1063,7 +1142,7 @@ final class _ConversationScreenState
                         .selectChannel(thread),
                   ),
                 )
-              : const ChannelView(),
+              : ChannelView(),
         ),
       ],
     );
@@ -1120,7 +1199,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Create Thread'),
+          title: Text('Create Thread'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1128,7 +1207,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                 controller: name,
                 autofocus: true,
                 maxLength: 100,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Thread name',
                   counterText: '',
                 ),
@@ -1138,15 +1217,15 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                   contentPadding: EdgeInsets.zero,
                   value: private,
                   onChanged: (value) => setDialogState(() => private = value),
-                  title: const Text('Private Thread'),
-                  subtitle: const Text('Only invited members can view it.'),
+                  title: Text('Private Thread'),
+                  subtitle: Text('Only invited members can view it.'),
                 ),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
+              child: Text('Cancel'),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
@@ -1157,7 +1236,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                           dialogContext,
                           (value.text.trim(), private),
                         ),
-                child: const Text('Create'),
+                child: Text('Create'),
               ),
             ),
           ],
@@ -1195,7 +1274,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
+            padding: EdgeInsets.fromLTRB(20, 0, 12, 8),
             child: Row(
               children: [
                 Expanded(
@@ -1205,43 +1284,42 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                 if (canCreate)
                   FilledButton.icon(
                     onPressed: _busy ? null : _create,
-                    icon: const Icon(Icons.add_rounded, size: 18),
-                    label: const Text('Create'),
+                    icon: Icon(Icons.add_rounded, size: 18),
+                    label: Text('Create'),
                   ),
               ],
             ),
           ),
           if (_error case final error?)
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-              child: Text(error,
-                  style: const TextStyle(color: KaedeColors.danger)),
+              padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
+              child: Text(error, style: TextStyle(color: context.kaede.danger)),
             ),
           Expanded(
             child: _active == null || _archived == null
-                ? const Center(child: CircularProgressIndicator())
+                ? Center(child: CircularProgressIndicator())
                 : RefreshIndicator(
                     onRefresh: _load,
                     child: ListView(
-                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
+                      padding: EdgeInsets.fromLTRB(12, 4, 12, 20),
                       children: [
                         const _ThreadSectionLabel('Active Threads'),
                         if (_active!.isEmpty)
-                          const ListTile(
+                          ListTile(
                             title: Text('No active threads',
-                                style: TextStyle(color: KaedeColors.muted)),
+                                style: TextStyle(color: context.kaede.muted)),
                           ),
                         for (final thread in _active!)
                           _ThreadBrowseRow(
                             thread: thread,
                             onOpen: () => widget.onOpen(thread),
                           ),
-                        const SizedBox(height: 12),
+                        SizedBox(height: 12),
                         const _ThreadSectionLabel('Archived Threads'),
                         if (_archived!.isEmpty)
-                          const ListTile(
+                          ListTile(
                             title: Text('No archived threads',
-                                style: TextStyle(color: KaedeColors.muted)),
+                                style: TextStyle(color: context.kaede.muted)),
                           ),
                         for (final thread in _archived!)
                           _ThreadBrowseRow(
@@ -1265,10 +1343,10 @@ final class _ThreadSectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+        padding: EdgeInsets.fromLTRB(8, 10, 8, 4),
         child: Text(label.toUpperCase(),
-            style: const TextStyle(
-              color: KaedeColors.muted,
+            style: TextStyle(
+              color: context.kaede.muted,
               fontSize: 11,
               fontWeight: FontWeight.w800,
               letterSpacing: .8,
@@ -1291,7 +1369,7 @@ final class _ThreadBrowseRow extends StatelessWidget {
           '${thread.messageCount} messages',
           '${thread.memberCount} members',
         ].join(' · ')),
-        trailing: const Icon(Icons.chevron_right_rounded),
+        trailing: Icon(Icons.chevron_right_rounded),
         onTap: onOpen,
       );
 }
@@ -1300,10 +1378,12 @@ final class _ThreadDetailsSheet extends ConsumerStatefulWidget {
   const _ThreadDetailsSheet({
     required this.thread,
     required this.canManage,
+    required this.onPins,
   });
 
   final KaedeChannel thread;
   final bool canManage;
+  final VoidCallback onPins;
 
   @override
   ConsumerState<_ThreadDetailsSheet> createState() =>
@@ -1360,7 +1440,7 @@ final class _ThreadDetailsSheetState
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Edit thread'),
+          title: Text('Edit thread'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1368,16 +1448,15 @@ final class _ThreadDetailsSheetState
                 controller: name,
                 autofocus: true,
                 maxLength: 100,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Thread name',
                   counterText: '',
                 ),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: 12),
               DropdownButtonFormField<int>(
                 initialValue: duration,
-                decoration:
-                    const InputDecoration(labelText: 'Hide after inactivity'),
+                decoration: InputDecoration(labelText: 'Hide after inactivity'),
                 items: const [
                   DropdownMenuItem(value: 60, child: Text('1 hour')),
                   DropdownMenuItem(value: 1440, child: Text('24 hours')),
@@ -1388,13 +1467,13 @@ final class _ThreadDetailsSheetState
                     setDialogState(() => duration = value ?? duration),
               ),
               if (forum != null && forum.availableTags.isNotEmpty) ...[
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
                 Align(
                   alignment: Alignment.centerLeft,
                   child: Text('Tags (${appliedTags.length}/5)',
-                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                      style: TextStyle(fontWeight: FontWeight.w700)),
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 Wrap(
                   spacing: 7,
                   runSpacing: 7,
@@ -1423,7 +1502,7 @@ final class _ThreadDetailsSheetState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
+              child: Text('Cancel'),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
@@ -1441,7 +1520,7 @@ final class _ThreadDetailsSheetState
                             appliedTags.toList(growable: false),
                           ),
                         ),
-                child: const Text('Save'),
+                child: Text('Save'),
               ),
             ),
           ],
@@ -1467,20 +1546,20 @@ final class _ThreadDetailsSheetState
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          padding: EdgeInsets.fromLTRB(20, 0, 20, 20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
               Text('Notifications',
                   style: Theme.of(sheetContext).textTheme.titleLarge),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               RadioGroup<String>(
                 groupValue: current,
                 onChanged: (value) {
                   if (value != null) Navigator.pop(sheetContext, value);
                 },
-                child: const Column(
+                child: Column(
                   children: [
                     RadioListTile<String>(
                       contentPadding: EdgeInsets.zero,
@@ -1527,16 +1606,17 @@ final class _ThreadDetailsSheetState
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete thread?'),
-        content: const Text('This cannot be undone.'),
+        title: Text('Delete thread?'),
+        content: Text('This cannot be undone.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
+              child: Text('Cancel')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: KaedeColors.danger),
+            style:
+                FilledButton.styleFrom(backgroundColor: context.kaede.danger),
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
+            child: Text('Delete'),
           ),
         ],
       ),
@@ -1565,14 +1645,20 @@ final class _ThreadDetailsSheetState
         thread.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(isPost ? 'Post settings' : 'Thread settings',
                 style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
+            _SettingsRow(
+              icon: Icons.push_pin_outlined,
+              title: 'Pins',
+              subtitle: 'Messages saved in this conversation',
+              onTap: widget.onPins,
+            ),
             if (canEdit)
               _SettingsRow(
                 icon: Icons.edit_outlined,
@@ -1676,7 +1762,7 @@ final class _ThreadDetailsSheetState
                             .updateThread(thread, <String, Object?>{
                           'invitable': value,
                         })),
-                title: const Text('Allow members to invite'),
+                title: Text('Allow members to invite'),
               ),
             if (showEncryption)
               _SettingsRow(
@@ -1684,8 +1770,8 @@ final class _ThreadDetailsSheetState
                     ? Icons.lock_rounded
                     : Icons.lock_open_rounded,
                 iconColor: thread.encryptionMode == 'e2ee'
-                    ? KaedeColors.mint
-                    : KaedeColors.muted,
+                    ? context.kaede.mint
+                    : context.kaede.muted,
                 title: 'End-to-end encryption',
                 subtitle: thread.encryptionMode == 'e2ee'
                     ? thread.encryptionState == 'active'
@@ -1704,14 +1790,14 @@ final class _ThreadDetailsSheetState
             if (widget.canManage)
               _SettingsRow(
                 icon: Icons.delete_outline_rounded,
-                iconColor: KaedeColors.danger,
+                iconColor: context.kaede.danger,
                 title: isPost ? 'Delete Post' : 'Delete Thread',
                 subtitle: 'Permanently delete all messages',
                 onTap: _busy ? null : _delete,
               ),
             if (_error case final error?) ...[
-              const SizedBox(height: 12),
-              Text(error, style: const TextStyle(color: KaedeColors.danger)),
+              SizedBox(height: 12),
+              Text(error, style: TextStyle(color: context.kaede.danger)),
             ],
           ],
         ),
@@ -1801,38 +1887,38 @@ final class _ThreadMembersSheetState
             Text('Thread members',
                 style: Theme.of(context).textTheme.headlineSmall),
             if (canInvite) ...[
-              const SizedBox(height: 14),
+              SizedBox(height: 14),
               Row(
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _invite,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Add member',
                         hintText: '@friend@example.net',
                       ),
                       onSubmitted: (_) => _add(),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: 8),
                   IconButton.filled(
                     tooltip: 'Add member',
                     onPressed: _busy ? null : _add,
-                    icon: const Icon(Icons.person_add_alt_1_rounded),
+                    icon: Icon(Icons.person_add_alt_1_rounded),
                   ),
                 ],
               ),
             ],
             if (_error case final error?) ...[
-              const SizedBox(height: 10),
-              Text(error, style: const TextStyle(color: KaedeColors.danger)),
+              SizedBox(height: 10),
+              Text(error, style: TextStyle(color: context.kaede.danger)),
             ],
-            const SizedBox(height: 10),
+            SizedBox(height: 10),
             Expanded(
               child: members == null
-                  ? const Center(child: CircularProgressIndicator())
+                  ? Center(child: CircularProgressIndicator())
                   : members.isEmpty
-                      ? const Center(child: Text('No joined members.'))
+                      ? Center(child: Text('No joined members.'))
                       : ListView.builder(
                           itemCount: members.length,
                           itemBuilder: (context, index) {
@@ -1844,7 +1930,7 @@ final class _ThreadMembersSheetState
                                         : null);
                             return ListTile(
                               leading: profile == null
-                                  ? const CircleAvatar(
+                                  ? CircleAvatar(
                                       child: Icon(Icons.person_outline_rounded))
                                   : UserAvatar(user: profile, radius: 18),
                               title: Text(profile?.name ?? member.userRef.wire),
@@ -1880,8 +1966,7 @@ final class _ThreadMembersSheetState
                                                 }
                                               }
                                             },
-                                      icon: const Icon(
-                                          Icons.person_remove_outlined),
+                                      icon: Icon(Icons.person_remove_outlined),
                                     )
                                   : null,
                             );
@@ -1938,7 +2023,7 @@ final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
   Widget build(BuildContext context) {
     final state = ref.watch(mobileControllerProvider);
     final parentRef = widget.thread.parentRef;
-    if (parentRef == null) return const SizedBox.shrink();
+    if (parentRef == null) return SizedBox.shrink();
     KaedeChannel? forum;
     for (final channel
         in state.activeGuild?.channels ?? const <KaedeChannel>[]) {
@@ -1947,7 +2032,7 @@ final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
         break;
       }
     }
-    if (forum?.isForum != true) return const SizedBox.shrink();
+    if (forum?.isForum != true) return SizedBox.shrink();
     final rawEmoji = forum!.defaultReactionEmoji;
     final name = '${rawEmoji?['emoji_name'] ?? ''}'.trim();
     final id = '${rawEmoji?['emoji_id'] ?? ''}'.trim();
@@ -1963,10 +2048,10 @@ final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
     final customRef = customEmojiRef(id, forum.ref.domain);
     final starter = widget.thread.starterMessage ?? state.messages.firstOrNull;
     return Container(
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: KaedeColors.border)),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: context.kaede.border)),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
+      padding: EdgeInsets.fromLTRB(12, 7, 12, 7),
       alignment: Alignment.centerLeft,
       child: OutlinedButton.icon(
         onPressed: _busy ||
@@ -2000,7 +2085,7 @@ final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
                     : ':${_customEmoji!.name}:',
                 size: 18,
               ),
-        label: const Text('React to Post'),
+        label: Text('React to Post'),
       ),
     );
   }
@@ -2013,11 +2098,13 @@ final class _ChannelDetailsSheet extends ConsumerStatefulWidget {
     required this.channel,
     required this.guild,
     required this.canManageChannels,
+    required this.onPins,
   });
 
   final KaedeChannel channel;
   final KaedeGuild? guild;
   final bool canManageChannels;
+  final VoidCallback onPins;
 
   @override
   ConsumerState<_ChannelDetailsSheet> createState() =>
@@ -2047,6 +2134,10 @@ final class _ChannelDetailsSheetState
       channels: guild.channels,
       e2eeActivationEnabled:
           ref.read(mobileControllerProvider).e2eeActivationEnabled,
+      loadVoiceRegions: () => ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .voiceRegions(guild.ref),
     );
     if (draft == null || !mounted) return;
     setState(() => _busy = true);
@@ -2061,7 +2152,7 @@ final class _ChannelDetailsSheetState
       await controller.refreshNavigation();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Channel saved')),
+          SnackBar(content: Text('Channel saved')),
         );
       }
     } on Object catch (error) {
@@ -2090,7 +2181,7 @@ final class _ChannelDetailsSheetState
     final topic = channel.topic?.trim();
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -2098,8 +2189,10 @@ final class _ChannelDetailsSheetState
             Row(
               children: [
                 Icon(
-                  channel.type == ChannelType.voice
-                      ? Icons.volume_up_rounded
+                  _isVoiceLikeChannel(channel)
+                      ? channel.type == ChannelType.stage
+                          ? Icons.record_voice_over_outlined
+                          : Icons.volume_up_rounded
                       : channel.type == ChannelType.announcement
                           ? Icons.campaign_rounded
                           : channel.isForum
@@ -2107,9 +2200,9 @@ final class _ChannelDetailsSheetState
                               : channel.type == ChannelType.tracker
                                   ? Icons.view_kanban_outlined
                                   : Icons.tag_rounded,
-                  color: KaedeColors.muted,
+                  color: context.kaede.muted,
                 ),
-                const SizedBox(width: 8),
+                SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     channel.name ?? 'channel',
@@ -2121,13 +2214,20 @@ final class _ChannelDetailsSheetState
               ],
             ),
             if (topic?.isNotEmpty == true) ...[
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               Text(
                 topic!,
-                style: const TextStyle(color: KaedeColors.muted, height: 1.4),
+                style: TextStyle(color: context.kaede.muted, height: 1.4),
               ),
             ],
-            const SizedBox(height: 18),
+            SizedBox(height: 18),
+            if (supportsPinnedMessages(channel))
+              _SettingsRow(
+                icon: Icons.push_pin_outlined,
+                title: 'Pins',
+                subtitle: 'Messages saved in this channel',
+                onTap: widget.onPins,
+              ),
             if (widget.canManageChannels)
               _SettingsRow(
                 icon: Icons.edit_outlined,
@@ -2141,8 +2241,8 @@ final class _ChannelDetailsSheetState
                     ? Icons.lock_rounded
                     : Icons.lock_open_rounded,
                 iconColor: channel.encryptionMode == 'e2ee'
-                    ? KaedeColors.mint
-                    : KaedeColors.muted,
+                    ? context.kaede.mint
+                    : context.kaede.muted,
                 title: 'End-to-end encryption',
                 subtitle: channel.encryptionMode == 'e2ee'
                     ? channel.encryptionState == 'active'
@@ -2159,9 +2259,9 @@ final class _ChannelDetailsSheetState
                         ),
               ),
             if (!widget.canManageChannels && !showEncryption)
-              const Text(
+              Text(
                 'You do not have permission to change this channel.',
-                style: TextStyle(color: KaedeColors.muted, fontSize: 13),
+                style: TextStyle(color: context.kaede.muted, fontSize: 13),
               ),
             if (widget.guild != null && widget.canManageChannels)
               _SettingsRow(
@@ -2180,6 +2280,29 @@ final class _ChannelDetailsSheetState
                         );
                       },
               ),
+            if (state.developerMode) ...[
+              _SettingsRow(
+                icon: Icons.badge_outlined,
+                title: 'Copy channel ID',
+                subtitle: channel.ref.wire,
+                onTap: () => copyDeveloperId(
+                  context,
+                  value: channel.ref.wire,
+                  label: 'Channel',
+                ),
+              ),
+              if (widget.guild case final guild?)
+                _SettingsRow(
+                  icon: Icons.badge_outlined,
+                  title: 'Copy server ID',
+                  subtitle: guild.ref.wire,
+                  onTap: () => copyDeveloperId(
+                    context,
+                    value: guild.ref.wire,
+                    label: 'Server',
+                  ),
+                ),
+            ],
           ],
         ),
       ),
@@ -2189,9 +2312,13 @@ final class _ChannelDetailsSheetState
 
 /// One-to-one conversation details, including the encryption decision.
 final class _DirectMessageDetailsSheet extends ConsumerWidget {
-  const _DirectMessageDetailsSheet({required this.channel});
+  const _DirectMessageDetailsSheet({
+    required this.channel,
+    required this.onPins,
+  });
 
   final KaedeChannel channel;
+  final VoidCallback onPins;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -2219,7 +2346,7 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
         current.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -2228,7 +2355,13 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
               'Conversation settings',
               style: Theme.of(context).textTheme.headlineSmall,
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
+            _SettingsRow(
+              icon: Icons.push_pin_outlined,
+              title: 'Pins',
+              subtitle: 'Messages saved in this conversation',
+              onTap: onPins,
+            ),
             if (recipient != null)
               _SettingsRow(
                 icon: Icons.person_outline_rounded,
@@ -2248,8 +2381,8 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
                     ? Icons.lock_rounded
                     : Icons.lock_open_rounded,
                 iconColor: current.encryptionMode == 'e2ee'
-                    ? KaedeColors.mint
-                    : KaedeColors.muted,
+                    ? context.kaede.mint
+                    : context.kaede.muted,
                 title: 'End-to-end encryption',
                 subtitle: current.encryptionMode == 'e2ee'
                     ? current.encryptionState == 'active'
@@ -2262,6 +2395,13 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
                   current,
                   canManage: true,
                 ),
+              ),
+            if (current.encryptionMode == 'e2ee')
+              _SettingsRow(
+                icon: Icons.apps_outlined,
+                title: 'Apps in this conversation',
+                subtitle: 'Review consent, devices, and history access',
+                onTap: () => _showDmBotE2eeParticipation(context, ref, current),
               ),
           ],
         ),
@@ -2288,23 +2428,23 @@ final class _SettingsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
+        padding: EdgeInsets.only(bottom: 8),
         child: Material(
-          color: KaedeColors.raised,
+          color: context.kaede.raised,
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: InkWell(
             onTap: onTap,
             borderRadius: BorderRadius.circular(KaedeRadius.medium),
             child: Container(
-              padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+              padding: EdgeInsets.fromLTRB(14, 12, 10, 12),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                border: Border.all(color: KaedeColors.border),
+                border: Border.all(color: context.kaede.border),
               ),
               child: Row(
                 children: [
-                  Icon(icon, size: 19, color: iconColor ?? KaedeColors.muted),
-                  const SizedBox(width: 12),
+                  Icon(icon, size: 19, color: iconColor ?? context.kaede.muted),
+                  SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2313,7 +2453,7 @@ final class _SettingsRow extends StatelessWidget {
                           title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontWeight: FontWeight.w600,
                             fontSize: 14.5,
                           ),
@@ -2322,8 +2462,8 @@ final class _SettingsRow extends StatelessWidget {
                           Text(
                             detail,
                             maxLines: 2,
-                            style: const TextStyle(
-                              color: KaedeColors.muted,
+                            style: TextStyle(
+                              color: context.kaede.muted,
                               fontSize: 12,
                               height: 1.3,
                             ),
@@ -2331,8 +2471,7 @@ final class _SettingsRow extends StatelessWidget {
                       ],
                     ),
                   ),
-                  const Icon(Icons.chevron_right_rounded,
-                      color: KaedeColors.muted),
+                  Icon(Icons.chevron_right_rounded, color: context.kaede.muted),
                 ],
               ),
             ),
@@ -2355,6 +2494,7 @@ final class _PinnedMessagesSheetState
     extends ConsumerState<_PinnedMessagesSheet> {
   List<KaedeMessage> _messages = const [];
   final _unpinning = <EntityRef>{};
+  StreamSubscription<Map<String, Object?>>? _pinSubscription;
   var _loading = true;
   String? _error;
 
@@ -2363,7 +2503,20 @@ final class _PinnedMessagesSheetState
   @override
   void initState() {
     super.initState();
+    _pinSubscription =
+        ref.read(mobileControllerProvider.notifier).pinEvents.listen((event) {
+      if (event['channel_id'] == widget.channel.ref.id.value &&
+          event['channel_domain'] == widget.channel.ref.domain.value) {
+        unawaited(_load());
+      }
+    });
     unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    unawaited(_pinSubscription?.cancel());
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -2378,7 +2531,8 @@ final class _PinnedMessagesSheetState
         messages = await (await controller.e2eeClient())
             .decryptMessages(widget.channel, messages);
       }
-      messages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      messages.sort((a, b) =>
+          (b.pinnedAt ?? b.createdAt).compareTo(a.pinnedAt ?? a.createdAt));
       if (mounted) setState(() => _messages = List.unmodifiable(messages));
     } on Object catch (error) {
       if (mounted) {
@@ -2401,6 +2555,24 @@ final class _PinnedMessagesSheetState
 
   Future<void> _unpin(KaedeMessage message) async {
     if (_unpinning.contains(message.ref)) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Remove this pin?'),
+        content: Text('The message will remain in the conversation.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Remove pin'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     setState(() {
       _unpinning.add(message.ref);
       _error = null;
@@ -2434,12 +2606,12 @@ final class _PinnedMessagesSheetState
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 2, 8, 12),
+                padding: EdgeInsets.fromLTRB(20, 2, 8, 12),
                 child: Row(
                   children: [
-                    const Icon(Icons.push_pin_rounded),
-                    const SizedBox(width: 10),
-                    const Expanded(
+                    Icon(Icons.push_pin_rounded),
+                    SizedBox(width: 10),
+                    Expanded(
                       child: Text(
                         'Pinned messages',
                         style: TextStyle(
@@ -2451,7 +2623,7 @@ final class _PinnedMessagesSheetState
                     IconButton(
                       tooltip: 'Close',
                       onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close_rounded),
+                      icon: Icon(Icons.close_rounded),
                     ),
                   ],
                 ),
@@ -2460,38 +2632,36 @@ final class _PinnedMessagesSheetState
                 Material(
                   color: Theme.of(context).colorScheme.errorContainer,
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                    padding: EdgeInsets.fromLTRB(16, 8, 8, 8),
                     child: Row(
                       children: [
                         Expanded(child: Text(error)),
-                        TextButton(
-                            onPressed: _load, child: const Text('Retry')),
+                        TextButton(onPressed: _load, child: Text('Retry')),
                       ],
                     ),
                   ),
                 ),
               Expanded(
                 child: _loading
-                    ? const Center(child: CircularProgressIndicator())
+                    ? Center(child: CircularProgressIndicator())
                     : _error != null && _messages.isEmpty
-                        ? const Center(
+                        ? Center(
                             child: Padding(
                               padding: EdgeInsets.all(28),
                               child: Text(
                                 'Pinned messages are unavailable right now.',
                                 textAlign: TextAlign.center,
-                                style: TextStyle(color: KaedeColors.muted),
+                                style: TextStyle(color: context.kaede.muted),
                               ),
                             ),
                           )
                         : _messages.isEmpty
                             ? const _EmptyPinnedMessages()
                             : ListView.separated(
-                                padding:
-                                    const EdgeInsets.fromLTRB(12, 8, 12, 20),
+                                padding: EdgeInsets.fromLTRB(12, 8, 12, 20),
                                 itemCount: _messages.length,
                                 separatorBuilder: (_, __) =>
-                                    const SizedBox(height: 8),
+                                    SizedBox(height: 8),
                                 itemBuilder: (context, index) {
                                   final message = _messages[index];
                                   final author = message.author?.name ??
@@ -2508,11 +2678,15 @@ final class _PinnedMessagesSheetState
                                       key: ValueKey(
                                           'pinned-${message.ref.wire}'),
                                       onTap: () => _jump(message),
+                                      onLongPress: _canManage &&
+                                              !_unpinning.contains(message.ref)
+                                          ? () => _unpin(message)
+                                          : null,
                                       title: Text(
                                         author,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
@@ -2530,18 +2704,16 @@ final class _PinnedMessagesSheetState
                                                   : () => _unpin(message),
                                               icon: _unpinning
                                                       .contains(message.ref)
-                                                  ? const SizedBox.square(
+                                                  ? SizedBox.square(
                                                       dimension: 18,
                                                       child:
                                                           CircularProgressIndicator(
                                                         strokeWidth: 2,
                                                       ),
                                                     )
-                                                  : const Icon(
-                                                      Icons.push_pin_rounded),
+                                                  : Icon(Icons.close_rounded),
                                             )
-                                          : const Icon(
-                                              Icons.chevron_right_rounded),
+                                          : Icon(Icons.chevron_right_rounded),
                                     ),
                                   );
                                 },
@@ -2557,13 +2729,14 @@ final class _EmptyPinnedMessages extends StatelessWidget {
   const _EmptyPinnedMessages();
 
   @override
-  Widget build(BuildContext context) => const Center(
+  Widget build(BuildContext context) => Center(
         child: Padding(
           padding: EdgeInsets.all(28),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.push_pin_outlined, size: 38, color: KaedeColors.muted),
+              Icon(Icons.push_pin_outlined,
+                  size: 38, color: context.kaede.muted),
               SizedBox(height: 12),
               Text(
                 'No pinned messages yet.',
@@ -2573,7 +2746,7 @@ final class _EmptyPinnedMessages extends StatelessWidget {
               Text(
                 'Pinned messages stay easy to find here.',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: KaedeColors.muted),
+                style: TextStyle(color: context.kaede.muted),
               ),
             ],
           ),
@@ -2596,12 +2769,12 @@ final class _DmCallRoom extends ConsumerWidget {
                   : channel.recipients.first.name)),
           actions: [
             Padding(
-              padding: const EdgeInsets.only(right: 10),
+              padding: EdgeInsets.only(right: 10),
               child: TextButton.icon(
                 style: TextButton.styleFrom(
-                  foregroundColor: KaedeColors.danger,
+                  foregroundColor: context.kaede.danger,
                 ),
-                icon: const Icon(Icons.call_end_rounded, size: 18),
+                icon: Icon(Icons.call_end_rounded, size: 18),
                 onPressed: () async {
                   try {
                     await ref
@@ -2618,7 +2791,7 @@ final class _DmCallRoom extends ConsumerWidget {
                     }
                   }
                 },
-                label: const Text('End call'),
+                label: Text('End call'),
               ),
             ),
           ],
@@ -2628,9 +2801,13 @@ final class _DmCallRoom extends ConsumerWidget {
 }
 
 final class _GroupDmSettings extends ConsumerStatefulWidget {
-  const _GroupDmSettings({required this.channel});
+  const _GroupDmSettings({
+    required this.channel,
+    required this.onPins,
+  });
 
   final KaedeChannel channel;
+  final VoidCallback onPins;
 
   @override
   ConsumerState<_GroupDmSettings> createState() => _GroupDmSettingsState();
@@ -2705,25 +2882,31 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                 'Group settings',
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
-              const SizedBox(height: 4),
+              SizedBox(height: 4),
               Text(
                 '${channel.recipients.length + 1} members · anyone can add a '
                 'friend',
-                style: const TextStyle(
-                  color: KaedeColors.muted,
+                style: TextStyle(
+                  color: context.kaede.muted,
                   fontSize: 12.5,
                 ),
               ),
-              const SizedBox(height: 20),
+              SizedBox(height: 20),
+              _SettingsRow(
+                icon: Icons.push_pin_outlined,
+                title: 'Pins',
+                subtitle: 'Messages saved in this conversation',
+                onTap: widget.onPins,
+              ),
               TextField(
                 controller: _name,
                 maxLength: 100,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Group name',
                   counterText: '',
                 ),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerRight,
                 child: FilledButton.tonal(
@@ -2740,19 +2923,19 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                       : _name.text.trim(),
                                 );
                           }),
-                  child: const Text('Save name'),
+                  child: Text('Save name'),
                 ),
               ),
-              const SizedBox(height: 18),
+              SizedBox(height: 18),
               TextField(
                 controller: _invite,
                 onChanged: (_) => setState(() {}),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Add a friend',
                   hintText: '@friend@example.net',
                 ),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerRight,
                 child: FilledButton.tonalIcon(
@@ -2766,15 +2949,15 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                     channel.ref, _invite.text.trim());
                             _invite.clear();
                           }),
-                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
-                  label: const Text('Add member'),
+                  icon: Icon(Icons.person_add_alt_1_rounded, size: 18),
+                  label: Text('Add member'),
                 ),
               ),
               if (channel.encryptionMode == 'e2ee' ||
                   mobile.e2eeActivationEnabled) ...[
-                const SizedBox(height: 18),
+                SizedBox(height: 18),
                 Material(
-                  color: KaedeColors.raised,
+                  color: context.kaede.raised,
                   borderRadius: BorderRadius.circular(KaedeRadius.medium),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(KaedeRadius.medium),
@@ -2787,10 +2970,10 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                               canManage: isOwner,
                             ),
                     child: Container(
-                      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                      padding: EdgeInsets.fromLTRB(14, 12, 10, 12),
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                        border: Border.all(color: KaedeColors.border),
+                        border: Border.all(color: context.kaede.border),
                       ),
                       child: Row(
                         children: [
@@ -2800,15 +2983,15 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                 : Icons.lock_open_rounded,
                             size: 19,
                             color: channel.encryptionMode == 'e2ee'
-                                ? KaedeColors.mint
-                                : KaedeColors.muted,
+                                ? context.kaede.mint
+                                : context.kaede.muted,
                           ),
-                          const SizedBox(width: 12),
+                          SizedBox(width: 12),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
+                                Text(
                                   'End-to-end encryption',
                                   style: TextStyle(
                                     fontWeight: FontWeight.w600,
@@ -2822,45 +3005,58 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                           : 'Paused until keys rotate'
                                       : 'Optional · review the tradeoffs '
                                           'before enabling',
-                                  style: const TextStyle(
-                                    color: KaedeColors.muted,
+                                  style: TextStyle(
+                                    color: context.kaede.muted,
                                     fontSize: 12,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                          const Icon(Icons.chevron_right_rounded,
-                              color: KaedeColors.muted),
+                          Icon(Icons.chevron_right_rounded,
+                              color: context.kaede.muted),
                         ],
                       ),
                     ),
                   ),
                 ),
+                if (channel.encryptionMode == 'e2ee')
+                  _SettingsRow(
+                    icon: Icons.apps_outlined,
+                    title: 'Apps in this conversation',
+                    subtitle: 'Review each member’s consent and app devices',
+                    onTap: _busy
+                        ? null
+                        : () => _showDmBotE2eeParticipation(
+                              context,
+                              ref,
+                              channel,
+                            ),
+                  ),
               ],
-              const SizedBox(height: 20),
-              const Text(
+              SizedBox(height: 20),
+              Text(
                 'MEMBERS',
                 style: TextStyle(
-                  color: KaedeColors.muted,
+                  color: context.kaede.muted,
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
                   letterSpacing: .9,
                 ),
               ),
-              const SizedBox(height: 4),
+              SizedBox(height: 4),
               if (current != null)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: UserAvatar(
                     user: current,
                     radius: 18,
-                    ringColor: KaedeColors.panel,
+                    ringColor: context.kaede.panel,
                   ),
                   title: Text(current.name),
-                  subtitle: const Text('You'),
+                  subtitle: Text('You'),
                   trailing: current.ref == channel.ownerRef
-                      ? const Chip(label: Text('Owner'))
+                      ? Chip(label: Text('Owner'))
                       : null,
                 ),
               for (final member in channel.recipients)
@@ -2871,7 +3067,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                     radius: 18,
                     presence:
                         mobile.presenceByUser[member.ref] ?? member.presence,
-                    ringColor: KaedeColors.panel,
+                    ringColor: context.kaede.panel,
                   ),
                   title: Text(member.name),
                   subtitle: Text(member.handle),
@@ -2881,7 +3077,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                     mobile.presenceByUser[member.ref] ?? member.presence,
                   ),
                   trailing: member.ref == channel.ownerRef
-                      ? const Chip(label: Text('Owner'))
+                      ? Chip(label: Text('Owner'))
                       : isOwner
                           ? IconButton(
                               tooltip: 'Remove member',
@@ -2894,33 +3090,33 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                         channel.ref,
                                         member.ref,
                                       )),
-                              icon: const Icon(Icons.person_remove_outlined),
+                              icon: Icon(Icons.person_remove_outlined),
                             )
                           : null,
                 ),
               if (_error case final error?)
                 Padding(
-                  padding: const EdgeInsets.only(top: 10),
+                  padding: EdgeInsets.only(top: 10),
                   child: Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: KaedeColors.dangerSoft,
+                      color: context.kaede.dangerSoft,
                       borderRadius: BorderRadius.circular(KaedeRadius.medium),
                     ),
                     child: Text(
                       error,
-                      style: const TextStyle(
-                        color: KaedeColors.danger,
+                      style: TextStyle(
+                        color: context.kaede.danger,
                         fontSize: 13,
                       ),
                     ),
                   ),
                 ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: KaedeColors.danger,
-                  side: const BorderSide(color: KaedeColors.dangerSoft),
+                  foregroundColor: context.kaede.danger,
+                  side: BorderSide(color: context.kaede.dangerSoft),
                 ),
                 onPressed: _busy
                     ? null
@@ -2933,8 +3129,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                             Navigator.of(context).pop();
                           }
                         }),
-                icon: const Icon(Icons.logout_rounded),
-                label: const Text('Leave group'),
+                icon: Icon(Icons.logout_rounded),
+                label: Text('Leave group'),
               ),
             ],
           ),
@@ -3096,13 +3292,13 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
           );
     final total = members?.length ?? 0;
     return ColoredBox(
-      color: KaedeColors.sidebar,
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: Column(
         children: [
           ConversationCompactHeader(
             leading: IconButton(
               onPressed: widget.onBack,
-              icon: const Icon(Icons.arrow_back_rounded),
+              icon: Icon(Icons.arrow_back_rounded),
             ),
             title: 'Members',
             subtitle: members == null
@@ -3115,17 +3311,17 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
               child: _error != null && members == null
                   ? _MemberListError(message: _error!, onRetry: _load)
                   : members == null
-                      ? const Center(child: CircularProgressIndicator())
+                      ? Center(child: CircularProgressIndicator())
                       : RefreshIndicator(
                           onRefresh: _load,
                           child: CustomScrollView(
                             slivers: [
                               if (_partial)
-                                const SliverToBoxAdapter(
+                                SliverToBoxAdapter(
                                   child: _StatusBanner(
                                     icon: Icons.info_outline_rounded,
-                                    background: KaedeColors.warningSoft,
-                                    foreground: KaedeColors.warning,
+                                    background: context.kaede.warningSoft,
+                                    foreground: context.kaede.warning,
                                     title: 'Partial member list',
                                     subtitle:
                                         'Only members seen in cached messages '
@@ -3171,9 +3367,9 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                                   widget.onBack,
                                                 );
                                               },
-                                              icon: const Icon(Icons
+                                              icon: Icon(Icons
                                                   .chat_bubble_outline_rounded),
-                                              label: const Text('Message'),
+                                              label: Text('Message'),
                                             ),
                                         ],
                                       ),
@@ -3181,7 +3377,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                   },
                                 ),
                               ],
-                              const SliverToBoxAdapter(
+                              SliverToBoxAdapter(
                                 child: SizedBox(height: 16),
                               ),
                             ],
@@ -3197,7 +3393,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
 
 /// One heading plus its members in the roster.
 final class MemberListSection {
-  const MemberListSection({
+  MemberListSection({
     required this.title,
     required this.members,
     required this.offline,
@@ -3305,7 +3501,7 @@ final class _MemberRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 1),
         child: Material(
           color: Colors.transparent,
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
@@ -3315,32 +3511,42 @@ final class _MemberRow extends StatelessWidget {
             child: Opacity(
               opacity: dimmed ? .55 : 1,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 7, 10, 7),
+                padding: EdgeInsets.fromLTRB(8, 7, 10, 7),
                 child: Row(
                   children: [
                     UserAvatar(user: user, radius: 17, presence: presence),
-                    const SizedBox(width: 11),
+                    SizedBox(width: 11),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            nickname ?? user.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 14.5,
-                              color: nameColor,
-                            ),
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  nickname ?? user.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14.5,
+                                    color: nameColor,
+                                  ),
+                                ),
+                              ),
+                              if (user.isApplication) ...[
+                                const SizedBox(width: 5),
+                                const ApplicationTag(compact: true),
+                              ],
+                            ],
                           ),
                           if (user.customStatus?.trim().isNotEmpty == true)
                             Text(
                               user.customStatus!.trim(),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: KaedeColors.muted,
+                              style: TextStyle(
+                                color: context.kaede.muted,
                                 fontSize: 12,
                               ),
                             ),
@@ -3365,23 +3571,23 @@ final class _MemberListError extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
-          padding: const EdgeInsets.all(28),
+          padding: EdgeInsets.all(28),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.people_outline_rounded,
-                  size: 34, color: KaedeColors.muted),
-              const SizedBox(height: 12),
+              Icon(Icons.people_outline_rounded,
+                  size: 34, color: context.kaede.muted),
+              SizedBox(height: 12),
               Text(
                 message,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: KaedeColors.muted),
+                style: TextStyle(color: context.kaede.muted),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: 14),
               OutlinedButton.icon(
                 onPressed: onRetry,
-                icon: const Icon(Icons.refresh_rounded),
-                label: const Text('Try again'),
+                icon: Icon(Icons.refresh_rounded),
+                label: Text('Try again'),
               ),
             ],
           ),
@@ -3476,13 +3682,13 @@ final class _ServerRail extends ConsumerWidget {
     return SizedBox(
       width: 72,
       child: ColoredBox(
-        color: KaedeColors.rail,
+        color: Theme.of(context).colorScheme.surfaceContainerLowest,
         child: SafeArea(
           right: false,
           bottom: false,
           child: Column(
             children: [
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               _RailButton(
                 label: 'Direct messages',
                 active: state.selectedGuild == null,
@@ -3494,19 +3700,19 @@ final class _ServerRail extends ConsumerWidget {
                 unread: state.dms.any(
                   (dm) => (state.unreadCounts[dm.ref] ?? 0) > 0,
                 ),
-                activeColor: KaedeColors.coral,
+                activeColor: context.kaede.coral,
                 child: Icon(
                   Icons.chat_bubble_rounded,
                   size: 23,
                   color: state.selectedGuild == null
-                      ? KaedeColors.onCoral
-                      : KaedeColors.textSoft,
+                      ? context.kaede.onCoral
+                      : context.kaede.textSoft,
                 ),
               ),
               Container(
-                margin: const EdgeInsets.fromLTRB(18, 2, 18, 8),
+                margin: EdgeInsets.fromLTRB(18, 2, 18, 8),
                 height: 1,
-                color: KaedeColors.border,
+                color: context.kaede.border,
               ),
               Expanded(
                 child: ReorderableListView.builder(
@@ -3533,7 +3739,7 @@ final class _ServerRail extends ConsumerWidget {
                             builder: (context) {
                               final guild = guildByRef[item.guild];
                               return guild == null
-                                  ? const SizedBox.shrink()
+                                  ? SizedBox.shrink()
                                   : _RailButton(
                                       label: guild.name,
                                       active: guild.ref == state.selectedGuild,
@@ -3580,10 +3786,10 @@ final class _ServerRail extends ConsumerWidget {
                 label: 'Add a guild',
                 active: false,
                 onTap: onAddGuild,
-                idleColor: KaedeColors.rail,
+                idleColor: context.kaede.rail,
                 border: true,
-                child: const Icon(Icons.add_rounded,
-                    color: KaedeColors.mint, size: 26),
+                child: Icon(Icons.add_rounded,
+                    color: context.kaede.mint, size: 26),
               ),
               _RailButton(
                 label: 'Organize guilds',
@@ -3597,12 +3803,12 @@ final class _ServerRail extends ConsumerWidget {
                     guilds: state.guilds,
                   ),
                 ),
-                idleColor: KaedeColors.rail,
+                idleColor: context.kaede.rail,
                 border: true,
-                child: const Icon(Icons.create_new_folder_outlined,
-                    size: 21, color: KaedeColors.muted),
+                child: Icon(Icons.create_new_folder_outlined,
+                    size: 21, color: context.kaede.muted),
               ),
-              const SizedBox(height: 4),
+              SizedBox(height: 4),
             ],
           ),
         ),
@@ -3637,12 +3843,12 @@ final class _GuildRailFolder extends StatelessWidget {
     final holdsSelection =
         guilds.any((guild) => guild.ref == state.selectedGuild);
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      margin: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      padding: EdgeInsets.symmetric(vertical: 3),
       decoration: BoxDecoration(
         color: group.collapsed
             ? Colors.transparent
-            : KaedeColors.panel.withValues(alpha: .72),
+            : context.kaede.panel.withValues(alpha: .72),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
@@ -3659,7 +3865,7 @@ final class _GuildRailFolder extends StatelessWidget {
               group.collapsed
                   ? Icons.folder_rounded
                   : Icons.folder_open_rounded,
-              color: KaedeColors.coralText,
+              color: context.kaede.coralText,
               size: 25,
             ),
           ),
@@ -3734,9 +3940,9 @@ final class _GuildOrganizerSheetState
                   controller: name,
                   autofocus: true,
                   maxLength: 32,
-                  decoration: const InputDecoration(labelText: 'Group name'),
+                  decoration: InputDecoration(labelText: 'Group name'),
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 Flexible(
                   child: ListView(
                     shrinkWrap: true,
@@ -3764,7 +3970,7 @@ final class _GuildOrganizerSheetState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: Text('Cancel'),
             ),
             FilledButton(
               onPressed: name.text.trim().isEmpty || selected.isEmpty
@@ -3773,7 +3979,7 @@ final class _GuildOrganizerSheetState
                         context,
                         _GuildGroupDraft(name.text.trim(), selected.toList()),
                       ),
-              child: const Text('Save group'),
+              child: Text('Save group'),
             ),
           ],
         ),
@@ -3785,7 +3991,7 @@ final class _GuildOrganizerSheetState
       _navigation = existing == null
           ? createGuildNavigationGroup(
               _navigation,
-              const Uuid().v4(),
+              Uuid().v4(),
               draft.name,
               draft.guilds,
             )
@@ -3805,20 +4011,20 @@ final class _GuildOrganizerSheetState
       child: SizedBox(
         height: MediaQuery.sizeOf(context).height * .84,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+          padding: EdgeInsets.fromLTRB(18, 0, 18, 18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 'Organize guilds',
                 style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
               ),
-              const SizedBox(height: 4),
-              const Text(
+              SizedBox(height: 4),
+              Text(
                 'Press and hold a row, then drag it. Groups and ordering sync to web and desktop.',
-                style: TextStyle(color: KaedeColors.muted),
+                style: TextStyle(color: context.kaede.muted),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: 12),
               Expanded(
                 child: ReorderableListView.builder(
                   itemCount: _navigation.items.length,
@@ -3836,11 +4042,11 @@ final class _GuildOrganizerSheetState
                       return ListTile(
                         key: ValueKey('organize-guild:${item.guild.wire}'),
                         leading: guild == null
-                            ? const Icon(Icons.public_off_rounded)
+                            ? Icon(Icons.public_off_rounded)
                             : GuildIcon(guild: guild, size: 42),
                         title: Text(guild?.name ?? 'Unavailable guild'),
                         subtitle: Text(item.guild.domain.value),
-                        trailing: const Icon(Icons.drag_handle_rounded),
+                        trailing: Icon(Icons.drag_handle_rounded),
                       );
                     }
                     final group = item as GuildNavigationGroupItem;
@@ -3850,10 +4056,10 @@ final class _GuildOrganizerSheetState
                         .join(', ');
                     return ListTile(
                       key: ValueKey('organize-group:${group.id}'),
-                      leading: const CircleAvatar(
-                        backgroundColor: KaedeColors.raised,
+                      leading: CircleAvatar(
+                        backgroundColor: context.kaede.raised,
                         child: Icon(Icons.folder_rounded,
-                            color: KaedeColors.coral),
+                            color: context.kaede.coral),
                       ),
                       title: Text(group.name),
                       subtitle: Text(names),
@@ -3879,15 +4085,15 @@ final class _GuildOrganizerSheetState
                   },
                 ),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: 12),
               Row(
                 children: [
                   OutlinedButton.icon(
                     onPressed: _editGroup,
-                    icon: const Icon(Icons.create_new_folder_outlined),
-                    label: const Text('Create group'),
+                    icon: Icon(Icons.create_new_folder_outlined),
+                    label: Text('Create group'),
                   ),
-                  const Spacer(),
+                  Spacer(),
                   FilledButton.icon(
                     onPressed: () async {
                       await ref
@@ -3895,8 +4101,8 @@ final class _GuildOrganizerSheetState
                           .saveGuildNavigation(_navigation);
                       if (context.mounted) Navigator.pop(context);
                     },
-                    icon: const Icon(Icons.sync_rounded),
-                    label: const Text('Save'),
+                    icon: Icon(Icons.sync_rounded),
+                    label: Text('Save'),
                   ),
                 ],
               ),
@@ -3962,11 +4168,11 @@ final class _DirectMessageBrowser extends ConsumerWidget {
         .where((item) => '${item['type']}' == 'pending_in')
         .length;
     return ColoredBox(
-      color: KaedeColors.sidebar,
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 10, 4),
+            padding: EdgeInsets.fromLTRB(16, 12, 10, 4),
             child: Row(
               children: [
                 Expanded(
@@ -3990,14 +4196,14 @@ final class _DirectMessageBrowser extends ConsumerWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            padding: EdgeInsets.fromLTRB(12, 8, 12, 4),
             child: _SearchField(
               hint: 'Search messages',
               onTap: () => _openSearch(context, ref),
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 2),
+            padding: EdgeInsets.fromLTRB(12, 4, 12, 2),
             child: _NavRow(
               icon: Icons.people_alt_rounded,
               title: 'Friends',
@@ -4019,7 +4225,7 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                 state,
                 onOpenChannel,
               ),
-              icon: const Icon(Icons.add_rounded, size: 18),
+              icon: Icon(Icons.add_rounded, size: 18),
             ),
           ),
           Expanded(
@@ -4030,7 +4236,7 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                     body: 'Start a message with a friend to see it here.',
                   )
                 : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                    padding: EdgeInsets.fromLTRB(8, 0, 8, 12),
                     itemCount: state.dms.length,
                     itemBuilder: (context, index) {
                       final dm = state.dms[index];
@@ -4100,27 +4306,27 @@ final class _SearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-        color: KaedeColors.canvas,
+        color: Theme.of(context).colorScheme.surfaceDim,
         borderRadius: BorderRadius.circular(KaedeRadius.small),
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(KaedeRadius.small),
           child: Container(
             height: 38,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
+            padding: EdgeInsets.symmetric(horizontal: 10),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(KaedeRadius.small),
-              border: Border.all(color: KaedeColors.border),
+              border: Border.all(color: context.kaede.border),
             ),
             child: Row(
               children: [
-                const Icon(Icons.search_rounded,
-                    size: 17, color: KaedeColors.muted),
-                const SizedBox(width: 8),
+                Icon(Icons.search_rounded,
+                    size: 17, color: context.kaede.muted),
+                SizedBox(width: 8),
                 Text(
                   hint,
-                  style: const TextStyle(
-                    color: KaedeColors.muted,
+                  style: TextStyle(
+                    color: context.kaede.muted,
                     fontSize: 13.5,
                   ),
                 ),
@@ -4146,8 +4352,8 @@ final class _SidebarSectionHeader extends StatelessWidget {
             Expanded(
               child: Text(
                 title.toUpperCase(),
-                style: const TextStyle(
-                  color: KaedeColors.muted,
+                style: TextStyle(
+                  color: context.kaede.muted,
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
                   letterSpacing: .9,
@@ -4176,17 +4382,54 @@ final class _GuildBrowser extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = ref.read(mobileControllerProvider.notifier);
-    final localGuild = controller.api.tokens?.instance == guild.ref.domain;
-    final canManageChannels = localGuild &&
-        (state.user?.ref == guild.ownerRef ||
-            guild.allows(Permission.manageChannels));
-    final canCreateInvite = localGuild &&
-        (state.user?.ref == guild.ownerRef ||
-            guild.allows(Permission.createInvite));
-    final banner = publicAssetUri(guild.ref.domain, guild.bannerHash,
-        variant: 'thumbnail_1024');
     final channels = [...guild.channels]
       ..sort((left, right) => left.position.compareTo(right.position));
+    final canManageChannels = state.user?.ref == guild.ownerRef ||
+        guild.allows(Permission.manageChannels);
+    final inviteTargets = guildInviteCreationTargets(
+      channels,
+      isOwner: state.user?.ref == guild.ownerRef,
+    );
+    final canCreateInvite = inviteTargets.isNotEmpty;
+    final canCreateExternalEvents = state.user?.ref == guild.ownerRef ||
+        guild.allows(Permission.createEvents);
+    final canManageExternalEvents = state.user?.ref == guild.ownerRef ||
+        guild.allows(Permission.manageEvents);
+    final canOpenSettings = state.user?.ref == guild.ownerRef ||
+        guild.allows(Permission.manageGuild) ||
+        guild.allows(Permission.manageChannels) ||
+        guild.allows(Permission.manageRoles) ||
+        guild.allows(Permission.kickMembers) ||
+        guild.allows(Permission.banMembers) ||
+        guild.allows(Permission.moderateMembers) ||
+        guild.allows(Permission.banInstances) ||
+        guild.allows(Permission.manageAutoModeration) ||
+        guild.allows(Permission.createGuildExpressions) ||
+        guild.allows(Permission.manageGuildExpressions) ||
+        guild.allows(Permission.manageWebhooks) ||
+        guild.allows(Permission.viewAuditLog);
+    final banner = publicAssetUri(guild.ref.domain, guild.bannerHash,
+        variant: 'thumbnail_1024');
+    final canCreateScheduledEvents = canCreateExternalEvents ||
+        channels.any(canCreateScheduledEventInChannel);
+    void openEvents({bool startCreating = false}) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => Scaffold(
+            appBar: AppBar(title: Text('${guild.name} Events')),
+            body: GuildScheduledEventsTab(
+              guild: guild,
+              repository: controller.repository,
+              currentUser: state.user,
+              canCreateExternal: canCreateExternalEvents,
+              canManageExternal: canManageExternalEvents,
+              startCreating: startCreating,
+            ),
+          ),
+        ),
+      );
+    }
+
     final children = <EntityRef, List<KaedeChannel>>{};
     for (final channel in channels) {
       if (channel.parentRef case final parent?) {
@@ -4209,13 +4452,16 @@ final class _GuildBrowser extends ConsumerWidget {
       (activeThreads[parent] ??= <KaedeChannel>[]).add(thread);
     }
     return ColoredBox(
-      color: KaedeColors.sidebar,
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: Column(
         children: [
           _GuildHeader(
             guild: guild,
             banner: banner,
-            onSettings: localGuild
+            onCreateEvent: canCreateScheduledEvents
+                ? () => openEvents(startCreating: true)
+                : null,
+            onSettings: canOpenSettings
                 ? () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (_) => GuildManagementScreen(guild: guild),
@@ -4224,7 +4470,7 @@ final class _GuildBrowser extends ConsumerWidget {
                 : null,
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+            padding: EdgeInsets.fromLTRB(12, 10, 12, 2),
             child: Row(
               children: [
                 Expanded(
@@ -4264,16 +4510,16 @@ final class _GuildBrowser extends ConsumerWidget {
                   ),
                 ),
                 if (canCreateInvite) ...[
-                  const SizedBox(width: 8),
+                  SizedBox(width: 8),
                   _SquareAction(
                     tooltip: 'Invite people',
                     icon: Icons.person_add_alt_1_rounded,
                     size: 38,
                     onTap: () async {
-                      final targets = guildTextChannelTargets(channels);
+                      final targets = inviteTargets;
                       if (targets.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
+                          SnackBar(
                             content: Text(
                               'Create a text or announcement channel before '
                               'creating an invite.',
@@ -4295,6 +4541,25 @@ final class _GuildBrowser extends ConsumerWidget {
               ],
             ),
           ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(8, 6, 8, 0),
+            child: Material(
+              color: Colors.transparent,
+              child: ListTile(
+                dense: true,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                leading: Icon(Icons.event_available_outlined, size: 21),
+                title: Text(
+                  'Events',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                trailing: Icon(Icons.chevron_right_rounded, size: 20),
+                onTap: openEvents,
+              ),
+            ),
+          ),
           GuildChannelsHeader(
             onAddChannel: canManageChannels
                 ? () => _createGuildChannel(
@@ -4308,7 +4573,7 @@ final class _GuildBrowser extends ConsumerWidget {
           ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 14),
+              padding: EdgeInsets.fromLTRB(8, 0, 8, 14),
               children: [
                 for (final channel in channels)
                   if (channel.parentRef == null)
@@ -4353,11 +4618,13 @@ final class _GuildHeader extends StatelessWidget {
   const _GuildHeader({
     required this.guild,
     required this.banner,
+    required this.onCreateEvent,
     required this.onSettings,
   });
 
   final KaedeGuild guild;
   final Uri? banner;
+  final VoidCallback? onCreateEvent;
   final VoidCallback? onSettings;
 
   @override
@@ -4370,10 +4637,10 @@ final class _GuildHeader extends StatelessWidget {
               CachedNetworkImage(
                 imageUrl: '$banner',
                 fit: BoxFit.cover,
-                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                errorWidget: (_, __, ___) => SizedBox.shrink(),
               ),
             if (banner != null)
-              const DecoratedBox(
+              DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
@@ -4391,7 +4658,7 @@ final class _GuildHeader extends StatelessWidget {
                 children: [
                   if (banner == null) ...[
                     GuildIcon(guild: guild, size: 34, borderRadius: 11),
-                    const SizedBox(width: 10),
+                    SizedBox(width: 10),
                   ],
                   Expanded(
                     child: Column(
@@ -4414,34 +4681,57 @@ final class _GuildHeader extends StatelessWidget {
                               : guild.ref.domain.value,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: KaedeColors.muted,
+                          style: TextStyle(
+                            color: context.kaede.muted,
                             fontSize: 11.5,
                           ),
                         ),
                       ],
                     ),
                   ),
-                  if (onSettings != null)
-                    IconButton(
-                      tooltip: 'Guild settings',
-                      onPressed: onSettings,
+                  if (onSettings != null || onCreateEvent != null)
+                    PopupMenuButton<String>(
+                      tooltip: 'Server menu',
+                      onSelected: (value) {
+                        if (value == 'create-event') onCreateEvent?.call();
+                        if (value == 'settings') onSettings?.call();
+                      },
+                      itemBuilder: (_) => [
+                        if (onCreateEvent != null)
+                          PopupMenuItem(
+                            value: 'create-event',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.event_available_outlined),
+                              title: Text('Create Event'),
+                            ),
+                          ),
+                        if (onSettings != null)
+                          PopupMenuItem(
+                            value: 'settings',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.settings_outlined),
+                              title: Text('Server Settings'),
+                            ),
+                          ),
+                      ],
                       style: IconButton.styleFrom(
                         backgroundColor: banner == null
                             ? Colors.transparent
                             : Colors.black26,
                       ),
-                      icon: const Icon(Icons.settings_rounded, size: 19),
+                      icon: Icon(Icons.keyboard_arrow_down_rounded, size: 21),
                     ),
                 ],
               ),
             ),
             if (banner != null)
-              const Positioned(
+              Positioned(
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: Divider(height: 1, color: KaedeColors.border),
+                child: Divider(height: 1, color: context.kaede.border),
               ),
           ],
         ),
@@ -4461,11 +4751,11 @@ final class GuildChannelsHeader extends StatelessWidget {
         padding: EdgeInsets.fromLTRB(18, 12, onAddChannel == null ? 18 : 8, 0),
         child: Row(
           children: [
-            const Expanded(
+            Expanded(
               child: Text(
                 'Channels',
                 style: TextStyle(
-                  color: KaedeColors.muted,
+                  color: context.kaede.muted,
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
                   letterSpacing: .9,
@@ -4474,20 +4764,20 @@ final class GuildChannelsHeader extends StatelessWidget {
             ),
             if (onAddChannel != null)
               TextButton.icon(
-                key: const ValueKey('guild-add-channel-button'),
+                key: ValueKey('guild-add-channel-button'),
                 style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 36),
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size(0, 36),
+                  padding: EdgeInsets.symmetric(horizontal: 8),
                   visualDensity: VisualDensity.compact,
-                  foregroundColor: KaedeColors.muted,
-                  textStyle: const TextStyle(
+                  foregroundColor: context.kaede.muted,
+                  textStyle: TextStyle(
                     fontSize: 11.5,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
                 onPressed: onAddChannel,
-                icon: const Icon(Icons.add_rounded, size: 16),
-                label: const Text('Add channel'),
+                icon: Icon(Icons.add_rounded, size: 16),
+                label: Text('Add channel'),
               ),
           ],
         ),
@@ -4505,6 +4795,7 @@ Future<void> _createGuildChannel(
     context,
     channels: channels,
     e2eeActivationEnabled: e2eeActivationEnabled,
+    loadVoiceRegions: () => controller.repository.voiceRegions(guild.ref),
   );
   if (draft == null || !context.mounted) return;
   try {
@@ -4521,7 +4812,7 @@ Future<void> _createGuildChannel(
             error,
             summary: 'Could not create the channel',
           )),
-          backgroundColor: KaedeColors.danger,
+          backgroundColor: context.kaede.danger,
         ),
       );
     }
@@ -4574,23 +4865,23 @@ final class _CategoryGroupState extends State<_CategoryGroup> {
           borderRadius: BorderRadius.circular(KaedeRadius.small),
           onTap: () => setState(() => expanded = !expanded),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 14, 8, 4),
+            padding: EdgeInsets.fromLTRB(8, 14, 8, 4),
             child: Row(
               children: [
                 AnimatedRotation(
                   turns: expanded ? 0 : -.25,
-                  duration: const Duration(milliseconds: 150),
-                  child: const Icon(Icons.keyboard_arrow_down_rounded,
-                      size: 16, color: KaedeColors.muted),
+                  duration: Duration(milliseconds: 150),
+                  child: Icon(Icons.keyboard_arrow_down_rounded,
+                      size: 16, color: context.kaede.muted),
                 ),
-                const SizedBox(width: 4),
+                SizedBox(width: 4),
                 Expanded(
                   child: Text(
                     (widget.category.name ?? 'Category').toUpperCase(),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: KaedeColors.muted,
+                    style: TextStyle(
+                      color: context.kaede.muted,
                       fontSize: 11,
                       fontWeight: FontWeight.w800,
                       letterSpacing: .9,
@@ -4664,9 +4955,9 @@ final class _ChannelRow extends StatelessWidget {
     final active = channel.ref == state.selectedChannel;
     final highlighted = unread > 0 || mentions > 0;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 1),
+      padding: EdgeInsets.symmetric(vertical: 1),
       child: Material(
-        color: active ? KaedeColors.selected : Colors.transparent,
+        color: active ? context.kaede.selected : Colors.transparent,
         borderRadius: BorderRadius.circular(KaedeRadius.small),
         child: InkWell(
           onTap: onTap,
@@ -4676,7 +4967,7 @@ final class _ChannelRow extends StatelessWidget {
             child: Row(
               children: [
                 _UnreadMarker(visible: highlighted && !active),
-                const SizedBox(width: 6),
+                SizedBox(width: 6),
                 Icon(
                   channel.isThread
                       ? Icons.subdirectory_arrow_right_rounded
@@ -4684,17 +4975,19 @@ final class _ChannelRow extends StatelessWidget {
                           ? Icons.forum_outlined
                           : channel.type == ChannelType.tracker
                               ? Icons.view_kanban_outlined
-                              : channel.type == ChannelType.voice
-                                  ? Icons.volume_up_rounded
+                              : _isVoiceLikeChannel(channel)
+                                  ? channel.type == ChannelType.stage
+                                      ? Icons.record_voice_over_outlined
+                                      : Icons.volume_up_rounded
                                   : channel.type == ChannelType.announcement
                                       ? Icons.campaign_rounded
                                       : Icons.tag_rounded,
                   size: 19,
                   color: highlighted || active
-                      ? KaedeColors.text
-                      : KaedeColors.muted,
+                      ? context.kaede.text
+                      : context.kaede.muted,
                 ),
-                const SizedBox(width: 8),
+                SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     channel.name ?? 'channel',
@@ -4703,10 +4996,10 @@ final class _ChannelRow extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 14.5,
                       color: active
-                          ? KaedeColors.text
+                          ? context.kaede.text
                           : highlighted
-                              ? KaedeColors.text
-                              : KaedeColors.muted,
+                              ? context.kaede.text
+                              : context.kaede.muted,
                       fontWeight: highlighted || active
                           ? FontWeight.w600
                           : FontWeight.w500,
@@ -4714,9 +5007,9 @@ final class _ChannelRow extends StatelessWidget {
                   ),
                 ),
                 if (channel.encryptionMode == 'e2ee') ...[
-                  const Icon(Icons.lock_rounded,
-                      size: 13, color: KaedeColors.muted),
-                  const SizedBox(width: 4),
+                  Icon(Icons.lock_rounded,
+                      size: 13, color: context.kaede.muted),
+                  SizedBox(width: 4),
                 ],
                 _ChannelUnread(unread: unread, mentions: mentions),
               ],
@@ -4751,19 +5044,19 @@ final class _ConversationRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final highlighted = unread > 0 || mentions > 0;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 1),
+      padding: EdgeInsets.symmetric(vertical: 1),
       child: Material(
-        color: active ? KaedeColors.selected : Colors.transparent,
+        color: active ? context.kaede.selected : Colors.transparent,
         borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 10, 8),
+            padding: EdgeInsets.fromLTRB(8, 8, 10, 8),
             child: Row(
               children: [
                 SizedBox.square(dimension: 40, child: avatar),
-                const SizedBox(width: 11),
+                SizedBox(width: 11),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -4777,17 +5070,17 @@ final class _ConversationRow extends StatelessWidget {
                               highlighted ? FontWeight.w700 : FontWeight.w600,
                           fontSize: 15,
                           color: highlighted || active
-                              ? KaedeColors.text
-                              : KaedeColors.textSoft,
+                              ? context.kaede.text
+                              : context.kaede.textSoft,
                         ),
                       ),
-                      const SizedBox(height: 1),
+                      SizedBox(height: 1),
                       Text(
                         subtitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.muted,
+                        style: TextStyle(
+                          color: context.kaede.muted,
                           fontSize: 12.5,
                         ),
                       ),
@@ -4821,28 +5114,28 @@ final class _NavRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-        color: KaedeColors.panel,
+        color: context.kaede.panel,
         borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: Container(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            padding: EdgeInsets.fromLTRB(12, 10, 12, 10),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(KaedeRadius.medium),
-              border: Border.all(color: KaedeColors.border),
+              border: Border.all(color: context.kaede.border),
             ),
             child: Row(
               children: [
-                Icon(icon, color: KaedeColors.muted, size: 20),
-                const SizedBox(width: 10),
+                Icon(icon, color: context.kaede.muted, size: 20),
+                SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         title,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontWeight: FontWeight.w600,
                           fontSize: 14.5,
                         ),
@@ -4850,8 +5143,8 @@ final class _NavRow extends StatelessWidget {
                       if (subtitle case final detail?)
                         Text(
                           detail,
-                          style: const TextStyle(
-                            color: KaedeColors.coralText,
+                          style: TextStyle(
+                            color: context.kaede.coralText,
                             fontSize: 11.5,
                           ),
                         ),
@@ -4886,7 +5179,7 @@ final class _SquareAction extends StatelessWidget {
   Widget build(BuildContext context) => Tooltip(
         message: tooltip,
         child: Material(
-          color: filled ? KaedeColors.coral : KaedeColors.panel,
+          color: filled ? context.kaede.coral : context.kaede.panel,
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: InkWell(
             onTap: onTap,
@@ -4896,12 +5189,12 @@ final class _SquareAction extends StatelessWidget {
               height: size,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                border: filled ? null : Border.all(color: KaedeColors.border),
+                border: filled ? null : Border.all(color: context.kaede.border),
               ),
               child: Icon(
                 icon,
                 size: 19,
-                color: filled ? KaedeColors.onCoral : KaedeColors.textSoft,
+                color: filled ? context.kaede.onCoral : context.kaede.textSoft,
               ),
             ),
           ),
@@ -4923,9 +5216,13 @@ final class _AccountBar extends ConsumerWidget {
     return SafeArea(
       top: false,
       child: DecoratedBox(
-        decoration: const BoxDecoration(
-          color: KaedeColors.canvas,
-          border: Border(top: BorderSide(color: KaedeColors.border)),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceDim,
+          border: Border(
+            top: BorderSide(
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+          ),
         ),
         child: Row(
           children: [
@@ -4933,7 +5230,7 @@ final class _AccountBar extends ConsumerWidget {
               child: InkWell(
                 onTap: () => _showPresenceMenu(context, ref),
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+                  padding: EdgeInsets.fromLTRB(10, 8, 6, 8),
                   child: Row(
                     children: [
                       if (user != null)
@@ -4941,15 +5238,15 @@ final class _AccountBar extends ConsumerWidget {
                           user: user!,
                           radius: 17,
                           presence: presence,
-                          ringColor: KaedeColors.canvas,
+                          ringColor: context.kaede.canvas,
                         )
                       else
-                        const CircleAvatar(
+                        CircleAvatar(
                           radius: 17,
-                          backgroundColor: KaedeColors.raised,
+                          backgroundColor: context.kaede.raised,
                           child: Icon(Icons.person_rounded, size: 18),
                         ),
-                      const SizedBox(width: 9),
+                      SizedBox(width: 9),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4958,7 +5255,7 @@ final class _AccountBar extends ConsumerWidget {
                               user?.name ?? 'Account',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontWeight: FontWeight.w700,
                                 fontSize: 13.5,
                               ),
@@ -4967,8 +5264,8 @@ final class _AccountBar extends ConsumerWidget {
                               presenceLabel(presence),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: KaedeColors.muted,
+                              style: TextStyle(
+                                color: context.kaede.muted,
                                 fontSize: 11,
                               ),
                             ),
@@ -4992,8 +5289,9 @@ final class _AccountBar extends ConsumerWidget {
                         )
                     : null,
                 style: IconButton.styleFrom(
-                  foregroundColor:
-                      voice.muted ? KaedeColors.danger : KaedeColors.textSoft,
+                  foregroundColor: voice.muted
+                      ? context.kaede.danger
+                      : context.kaede.textSoft,
                 ),
                 icon: Icon(
                   voice.muted ? Icons.mic_off_rounded : Icons.mic_rounded,
@@ -5004,9 +5302,9 @@ final class _AccountBar extends ConsumerWidget {
               tooltip: 'Settings',
               visualDensity: VisualDensity.compact,
               onPressed: onTap,
-              icon: const Icon(Icons.settings_rounded, size: 19),
+              icon: Icon(Icons.settings_rounded, size: 19),
             ),
-            const SizedBox(width: 2),
+            SizedBox(width: 2),
           ],
         ),
       ),
@@ -5024,16 +5322,16 @@ final class _AccountBar extends ConsumerWidget {
           children: [
             if (user case final account?)
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                padding: EdgeInsets.fromLTRB(20, 0, 20, 12),
                 child: Row(
                   children: [
                     UserAvatar(
                       user: account,
                       radius: 21,
                       presence: presence,
-                      ringColor: KaedeColors.panel,
+                      ringColor: context.kaede.panel,
                     ),
-                    const SizedBox(width: 12),
+                    SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -5042,7 +5340,7 @@ final class _AccountBar extends ConsumerWidget {
                             account.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontWeight: FontWeight.w700,
                               fontSize: 15,
                             ),
@@ -5051,8 +5349,8 @@ final class _AccountBar extends ConsumerWidget {
                             account.handle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: KaedeColors.muted,
+                            style: TextStyle(
+                              color: context.kaede.muted,
                               fontSize: 12,
                             ),
                           ),
@@ -5062,7 +5360,7 @@ final class _AccountBar extends ConsumerWidget {
                   ],
                 ),
               ),
-            const Divider(),
+            Divider(),
             for (final status in const <PresenceStatus>[
               PresenceStatus.online,
               PresenceStatus.idle,
@@ -5073,16 +5371,15 @@ final class _AccountBar extends ConsumerWidget {
                 leading: Icon(
                   presenceIcon(status),
                   size: 18,
-                  color: presenceColor(status),
+                  color: presenceColor(context, status),
                 ),
                 title: Text(presenceLabel(status)),
                 subtitle: status == PresenceStatus.dnd
-                    ? const Text('Notifications stay silent')
+                    ? Text('Notifications stay silent')
                     : status == PresenceStatus.invisible
-                        ? const Text('Appear offline to everyone')
+                        ? Text('Appear offline to everyone')
                         : null,
-                trailing:
-                    status == presence ? const Icon(Icons.check_rounded) : null,
+                trailing: status == presence ? Icon(Icons.check_rounded) : null,
                 onTap: () {
                   Navigator.pop(sheetContext);
                   ref
@@ -5090,10 +5387,10 @@ final class _AccountBar extends ConsumerWidget {
                       .setPresence(status);
                 },
               ),
-            const Divider(),
+            Divider(),
             ListTile(
-              leading: const Icon(Icons.settings_outlined),
-              title: const Text('Account settings'),
+              leading: Icon(Icons.settings_outlined),
+              title: Text('Account settings'),
               onTap: () {
                 Navigator.pop(sheetContext);
                 onTap();
@@ -5137,8 +5434,8 @@ final class _ShellBanners extends ConsumerWidget {
         if (state.offline)
           _StatusBanner(
             icon: Icons.cloud_off_rounded,
-            background: KaedeColors.coralSoft,
-            foreground: KaedeColors.coralText,
+            background: context.kaede.coralSoft,
+            foreground: context.kaede.coralText,
             title: 'Offline · showing saved conversations',
             actionLabel: 'Retry',
             onAction: () =>
@@ -5150,28 +5447,28 @@ final class _ShellBanners extends ConsumerWidget {
             icon: state.gatewayHealth.phase == GatewayConnectionPhase.offline
                 ? Icons.sync_problem_rounded
                 : Icons.sync_rounded,
-            background: KaedeColors.warningSoft,
-            foreground: KaedeColors.warning,
+            background: context.kaede.warningSoft,
+            foreground: context.kaede.warning,
             busy: state.gatewayHealth.phase != GatewayConnectionPhase.offline,
             title: state.gatewayHealth.message ??
                 'Realtime updates are temporarily unavailable.',
             actionLabel: 'Retry',
-            actionKey: const ValueKey('retry-realtime-button'),
+            actionKey: ValueKey('retry-realtime-button'),
             onAction: () =>
                 ref.read(mobileControllerProvider.notifier).retryRealtime(),
           ),
         if (state.gatewayProtocolWarning case final warning?)
           _StatusBanner(
             icon: Icons.warning_amber_rounded,
-            background: KaedeColors.warningSoft,
-            foreground: KaedeColors.warning,
+            background: context.kaede.warningSoft,
+            foreground: context.kaede.warning,
             title: warning,
           ),
         if (state.degradedWarnings.isNotEmpty)
           _StatusBanner(
             icon: Icons.cloud_sync_outlined,
-            background: KaedeColors.warningSoft,
-            foreground: KaedeColors.warning,
+            background: context.kaede.warningSoft,
+            foreground: context.kaede.warning,
             title: state.degradedWarnings.values.first,
             subtitle: state.degradedWarnings.length > 1
                 ? '${state.degradedWarnings.length} account areas need to '
@@ -5184,8 +5481,8 @@ final class _ShellBanners extends ConsumerWidget {
         if (state.pushWarning case final warning?)
           _StatusBanner(
             icon: Icons.notifications_off_outlined,
-            background: KaedeColors.warningSoft,
-            foreground: KaedeColors.warning,
+            background: context.kaede.warningSoft,
+            foreground: context.kaede.warning,
             title: warning,
             actionLabel: 'Settings',
             onAction: () => onOpenSettings(),
@@ -5209,7 +5506,7 @@ final class _VoiceStatusStrip extends ConsumerWidget {
       mobileControllerProvider.select((state) => state.activeChannel?.ref),
     );
     if (!voice.joined || voice.channel?.ref == openChannel) {
-      return const SizedBox.shrink();
+      return SizedBox.shrink();
     }
     return _VoiceStatusBar(
       voice: voice,
@@ -5273,7 +5570,7 @@ final class _StatusBanner extends StatelessWidget {
                 )
               else
                 Icon(icon, size: 17, color: foreground),
-              const SizedBox(width: 10),
+              SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -5294,8 +5591,8 @@ final class _StatusBanner extends StatelessWidget {
                         detail,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.textSoft,
+                        style: TextStyle(
+                          color: context.kaede.textSoft,
                           fontSize: 11.5,
                           height: 1.3,
                         ),
@@ -5308,8 +5605,8 @@ final class _StatusBanner extends StatelessWidget {
                   key: actionKey,
                   onPressed: onAction,
                   style: TextButton.styleFrom(
-                    minimumSize: const Size(0, 34),
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: Size(0, 34),
+                    padding: EdgeInsets.symmetric(horizontal: 12),
                     foregroundColor: foreground,
                   ),
                   child: Text(actionLabel!),
@@ -5337,25 +5634,25 @@ final class _VoiceStatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-        color: KaedeColors.mintSoft,
+        color: context.kaede.mintSoft,
         child: InkWell(
           onTap: onOpen,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 7, 6, 7),
+            padding: EdgeInsets.fromLTRB(14, 7, 6, 7),
             child: Row(
               children: [
                 if (voice.reconnecting)
-                  const SizedBox.square(
+                  SizedBox.square(
                     dimension: 16,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
-                      color: KaedeColors.mint,
+                      color: context.kaede.mint,
                     ),
                   )
                 else
-                  const Icon(Icons.graphic_eq_rounded,
-                      size: 18, color: KaedeColors.mint),
-                const SizedBox(width: 10),
+                  Icon(Icons.graphic_eq_rounded,
+                      size: 18, color: context.kaede.mint),
+                SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -5364,8 +5661,8 @@ final class _VoiceStatusBar extends StatelessWidget {
                         voice.channel?.name ?? 'Voice room',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.mint,
+                        style: TextStyle(
+                          color: context.kaede.mint,
                           fontWeight: FontWeight.w700,
                           fontSize: 13,
                         ),
@@ -5376,8 +5673,8 @@ final class _VoiceStatusBar extends StatelessWidget {
                             : '${voice.participants.length} connected',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.textSoft,
+                        style: TextStyle(
+                          color: context.kaede.textSoft,
                           fontSize: 11.5,
                         ),
                       ),
@@ -5390,7 +5687,7 @@ final class _VoiceStatusBar extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                   style: IconButton.styleFrom(
                     foregroundColor:
-                        voice.muted ? KaedeColors.danger : KaedeColors.text,
+                        voice.muted ? context.kaede.danger : context.kaede.text,
                   ),
                   icon: Icon(
                     voice.muted ? Icons.mic_off_rounded : Icons.mic_rounded,
@@ -5402,9 +5699,9 @@ final class _VoiceStatusBar extends StatelessWidget {
                   onPressed: onLeave,
                   visualDensity: VisualDensity.compact,
                   style: IconButton.styleFrom(
-                    foregroundColor: KaedeColors.danger,
+                    foregroundColor: context.kaede.danger,
                   ),
-                  icon: const Icon(Icons.call_end_rounded, size: 20),
+                  icon: Icon(Icons.call_end_rounded, size: 20),
                 ),
               ],
             ),
@@ -5417,13 +5714,13 @@ final class _NoConversationSelected extends StatelessWidget {
   const _NoConversationSelected();
 
   @override
-  Widget build(BuildContext context) => const Center(
+  Widget build(BuildContext context) => Center(
         child: Padding(
           padding: EdgeInsets.all(32),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.forum_outlined, size: 38, color: KaedeColors.muted),
+              Icon(Icons.forum_outlined, size: 38, color: context.kaede.muted),
               SizedBox(height: 14),
               Text(
                 'No conversation open',
@@ -5433,7 +5730,7 @@ final class _NoConversationSelected extends StatelessWidget {
               Text(
                 'Pick a channel or direct message to start reading.',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: KaedeColors.muted),
+                style: TextStyle(color: context.kaede.muted),
               ),
             ],
           ),
@@ -5451,7 +5748,7 @@ final class _EmptyNavigation extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
-          padding: const EdgeInsets.all(28),
+          padding: EdgeInsets.all(28),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -5459,27 +5756,27 @@ final class _EmptyNavigation extends StatelessWidget {
                 width: 54,
                 height: 54,
                 decoration: BoxDecoration(
-                  color: KaedeColors.panel,
+                  color: context.kaede.panel,
                   shape: BoxShape.circle,
-                  border: Border.all(color: KaedeColors.border),
+                  border: Border.all(color: context.kaede.border),
                 ),
-                child: Icon(icon, size: 24, color: KaedeColors.muted),
+                child: Icon(icon, size: 24, color: context.kaede.muted),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: 14),
               Text(
                 title,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 14.5,
                 ),
               ),
-              const SizedBox(height: 4),
+              SizedBox(height: 4),
               Text(
                 body,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: KaedeColors.muted,
+                style: TextStyle(
+                  color: context.kaede.muted,
                   fontSize: 13,
                   height: 1.35,
                 ),
@@ -5496,7 +5793,7 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -5505,13 +5802,13 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
               'Add a guild',
               style: Theme.of(context).textTheme.headlineSmall,
             ),
-            const SizedBox(height: 4),
-            const Text(
+            SizedBox(height: 4),
+            Text(
               'Guilds are communities. Create your own or join one with an '
               'invite from any Kaede server.',
-              style: TextStyle(color: KaedeColors.muted, fontSize: 13),
+              style: TextStyle(color: context.kaede.muted, fontSize: 13),
             ),
-            const SizedBox(height: 18),
+            SizedBox(height: 18),
             FilledButton.icon(
               onPressed: () {
                 Navigator.pop(sheetContext);
@@ -5526,10 +5823,10 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
                       .refreshNavigation();
                 });
               },
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('Create a guild'),
+              icon: Icon(Icons.add_rounded),
+              label: Text('Create a guild'),
             ),
-            const SizedBox(height: 10),
+            SizedBox(height: 10),
             OutlinedButton.icon(
               onPressed: () {
                 Navigator.pop(sheetContext);
@@ -5547,8 +5844,8 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
                       .refreshNavigation();
                 });
               },
-              icon: const Icon(Icons.public_rounded),
-              label: const Text('Join with an invite'),
+              icon: Icon(Icons.public_rounded),
+              label: Text('Join with an invite'),
             ),
           ],
         ),
@@ -5563,39 +5860,38 @@ Future<void> _createAndShowInvite(BuildContext context,
   if (restrictions == null || !context.mounted) return;
   try {
     final result = await controller.repository.createInvite(guild.ref, {
-      'channel_id': channel.ref.id.value,
+      'channel_id': channel.ref.wire,
       'max_age_seconds': restrictions.$1,
       'max_uses': restrictions.$2,
     });
     if (!context.mounted) return;
     final code = '${result['code'] ?? ''}';
-    final instance = controller.api.tokens?.instance.value;
-    final link = code.isEmpty || instance == null
+    final link = code.isEmpty
         ? null
-        : 'https://$instance/invite/$code';
+        : 'https://${guild.ref.domain.value}/invite/${Uri.encodeComponent(code)}';
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        icon: const Icon(Icons.person_add_alt_1_rounded),
-        title: const Text('Invite people'),
+        icon: Icon(Icons.person_add_alt_1_rounded),
+        title: Text('Invite people'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
                 'Anyone with this link can join #${channel.name ?? 'channel'}.'),
-            const SizedBox(height: 14),
+            SizedBox(height: 14),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
               decoration: BoxDecoration(
-                color: KaedeColors.raised,
+                color: context.kaede.raised,
                 borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                border: Border.all(color: KaedeColors.border),
+                border: Border.all(color: context.kaede.border),
               ),
               child: SelectableText(
                 link ?? (code.isEmpty ? 'Invite created.' : code),
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 13,
                 ),
@@ -5606,7 +5902,7 @@ Future<void> _createAndShowInvite(BuildContext context,
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Done'),
+            child: Text('Done'),
           ),
           if (link != null || code.isNotEmpty)
             FilledButton.icon(
@@ -5615,12 +5911,12 @@ Future<void> _createAndShowInvite(BuildContext context,
                 if (dialogContext.mounted) Navigator.pop(dialogContext);
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Invite link copied.')),
+                    SnackBar(content: Text('Invite link copied.')),
                   );
                 }
               },
-              icon: const Icon(Icons.copy_rounded),
-              label: const Text('Copy link'),
+              icon: Icon(Icons.copy_rounded),
+              label: Text('Copy link'),
             ),
         ],
       ),
@@ -5655,9 +5951,13 @@ final class ConversationCompactHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
-        decoration: const BoxDecoration(
-          color: KaedeColors.canvas,
-          border: Border(bottom: BorderSide(color: KaedeColors.border)),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceDim,
+          border: Border(
+            bottom: BorderSide(
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+          ),
         ),
         child: SizedBox(
           height: 58,
@@ -5665,11 +5965,11 @@ final class ConversationCompactHeader extends StatelessWidget {
             children: [
               if (leading != null) leading!,
               if (avatar != null) ...[
-                if (leading == null) const SizedBox(width: 14),
+                if (leading == null) SizedBox(width: 14),
                 SizedBox.square(dimension: 34, child: avatar),
-                const SizedBox(width: 10),
+                SizedBox(width: 10),
               ] else if (leading == null)
-                const SizedBox(width: 16),
+                SizedBox(width: 16),
               Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -5679,7 +5979,7 @@ final class ConversationCompactHeader extends StatelessWidget {
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 17,
                         fontWeight: FontWeight.w700,
                         letterSpacing: -.2,
@@ -5690,8 +5990,8 @@ final class ConversationCompactHeader extends StatelessWidget {
                         subtitle!,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.muted,
+                        style: TextStyle(
+                          color: context.kaede.muted,
                           fontSize: 11.5,
                           height: 1.25,
                         ),
@@ -5700,7 +6000,7 @@ final class ConversationCompactHeader extends StatelessWidget {
                 ),
               ),
               ...actions,
-              const SizedBox(width: 4),
+              SizedBox(width: 4),
             ],
           ),
         ),
@@ -5749,12 +6049,12 @@ final class _RailButton extends StatelessWidget {
           Align(
             alignment: Alignment.centerLeft,
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
+              duration: Duration(milliseconds: 180),
               curve: Curves.easeOutCubic,
               width: 4,
               height: active ? size * .6 : (unread || badge > 0 ? 8.0 : 0.0),
-              decoration: const BoxDecoration(
-                color: KaedeColors.text,
+              decoration: BoxDecoration(
+                color: context.kaede.text,
                 borderRadius: BorderRadius.horizontal(
                   right: Radius.circular(4),
                 ),
@@ -5765,18 +6065,18 @@ final class _RailButton extends StatelessWidget {
             message: label,
             child: Badge(
               isLabelVisible: badge > 0,
-              offset: const Offset(-2, 2),
+              offset: Offset(-2, 2),
               alignment: Alignment.bottomRight,
               label: Text(badge > 99 ? '99+' : '$badge'),
               child: Material(
                 color: active
-                    ? activeColor ?? KaedeColors.selected
-                    : idleColor ?? KaedeColors.panel,
+                    ? activeColor ?? context.kaede.selected
+                    : idleColor ?? context.kaede.panel,
                 clipBehavior: Clip.antiAlias,
                 shape: RoundedRectangleBorder(
                   borderRadius: radius,
                   side: border
-                      ? const BorderSide(color: KaedeColors.border)
+                      ? BorderSide(color: context.kaede.border)
                       : BorderSide.none,
                 ),
                 child: InkWell(
@@ -5787,7 +6087,7 @@ final class _RailButton extends StatelessWidget {
                         Center(
                           child: Text(
                             label,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontWeight: FontWeight.w700,
                             ),
                           ),
@@ -5813,12 +6113,12 @@ final class _ChannelUnread extends StatelessWidget {
   Widget build(BuildContext context) {
     if (mentions > 0) {
       return Badge(
-        backgroundColor: KaedeColors.danger,
-        textColor: Colors.white,
+        backgroundColor: context.kaede.danger,
+        textColor: Theme.of(context).colorScheme.onError,
         label: Text(mentions > 99 ? '99+' : '$mentions'),
       );
     }
-    return const SizedBox.shrink();
+    return SizedBox.shrink();
   }
 }
 
@@ -5831,10 +6131,10 @@ final class _DmUnread extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final count = unread > 0 ? unread : mentions;
-    if (count <= 0) return const SizedBox.shrink();
+    if (count <= 0) return SizedBox.shrink();
     return Badge(
-      backgroundColor: KaedeColors.danger,
-      textColor: Colors.white,
+      backgroundColor: context.kaede.danger,
+      textColor: Theme.of(context).colorScheme.onError,
       label: Text(count > 99 ? '99+' : '$count'),
     );
   }
@@ -5850,12 +6150,12 @@ final class _UnreadMarker extends StatelessWidget {
         width: 4,
         child: Center(
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 140),
+            duration: Duration(milliseconds: 140),
             curve: Curves.easeOut,
             width: 4,
             height: visible ? 20 : 0,
             decoration: BoxDecoration(
-              color: Colors.white,
+              color: context.kaede.coral,
               borderRadius: BorderRadius.circular(4),
             ),
           ),
@@ -5894,7 +6194,7 @@ final class _FriendsPage extends ConsumerWidget {
     return RefreshIndicator(
       onRefresh: ref.read(mobileControllerProvider.notifier).refreshNavigation,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 32),
+        padding: EdgeInsets.fromLTRB(14, 12, 14, 32),
         children: [
           FilledButton.icon(
             onPressed: () => _textAction(
@@ -5907,20 +6207,20 @@ final class _FriendsPage extends ConsumerWidget {
                   .read(mobileControllerProvider.notifier)
                   .refreshNavigation();
             }),
-            icon: const Icon(Icons.person_add_alt_1_rounded),
-            label: const Text('Add friend'),
+            icon: Icon(Icons.person_add_alt_1_rounded),
+            label: Text('Add friend'),
           ),
-          const SizedBox(height: 6),
-          const Padding(
+          SizedBox(height: 6),
+          Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),
             child: Text(
               'Friends live on their own home server. Use their full address, '
               'like @maple@kaede.chat.',
-              style: TextStyle(color: KaedeColors.muted, fontSize: 12.5),
+              style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
             ),
           ),
           if (empty)
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(top: 40),
               child: _EmptyNavigation(
                 icon: Icons.people_outline_rounded,
@@ -5974,11 +6274,11 @@ final class _RelationshipSection extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 20, 4, 6),
+            padding: EdgeInsets.fromLTRB(4, 20, 4, 6),
             child: Text(
               title.toUpperCase(),
-              style: const TextStyle(
-                color: KaedeColors.muted,
+              style: TextStyle(
+                color: context.kaede.muted,
                 fontSize: 11,
                 fontWeight: FontWeight.w800,
                 letterSpacing: .9,
@@ -6002,7 +6302,7 @@ final class _RelationshipTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final snapshot = _relationshipUser(relationship);
-    if (snapshot == null) return const SizedBox.shrink();
+    if (snapshot == null) return SizedBox.shrink();
     // Rebuild only when this relationship's profile or presence changes;
     // unrelated profile and presence updates leave this row untouched.
     final projection = ref.watch(mobileControllerProvider.select((state) {
@@ -6016,18 +6316,18 @@ final class _RelationshipTile extends ConsumerWidget {
     final presence = projection.presence;
     final type = '${relationship['type']}';
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: EdgeInsets.only(bottom: 6),
       child: Material(
-        color: KaedeColors.panel,
+        color: context.kaede.panel,
         borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: InkWell(
           onTap: () => _showProfile(context, ref, user, type, onOpenChat),
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: Container(
-            padding: const EdgeInsets.fromLTRB(12, 9, 6, 9),
+            padding: EdgeInsets.fromLTRB(12, 9, 6, 9),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(KaedeRadius.medium),
-              border: Border.all(color: KaedeColors.border),
+              border: Border.all(color: context.kaede.border),
             ),
             child: Row(
               children: [
@@ -6035,9 +6335,9 @@ final class _RelationshipTile extends ConsumerWidget {
                   user: user,
                   radius: 19,
                   presence: presence,
-                  ringColor: KaedeColors.panel,
+                  ringColor: context.kaede.panel,
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -6046,7 +6346,7 @@ final class _RelationshipTile extends ConsumerWidget {
                         user.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontWeight: FontWeight.w600,
                           fontSize: 14.5,
                         ),
@@ -6057,74 +6357,83 @@ final class _RelationshipTile extends ConsumerWidget {
                             : 'Profile unavailable · refreshes automatically',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.muted,
+                        style: TextStyle(
+                          color: context.kaede.muted,
                           fontSize: 12,
                         ),
                       ),
                     ],
                   ),
                 ),
-                switch (type) {
-                  'pending_in' => Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: 'Accept',
-                          style: IconButton.styleFrom(
-                            foregroundColor: KaedeColors.mint,
+                if (!userProfileSupportsFriendshipActions(user))
+                  IconButton(
+                    tooltip: 'Message',
+                    onPressed: user.profileResolved
+                        ? () => _openDm(context, ref, user, onOpenChat)
+                        : null,
+                    icon: Icon(Icons.chat_bubble_outline_rounded),
+                  )
+                else
+                  switch (type) {
+                    'pending_in' => Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Accept',
+                            style: IconButton.styleFrom(
+                              foregroundColor: context.kaede.mint,
+                            ),
+                            onPressed: () => _relationshipAction(
+                                context,
+                                ref,
+                                () => ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .repository
+                                    .acceptFriend(user.ref)),
+                            icon: Icon(Icons.check_circle_rounded),
                           ),
-                          onPressed: () => _relationshipAction(
-                              context,
-                              ref,
-                              () => ref
-                                  .read(mobileControllerProvider.notifier)
-                                  .repository
-                                  .acceptFriend(user.ref)),
-                          icon: const Icon(Icons.check_circle_rounded),
-                        ),
-                        IconButton(
-                          tooltip: 'Decline',
-                          onPressed: () => _relationshipAction(
-                              context,
-                              ref,
-                              () => ref
-                                  .read(mobileControllerProvider.notifier)
-                                  .repository
-                                  .removeRelationship(user.ref)),
-                          icon: const Icon(Icons.cancel_outlined),
-                        ),
-                      ],
-                    ),
-                  'friend' => IconButton(
-                      tooltip: 'Message',
-                      onPressed: user.profileResolved
-                          ? () => _openDm(context, ref, user, onOpenChat)
-                          : null,
-                      icon: const Icon(Icons.chat_bubble_outline_rounded),
-                    ),
-                  'blocked' => TextButton(
-                      onPressed: () => _relationshipAction(
-                          context,
-                          ref,
-                          () => ref
-                              .read(mobileControllerProvider.notifier)
-                              .repository
-                              .unblock(user.ref)),
-                      child: const Text('Unblock'),
-                    ),
-                  _ => IconButton(
-                      tooltip: 'Cancel request',
-                      onPressed: () => _relationshipAction(
-                          context,
-                          ref,
-                          () => ref
-                              .read(mobileControllerProvider.notifier)
-                              .repository
-                              .removeRelationship(user.ref)),
-                      icon: const Icon(Icons.close_rounded),
-                    ),
-                },
+                          IconButton(
+                            tooltip: 'Decline',
+                            onPressed: () => _relationshipAction(
+                                context,
+                                ref,
+                                () => ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .repository
+                                    .removeRelationship(user.ref)),
+                            icon: Icon(Icons.cancel_outlined),
+                          ),
+                        ],
+                      ),
+                    'friend' => IconButton(
+                        tooltip: 'Message',
+                        onPressed: user.profileResolved
+                            ? () => _openDm(context, ref, user, onOpenChat)
+                            : null,
+                        icon: Icon(Icons.chat_bubble_outline_rounded),
+                      ),
+                    'blocked' => TextButton(
+                        onPressed: () => _relationshipAction(
+                            context,
+                            ref,
+                            () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .repository
+                                .unblock(user.ref)),
+                        child: Text('Unblock'),
+                      ),
+                    _ => IconButton(
+                        tooltip: 'Cancel request',
+                        onPressed: () => _relationshipAction(
+                            context,
+                            ref,
+                            () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .repository
+                                .removeRelationship(user.ref)),
+                        icon: Icon(Icons.close_rounded),
+                      ),
+                  },
               ],
             ),
           ),
@@ -6213,10 +6522,11 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
             Navigator.pop(context);
             _openDm(context, ref, profile, onOpenChat);
           },
-          icon: const Icon(Icons.chat_bubble_outline_rounded),
-          label: const Text('Message'),
+          icon: Icon(Icons.chat_bubble_outline_rounded),
+          label: Text('Message'),
         ),
       if (profile.profileResolved &&
+          userProfileSupportsFriendshipActions(profile) &&
           relationshipType != 'friend' &&
           relationshipType != 'pending_out' &&
           relationshipType != 'blocked')
@@ -6231,10 +6541,11 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                     .repository
                     .requestFriend(profile.handle));
           },
-          icon: const Icon(Icons.person_add_alt_1_rounded),
-          label: const Text('Send friend request'),
+          icon: Icon(Icons.person_add_alt_1_rounded),
+          label: Text('Send friend request'),
         ),
-      if (relationshipType == 'friend')
+      if (userProfileSupportsFriendshipActions(profile) &&
+          relationshipType == 'friend')
         OutlinedButton.icon(
           onPressed: () {
             Navigator.pop(context);
@@ -6247,11 +6558,11 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                     .removeRelationship(profile.ref));
           },
           style: OutlinedButton.styleFrom(
-            foregroundColor: KaedeColors.danger,
-            side: const BorderSide(color: KaedeColors.dangerSoft),
+            foregroundColor: context.kaede.danger,
+            side: BorderSide(color: context.kaede.dangerSoft),
           ),
-          icon: const Icon(Icons.person_remove_alt_1_rounded),
-          label: const Text('Remove friend'),
+          icon: Icon(Icons.person_remove_alt_1_rounded),
+          label: Text('Remove friend'),
         ),
       if (relationshipType == 'blocked')
         OutlinedButton.icon(
@@ -6265,8 +6576,8 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                     .repository
                     .unblock(profile.ref));
           },
-          icon: const Icon(Icons.lock_open_rounded),
-          label: const Text('Unblock'),
+          icon: Icon(Icons.lock_open_rounded),
+          label: Text('Unblock'),
         ),
     ],
   );
@@ -6286,10 +6597,10 @@ final class _DmAvatar extends StatelessWidget {
         .toList();
     if (channel.conversationType == 'group') {
       if (recipients.length < 2) {
-        return const CircleAvatar(
+        return CircleAvatar(
           radius: 20,
-          backgroundColor: KaedeColors.raised,
-          foregroundColor: KaedeColors.textSoft,
+          backgroundColor: context.kaede.raised,
+          foregroundColor: context.kaede.textSoft,
           child: Icon(Icons.group_rounded, size: 20),
         );
       }
@@ -6307,9 +6618,9 @@ final class _DmAvatar extends StatelessWidget {
               left: 0,
               top: 0,
               child: Container(
-                padding: const EdgeInsets.all(1.5),
-                decoration: const BoxDecoration(
-                  color: KaedeColors.sidebar,
+                padding: EdgeInsets.all(1.5),
+                decoration: BoxDecoration(
+                  color: context.kaede.sidebar,
                   shape: BoxShape.circle,
                 ),
                 child: UserAvatar(user: recipients.first, radius: 13),
@@ -6326,10 +6637,10 @@ final class _DmAvatar extends StatelessWidget {
         presence: presence,
       );
     }
-    return const CircleAvatar(
+    return CircleAvatar(
       radius: 20,
-      backgroundColor: KaedeColors.raised,
-      foregroundColor: KaedeColors.textSoft,
+      backgroundColor: context.kaede.raised,
+      foregroundColor: context.kaede.textSoft,
       child: Icon(Icons.group_rounded, size: 20),
     );
   }
@@ -6348,16 +6659,15 @@ Future<void> _newConversationAction(
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
-            leading: const Icon(Icons.person_outline_rounded),
-            title: const Text('Direct message'),
-            subtitle:
-                const Text('Start a private conversation with one person'),
+            leading: Icon(Icons.person_outline_rounded),
+            title: Text('Direct message'),
+            subtitle: Text('Start a private conversation with one person'),
             onTap: () => Navigator.pop(context, 'direct'),
           ),
           ListTile(
-            leading: const Icon(Icons.group_outlined),
-            title: const Text('Create group DM'),
-            subtitle: const Text('Choose two or more friends'),
+            leading: Icon(Icons.group_outlined),
+            title: Text('Create group DM'),
+            subtitle: Text('Choose two or more friends'),
             onTap: () => Navigator.pop(context, 'group'),
           ),
         ],
@@ -6390,7 +6700,7 @@ Future<void> _newConversationAction(
     context: context,
     builder: (context) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
-        title: const Text('Create group DM'),
+        title: Text('Create group DM'),
         content: SizedBox(
           width: 440,
           child: Column(
@@ -6399,7 +6709,7 @@ Future<void> _newConversationAction(
               TextField(
                 controller: name,
                 maxLength: 100,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Group name',
                   hintText: 'Optional',
                 ),
@@ -6408,7 +6718,7 @@ Future<void> _newConversationAction(
                 alignment: Alignment.centerLeft,
                 child: Text('${selected.length} of 9 friends selected'),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               SizedBox(
                 height: 320,
                 child: ListView(
@@ -6437,11 +6747,11 @@ Future<void> _newConversationAction(
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
+              child: Text('Cancel')),
           FilledButton(
             onPressed:
                 selected.length < 2 ? null : () => Navigator.pop(context, true),
-            child: const Text('Create'),
+            child: Text('Create'),
           ),
         ],
       ),
@@ -6491,8 +6801,7 @@ Future<void> _textAction(
           decoration: InputDecoration(hintText: hint)),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(context), child: Text('Cancel')),
         FilledButton(
             onPressed: () {
               final value = controller.text.trim();
@@ -6504,7 +6813,7 @@ Future<void> _textAction(
               }
               Navigator.pop(context, value);
             },
-            child: const Text('Continue')),
+            child: Text('Continue')),
       ],
     ),
   );

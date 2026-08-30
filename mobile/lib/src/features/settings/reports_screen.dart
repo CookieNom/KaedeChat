@@ -50,19 +50,19 @@ final class _MyReportsScreenState extends ConsumerState<MyReportsScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('My reports')),
+        appBar: AppBar(title: Text('My reports')),
         body: RefreshIndicator(
           onRefresh: _load,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 32),
             children: [
-              const Text(
+              Text(
                 'Reports go to your home instance’s Trust & Safety team, not guild moderators.',
-                style: TextStyle(color: KaedeColors.muted, height: 1.4),
+                style: TextStyle(color: context.kaede.muted, height: 1.4),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               if (_loading)
-                const Center(child: CircularProgressIndicator())
+                Center(child: CircularProgressIndicator())
               else if (_error case final error?)
                 _ReportsNotice(
                   text: userFacingError(error,
@@ -88,9 +88,9 @@ final class _ReportCard extends StatelessWidget {
     final created =
         DateTime.tryParse('${report['created_at'] ?? ''}')?.toLocal();
     return Card(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: EdgeInsets.only(bottom: 10),
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -98,25 +98,24 @@ final class _ReportCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   '${report['category'] ?? 'report'}'.replaceAll('_', ' '),
-                  style: const TextStyle(fontWeight: FontWeight.w800),
+                  style: TextStyle(fontWeight: FontWeight.w800),
                 ),
               ),
               _StatusPill('${report['status'] ?? 'submitted'}'),
             ]),
-            const SizedBox(height: 6),
+            SizedBox(height: 6),
             Text(
                 '${report['target_type'] ?? 'item'} · ${report['target_ref'] ?? ''}',
-                style: const TextStyle(color: KaedeColors.muted, fontSize: 12)),
+                style: TextStyle(color: context.kaede.muted, fontSize: 12)),
             if ('${report['description'] ?? ''}'.trim().isNotEmpty) ...[
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               Text('${report['description']}',
-                  style: const TextStyle(color: KaedeColors.textSoft)),
+                  style: TextStyle(color: context.kaede.textSoft)),
             ],
             if (created != null) ...[
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               Text('Submitted ${DateFormat.yMMMd().add_jm().format(created)}',
-                  style:
-                      const TextStyle(color: KaedeColors.muted, fontSize: 11)),
+                  style: TextStyle(color: context.kaede.muted, fontSize: 11)),
             ],
           ],
         ),
@@ -130,13 +129,13 @@ final class _StatusPill extends StatelessWidget {
   final String status;
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: KaedeColors.raised,
+          color: context.kaede.raised,
           borderRadius: BorderRadius.circular(99),
         ),
         child: Text(status.replaceAll('_', ' '),
-            style: const TextStyle(color: KaedeColors.muted, fontSize: 11)),
+            style: TextStyle(color: context.kaede.muted, fontSize: 11)),
       );
 }
 
@@ -147,9 +146,9 @@ final class _ReportsNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Card(
         child: ListTile(
-          leading: const Icon(Icons.error_outline_rounded),
+          leading: Icon(Icons.error_outline_rounded),
           title: Text(text),
-          trailing: TextButton(onPressed: onRetry, child: const Text('Retry')),
+          trailing: TextButton(onPressed: onRetry, child: Text('Retry')),
         ),
       );
 }
@@ -157,17 +156,17 @@ final class _ReportsNotice extends StatelessWidget {
 final class _ReportsEmpty extends StatelessWidget {
   const _ReportsEmpty();
   @override
-  Widget build(BuildContext context) => const Card(
+  Widget build(BuildContext context) => Card(
         child: Padding(
           padding: EdgeInsets.all(24),
           child: Column(children: [
-            Icon(Icons.flag_outlined, size: 34, color: KaedeColors.muted),
+            Icon(Icons.flag_outlined, size: 34, color: context.kaede.muted),
             SizedBox(height: 10),
             Text('No reports', style: TextStyle(fontWeight: FontWeight.w800)),
             SizedBox(height: 4),
             Text('Reports submitted from a message menu will appear here.',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: KaedeColors.muted)),
+                style: TextStyle(color: context.kaede.muted)),
           ]),
         ),
       );

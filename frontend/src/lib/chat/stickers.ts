@@ -1,5 +1,5 @@
 import { assetUrl } from '$lib/media/assets';
-import type { GuildSticker } from './types';
+import type { GuildSticker, StickerItem } from './types';
 
 const DOMAIN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
@@ -27,6 +27,16 @@ export function stickerToken(sticker: Pick<GuildSticker, 'id' | 'origin_domain' 
   return `<sticker:${sticker.name}:${sticker.id}@${sticker.origin_domain.toLowerCase()}>`;
 }
 
+export function stickerItem(sticker: StickerOption): StickerItem {
+  return {
+    id: sticker.id,
+    origin_domain: sticker.origin_domain.toLowerCase(),
+    name: sticker.name,
+    format_type: sticker.animated ? 2 : 1,
+    media_hash: sticker.media_hash ?? ''
+  };
+}
+
 export function stickerFromToken(
   value: string
 ): { name: string; id: string; domain: string } | null {
@@ -51,10 +61,12 @@ export function stickerOptions(
     .filter((sticker) => sticker.media_hash)
     .map((sticker) => ({
       ...sticker,
-      value: stickerToken(sticker),
+      value: `${sticker.id}@${sticker.origin_domain.toLowerCase()}`,
       url: assetUrl(sticker.media_hash ?? '', 'thumbnail_512', sticker.origin_domain)
     }))
-    .filter((sticker) => sticker.value && sticker.url)
+    .filter(
+      (sticker) => validSnowflake(sticker.id) && DOMAIN.test(sticker.origin_domain) && sticker.url
+    )
     .sort((left, right) => {
       const leftActive =
         activeGuild &&

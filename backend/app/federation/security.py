@@ -17,16 +17,29 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_redis, get_session
+from app.chat.dm_mutations import authority_attested_dm_message_mutation
+from app.chat.forwarding import authority_attested_forward_source
+from app.chat.poll_results import (
+    authority_attested_direct_poll_result,
+    authority_attested_dm_poll_mutation,
+)
 from app.core.federation import (
     BLOCK_POLICY_ADVISORY_NAME,
     SigningInput,
+    authority_attested_group_event_ref,
     canonical_request_target,
     content_sha256,
+    federation_policy_holds_event,
+    guild_authority_event_ref,
+    guild_crosspost_authority_event_ref,
+    guild_media_delete_request_ref,
+    guild_message_authority_event_refs,
     terminal_room_event_ref,
     verify_envelope,
     verify_request,
 )
 from app.core.json_limits import strict_json_loads
+from app.core.permissions import PERMISSION_SCHEMA_CAPABILITY
 from app.core.proxy import resolve_client_ip
 from app.core.settings import Settings, get_settings
 from app.db.models import Instance, InstanceBlock, PeerKey
@@ -140,6 +153,16 @@ def require_pinned_request_nonce(instance: Instance | None, nonce: str | None) -
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_NONCE_REQUIRED"})
 
 
+def require_permission_schema(instance: Instance | None) -> None:
+    """Reject imports whose peer did not negotiate Kaede's exact mask layout."""
+
+    if instance is None or PERMISSION_SCHEMA_CAPABILITY not in instance.capabilities:
+        raise HTTPException(
+            status_code=426,
+            detail={"code": "KAED_FED_PERMISSION_SCHEMA_REQUIRED"},
+        )
+
+
 async def consume_request_nonce(
     redis: Redis,
     settings: Settings,
@@ -184,6 +207,7 @@ async def federation_event_policy_code(
     event_type: str,
     *,
     deletion_control: bool = False,
+    event_context: object = None,
 ) -> str | None:
     """Recheck policy for one inbox event after prior events may commit."""
 
@@ -199,7 +223,11 @@ async def federation_event_policy_code(
         return None
     if current_block.level == "suspend":
         return "KAED_FED_INSTANCE_SUSPENDED"
-    if event_type.startswith("guild."):
+    if federation_policy_holds_event(
+        current_block.level,
+        event_type,
+        context=event_context,
+    ):
         return "KAED_FED_INSTANCE_SILENCED"
     return None
 
@@ -518,12 +546,102 @@ async def validated_event_envelope(
     settings: Settings,
     expected_origin: str,
     raw_envelope: object,
+    *,
+    allow_authority_attested_actor: bool = False,
 ) -> EventEnvelope:
     try:
         envelope = EventEnvelope.model_validate(raw_envelope)
     except ValueError as exc:
         raise ValueError("invalid signed event envelope") from exc
-    if envelope.origin != expected_origin or envelope.actor.domain != expected_origin:
+    serialized_envelope = envelope.model_dump(mode="json")
+    authority_attested_actor = False
+    if allow_authority_attested_actor and envelope.actor.domain != expected_origin:
+        from app.bots.dm_capability import authority_attested_bot_dm_capability
+        from app.bots.interaction_events import authority_attested_interaction_response
+        from app.chat.expression_authorization import authority_attested_expression_use
+
+        authority_attested_actor = bool(
+            terminal_room_event_ref(serialized_envelope) is not None
+            or authority_attested_group_event_ref(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+                actor_id=envelope.actor.id,
+                actor_domain=envelope.actor.domain,
+            )
+            is not None
+            or guild_media_delete_request_ref(serialized_envelope) is not None
+            or guild_authority_event_ref(
+                envelope.type,
+                envelope.context,
+                expected_authority=expected_origin,
+            )
+            is not None
+            or guild_message_authority_event_refs(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+            )
+            is not None
+            or guild_crosspost_authority_event_ref(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+            )
+            is not None
+            or authority_attested_bot_dm_capability(
+                envelope.type,
+                envelope.content,
+                expected_authority=expected_origin,
+                actor=(envelope.actor.id, envelope.actor.domain),
+            )
+            or authority_attested_interaction_response(
+                envelope.type,
+                envelope.content,
+                expected_authority=expected_origin,
+                actor=(envelope.actor.id, envelope.actor.domain),
+            )
+            or authority_attested_direct_poll_result(
+                envelope.type,
+                envelope.content,
+                expected_authority=expected_origin,
+                actor=(envelope.actor.id, envelope.actor.domain),
+            )
+            or authority_attested_dm_poll_mutation(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+            )
+            or authority_attested_dm_message_mutation(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+                actor=(envelope.actor.id, envelope.actor.domain),
+            )
+            or authority_attested_forward_source(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+                actor=(envelope.actor.id, envelope.actor.domain),
+                event_timestamp_ms=envelope.ts,
+            )
+            or authority_attested_expression_use(
+                envelope.type,
+                envelope.content,
+                envelope.context,
+                expected_authority=expected_origin,
+                actor=(envelope.actor.id, envelope.actor.domain),
+            )
+        )
+    if envelope.origin != expected_origin or (
+        envelope.actor.domain != expected_origin and not authority_attested_actor
+    ):
         raise ValueError("signed event actor does not belong to its origin")
     if not event_timestamp_allowed(
         envelope.ts,
@@ -535,6 +653,25 @@ async def validated_event_envelope(
     signatures = envelope.signatures.get(expected_origin, {})
     if not signatures:
         raise ValueError("event envelope has no signature from its origin")
+    if expected_origin == settings.domain:
+        # In-process authority joins (for example A=B bot installs) must not
+        # discover or HTTP-call the local instance as though it were a peer.
+        # Verify the current self key directly; retained old-key envelopes can
+        # still fall through to the ordinary cached-key path below.
+        current_key_id, current_private_key = await self_private_key(session, settings)
+        encoded = signatures.get(current_key_id)
+        try:
+            current_signature = (
+                base64.b64decode(encoded, validate=True) if encoded is not None else b""
+            )
+        except (TypeError, ValueError):
+            current_signature = b""
+        if len(current_signature) == 64 and verify_envelope(
+            serialized_envelope,
+            current_signature,
+            current_private_key.public_key(),
+        ):
+            return envelope
 
     async def verify_cached_signatures() -> tuple[bool, bool]:
         refresh_candidate = False
@@ -560,7 +697,7 @@ async def validated_event_envelope(
     verified, refresh_candidate = await verify_cached_signatures()
     if verified:
         return envelope
-    if refresh_candidate:
+    if refresh_candidate and expected_origin != settings.domain:
         # Direct proxy responses and guild gap-fill share this verifier. A peer
         # may rotate between our signed request and its signed response, so
         # force exactly one bounded trust-document refresh for an otherwise
@@ -654,6 +791,7 @@ async def authenticate_federation(
     public_key = Ed25519PublicKey.from_public_bytes(peer_key.public_key)
     if not verify_request(signing_input, signature, public_key):
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_BAD_SIGNATURE"})
+    require_permission_schema(instance)
     # Charge the authenticated peer before allocating its per-request replay
     # key. This bounds nonce-key growth across a peer's source IPs, including
     # signed requests that are later rejected as malformed or replayed.
@@ -662,7 +800,13 @@ async def authenticate_federation(
     if body:
         try:
             if not hasattr(request.state, "federation_json"):
-                request.state.federation_json = strict_json_loads(body)
+                request.state.federation_json = strict_json_loads(
+                    body,
+                    allow_floats=(
+                        request.url.path.startswith("/_kaede/v1/channels/")
+                        and request.url.path.endswith("/interactions")
+                    ),
+                )
         except ValueError:
             raise HTTPException(
                 status_code=400,
@@ -776,6 +920,7 @@ async def authenticate_federation_websocket(
     public_key = Ed25519PublicKey.from_public_bytes(peer_key.public_key)
     if not verify_request(signing_input, signature, public_key):
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_BAD_SIGNATURE"})
+    require_permission_schema(instance)
     # Keep replay-key memory bounded by the authenticated-origin bucket even
     # when an attacker spreads signed upgrades over many source addresses.
     await enforce_origin_rate_limit(redis, origin)

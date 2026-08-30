@@ -11,13 +11,16 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 KaedeUser _user(
-        {String name = 'Maple', String handle = '@maple@home.example'}) =>
+        {String name = 'Maple',
+        String handle = '@maple@home.example',
+        AccountType accountType = AccountType.human}) =>
     KaedeUser(
       ref: EntityRef.parse('7@home.example'),
       username: 'maple',
       handle: handle,
       displayName: name,
       profileResolved: true,
+      accountType: accountType,
     );
 
 KaedeChannel _channel({
@@ -231,6 +234,47 @@ void main() {
       expect(find.text('Maple'), findsOneWidget);
       expect(find.text('Do not disturb'), findsOneWidget);
       expect(find.text('Message'), findsOneWidget);
+    });
+
+    testWidgets('application profiles expose a trusted APP tag',
+        (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pump(
+        tester,
+        UserProfileSheet(
+          user: _user(accountType: AccountType.bot),
+          presence: PresenceStatus.online,
+        ),
+      );
+
+      expect(find.text('APP'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('Application account')),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    test('bot identity comes from the typed API discriminator', () {
+      final bot = KaedeUser.fromJson(<String, Object?>{
+        'id': '8',
+        'origin_domain': 'apps.example',
+        'username': 'helper',
+        'handle': 'helper@apps.example',
+        'account_type': 'bot',
+      });
+      final namedLikeAnApp = KaedeUser.fromJson(<String, Object?>{
+        'id': '9',
+        'origin_domain': 'home.example',
+        'username': 'app',
+        'handle': 'app@home.example',
+        'display_name': 'APP',
+      });
+
+      expect(bot.accountType, AccountType.bot);
+      expect(bot.isApplication, isTrue);
+      expect(bot.toJson(), containsPair('bot', true));
+      expect(namedLikeAnApp.isApplication, isFalse);
     });
   });
 

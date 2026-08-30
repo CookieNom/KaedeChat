@@ -10,6 +10,7 @@ from app.core.federation import (
     sign_request,
     verify_request,
 )
+from app.core.gateway_ops import EVENT_NAMES
 from app.core.permissions import ALL_PERMISSIONS, Permission
 
 
@@ -88,5 +89,25 @@ def test_dm_pair_is_order_independent_and_authority_is_lower_domain() -> None:
 
 
 def test_permissions_fit_decimal_64_bit_wire_format() -> None:
-    assert ALL_PERMISSIONS < 1 << 64
+    # Permission masks are persisted in signed PostgreSQL BIGINT columns.
+    assert ALL_PERMISSIONS == 576_456_216_817_434_111
+    assert not ALL_PERMISSIONS & (1 << 19)
+    assert ALL_PERMISSIONS & Permission.PRIORITY_SPEAKER
+    assert ALL_PERMISSIONS < 1 << 63
     assert Permission.CONNECT & Permission.SPEAK == 0
+
+
+def test_additive_gateway_event_registry_is_unique_and_complete() -> None:
+    assert len(EVENT_NAMES) == len(set(EVENT_NAMES))
+    assert {
+        "GUILD_BAN_ADD",
+        "GUILD_AUDIT_LOG_ENTRY_CREATE",
+        "INVITE_CREATE",
+        "GUILD_EMOJIS_UPDATE",
+        "AUTO_MODERATION_ACTION_EXECUTION",
+        "MESSAGE_POLL_VOTE_ADD",
+        "GUILD_SOUNDBOARD_SOUND_CREATE",
+        "INTERACTION_CREATE",
+        "INTEGRATION_CREATE",
+        "WEBHOOKS_UPDATE",
+    } <= set(EVENT_NAMES)

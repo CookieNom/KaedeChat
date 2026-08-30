@@ -4,11 +4,11 @@ import hashlib
 import json
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from redis.asyncio import Redis
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,10 +36,20 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
-from app.api.media import redirect_to_object, ticket_payload
+from app.api.media import redirect_to_object
 from app.auth.tokens import AccessTokenStore
+from app.bots.developer_projection import commit_developer_application_mutation
+from app.bots.e2ee import revoke_bot_e2ee_access
+from app.bots.installations import transition_application_installations, usable_guild_installation
+from app.bots.runtime_control import active_dm_runtime_target_domains
+from app.bots.target_discovery import (
+    queue_application_target_snapshots_for_refs,
+    wake_application_target_deliveries,
+)
 from app.chat.channel_access import load_channel_access
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.payloads import user_payload
+from app.core.model_validation import UnambiguousInputModel
 from app.core.permission_contract import required_permissions
 from app.core.rate_limits import ClientRateLimit, enforce_keyed_rate_limit
 from app.core.settings import Settings, get_settings
@@ -53,6 +63,7 @@ from app.db.bot_models import (
     InstanceAdminGrant,
     InstanceAuditEvent,
 )
+from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Attachment,
     Instance,
@@ -75,7 +86,7 @@ from app.federation.security import (
     enforce_federation_route_rate_limit,
 )
 from app.media.schemas import AssetCommitRequest, UploadTicketRequest
-from app.media.service import create_upload_ticket, finalize_attachment
+from app.media.service import create_upload_ticket, finalize_attachment, ticket_payload
 from app.tasks import media_process
 
 router = APIRouter(prefix="/api/v1", tags=["instance administration"])
@@ -121,7 +132,7 @@ MESSAGE_ACTION_SECONDS: dict[str, int | None] = {
 }
 
 
-class AdminGrantCreate(BaseModel):
+class AdminGrantCreate(UnambiguousInputModel):
     user_ref: EntityRef
     role: Literal[
         "administrator",
@@ -132,17 +143,57 @@ class AdminGrantCreate(BaseModel):
     ]
 
 
-class UserStatePatch(BaseModel):
-    disabled: bool
+class UserStatePatch(UnambiguousInputModel):
+    disabled: bool | None = None
+    age_assurance_state: Literal["unknown", "adult", "minor"] | None = None
     reason: str | None = Field(default=None, max_length=500)
 
+    @model_validator(mode="after")
+    def require_state_change(self) -> UserStatePatch:
+        if not self.model_fields_set & {"disabled", "age_assurance_state"}:
+            raise ValueError("at least one user state field is required")
+        if any(
+            field in self.model_fields_set and getattr(self, field) is None
+            for field in ("disabled", "age_assurance_state")
+        ):
+            raise ValueError("user state fields cannot be null")
+        return self
 
-class ApplicationStatePatch(BaseModel):
+
+class ApplicationStatePatch(UnambiguousInputModel):
     status: Literal["active", "suspended"]
     reason: str | None = Field(default=None, max_length=500)
 
 
-class ReportCreate(BaseModel):
+class ApplicationDirectoryApprovalPatch(UnambiguousInputModel):
+    approved: bool | None = None
+    collections: list[Literal["featured", "staff-picks", "new-and-noteworthy"]] | None = Field(
+        default=None, max_length=3
+    )
+    reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def visible_reason(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 3:
+            raise ValueError("directory review reason must contain at least three characters")
+        return cleaned
+
+    @model_validator(mode="after")
+    def require_directory_change(self) -> ApplicationDirectoryApprovalPatch:
+        if not self.model_fields_set & {"approved", "collections"}:
+            raise ValueError("approved or collections is required")
+        if self.approved is None and "approved" in self.model_fields_set:
+            raise ValueError("approved cannot be null")
+        if self.collections is None and "collections" in self.model_fields_set:
+            raise ValueError("collections cannot be null")
+        if self.collections is not None and len(set(self.collections)) != len(self.collections):
+            raise ValueError("collections must be unique")
+        return self
+
+
+class ReportCreate(UnambiguousInputModel):
     target_type: Literal[
         "message", "attachment", "user", "bot", "application", "guild", "instance", "invite"
     ]
@@ -188,7 +239,7 @@ class FederatedReportCreate(ReportCreate):
     source_report_ref: EntityRef
 
 
-class ReportPatch(BaseModel):
+class ReportPatch(UnambiguousInputModel):
     status: Literal[
         "submitted",
         "triaged",
@@ -203,7 +254,7 @@ class ReportPatch(BaseModel):
     resolution: str | None = Field(default=None, max_length=2000)
 
 
-class ReportActionCreate(BaseModel):
+class ReportActionCreate(UnambiguousInputModel):
     account_action: Literal[
         "none",
         "suspend_24h",
@@ -245,7 +296,7 @@ class ReportAttachmentEvidenceCommit(AssetCommitRequest):
     disclosure_acknowledged: bool
 
 
-class InstanceBlockCreate(BaseModel):
+class InstanceBlockCreate(UnambiguousInputModel):
     domain: str = Field(min_length=1, max_length=253)
     level: Literal["silence", "suspend"]
     include_subdomains: bool = False
@@ -535,7 +586,7 @@ async def administration_overview(
         if name == "local_users":
             statement = statement.where(User.is_local.is_(True))
         elif name == "active_installations":
-            statement = statement.where(BotInstallation.status == "active")
+            statement = statement.where(usable_guild_installation())
         elif name == "open_reports":
             statement = statement.where(
                 AbuseReport.status.not_in(("action_taken", "closed_no_action", "duplicate")),
@@ -659,6 +710,7 @@ async def list_users(
         | {
             "disabled_at": user.disabled_at.isoformat() if user.disabled_at else None,
             "suspended_until": (user.suspended_until.isoformat() if user.suspended_until else None),
+            "age_assurance_state": getattr(user, "age_assurance_state", "unknown"),
         }
         for user in users
     ]
@@ -678,54 +730,70 @@ async def patch_user_state(
     user = await session.get(User, (user_id, user_domain), with_for_update=True)
     if user is None or not user.is_local:
         raise HTTPException(status_code=404, detail={"code": "LOCAL_USER_NOT_FOUND"})
-    if user.id == principal.user.id and payload.disabled:
+    if user.id == principal.user.id and payload.disabled is True:
         raise HTTPException(status_code=409, detail={"code": "CANNOT_DISABLE_SELF"})
-    user.disabled_at = datetime.now(UTC) if payload.disabled else None
-    user.suspended_until = None
-    await audit(
-        session,
-        snowflake,
-        principal,
-        "admin.user.disable" if payload.disabled else "admin.user.enable",
-        "user",
-        f"{user.id}@{user.origin_domain}",
-        metadata={"reason": payload.reason},
-    )
+    if payload.age_assurance_state is not None and user.account_type != "human":
+        raise HTTPException(status_code=400, detail={"code": "HUMAN_USER_REQUIRED"})
+    target_ref = f"{user.id}@{user.origin_domain}"
+    if payload.disabled is not None:
+        user.disabled_at = datetime.now(UTC) if payload.disabled else None
+        user.suspended_until = None
+        await audit(
+            session,
+            snowflake,
+            principal,
+            "admin.user.disable" if payload.disabled else "admin.user.enable",
+            "user",
+            target_ref,
+            metadata={"reason": payload.reason},
+        )
+    if payload.age_assurance_state is not None:
+        previous_age_state = getattr(user, "age_assurance_state", "unknown")
+        user.age_assurance_state = payload.age_assurance_state
+        await audit(
+            session,
+            snowflake,
+            principal,
+            "admin.user.age_assurance.update",
+            "user",
+            target_ref,
+            metadata={
+                "old_state": previous_age_state,
+                "new_state": payload.age_assurance_state,
+                "reason": payload.reason,
+            },
+        )
     await session.commit()
     return user_payload(user) | {
         "disabled_at": user.disabled_at.isoformat() if user.disabled_at else None,
         "suspended_until": (user.suspended_until.isoformat() if user.suspended_until else None),
+        "age_assurance_state": getattr(user, "age_assurance_state", "unknown"),
     }
 
 
-@router.get("/administration/applications")
-async def administration_applications(
-    principal: Annotated[AdminPrincipal, Depends(require_admin)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> list[dict[str, object]]:
-    principal.require("admin.read")
-    rows = list(
-        await session.scalars(
-            select(BotApplication).order_by(BotApplication.updated_at.desc()).limit(500)
-        )
-    )
-    return [
-        {
-            "ref": f"{app.id}@{app.origin_domain}",
-            "name": app.name,
-            "status": app.status,
-            "team_ref": f"{app.team_id}@{app.team_domain}",
-            "created_at": app.created_at.isoformat(),
-            "updated_at": app.updated_at.isoformat(),
-        }
-        for app in rows
-    ]
+def _administration_application_payload(
+    application: BotApplication,
+    settings: Settings,
+) -> dict[str, object]:
+    return {
+        "ref": f"{application.id}@{application.origin_domain}",
+        "name": application.name,
+        "status": application.status,
+        "directory_enabled": application.directory_enabled,
+        "directory_approved": application.directory_approved,
+        "directory_collections": list(application.directory_collections),
+        "team_ref": f"{application.team_id}@{application.team_domain}",
+        "state_authority": application.origin_domain,
+        "can_manage_state": application.origin_domain == settings.domain,
+        "created_at": application.created_at.isoformat(),
+        "updated_at": application.updated_at.isoformat(),
+    }
 
 
-@router.patch("/administration/applications/{application_ref}")
-async def patch_application_state(
+@router.patch("/administration/applications/{application_ref}/directory")
+async def patch_application_directory_approval(
     application_ref: EntityRef,
-    payload: ApplicationStatePatch,
+    payload: ApplicationDirectoryApprovalPatch,
     principal: Annotated[AdminPrincipal, Depends(require_admin)],
     session: Annotated[AsyncSession, Depends(get_session)],
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
@@ -736,20 +804,117 @@ async def patch_application_state(
     app = await session.get(BotApplication, (app_id, app_domain), with_for_update=True)
     if app is None:
         raise HTTPException(status_code=404, detail={"code": "APPLICATION_NOT_FOUND"})
+    if app.origin_domain != settings.domain:
+        raise HTTPException(status_code=409, detail={"code": "APPLICATION_HOME_INSTANCE_REQUIRED"})
+    if payload.approved is True:
+        from app.api.application_directory import directory_readiness_errors
+
+        readiness_errors = await directory_readiness_errors(session, app)
+        if readiness_errors:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "APPLICATION_DIRECTORY_NOT_READY",
+                    "missing": readiness_errors,
+                },
+            )
+    if payload.approved is not None:
+        app.directory_approved = payload.approved
+    if payload.collections is not None:
+        app.directory_collections = cast(list[str], payload.collections)
+    action = (
+        "admin.application.directory.approve"
+        if payload.approved is True
+        else "admin.application.directory.revoke"
+        if payload.approved is False
+        else "admin.application.directory.collections.update"
+    )
+    await audit(
+        session,
+        snowflake,
+        principal,
+        action,
+        "application",
+        f"{app.id}@{app.origin_domain}",
+        metadata={
+            "reason": payload.reason,
+            "collections": list(app.directory_collections),
+        },
+    )
+    await commit_developer_application_mutation(session, settings, app)
+    return _administration_application_payload(app, settings)
+
+
+@router.get("/administration/applications")
+async def administration_applications(
+    principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> list[dict[str, object]]:
+    principal.require("admin.read")
+    rows = list(
+        await session.scalars(
+            select(BotApplication).order_by(BotApplication.updated_at.desc()).limit(500)
+        )
+    )
+    return [_administration_application_payload(app, settings) for app in rows]
+
+
+@router.patch("/administration/applications/{application_ref}")
+async def patch_application_state(
+    application_ref: EntityRef,
+    payload: ApplicationStatePatch,
+    principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    principal.require("bots.manage")
+    app_id, app_domain = application_ref.resolve(settings.domain)
+    app = await session.get(BotApplication, (app_id, app_domain), with_for_update=True)
+    if app is None:
+        raise HTTPException(status_code=404, detail={"code": "APPLICATION_NOT_FOUND"})
+    if app.origin_domain != settings.domain:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "APPLICATION_HOME_INSTANCE_REQUIRED"},
+        )
+    previous_status = app.status
+    runtime_target_domains = (
+        await active_dm_runtime_target_domains(session, settings, app)
+        if app.origin_domain == settings.domain
+        and payload.status == "suspended"
+        and previous_status != "suspended"
+        else set()
+    )
+    paused_channels = (
+        await revoke_bot_e2ee_access(
+            session,
+            redis,
+            settings,
+            application_ref=(app.id, app.origin_domain),
+        )
+        if payload.status == "suspended" and app.status != "suspended"
+        else []
+    )
     app.status = payload.status
     app.revocation_generation += 1
-    if payload.status == "suspended":
-        for installation in await session.scalars(
-            select(BotInstallation)
-            .where(
-                BotInstallation.application_id == app.id,
-                BotInstallation.application_domain == app.origin_domain,
-                BotInstallation.status == "active",
-            )
-            .with_for_update()
-        ):
-            installation.status = "suspended"
-            installation.grant_revision += 1
+    changed_installations = await transition_application_installations(
+        session,
+        app,
+        previous_status=previous_status,
+        next_status=payload.status,
+    )
+    target_destinations = (
+        await queue_application_target_snapshots_for_refs(
+            session,
+            settings,
+            {(app.id, app.origin_domain)},
+        )
+        if changed_installations
+        else set()
+    )
     await audit(
         session,
         snowflake,
@@ -759,7 +924,17 @@ async def patch_application_state(
         f"{app.id}@{app.origin_domain}",
         metadata={"reason": payload.reason},
     )
-    await session.commit()
+    if app.origin_domain == settings.domain:
+        await commit_developer_application_mutation(
+            session,
+            settings,
+            app,
+            runtime_target_domains=runtime_target_domains,
+        )
+    else:
+        await session.commit()
+    await wake_application_target_deliveries(target_destinations)
+    await publish_e2ee_policy_updates(session, redis, settings, paused_channels)
     return {"ref": f"{app.id}@{app.origin_domain}", "status": app.status}
 
 
@@ -958,8 +1133,6 @@ async def create_federated_report(
 ) -> dict[str, object]:
     """Receive a user report at the instance authoritative for its channel."""
 
-    if principal.silenced:
-        raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SILENCED"})
     if payload.target_type != "message" or payload.message_ref is None:
         raise HTTPException(status_code=422, detail={"code": "KAED_FED_REPORT_TARGET_INVALID"})
     reporter_id, reporter_domain = payload.reporter_ref.resolve(settings.domain)
@@ -1325,6 +1498,7 @@ async def commit_report_attachment_evidence(
             detail={"code": "REPORT_EVIDENCE_NOT_FOUND"},
         )
     attach_disclosed_evidence(report, evidence_attachment)
+    await materialize_updated_at(session, report)
     await session.commit()
     await enqueue_best_effort(
         media_process,
@@ -1410,6 +1584,7 @@ async def commit_federated_report_attachment_evidence(
     payload: ReportAttachmentEvidenceCommit,
     principal: Annotated[FederationPrincipal, Depends(authenticate_federation)],
     session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
     if not payload.disclosure_acknowledged:
@@ -1417,6 +1592,13 @@ async def commit_federated_report_attachment_evidence(
             status_code=422,
             detail={"code": "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"},
         )
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "abuse-report-evidence",
+        capacity=20,
+        refill_per_minute=2,
+    )
     report, reporter = await federated_encrypted_media_evidence_report(
         session,
         report_id,
@@ -1433,6 +1615,7 @@ async def commit_federated_report_attachment_evidence(
     if evidence_attachment.report_id != report.id:
         raise HTTPException(status_code=404, detail={"code": "REPORT_EVIDENCE_NOT_FOUND"})
     attach_disclosed_evidence(report, evidence_attachment)
+    await materialize_updated_at(session, report)
     await session.commit()
     await enqueue_best_effort(
         media_process,

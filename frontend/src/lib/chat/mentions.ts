@@ -45,3 +45,38 @@ export function mentionsUser(
     containsMentionToken(content, `@${user.username}`)
   );
 }
+
+/** Expand authenticated E2EE user/role/everyone intent against the current guild roster. */
+export function expandedEncryptedGuildMentionRecipients(
+  intent: RichMessageMentionIntent,
+  members: readonly GuildMemberSummary[],
+  roles: readonly Role[],
+  repliedUserRef: string | null = null,
+  canMentionEveryone = false
+): string[] {
+  const recipients = new Set(intent.userRefs);
+  const memberRef = (member: GuildMemberSummary) =>
+    `${member.user.id}@${member.user.origin_domain}`;
+  if (intent.everyone && canMentionEveryone)
+    members.forEach((member) => recipients.add(memberRef(member)));
+
+  const roleByRef = new Map(roles.map((role) => [`${role.id}@${role.origin_domain}`, role]));
+  for (const roleRef of intent.roleRefs) {
+    const role = roleByRef.get(roleRef);
+    if (!role || (!role.mentionable && !canMentionEveryone)) continue;
+    const everyoneRole = role.id === role.guild_id && role.origin_domain === role.guild_domain;
+    for (const member of members) {
+      if (
+        everyoneRole ||
+        member.role_ids.includes(role.id) ||
+        member.role_ids.includes(`${role.id}@${role.origin_domain}`)
+      ) {
+        recipients.add(memberRef(member));
+      }
+    }
+  }
+  if (repliedUserRef) recipients.add(repliedUserRef);
+  return [...recipients].sort();
+}
+import type { GuildMemberSummary, Role } from './types';
+import type { RichMessageMentionIntent } from '$lib/e2ee/client';

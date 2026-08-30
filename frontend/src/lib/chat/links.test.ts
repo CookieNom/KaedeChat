@@ -11,5 +11,8 @@ describe('message links', () => {
   it('does not separately unfurl invite or KLIPY cards', () => {
     expect(previewableLink('https://chat.example/invite/abc')).toBeNull();
     expect(previewableLink('https://media.klipy.com/example.gif')).toBeNull();
+    expect(
+      previewableLink('https://apps.example/application-directory/123@apps.example')
+    ).toBeNull();
   });
 });

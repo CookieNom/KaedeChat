@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from inspect import unwrap
 from types import SimpleNamespace
 from typing import Any, cast
@@ -178,6 +179,46 @@ async def test_remote_guild_human_attachment_uses_local_uploader_as_tombstone_si
     )
 
     assert signer is uploader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_type", ["human", "bot"])
+async def test_local_attachment_retains_remote_uploader_for_tombstone_attribution(
+    account_type: str,
+) -> None:
+    uploader = SimpleNamespace(
+        id=12,
+        origin_domain=REMOTE_DOMAIN,
+        is_local=False,
+        account_type=account_type,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=uploader),
+        get=AsyncMock(side_effect=AssertionError("no fallback signer should be needed")),
+    )
+    attachment = SimpleNamespace(
+        uploader_id=uploader.id,
+        uploader_domain=uploader.origin_domain,
+        bot_installation_id=None,
+        bot_user_installation_id=None,
+    )
+    guild = SimpleNamespace(
+        id=1,
+        origin_domain=LOCAL_DOMAIN,
+        owner_id=90,
+        owner_domain=REMOTE_DOMAIN,
+    )
+
+    signer = await tombstones.resolve_media_delete_signer(
+        cast(Any, session),
+        settings(),
+        cast(Any, attachment),
+        cast(Any, guild),
+    )
+
+    assert signer is uploader
+    signer_sql = str(session.scalar.await_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "users.is_local IS false" in signer_sql
 
 
 def test_message_fanout_records_every_attachment_origin_for_authority_relay() -> None:
@@ -492,6 +533,70 @@ async def test_initial_media_tombstone_persists_proof_without_destinations(
         "ed25519:current",
         1,
     )
+
+
+@pytest.mark.asyncio
+async def test_initial_remote_uploader_tombstone_uses_narrow_retained_actor_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = SimpleNamespace(
+        domain=LOCAL_DOMAIN,
+        is_self=True,
+        current_key_id="ed25519:current",
+    )
+    envelope = {
+        "event_id": "kcfe_remote_uploader",
+        "origin": LOCAL_DOMAIN,
+        "type": "media.delete",
+        "ts": 1,
+        "actor": {"id": "30", "domain": REMOTE_DOMAIN},
+        "context": {},
+        "content": {
+            "attachment_id": "40",
+            "origin_domain": LOCAL_DOMAIN,
+            "generation": "1",
+        },
+        "signatures": {LOCAL_DOMAIN: {"ed25519:current": "signature"}},
+    }
+    added: list[object] = []
+
+    async def get_model(model: object, _key: object, **_kwargs: object) -> object | None:
+        if model is Instance:
+            return instance
+        raise AssertionError("unexpected model lookup")
+
+    session = SimpleNamespace(
+        get=get_model,
+        scalar=AsyncMock(return_value=None),
+        scalars=AsyncMock(return_value=[]),
+        execute=AsyncMock(),
+        flush=AsyncMock(),
+        add=added.append,
+    )
+    signer = SimpleNamespace(id=30, origin_domain=REMOTE_DOMAIN)
+    monkeypatch.setattr(tombstones, "lock_media_tombstone_ref", AsyncMock())
+    build = AsyncMock(return_value=envelope)
+    monkeypatch.setattr(tombstones, "build_envelope", build)
+    monkeypatch.setattr(
+        tombstones,
+        "_retain_media_delete_event",
+        AsyncMock(return_value=SimpleNamespace(envelope=envelope)),
+    )
+    monkeypatch.setattr(tombstones, "queue_event", AsyncMock())
+    monkeypatch.setattr(tombstones, "record_media_tombstone_destinations", AsyncMock())
+
+    await tombstones.queue_media_delete_tombstone(
+        cast(Any, session),
+        settings(),
+        attachment_id=40,
+        attachment_domain=LOCAL_DOMAIN,
+        destinations=set(),
+        signer=cast(Any, signer),
+    )
+
+    assert build.await_args.kwargs["retained_authority_attested_actor"] is True
+    source = cast(MediaTombstoneSource, added[0])
+    assert (source.signer_id, source.signer_domain) == (30, REMOTE_DOMAIN)
 
 
 @pytest.mark.asyncio
@@ -895,13 +1000,19 @@ async def test_terminal_verdict_does_not_commit_when_tombstone_preparation_crash
 async def test_guild_gap_sync_queues_late_bound_terminal_tombstone_before_wake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    guild = SimpleNamespace(id=1, origin_domain=REMOTE_DOMAIN)
+    guild = SimpleNamespace(
+        id=1,
+        origin_domain=REMOTE_DOMAIN,
+        updated_at=datetime.now(UTC),
+    )
     message = SimpleNamespace(id=20, origin_domain=REMOTE_DOMAIN)
     attachment = SimpleNamespace(id=40, origin_domain=LOCAL_DOMAIN)
 
     class FakeSession:
         def __init__(self) -> None:
             self.committed = False
+            self.flushed = False
+            self.refreshed: list[object] = []
 
         async def __aenter__(self) -> FakeSession:
             return self
@@ -921,6 +1032,15 @@ async def test_guild_gap_sync_queues_late_bound_terminal_tombstone_before_wake(
 
         async def scalars(self, _statement: object) -> list[object]:
             return []
+
+        async def flush(self) -> None:
+            assert not self.committed
+            self.flushed = True
+
+        async def refresh(self, value: object) -> None:
+            assert self.flushed
+            assert not self.committed
+            self.refreshed.append(value)
 
         async def commit(self) -> None:
             self.committed = True
@@ -951,9 +1071,28 @@ async def test_guild_gap_sync_queues_late_bound_terminal_tombstone_before_wake(
     monkeypatch.setattr(tasks, "terminal_attachment_refs_for_messages", refs)
     queue_tombstone = AsyncMock(return_value={"gamma.localhost"})
     monkeypatch.setattr(tasks, "queue_terminal_attachment_tombstone", queue_tombstone)
-    monkeypatch.setattr(tasks, "guild_payload", lambda _guild: {})
-    monkeypatch.setattr(tasks, "render_message_payload", AsyncMock(return_value={}))
-    monkeypatch.setattr(tasks, "publish_dispatch", AsyncMock())
+
+    def materialize_guild_payload(value: object) -> dict[str, object]:
+        # TimestampMixin.updated_at is expired by its SQL-expression onupdate.
+        # The old post-commit renderer raised MissingGreenlet at this access.
+        assert not session.committed
+        return {"version": cast(Any, value).updated_at.isoformat()}
+
+    async def materialize_message_payload(
+        _session: object,
+        value: object,
+    ) -> dict[str, object]:
+        assert not session.committed
+        return {"id": str(cast(Any, value).id)}
+
+    async def assert_committed_before_publish(*_args: object) -> None:
+        assert session.committed
+
+    monkeypatch.setattr(tasks, "guild_payload", materialize_guild_payload)
+    render_message = AsyncMock(side_effect=materialize_message_payload)
+    monkeypatch.setattr(tasks, "render_message_payload", render_message)
+    publish = AsyncMock(side_effect=assert_committed_before_publish)
+    monkeypatch.setattr(tasks, "publish_dispatch", publish)
 
     async def assert_committed_before_wake(*_args: object) -> None:
         assert session.committed
@@ -966,6 +1105,10 @@ async def test_guild_gap_sync_queues_late_bound_terminal_tombstone_before_wake(
     assert result == 1
     refs.assert_awaited_once_with(session, worker_settings, {(message.id, message.origin_domain)})
     queue_tombstone.assert_awaited_once_with(session, worker_settings, attachment)
+    assert session.flushed
+    assert session.refreshed == [guild, message]
+    render_message.assert_awaited_once_with(session, message)
+    assert publish.await_count == 2
     assert call(tasks.federation_deliver, "gamma.localhost") in wake.await_args_list
     redis.aclose.assert_awaited_once()
     engine.dispose.assert_awaited_once()

@@ -12,10 +12,14 @@
   let {
     message,
     initialEmoji,
+    canManage = false,
+    onClearReactions,
     onClose
   }: {
     message: Message;
     initialEmoji?: string;
+    canManage?: boolean;
+    onClearReactions?: (message: Message, emoji?: string) => Promise<void> | void;
     onClose: () => void;
   } = $props();
 
@@ -28,6 +32,9 @@
   let nextAfter = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
+  let managementError = $state('');
+  let clearConfirmation = $state<'emoji' | 'all' | null>(null);
+  let clearing = $state(false);
   let dialog = $state<HTMLElement | null>(null);
   let requestGeneration = 0;
 
@@ -71,6 +78,48 @@
     requestGeneration += 1;
     loading = false;
     void loadUsers();
+  }
+
+  function requestClear(kind: 'emoji' | 'all') {
+    managementError = '';
+    clearConfirmation = kind;
+  }
+
+  async function confirmClear() {
+    const kind = clearConfirmation;
+    if (!kind || !onClearReactions || clearing) return;
+    const emoji = kind === 'emoji' ? selectedEmoji : undefined;
+    if (kind === 'emoji' && !emoji) return;
+    clearing = true;
+    managementError = '';
+    try {
+      await onClearReactions(message, emoji);
+      clearConfirmation = null;
+      if (kind === 'all') {
+        onClose();
+        return;
+      }
+      users = [];
+      nextAfter = null;
+      total = 0;
+      selectedEmoji = '';
+      await tick();
+      const nextEmoji = reactions[0]?.[0];
+      if (!nextEmoji) {
+        onClose();
+        return;
+      }
+      selectReaction(nextEmoji);
+    } catch (caught) {
+      managementError = userErrorMessage(
+        caught,
+        emoji
+          ? `Could not clear the ${emoji} reactions. Check your permissions and try again.`
+          : 'Could not clear reactions from this message. Check your permissions and try again.'
+      );
+    } finally {
+      clearing = false;
+    }
   }
 
   function backdropClick(event: MouseEvent) {
@@ -131,13 +180,26 @@
   >
     <header>
       <h2 id="reaction-viewer-title">Reactions</h2>
-      <button type="button" aria-label="Close reactions" onclick={onClose}>×</button>
+      <div class="reaction-header-actions">
+        {#if canManage && onClearReactions && reactions.length}
+          <button
+            class="clear-all-trigger"
+            type="button"
+            disabled={clearing}
+            onclick={() => requestClear('all')}>Clear all</button
+          >
+        {/if}
+        <button class="close-trigger" type="button" aria-label="Close reactions" onclick={onClose}
+          >×</button
+        >
+      </div>
     </header>
     <div class="reaction-viewer-body">
       <nav aria-label="Reaction types">
         {#each reactions as [emoji, count] (emoji)}
           <button
             type="button"
+            disabled={clearing}
             class:active={emoji === selectedEmoji}
             aria-current={emoji === selectedEmoji ? 'true' : undefined}
             onclick={() => selectReaction(emoji)}
@@ -192,8 +254,51 @@
             </button>
           {/if}
         {/if}
+        {#if canManage && onClearReactions && selectedEmoji}
+          <div class="reaction-management">
+            <button type="button" disabled={clearing} onclick={() => requestClear('emoji')}>
+              Clear <ReactionEmoji value={selectedEmoji} /> reactions
+            </button>
+          </div>
+        {/if}
+        {#if managementError}<p class="reaction-management-error" role="alert">
+            {managementError}
+          </p>{/if}
       </div>
     </div>
+    {#if clearConfirmation}
+      <section class="reaction-confirmation" role="alert" aria-live="assertive">
+        <div>
+          <strong>
+            {clearConfirmation === 'all'
+              ? 'Clear every reaction?'
+              : `Clear all ${selectedEmoji} reactions?`}
+          </strong>
+          <p>
+            {clearConfirmation === 'all'
+              ? 'Every reaction will be removed from this message. This cannot be undone.'
+              : `${reactionCount(selectedEmoji)} reaction${reactionCount(selectedEmoji) === 1 ? '' : 's'} will be removed from this message. This cannot be undone.`}
+          </p>
+        </div>
+        <div class="reaction-confirmation-actions">
+          <button type="button" disabled={clearing} onclick={() => (clearConfirmation = null)}
+            >Cancel</button
+          >
+          <button
+            class="danger"
+            type="button"
+            disabled={clearing}
+            onclick={() => void confirmClear()}
+          >
+            {clearing
+              ? 'Clearing…'
+              : clearConfirmation === 'all'
+                ? 'Clear all reactions'
+                : `Clear ${selectedEmoji}`}
+          </button>
+        </div>
+      </section>
+    {/if}
   </div>
 </div>
 
@@ -212,7 +317,7 @@
     display: grid;
     width: min(580px, calc(100vw - 2rem));
     height: min(430px, calc(100dvh - 2rem));
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: var(--radius-lg);
@@ -235,14 +340,32 @@
     font-size: 1.25rem;
   }
 
+  .reaction-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   header button {
     border: 0;
     padding: 0.25rem;
     color: var(--text-muted);
     background: transparent;
+    cursor: pointer;
+  }
+
+  header .close-trigger {
     font-size: 2rem;
     line-height: 1;
-    cursor: pointer;
+  }
+
+  header .clear-all-trigger {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line));
+    border-radius: 8px;
+    padding: 0.45rem 0.65rem;
+    color: var(--danger);
+    font-size: 0.78rem;
+    font-weight: 800;
   }
 
   header button:hover,
@@ -293,7 +416,9 @@
   }
 
   .reaction-user-panel {
+    display: flex;
     min-width: 0;
+    flex-direction: column;
     overflow-y: auto;
     padding: 0.8rem 1rem;
   }
@@ -368,6 +493,79 @@
     text-align: center;
   }
 
+  .reaction-management {
+    margin-top: auto;
+    border-top: 1px solid var(--line);
+    padding-top: 0.75rem;
+  }
+
+  .reaction-management button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line));
+    border-radius: 8px;
+    padding: 0.5rem 0.7rem;
+    color: var(--danger);
+    background: transparent;
+    font-weight: 800;
+    cursor: pointer;
+  }
+
+  .reaction-management :global(.reaction-emoji-image) {
+    width: 20px;
+    height: 20px;
+  }
+
+  .reaction-management-error {
+    margin: 0.7rem 0 0;
+    color: var(--danger);
+    font-size: 0.82rem;
+  }
+
+  .reaction-confirmation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    border-top: 1px solid var(--line);
+    padding: 0.8rem 1rem;
+    background: var(--surface-subtle);
+  }
+
+  .reaction-confirmation p {
+    margin: 0.2rem 0 0;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+
+  .reaction-confirmation-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.45rem;
+  }
+
+  .reaction-confirmation-actions button {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.5rem 0.7rem;
+    color: var(--text);
+    background: var(--surface-raised);
+    font-weight: 800;
+    cursor: pointer;
+  }
+
+  .reaction-confirmation-actions .danger {
+    border-color: var(--danger);
+    color: white;
+    background: var(--danger);
+  }
+
+  button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
   .reaction-viewer-state button,
   .reaction-load-more {
     border: 1px solid var(--line);
@@ -405,6 +603,15 @@
 
     nav button {
       flex: 0 0 auto;
+    }
+
+    .reaction-confirmation {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .reaction-confirmation-actions {
+      justify-content: flex-end;
     }
   }
 </style>

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
-from app.api.link_previews import normalize_preview_url, preview_metadata
+from app.api.link_previews import PreviewRequest, normalize_preview_url, preview_metadata
 
 
 @pytest.mark.parametrize(
@@ -24,6 +25,11 @@ def test_preview_url_is_canonical_and_drops_fragments() -> None:
     assert normalize_preview_url("HTTPS://Example.COM/post?q=1#section") == (
         "https://example.com/post?q=1"
     )
+
+
+def test_preview_request_rejects_nul_text_before_url_processing() -> None:
+    with pytest.raises(ValidationError):
+        PreviewRequest.model_validate({"url": "https://example.com/\x00preview"})
 
 
 def test_preview_metadata_extracts_bounded_open_graph_values() -> None:

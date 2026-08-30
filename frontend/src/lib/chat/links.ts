@@ -1,3 +1,5 @@
+import { normalizeDirectoryProductLink } from './application-product-links';
+
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 const TRAILING_PUNCTUATION = /[),.!?:;\]}]+$/;
 
@@ -24,7 +26,8 @@ export function previewableLink(content: string | null): string | null {
       const url = new URL(value);
       return (
         !['media.klipy.com', 'static.klipy.com'].includes(url.hostname) &&
-        !/^\/invite\/[^/]+\/?$/i.test(url.pathname)
+        !/^\/invite\/[^/]+\/?$/i.test(url.pathname) &&
+        !normalizeDirectoryProductLink(value)
       );
     }) ?? null
   );

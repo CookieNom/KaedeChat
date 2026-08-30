@@ -9,12 +9,18 @@ import {
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
 import { userErrorMessage } from '$lib/api/client';
 import type { Channel } from '$lib/chat/types';
-import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
+import {
+  isNativeDesktop,
+  nativeInvoke,
+  nativePrioritySpeakerIdentities,
+  type NativeVoiceStatus
+} from '$lib/platform/native';
 import { base64url } from '$lib/e2ee/encoding';
 import {
   loadMediaQuality,
   saveMediaQuality,
   webAudioPublishOptions,
+  webCameraDefaults,
   webScreenShareOptions,
   type MediaQualityPreferences
 } from './quality';
@@ -29,6 +35,10 @@ export interface VoiceToken {
   can_speak: boolean;
   can_stream: boolean;
   can_use_vad: boolean;
+  bitrate: number;
+  user_limit: number;
+  rtc_region: string | null;
+  video_quality_mode: 1 | 2;
   move_session_id?: string | null;
   e2ee: boolean;
   channel_id?: string | null;
@@ -49,9 +59,20 @@ export type VoiceChannelPolicy = Pick<
   | 'encryption_state'
   | 'encryption_policy_generation'
   | 'encryption_epoch'
+  | 'bitrate'
+  | 'user_limit'
+  | 'rtc_region'
+  | 'video_quality_mode'
 >;
 
-export interface ExpectedVoicePolicy {
+export interface VoiceMediaPolicy {
+  bitrate: number;
+  user_limit: number;
+  rtc_region: string | null;
+  video_quality_mode: 1 | 2;
+}
+
+export interface ExpectedVoicePolicy extends VoiceMediaPolicy {
   e2ee: boolean;
   room: string;
   channel_id: string;
@@ -93,7 +114,78 @@ export interface VoiceParticipant {
 
 export type VoiceRoomFactory = (options: ConstructorParameters<typeof Room>[0]) => Room;
 
+export interface SelfVoiceState {
+  self_mute: boolean;
+  self_deaf: boolean;
+}
+
+export type VoiceStatePublisher = (state: SelfVoiceState) => Promise<void>;
+
 const VOICE_CONNECT_TIMEOUT_MS = 15_000;
+const DEFAULT_VOICE_MEDIA_POLICY: VoiceMediaPolicy = {
+  bitrate: 64_000,
+  user_limit: 0,
+  rtc_region: null,
+  video_quality_mode: 1
+};
+
+function validRtcRegion(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== 'string') return false;
+  const length = [...value].length;
+  return length >= 1 && length <= 64;
+}
+
+function parseVoiceMediaPolicy(value: {
+  bitrate: unknown;
+  user_limit: unknown;
+  rtc_region: unknown;
+  video_quality_mode: unknown;
+}): VoiceMediaPolicy | null {
+  if (
+    typeof value.bitrate !== 'number' ||
+    !Number.isInteger(value.bitrate) ||
+    value.bitrate < 8_000 ||
+    value.bitrate > 384_000 ||
+    typeof value.user_limit !== 'number' ||
+    !Number.isInteger(value.user_limit) ||
+    value.user_limit < 0 ||
+    value.user_limit > 10_000 ||
+    !validRtcRegion(value.rtc_region) ||
+    (value.video_quality_mode !== 1 && value.video_quality_mode !== 2)
+  ) {
+    return null;
+  }
+  return {
+    bitrate: value.bitrate,
+    user_limit: value.user_limit,
+    rtc_region: value.rtc_region,
+    video_quality_mode: value.video_quality_mode
+  };
+}
+
+function voiceMediaPolicyFromGrant(grant: VoiceToken): VoiceMediaPolicy | null {
+  return parseVoiceMediaPolicy(grant);
+}
+
+function voiceMediaPolicyFromChannel(channel: VoiceChannelPolicy): VoiceMediaPolicy | null {
+  const policy = {
+    bitrate: channel.bitrate ?? DEFAULT_VOICE_MEDIA_POLICY.bitrate,
+    user_limit: channel.user_limit ?? DEFAULT_VOICE_MEDIA_POLICY.user_limit,
+    rtc_region: channel.rtc_region ?? DEFAULT_VOICE_MEDIA_POLICY.rtc_region,
+    video_quality_mode: channel.video_quality_mode ?? DEFAULT_VOICE_MEDIA_POLICY.video_quality_mode
+  };
+  return parseVoiceMediaPolicy(policy);
+}
+
+function sameVoiceMediaPolicy(left: VoiceMediaPolicy, right: VoiceMediaPolicy): boolean {
+  return (
+    left.bitrate === right.bitrate &&
+    left.user_limit === right.user_limit &&
+    left.rtc_region === right.rtc_region &&
+    left.video_quality_mode === right.video_quality_mode
+  );
+}
 
 export class VoiceConnectionFence {
   #generation = 0;
@@ -145,6 +237,7 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
       (typeof value.move_session_id === 'string' &&
         /^[A-Za-z0-9_-]{32,64}$/.test(value.move_session_id))) &&
     typeof value.e2ee === 'boolean' &&
+    voiceMediaPolicyFromGrant(value) !== null &&
     (!value.e2ee
       ? Boolean(value.channel_id) &&
         Boolean(value.channel_domain) &&
@@ -171,6 +264,9 @@ export function voiceGrantMatchesChannelPolicy(
   grant: VoiceToken,
   channel: VoiceChannelPolicy
 ): boolean {
+  const grantMedia = voiceMediaPolicyFromGrant(grant);
+  const channelMedia = voiceMediaPolicyFromChannel(channel);
+  if (!grantMedia || !channelMedia || !sameVoiceMediaPolicy(grantMedia, channelMedia)) return false;
   if (channel.encryption_mode !== 'plaintext' && channel.encryption_mode !== 'e2ee') return false;
   if (grant.e2ee !== (channel.encryption_mode === 'e2ee')) return false;
   if (`${grant.channel_id}@${grant.channel_domain}` !== `${channel.id}@${channel.origin_domain}`)
@@ -201,9 +297,7 @@ export function expectedVoicePolicy(
   channel: VoiceChannelPolicy
 ): ExpectedVoicePolicy {
   if (!isUsableVoiceToken(grant) || !voiceGrantMatchesChannelPolicy(grant, channel)) {
-    throw new Error(
-      'The voice encryption grant did not match this conversation. Nothing connected.'
-    );
+    throw new Error('The voice grant did not match this channel policy. Nothing connected.');
   }
   return {
     e2ee: grant.e2ee,
@@ -215,7 +309,11 @@ export function expectedVoicePolicy(
     media_protocol: grant.media_protocol ?? null,
     media_suite: grant.media_suite ?? null,
     media_session_id: grant.media_session_id ?? null,
-    media_epoch: grant.media_epoch ?? null
+    media_epoch: grant.media_epoch ?? null,
+    bitrate: grant.bitrate,
+    user_limit: grant.user_limit,
+    rtc_region: grant.rtc_region,
+    video_quality_mode: grant.video_quality_mode
   };
 }
 
@@ -234,7 +332,11 @@ export function voiceGrantMatchesExpectedPolicy(
     (grant.media_protocol ?? null) === expected.media_protocol &&
     (grant.media_suite ?? null) === expected.media_suite &&
     (grant.media_session_id ?? null) === expected.media_session_id &&
-    (grant.media_epoch ?? null) === expected.media_epoch
+    (grant.media_epoch ?? null) === expected.media_epoch &&
+    grant.bitrate === expected.bitrate &&
+    grant.user_limit === expected.user_limit &&
+    grant.rtc_region === expected.rtc_region &&
+    grant.video_quality_mode === expected.video_quality_mode
   );
 }
 
@@ -245,6 +347,7 @@ export class VoiceSession extends EventTarget {
   connecting = false;
   encrypted: boolean | null = null;
   microphone = false;
+  deafened = false;
   camera = false;
   screen = false;
   canSpeak = false;
@@ -257,28 +360,48 @@ export class VoiceSession extends EventTarget {
   #nativeMuted = false;
   #nativeDeafened = false;
   #nativeSpeakingUntil = 0;
+  #nativePrioritySpeakers = new Set<string>();
   #activeSpeakers = new Set<string>();
+  #remoteAudio = new Set<HTMLMediaElement>();
   #connectGeneration = 0;
   #candidateRoom: Room | null = null;
   #candidateWorker: Worker | null = null;
   #e2eeWorker: Worker | null = null;
   readonly #roomFactory: VoiceRoomFactory;
+  readonly #publishVoiceState: VoiceStatePublisher;
   #mediaQuality: MediaQualityPreferences;
+  #voiceMediaPolicy: VoiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
 
-  constructor(roomFactory: VoiceRoomFactory = (options) => new Room(options)) {
+  constructor(
+    roomFactory: VoiceRoomFactory = (options) => new Room(options),
+    publishVoiceState: VoiceStatePublisher = async () => undefined
+  ) {
     super();
     this.#roomFactory = roomFactory;
+    this.#publishVoiceState = publishVoiceState;
     this.#mediaQuality = loadMediaQuality();
     this.room = this.#createRoom();
   }
 
-  #createRoom(e2ee?: { keyProvider: ExternalE2EEKeyProvider; worker: Worker }): Room {
+  get voiceMediaPolicy(): VoiceMediaPolicy {
+    return { ...this.#voiceMediaPolicy };
+  }
+
+  #createRoom(
+    policy: VoiceMediaPolicy = DEFAULT_VOICE_MEDIA_POLICY,
+    e2ee?: { keyProvider: ExternalE2EEKeyProvider; worker: Worker }
+  ): Room {
+    const camera = webCameraDefaults(policy.video_quality_mode);
     const room = this.#roomFactory({
       adaptiveStream: true,
       dynacast: true,
       disconnectOnPageLeave: true,
       stopLocalTrackOnUnpublish: true,
-      publishDefaults: webAudioPublishOptions(this.#mediaQuality),
+      videoCaptureDefaults: camera.capture,
+      publishDefaults: {
+        ...webAudioPublishOptions(this.#mediaQuality, policy.bitrate),
+        ...camera.publish
+      },
       ...(e2ee ? { e2ee } : {})
     });
     const changed = () => this.#changed();
@@ -298,7 +421,9 @@ export class VoiceSession extends EventTarget {
       this.connected = false;
       this.encrypted = null;
       this.moveSessionId = null;
+      this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
       this.microphone = false;
+      this.deafened = false;
       this.camera = false;
       this.screen = false;
       if (
@@ -343,6 +468,7 @@ export class VoiceSession extends EventTarget {
     this.encrypted = null;
     this.moveSessionId = null;
     this.microphone = false;
+    this.deafened = false;
     this.camera = false;
     this.screen = false;
     this.error = '';
@@ -373,9 +499,9 @@ export class VoiceSession extends EventTarget {
         candidateWorker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
           type: 'module'
         });
-        candidate = this.#createRoom({ keyProvider, worker: candidateWorker });
+        candidate = this.#createRoom(expected, { keyProvider, worker: candidateWorker });
       } else {
-        candidate = this.#createRoom();
+        candidate = this.#createRoom(expected);
       }
       this.#candidateRoom = candidate;
       this.#candidateWorker = candidateWorker;
@@ -402,6 +528,12 @@ export class VoiceSession extends EventTarget {
       promoted = true;
       this.connected = true;
       this.encrypted = expected.e2ee;
+      this.#voiceMediaPolicy = {
+        bitrate: expected.bitrate,
+        user_limit: expected.user_limit,
+        rtc_region: expected.rtc_region,
+        video_quality_mode: expected.video_quality_mode
+      };
       this.moveSessionId = grant.move_session_id ?? null;
       this.microphone = grant.can_speak;
     } catch (caught) {
@@ -454,6 +586,12 @@ export class VoiceSession extends EventTarget {
       this.#startNativePolling();
       await this.#pollNativeStatus();
       this.encrypted = expectedPolicy.e2ee;
+      this.#voiceMediaPolicy = {
+        bitrate: expectedPolicy.bitrate,
+        user_limit: expectedPolicy.user_limit,
+        rtc_region: expectedPolicy.rtc_region,
+        video_quality_mode: expectedPolicy.video_quality_mode
+      };
       this.moveSessionId = grant.move_session_id ?? null;
       this.#startNativeVideoPolling();
     } catch (caught) {
@@ -484,6 +622,8 @@ export class VoiceSession extends EventTarget {
       this.screen = status.screen ?? false;
       this.#nativeMuted = status.muted ?? this.#nativeMuted;
       this.#nativeDeafened = status.deafened ?? this.#nativeDeafened;
+      this.#nativePrioritySpeakers = nativePrioritySpeakerIdentities(status.priority_speakers);
+      this.deafened = this.#nativeDeafened;
       this.microphone = this.connected && this.canSpeak && !this.#nativeMuted;
       const inputLevel = Math.max(0, status.input_level ?? 0);
       if (this.microphone && inputLevel >= 0.015) {
@@ -509,6 +649,7 @@ export class VoiceSession extends EventTarget {
       if (status.state === 'disconnected' || status.state === 'failed') {
         this.encrypted = null;
         this.moveSessionId = null;
+        this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
         if (this.#nativePoll) clearInterval(this.#nativePoll);
         this.#nativePoll = null;
       }
@@ -542,19 +683,109 @@ export class VoiceSession extends EventTarget {
 
   async toggleMicrophone(): Promise<void> {
     if (!this.connected || !this.canSpeak) return;
+    const wasDeafened = this.deafened;
+    const nextMuted = this.microphone;
+    const nextDeafened = nextMuted ? wasDeafened : false;
+    if (!nextMuted) {
+      // Publish an unmute before opening capture. If realtime state is down,
+      // the local microphone stays closed instead of surprising the user.
+      await this.#publishVoiceState({ self_mute: false, self_deaf: false });
+    }
     if (isNativeDesktop()) {
-      this.#nativeMuted = !this.#nativeMuted;
-      await nativeInvoke('native_voice_control', {
-        control: this.#nativeMuted ? 'mute' : 'unmute'
-      });
+      try {
+        if (!nextMuted && wasDeafened) {
+          await nativeInvoke('native_voice_control', { control: 'undeafen' });
+        }
+        await nativeInvoke('native_voice_control', {
+          control: nextMuted ? 'mute' : 'unmute'
+        });
+      } catch (caught) {
+        if (!nextMuted) {
+          if (wasDeafened) {
+            await nativeInvoke('native_voice_control', { control: 'deafen' }).catch(
+              () => undefined
+            );
+          }
+          await this.#publishVoiceState({
+            self_mute: true,
+            self_deaf: wasDeafened
+          }).catch(() => undefined);
+        }
+        throw caught;
+      }
+      this.#nativeMuted = nextMuted;
+      this.#nativeDeafened = nextDeafened;
       this.microphone = !this.#nativeMuted;
+      this.deafened = this.#nativeDeafened;
       this.#changed();
+      if (nextMuted) {
+        await this.#publishVoiceState({ self_mute: true, self_deaf: nextDeafened });
+      }
       return;
     }
-    const enabled = !this.microphone;
-    await this.room.localParticipant.setMicrophoneEnabled(enabled);
-    this.microphone = enabled;
+    try {
+      await this.room.localParticipant.setMicrophoneEnabled(!nextMuted);
+    } catch (caught) {
+      if (!nextMuted) {
+        await this.#publishVoiceState({
+          self_mute: true,
+          self_deaf: this.deafened
+        }).catch(() => undefined);
+      }
+      throw caught;
+    }
+    this.microphone = !nextMuted;
+    if (!nextMuted && wasDeafened) this.#setBrowserDeafened(false);
+    this.deafened = nextDeafened;
     this.#changed();
+    if (nextMuted) {
+      await this.#publishVoiceState({ self_mute: true, self_deaf: nextDeafened });
+    }
+  }
+
+  async toggleDeafen(): Promise<void> {
+    if (!this.connected) return;
+    const nextDeafened = !this.deafened;
+    if (!nextDeafened) {
+      await this.#publishVoiceState({ self_mute: true, self_deaf: false });
+    }
+    if (isNativeDesktop()) {
+      try {
+        await nativeInvoke('native_voice_control', {
+          control: nextDeafened ? 'deafen' : 'undeafen'
+        });
+      } catch (caught) {
+        if (!nextDeafened) {
+          await this.#publishVoiceState({ self_mute: true, self_deaf: true }).catch(
+            () => undefined
+          );
+        }
+        throw caught;
+      }
+      this.#nativeDeafened = nextDeafened;
+      if (nextDeafened) this.#nativeMuted = true;
+      this.microphone = !this.#nativeMuted;
+    } else {
+      try {
+        if (nextDeafened && this.microphone) {
+          await this.room.localParticipant.setMicrophoneEnabled(false);
+          this.microphone = false;
+        }
+        this.#setBrowserDeafened(nextDeafened);
+      } catch (caught) {
+        if (!nextDeafened) {
+          await this.#publishVoiceState({ self_mute: true, self_deaf: true }).catch(
+            () => undefined
+          );
+        }
+        throw caught;
+      }
+    }
+    this.deafened = nextDeafened;
+    this.#changed();
+    if (nextDeafened) {
+      await this.#publishVoiceState({ self_mute: true, self_deaf: true });
+    }
   }
 
   async toggleCamera(): Promise<void> {
@@ -568,7 +799,8 @@ export class VoiceSession extends EventTarget {
       this.#changed();
       return;
     }
-    await this.room.localParticipant.setCameraEnabled(enabled);
+    const camera = webCameraDefaults(this.#voiceMediaPolicy.video_quality_mode);
+    await this.room.localParticipant.setCameraEnabled(enabled, camera.capture, camera.publish);
     this.camera = enabled;
     this.#changed();
   }
@@ -648,7 +880,7 @@ export class VoiceSession extends EventTarget {
     try {
       await this.room.localParticipant.publishTrack(
         track,
-        webAudioPublishOptions(this.#mediaQuality)
+        webAudioPublishOptions(this.#mediaQuality, this.#voiceMediaPolicy.bitrate)
       );
       if (wasMuted) await track.mute();
     } catch (caught) {
@@ -667,11 +899,19 @@ export class VoiceSession extends EventTarget {
       this.#nativeVideoGeneration += 1;
       this.#nativeVideo.clear();
       this.#nativeSpeakingUntil = 0;
+      this.#nativePrioritySpeakers.clear();
       await nativeInvoke('native_voice_leave');
       this.connected = false;
       this.encrypted = null;
       this.moveSessionId = null;
+      this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
       this.connecting = false;
+      this.microphone = false;
+      this.deafened = false;
+      this.camera = false;
+      this.screen = false;
+      this.#nativeMuted = false;
+      this.#nativeDeafened = false;
       this.#changed();
       return;
     }
@@ -694,8 +934,10 @@ export class VoiceSession extends EventTarget {
     this.connected = false;
     this.encrypted = null;
     this.moveSessionId = null;
+    this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
     this.connecting = false;
     this.microphone = false;
+    this.deafened = false;
     this.camera = false;
     this.screen = false;
     this.#activeSpeakers.clear();
@@ -785,6 +1027,10 @@ export class VoiceSession extends EventTarget {
     );
   }
 
+  prioritySpeakers(): ReadonlySet<string> {
+    return this.#nativePrioritySpeakers;
+  }
+
   attachAudio(element: HTMLElement): () => void {
     if (isNativeDesktop()) return () => undefined;
     const attached: HTMLMediaElement[] = [];
@@ -794,8 +1040,10 @@ export class VoiceSession extends EventTarget {
       if (!publication.track || publication.track.kind !== Track.Kind.Audio) return;
       const media = publication.track.attach();
       media.autoplay = true;
+      media.muted = this.deafened;
       element.append(media);
       attached.push(media);
+      this.#remoteAudio.add(media);
     };
     for (const participant of this.room.remoteParticipants.values()) {
       for (const publication of participant.audioTrackPublications.values()) {
@@ -806,14 +1054,23 @@ export class VoiceSession extends EventTarget {
       if (track.kind !== Track.Kind.Audio) return;
       const media = track.attach();
       media.autoplay = true;
+      media.muted = this.deafened;
       element.append(media);
       attached.push(media);
+      this.#remoteAudio.add(media);
     };
     this.room.on(RoomEvent.TrackSubscribed, onSubscribed);
     return () => {
       this.room.off(RoomEvent.TrackSubscribed, onSubscribed);
-      for (const media of attached) media.remove();
+      for (const media of attached) {
+        this.#remoteAudio.delete(media);
+        media.remove();
+      }
     };
+  }
+
+  #setBrowserDeafened(deafened: boolean): void {
+    for (const media of this.#remoteAudio) media.muted = deafened;
   }
 
   #changed(): void {

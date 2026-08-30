@@ -155,24 +155,48 @@ final class MobileMessageCacheEntry {
     required this.plaintext,
     required this.authorRef,
     required this.messageRef,
+    this.applicationRef,
+    this.webhookRef,
   });
 
   factory MobileMessageCacheEntry.fromJson(Map<String, Object?> json) {
-    const fields = <String>{'plaintext', 'authorRef', 'messageRef'};
+    const legacyFields = <String>{'plaintext', 'authorRef', 'messageRef'};
+    const appBoundFields = <String>{
+      'plaintext',
+      'authorRef',
+      'messageRef',
+      'applicationRef',
+    };
+    const fields = <String>{
+      ...appBoundFields,
+      'webhookRef',
+    };
     final plaintext = json['plaintext'];
     final authorRef = json['authorRef'];
     final messageRef = json['messageRef'];
-    if (json.length != fields.length ||
-        !json.keys.toSet().containsAll(fields) ||
+    final applicationRef = json['applicationRef'];
+    final webhookRef = json['webhookRef'];
+    if (!((json.length == fields.length &&
+                json.keys.toSet().containsAll(fields)) ||
+            (json.length == appBoundFields.length &&
+                json.keys.toSet().containsAll(appBoundFields)) ||
+            (json.length == legacyFields.length &&
+                json.keys.toSet().containsAll(legacyFields))) ||
         plaintext is! String ||
         authorRef is! String ||
-        (messageRef != null && messageRef is! String)) {
+        (messageRef != null && messageRef is! String) ||
+        (applicationRef != null && applicationRef is! String) ||
+        (webhookRef != null && webhookRef is! String)) {
       throw const FormatException('Invalid encrypted message cache.');
     }
     try {
       if (EntityRef.parse(authorRef).wire != authorRef ||
           (messageRef is String &&
-              EntityRef.parse(messageRef).wire != messageRef)) {
+              EntityRef.parse(messageRef).wire != messageRef) ||
+          (applicationRef is String &&
+              EntityRef.parse(applicationRef).wire != applicationRef) ||
+          (webhookRef is String &&
+              EntityRef.parse(webhookRef).wire != webhookRef)) {
         throw const FormatException('Invalid encrypted message cache.');
       }
     } on Object {
@@ -182,23 +206,31 @@ final class MobileMessageCacheEntry {
       plaintext: plaintext,
       authorRef: authorRef,
       messageRef: messageRef as String?,
+      applicationRef: applicationRef as String?,
+      webhookRef: webhookRef as String?,
     );
   }
 
   final String plaintext;
   final String authorRef;
   final String? messageRef;
+  final String? applicationRef;
+  final String? webhookRef;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'plaintext': plaintext,
         'authorRef': authorRef,
         'messageRef': messageRef,
+        'applicationRef': applicationRef,
+        'webhookRef': webhookRef,
       };
 
   MobileMessageCacheEntry bindMessage(String ref) => MobileMessageCacheEntry(
         plaintext: plaintext,
         authorRef: authorRef,
         messageRef: ref,
+        applicationRef: applicationRef,
+        webhookRef: webhookRef,
       );
 
   @override
@@ -206,10 +238,13 @@ final class MobileMessageCacheEntry {
       other is MobileMessageCacheEntry &&
       other.plaintext == plaintext &&
       other.authorRef == authorRef &&
-      other.messageRef == messageRef;
+      other.messageRef == messageRef &&
+      other.applicationRef == applicationRef &&
+      other.webhookRef == webhookRef;
 
   @override
-  int get hashCode => Object.hash(plaintext, authorRef, messageRef);
+  int get hashCode =>
+      Object.hash(plaintext, authorRef, messageRef, applicationRef, webhookRef);
 }
 
 int mobileMessageCacheSerializedBytes(

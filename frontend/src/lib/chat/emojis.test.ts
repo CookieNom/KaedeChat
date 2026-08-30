@@ -70,7 +70,7 @@ describe('custom emoji identity', () => {
     expect(
       customEmojiToken({
         id: '75512661369970688',
-        origin_domain: 'CHAT.Example',
+        origin_domain: 'CHAT.Example.',
         name: 'party_blob'
       })
     ).toBe('<:party_blob:75512661369970688@chat.example>');
@@ -91,7 +91,7 @@ describe('custom emoji identity', () => {
   });
 
   it('uses the emoji origin for immutable federated media URLs', () => {
-    expect(customEmojiUrl('75512661369970689', 'CHAT.Example')).toBe(
+    expect(customEmojiUrl('75512661369970689', 'CHAT.Example.')).toBe(
       'https://chat.example/media/emojis/75512661369970689/thumbnail_128'
     );
   });

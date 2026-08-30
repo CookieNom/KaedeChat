@@ -28,6 +28,7 @@ from app.chat.thread_membership import (
 )
 from app.core.settings import Settings
 from app.core.task_wake import enqueue_best_effort
+from app.db.materialization import materialize_updated_at
 from app.db.models import Attachment, Channel, DMParticipant, Guild, GuildMember, Message, User
 from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages
@@ -43,6 +44,7 @@ class MessagePurgeResult:
     local_attachments: list[Attachment]
     delivery_destinations: set[str]
     guilds: dict[tuple[int, str], Guild]
+    rendered_threads: dict[tuple[int, str], dict[str, object]]
     skipped_messages: int
 
     @property
@@ -386,12 +388,21 @@ async def purge_author_messages(
                     channel=channel,
                 )
 
+    thread_channels = [
+        access.channel
+        for access in access_by_channel.values()
+        if access.channel.type in {10, 11, 12}
+    ]
+    await materialize_updated_at(session, *thread_channels)
     return MessagePurgeResult(
         messages=messages,
         access_by_channel=access_by_channel,
         local_attachments=local_attachments,
         delivery_destinations=delivery_destinations,
         guilds=guilds,
+        rendered_threads={
+            (thread.id, thread.origin_domain): channel_payload(thread) for thread in thread_channels
+        },
         skipped_messages=max(0, total_count - len(messages)),
     )
 
@@ -421,9 +432,14 @@ async def publish_message_purge(
         )
     for access in result.access_by_channel.values():
         if access.channel.type in {10, 11, 12}:
+            rendered = result.rendered_threads.get(
+                (access.channel.id, access.channel.origin_domain)
+            )
+            if rendered is None:
+                raise RuntimeError("thread purge projection was not materialized")
             await publish_channel_dispatch(
                 redis,
                 access,
                 "THREAD_UPDATE",
-                channel_payload(access.channel),
+                rendered,
             )

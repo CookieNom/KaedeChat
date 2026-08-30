@@ -5,21 +5,36 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import delete, exists, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bots.target_contract import authority_attested_application_target
+from app.chat.dm_mutations import authority_attested_dm_message_mutation
 from app.chat.e2ee_controls import (
     authority_attested_direct_dm_control,
     authority_attested_room_policy_change,
 )
+from app.chat.forwarding import authority_attested_forward_source
+from app.chat.poll_results import (
+    authority_attested_direct_poll_result,
+    authority_attested_dm_poll_mutation,
+)
 from app.core.federation import (
+    DURABLE_LATEST_STATE_EVENTS,
     POLICY_HELD_OUTBOX_PREFIX,
     SECURITY_CRITICAL_GUILD_EVENTS,
+    authority_attested_group_event_ref,
+    authority_attested_guild_owner_actor,
+    authority_attested_media_delete_ref,
+    authority_attested_terminal_guild_actor,
     canonical_json,
     durable_guild_media_delete_request,
     durable_terminal_room_event,
     federation_policy_holds_event,
+    guild_crosspost_authority_event_ref,
+    guild_media_delete_request_ref,
+    guild_message_authority_event_refs,
     policy_held_retry_at,
     sign_envelope,
 )
@@ -31,6 +46,7 @@ from app.db.models import (
     FederationEvent,
     FederationOutbox,
     Guild,
+    GuildMember,
     Instance,
     MediaTombstoneDestination,
     MediaTombstoneSource,
@@ -195,7 +211,7 @@ def message_attachment_refs(envelope: dict[str, Any]) -> set[tuple[int, str]]:
 
 
 def metadata_room_ref(envelope: dict[str, Any]) -> tuple[str, int, str] | None:
-    """Return a durable room identity for attachment-bearing event metadata."""
+    """Return a durable room identity carried by event metadata."""
 
     context = envelope.get("context")
     if not isinstance(context, dict):
@@ -209,6 +225,18 @@ def metadata_room_ref(envelope: dict[str, Any]) -> tuple[str, int, str] | None:
             return None
         if 0 <= guild_id <= (1 << 63) - 1:
             return "guild", guild_id, normalize_domain(guild_domain)
+    if envelope.get("type") == "e2ee.room-policy.changed":
+        scope = context.get("scope")
+        if isinstance(scope, dict) and scope.get("type") == "guild":
+            raw_scope_id = scope.get("id")
+            scope_domain = scope.get("domain")
+            if isinstance(scope_domain, str) and raw_scope_id is not None:
+                try:
+                    scope_id = int(str(raw_scope_id))
+                except ValueError:
+                    return None
+                if 0 <= scope_id <= (1 << 63) - 1:
+                    return "guild", scope_id, normalize_domain(scope_domain)
     if envelope.get("type") in {
         "dm.group.call.create",
         "dm.group.message.proposed",
@@ -439,33 +467,190 @@ async def build_envelope(
     *,
     context: dict[str, Any] | None = None,
     authority_attested_actor: bool = False,
+    authority_attested_guild: Guild | None = None,
+    authority_attested_guild_message_author: GuildMember | None = None,
+    retained_authority_attested_actor: bool = False,
 ) -> dict[str, Any]:
-    remote_authority_actor = (
-        authority_attested_actor
-        and actor.origin_domain != settings.domain
+    # Imported lazily because developer projections publish through this
+    # module; keeping the contract check here avoids an import cycle.
+    from app.bots.developer_projection import authority_attested_developer_team_snapshot
+    from app.bots.dm_capability import authority_attested_bot_dm_capability
+    from app.bots.interaction_events import authority_attested_interaction_response
+    from app.chat.expression_authorization import authority_attested_expression_use
+
+    draft_guild_media_request = {
+        "event_id": "kcfe_authority-check",
+        "origin": settings.domain,
+        "type": event_type,
+        "ts": 0,
+        "actor": {"id": str(actor.id), "domain": actor.origin_domain},
+        "context": context or {},
+        "content": content,
+        "signatures": {settings.domain: {"authority-check": "signature"}},
+    }
+    exact_guild_media_request = (
+        guild_media_delete_request_ref(draft_guild_media_request) is not None
+    )
+    exact_media_delete = (
+        authority_attested_media_delete_ref(
+            draft_guild_media_request,
+            expected_authority=settings.domain,
+        )
+        is not None
+    )
+    explicit_authority_actor = authority_attested_actor and (
+        authority_attested_group_event_ref(
+            event_type,
+            content,
+            context or {},
+            expected_authority=settings.domain,
+            actor_id=str(actor.id),
+            actor_domain=actor.origin_domain,
+        )
+        is not None
+        or authority_attested_direct_dm_control(
+            event_type,
+            content,
+            expected_authority=settings.domain,
+            actor_id=str(actor.id),
+            actor_domain=actor.origin_domain,
+        )
+        or authority_attested_room_policy_change(
+            event_type,
+            content,
+            context,
+            expected_authority=settings.domain,
+            actor_id=str(actor.id),
+            actor_domain=actor.origin_domain,
+        )
+        or authority_attested_direct_poll_result(
+            event_type,
+            content,
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_dm_poll_mutation(
+            event_type,
+            content,
+            context or {},
+            expected_authority=settings.domain,
+        )
+        or authority_attested_dm_message_mutation(
+            event_type,
+            content,
+            context or {},
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_application_target(
+            event_type,
+            content,
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_bot_dm_capability(
+            event_type,
+            content,
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_developer_team_snapshot(
+            event_type,
+            content,
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_interaction_response(
+            event_type,
+            content,
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_forward_source(
+            event_type,
+            content,
+            context or {},
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+        or authority_attested_expression_use(
+            event_type,
+            content,
+            context or {},
+            expected_authority=settings.domain,
+            actor=(str(actor.id), actor.origin_domain),
+        )
+    )
+    retained_authority_actor = retained_authority_attested_actor and (
+        authority_attested_terminal_guild_actor(
+            event_type,
+            content,
+            context,
+            expected_authority=settings.domain,
+            actor_id=str(actor.id),
+            actor_domain=actor.origin_domain,
+        )
+        or exact_guild_media_request
+        or exact_media_delete
+    )
+    authority_message_refs = guild_message_authority_event_refs(
+        event_type,
+        content,
+        context,
+        expected_authority=settings.domain,
+    )
+    authority_message_author = bool(
+        authority_attested_guild is not None
+        and authority_attested_guild_message_author is not None
+        and authority_message_refs
+        == (
+            authority_attested_guild.id,
+            authority_attested_guild.origin_domain,
+            authority_attested_guild_message_author.user_id,
+            authority_attested_guild_message_author.user_domain,
+        )
         and (
-            event_type
-            in {
-                "dm.group.state",
-                "dm.group.message.committed",
-                "dm.group.call.create",
-            }
-            or authority_attested_direct_dm_control(
+            authority_attested_guild_message_author.guild_id,
+            authority_attested_guild_message_author.guild_domain,
+        )
+        == (
+            authority_attested_guild.id,
+            authority_attested_guild.origin_domain,
+        )
+    )
+    guild_owner_actor = bool(
+        authority_attested_guild is not None
+        and authority_attested_guild.origin_domain == settings.domain
+        and (
+            authority_attested_guild.owner_id,
+            authority_attested_guild.owner_domain,
+        )
+        == (actor.id, actor.origin_domain)
+        and (
+            authority_attested_guild_owner_actor(
                 event_type,
-                content,
+                context,
                 expected_authority=settings.domain,
-                actor_id=str(actor.id),
-                actor_domain=actor.origin_domain,
+                expected_guild_id=authority_attested_guild.id,
+                expected_owner=(
+                    authority_attested_guild.owner_id,
+                    authority_attested_guild.owner_domain,
+                ),
+                actor=(actor.id, actor.origin_domain),
             )
-            or authority_attested_room_policy_change(
+            or authority_message_author
+            or guild_crosspost_authority_event_ref(
                 event_type,
                 content,
                 context,
                 expected_authority=settings.domain,
-                actor_id=str(actor.id),
-                actor_domain=actor.origin_domain,
             )
+            == (authority_attested_guild.id, settings.domain)
+            or exact_guild_media_request
         )
+    )
+    remote_authority_actor = actor.origin_domain != settings.domain and (
+        explicit_authority_actor or retained_authority_actor or guild_owner_actor
     )
     if actor.origin_domain != settings.domain and not remote_authority_actor:
         raise ValueError("an instance may only sign events for its own users")
@@ -484,6 +669,104 @@ async def build_envelope(
     return envelope
 
 
+async def discard_superseded_latest_state_event(
+    session: AsyncSession,
+    *,
+    destination: str,
+    event_type: str,
+    actor_ref: tuple[int, str] | None = None,
+    channel_ref: tuple[int, str] | None = None,
+    application_ref: tuple[int, str] | None = None,
+    team_ref: tuple[int, str] | None = None,
+    target_domain: str | None = None,
+    grant_id: str | None = None,
+) -> None:
+    """Keep one durable latest-state projection for an exact destination key."""
+
+    if event_type not in DURABLE_LATEST_STATE_EVENTS:
+        raise ValueError("latest-state compaction requires a durable event type")
+    if not any((actor_ref, channel_ref, application_ref, team_ref, grant_id)):
+        raise ValueError("latest-state compaction requires an identity")
+    destination = normalize_domain(destination)
+    conditions = [
+        FederationOutbox.destination == destination,
+        FederationEvent.event_type == event_type,
+    ]
+    if actor_ref is not None:
+        conditions.extend(
+            (
+                FederationEvent.envelope["actor"]["id"].as_string() == str(actor_ref[0]),
+                FederationEvent.envelope["actor"]["domain"].as_string() == actor_ref[1],
+            )
+        )
+    if channel_ref is not None:
+        conditions.extend(
+            (
+                FederationEvent.envelope["content"]["channel_id"].as_string()
+                == str(channel_ref[0]),
+                FederationEvent.envelope["content"]["channel_domain"].as_string() == channel_ref[1],
+            )
+        )
+    if application_ref is not None:
+        conditions.extend(
+            (
+                FederationEvent.envelope["content"]["application_id"].as_string()
+                == str(application_ref[0]),
+                FederationEvent.envelope["content"]["application_domain"].as_string()
+                == application_ref[1],
+            )
+        )
+    if team_ref is not None:
+        conditions.extend(
+            (
+                FederationEvent.envelope["content"]["team_id"].as_string() == str(team_ref[0]),
+                FederationEvent.envelope["content"]["team_domain"].as_string() == team_ref[1],
+            )
+        )
+    if target_domain is not None:
+        conditions.append(
+            FederationEvent.envelope["content"]["target_domain"].as_string()
+            == normalize_domain(target_domain)
+        )
+    if grant_id is not None:
+        conditions.append(FederationEvent.envelope["content"]["grant_id"].as_string() == grant_id)
+    await session.scalar(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(f"kaede-outbox:{destination}", 0)))
+    )
+    old_refs = list(
+        (
+            await session.execute(
+                select(FederationEvent.origin_domain, FederationEvent.event_id)
+                .join(
+                    FederationOutbox,
+                    (FederationOutbox.event_origin_domain == FederationEvent.origin_domain)
+                    & (FederationOutbox.event_id == FederationEvent.event_id),
+                )
+                .where(*conditions)
+            )
+        ).all()
+    )
+    if not old_refs:
+        return
+    await session.execute(
+        delete(FederationOutbox).where(
+            FederationOutbox.destination == destination,
+            tuple_(FederationOutbox.event_origin_domain, FederationOutbox.event_id).in_(old_refs),
+        )
+    )
+    await session.execute(
+        delete(FederationEvent).where(
+            tuple_(FederationEvent.origin_domain, FederationEvent.event_id).in_(old_refs),
+            ~exists(
+                select(FederationOutbox.id).where(
+                    FederationOutbox.event_origin_domain == FederationEvent.origin_domain,
+                    FederationOutbox.event_id == FederationEvent.event_id,
+                )
+            ),
+        )
+    )
+
+
 async def queue_event(
     session: AsyncSession,
     settings: Settings,
@@ -491,6 +774,7 @@ async def queue_event(
     envelope: dict[str, Any],
     *,
     discover_destination: bool = True,
+    requeue_existing: bool = False,
 ) -> None:
     destination = normalize_domain(destination)
     attachment_refs = message_attachment_refs(envelope)
@@ -535,13 +819,29 @@ async def queue_event(
     block = await matching_block(session, destination)
     event_type = str(envelope.get("type", ""))
     event_origin = normalize_domain(str(envelope.get("origin", "")))
+    interaction_response_expiry: datetime | None = None
+    if event_type == "bot.interaction.response":
+        content = envelope.get("content")
+        if not isinstance(content, dict):
+            raise ValueError("interaction response event content is invalid")
+        try:
+            interaction_response_expiry = datetime.fromisoformat(str(content["expires_at"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("interaction response event expiry is invalid") from exc
+        if interaction_response_expiry.tzinfo is None:
+            raise ValueError("interaction response event expiry is invalid")
     if event_origin != settings.domain and event_type != "media.delete":
         raise ValueError("only origin-signed media tombstones may be relayed")
     deletion_control = event_type == "media.delete" or durable_room_delete or durable_media_request
+    durable_projection = event_type in DURABLE_LATEST_STATE_EVENTS
     policy_held = (
         block is not None
         and not deletion_control
-        and federation_policy_holds_event(block.level, event_type)
+        and federation_policy_holds_event(
+            block.level,
+            event_type,
+            context=envelope.get("context"),
+        )
     )
     await ensure_queue_destination(
         session,
@@ -567,12 +867,15 @@ async def queue_event(
         )
     )
     if existing_outbox is not None:
-        if (
-            event_type == "media.delete" or durable_room_delete or durable_media_request
-        ) and existing_outbox.status in {
-            "expired",
-            "failed",
-        }:
+        if (requeue_existing and existing_outbox.status in {"delivered", "expired", "failed"}) or (
+            (
+                event_type == "media.delete"
+                or durable_room_delete
+                or durable_media_request
+                or durable_projection
+            )
+            and existing_outbox.status in {"expired", "failed"}
+        ):
             existing_outbox.status = "circuit" if policy_held else "pending"
             existing_outbox.attempts = 0
             existing_outbox.next_retry_at = (
@@ -602,11 +905,14 @@ async def queue_event(
             # the expiry sweep can inspect it and enqueue a resync marker even
             # when operators configure the minimum retention window.
             expires_at=(
-                None
+                interaction_response_expiry
+                if interaction_response_expiry is not None
+                else None
                 if policy_held
                 or event_type == "media.delete"
                 or durable_room_delete
                 or durable_media_request
+                or durable_projection
                 else now
                 + max(
                     timedelta(days=settings.federation_event_retention_days),
@@ -628,6 +934,7 @@ async def queue_event(
             or event_type == "media.delete"
             or durable_room_delete
             or durable_media_request
+            or durable_projection
         ):
             existing.expires_at = None
     outbox_insert = pg_insert(FederationOutbox).values(

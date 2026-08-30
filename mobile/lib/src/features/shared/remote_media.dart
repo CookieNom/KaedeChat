@@ -1,7 +1,15 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 /// Wording shared by the member list, profile sheets and the account bar.
@@ -13,12 +21,16 @@ String presenceLabel(PresenceStatus status) => switch (status) {
       PresenceStatus.offline => 'Offline',
     };
 
-Color presenceColor(PresenceStatus status) => switch (status) {
-      PresenceStatus.online => KaedeColors.mint,
-      PresenceStatus.idle => KaedeColors.warning,
-      PresenceStatus.dnd => KaedeColors.danger,
-      PresenceStatus.invisible || PresenceStatus.offline => KaedeColors.muted,
+Color presenceColor(BuildContext context, PresenceStatus status) =>
+    switch (status) {
+      PresenceStatus.online => context.kaede.mint,
+      PresenceStatus.idle => context.kaede.warning,
+      PresenceStatus.dnd => context.kaede.danger,
+      PresenceStatus.invisible || PresenceStatus.offline => context.kaede.muted,
     };
+
+bool userProfileSupportsFriendshipActions(KaedeUser user) =>
+    !user.isApplication;
 
 IconData presenceIcon(PresenceStatus status) => switch (status) {
       PresenceStatus.online => Icons.circle,
@@ -28,6 +40,42 @@ IconData presenceIcon(PresenceStatus status) => switch (status) {
       PresenceStatus.offline => Icons.circle_outlined,
     };
 
+/// Trusted application-account marker. It is rendered only from the server's
+/// account discriminator; display names, nicknames, and webhook labels cannot
+/// opt into it.
+final class ApplicationTag extends StatelessWidget {
+  const ApplicationTag({super.key, this.compact = false});
+
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        label: 'Application account',
+        child: ExcludeSemantics(
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 4 : 5,
+              vertical: compact ? 1 : 2,
+            ),
+            decoration: BoxDecoration(
+              color: context.kaede.purple,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              'APP',
+              style: TextStyle(
+                color: context.kaede.onPurple,
+                fontSize: compact ? 8 : 9,
+                height: 1,
+                fontWeight: FontWeight.w800,
+                letterSpacing: .3,
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
 /// Round avatar with an optional presence dot punched out of its edge, the way
 /// the web client renders it.
 final class UserAvatar extends StatelessWidget {
@@ -36,7 +84,7 @@ final class UserAvatar extends StatelessWidget {
     required this.user,
     this.radius = 22,
     this.presence,
-    this.ringColor = KaedeColors.sidebar,
+    this.ringColor,
   });
 
   final KaedeUser user;
@@ -46,7 +94,7 @@ final class UserAvatar extends StatelessWidget {
   final PresenceStatus? presence;
 
   /// Colour behind the presence dot, normally the surface the avatar sits on.
-  final Color ringColor;
+  final Color? ringColor;
 
   @override
   Widget build(BuildContext context) {
@@ -57,8 +105,8 @@ final class UserAvatar extends StatelessWidget {
     );
     final avatar = CircleAvatar(
       radius: radius,
-      backgroundColor: KaedeColors.raised,
-      foregroundColor: KaedeColors.textSoft,
+      backgroundColor: context.kaede.raised,
+      foregroundColor: context.kaede.textSoft,
       backgroundImage: url == null ? null : CachedNetworkImageProvider('$url'),
       child: url == null
           ? Text(
@@ -85,7 +133,7 @@ final class UserAvatar extends StatelessWidget {
             child: PresenceDot(
               status: status,
               size: dot,
-              ringColor: ringColor,
+              ringColor: ringColor ?? context.kaede.sidebar,
             ),
           ),
         ],
@@ -100,12 +148,12 @@ final class PresenceDot extends StatelessWidget {
     super.key,
     required this.status,
     this.size = 12,
-    this.ringColor = KaedeColors.sidebar,
+    this.ringColor,
   });
 
   final PresenceStatus status;
   final double size;
-  final Color ringColor;
+  final Color? ringColor;
 
   @override
   Widget build(BuildContext context) {
@@ -116,7 +164,7 @@ final class PresenceDot extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: ringColor,
+        color: ringColor ?? context.kaede.sidebar,
         shape: BoxShape.circle,
       ),
       child: Center(
@@ -124,10 +172,10 @@ final class PresenceDot extends StatelessWidget {
           width: size - 4,
           height: size - 4,
           decoration: BoxDecoration(
-            color: hollow ? Colors.transparent : presenceColor(status),
+            color: hollow ? Colors.transparent : presenceColor(context, status),
             shape: BoxShape.circle,
             border: hollow
-                ? Border.all(color: KaedeColors.muted, width: 1.6)
+                ? Border.all(color: context.kaede.muted, width: 1.6)
                 : null,
           ),
           child: idle
@@ -136,7 +184,7 @@ final class PresenceDot extends StatelessWidget {
                     width: (size - 4) * .55,
                     height: (size - 4) * .55,
                     decoration: BoxDecoration(
-                      color: ringColor,
+                      color: ringColor ?? context.kaede.sidebar,
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -174,7 +222,7 @@ final class GuildIcon extends StatelessWidget {
         style: TextStyle(
           fontWeight: FontWeight.w700,
           fontSize: size * .34,
-          color: KaedeColors.textSoft,
+          color: context.kaede.textSoft,
           letterSpacing: -.3,
         ),
       ),
@@ -182,7 +230,7 @@ final class GuildIcon extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius ?? size * .3),
       child: ColoredBox(
-        color: KaedeColors.raised,
+        color: context.kaede.raised,
         child: SizedBox.square(
           dimension: size,
           child: url == null
@@ -240,22 +288,93 @@ Future<void> showUserProfile(
       ),
     );
 
-final class UserProfileSheet extends StatelessWidget {
+final class UserProfileSheet extends StatefulWidget {
   const UserProfileSheet({
     super.key,
     required this.user,
     required this.presence,
     this.actions = const <Widget>[],
     this.memberOf,
+    this.applicationLookup,
+    this.onAddApplication,
   });
 
   final KaedeUser user;
   final PresenceStatus presence;
   final List<Widget> actions;
   final String? memberOf;
+  final Future<MobileBotProfileApplication?> Function(EntityRef bot)?
+      applicationLookup;
+  final ValueChanged<MobileBotProfileApplication>? onAddApplication;
+
+  @override
+  State<UserProfileSheet> createState() => _UserProfileSheetState();
+}
+
+final class _UserProfileSheetState extends State<UserProfileSheet> {
+  MobileBotProfileApplication? _application;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.user.isApplication) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => unawaited(_loadApplication()),
+      );
+    }
+  }
+
+  Future<void> _loadApplication() async {
+    try {
+      final application =
+          await (widget.applicationLookup?.call(widget.user.ref) ??
+              ProviderScope.containerOf(context)
+                  .read(mobileControllerProvider.notifier)
+                  .repository
+                  .botProfileApplication(widget.user.ref));
+      if (mounted && widget.user.isApplication) {
+        setState(() => _application = application);
+      }
+    } on Object {
+      // Bot profiles remain fully usable when Add App discovery is unavailable.
+    }
+  }
+
+  void _addApplication(MobileBotProfileApplication application) {
+    if (widget.onAddApplication case final callback?) {
+      callback(application);
+      return;
+    }
+    try {
+      final controller = ProviderScope.containerOf(context)
+          .read(mobileControllerProvider.notifier);
+      final home = controller.api.tokens?.instance;
+      if (home == null) return;
+      final router = GoRouter.of(context);
+      Navigator.pop(context);
+      unawaited(
+        router.push<void>(mobileBotApplicationInstallPath(application, home)),
+      );
+    } on StateError {
+      // Standalone profile previews may not have an authenticated app router.
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final user = widget.user;
+    final presence = widget.presence;
+    final memberOf = widget.memberOf;
+    final actions = <Widget>[
+      if (_application case final application?)
+        FilledButton.icon(
+          key: const ValueKey('bot-profile-add-app'),
+          onPressed: () => _addApplication(application),
+          icon: const Icon(Icons.add_rounded),
+          label: const Text('Add App'),
+        ),
+      ...widget.actions,
+    ];
     final banner = publicAssetUri(
       user.ref.domain,
       user.bannerHash,
@@ -280,14 +399,14 @@ final class UserProfileSheet extends StatelessWidget {
                     fit: StackFit.expand,
                     children: [
                       if (banner == null)
-                        const DecoratedBox(
+                        DecoratedBox(
                           decoration: BoxDecoration(
                             gradient: LinearGradient(
                               begin: Alignment.topLeft,
                               end: Alignment.bottomRight,
                               colors: [
-                                KaedeColors.coralSoft,
-                                KaedeColors.purpleSoft,
+                                context.kaede.coralSoft,
+                                context.kaede.purpleSoft,
                               ],
                             ),
                           ),
@@ -296,8 +415,8 @@ final class UserProfileSheet extends StatelessWidget {
                         CachedNetworkImage(
                           imageUrl: '$banner',
                           fit: BoxFit.cover,
-                          errorWidget: (_, __, ___) => const ColoredBox(
-                            color: KaedeColors.coralSoft,
+                          errorWidget: (_, __, ___) => ColoredBox(
+                            color: context.kaede.coralSoft,
                           ),
                         ),
                       Positioned(
@@ -305,11 +424,11 @@ final class UserProfileSheet extends StatelessWidget {
                         right: 8,
                         child: Material(
                           color: Colors.black38,
-                          shape: const CircleBorder(),
+                          shape: CircleBorder(),
                           child: InkWell(
-                            customBorder: const CircleBorder(),
+                            customBorder: CircleBorder(),
                             onTap: () => Navigator.pop(context),
-                            child: const Padding(
+                            child: Padding(
                               padding: EdgeInsets.all(6),
                               child: Icon(Icons.close_rounded,
                                   size: 18, color: Colors.white),
@@ -321,31 +440,44 @@ final class UserProfileSheet extends StatelessWidget {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, 0),
                   child: Transform.translate(
-                    offset: const Offset(0, -34),
+                    offset: Offset(0, -34),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Container(
-                          padding: const EdgeInsets.all(4),
-                          decoration: const BoxDecoration(
-                            color: KaedeColors.panel,
+                          padding: EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: context.kaede.panel,
                             shape: BoxShape.circle,
                           ),
                           child: UserAvatar(
                             user: user,
                             radius: 36,
                             presence: presence,
-                            ringColor: KaedeColors.panel,
+                            ringColor: context.kaede.panel,
                           ),
                         ),
-                        const SizedBox(height: 10),
-                        Text(
-                          user.name,
-                          style: Theme.of(context).textTheme.headlineSmall,
+                        SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                user.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style:
+                                    Theme.of(context).textTheme.headlineSmall,
+                              ),
+                            ),
+                            if (user.isApplication) ...[
+                              const SizedBox(width: 7),
+                              const ApplicationTag(),
+                            ],
+                          ],
                         ),
-                        const SizedBox(height: 2),
+                        SizedBox(height: 2),
                         Row(
                           children: [
                             Expanded(
@@ -354,43 +486,43 @@ final class UserProfileSheet extends StatelessWidget {
                                     ? user.handle
                                     : 'Profile unavailable · refreshes '
                                         'automatically',
-                                style: const TextStyle(
-                                  color: KaedeColors.muted,
+                                style: TextStyle(
+                                  color: context.kaede.muted,
                                   fontSize: 13,
                                 ),
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
+                        SizedBox(height: 8),
                         Row(
                           children: [
                             PresenceDot(
                               status: presence,
                               size: 11,
-                              ringColor: KaedeColors.panel,
+                              ringColor: context.kaede.panel,
                             ),
-                            const SizedBox(width: 6),
+                            SizedBox(width: 6),
                             Text(
                               presenceLabel(presence),
-                              style: const TextStyle(
-                                color: KaedeColors.textSoft,
+                              style: TextStyle(
+                                color: context.kaede.textSoft,
                                 fontSize: 12.5,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
                             if (memberOf != null) ...[
-                              const SizedBox(width: 8),
-                              const Text('·',
-                                  style: TextStyle(color: KaedeColors.muted)),
-                              const SizedBox(width: 8),
+                              SizedBox(width: 8),
+                              Text('·',
+                                  style: TextStyle(color: context.kaede.muted)),
+                              SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  memberOf!,
+                                  memberOf,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: KaedeColors.muted,
+                                  style: TextStyle(
+                                    color: context.kaede.muted,
                                     fontSize: 12.5,
                                   ),
                                 ),
@@ -399,36 +531,43 @@ final class UserProfileSheet extends StatelessWidget {
                           ],
                         ),
                         if (user.customStatus?.trim().isNotEmpty == true) ...[
-                          const SizedBox(height: 14),
+                          SizedBox(height: 14),
                           _ProfileCard(
                             child: Text(
                               user.customStatus!.trim(),
-                              style: const TextStyle(height: 1.35),
+                              style: TextStyle(height: 1.35),
                             ),
                           ),
                         ],
                         if (user.bio?.trim().isNotEmpty == true) ...[
-                          const SizedBox(height: 10),
+                          SizedBox(height: 10),
                           _ProfileCard(
                             label: 'About me',
                             child: Text(
                               user.bio!.trim(),
-                              style: const TextStyle(height: 1.4),
+                              style: TextStyle(height: 1.4),
                             ),
                           ),
                         ],
-                        const SizedBox(height: 10),
-                        _ProfileCard(
-                          label: 'Kaede address',
-                          child: SelectableText(
-                            user.ref.wire,
-                            style: const TextStyle(
-                              color: KaedeColors.textSoft,
-                              fontSize: 12.5,
+                        if (_developerMode(context)) ...[
+                          SizedBox(height: 10),
+                          _ProfileCard(
+                            label: 'Developer mode',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              dense: true,
+                              leading: Icon(Icons.badge_outlined),
+                              title: Text('Copy user ID'),
+                              subtitle: Text(user.ref.wire),
+                              onTap: () => copyDeveloperId(
+                                context,
+                                value: user.ref.wire,
+                                label: 'User',
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(height: 16),
+                        ],
+                        SizedBox(height: 16),
                       ],
                     ),
                   ),
@@ -440,16 +579,16 @@ final class UserProfileSheet extends StatelessWidget {
             SafeArea(
               top: false,
               child: DecoratedBox(
-                decoration: const BoxDecoration(
-                  border: Border(top: BorderSide(color: KaedeColors.border)),
+                decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: context.kaede.border)),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  padding: EdgeInsets.fromLTRB(16, 12, 16, 12),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       for (var index = 0; index < actions.length; index++) ...[
-                        if (index > 0) const SizedBox(height: 8),
+                        if (index > 0) SizedBox(height: 8),
                         actions[index],
                       ],
                     ],
@@ -463,6 +602,18 @@ final class UserProfileSheet extends StatelessWidget {
   }
 }
 
+bool _developerMode(BuildContext context) {
+  try {
+    return ProviderScope.containerOf(context)
+        .read(mobileControllerProvider)
+        .developerMode;
+  } on StateError {
+    // Reusable profile previews (including golden/widget tests) may be hosted
+    // without the signed-in application scope. Technical IDs stay hidden.
+    return false;
+  }
+}
+
 final class _ProfileCard extends StatelessWidget {
   const _ProfileCard({required this.child, this.label});
 
@@ -472,11 +623,11 @@ final class _ProfileCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
         width: double.infinity,
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+        padding: EdgeInsets.fromLTRB(14, 12, 14, 13),
         decoration: BoxDecoration(
-          color: KaedeColors.raised,
+          color: context.kaede.raised,
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
-          border: Border.all(color: KaedeColors.border),
+          border: Border.all(color: context.kaede.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -484,14 +635,14 @@ final class _ProfileCard extends StatelessWidget {
             if (label != null) ...[
               Text(
                 label!.toUpperCase(),
-                style: const TextStyle(
-                  color: KaedeColors.muted,
+                style: TextStyle(
+                  color: context.kaede.muted,
                   fontSize: 10.5,
                   fontWeight: FontWeight.w800,
                   letterSpacing: .9,
                 ),
               ),
-              const SizedBox(height: 6),
+              SizedBox(height: 6),
             ],
             child,
           ],

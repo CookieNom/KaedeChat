@@ -1,5 +1,6 @@
 import { api } from '$lib/api/client';
 import { compareEntityRefs, entityKey, entityRef } from './refs';
+import { canonicalReactionEmoji } from './reactions';
 import type { Attachment, Channel, ForumTag, Message, ThreadMember, UserSummary } from './types';
 
 export const THREAD_TYPES = [10, 11, 12] as const;
@@ -19,6 +20,7 @@ export interface ThreadPage {
 export interface CreatedThread {
   channel: Channel;
   starter_message: Message | null;
+  starter_reservation: { client_nonce: string; claimed: boolean } | null;
 }
 
 export interface CreateThreadRequest {
@@ -30,6 +32,7 @@ export interface CreateThreadRequest {
   attachmentIds?: string[];
   autoArchiveDuration?: number;
   clientNonce?: string;
+  starterReservationNonce?: string;
 }
 
 export interface ForumFilters {
@@ -54,7 +57,7 @@ export function forumDefaultReactionPayload(
 ): NonNullable<Channel['default_reaction_emoji']> | null {
   const id = emojiId?.trim();
   if (id) return { emoji_id: id };
-  const name = emojiName.trim();
+  const name = canonicalReactionEmoji(emojiName.trim());
   return name ? { emoji_name: name } : null;
 }
 
@@ -121,6 +124,16 @@ export function threadParentAllowsChildCreation(
     channel &&
     isThreadParentChannel(channel) &&
     (channel.encryption_mode !== 'e2ee' || channel.encryption_state === 'active')
+  );
+}
+
+/** E2EE children are created empty, activated, then receive a ciphertext starter. */
+export function deferThreadStarterUntilE2EEActive(
+  channel: Pick<Channel, 'type' | 'e2ee_required' | 'encryption_mode'>
+): boolean {
+  return (
+    channel.encryption_mode === 'e2ee' ||
+    (channel.type === FORUM_TYPE && channel.e2ee_required === true)
   );
 }
 
@@ -239,9 +252,33 @@ export function parseCreatedThread(payload: unknown): CreatedThread {
     throw new Error('The thread response is invalid.');
   }
   const starter = value.starter_message;
+  const rawReservation = value.starter_reservation;
+  let starterReservation: CreatedThread['starter_reservation'] = null;
+  if (rawReservation !== undefined && rawReservation !== null) {
+    if (
+      typeof rawReservation !== 'object' ||
+      Array.isArray(rawReservation) ||
+      Object.keys(rawReservation).length !== 2
+    ) {
+      throw new Error('The encrypted forum starter reservation is invalid.');
+    }
+    const reservation = rawReservation as Record<string, unknown>;
+    if (
+      typeof reservation.client_nonce !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,64}$/u.test(reservation.client_nonce) ||
+      typeof reservation.claimed !== 'boolean'
+    ) {
+      throw new Error('The encrypted forum starter reservation is invalid.');
+    }
+    starterReservation = {
+      client_nonce: reservation.client_nonce,
+      claimed: reservation.claimed
+    };
+  }
   return {
     channel,
-    starter_message: starter && typeof starter === 'object' ? (starter as Message) : null
+    starter_message: starter && typeof starter === 'object' ? (starter as Message) : null,
+    starter_reservation: starterReservation
   };
 }
 
@@ -301,6 +338,9 @@ export async function createThread(
         applied_tag_ids: request.appliedTagIds ?? [],
         auto_archive_duration:
           request.autoArchiveDuration ?? parent.default_auto_archive_duration ?? 1440,
+        ...(request.starterReservationNonce
+          ? { starter_reservation_nonce: request.starterReservationNonce }
+          : {}),
         ...(content || request.attachmentIds?.length
           ? {
               message: {

@@ -28,13 +28,19 @@
     account_type?: string;
     disabled_at: string | null;
     suspended_until: string | null;
+    age_assurance_state: 'unknown' | 'adult' | 'minor';
   }
 
   interface App {
     ref: string;
     name: string;
     status: string;
+    directory_enabled: boolean;
+    directory_approved: boolean;
+    directory_collections: string[];
     team_ref: string;
+    state_authority: string;
+    can_manage_state: boolean;
     updated_at: string;
   }
 
@@ -159,6 +165,12 @@
     capability: string;
   }
 
+  const directoryCollections = [
+    ['featured', 'Featured'],
+    ['staff-picks', 'Staff picks'],
+    ['new-and-noteworthy', 'New & noteworthy']
+  ] as const;
+
   const sections: SectionDefinition[] = [
     {
       id: 'overview',
@@ -178,7 +190,7 @@
       id: 'applications',
       label: 'Applications',
       icon: 'sparkles',
-      description: 'Review bot applications and suspend unsafe integrations.',
+      description: 'Review apps and suspend unsafe integrations.',
       capability: 'admin.read'
     },
     {
@@ -214,7 +226,7 @@
   const overviewCards = [
     ['local_users', 'Local users', 'Human and bot accounts hosted here'],
     ['known_instances', 'Known instances', 'Federation peers discovered by this instance'],
-    ['applications', 'Applications', 'Registered bot applications'],
+    ['applications', 'Applications', 'Registered apps'],
     ['active_installations', 'Active installations', 'Bots currently installed in guilds'],
     ['open_reports', 'Open reports', 'Safety cases awaiting a final outcome'],
     ['blocked_instances', 'Blocked instances', 'Active federation restrictions']
@@ -289,6 +301,7 @@
   let blockDomain = $state('');
   let blockLevel = $state<'silence' | 'suspend'>('suspend');
   let blockReason = $state('');
+  let directoryReasons = $state<Record<string, string>>({});
   let blockSubdomains = $state(false);
   let operatorRef = $state('');
   let operatorRole = $state('administrator');
@@ -310,6 +323,18 @@
 
   function can(capability: string): boolean {
     return hasAdminCapability(me?.capabilities, capability);
+  }
+
+  function directoryReason(app: App): string {
+    return (directoryReasons[app.ref] ?? '').trim();
+  }
+
+  function hasDirectoryReason(app: App): boolean {
+    return directoryReason(app).length >= 3;
+  }
+
+  function setDirectoryReason(app: App, value: string): void {
+    directoryReasons = { ...directoryReasons, [app.ref]: value };
   }
 
   function sectionBadge(section: View): number | null {
@@ -651,7 +676,37 @@
     }
   }
 
+  async function patchUserAgeAssurance(
+    user: User,
+    ageAssuranceState: User['age_assurance_state']
+  ): Promise<void> {
+    if (ageAssuranceState === user.age_assurance_state) return;
+    if (
+      !confirm(
+        `Set age assurance for ${user.username} to ${ageAssuranceState}? This changes access to age-restricted commands.`
+      )
+    )
+      return;
+    clearFeedback();
+    busyAction = `user:${user.id}@${user.origin_domain}`;
+    try {
+      const updated = await api<User>(`/administration/users/${user.id}@${user.origin_domain}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ age_assurance_state: ageAssuranceState, reason: null })
+      });
+      users = users.map((entry) =>
+        entry.id === user.id && entry.origin_domain === user.origin_domain ? updated : entry
+      );
+      notice = `${user.username} age assurance is now ${ageAssuranceState}.`;
+    } catch (caught) {
+      showError(caught, 'Could not update age assurance.');
+    } finally {
+      busyAction = '';
+    }
+  }
+
   async function patchApp(app: App): Promise<void> {
+    if (!app.can_manage_state) return;
     const status = app.status === 'suspended' ? 'active' : 'suspended';
     if (!confirm(`${status === 'suspended' ? 'Suspend' : 'Activate'} ${app.name}?`)) return;
     clearFeedback();
@@ -667,6 +722,59 @@
       notice = `${app.name} is now ${updated.status}.`;
     } catch (caught) {
       showError(caught, 'Could not update the application.');
+    } finally {
+      busyAction = '';
+    }
+  }
+
+  async function patchAppDirectory(app: App): Promise<void> {
+    if (!app.can_manage_state) return;
+    const reason = directoryReason(app);
+    if (reason.length < 3) {
+      showError(new Error('Enter a review reason with at least 3 characters.'), '');
+      return;
+    }
+    const approved = !app.directory_approved;
+    if (!confirm(`${approved ? 'Approve' : 'Remove'} ${app.name} from the App Directory?`)) return;
+    clearFeedback();
+    busyAction = `app-directory:${app.ref}`;
+    try {
+      const updated = await api<App>(
+        `/administration/applications/${encodeURIComponent(app.ref)}/directory`,
+        { method: 'PATCH', body: JSON.stringify({ approved, reason }) }
+      );
+      apps = apps.map((entry) => (entry.ref === app.ref ? updated : entry));
+      setDirectoryReason(app, '');
+      notice = `${app.name} is ${updated.directory_approved ? 'approved' : 'not approved'} for discovery.`;
+    } catch (caught) {
+      showError(caught, 'Could not update the directory approval.');
+    } finally {
+      busyAction = '';
+    }
+  }
+
+  async function toggleAppDirectoryCollection(app: App, collection: string): Promise<void> {
+    if (!app.can_manage_state) return;
+    const reason = directoryReason(app);
+    if (reason.length < 3) {
+      showError(new Error('Enter a curation reason with at least 3 characters.'), '');
+      return;
+    }
+    const collections = app.directory_collections.includes(collection)
+      ? app.directory_collections.filter((item) => item !== collection)
+      : [...app.directory_collections, collection];
+    clearFeedback();
+    busyAction = `app-directory:${app.ref}`;
+    try {
+      const updated = await api<App>(
+        `/administration/applications/${encodeURIComponent(app.ref)}/directory`,
+        { method: 'PATCH', body: JSON.stringify({ collections, reason }) }
+      );
+      apps = apps.map((entry) => (entry.ref === app.ref ? updated : entry));
+      setDirectoryReason(app, '');
+      notice = `${app.name} directory collections updated.`;
+    } catch (caught) {
+      showError(caught, 'Could not update directory collections.');
     } finally {
       busyAction = '';
     }
@@ -1039,6 +1147,24 @@
                         : 'Active'}</span
                   >
                   {#if can('users.manage') && user.account_type !== 'bot'}
+                    <label class="age-assurance-control">
+                      <span class="sr-only">Age assurance for {user.username}</span>
+                      <select
+                        value={user.age_assurance_state}
+                        disabled={busyAction === `user:${user.id}@${user.origin_domain}`}
+                        onchange={(event) =>
+                          void patchUserAgeAssurance(
+                            user,
+                            event.currentTarget.value as User['age_assurance_state']
+                          )}
+                      >
+                        <option value="unknown">Age unknown</option>
+                        <option value="adult">Verified adult</option>
+                        <option value="minor">Verified minor</option>
+                      </select>
+                    </label>
+                  {/if}
+                  {#if can('users.manage') && user.account_type !== 'bot'}
                     <button
                       type="button"
                       class:danger-button={!userIsSuspended(user)}
@@ -1065,7 +1191,7 @@
           {#if apps.length === 0}
             <div class="empty-state">
               <Icon name="sparkles" size={28} />
-              <h3>No bot applications</h3>
+              <h3>No applications</h3>
               <p>
                 Applications registered on this instance or learned through federation will appear
                 here.
@@ -1080,18 +1206,71 @@
                     <strong>{app.name}</strong><small
                       >{app.ref} · team {app.team_ref} · updated {new Date(
                         app.updated_at
-                      ).toLocaleString()}</small
+                      ).toLocaleString()}{app.can_manage_state
+                        ? ''
+                        : ` · state managed by ${app.state_authority}`}</small
                     >
                   </div>
                   <span class:danger-badge={app.status === 'suspended'} class="badge"
                     >{app.status}</span
                   >
                   {#if can('bots.manage')}
+                    {#if app.directory_enabled}
+                      <label class="directory-review-reason">
+                        <span>Directory review reason</span>
+                        <input
+                          value={directoryReasons[app.ref] ?? ''}
+                          minlength="3"
+                          maxlength="500"
+                          placeholder="Required for approval and curation"
+                          disabled={!app.can_manage_state ||
+                            busyAction === `app-directory:${app.ref}`}
+                          aria-describedby={`directory-reason-help-${app.ref}`}
+                          oninput={(event) => setDirectoryReason(app, event.currentTarget.value)}
+                        />
+                        <small id={`directory-reason-help-${app.ref}`}
+                          >At least 3 characters; stored in the audit log.</small
+                        >
+                      </label>
+                      {#each directoryCollections as collection (collection[0])}
+                        <button
+                          type="button"
+                          class:secondary-button={!app.directory_collections.includes(
+                            collection[0]
+                          )}
+                          disabled={!app.can_manage_state ||
+                            !hasDirectoryReason(app) ||
+                            busyAction === `app-directory:${app.ref}`}
+                          title={!hasDirectoryReason(app)
+                            ? 'Enter a directory review reason first.'
+                            : undefined}
+                          aria-pressed={app.directory_collections.includes(collection[0])}
+                          onclick={() => void toggleAppDirectoryCollection(app, collection[0])}
+                          >{collection[1]}</button
+                        >
+                      {/each}
+                      <button
+                        type="button"
+                        class:secondary-button={!app.directory_approved}
+                        class:danger-button={app.directory_approved}
+                        disabled={!app.can_manage_state ||
+                          !hasDirectoryReason(app) ||
+                          busyAction === `app-directory:${app.ref}`}
+                        title={!hasDirectoryReason(app)
+                          ? 'Enter a directory review reason first.'
+                          : undefined}
+                        onclick={() => void patchAppDirectory(app)}
+                        >{app.directory_approved ? 'Remove listing' : 'Approve listing'}</button
+                      >
+                    {/if}
                     <button
                       type="button"
                       class:danger-button={app.status !== 'suspended'}
                       class:secondary-button={app.status === 'suspended'}
-                      disabled={busyAction === `app:${app.ref}`}
+                      disabled={!app.can_manage_state || busyAction === `app:${app.ref}`}
+                      title={app.can_manage_state
+                        ? undefined
+                        : `Application state is managed by ${app.state_authority}.`}
                       onclick={() => void patchApp(app)}
                       >{app.status === 'suspended' ? 'Activate' : 'Suspend'}</button
                     >
@@ -2204,6 +2383,25 @@
   .app-avatar {
     color: var(--on-purple);
     background: var(--purple);
+  }
+
+  .directory-review-reason {
+    min-width: 220px;
+    flex: 0 1 280px;
+    display: grid;
+    gap: 0.25rem;
+    color: var(--text-soft);
+    font-size: 0.72rem;
+    font-weight: 800;
+  }
+
+  .directory-review-reason input {
+    padding-block: 0.55rem;
+  }
+
+  .directory-review-reason small {
+    color: var(--text-muted);
+    font-weight: 500;
   }
 
   .badge {

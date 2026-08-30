@@ -185,7 +185,7 @@ release-check:
 
 federation-check:
 	@set -eu; \
-	cleanup() { status=$$?; if [ $$status -ne 0 ]; then $(FEDERATION_COMPOSE) logs --no-color --tail=240 alpha-api beta-api || true; fi; $(FEDERATION_COMPOSE) --profile validation down -v; exit $$status; }; \
+	cleanup() { status=$$?; if [ $$status -ne 0 ]; then $(FEDERATION_COMPOSE) logs --no-color --tail=240 alpha-api beta-api alpha-worker beta-worker alpha-gateway beta-gateway || true; fi; $(FEDERATION_COMPOSE) --profile validation down -v; exit $$status; }; \
 	trap cleanup EXIT INT TERM; \
 	$(FEDERATION_COMPOSE) up -d --wait alpha-postgres alpha-dragonfly beta-postgres beta-dragonfly; \
 	$(FEDERATION_COMPOSE) run --rm --no-deps --build alpha-api sh -ec 'alembic upgrade head && kaede bootstrap'; \

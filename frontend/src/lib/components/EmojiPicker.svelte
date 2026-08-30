@@ -19,7 +19,7 @@
     customEmojis?: CustomEmojiOption[];
     stickers?: StickerOption[];
     onSelect: (value: string) => void;
-    onStickerSelect?: (value: string) => void;
+    onStickerSelect?: (sticker: StickerOption) => void;
     onClose: () => void;
   } = $props();
   let mode = $state<'emoji' | 'sticker'>('emoji');
@@ -244,7 +244,7 @@
               <button
                 type="button"
                 title={sticker.description ?? sticker.name}
-                onclick={() => onStickerSelect?.(sticker.value)}
+                onclick={() => onStickerSelect?.(sticker)}
               >
                 <img src={sticker.url} alt={sticker.name} loading="lazy" />
                 <span>{sticker.name}</span>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Sequence
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
@@ -22,6 +23,13 @@ local encoded = string.sub(ARGV[1], 1, -2) .. ',"topic_seq":' .. tostring(sequen
 redis.call('XADD', KEYS[2], 'MAXLEN', '~', 1000, '*', 'event', encoded)
 redis.call('PUBLISH', KEYS[3], encoded)
 return {sequence, encoded}
+"""
+
+PUBLISH_EPHEMERAL_ONCE_SCRIPT = """
+if redis.call('EXISTS', KEYS[2]) == 1 then return 1 end
+redis.call('PUBLISH', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[2], '1', 'EX', ARGV[2])
+return 1
 """
 
 PUBLISH_EPHEMERAL_SCRIPT = """
@@ -81,6 +89,55 @@ def interaction_dispatch_audience(event: dict[str, Any]) -> str | None:
     return bot_ref
 
 
+def interaction_response_dispatch_expired(
+    event: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Fail closed on retained private-response events past their hard deadline."""
+
+    if event.get("t") not in {
+        "INTERACTION_RESPONSE_CREATE",
+        "INTERACTION_RESPONSE_UPDATE",
+        "INTERACTION_RESPONSE_DELETE",
+    }:
+        return False
+    data = event.get("d")
+    raw_expiry = data.get("expires_at") if isinstance(data, dict) else None
+    if not isinstance(raw_expiry, str):
+        return True
+    try:
+        expiry = datetime.fromisoformat(raw_expiry)
+    except ValueError:
+        return True
+    return expiry.tzinfo is None or expiry <= (now or datetime.now(UTC))
+
+
+def _dispatch_event(
+    event_type: str,
+    data: dict[str, Any],
+    audience_user_refs: Sequence[str] | None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {"t": event_type, "d": data}
+    if audience_user_refs is not None:
+        audience = list(dict.fromkeys(audience_user_refs))
+        if not audience or not all(isinstance(item, str) and item for item in audience):
+            raise ValueError("dispatch audience is invalid")
+        event["audience_user_refs"] = audience
+    return event
+
+
+def _decoded_dispatch_event(encoded: object) -> dict[str, Any]:
+    if isinstance(encoded, bytes):
+        encoded = encoded.decode("utf-8")
+    if not isinstance(encoded, str):
+        raise RuntimeError("Dragonfly returned an invalid dispatch event")
+    event = json.loads(encoded)
+    if not isinstance(event, dict) or not isinstance(event.get("topic_seq"), int):
+        raise RuntimeError("Dragonfly returned an invalid dispatch event")
+    return cast(dict[str, Any], event)
+
+
 async def publish_dispatch(
     redis: Redis,
     topic: str,
@@ -90,12 +147,7 @@ async def publish_dispatch(
     audience_user_refs: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     try:
-        event: dict[str, Any] = {"t": event_type, "d": data}
-        if audience_user_refs is not None:
-            audience = list(dict.fromkeys(audience_user_refs))
-            if not audience or not all(isinstance(item, str) and item for item in audience):
-                raise ValueError("dispatch audience is invalid")
-            event["audience_user_refs"] = audience
+        event = _dispatch_event(event_type, data, audience_user_refs)
         result = await cast(
             Awaitable[object],
             redis.eval(
@@ -110,20 +162,61 @@ async def publish_dispatch(
         if not isinstance(result, (list, tuple)) or len(result) != 2:
             raise RuntimeError("Dragonfly returned an invalid dispatch result")
         sequence, encoded = result
-        if isinstance(encoded, bytes):
-            encoded = encoded.decode("utf-8")
-        if not isinstance(encoded, str):
-            raise RuntimeError("Dragonfly returned an invalid dispatch event")
-        event = json.loads(encoded)
-        if not isinstance(event, dict):
-            raise RuntimeError("Dragonfly returned an invalid dispatch event")
-        event["topic_seq"] = int(sequence)
-        return event
+        decoded = _decoded_dispatch_event(encoded)
+        if decoded["topic_seq"] != int(sequence):
+            raise RuntimeError("Dragonfly returned an inconsistent dispatch sequence")
+        return decoded
     except Exception:
         # Dispatch streams are a recoverable projection of committed SQL/outbox
         # state. Never turn a successful mutation into a false 5xx response.
         log.exception("dispatch_projection_failed", topic=topic, event_type=event_type)
         return None
+
+
+async def publish_ephemeral_once(
+    redis: Redis,
+    topic: str,
+    event_type: str,
+    data: dict[str, Any],
+    *,
+    idempotency_key: str,
+    ttl_seconds: int,
+    audience_user_refs: Sequence[str] | None = None,
+) -> bool:
+    """Publish once without retaining the payload in a mixed Redis stream.
+
+    The idempotency marker contains no event body or callback credential. SQL
+    remains the encrypted replay authority for reconnecting bot workers.
+    """
+
+    try:
+        if (
+            not idempotency_key.isascii()
+            or not 1 <= len(idempotency_key) <= 256
+            or not 1 <= ttl_seconds <= 86_400
+        ):
+            raise ValueError("dispatch idempotency binding is invalid")
+        event = _dispatch_event(event_type, data, audience_user_refs)
+        result = await cast(
+            Awaitable[object],
+            redis.eval(
+                PUBLISH_EPHEMERAL_ONCE_SCRIPT,
+                2,
+                f"dispatch:{topic}",
+                f"dispatch:once:{topic}:{idempotency_key}",
+                json.dumps(event, separators=(",", ":")),
+                str(ttl_seconds),
+            ),
+        )
+        return bool(result)
+    except Exception:
+        log.exception(
+            "dispatch_once_projection_failed",
+            topic=topic,
+            event_type=event_type,
+            idempotency_key=idempotency_key,
+        )
+        return False
 
 
 async def publish_ephemeral(

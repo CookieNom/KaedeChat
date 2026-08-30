@@ -11,6 +11,11 @@ export function userPublicHandle(user: UserSummary): string | null {
   return user.profile_resolved === false ? null : user.handle;
 }
 
+/** Trusted application identity from the API, never from display text. */
+export function isApplicationUser(user: UserSummary | null | undefined): boolean {
+  return user?.account_type === 'bot' || user?.bot === true;
+}
+
 export function applyUserProfileToHomeProjections(
   directMessages: Channel[],
   relationships: Relationship[],

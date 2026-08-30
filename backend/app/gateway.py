@@ -17,14 +17,17 @@ from anyio import CapacityLimiter, EndOfStream, WouldBlock
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.guild_lifecycle import expire_temporary_memberships
 from app.auth.account_status import account_active_clause
 from app.auth.tokens import AccessGrant, AccessTokenStore
+from app.bots.interaction_events import interaction_response_replay_events
 from app.chat.events import (
     guild_topic,
     interaction_dispatch_audience,
+    interaction_response_dispatch_expired,
     publish_ephemeral,
     publish_presence,
     user_topic,
@@ -40,6 +43,7 @@ from app.chat.permissions import get_permissions
 from app.chat.presence import (
     PRESENCE_TTL_SECONDS,
     broadcast_presence_preference,
+    decode_presence_state,
 )
 from app.chat.presence import (
     SET_PRESENCE_SCRIPT as SET_PRESENCE_SCRIPT,
@@ -55,7 +59,7 @@ from app.core.permissions import Permission
 from app.core.proxy import resolve_client_ip
 from app.core.settings import get_settings
 from app.core.task_wake import enqueue_best_effort
-from app.core.types import EntityReference, validate_entity_reference
+from app.core.types import EntityRef, EntityReference, validate_entity_reference
 from app.db.models import (
     Channel,
     DMConversation,
@@ -74,8 +78,18 @@ from app.federation.dm_storage import (
     dm_history_metadata,
 )
 from app.tasks import federation_presence_fanout, history_status_key
+from app.voice.broker import (
+    request_remote_dm_voice_self_state,
+    request_remote_guild_voice_self_state,
+)
+from app.voice.channel_info import (
+    validate_channel_info_request,
+    visible_guild_channel_info,
+)
+from app.voice.livekit import LiveKitError
 from app.voice.rooms import parse_room_name, participant_identity
-from app.voice.state import update_self_flags
+from app.voice.service import update_current_authoritative_occupant_self_state
+from app.voice.state import get_federated_voice_session
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -262,12 +276,14 @@ return 1
 RENEW_PRESENCE_SCRIPT = """
 local raw = redis.call('GET', KEYS[2])
 if not raw then return 0 end
-local state = cjson.decode(raw)
+local marker = string.find(raw, ',"generation":', 1, true)
+if not marker then return 0 end
+local base = string.sub(raw, 1, marker - 1)
 local generation = redis.call('INCR', KEYS[1])
-state['generation'] = generation
-state['expires_at'] = tonumber(ARGV[1])
-state['claim_until'] = nil
-redis.call('SET', KEYS[2], cjson.encode(state))
+local state = base
+    .. ',"generation":' .. tostring(generation)
+    .. ',"expires_at":' .. ARGV[1] .. '}'
+redis.call('SET', KEYS[2], state)
 redis.call('ZADD', KEYS[3], ARGV[1], ARGV[2])
 return generation
 """
@@ -286,11 +302,17 @@ if expires_at > tonumber(ARGV[2]) then
     redis.call('ZADD', KEYS[2], expires_at, ARGV[1])
     return 0
 end
+local marker = string.find(raw, ',"generation":', 1, true)
+if not marker then return 0 end
+local base = string.sub(raw, 1, marker - 1)
 local generation = redis.call('INCR', KEYS[3])
-state['generation'] = generation
-state['claim_until'] = tonumber(ARGV[2]) + tonumber(ARGV[3])
-redis.call('SET', KEYS[1], cjson.encode(state))
-redis.call('ZADD', KEYS[2], state['claim_until'], ARGV[1])
+local claim_until = tonumber(ARGV[2]) + tonumber(ARGV[3])
+local claimed = base
+    .. ',"generation":' .. tostring(generation)
+    .. ',"expires_at":' .. tostring(expires_at)
+    .. ',"claim_until":' .. tostring(claim_until) .. '}'
+redis.call('SET', KEYS[1], claimed)
+redis.call('ZADD', KEYS[2], claim_until, ARGV[1])
 return generation
 """
 
@@ -668,6 +690,13 @@ async def presence_reaper(redis: Redis, sessionmaker: async_sessionmaker[AsyncSe
                         async with sessionmaker() as session:
                             user = await session.get(User, (user_id, domain))
                         if user is not None:
+                            await expire_temporary_memberships(
+                                redis,
+                                sessionmaker,
+                                settings,
+                                user_id=user_id,
+                                user_domain=domain,
+                            )
                             schedule_presence_fanout(user, "offline", generation)
                     if not still_leader:
                         break
@@ -1263,12 +1292,22 @@ async def replay_topic_events(
 ) -> list[tuple[str, dict[str, Any]]] | None:
     replay: list[tuple[str, str, dict[str, Any]]] = []
     for topic in topics:
-        entries = await redis.xrange(f"dispatch:stream:{topic}", min="-", max="+")
+        stream = f"dispatch:stream:{topic}"
+        entries = await redis.xrange(stream, min="-", max="+")
         pending = []
+        expired_ids: list[int | bytes | str] = []
         for entry_id, fields in entries:
-            event = cast(dict[str, Any], json.loads(str(fields["event"])))
+            raw_event = fields["event"]
+            if isinstance(raw_event, bytes):
+                raw_event = raw_event.decode("utf-8")
+            event = cast(dict[str, Any], json.loads(str(raw_event)))
+            if interaction_response_dispatch_expired(event):
+                expired_ids.append(cast(int | bytes | str, entry_id))
+                continue
             if int(event.get("topic_seq", 0)) > cursors.get(topic, 0):
                 pending.append((str(entry_id), event))
+        if expired_ids:
+            await redis.xdel(stream, *expired_ids)
         if pending and int(pending[0][1].get("topic_seq", 0)) > cursors.get(topic, 0) + 1:
             return None
         replay.extend((entry_id, topic, event) for entry_id, event in pending)
@@ -1276,14 +1315,50 @@ async def replay_topic_events(
     return [(topic, event) for _, topic, event in replay]
 
 
+async def replay_private_interaction_responses(
+    websocket: WebSocket,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    user: User,
+    sequence: int,
+) -> tuple[int, int]:
+    """Replay current private response state without a secret-bearing Redis stream."""
+
+    async with sessionmaker() as session:
+        events = await interaction_response_replay_events(
+            session,
+            user_id=user.id,
+            user_domain=user.origin_domain,
+        )
+    delivered = 0
+    for event in events:
+        if interaction_response_dispatch_expired(cast(dict[str, Any], event)):
+            continue
+        event_type = event.get("t")
+        data = event.get("d")
+        if not isinstance(event_type, str) or not isinstance(data, dict):
+            continue
+        sequence += 1
+        delivered += 1
+        await websocket.send_json(
+            {
+                "op": GatewayOp.DISPATCH,
+                "t": event_type,
+                "d": data,
+                "s": sequence,
+            }
+        )
+    return sequence, delivered
+
+
 def parse_guild_topic(topic: str) -> EntityReference | None:
     if not topic.startswith("guild:"):
         return None
     try:
         domain, identifier = topic.removeprefix("guild:").rsplit(":", 1)
-        return EntityReference(int(identifier), domain)
-    except (TypeError, ValueError):
+        reference = validate_entity_reference(f"{identifier}@{domain}")
+    except ValueError:
         return None
+    return reference if reference.id > 0 and reference.domain is not None else None
 
 
 def dispatch_audience_allows(user: User, event: dict[str, Any]) -> bool:
@@ -1527,6 +1602,17 @@ async def event_visibility(
     data = event.get("d")
     if not isinstance(data, dict):
         return False, True
+    if event.get("t") == "AUTO_MODERATION_ACTION_EXECUTION":
+        async with sessionmaker() as session:
+            guild = await session.get(Guild, guild_key)
+            if guild is None:
+                return False, True
+            try:
+                permissions = await get_permissions(session, redis, guild, user)
+            except HTTPException:
+                return False, True
+        if not permissions & Permission.MANAGE_GUILD:
+            return False, True
     channel_id = data.get("channel_id")
     channel_domain = data.get("channel_domain")
     # Attachment state can disclose both a private-channel filename and its
@@ -1553,6 +1639,28 @@ async def event_visibility(
     except ValueError:
         return False, True
     channel_number, resolved_domain = channel_ref.resolve(guild_domain)
+    if event.get("t") in {"INVITE_CREATE", "INVITE_DELETE"}:
+        async with sessionmaker() as session:
+            guild = await session.get(Guild, guild_key)
+            channel = await session.get(Channel, (channel_number, resolved_domain))
+            if (
+                guild is None
+                or channel is None
+                or (channel.guild_id, channel.guild_domain) != guild_key
+            ):
+                return False, True
+            try:
+                permissions = await get_permissions(
+                    session,
+                    redis,
+                    guild,
+                    user,
+                    channel=channel,
+                )
+            except HTTPException:
+                return False, True
+        if not permissions & Permission.MANAGE_CHANNELS:
+            return False, True
     if event.get("t") == "CHANNEL_DELETE":
         return True, True
     resolved_ref = (channel_number, resolved_domain)
@@ -1631,6 +1739,10 @@ async def member_payloads(
     query: str = "",
     offset: int = 0,
     limit: int = 100,
+    query_prefix: bool = False,
+    user_refs: set[tuple[int, str]] | None = None,
+    include_presence: bool = True,
+    include_presence_details: bool = False,
 ) -> list[dict[str, object]] | None:
     guild_id, guild_domain = guild_ref.resolve(settings.domain)
     async with sessionmaker() as session:
@@ -1649,7 +1761,19 @@ async def member_payloads(
             GuildMember.guild_domain == guild_domain,
         ]
         if query:
-            conditions.append(func.lower(User.username).contains(query.lower()))
+            username = func.lower(User.username)
+            conditions.append(
+                or_(
+                    username.startswith(query.lower(), autoescape=True),
+                    func.lower(GuildMember.nickname).startswith(query.lower(), autoescape=True),
+                )
+                if query_prefix
+                else username.contains(query.lower(), autoescape=True)
+            )
+        if user_refs is not None:
+            if not user_refs:
+                return []
+            conditions.append(tuple_(GuildMember.user_id, GuildMember.user_domain).in_(user_refs))
         rows = (
             await session.execute(
                 select(GuildMember, User)
@@ -1659,7 +1783,7 @@ async def member_payloads(
                     & (User.origin_domain == GuildMember.user_domain),
                 )
                 .where(*conditions)
-                .order_by(func.lower(User.username), User.id)
+                .order_by(func.lower(User.username), User.id, User.origin_domain)
                 .offset(offset)
                 .limit(limit)
             )
@@ -1676,7 +1800,11 @@ async def member_payloads(
             )
             for assignment in assignments:
                 roles[(assignment.user_id, assignment.user_domain)].append(assignment.role_id)
-        presence_keys = [f"presence:{member.user_domain}:{member.user_id}" for member, _ in rows]
+        presence_keys = (
+            [f"presence:{member.user_domain}:{member.user_id}" for member, _ in rows]
+            if include_presence
+            else []
+        )
         raw_presences: list[Any] = []
         if presence_keys:
             async with redis.pipeline(transaction=False) as pipeline:
@@ -1687,22 +1815,28 @@ async def member_payloads(
         payloads: list[dict[str, object]] = []
         for index, (member, member_user) in enumerate(rows):
             status = "offline"
+            activities: list[dict[str, object]] = []
             raw = raw_presences[index] if index < len(raw_presences) else None
-            if raw is not None:
-                try:
-                    state = json.loads(raw)
-                    candidate = state.get("status") if isinstance(state, dict) else None
-                    if candidate in {"online", "idle", "dnd"}:
-                        status = candidate
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    pass
+            decoded_presence = decode_presence_state(raw)
+            if decoded_presence is not None:
+                candidate, _generation, candidate_activities, _since, _afk = decoded_presence
+                if candidate in {"online", "idle", "dnd"}:
+                    status = candidate
+                    activities = candidate_activities
             payload = member_payload(
                 member,
                 member_user,
                 roles[(member.user_id, member.user_domain)],
                 include_private_authority_state=guild_domain == settings.domain,
             )
-            payload["presence"] = status
+            if include_presence:
+                payload["presence"] = status
+                if include_presence_details:
+                    payload["presence_details"] = {
+                        "status": status,
+                        "activities": activities,
+                        "client_status": ({"web": status} if status != "offline" else {}),
+                    }
             payloads.append(payload)
         return payloads
 
@@ -1782,6 +1916,145 @@ async def handle_member_request(
     return sequence
 
 
+async def _gateway_guild_for_user(
+    session: AsyncSession,
+    user: User,
+    raw_guild_ref: str,
+) -> Guild | None:
+    """Resolve an opcode guild without guessing across federated ID collisions."""
+
+    try:
+        if "@" in raw_guild_ref:
+            guild_id, guild_domain = validate_entity_reference(raw_guild_ref).resolve(
+                settings.domain
+            )
+            refs = [(guild_id, guild_domain)]
+        elif (
+            not raw_guild_ref.isascii()
+            or not raw_guild_ref.isdecimal()
+            or raw_guild_ref.startswith("0")
+        ):
+            return None
+        else:
+            refs = [
+                (row.guild_id, row.guild_domain)
+                for row in (
+                    await session.execute(
+                        select(GuildMember.guild_id, GuildMember.guild_domain).where(
+                            GuildMember.guild_id == int(raw_guild_ref),
+                            GuildMember.user_id == user.id,
+                            GuildMember.user_domain == user.origin_domain,
+                        )
+                    )
+                )
+            ]
+            if len(refs) != 1:
+                return None
+        guild = await session.get(Guild, refs[0])
+        if guild is None:
+            return None
+        member = await session.get(
+            GuildMember,
+            (guild.id, guild.origin_domain, user.id, user.origin_domain),
+        )
+    except (TypeError, ValueError):
+        return None
+    return guild if not guild.unavailable and member is not None else None
+
+
+async def handle_channel_info_request(
+    websocket: WebSocket,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    redis: Redis,
+    user: User,
+    data: object,
+    sequence: int,
+) -> int:
+    try:
+        raw_guild_id, fields = validate_channel_info_request(data)
+    except ValueError:
+        return sequence
+    async with sessionmaker() as session:
+        guild = await _gateway_guild_for_user(session, user, raw_guild_id)
+        if guild is None:
+            return sequence
+        if guild.origin_domain != settings.domain:
+            from app.federation.guild_management import proxy_remote_guild_management
+
+            proxied = await proxy_remote_guild_management(
+                session,
+                settings,
+                EntityRef(f"{guild.id}@{guild.origin_domain}"),
+                user,
+                "voice_channel_info.get",
+                {"fields": list(fields)},
+            )
+            if proxied is None or not isinstance(proxied.body, dict):
+                return sequence
+            rendered = dict(proxied.body)
+        else:
+            rendered = await visible_guild_channel_info(session, redis, guild, user, fields)
+            rendered["guild_domain"] = guild.origin_domain
+    sequence += 1
+    await websocket.send_json(
+        {
+            "op": GatewayOp.DISPATCH,
+            "t": "CHANNEL_INFO",
+            "s": sequence,
+            "d": rendered,
+        }
+    )
+    return sequence
+
+
+async def handle_soundboard_sounds_request(
+    websocket: WebSocket,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    redis: Redis,
+    user: User,
+    data: object,
+    sequence: int,
+) -> int:
+    if not isinstance(data, dict) or set(data) != {"guild_ids"}:
+        return sequence
+    raw_guild_ids = data.get("guild_ids")
+    if (
+        not isinstance(raw_guild_ids, list)
+        or not 1 <= len(raw_guild_ids) <= 100
+        or any(not isinstance(item, str) for item in raw_guild_ids)
+        or len(set(raw_guild_ids)) != len(raw_guild_ids)
+    ):
+        return sequence
+    from app.api.soundboard import gateway_soundboard_sounds
+
+    async with sessionmaker() as session:
+        for raw_guild_id in raw_guild_ids:
+            guild = await _gateway_guild_for_user(session, user, raw_guild_id)
+            if guild is None:
+                continue
+            sounds = await gateway_soundboard_sounds(
+                session,
+                redis,
+                settings,
+                guild,
+                user,
+            )
+            sequence += 1
+            await websocket.send_json(
+                {
+                    "op": GatewayOp.DISPATCH,
+                    "t": "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
+                    "s": sequence,
+                    "d": {
+                        "guild_id": str(guild.id),
+                        "guild_domain": guild.origin_domain,
+                        "soundboard_sounds": sounds,
+                    },
+                }
+            )
+    return sequence
+
+
 async def deliver_topic_event(
     websocket: WebSocket,
     pubsub: GatewaySubscription,
@@ -1797,6 +2070,9 @@ async def deliver_topic_event(
 ) -> int:
     topic_sequence = int(event.get("topic_seq", 0))
     if topic_sequence <= cursors.get(topic, 0):
+        return sequence
+    if interaction_response_dispatch_expired(event):
+        cursors[topic] = topic_sequence
         return sequence
     guild_ref = parse_guild_topic(topic)
     guild_key = guild_ref.resolve(settings.domain) if guild_ref is not None else None
@@ -1959,6 +2235,8 @@ async def deliver_ephemeral_topic_event(
     sequence: int,
 ) -> int:
     """Deliver live-only state without changing a durable topic cursor."""
+    if interaction_response_dispatch_expired(event):
+        return sequence
     visible, member = await event_visibility(sessionmaker, redis, user, visibility, topic, event)
     if not member and topic in topics:
         await pubsub.unsubscribe(f"dispatch:{topic}")
@@ -2112,17 +2390,47 @@ async def fanout_loop(
                     await websocket.close(code=GatewayCloseCode.DECODE_ERROR)
                     return
                 identity = participant_identity(user.id, user.origin_domain)
-                occupant = await update_self_flags(
-                    redis,
-                    settings.domain,
-                    identity,
-                    self_mute=raw_data["self_mute"],
-                    self_deaf=raw_data["self_deaf"],
-                )
+                remote_session = await get_federated_voice_session(redis, "home", identity)
+                try:
+                    if (
+                        remote_session is not None
+                        and remote_session.authority_domain != settings.domain
+                    ):
+                        async with sessionmaker() as session:
+                            remote_self_state = (
+                                request_remote_dm_voice_self_state
+                                if remote_session.call_id is not None
+                                else request_remote_guild_voice_self_state
+                            )
+                            occupant = await remote_self_state(
+                                session,
+                                redis,
+                                settings,
+                                actor=user,
+                                self_mute=raw_data["self_mute"],
+                                self_deaf=raw_data["self_deaf"],
+                            )
+                        authority_domain = remote_session.authority_domain
+                    else:
+                        occupant = await update_current_authoritative_occupant_self_state(
+                            redis,
+                            settings,
+                            identity,
+                            self_mute=raw_data["self_mute"],
+                            self_deaf=raw_data["self_deaf"],
+                        )
+                        authority_domain = settings.domain
+                except (HTTPException, LiveKitError) as exc:
+                    log.warning(
+                        "voice_self_state_rejected",
+                        identity=identity,
+                        detail=getattr(exc, "detail", str(exc)),
+                    )
+                    occupant = None
                 if occupant is not None:
                     kind, scope_id, _ = parse_room_name(occupant.room)
                     topic = (
-                        guild_topic(settings.domain, scope_id)
+                        guild_topic(authority_domain, scope_id)
                         if kind == "g"
                         else user_topic(user.origin_domain, user.id)
                     )
@@ -2150,6 +2458,26 @@ async def fanout_loop(
                     user,
                     op,
                     cast(dict[str, Any], raw_data),
+                    sequence,
+                )
+                await persist_gateway_progress(redis, gateway_session_id, sequence, cursors, topics)
+            elif op == GatewayOp.REQUEST_CHANNEL_INFO:
+                sequence = await handle_channel_info_request(
+                    websocket,
+                    sessionmaker,
+                    redis,
+                    user,
+                    payload.get("d"),
+                    sequence,
+                )
+                await persist_gateway_progress(redis, gateway_session_id, sequence, cursors, topics)
+            elif op == GatewayOp.REQUEST_SOUNDBOARD_SOUNDS:
+                sequence = await handle_soundboard_sounds_request(
+                    websocket,
+                    sessionmaker,
+                    redis,
+                    user,
+                    payload.get("d"),
                     sequence,
                 )
                 await persist_gateway_progress(redis, gateway_session_id, sequence, cursors, topics)
@@ -2383,6 +2711,12 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     cursors,
                     sequence,
                 )
+            sequence, _private_replayed = await replay_private_interaction_responses(
+                websocket,
+                sessionmaker,
+                user,
+                sequence,
+            )
             sequence += 1
             presence_preference = await current_presence_preference(sessionmaker, redis, user)
             presences = await dm_presence_snapshot(redis, dm_channels)
@@ -2516,6 +2850,12 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     cursors,
                     sequence,
                 )
+            sequence, _private_replayed = await replay_private_interaction_responses(
+                websocket,
+                sessionmaker,
+                user,
+                sequence,
+            )
             await persist_gateway_progress(redis, gateway_session_id, sequence, cursors, topics)
             fresh_session_resumable = True
         if connection_lock_key is None or connection_owner is None:

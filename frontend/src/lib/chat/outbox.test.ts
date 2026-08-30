@@ -17,7 +17,12 @@ describe('pending message sends', () => {
       encryptedAttachments: [],
       attachmentIds: ['10'],
       mentionUserIds: ['20@example.test'],
-      referencedMessageId: null
+      referencedMessageId: null,
+      stickerIds: [],
+      stickerItems: [],
+      encryptedAllowedMentions: null,
+      repliedUserRef: null,
+      tts: false
     });
   });
 
@@ -30,7 +35,12 @@ describe('pending message sends', () => {
       encryptedAttachments: [],
       attachmentIds: [],
       mentionUserIds: [],
-      referencedMessageId: null
+      referencedMessageId: null,
+      stickerIds: [],
+      stickerItems: [],
+      encryptedAllowedMentions: null,
+      repliedUserRef: null,
+      tts: false
     });
     expect(send.attachmentIds).toEqual(['10']);
   });
@@ -44,7 +54,12 @@ describe('pending message sends', () => {
       encryptedAttachments: [],
       attachmentIds: [],
       mentionUserIds: ['20@example.test'],
-      referencedMessageId: '30'
+      referencedMessageId: '30',
+      stickerIds: [],
+      stickerItems: [],
+      encryptedAllowedMentions: null,
+      repliedUserRef: null,
+      tts: false
     });
   });
 

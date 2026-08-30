@@ -24,6 +24,7 @@ void main() {
       expect(channelType(11), ChannelType.publicThread);
       expect(channelType(12), ChannelType.privateThread);
       expect(channelType(15), ChannelType.forum);
+      expect(channelType(3), ChannelType.groupDm);
 
       final forum = KaedeChannel.fromJson(_channelJson(
         id: '15',
@@ -347,6 +348,7 @@ void main() {
       int permissions, {
       bool archived = false,
       bool invitable = true,
+      bool e2eeRequired = false,
       ThreadMember? member,
       EntityRef? ownerRef,
     }) =>
@@ -358,6 +360,7 @@ void main() {
           permissions: BigInt.from(permissions),
           archived: archived,
           invitable: invitable,
+          e2eeRequired: e2eeRequired,
           member: member,
           ownerRef: ownerRef,
         );
@@ -404,14 +407,28 @@ void main() {
           canCreatePublicThread(channel(ChannelType.text, replies)), isFalse);
     });
 
-    test('message-scoped thread creation is hidden in encrypted parents', () {
+    test(
+        'message-scoped thread creation remains available in encrypted parents',
+        () {
       final permissions =
           Permission.viewChannel | Permission.createPublicThreads;
       final plaintext = channel(ChannelType.text, permissions);
       final encrypted = plaintext.copyWith(encryptionMode: 'e2ee');
 
       expect(canStartThreadFromMessage(plaintext), isTrue);
-      expect(canStartThreadFromMessage(encrypted), isFalse);
+      expect(canStartThreadFromMessage(encrypted), isTrue);
+      expect(deferThreadStarterUntilE2eeActive(plaintext), isFalse);
+      expect(deferThreadStarterUntilE2eeActive(encrypted), isTrue);
+      expect(
+        deferThreadStarterUntilE2eeActive(
+          channel(
+            ChannelType.forum,
+            permissions,
+            e2eeRequired: true,
+          ),
+        ),
+        isTrue,
+      );
     });
 
     test('adding members follows public and private thread rules', () {
@@ -509,6 +526,64 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('pin eligibility matches direct and guild channel types', () {
+      KaedeChannel direct(ChannelType type) => KaedeChannel(
+            ref: EntityRef.parse('15@chat.example'),
+            type: type,
+            guildRef: null,
+            position: 0,
+            permissions: BigInt.zero,
+          );
+
+      expect(canPinMessages(direct(ChannelType.dm)), isTrue);
+      expect(canPinMessages(direct(ChannelType.groupDm)), isTrue);
+      expect(canPinMessages(direct(ChannelType.text)), isFalse);
+
+      for (final type in <ChannelType>[
+        ChannelType.text,
+        ChannelType.announcement,
+        ChannelType.announcementThread,
+        ChannelType.publicThread,
+        ChannelType.privateThread,
+        ChannelType.forum,
+        ChannelType.tracker,
+      ]) {
+        expect(canPinMessages(channel(type, Permission.pinMessages)), isTrue);
+      }
+      for (final type in <ChannelType>[
+        ChannelType.voice,
+        ChannelType.stage,
+        ChannelType.category,
+      ]) {
+        expect(canPinMessages(channel(type, Permission.pinMessages)), isFalse);
+      }
+    });
+
+    test('voice messages depend on permissions, not guild member count', () {
+      final permitted = Permission.attachFiles | Permission.sendVoiceMessages;
+      expect(canSendVoiceMessage(channel(ChannelType.text, permitted)), isTrue);
+      expect(
+        canSendVoiceMessage(channel(ChannelType.text, Permission.attachFiles)),
+        isFalse,
+      );
+      expect(
+        canSendVoiceMessage(
+          channel(ChannelType.text, permitted, archived: true),
+        ),
+        isFalse,
+      );
+
+      KaedeChannel direct(ChannelType type) => KaedeChannel(
+            ref: EntityRef.parse('16@chat.example'),
+            type: type,
+            guildRef: null,
+            position: 0,
+            permissions: BigInt.zero,
+          );
+      expect(canSendVoiceMessage(direct(ChannelType.dm)), isTrue);
+      expect(canSendVoiceMessage(direct(ChannelType.groupDm)), isTrue);
     });
 
     test('only managers and private-thread creators can remove members', () {
@@ -793,6 +868,80 @@ void main() {
   });
 
   group('thread REST contract', () {
+    test('creates an inherited-E2EE child without a plaintext starter',
+        () async {
+      final adapter = _RecordingJsonAdapter(jsonEncode(_channelJson(
+        id: '11',
+        type: 11,
+      )));
+      final repository = _repository(adapter);
+
+      await repository.createThread(
+        parent: EntityRef.parse('3@chat.example'),
+        name: 'Encrypted child',
+        type: 11,
+      );
+
+      final data = adapter.request!.data as Map<String, Object?>;
+      expect(data.containsKey('message'), isFalse);
+    });
+
+    test('reserves and claims an encrypted forum starter without plaintext',
+        () async {
+      final reservationAdapter =
+          _RecordingJsonAdapter(jsonEncode(<String, Object?>{
+        ..._channelJson(
+          id: '11',
+          type: 11,
+          extra: <String, Object?>{
+            'e2ee_required': true,
+            'encryption_state': 'plaintext',
+          },
+        ),
+        'starter_message': null,
+        'message': null,
+        'starter_reservation': <String, Object?>{
+          'client_nonce': 'forum-reservation-1',
+          'claimed': false,
+        },
+      }));
+      final repository = _repository(reservationAdapter);
+
+      final reserved = await repository.reserveEncryptedForumThread(
+        parent: EntityRef.parse('15@chat.example'),
+        name: 'Encrypted post',
+        clientNonce: 'forum-reservation-1',
+        appliedTagIds: const <String>['7'],
+      );
+      expect(reserved.channel.ref.wire, '11@chat.example');
+      expect(reserved.claimed, isFalse);
+      final reservationData =
+          reservationAdapter.request!.data as Map<String, Object?>;
+      expect(
+          reservationData['starter_reservation_nonce'], 'forum-reservation-1');
+      expect(reservationData.containsKey('message'), isFalse);
+
+      final claimAdapter = _RecordingJsonAdapter(
+        jsonEncode(_messageJson('11', channelId: '11')),
+      );
+      await _repository(claimAdapter).claimEncryptedForumStarter(
+        thread: EntityRef.parse('11@chat.example'),
+        clientNonce: 'forum-reservation-1',
+        e2ee: <String, Object?>{'rich_payload_digest': 'digest'},
+        attachments: <EntityRef>[EntityRef.parse('80@chat.example')],
+        mentionUsers: <EntityRef>[EntityRef.parse('42@remote.example')],
+      );
+      expect(
+        claimAdapter.request?.path,
+        '/api/v1/channels/11@chat.example/starter',
+      );
+      final claimData = claimAdapter.request!.data as Map<String, Object?>;
+      expect(claimData['content'], isNull);
+      expect(claimData['client_nonce'], 'forum-reservation-1');
+      expect(claimData['attachment_ids'], <String>['80']);
+      expect(claimData['mention_user_ids'], <String>['42@remote.example']);
+    });
+
     test('creates a canonical atomic starter payload', () async {
       final adapter = _RecordingJsonAdapter(jsonEncode(_channelJson(
         id: '11',

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   attachmentMediaPath,
+  dmHistoryAttachmentMediaPath,
+  privateInteractionAttachmentMediaPath,
   isSafeSameOriginMediaPath,
   mediaCapacityRetryDelay
 } from './authenticated';
@@ -22,9 +24,9 @@ describe('authenticated media capacity retry', () => {
 
 describe('federated history media paths', () => {
   it('prefers a temporary same-origin authenticated history path', () => {
-    expect(
-      attachmentMediaPath('remote.example', '123', 'original', '/api/v1/dms/history/media/token')
-    ).toBe('/api/v1/dms/history/media/token');
+    const path =
+      '/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=1787961600&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO';
+    expect(attachmentMediaPath('remote.example', '60', 'original', path)).toBe(path);
   });
 
   it('retries an expired signed path through the authenticated renewal route', () => {
@@ -40,5 +42,63 @@ describe('federated history media paths', () => {
     expect(attachmentMediaPath('remote.example', '123', 'original', '//evil.example/media')).toBe(
       '/media/remote.example/123/original'
     );
+  });
+
+  it('rejects same-origin history paths with the wrong route, identity, variant, or query', () => {
+    const valid =
+      '/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=1787961600&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO';
+    expect(dmHistoryAttachmentMediaPath('remote.example', '60', 'original', valid)).toBe(valid);
+    expect(
+      dmHistoryAttachmentMediaPath('remote.example', '60', 'original', '/api/v1/users/@me')
+    ).toBeNull();
+    expect(dmHistoryAttachmentMediaPath('remote.example', '61', 'original', valid)).toBeNull();
+    expect(dmHistoryAttachmentMediaPath('remote.example', '60', 'thumbnail_512', valid)).toBeNull();
+    expect(
+      dmHistoryAttachmentMediaPath('remote.example', '60', 'original', `${valid}&next=/users/@me`)
+    ).toBeNull();
+  });
+});
+
+describe('private interaction media paths', () => {
+  const base =
+    '/api/v1/interactions/70@chat.example/responses/71@chat.example/attachments/90@chat.example';
+
+  it('binds the projected path to every qualified identity', () => {
+    expect(privateInteractionAttachmentMediaPath('chat.example', '90', 'original', base)).toBe(
+      `${base}/original`
+    );
+    expect(attachmentMediaPath('chat.example', '90', 'thumbnail_512', null, base)).toBe(
+      `${base}/thumbnail_512`
+    );
+    expect(
+      privateInteractionAttachmentMediaPath('chat.example', '91', 'original', base)
+    ).toBeNull();
+    expect(
+      privateInteractionAttachmentMediaPath(
+        'chat.example',
+        '90',
+        'original',
+        base.replace('71@chat.example', '71@other.example')
+      )
+    ).toBeNull();
+  });
+
+  it('never accepts a remote or malformed override', () => {
+    expect(
+      privateInteractionAttachmentMediaPath(
+        'chat.example',
+        '90',
+        'original',
+        'https://evil.example/private'
+      )
+    ).toBeNull();
+    expect(
+      privateInteractionAttachmentMediaPath(
+        'chat.example',
+        '90',
+        'original',
+        base.replace('chat.example', 'chat..example')
+      )
+    ).toBeNull();
   });
 });

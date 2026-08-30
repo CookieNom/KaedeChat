@@ -84,6 +84,14 @@ only when `KAEDE_VOICE_ENABLED=true`. Application controls reach the
 host-networked server through the Docker host gateway; secrets never reach the
 frontend or gateway service.
 
+Operators may expose selectable provider regions with
+`KAEDE_VOICE_REGIONS`, a JSON array of objects containing stable `id`, `name`,
+`optimal`, `deprecated`, and `custom` fields. Human and bot region discovery
+return that same catalog. Channel create/update accepts only configured IDs at
+the guild voice authority; `rtc_region: null` keeps automatic selection. An
+empty catalog therefore supports automatic placement without advertising
+provider identifiers that the deployment cannot honor.
+
 `make voice-check` starts only an isolated, non-published Dragonfly and LiveKit
 validation pair. It checks occupancy replay fencing, caller/callee call
 transitions, terminal and replica replay, orphan-room cleanup, room control,

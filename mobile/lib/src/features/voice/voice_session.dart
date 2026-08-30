@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/stage_instances_repository.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
@@ -20,11 +24,22 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart' as permissions;
 
 final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
+  final controller = ref.watch(mobileControllerProvider.notifier);
   final session = VoiceSession(
     ref.watch(repositoryProvider),
-    () => ref.read(mobileControllerProvider.notifier).e2eeClient(),
+    controller.e2eeClient,
+    voiceStatePublisher: ({required selfMute, required selfDeaf}) =>
+        controller.gateway.setSelfVoiceState(
+      selfMute: selfMute,
+      selfDeaf: selfDeaf,
+    ),
   );
-  ref.onDispose(session.dispose);
+  final soundboardSubscription = controller.soundboardEvents.listen(
+    (event) => unawaited(session.playSoundboardEvent(event)),
+  );
+  ref.onDispose(() {
+    unawaited(soundboardSubscription.cancel());
+  });
   return session;
 });
 
@@ -39,6 +54,41 @@ enum VoiceResumeAction {
   restoreConnectedMedia,
   recoverDisconnectedRoom,
 }
+
+@visibleForTesting
+bool validSoundboardMediaCapability({
+  required Uri? download,
+  required String authorityDomain,
+  required String mediaOrigin,
+}) {
+  try {
+    Domain(authorityDomain);
+  } on FormatException {
+    return false;
+  }
+  final origin = Uri.tryParse(mediaOrigin);
+  if (download == null ||
+      origin == null ||
+      download.scheme != 'https' ||
+      origin.scheme != 'https' ||
+      origin.host.isEmpty ||
+      (origin.path.isNotEmpty && origin.path != '/') ||
+      origin.hasQuery ||
+      origin.hasFragment ||
+      origin.userInfo.isNotEmpty ||
+      download.userInfo.isNotEmpty ||
+      download.hasFragment) {
+    return false;
+  }
+  return download.scheme == origin.scheme &&
+      download.host == origin.host &&
+      download.port == origin.port;
+}
+
+typedef MobileVoiceStatePublisher = Future<void> Function({
+  required bool selfMute,
+  required bool selfDeaf,
+});
 
 @visibleForTesting
 bool voiceCanBeginProtectedJoin({
@@ -261,14 +311,18 @@ final class VoiceSession extends ChangeNotifier {
   VoiceSession(
     this._repository,
     this._e2eeClient, {
+    required MobileVoiceStatePublisher voiceStatePublisher,
     VoiceBackgroundService backgroundService = const VoiceBackgroundService(),
-  }) : _backgroundService = backgroundService {
+  })  : _voiceStatePublisher = voiceStatePublisher,
+        _backgroundService = backgroundService {
     unawaited(_loadMediaQuality());
   }
 
   final KaedeRepository _repository;
   final Future<MobileE2EEClient> Function() _e2eeClient;
+  final MobileVoiceStatePublisher _voiceStatePublisher;
   final VoiceBackgroundService _backgroundService;
+  final AudioPlayer _soundboardPlayer = AudioPlayer();
   String? _connectionId;
   String? _activeElsewhereClient;
   static const _backgroundServiceError =
@@ -284,6 +338,7 @@ final class VoiceSession extends ChangeNotifier {
   var _camera = false;
   var _screen = false;
   var _mediaQuality = const MobileMediaQuality();
+  var _voiceMediaPolicy = VoiceMediaPolicy.defaults;
   var _speaker = true;
   var _audioRoute = VoiceAudioRoute.speaker;
   var _pushToTalk = false;
@@ -319,6 +374,7 @@ final class VoiceSession extends ChangeNotifier {
   bool get camera => _camera;
   bool get screen => _screen;
   MobileMediaQuality get mediaQuality => _mediaQuality;
+  VoiceMediaPolicy get voiceMediaPolicy => _voiceMediaPolicy;
   bool get speaker => _speaker;
   VoiceAudioRoute get audioRoute => _audioRoute;
   bool get pushToTalk => _pushToTalk;
@@ -341,6 +397,92 @@ final class VoiceSession extends ChangeNotifier {
       if (current.localParticipant case final participant?) participant,
       ...current.remoteParticipants.values,
     ];
+  }
+
+  /// Plays an authorized server-dispatched sound only in the matching active
+  /// voice room. Every connected client receives the same short, integrity-
+  /// checked clip, so soundboard playback does not need to capture or mix the
+  /// device microphone.
+  Future<void> playSoundboardEvent(Map<String, Object?> data) async {
+    final target = _channel;
+    if (!joined || target == null || !target.type.isVoiceLike) return;
+    final channelId = '${data['channel_id'] ?? ''}';
+    final channelDomain = '${data['channel_domain'] ?? ''}';
+    if (channelId != target.ref.id.value ||
+        channelDomain != target.ref.domain.value) {
+      return;
+    }
+    final rawSound = data['sound'];
+    if (rawSound is! Map) return;
+    final sound = Map<String, Object?>.from(rawSound);
+    final expectedHash = '${sound['media_hash'] ?? ''}';
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expectedHash)) return;
+    final uri = Uri.tryParse('${data['download_url'] ?? ''}');
+    final mediaAuthority = '${data['media_authority'] ?? ''}'
+        .trim()
+        .toLowerCase()
+        .replaceFirst(RegExp(r'\.$'), '');
+    if (!validSoundboardMediaCapability(
+      download: uri,
+      authorityDomain: mediaAuthority,
+      mediaOrigin: '${data['media_origin'] ?? ''}',
+    )) {
+      return;
+    }
+    final rawVolume = data['effective_volume'];
+    final volume = rawVolume is num && rawVolume.isFinite
+        ? rawVolume.toDouble().clamp(0, 1).toDouble()
+        : 1.0;
+    try {
+      final bytes = await _downloadSoundboardBytes(uri!);
+      final digest = await Sha256().hash(bytes);
+      final actual = digest.bytes
+          .map((value) => value.toRadixString(16).padLeft(2, '0'))
+          .join();
+      if (actual != expectedHash || !joined || _channel?.ref != target.ref) {
+        return;
+      }
+      await _soundboardPlayer.stop();
+      await _soundboardPlayer.play(
+        BytesSource(Uint8List.fromList(bytes)),
+        volume: volume,
+      );
+    } on Object {
+      // A single expired or unavailable clip must never destabilize voice.
+    }
+  }
+
+  Future<List<int>> _downloadSoundboardBytes(Uri uri) async {
+    const maximum = 512 * 1024;
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..autoUncompress = false;
+    try {
+      final request =
+          await client.getUrl(uri).timeout(const Duration(seconds: 8));
+      request.followRedirects = false;
+      final response =
+          await request.close().timeout(const Duration(seconds: 8));
+      if (response.isRedirect || response.statusCode != HttpStatus.ok) {
+        throw const HttpException('Soundboard download was rejected.');
+      }
+      if (response.contentLength > maximum) {
+        throw const HttpException('Soundboard response was too large.');
+      }
+      final bytes = <int>[];
+      await for (final chunk in response.timeout(const Duration(seconds: 8))) {
+        if (bytes.length + chunk.length > maximum) {
+          throw const HttpException('Soundboard response was too large.');
+        }
+        bytes.addAll(chunk);
+      }
+      if (bytes.isEmpty) {
+        throw const HttpException('Soundboard response was empty.');
+      }
+      return bytes;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   Future<void> connect(
@@ -449,12 +591,14 @@ final class VoiceSession extends ChangeNotifier {
       }
       final encryptedGrant = grantEncryptionMode;
       final encryptedChannel = target.encryptionMode == 'e2ee';
+      final mediaPolicy = voiceMediaPolicyFromGrant(grant);
       if (encryptedGrant != encryptedChannel ||
+          mediaPolicy == null ||
           !voiceGrantMatchesChannelPolicy(grant, target)) {
         throw const KaedeException(
           code: 'VOICE_E2EE_POLICY_MISMATCH',
           message:
-              'The voice encryption grant did not match this conversation. Nothing was connected.',
+              'The voice grant did not match this channel policy. Nothing was connected.',
           status: 409,
         );
       }
@@ -493,8 +637,12 @@ final class VoiceSession extends ChangeNotifier {
             useIosBroadcastExtension:
                 !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS,
           ),
-          defaultAudioPublishOptions: _mediaQuality.audioPublishOptions,
-          defaultVideoPublishOptions: _mediaQuality.videoPublishOptions,
+          defaultCameraCaptureOptions:
+              cameraCaptureOptionsForMode(mediaPolicy.videoQualityMode),
+          defaultAudioPublishOptions:
+              _mediaQuality.audioPublishOptionsForChannel(mediaPolicy.bitrate),
+          defaultVideoPublishOptions: _mediaQuality
+              .videoPublishOptionsForCameraMode(mediaPolicy.videoQualityMode),
           defaultAudioCaptureOptions: const AudioCaptureOptions(
             echoCancellation: true,
             noiseSuppression: true,
@@ -504,6 +652,8 @@ final class VoiceSession extends ChangeNotifier {
             typingNoiseDetection: true,
             stopAudioCaptureOnMute: false,
           ),
+          adaptiveStream: true,
+          dynacast: true,
         ),
       );
       final events = candidateEvents = room.createListener();
@@ -587,6 +737,7 @@ final class VoiceSession extends ChangeNotifier {
       if (generation != _generation) return;
       _room = room;
       _events = events;
+      _voiceMediaPolicy = mediaPolicy;
       candidate = null;
       candidateEvents = null;
       room.addListener(_notifyRoomChanged);
@@ -718,38 +869,89 @@ final class VoiceSession extends ChangeNotifier {
   Future<void> toggleMute() async {
     if (!_canSpeak) return;
     final next = !_muted;
+    final wasDeafened = _deafened;
     final room = _room;
     final publish = !next && (!_pushToTalk || _pushHeld);
+    if (!next) {
+      // Do not open capture until the authoritative session can publish the
+      // unmute. Offline UI must fail closed for microphone privacy.
+      await _voiceStatePublisher(selfMute: false, selfDeaf: false);
+    }
     if (publish && room != null) {
       final protected = await _activateBackgroundService(
         room,
         microphone: true,
       );
-      if (defaultTargetPlatform == TargetPlatform.android && !protected) return;
+      if (defaultTargetPlatform == TargetPlatform.android && !protected) {
+        await _voiceStatePublisher(
+          selfMute: true,
+          selfDeaf: wasDeafened,
+        ).catchError((_) {});
+        return;
+      }
     }
-    await room?.localParticipant?.setMicrophoneEnabled(publish);
+    try {
+      await room?.localParticipant?.setMicrophoneEnabled(publish);
+      if (!next && wasDeafened) await _setRemoteDeafened(false);
+    } on Object {
+      if (!next) {
+        await _voiceStatePublisher(
+          selfMute: true,
+          selfDeaf: wasDeafened,
+        ).catchError((_) {});
+      }
+      rethrow;
+    }
     _muted = next;
+    if (!next) _deafened = false;
     if (!publish && room != null && _appActive) {
       await _activateBackgroundService(room, microphone: false);
     }
     notifyListeners();
+    if (next) {
+      await _voiceStatePublisher(
+        selfMute: true,
+        selfDeaf: wasDeafened,
+      );
+    }
   }
 
   Future<void> toggleDeafen() async {
     final next = !_deafened;
+    if (!next) {
+      await _voiceStatePublisher(selfMute: true, selfDeaf: false);
+    }
+    try {
+      await _setRemoteDeafened(next);
+      if (next && !_muted) {
+        await _room?.localParticipant?.setMicrophoneEnabled(false);
+      }
+    } on Object {
+      if (!next) {
+        await _voiceStatePublisher(selfMute: true, selfDeaf: true)
+            .catchError((_) {});
+      }
+      rethrow;
+    }
+    if (next) _muted = true;
+    _deafened = next;
+    notifyListeners();
+    if (next) {
+      await _voiceStatePublisher(selfMute: true, selfDeaf: true);
+    }
+  }
+
+  Future<void> _setRemoteDeafened(bool deafened) async {
     for (final participant
         in _room?.remoteParticipants.values ?? const <RemoteParticipant>[]) {
       for (final publication in participant.audioTrackPublications) {
-        if (next) {
+        if (deafened) {
           await publication.disable();
         } else {
           await publication.enable();
         }
       }
     }
-    if (next && !_muted) await toggleMute();
-    _deafened = next;
-    notifyListeners();
   }
 
   Future<void> toggleCamera() async {
@@ -760,7 +962,11 @@ final class VoiceSession extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    await _room?.localParticipant?.setCameraEnabled(next);
+    await _room?.localParticipant?.setCameraEnabled(
+      next,
+      cameraCaptureOptions:
+          cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
+    );
     _camera = next;
     notifyListeners();
   }
@@ -876,7 +1082,9 @@ final class VoiceSession extends ChangeNotifier {
     final previousBitrates =
         encodings.map((encoding) => encoding.maxBitrate).toList();
     for (final encoding in encodings) {
-      encoding.maxBitrate = _mediaQuality.audio.bitrate;
+      encoding.maxBitrate = _mediaQuality
+          .audioPublishOptionsForChannel(_voiceMediaPolicy.bitrate)
+          .audioBitrate;
     }
     final applied = await sender.setParameters(parameters);
     if (!applied) {
@@ -888,7 +1096,8 @@ final class VoiceSession extends ChangeNotifier {
     }
     // LiveKit uses this on a future transport negotiation/reconnect, at which
     // point Studio's DTX preference is applied as well as the bitrate ceiling.
-    track.lastPublishOptions = _mediaQuality.audioPublishOptions;
+    track.lastPublishOptions =
+        _mediaQuality.audioPublishOptionsForChannel(_voiceMediaPolicy.bitrate);
   }
 
   Future<void> toggleSpeaker() async {
@@ -1046,6 +1255,39 @@ final class VoiceSession extends ChangeNotifier {
     EntityRef target,
   ) async {
     await _repository.moveMemberVoice(guild, user, target);
+    await refreshOccupancy();
+  }
+
+  Future<void> requestToSpeak(EntityRef guild,
+      {required bool requested}) async {
+    await _repository.updateMyStageVoiceState(
+      guild,
+      <String, Object?>{
+        'request_to_speak_timestamp':
+            requested ? DateTime.now().toUtc().toIso8601String() : null,
+      },
+    );
+    await refreshOccupancy();
+  }
+
+  Future<void> moveSelfToStageAudience(EntityRef guild) async {
+    await _repository.updateMyStageVoiceState(
+      guild,
+      const <String, Object?>{'suppress': true},
+    );
+    await refreshOccupancy();
+  }
+
+  Future<void> setStageParticipantSuppressed(
+    EntityRef guild,
+    EntityRef user,
+    bool suppressed,
+  ) async {
+    await _repository.updateStageVoiceState(
+      guild,
+      user,
+      suppress: suppressed,
+    );
     await refreshOccupancy();
   }
 
@@ -1211,7 +1453,11 @@ final class VoiceSession extends ChangeNotifier {
         if (participant == null) {
           throw StateError('The local voice participant is unavailable.');
         }
-        await participant.setCameraEnabled(true);
+        await participant.setCameraEnabled(
+          true,
+          cameraCaptureOptions:
+              cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
+        );
       },
       publishScreen: () async {
         if (participant == null) {
@@ -1292,6 +1538,7 @@ final class VoiceSession extends ChangeNotifier {
     _canSpeak = false;
     _canStream = false;
     _canUseVad = false;
+    _voiceMediaPolicy = VoiceMediaPolicy.defaults;
     _recoverableDisconnect = false;
     _retryJoinOnResume = false;
     _activeElsewhereClient = null;
@@ -1325,6 +1572,7 @@ final class VoiceSession extends ChangeNotifier {
     _pushHeld = false;
     _canSpeak = false;
     _canStream = false;
+    _voiceMediaPolicy = VoiceMediaPolicy.defaults;
     _recoverableDisconnect = false;
     _retryJoinOnResume = false;
     _activeElsewhereClient = null;
@@ -1344,6 +1592,7 @@ final class VoiceSession extends ChangeNotifier {
   }
 
   Future<void> _disposeRoom({required bool notify}) async {
+    await _soundboardPlayer.stop();
     _occupancyTimer?.cancel();
     _occupancyTimer = null;
     _occupants.clear();
@@ -1351,6 +1600,7 @@ final class VoiceSession extends ChangeNotifier {
     final events = _events;
     _room = null;
     _events = null;
+    _voiceMediaPolicy = VoiceMediaPolicy.defaults;
     room?.removeListener(_notifyRoomChanged);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS && _screen) {
       await _mediaQuality.stopIosBroadcastExtension();
@@ -1378,6 +1628,7 @@ final class VoiceSession extends ChangeNotifier {
     _occupancyTimer?.cancel();
     _generation += 1;
     unawaited(_disposeRoom(notify: false));
+    unawaited(_soundboardPlayer.dispose());
     super.dispose();
   }
 }

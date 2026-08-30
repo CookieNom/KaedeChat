@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   beginMessageSearchOperator,
+  MESSAGE_SEARCH_AUTHOR_TYPES,
   messageSearchUserCandidates,
   messageSearchOperator,
   moveSearchSuggestion,
@@ -9,6 +10,10 @@ import {
 import type { UserSummary } from './types';
 
 describe('Discord-style message search composer', () => {
+  it('offers distinct people, bot, and webhook author filters', () => {
+    expect(MESSAGE_SEARCH_AUTHOR_TYPES).toEqual(['user', 'bot', 'webhook']);
+  });
+
   it('recognizes contextual operators at the active end of a query', () => {
     expect(messageSearchOperator('release notes from:co')).toEqual({
       operator: 'from',

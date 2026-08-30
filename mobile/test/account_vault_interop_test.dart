@@ -26,9 +26,9 @@ void main() {
     },
   );
   const expectedCiphertext =
-      'PCCleK2Ar3qve6Wnk4gbDuyj6UCiHjleAkXUxXgRYd9xfMvSzK5_uliGG4j-7ktdpz1Ct3i9xr5g1mtYWaK0r7F9hzuSkGcgXRXrL67OT6l5y4gjNyISKby83405sfjMirkYp4Zt6nnseVrXJgFIHtZFWImAt0D-KJEjpOOKTCKZP2y156OqJ23DcoNQtj_vRYCCQVAzv2j6Pp0bjoGMn-by8HaM3fZclkHx2Knh89fpnqtQ7sUH_w2-qalT_5WyUg3Lu0ycl4h2F5Kn-wCYxaA_uTd8QfuwMNDbhgAJzrsCYpXup2FCZBMGmiSXfBki2_LeEN5R6s1ySV0IqcVw7WOwtcbk-HJFVa8eZt5DTm-iwOj3ovvtzhhBGTRygJhnI2KrPNKqvEX3WhhgKKTgtuCrNi4l8eF091w_OrVQIJq69BhP2QUey5nCSWA4q3wP43ayqv976Co03lRE7t4miytAlZrwJgGkUtyGGezITgr0mHEdh59nk_CKWZOsMitT0eqvt_Ql6afcDfOyjkqjEP_j38A-NSURUvU';
-  const expectedVaultDigest = 'AqLF_ssQCwyJ5hsba6wmVQPoqzkzlY0ev9Vh4Cr2e5Y';
-  const expectedVaultChainRoot = 'CAEkikOBbzZQ0cRXCHB9tNKIKtLoERyk6okiTTReHcU';
+      'PCCleK2Ar3qve6Wnk4gbDuyj6UCiHjleAkXUxXgRYd9xfMvSzK5_uliGG4j-7ktdpz1Ct3i9xr5g1mtYWaK0r7F9hzuSkGcgXRXrL67OT6l5y4gjNyISKby83405sfjMirkYp4Zt6nnseVrXJgFIHtZFWImAt0D-KJEjpOOKTCKZP2y156OqJ23DcoNQtj_vRYCCQVAzv2j6Pp0bjoGMn-by8HaM3fZclkHx2Knh89fpnqtQ7sUH_w2-qalT_5WyUg3Lu0ycl4h2F5Kn-wCYxaA_uTd8QfuwMNDbhgAJzrsCYpXup2FCZBMGmiSXfBki2_LeEN5R6s1ySV0IqcVw7WOwtcbk-HJFVa8eZt5DTm-iwOj3ovvtzhhBGTRygJhnI2KrPNKqvEX3WhhgKKTgtuCrNi4l8eF091w_OrVQIJq69BhP2QUey5nCSWA4q3wP43ayqv976CplgRkW_d0hnDhbkLbrBhetApXKVvvZTgrzmH0RgZ5rk_qDFuayIjVe2P7s--RovajTH5I8SzJh6JB4ToHkXX72TXWwIiSI3AR2FToks7QjE9TRszyM2oreIBZ4JmMYCq_Z4eyW7ZL7wuo2';
+  const expectedVaultDigest = 'CscI0ecGf1TpLCxvkqJ6K9GbkkYslcwh-Ufa7jvVFGw';
+  const expectedVaultChainRoot = 'bl3cycRcdn7rmzM4K-oZMn0LhFwHdKSQDtBDpYMrinw';
 
   String encoded(List<int> value) =>
       base64Url.encode(value).replaceAll('=', '');
@@ -248,6 +248,8 @@ void main() {
           'plaintext': 'plaintext',
           'authorRef': accountRef,
           'messageRef': '2@example.com',
+          'applicationRef': null,
+          'webhookRef': null,
         },
       },
     );

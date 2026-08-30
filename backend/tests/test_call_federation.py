@@ -8,7 +8,12 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.api.calls import act_on_call, federation_call_signal, federation_call_state
+from app.api.calls import (
+    act_on_call,
+    exact_call_projection,
+    federation_call_signal,
+    federation_call_state,
+)
 from app.core.settings import Settings
 from app.core.types import EntityRef
 from app.db.models import Channel, DMConversation, User
@@ -31,6 +36,10 @@ VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 def allow_call_policy_for_transport_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     """Transport-state tests isolate their subject from SQL privacy policy."""
     monkeypatch.setattr("app.api.calls.require_call_policy", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "app.api.calls.clear_terminal_call_voice_projection",
+        AsyncMock(),
+    )
 
 
 def settings(domain: str = "alpha.localhost") -> Settings:
@@ -68,6 +77,16 @@ def call_record(
         "caller": "1@alpha.localhost",
         "participants": ["1@alpha.localhost", "2@beta.localhost"],
     }
+
+
+def test_peer_call_acknowledgement_is_an_exact_projection() -> None:
+    record = call_record()
+
+    assert exact_call_projection(record, record) == record
+    with pytest.raises(ValueError):
+        exact_call_projection(record, record | {"authority_secret": "leak"})
+    with pytest.raises(ValueError):
+        exact_call_projection(record, record | {"state": "ringing"})
 
 
 def user(user_id: int, domain: str) -> User:
@@ -122,6 +141,11 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
 
     monkeypatch.setattr("app.api.calls.time.time", lambda: 10)
     monkeypatch.setattr("app.api.calls.enforce_federation_route_rate_limit", AsyncMock())
+    remote_user_allowed = AsyncMock()
+    monkeypatch.setattr(
+        "app.api.calls.require_remote_user_creation_allowed",
+        remote_user_allowed,
+    )
     monkeypatch.setattr(
         "app.api.calls.local_dm_participants",
         AsyncMock(return_value=[owner, actor, third]),
@@ -150,6 +174,7 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
     )
 
     assert response.authority_domain == "alpha.localhost"
+    assert remote_user_allowed.await_args.args[1] is actor
     assert response.caller == "2@beta.localhost"
     assert set(response.participants) == {
         "1@alpha.localhost",

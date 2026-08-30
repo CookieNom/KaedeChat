@@ -11,8 +11,12 @@ bool canCreatePublicThread(KaedeChannel parent) =>
     parent.allows(Permission.viewChannel) &&
     parent.allows(Permission.createPublicThreads);
 
+/// An inherited E2EE thread must be created without a starter, activated, and
+/// only then receive its first encrypted message.
+bool deferThreadStarterUntilE2eeActive(KaedeChannel parent) =>
+    parent.encryptionMode == 'e2ee' || (parent.isForum && parent.e2eeRequired);
+
 bool canStartThreadFromMessage(KaedeChannel parent) =>
-    parent.encryptionMode != 'e2ee' &&
     (parent.type == ChannelType.text ||
         parent.type == ChannelType.announcement) &&
     canCreatePublicThread(parent);
@@ -34,9 +38,34 @@ bool canUseApplicationCommands(KaedeChannel channel) =>
     channel.guildRef == null ||
     channel.allows(Permission.useApplicationCommands);
 
-bool canPinMessages(KaedeChannel channel) =>
-    !channel.archived &&
-    (channel.guildRef == null || channel.allows(Permission.pinMessages));
+bool canPinMessages(KaedeChannel channel) {
+  if (channel.archived) return false;
+  if (channel.guildRef == null) {
+    return channel.type == ChannelType.dm ||
+        channel.type == ChannelType.groupDm;
+  }
+  const guildPinTypes = <ChannelType>{
+    ChannelType.text,
+    ChannelType.announcement,
+    ChannelType.announcementThread,
+    ChannelType.publicThread,
+    ChannelType.privateThread,
+    ChannelType.forum,
+    ChannelType.tracker,
+  };
+  return guildPinTypes.contains(channel.type) &&
+      channel.allows(Permission.pinMessages);
+}
+
+bool canSendVoiceMessage(KaedeChannel channel) {
+  if (channel.archived) return false;
+  if (channel.guildRef == null) {
+    return channel.type == ChannelType.dm ||
+        channel.type == ChannelType.groupDm;
+  }
+  return channel.allows(Permission.attachFiles) &&
+      channel.allows(Permission.sendVoiceMessages);
+}
 
 bool canBypassSlowmode(KaedeChannel channel) =>
     channel.allows(Permission.bypassSlowmode);

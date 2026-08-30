@@ -170,19 +170,30 @@ membership counts, authorship, and other routing metadata remain plaintext.
 Activating an ordinary thread follows the same irreversible, future-only flow
 as any other channel.
 
-An E2EE-required forum applies that flow to every new post. Post creation first
-commits its required starter atomically as plaintext, then the creating client
-must activate the child thread before any reply is accepted. The UI discloses
-that starter and all earlier history remain server-readable. Activation failure
-leaves a durable post with replies blocked and a visible retry action; it never
-downgrades to accepting plaintext replies. Creating a thread from an existing
-message in an active E2EE parent, or using native `/thread` with a starter
-there, fails closed because the source cannot be safely projected into a new
-MLS group without inventing cross-room key semantics.
+An E2EE-required forum applies that flow to every new post without a plaintext
+starter exception. Post creation commits only a child-thread shell and a
+durable, nonce-bound starter reservation. The reservation is bound to the
+creating human, or to the exact application worker/webhook automation device
+and installation lineage. The client activates the child MLS room and then
+atomically claims the reservation with exactly one rich-v2 encrypted starter;
+that starter reuses the thread snowflake. Other sends, a different claimant,
+and a different retry body fail closed. Activation failure leaves only the
+metadata shell and a visible retry action, never server-readable post content.
 
-Bots receive thread/forum metadata only. E2EE-required post creation and writes
-to an active or activation-required child fail closed until Kaede defines and
-ships a verified bot-device MLS participant protocol.
+Creating a thread from an existing message in an active E2EE parent likewise
+creates an independent required-E2EE child shell. The child keeps Discord's
+source-message snowflake and reference, but the source body remains in the
+parent MLS group and is never copied or decrypted by the server. After child
+activation, replies use the child group. Native `/thread` may also create an
+empty child shell, but it cannot submit a plaintext or parent-group starter as
+part of that operation.
+
+Bots receive thread/forum metadata without cryptographic admission. A
+participant-mode bot may receive encrypted child-room content only through a
+verified worker-owned MLS device with an active, administrator-approved
+participation row and future-only history floor. E2EE-required replies and
+writes to an active child fail closed while that admission or its rekey is
+incomplete.
 
 ## Message envelope
 
@@ -193,12 +204,84 @@ envelope uses version 2 and binds, in authenticated data:
 - canonical room reference and MLS group ID;
 - sender device (the MLS BasicCredential independently binds the author account);
 - policy generation and MLS epoch;
-- operation (`create`, `edit`, or a control operation);
-- operation and edit target, when applicable; and
-- encrypted attachment-manifest digest.
+- operation (`create`, `edit`, or a control operation), message revision, and
+  edit target when applicable;
+- exact author, application/installation lineage, reply reference, delivery
+  flags, and resolved mention-routing projection;
+- encrypted attachment-manifest, sticker, and custom-emoji references;
+- the sanitized interaction-routing contract digest for components and opaque
+  poll answer identities; and
+- canonical rich-body and forward-projection digests.
+
+The encrypted rich body carries content, embeds, Components V1/V2, polls,
+stickers, TTS/voice markers, attachment manifests, flags, allowed-mention
+intent, and an optional author-free forward snapshot. Authorities retain only
+the public authenticated routing projection: attachment/expression references,
+resolved mention recipients, component callback metadata, opaque poll answer
+identities and counts, expiry, application attribution, and revisions. They do
+not receive poll labels, questions, message text, embed text, or component
+display text.
 
 Servers validate the bounded public context and relay the MLS wire message as
 opaque bytes. Clients reject any mismatch before attempting decryption.
+
+Poll votes and finalization use only deterministic answer IDs, counts, voter
+state, and expiry at the authority. Manual or scheduled finalization also
+creates the idempotent Discord-style type-46 `POLL_RESULT` message. Its public
+`poll_result` projection is label-free and binds the source poll reference,
+source encryption mode, exact answer counts, total selections, and optional
+unique victor ID/count. For an encrypted poll, clients show the question and
+winning answer label only after decrypting and verifying the referenced source
+poll locally; a missing or unverifiable source renders those labels unavailable.
+Conversation authorities relay vote/finalization and type-46 state to every DM
+participant home without exposing question, answer, or emoji text.
+
+### Secure forwarding
+
+Forwarding never asks an authority to decrypt an MLS message and never copies
+MLS ciphertext between rooms. A human first calls
+`POST /api/v1/channels/{source}/messages/{message}/forward/prepare`; a bot calls
+`POST /api/v1/bots/channels/{source}/messages/{message}/forward-authorize`.
+The source authority rechecks the requester's live channel installation or
+membership, message-history/content and attachment grants, and (for an E2EE
+source) the participant device and history floor. It returns a short-lived,
+signed authorization bound to the requester, application/device when present,
+source message and channel, destination channel and encryption mode, client
+nonce, source type/flags/timestamps, age context, attachment references, and
+the source rich-v2 forward-projection digest. It also carries only the canonical
+sticker items and custom-emoji routing tokens already approved by the source
+authority, so a remote destination can recheck its external-expression
+permissions without seeing message text. An encrypted-source proof contains no
+decrypted body.
+
+The client builds the author-free, depth-one snapshot and verifies its canonical
+digest against that proof. Plaintext-to-E2EE and E2EE-to-E2EE forwards encrypt a
+fresh rich-v2 snapshot for the destination MLS group. E2EE-to-plaintext requires
+an explicit disclosure confirmation and sends the disclosed snapshot only to
+the plaintext destination. Attachments are downloaded only with the source
+grant, then uploaded again for the destination; the authenticated
+`plaintext_sha256`, filename, MIME type, size, and voice metadata must remain
+identical while attachment IDs, domains, file IDs, keys, and ciphertext hashes
+are rebound. Existing nested snapshots are rebound the same way, so prior-room
+keys and URLs never leak.
+
+The destination verifies the source signature and every proof binding, current
+destination grants, the exact snapshot metadata, attachment count/integrity,
+and the destination MLS AAD before admission. Cross-authority requests use the
+same contract; neither a replica nor an application home may compose grants
+from different installations. A queued federated write must have been signed
+while the 90-second proof was live; retries validate against that signed outer
+event time and the nonce remains idempotent. Legacy encrypted envelopes without
+the v2 commitment fail closed. Discord-nonforwardable polls, calls, activities,
+unsupported message types, and snapshots deeper than one remain rejected.
+
+Announcement following is different from an explicit user-mediated forward:
+publication is an unattended fan-out into independently keyed rooms. Kaede
+therefore rejects E2EE activation for announcement channels and active follower
+targets, and rejects encrypted follow creation. A future encrypted announcement
+bridge would have to be an explicitly consented MLS participant in every source
+and destination room and re-encrypt each publication; ciphertext is never
+copied and plaintext fallback is forbidden.
 
 ## Reports and voluntary disclosure
 
@@ -280,8 +363,9 @@ The full activation confirmation spells out what changes:
 
 - Protection applies only to future content; old history remains readable to
   servers.
-- Server search, automatic previews, traditional webhooks, and ordinary bots
-  stop working, and notifications may become generic.
+- Server search, automatic previews, traditional webhooks, and bots that are
+  not explicitly admitted as verified MLS participants stop working, and
+  notifications may become generic.
 - Encrypted files are not server-scanned.
 - Losing the synchronized vault, all trusted local state, and the recovery
   backup loses history, and unsupported clients can't use the room.

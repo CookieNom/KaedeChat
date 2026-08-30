@@ -1,4 +1,6 @@
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
+import 'package:kaede_mobile/src/domain/rich_content.dart';
 
 typedef Json = Map<String, Object?>;
 
@@ -21,19 +23,75 @@ EntityRef? _entityRefOrNull(Object? value) {
   }
 }
 
-List<Json> _objects(Object? value) => value is List
-    ? value
-        .whereType<Map<Object?, Object?>>()
-        .map((item) => item.map((key, value) => MapEntry('$key', value)))
-        .toList()
-    : const <Json>[];
+Json? _messageReference(Object? value) {
+  if (value == null) return null;
+  if (value is! Map || value.keys.any((key) => key is! String)) {
+    throw const FormatException('Invalid message reference.');
+  }
+  final reference = Map<String, Object?>.from(value);
+  if (reference['type'] != null && reference['type'] is! int) {
+    throw const FormatException('Invalid message reference type.');
+  }
+  return Map<String, Object?>.unmodifiable(reference);
+}
+
+EntityRef? _messageReferenceEntity(
+  Json? reference,
+  String idKey,
+  String domainKey,
+) {
+  if (reference == null) return null;
+  final id = _string(reference[idKey]);
+  final domain = _string(reference[domainKey]);
+  if (id == null && domain == null) return null;
+  if (id == null || domain == null) {
+    throw const FormatException('Incomplete federated message reference.');
+  }
+  return EntityRef(Snowflake(id), Domain(domain));
+}
+
+EntityRef? _messageWebhookRef(Json json) {
+  final webhookId = _string(json['webhook_id']);
+  final rawWebhook = json['webhook'];
+  if (webhookId == null && rawWebhook == null) return null;
+  if (webhookId == null || rawWebhook is! Map) {
+    throw const FormatException('Invalid webhook message identity.');
+  }
+  final webhook = Map<String, Object?>.from(rawWebhook);
+  final id = _string(webhook['id']);
+  final domain = _string(webhook['origin_domain']);
+  final ref = _string(webhook['ref']);
+  if (id != webhookId || domain == null || ref == null) {
+    throw const FormatException('Invalid webhook message identity.');
+  }
+  final parsed = EntityRef.parse(ref);
+  if (parsed.id.value != id || parsed.domain.value != domain) {
+    throw const FormatException('Invalid webhook message identity.');
+  }
+  return parsed;
+}
+
+List<Json> _objects(Object? value) {
+  if (value == null) return const <Json>[];
+  if (value is! List) throw const FormatException('Expected an object array.');
+  final result = <Json>[];
+  for (final item in value) {
+    if (item is! Map || item.keys.any((key) => key is! String)) {
+      throw const FormatException('Object array contains an invalid child.');
+    }
+    result.add(Map<String, Object?>.from(item));
+  }
+  return result;
+}
 
 enum PresenceStatus { online, idle, dnd, invisible, offline }
 
 enum ChannelType {
   text,
   dm,
+  groupDm,
   voice,
+  stage,
   unknown,
   category,
   announcement,
@@ -44,12 +102,19 @@ enum ChannelType {
   tracker,
 }
 
+extension ChannelTypeCapabilities on ChannelType {
+  bool get isVoiceLike =>
+      this == ChannelType.voice || this == ChannelType.stage;
+}
+
 enum RelationshipType { friend, pendingIn, pendingOut, blocked }
 
 ChannelType channelType(int value) => switch (value) {
       0 => ChannelType.text,
       1 => ChannelType.dm,
+      3 => ChannelType.groupDm,
       2 => ChannelType.voice,
+      13 => ChannelType.stage,
       4 => ChannelType.category,
       5 => ChannelType.announcement,
       10 => ChannelType.announcementThread,
@@ -155,6 +220,8 @@ final class ThreadMember {
       };
 }
 
+enum AccountType { human, bot }
+
 final class KaedeUser {
   const KaedeUser({
     required this.ref,
@@ -168,6 +235,8 @@ final class KaedeUser {
     this.email,
     this.emailVerified = false,
     this.mfaEnabled = false,
+    this.ageAssuranceState = 'unknown',
+    this.accountType = AccountType.human,
     this.profileResolved = true,
     this.presence = PresenceStatus.offline,
   });
@@ -186,6 +255,12 @@ final class KaedeUser {
       email: _string(json['email']),
       emailVerified: _boolean(json['email_verified']),
       mfaEnabled: _boolean(json['mfa_enabled']),
+      ageAssuranceState: _string(json['age_assurance_state']) ?? 'unknown',
+      accountType: switch (_string(json['account_type'])) {
+        'bot' => AccountType.bot,
+        _ when _boolean(json['bot']) => AccountType.bot,
+        _ => AccountType.human,
+      },
       profileResolved: _boolean(json['profile_resolved'], true),
       presence: PresenceStatus.values.firstWhere(
         (value) => value.name == _string(json['presence']),
@@ -205,8 +280,12 @@ final class KaedeUser {
   final String? email;
   final bool emailVerified;
   final bool mfaEnabled;
+  final String ageAssuranceState;
+  final AccountType accountType;
   final bool profileResolved;
   final PresenceStatus presence;
+
+  bool get isApplication => accountType == AccountType.bot;
 
   String get name => profileResolved
       ? (displayName?.trim().isNotEmpty == true ? displayName! : username)
@@ -225,6 +304,9 @@ final class KaedeUser {
         'email': email,
         'email_verified': emailVerified,
         'mfa_enabled': mfaEnabled,
+        'age_assurance_state': ageAssuranceState,
+        'account_type': accountType.name,
+        'bot': isApplication,
         'profile_resolved': profileResolved,
         'presence': presence.name,
       };
@@ -240,12 +322,17 @@ final class KaedeChannel {
     this.guildRef,
     this.name,
     this.topic,
+    this.nsfw = false,
     this.parentRef,
     this.lastMessageRef,
     this.recipients = const <KaedeUser>[],
     this.conversationType = 'direct',
     this.ownerRef,
     this.slowModeSeconds = 0,
+    this.bitrate = 64000,
+    this.userLimit = 0,
+    this.rtcRegion,
+    this.videoQualityMode = 1,
     this.permissionsSynced = false,
     this.historyTruncated = false,
     this.historyRetention,
@@ -310,6 +397,7 @@ final class KaedeChannel {
       type: channelType(_integer(json['type'])),
       name: _string(json['name']),
       topic: _string(json['topic']),
+      nsfw: _boolean(json['nsfw']),
       position: _integer(json['position']),
       createdAt:
           createdAt == null ? null : DateTime.tryParse(createdAt)?.toUtc(),
@@ -323,6 +411,10 @@ final class KaedeChannel {
       conversationType: _string(json['conversation_type']) ?? 'direct',
       ownerRef: ownerRef,
       slowModeSeconds: _integer(json['rate_limit_per_user']),
+      bitrate: _integer(json['bitrate'], 64000),
+      userLimit: _integer(json['user_limit']),
+      rtcRegion: _string(json['rtc_region']),
+      videoQualityMode: _integer(json['video_quality_mode'], 1),
       permissionsSynced: _boolean(json['permissions_synced']),
       historyTruncated: _boolean(json['history_truncated']),
       historyRetention: _string(json['history_retention']),
@@ -395,6 +487,7 @@ final class KaedeChannel {
   final ChannelType type;
   final String? name;
   final String? topic;
+  final bool nsfw;
   final int position;
   final DateTime? createdAt;
   final EntityRef? parentRef;
@@ -404,6 +497,10 @@ final class KaedeChannel {
   final String conversationType;
   final EntityRef? ownerRef;
   final int slowModeSeconds;
+  final int bitrate;
+  final int userLimit;
+  final String? rtcRegion;
+  final int videoQualityMode;
   final bool permissionsSynced;
   final bool historyTruncated;
   final String? historyRetention;
@@ -463,7 +560,9 @@ final class KaedeChannel {
         'type': switch (type) {
           ChannelType.text => 0,
           ChannelType.dm => 1,
+          ChannelType.groupDm => 3,
           ChannelType.voice => 2,
+          ChannelType.stage => 13,
           ChannelType.category => 4,
           ChannelType.announcement => 5,
           ChannelType.announcementThread => 10,
@@ -475,6 +574,7 @@ final class KaedeChannel {
         },
         'name': name,
         'topic': topic,
+        'nsfw': nsfw,
         'position': position,
         'created_at': createdAt?.toUtc().toIso8601String(),
         'parent_id': parentRef?.id.value,
@@ -487,6 +587,10 @@ final class KaedeChannel {
         'owner_id': ownerRef?.id.value,
         'owner_domain': ownerRef?.domain.value,
         'rate_limit_per_user': slowModeSeconds,
+        'bitrate': type.isVoiceLike ? bitrate : null,
+        'user_limit': type.isVoiceLike ? userLimit : null,
+        'rtc_region': type.isVoiceLike ? rtcRegion : null,
+        'video_quality_mode': type.isVoiceLike ? videoQualityMode : null,
         'permissions_synced': permissionsSynced,
         'history_truncated': historyTruncated,
         'history_retention': historyRetention,
@@ -567,12 +671,17 @@ final class KaedeChannel {
         guildRef: guildRef,
         name: name ?? this.name,
         topic: topic,
+        nsfw: nsfw,
         parentRef: parentRef,
         lastMessageRef: lastMessageRef,
         recipients: recipients,
         conversationType: conversationType,
         ownerRef: ownerRef,
         slowModeSeconds: slowModeSeconds,
+        bitrate: bitrate,
+        userLimit: userLimit,
+        rtcRegion: rtcRegion,
+        videoQualityMode: videoQualityMode,
         permissionsSynced: permissionsSynced,
         historyTruncated: historyTruncated,
         historyRetention: historyRetention,
@@ -626,6 +735,7 @@ final class KaedeChannel {
         guildRef: guildRef,
         name: name,
         topic: topic,
+        nsfw: nsfw,
         parentRef: parentRef,
         lastMessageRef: lastMessageRef,
         recipients: List.unmodifiable(
@@ -637,6 +747,10 @@ final class KaedeChannel {
         conversationType: conversationType,
         ownerRef: ownerRef,
         slowModeSeconds: slowModeSeconds,
+        bitrate: bitrate,
+        userLimit: userLimit,
+        rtcRegion: rtcRegion,
+        videoQualityMode: videoQualityMode,
         permissionsSynced: permissionsSynced,
         historyTruncated: historyTruncated,
         historyRetention: historyRetention,
@@ -674,6 +788,31 @@ final class KaedeChannel {
         member: member,
         version: version,
       );
+}
+
+/// One authority-advertised RTC region available to a guild voice channel.
+final class VoiceRegion {
+  const VoiceRegion({
+    required this.id,
+    required this.name,
+    required this.optimal,
+    required this.deprecated,
+    required this.custom,
+  });
+
+  factory VoiceRegion.fromJson(Json json) => VoiceRegion(
+        id: json['id']! as String,
+        name: json['name']! as String,
+        optimal: _boolean(json['optimal']),
+        deprecated: _boolean(json['deprecated']),
+        custom: _boolean(json['custom'], true),
+      );
+
+  final String id;
+  final String name;
+  final bool optimal;
+  final bool deprecated;
+  final bool custom;
 }
 
 final class ThreadPage {
@@ -1094,8 +1233,9 @@ final class KaedeGuild {
     this.channels = const <KaedeChannel>[],
     this.roles = const <KaedeRole>[],
     this.stickers = const <Json>[],
+    this.emojiMaxBytes = 256 * 1024,
     this.stickerLimit = 60,
-    this.stickerMaxBytes = 2 * 1024 * 1024,
+    this.stickerMaxBytes = 512 * 1024,
     this.stickerBackgroundRemovalEnabled = false,
     this.federatedHistoryPolicy = 'disabled',
     this.actorHighestRoleId,
@@ -1124,8 +1264,9 @@ final class KaedeGuild {
       channels: _objects(json['channels']).map(KaedeChannel.fromJson).toList(),
       roles: _objects(json['roles']).map(KaedeRole.fromJson).toList(),
       stickers: _objects(json['stickers']).toList(growable: false),
+      emojiMaxBytes: _integer(json['emoji_max_bytes'], 256 * 1024),
       stickerLimit: _integer(json['sticker_limit'], 60),
-      stickerMaxBytes: _integer(json['sticker_max_bytes'], 2 * 1024 * 1024),
+      stickerMaxBytes: _integer(json['sticker_max_bytes'], 512 * 1024),
       stickerBackgroundRemovalEnabled:
           _boolean(json['sticker_background_removal_enabled']),
       federatedHistoryPolicy:
@@ -1153,6 +1294,7 @@ final class KaedeGuild {
   final List<KaedeChannel> channels;
   final List<KaedeRole> roles;
   final List<Json> stickers;
+  final int emojiMaxBytes;
   final int stickerLimit;
   final int stickerMaxBytes;
   final bool stickerBackgroundRemovalEnabled;
@@ -1182,6 +1324,7 @@ final class KaedeGuild {
         'channels': channels.map((channel) => channel.toJson()).toList(),
         'roles': roles.map((role) => role.toJson()).toList(),
         'stickers': stickers,
+        'emoji_max_bytes': emojiMaxBytes,
         'sticker_limit': stickerLimit,
         'sticker_max_bytes': stickerMaxBytes,
         'sticker_background_removal_enabled': stickerBackgroundRemovalEnabled,
@@ -1217,6 +1360,7 @@ final class KaedeGuild {
         channels: channels,
         roles: roles,
         stickers: stickers,
+        emojiMaxBytes: emojiMaxBytes,
         stickerLimit: stickerLimit,
         stickerMaxBytes: stickerMaxBytes,
         stickerBackgroundRemovalEnabled: stickerBackgroundRemovalEnabled,
@@ -1247,6 +1391,7 @@ final class KaedeGuild {
         channels: channels,
         roles: roles,
         stickers: stickers,
+        emojiMaxBytes: emojiMaxBytes,
         stickerLimit: stickerLimit,
         stickerMaxBytes: stickerMaxBytes,
         stickerBackgroundRemovalEnabled: stickerBackgroundRemovalEnabled,
@@ -1273,9 +1418,18 @@ final class KaedeAttachment {
     this.height,
     this.blurHash,
     this.historyMediaUrl,
+    this.privateMediaUrl,
+    this.durationSecs,
+    this.waveform,
+    this.plaintextSha256,
+    this.encryptedManifest,
   });
 
-  factory KaedeAttachment.fromJson(Json json) => KaedeAttachment(
+  factory KaedeAttachment.fromJson(
+    Json json, {
+    bool trustClientState = false,
+  }) =>
+      KaedeAttachment(
         ref: EntityRef(Snowflake(json['id']! as String),
             Domain(json['origin_domain']! as String)),
         filename: json['filename']! as String,
@@ -1286,6 +1440,21 @@ final class KaedeAttachment {
         height: json['height'] is num ? (json['height']! as num).toInt() : null,
         blurHash: _string(json['blurhash']),
         historyMediaUrl: _string(json['history_media_url']),
+        privateMediaUrl: _string(json['private_media_url']),
+        durationSecs: json['duration_secs'] is num
+            ? (json['duration_secs']! as num).toDouble()
+            : null,
+        waveform: _string(json['waveform']),
+        // The plaintext commitment is MLS/private-forward material. Ordinary
+        // REST and Gateway attachment projections must not be able to inject
+        // it into the locally authenticated presentation/cache state.
+        plaintextSha256:
+            trustClientState ? _string(json['plaintext_sha256']) : null,
+        encryptedManifest: trustClientState && json['encrypted_manifest'] is Map
+            ? Map<String, Object?>.unmodifiable(
+                Map<String, Object?>.from(json['encrypted_manifest']! as Map),
+              )
+            : null,
       );
 
   final EntityRef ref;
@@ -1297,6 +1466,15 @@ final class KaedeAttachment {
   final String? blurHash;
   final String scanStatus;
   final String? historyMediaUrl;
+  final String? privateMediaUrl;
+  final double? durationSecs;
+  final String? waveform;
+  final String? plaintextSha256;
+
+  /// Client-authenticated kaede-file-v1 material for an encrypted attachment.
+  /// Network projections never populate this field; it is derived after MLS
+  /// verification and retained only in the encrypted local cache.
+  final Json? encryptedManifest;
 
   Json toJson() => <String, Object?>{
         'id': ref.id.value,
@@ -1309,7 +1487,356 @@ final class KaedeAttachment {
         'blurhash': blurHash,
         'scan_status': scanStatus,
         'history_media_url': historyMediaUrl,
+        'private_media_url': privateMediaUrl,
+        'duration_secs': durationSecs,
+        'waveform': waveform,
+        'plaintext_sha256': plaintextSha256,
+        if (encryptedManifest != null) 'encrypted_manifest': encryptedManifest,
       };
+}
+
+final class KaedeStickerItem {
+  const KaedeStickerItem({
+    required this.ref,
+    required this.name,
+    required this.formatType,
+    required this.mediaHash,
+  });
+
+  factory KaedeStickerItem.fromJson(Json json) => KaedeStickerItem(
+        ref: EntityRef(
+          Snowflake('${json['id']}'),
+          Domain('${json['origin_domain']}'),
+        ),
+        name: '${json['name']}',
+        formatType: _integer(json['format_type'], 1),
+        mediaHash: '${json['media_hash']}',
+      );
+
+  final EntityRef ref;
+  final String name;
+  final int formatType;
+  final String mediaHash;
+
+  Json toJson() => <String, Object?>{
+        'id': ref.id.value,
+        'origin_domain': ref.domain.value,
+        'name': name,
+        'format_type': formatType,
+        'media_hash': mediaHash,
+      };
+}
+
+/// Immutable, author-free material embedded in a forwarded message. It is not
+/// a [KaedeMessage]: snapshots deliberately have no author or source channel.
+final class KaedeMessageSnapshot {
+  const KaedeMessageSnapshot({
+    required this.content,
+    required this.embeds,
+    required this.components,
+    required this.attachments,
+    this.stickerItems = const <KaedeStickerItem>[],
+    this.mentionUserRefs = const <EntityRef>[],
+    this.messageSnapshots = const <KaedeMessageSnapshot>[],
+    required this.messageType,
+    required this.flags,
+    required this.createdAt,
+    this.editedAt,
+  });
+
+  factory KaedeMessageSnapshot.fromJson(
+    Json json, {
+    bool trustClientState = false,
+  }) =>
+      KaedeMessageSnapshot(
+        content: _string(json['content']),
+        embeds: _objects(json['embeds']).map(RichEmbed.fromJson).toList(),
+        components: _objects(json['components'])
+            .map(RichMessageLayout.fromJson)
+            .toList(),
+        attachments: _objects(json['attachments'])
+            .map((item) => KaedeAttachment.fromJson(
+                  item,
+                  trustClientState: trustClientState,
+                ))
+            .toList(),
+        stickerItems: _objects(json['sticker_items'])
+            .map(KaedeStickerItem.fromJson)
+            .toList(),
+        mentionUserRefs: _objects(json['mention_user_refs'])
+            .map(EntityRef.fromJson)
+            .toList(),
+        messageSnapshots: _objects(json['message_snapshots']).map((item) {
+          final message = item['message'];
+          if (message is! Map || message.keys.any((key) => key is! String)) {
+            throw const FormatException(
+              'Forward snapshot contains an invalid nested message.',
+            );
+          }
+          return KaedeMessageSnapshot.fromJson(
+            Map<String, Object?>.from(message),
+            trustClientState: trustClientState,
+          );
+        }).toList(),
+        messageType: (json['message_type'] as num?)?.toInt() ?? 0,
+        flags: _integer(json['flags']),
+        createdAt: DateTime.parse('${json['created_at']}').toUtc(),
+        editedAt: _string(json['edited_at']) == null
+            ? null
+            : DateTime.parse('${json['edited_at']}').toUtc(),
+      );
+
+  final String? content;
+  final List<RichEmbed> embeds;
+  final List<RichMessageLayout> components;
+  final List<KaedeAttachment> attachments;
+  final List<KaedeStickerItem> stickerItems;
+  final List<EntityRef> mentionUserRefs;
+  final List<KaedeMessageSnapshot> messageSnapshots;
+  final int messageType;
+  final int flags;
+  final DateTime createdAt;
+  final DateTime? editedAt;
+
+  Json toJson() => <String, Object?>{
+        'content': content,
+        'embeds': embeds.map((item) => item.toJson()).toList(),
+        'components': components.map((item) => item.toJson()).toList(),
+        'attachments': attachments.map((item) => item.toJson()).toList(),
+        'sticker_items': stickerItems.map((item) => item.toJson()).toList(),
+        'mention_user_refs': mentionUserRefs
+            .map((item) => <String, Object?>{
+                  'id': item.id.value,
+                  'origin_domain': item.domain.value,
+                })
+            .toList(),
+        'message_snapshots': messageSnapshots
+            .map((item) => <String, Object?>{'message': item.toJson()})
+            .toList(),
+        'message_type': messageType,
+        'flags': flags,
+        'created_at': createdAt.toUtc().toIso8601String(),
+        'edited_at': editedAt?.toUtc().toIso8601String(),
+      };
+}
+
+final class KaedeInteractionMetadata {
+  const KaedeInteractionMetadata({
+    required this.ref,
+    required this.type,
+    required this.user,
+    required this.userRef,
+    required this.applicationRef,
+    required this.integrationType,
+    required this.authorizingIntegrationOwners,
+    this.commandName,
+    this.commandType,
+    this.targetUser,
+    this.targetUserRef,
+    this.targetMessageRef,
+    this.originalResponseMessageRef,
+    this.interactedMessageRef,
+    this.triggeringInteractionMetadata,
+  });
+
+  static KaedeInteractionMetadata? tryFromJson(Object? value, [int depth = 0]) {
+    if (value is! Map || depth > 1) return null;
+    try {
+      final json = Map<String, Object?>.from(value);
+      final ref = EntityRef(
+        Snowflake(json['id']! as String),
+        Domain(json['origin_domain']! as String),
+      );
+      if (json['interaction_ref'] != ref.wire) return null;
+      final type = json['type'];
+      if (type != 'command' && type != 'component' && type != 'modal_submit') {
+        return null;
+      }
+      final rawUser = json['user'];
+      if (rawUser is! Map) return null;
+      final user = KaedeUser.fromJson(Map<String, Object?>.from(rawUser));
+      final userRef = EntityRef.fromJson(json['user_ref']);
+      if (user.ref != userRef) return null;
+      final applicationRef = EntityRef.fromJson(json['application_ref']);
+      final integrationType = json['integration_type'];
+      if (integrationType != 'guild_install' &&
+          integrationType != 'user_install' &&
+          integrationType != 'dm_capability') {
+        return null;
+      }
+      final rawOwners = json['authorizing_integration_owners'];
+      if (rawOwners is! Map) return null;
+      final owners = <String, EntityRef>{};
+      for (final entry in rawOwners.entries) {
+        final key = '${entry.key}';
+        if (key != 'guild_install' &&
+            key != 'user_install' &&
+            key != 'dm_capability') {
+          return null;
+        }
+        owners[key] = EntityRef.fromJson(entry.value);
+      }
+      if (!owners.containsKey(integrationType)) return null;
+
+      final commandName = _string(json['command_name']);
+      final commandType = _string(json['command_type']);
+      if (type == 'command' &&
+          (commandName == null ||
+              commandName.trim().isEmpty ||
+              !const <String>{'chat_input', 'user', 'message'}
+                  .contains(commandType))) {
+        return null;
+      }
+      final targetUser = json['target_user'] is Map
+          ? KaedeUser.fromJson(
+              Map<String, Object?>.from(json['target_user']! as Map),
+            )
+          : null;
+      final targetUserRef = _entityRefOrNull(json['target_user_ref']);
+      if ((targetUser == null) != (targetUserRef == null) ||
+          (targetUser != null && targetUser.ref != targetUserRef)) {
+        return null;
+      }
+      final targetMessageRef = _consistentMetadataRef(
+        json,
+        idKey: 'target_message_id',
+        domainKey: 'target_message_domain',
+        refKey: 'target_message_ref',
+      );
+      final originalResponseMessageRef = _consistentMetadataRef(
+        json,
+        idKey: 'original_response_message_id',
+        domainKey: 'original_response_message_domain',
+        refKey: 'original_response_message_ref',
+      );
+      final interactedMessageRef = _consistentMetadataRef(
+        json,
+        idKey: 'interacted_message_id',
+        domainKey: 'interacted_message_domain',
+        refKey: 'interacted_message_ref',
+      );
+      if (commandType == 'user' && targetUserRef == null ||
+          commandType == 'message' && targetMessageRef == null ||
+          type == 'component' && interactedMessageRef == null) {
+        return null;
+      }
+      final triggering = json['triggering_interaction_metadata'] == null
+          ? null
+          : tryFromJson(json['triggering_interaction_metadata'], depth + 1);
+      if (type == 'modal_submit' && triggering == null) return null;
+      return KaedeInteractionMetadata(
+        ref: ref,
+        type: type as String,
+        user: user,
+        userRef: userRef,
+        applicationRef: applicationRef,
+        integrationType: integrationType as String,
+        authorizingIntegrationOwners: Map.unmodifiable(owners),
+        commandName: commandName,
+        commandType: commandType,
+        targetUser: targetUser,
+        targetUserRef: targetUserRef,
+        targetMessageRef: targetMessageRef,
+        originalResponseMessageRef: originalResponseMessageRef,
+        interactedMessageRef: interactedMessageRef,
+        triggeringInteractionMetadata: triggering,
+      );
+    } on Object {
+      return null;
+    }
+  }
+
+  final EntityRef ref;
+  final String type;
+  final KaedeUser user;
+  final EntityRef userRef;
+  final EntityRef applicationRef;
+  final String integrationType;
+  final Map<String, EntityRef> authorizingIntegrationOwners;
+  final String? commandName;
+  final String? commandType;
+  final KaedeUser? targetUser;
+  final EntityRef? targetUserRef;
+  final EntityRef? targetMessageRef;
+  final EntityRef? originalResponseMessageRef;
+  final EntityRef? interactedMessageRef;
+  final KaedeInteractionMetadata? triggeringInteractionMetadata;
+
+  Json toJson() => <String, Object?>{
+        'id': ref.id.value,
+        'origin_domain': ref.domain.value,
+        'interaction_ref': ref.wire,
+        'type': type,
+        'user': user.toJson(),
+        'user_ref': userRef.wire,
+        'application_ref': applicationRef.wire,
+        'integration_type': integrationType,
+        'authorizing_integration_owners': authorizingIntegrationOwners.map(
+          (key, value) => MapEntry(key, value.wire),
+        ),
+        if (commandName != null) 'command_name': commandName,
+        if (commandType != null) 'command_type': commandType,
+        if (targetUser != null) 'target_user': targetUser!.toJson(),
+        if (targetUserRef != null) 'target_user_ref': targetUserRef!.wire,
+        if (targetMessageRef != null) ...<String, Object?>{
+          'target_message_id': targetMessageRef!.id.value,
+          'target_message_domain': targetMessageRef!.domain.value,
+          'target_message_ref': targetMessageRef!.wire,
+        },
+        if (originalResponseMessageRef != null) ...<String, Object?>{
+          'original_response_message_id': originalResponseMessageRef!.id.value,
+          'original_response_message_domain':
+              originalResponseMessageRef!.domain.value,
+          'original_response_message_ref': originalResponseMessageRef!.wire,
+        },
+        if (interactedMessageRef != null) ...<String, Object?>{
+          'interacted_message_id': interactedMessageRef!.id.value,
+          'interacted_message_domain': interactedMessageRef!.domain.value,
+          'interacted_message_ref': interactedMessageRef!.wire,
+        },
+        if (triggeringInteractionMetadata != null)
+          'triggering_interaction_metadata':
+              triggeringInteractionMetadata!.toJson(),
+      };
+}
+
+EntityRef? _consistentMetadataRef(
+  Json json, {
+  required String idKey,
+  required String domainKey,
+  required String refKey,
+}) {
+  final id = _string(json[idKey]);
+  final domain = _string(json[domainKey]);
+  final rawRef = _string(json[refKey]);
+  if (id == null && domain == null && rawRef == null) return null;
+  if (id == null || domain == null || rawRef == null) {
+    throw const FormatException('Incomplete interaction message reference');
+  }
+  final ref = EntityRef(Snowflake(id), Domain(domain));
+  if (rawRef != ref.wire) {
+    throw const FormatException('Inconsistent interaction message reference');
+  }
+  return ref;
+}
+
+String? interactionAttributionText(
+  KaedeInteractionMetadata? metadata, {
+  required bool deleted,
+}) {
+  if (deleted || metadata == null) return null;
+  final actor = metadata.user.name.trim();
+  if (actor.isEmpty) return null;
+  if (metadata.type == 'command') {
+    final command = metadata.commandName?.trim();
+    if (command == null || command.isEmpty) return null;
+    return metadata.commandType == 'chat_input'
+        ? '$actor used /$command'
+        : '$actor used $command';
+  }
+  if (metadata.type == 'component') return '$actor used a message component';
+  if (metadata.type == 'modal_submit') return '$actor submitted a form';
+  return null;
 }
 
 final class KaedeMessage {
@@ -1320,20 +1847,47 @@ final class KaedeMessage {
     required this.createdAt,
     this.author,
     this.content,
+    this.stickerItems = const <KaedeStickerItem>[],
+    this.embeds = const <RichEmbed>[],
+    this.components = const <RichMessageLayout>[],
+    this.applicationRef,
+    this.webhookRef,
+    this.viewVersion = 0,
+    this.viewPersistent = false,
+    this.viewExpiresAt,
+    this.interactionIntegrationType,
+    this.interactionInstallationRef,
+    this.interactionInstallationRevision,
+    this.interactionMetadata,
+    this.forwardedMessageRef,
+    this.forwardedMessage,
+    this.forwardSnapshot,
+    this.decryptedForwardSnapshot,
+    this.poll,
+    this.pollResult,
+    this.encryptedPollProjection,
     this.e2ee,
+    this.e2eeVerified = false,
     this.encryptionPolicyGeneration = 0,
     this.encryptionEpoch,
+    this.tts = false,
     this.messageType = 0,
+    this.flags = 0,
     this.attachments = const <KaedeAttachment>[],
     this.decryptedAttachments = const <Json>[],
+    this.decryptedAllowedMentions,
     this.mentionUserRefs = const <EntityRef>[],
+    this.mentionRoleRefs = const <EntityRef>[],
+    this.mentionEveryone = false,
     this.reference,
+    this.messageReference,
     this.clientNonce,
     this.editedAt,
     this.deliveryStatus,
     this.failureReason,
     this.retryable = true,
     this.pinned = false,
+    this.pinnedAt,
     this.reactionCounts = const <String, int>{},
     this.reactedEmoji = const <String>{},
     this.thread,
@@ -1349,15 +1903,76 @@ final class KaedeMessage {
   factory KaedeMessage.fromJson(Json json) => KaedeMessage._fromJson(
         json,
         includeReferencedMessage: true,
+        trustClientState: false,
+      );
+
+  /// Decodes a row written by this client's encrypted local snapshot store.
+  /// Network and Gateway payloads must always use [KaedeMessage.fromJson].
+  factory KaedeMessage.fromTrustedCacheJson(Json json) =>
+      KaedeMessage._fromJson(
+        json,
+        includeReferencedMessage: true,
+        trustClientState: true,
       );
 
   factory KaedeMessage._fromJson(
     Json json, {
     required bool includeReferencedMessage,
+    required bool trustClientState,
   }) {
-    final referenceId = _string(json['referenced_message_id']);
-    final referenceDomain = _string(json['referenced_message_domain']);
+    final messageReference = _messageReference(json['message_reference']);
+    final flattenedReferenceId = _string(json['referenced_message_id']);
+    final flattenedReferenceDomain = _string(json['referenced_message_domain']);
+    final flattenedReference =
+        flattenedReferenceId == null || flattenedReferenceDomain == null
+            ? null
+            : EntityRef(
+                Snowflake(flattenedReferenceId),
+                Domain(flattenedReferenceDomain),
+              );
+    final structuredReference = _messageReferenceEntity(
+      messageReference,
+      'message_id',
+      'message_domain',
+    );
+    if (flattenedReference != null &&
+        structuredReference != null &&
+        flattenedReference != structuredReference) {
+      throw const FormatException('Inconsistent message reference.');
+    }
     final author = json['author'];
+    final snapshots = _objects(json['message_snapshots']);
+    final snapshot = snapshots.isNotEmpty && snapshots.first['message'] is Map
+        ? Map<String, Object?>.from(snapshots.first['message']! as Map)
+        : null;
+    final rawMessageType = json['message_type'] ?? 0;
+    if (rawMessageType is! int) {
+      throw const FormatException('Message type must be an integer.');
+    }
+    if (rawMessageType == 12 &&
+        (_messageReferenceEntity(
+                  messageReference,
+                  'channel_id',
+                  'channel_domain',
+                ) ==
+                null ||
+            _messageReferenceEntity(
+                  messageReference,
+                  'guild_id',
+                  'guild_domain',
+                ) ==
+                null)) {
+      throw const FormatException(
+        'Channel follow messages require qualified channel and guild references.',
+      );
+    }
+    final pollResult = rawMessageType == 46
+        ? RichPollResultMessage.fromMessageJson(json)
+        : json['poll_result'] == null
+            ? null
+            : throw const FormatException(
+                'Poll result metadata requires message type 46.',
+              );
     return KaedeMessage(
       ref: EntityRef(Snowflake(json['id']! as String),
           Domain(json['origin_domain']! as String)),
@@ -1369,24 +1984,109 @@ final class KaedeMessage {
           ? KaedeUser.fromJson(Map<String, Object?>.from(author))
           : null,
       content: _string(json['content']),
+      stickerItems: _objects(json['sticker_items'])
+          .map(KaedeStickerItem.fromJson)
+          .toList(),
+      embeds: _objects(json['embeds']).map(RichEmbed.fromJson).toList(),
+      components:
+          _objects(json['components']).map(RichMessageLayout.fromJson).toList(),
+      applicationRef: _entityRefOrNull(
+        json['application_id'] == null || json['application_domain'] == null
+            ? null
+            : '${json['application_id']}@${json['application_domain']}',
+      ),
+      webhookRef: _messageWebhookRef(json),
+      viewVersion: _integer(json['view_version']),
+      viewPersistent: _boolean(json['view_persistent']),
+      viewExpiresAt: _string(json['view_expires_at']) == null
+          ? null
+          : DateTime.parse(json['view_expires_at']! as String).toUtc(),
+      interactionIntegrationType: _string(json['interaction_integration_type']),
+      interactionInstallationRef:
+          _entityRefOrNull(json['interaction_installation_ref']),
+      interactionInstallationRevision:
+          _nullableInteger(json['interaction_installation_revision']),
+      interactionMetadata: _string(json['deleted_at']) == null
+          ? KaedeInteractionMetadata.tryFromJson(json['interaction_metadata'])
+          : null,
+      forwardedMessageRef: _entityRefOrNull(
+        json['forwarded_message_ref'] ??
+            (json['forwarded_message_id'] == null ||
+                    json['forwarded_message_domain'] == null
+                ? null
+                : '${json['forwarded_message_id']}@${json['forwarded_message_domain']}'),
+      ),
+      forwardedMessage: json['forwarded_message'] is Map
+          ? KaedeMessage._fromJson(
+              Map<String, Object?>.from(json['forwarded_message']! as Map),
+              includeReferencedMessage: false,
+              trustClientState: trustClientState,
+            )
+          : null,
+      forwardSnapshot: snapshot == null
+          ? null
+          : KaedeMessageSnapshot.fromJson(
+              snapshot,
+              trustClientState: trustClientState,
+            ),
+      decryptedForwardSnapshot:
+          trustClientState && json['decrypted_forward_snapshot'] is Map
+              ? Map<String, Object?>.unmodifiable(
+                  Map<String, Object?>.from(
+                    json['decrypted_forward_snapshot']! as Map,
+                  ),
+                )
+              : null,
+      poll: json['poll'] is Map && (json['poll']! as Map)['encrypted'] != true
+          ? RichPoll.fromJson(Map<String, Object?>.from(json['poll']! as Map))
+          : null,
+      pollResult: pollResult,
+      encryptedPollProjection:
+          json['poll'] is Map && (json['poll']! as Map)['encrypted'] == true
+              ? Map<String, Object?>.unmodifiable(
+                  Map<String, Object?>.from(json['poll']! as Map),
+                )
+              : null,
       e2ee: json['e2ee'] is Map
           ? Map<String, Object?>.unmodifiable(
               Map<String, Object?>.from(json['e2ee']! as Map),
             )
           : null,
+      e2eeVerified: trustClientState && _boolean(json['e2ee_verified']),
       encryptionPolicyGeneration:
           _integer(json['encryption_policy_generation']),
       encryptionEpoch: _nullableInteger(json['encryption_epoch']),
-      messageType: (json['message_type'] as num?)?.toInt() ?? 0,
+      tts: _boolean(json['tts']),
+      messageType: rawMessageType,
+      flags: _integer(json['flags']),
       attachments:
           _objects(json['attachments']).map(KaedeAttachment.fromJson).toList(),
-      decryptedAttachments: _objects(json['decrypted_attachments']),
+      decryptedAttachments: trustClientState
+          ? _objects(json['decrypted_attachments'])
+          : const <Json>[],
+      decryptedAllowedMentions:
+          trustClientState && json['decrypted_allowed_mentions'] is Map
+              ? Map<String, Object?>.unmodifiable(
+                  Map<String, Object?>.from(
+                    json['decrypted_allowed_mentions']! as Map,
+                  ),
+                )
+              : null,
       mentionUserRefs: (json['mention_user_refs'] as List? ?? const <Object>[])
           .map(EntityRef.fromJson)
           .toList(),
-      reference: referenceId == null || referenceDomain == null
-          ? null
-          : EntityRef(Snowflake(referenceId), Domain(referenceDomain)),
+      mentionRoleRefs: (json['mention_role_refs'] as List? ?? const <Object>[])
+          .map(EntityRef.fromJson)
+          .toList(),
+      mentionEveryone: json['mention_everyone'] == null
+          ? false
+          : json['mention_everyone'] is bool
+              ? json['mention_everyone']! as bool
+              : throw const FormatException(
+                  'Message mention_everyone must be a boolean.',
+                ),
+      reference: flattenedReference ?? structuredReference,
+      messageReference: messageReference,
       clientNonce: _string(json['client_nonce']),
       createdAt: DateTime.parse(json['created_at']! as String).toUtc(),
       editedAt: _string(json['edited_at']) == null
@@ -1396,14 +2096,17 @@ final class KaedeMessage {
       failureReason: _string(json['failure_reason']),
       retryable: _boolean(json['retryable'], true),
       pinned: json['pinned'] == true || json['pinned_at'] != null,
+      pinnedAt: _string(json['pinned_at']) == null
+          ? null
+          : DateTime.parse(json['pinned_at']! as String).toUtc(),
       reactionCounts: json['reaction_counts'] is Map
-          ? Map<String, int>.unmodifiable(
+          ? canonicalReactionCounts(
               (json['reaction_counts']! as Map).map(
                 (key, value) => MapEntry('$key', (value as num).toInt()),
               ),
             )
           : const <String, int>{},
-      reactedEmoji: Set<String>.unmodifiable(
+      reactedEmoji: canonicalReactedEmoji(
         (json['reacted_emoji'] as List? ?? const <Object>[])
             .map((value) => '$value'),
       ),
@@ -1419,6 +2122,7 @@ final class KaedeMessage {
                     json['referenced_message']! as Map,
                   ),
                   includeReferencedMessage: false,
+                  trustClientState: trustClientState,
                 )
               : null,
       contentUnavailable: _boolean(json['content_unavailable']),
@@ -1468,6 +2172,7 @@ final class KaedeMessage {
       contentUnavailable: decoded.contentUnavailable ||
           (decoded.referencedMessage == null &&
               decoded.content == null &&
+              decoded.stickerItems.isEmpty &&
               decoded.attachments.isEmpty &&
               decoded.deletedAt == null),
       createdAtAvailable: createdAt != null,
@@ -1479,14 +2184,49 @@ final class KaedeMessage {
   final EntityRef authorRef;
   final KaedeUser? author;
   final String? content;
+  final List<KaedeStickerItem> stickerItems;
+  final List<RichEmbed> embeds;
+  final List<RichMessageLayout> components;
+  final EntityRef? applicationRef;
+  final EntityRef? webhookRef;
+  final int viewVersion;
+  final bool viewPersistent;
+  final DateTime? viewExpiresAt;
+  final String? interactionIntegrationType;
+  final EntityRef? interactionInstallationRef;
+  final int? interactionInstallationRevision;
+  final KaedeInteractionMetadata? interactionMetadata;
+  final EntityRef? forwardedMessageRef;
+  final KaedeMessage? forwardedMessage;
+  final KaedeMessageSnapshot? forwardSnapshot;
+
+  /// Exact authenticated snapshot retained for secure re-forwarding. This is
+  /// intentionally separate from the presentation model, which strips keys.
+  final Json? decryptedForwardSnapshot;
+  final RichPoll? poll;
+  final RichPollResultMessage? pollResult;
+  final Json? encryptedPollProjection;
   final Json? e2ee;
+
+  /// Client-local proof that [e2ee] was authenticated and decrypted.
+  ///
+  /// Content-less rich messages use this marker to distinguish successful
+  /// decryption from an unavailable ciphertext. It must only be set by the
+  /// E2EE client after validation.
+  final bool e2eeVerified;
   final int encryptionPolicyGeneration;
   final int? encryptionEpoch;
+  final bool tts;
   final int messageType;
+  final int flags;
   final List<KaedeAttachment> attachments;
   final List<Json> decryptedAttachments;
+  final Json? decryptedAllowedMentions;
   final List<EntityRef> mentionUserRefs;
+  final List<EntityRef> mentionRoleRefs;
+  final bool mentionEveryone;
   final EntityRef? reference;
+  final Json? messageReference;
   final String? clientNonce;
   final DateTime createdAt;
   final DateTime? editedAt;
@@ -1494,6 +2234,7 @@ final class KaedeMessage {
   final String? failureReason;
   final bool retryable;
   final bool pinned;
+  final DateTime? pinnedAt;
   final Set<String> reactedEmoji;
   final Map<String, int> reactionCounts;
   final KaedeChannel? thread;
@@ -1505,21 +2246,78 @@ final class KaedeMessage {
   final String? historyPageErrorCode;
   final int? historyPageRetryAfterMs;
 
+  /// Plaintext is usable only for ordinary messages or after local E2EE
+  /// authentication. Network projections cannot make encrypted content usable.
+  bool get clientContentAvailable => e2ee == null || e2eeVerified;
+
+  EntityRef? get messageReferenceChannelRef => _messageReferenceEntity(
+        messageReference,
+        'channel_id',
+        'channel_domain',
+      );
+
+  EntityRef? get messageReferenceGuildRef => _messageReferenceEntity(
+        messageReference,
+        'guild_id',
+        'guild_domain',
+      );
+
+  EntityRef? get followedChannelRef =>
+      messageType == 12 ? messageReferenceChannelRef : null;
+
+  EntityRef? get followedGuildRef =>
+      messageType == 12 ? messageReferenceGuildRef : null;
+
   KaedeMessage copyWith({
     KaedeUser? author,
     String? content,
+    List<KaedeStickerItem>? stickerItems,
+    List<RichEmbed>? embeds,
+    List<RichMessageLayout>? components,
+    EntityRef? applicationRef,
+    EntityRef? webhookRef,
+    int? viewVersion,
+    bool? viewPersistent,
+    DateTime? viewExpiresAt,
+    String? interactionIntegrationType,
+    EntityRef? interactionInstallationRef,
+    int? interactionInstallationRevision,
+    KaedeInteractionMetadata? interactionMetadata,
+    EntityRef? forwardedMessageRef,
+    bool clearForwardedMessageRef = false,
+    KaedeMessage? forwardedMessage,
+    bool clearForwardedMessage = false,
+    KaedeMessageSnapshot? forwardSnapshot,
+    bool clearForwardSnapshot = false,
+    Json? decryptedForwardSnapshot,
+    bool clearDecryptedForwardSnapshot = false,
+    RichPoll? poll,
+    bool clearPoll = false,
+    RichPollResultMessage? pollResult,
+    bool clearPollResult = false,
+    Json? encryptedPollProjection,
+    bool clearEncryptedPollProjection = false,
     Json? e2ee,
     bool clearE2ee = false,
+    bool? e2eeVerified,
     int? encryptionPolicyGeneration,
     int? encryptionEpoch,
     bool clearEncryptionEpoch = false,
+    bool? tts,
     int? messageType,
+    int? flags,
     bool clearContent = false,
     List<KaedeAttachment>? attachments,
     List<Json>? decryptedAttachments,
+    Json? decryptedAllowedMentions,
+    bool clearDecryptedAllowedMentions = false,
     List<EntityRef>? mentionUserRefs,
+    List<EntityRef>? mentionRoleRefs,
+    bool? mentionEveryone,
     EntityRef? reference,
     bool clearReference = false,
+    Json? messageReference,
+    bool clearMessageReference = false,
     String? clientNonce,
     DateTime? editedAt,
     String? deliveryStatus,
@@ -1527,6 +2325,8 @@ final class KaedeMessage {
     bool clearFailureReason = false,
     bool? retryable,
     bool? pinned,
+    DateTime? pinnedAt,
+    bool clearPinnedAt = false,
     Set<String>? reactedEmoji,
     Map<String, int>? reactionCounts,
     KaedeChannel? thread,
@@ -1547,17 +2347,62 @@ final class KaedeMessage {
         authorRef: authorRef,
         author: author ?? this.author,
         content: clearContent ? null : content ?? this.content,
+        stickerItems: stickerItems ?? this.stickerItems,
+        embeds: embeds ?? this.embeds,
+        components: components ?? this.components,
+        applicationRef: applicationRef ?? this.applicationRef,
+        webhookRef: webhookRef ?? this.webhookRef,
+        viewVersion: viewVersion ?? this.viewVersion,
+        viewPersistent: viewPersistent ?? this.viewPersistent,
+        viewExpiresAt: viewExpiresAt ?? this.viewExpiresAt,
+        interactionIntegrationType:
+            interactionIntegrationType ?? this.interactionIntegrationType,
+        interactionInstallationRef:
+            interactionInstallationRef ?? this.interactionInstallationRef,
+        interactionInstallationRevision: interactionInstallationRevision ??
+            this.interactionInstallationRevision,
+        interactionMetadata: (deletedAt ?? this.deletedAt) != null
+            ? null
+            : interactionMetadata ?? this.interactionMetadata,
+        forwardedMessageRef: clearForwardedMessageRef
+            ? null
+            : forwardedMessageRef ?? this.forwardedMessageRef,
+        forwardedMessage: clearForwardedMessage
+            ? null
+            : forwardedMessage ?? this.forwardedMessage,
+        forwardSnapshot: clearForwardSnapshot
+            ? null
+            : forwardSnapshot ?? this.forwardSnapshot,
+        decryptedForwardSnapshot: clearDecryptedForwardSnapshot
+            ? null
+            : decryptedForwardSnapshot ?? this.decryptedForwardSnapshot,
+        poll: clearPoll ? null : poll ?? this.poll,
+        pollResult: clearPollResult ? null : pollResult ?? this.pollResult,
+        encryptedPollProjection: clearEncryptedPollProjection
+            ? null
+            : encryptedPollProjection ?? this.encryptedPollProjection,
         e2ee: clearE2ee ? null : e2ee ?? this.e2ee,
+        e2eeVerified: e2eeVerified ?? this.e2eeVerified,
         encryptionPolicyGeneration:
             encryptionPolicyGeneration ?? this.encryptionPolicyGeneration,
         encryptionEpoch: clearEncryptionEpoch
             ? null
             : encryptionEpoch ?? this.encryptionEpoch,
+        tts: tts ?? this.tts,
         messageType: messageType ?? this.messageType,
+        flags: flags ?? this.flags,
         attachments: attachments ?? this.attachments,
         decryptedAttachments: decryptedAttachments ?? this.decryptedAttachments,
+        decryptedAllowedMentions: clearDecryptedAllowedMentions
+            ? null
+            : decryptedAllowedMentions ?? this.decryptedAllowedMentions,
         mentionUserRefs: mentionUserRefs ?? this.mentionUserRefs,
+        mentionRoleRefs: mentionRoleRefs ?? this.mentionRoleRefs,
+        mentionEveryone: mentionEveryone ?? this.mentionEveryone,
         reference: clearReference ? null : reference ?? this.reference,
+        messageReference: clearMessageReference
+            ? null
+            : messageReference ?? this.messageReference,
         clientNonce: clientNonce ?? this.clientNonce,
         createdAt: createdAt,
         editedAt: editedAt ?? this.editedAt,
@@ -1566,6 +2411,8 @@ final class KaedeMessage {
             clearFailureReason ? null : failureReason ?? this.failureReason,
         retryable: retryable ?? this.retryable,
         pinned: pinned ?? this.pinned,
+        pinnedAt:
+            pinned == false || clearPinnedAt ? null : pinnedAt ?? this.pinnedAt,
         reactedEmoji: reactedEmoji ?? this.reactedEmoji,
         reactionCounts: reactionCounts ?? this.reactionCounts,
         thread: clearThread ? null : thread ?? this.thread,
@@ -1592,15 +2439,55 @@ final class KaedeMessage {
         'author_domain': authorRef.domain.value,
         'author': author?.toJson(),
         'content': content,
+        'sticker_items': stickerItems.map((item) => item.toJson()).toList(),
+        'embeds': embeds.map((item) => item.toJson()).toList(),
+        'components': components.map((item) => item.toJson()).toList(),
+        'application_id': applicationRef?.id.value,
+        'application_domain': applicationRef?.domain.value,
+        'webhook_id': webhookRef?.id.value,
+        'webhook': webhookRef == null
+            ? null
+            : <String, Object?>{
+                'id': webhookRef!.id.value,
+                'origin_domain': webhookRef!.domain.value,
+                'ref': webhookRef!.wire,
+                'name': author?.name ?? 'Webhook',
+                'avatar_hash': author?.avatarHash,
+              },
+        'view_version': viewVersion,
+        'view_persistent': viewPersistent,
+        'view_expires_at': viewExpiresAt?.toUtc().toIso8601String(),
+        'interaction_integration_type': interactionIntegrationType,
+        'interaction_installation_ref': interactionInstallationRef?.wire,
+        'interaction_installation_revision':
+            interactionInstallationRevision?.toString(),
+        'interaction_metadata':
+            deletedAt == null ? interactionMetadata?.toJson() : null,
+        'forwarded_message_ref': forwardedMessageRef?.wire,
+        if (forwardSnapshot != null)
+          'message_snapshots': <Object?>[
+            <String, Object?>{'message': forwardSnapshot!.toJson()},
+          ],
+        if (decryptedForwardSnapshot != null)
+          'decrypted_forward_snapshot': decryptedForwardSnapshot,
+        'poll': poll?.toJson() ?? encryptedPollProjection,
+        'poll_result': pollResult?.toJson(),
         'e2ee': e2ee,
+        'e2ee_verified': e2eeVerified,
         'encryption_policy_generation': encryptionPolicyGeneration.toString(),
         'encryption_epoch': encryptionEpoch?.toString(),
+        'tts': tts,
         'message_type': messageType,
+        'flags': flags,
         'attachments': attachments.map((item) => item.toJson()).toList(),
         'decrypted_attachments': decryptedAttachments,
+        'decrypted_allowed_mentions': decryptedAllowedMentions,
         'mention_user_refs': mentionUserRefs.map((item) => item.wire).toList(),
+        'mention_role_refs': mentionRoleRefs.map((item) => item.wire).toList(),
+        'mention_everyone': mentionEveryone,
         'referenced_message_id': reference?.id.value,
         'referenced_message_domain': reference?.domain.value,
+        'message_reference': messageReference,
         'client_nonce': clientNonce,
         'created_at':
             createdAtAvailable ? createdAt.toUtc().toIso8601String() : null,
@@ -1609,6 +2496,7 @@ final class KaedeMessage {
         'failure_reason': failureReason,
         'retryable': retryable,
         'pinned': pinned,
+        'pinned_at': pinnedAt?.toUtc().toIso8601String(),
         'reacted_emoji': reactedEmoji.toList(),
         'reaction_counts': reactionCounts,
         'thread': thread?.toJson(),
@@ -1626,7 +2514,8 @@ final class GuildMember {
       {required this.user,
       required this.roleIds,
       this.nickname,
-      this.timeoutUntil});
+      this.timeoutUntil,
+      this.temporary = false});
 
   factory GuildMember.fromJson(Json json) => GuildMember(
         user:
@@ -1638,18 +2527,21 @@ final class GuildMember {
         timeoutUntil: _string(json['timeout_until']) == null
             ? null
             : DateTime.parse(json['timeout_until']! as String),
+        temporary: json['temporary'] == true,
       );
 
   final KaedeUser user;
   final List<String> roleIds;
   final String? nickname;
   final DateTime? timeoutUntil;
+  final bool temporary;
 
   Json toJson() => <String, Object?>{
         'user': user.toJson(),
         'role_ids': roleIds,
         'nickname': nickname,
         'timeout_until': timeoutUntil?.toUtc().toIso8601String(),
+        'temporary': temporary,
       };
 }
 
@@ -1664,6 +2556,7 @@ GuildMember overlayGuildMemberProfile(
     roleIds: member.roleIds,
     nickname: member.nickname,
     timeoutUntil: member.timeoutUntil,
+    temporary: member.temporary,
   );
 }
 

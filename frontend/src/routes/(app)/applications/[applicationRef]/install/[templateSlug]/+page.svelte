@@ -2,8 +2,16 @@
   import { api, userErrorMessage } from '$lib/api/client';
   import { resolve } from '$app/paths';
   import { Permission } from '$lib/generated/permissions';
-  import { onMount } from 'svelte';
-  let { data } = $props<{ data: { applicationRef: string; templateSlug: string } }>();
+  import { selectedPermissionMetadata } from '$lib/chat/permission-selection';
+  import {
+    installUserApplication,
+    userApplicationGrantFromPolicy,
+    type UserApplicationContext
+  } from '$lib/chat/application-installations';
+  import { onDestroy } from 'svelte';
+  let { data } = $props<{
+    data: { applicationRef: string; templateSlug: string; returnTo: string };
+  }>();
   interface Guild {
     id: string;
     origin_domain: string;
@@ -20,6 +28,9 @@
       description: string | null;
       support_url?: string | null;
       privacy_url?: string | null;
+      supported_install_types: Array<'guild_install' | 'user_install'>;
+      user_install_scopes: string[];
+      user_install_contexts: UserApplicationContext[];
       bot_user: { username: string; display_name: string | null; handle?: string };
     };
     template: {
@@ -37,57 +48,240 @@
   let error = $state('');
   let busy = $state(false);
   let installed = $state(false);
-  async function load() {
+  let userInstalled = $state(false);
+  let personalBusy = $state(false);
+  let selectedUserContexts = $state<UserApplicationContext[]>([]);
+  let loading = $state(true);
+  let guildsLoading = $state(false);
+  let guildsError = $state('');
+  let loadedApplicationRef = $state('');
+  let loadedTemplateSlug = $state('');
+  let controller = new AbortController();
+  let requestGeneration = 0;
+  const routeIsLoaded = $derived(
+    loadedApplicationRef === data.applicationRef && loadedTemplateSlug === data.templateSlug
+  );
+  const userContextLabels: Record<UserApplicationContext, string> = {
+    guild: 'Guild channels',
+    private_channel: 'Private conversations and group DMs',
+    bot_dm: 'Direct messages with the app bot'
+  };
+
+  function toggleUserContext(context: UserApplicationContext) {
+    selectedUserContexts = selectedUserContexts.includes(context)
+      ? selectedUserContexts.filter((item) => item !== context)
+      : [...selectedUserContexts, context];
+  }
+
+  function requestIsCurrent(
+    signal: AbortSignal,
+    generation: number,
+    applicationRef: string,
+    templateSlug: string
+  ): boolean {
+    return (
+      !signal.aborted &&
+      requestGeneration === generation &&
+      loadedApplicationRef === applicationRef &&
+      loadedTemplateSlug === templateSlug &&
+      data.applicationRef === applicationRef &&
+      data.templateSlug === templateSlug
+    );
+  }
+
+  function applicationRefFor(invitePayload: Invite): string {
+    return (
+      invitePayload.application.ref ??
+      `${invitePayload.application.id}@${invitePayload.application.origin_domain}`
+    );
+  }
+
+  function loadedInviteIsCurrent(
+    applicationRef: string,
+    templateSlug: string,
+    loadedInvite: Invite
+  ): boolean {
+    return (
+      loadedApplicationRef === applicationRef &&
+      loadedTemplateSlug === templateSlug &&
+      data.applicationRef === applicationRef &&
+      data.templateSlug === templateSlug &&
+      invite === loadedInvite
+    );
+  }
+
+  async function load(
+    applicationRef: string,
+    templateSlug: string,
+    signal: AbortSignal,
+    generation: number
+  ) {
     try {
-      const [resolvedInvite, memberships] = await Promise.all([
-        api<Invite>(
-          `/bot-invites/${encodeURIComponent(data.applicationRef)}/${encodeURIComponent(data.templateSlug)}`
-        ),
-        api<Guild[]>('/users/@me/guilds')
-      ]);
+      const resolvedInvite = await api<Invite>(
+        `/bot-invites/${encodeURIComponent(applicationRef)}/${encodeURIComponent(templateSlug)}`,
+        { signal }
+      );
+      if (!requestIsCurrent(signal, generation, applicationRef, templateSlug)) return;
+      if (applicationRefFor(resolvedInvite) !== applicationRef) {
+        throw new Error('The resolved invitation did not match the requested application.');
+      }
       invite = resolvedInvite;
-      guilds = memberships.filter((guild) => {
-        const permissions = BigInt(guild.permissions ?? '0');
-        return Boolean(permissions & (Permission.MANAGE_GUILD | Permission.ADMINISTRATOR));
-      });
-      if (guilds.length) selected = `${guilds[0].id}@${guilds[0].origin_domain}`;
+      selectedUserContexts = [...resolvedInvite.application.user_install_contexts];
+      loading = false;
+
+      if (!resolvedInvite.application.supported_install_types.includes('guild_install')) return;
+      guildsLoading = true;
+      try {
+        const memberships = await api<Guild[]>('/users/@me/guilds', { signal });
+        if (!requestIsCurrent(signal, generation, applicationRef, templateSlug)) return;
+        guilds = memberships.filter((guild) => {
+          try {
+            const permissions = BigInt(guild.permissions ?? '0');
+            return Boolean(permissions & (Permission.MANAGE_GUILD | Permission.ADMINISTRATOR));
+          } catch {
+            return false;
+          }
+        });
+        if (guilds.length) selected = `${guilds[0].id}@${guilds[0].origin_domain}`;
+      } catch (caught) {
+        if (requestIsCurrent(signal, generation, applicationRef, templateSlug)) {
+          guildsError = userErrorMessage(
+            caught,
+            resolvedInvite.application.supported_install_types.includes('user_install')
+              ? 'Your guilds could not be loaded. Account installation is still available.'
+              : 'Your guilds could not be loaded. Reload this page to try again.'
+          );
+        }
+      } finally {
+        if (requestIsCurrent(signal, generation, applicationRef, templateSlug)) {
+          guildsLoading = false;
+        }
+      }
     } catch (caught) {
-      error = userErrorMessage(caught, 'This bot invitation is unavailable.');
+      if (requestIsCurrent(signal, generation, applicationRef, templateSlug)) {
+        error = userErrorMessage(caught, 'This bot invitation is unavailable.');
+        loading = false;
+      }
     }
   }
   async function install() {
-    if (!selected || busy) return;
+    const applicationRef = loadedApplicationRef;
+    const templateSlug = loadedTemplateSlug;
+    const loadedInvite = invite;
+    const selectedGuild = selected;
+    if (
+      !selectedGuild ||
+      busy ||
+      !loadedInvite ||
+      !applicationRef ||
+      !templateSlug ||
+      !routeIsLoaded ||
+      applicationRefFor(loadedInvite) !== applicationRef
+    )
+      return;
     busy = true;
     error = '';
     try {
       await api(
-        `/guilds/${encodeURIComponent(selected)}/integrations/bots?application_ref=${encodeURIComponent(data.applicationRef)}&template_slug=${encodeURIComponent(data.templateSlug)}`,
+        `/guilds/${encodeURIComponent(selectedGuild)}/integrations/bots?application_ref=${encodeURIComponent(applicationRef)}&template_slug=${encodeURIComponent(templateSlug)}`,
         { method: 'POST' }
       );
-      installed = true;
+      if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
+        installed = true;
+      }
     } catch (caught) {
-      error = userErrorMessage(caught, 'The bot could not be added to that guild.');
+      if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
+        error = userErrorMessage(caught, 'The bot could not be added to that guild.');
+      }
     } finally {
-      busy = false;
+      if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
+        busy = false;
+      }
     }
   }
-  onMount(() => void load());
+  async function installForUser() {
+    const applicationRef = loadedApplicationRef;
+    const templateSlug = loadedTemplateSlug;
+    const loadedInvite = invite;
+    if (
+      personalBusy ||
+      !loadedInvite ||
+      !applicationRef ||
+      !templateSlug ||
+      !routeIsLoaded ||
+      applicationRefFor(loadedInvite) !== applicationRef
+    )
+      return;
+    personalBusy = true;
+    error = '';
+    try {
+      await installUserApplication(applicationRef, {
+        ...userApplicationGrantFromPolicy(loadedInvite.application),
+        contexts: [...selectedUserContexts]
+      });
+      if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
+        userInstalled = true;
+      }
+    } catch (caught) {
+      if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
+        error = userErrorMessage(
+          caught,
+          'This app does not currently offer commands that can be installed for your account.'
+        );
+      }
+    } finally {
+      if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
+        personalBusy = false;
+      }
+    }
+  }
+
+  $effect(() => {
+    const applicationRef = data.applicationRef;
+    const templateSlug = data.templateSlug;
+    if (applicationRef === loadedApplicationRef && templateSlug === loadedTemplateSlug) return;
+
+    loadedApplicationRef = applicationRef;
+    loadedTemplateSlug = templateSlug;
+    controller.abort();
+    controller = new AbortController();
+    const generation = ++requestGeneration;
+    invite = null;
+    guilds = [];
+    selected = '';
+    selectedUserContexts = [];
+    installed = false;
+    userInstalled = false;
+    busy = false;
+    personalBusy = false;
+    loading = true;
+    guildsLoading = false;
+    guildsError = '';
+    error = '';
+    void load(applicationRef, templateSlug, controller.signal, generation);
+  });
+
+  onDestroy(() => {
+    requestGeneration += 1;
+    controller.abort();
+  });
 </script>
 
-<svelte:head><title>{invite?.application.name ?? 'Bot invitation'} · Kaede Chat</title></svelte:head
->
+<svelte:head><title>{invite?.application.name ?? 'Add App'} · Kaede Chat</title></svelte:head>
 <!-- eslint-disable svelte/no-navigation-without-resolve -- privacy and support destinations are external URLs supplied by the application -->
 <main>
-  <a class="back" href={resolve('/home')}>← Back to Kaede</a>{#if error}<div
+  <a class="back" href={resolve(data.returnTo as '/home')}>← Back to Kaede</a>{#if error}<div
       class="notice error"
       role="alert"
     >
       {error}
-    </div>{/if}{#if invite}<article class="invite">
+    </div>{/if}{#if loading || !routeIsLoaded}<div class="notice" role="status">
+      Loading app authorization…
+    </div>{:else if invite}<article class="invite">
       <header>
         <span class="avatar">{invite.application.name.slice(0, 1).toUpperCase()}</span>
         <div>
-          <small>BOT INVITATION</small>
+          <small>APP AUTHORIZATION</small>
           <h1>{invite.application.name}</h1>
           <p>
             {invite.application.bot_user.handle ??
@@ -100,49 +294,128 @@
           invite.template.description ??
           'This bot has not provided a description.'}
       </p>
-      <section>
-        <h2>Add to a guild</h2>
-        {#if installed}<div class="success">
-            <strong>Bot added</strong>
-            <p>
-              The bot is now a visible member of the selected guild. Its permissions can be changed
-              through guild roles.
+      {#if invite.application.supported_install_types.includes('guild_install')}<section>
+          <h2>Add to a guild</h2>
+          {#if guildsError}<p class="notice error" role="alert">{guildsError}</p>{/if}
+          {#if guildsLoading}<p class="muted" role="status">Loading your guilds…</p>{/if}
+          {#if installed}<div class="success">
+              <strong>Bot added</strong>
+              <p>
+                The bot is now a visible member of the selected guild. Its permissions can be
+                changed through guild roles.
+              </p>
+              <a href={resolve(data.returnTo as '/home')}>Return to Kaede</a>
+            </div>{:else}<label
+              >Guild<select bind:value={selected} disabled={busy}
+                >{#each guilds as guild (`${guild.id}@${guild.origin_domain}`)}<option
+                    value={`${guild.id}@${guild.origin_domain}`}
+                    >{guild.name} · {guild.origin_domain}</option
+                  >{/each}</select
+              ></label
+            >{#if !guildsLoading && !guildsError && guilds.length === 0}<p class="muted">
+                You do not have any guilds available for installation.
+              </p>{/if}{/if}
+        </section>{/if}
+      {#if invite.application.supported_install_types.includes('user_install')}<section>
+          <h2>Install for your account</h2>
+          {#if userInstalled}
+            <div class="success">
+              <strong>Installed for your account</strong>
+              <p>
+                This app’s user-installable commands can appear in the locations you authorized. You
+                can change or revoke this in Authorized apps under Settings.
+              </p>
+            </div>
+          {:else}
+            <p class="muted">
+              Authorize this app for your account without adding it as a guild member. It receives
+              only command interactions you explicitly start.
             </p>
-            <a href={resolve('/home')}>Return to Kaede</a>
-          </div>{:else}<label
-            >Guild<select bind:value={selected}
-              >{#each guilds as guild (`${guild.id}@${guild.origin_domain}`)}<option
-                  value={`${guild.id}@${guild.origin_domain}`}
-                  >{guild.name} · {guild.origin_domain}</option
-                >{/each}</select
-            ></label
-          >{#if guilds.length === 0}<p class="muted">
-              You do not have any guilds available for installation.
-            </p>{/if}{/if}
-      </section>
-      <section>
-        <h2>Requested access</h2>
-        <div class="pills">
-          {#each invite.template.scopes as scope (scope)}<span>{scope}</span>{/each}
-        </div>
-        <details>
-          <summary>Live event intents</summary>
+            <fieldset class="context-options">
+              <legend>Use commands in</legend>
+              {#each invite.application.user_install_contexts as context (context)}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={selectedUserContexts.includes(context)}
+                    onchange={() => toggleUserContext(context)}
+                  />
+                  {userContextLabels[context]}
+                </label>
+              {/each}
+            </fieldset>
+            <button
+              class="personal-install"
+              type="button"
+              disabled={personalBusy || selectedUserContexts.length === 0}
+              onclick={() => void installForUser()}
+            >
+              {personalBusy ? 'Authorizing…' : 'Authorize for my account'}
+            </button>
+          {/if}
+        </section>{/if}
+      {#if invite.application.supported_install_types.includes('guild_install')}
+        <section>
+          <h2>Guild installation access</h2>
           <div class="pills">
-            {#each invite.template.intents as intent (intent)}<span>{intent}</span>{/each}
+            {#each invite.template.scopes as scope (scope)}<span>{scope}</span>{/each}
           </div>
-        </details>
-        <p class="muted">Guild permission bits: {invite.template.permissions}</p>
-      </section>
+          <details>
+            <summary>Live event intents</summary>
+            <div class="pills">
+              {#each invite.template.intents as intent (intent)}<span>{intent}</span>{/each}
+            </div>
+          </details>
+          <details>
+            <summary>Server permissions</summary>
+            {#if selectedPermissionMetadata(invite.template.permissions).length}
+              <div class="pills">
+                {#each selectedPermissionMetadata(invite.template.permissions) as permission (permission.permission)}
+                  <span title={permission.description}>{permission.label}</span>
+                {/each}
+              </div>
+            {:else}
+              <p class="muted">No server permissions requested.</p>
+            {/if}
+          </details>
+        </section>
+      {/if}
+      {#if invite.application.supported_install_types.includes('user_install')}
+        <section>
+          <h2>Account installation access</h2>
+          <p class="muted">Commands and responses only; this does not add a guild member.</p>
+          <div class="pills">
+            {#each invite.application.user_install_scopes as scope (scope)}<span>{scope}</span
+              >{/each}
+            <span>interactions</span>
+          </div>
+          <details>
+            <summary>Supported command locations</summary>
+            <div class="pills">
+              {#each invite.application.user_install_contexts as context (context)}
+                <span>{userContextLabels[context]}</span>
+              {/each}
+            </div>
+          </details>
+        </section>
+      {/if}
       <section class="privacy">
         <h2>Encryption and privacy</h2>
-        {#if invite.template.e2ee_mode === 'participant'}<p>
-            <strong>This bot may become an E2EE participant.</strong> In E2EE channels where it is explicitly
-            added, the bot operator can decrypt future messages and keep anything the bot receives. Installing
-            or removing it rotates room keys. It receives no pre-install history by default.
-          </p>{:else if invite.template.e2ee_mode === 'interaction_only'}<p>
-            This bot receives only encrypted command payloads users explicitly submit in E2EE
-            channels. It cannot passively read the channel or request plaintext history.
-          </p>{:else}<p>This bot has no access to E2EE channel contents or interactions.</p>{/if}
+        {#if invite.application.supported_install_types.includes('guild_install')}
+          {#if invite.template.e2ee_mode === 'participant'}<p>
+              <strong>Guild install:</strong> this bot may become an E2EE participant. In E2EE channels
+              where it is explicitly added, the bot operator can decrypt future messages and keep anything
+              the bot receives. Installing or removing it rotates room keys. It receives no pre-install
+              history by default.
+            </p>{:else}<p>The guild install has no access to E2EE channel contents.</p>{/if}
+        {/if}
+        {#if invite.application.supported_install_types.includes('user_install')}
+          <p>
+            <strong>Account install:</strong> the app receives only interactions you explicitly start
+            in an authorized location. Encrypted interactions require a registered app device and current
+            room consent; they do not grant ordinary message or DM access.
+          </p>
+        {/if}
         <p>
           For plaintext channels, the bot can access only the scopes and channel permissions shown
           above. Revocation stops future access but cannot erase information already delivered to
@@ -159,8 +432,9 @@
             aria-disabled={!invite.application.support_url}>Support</a
           ><small>Application home: {invite.application.origin_domain}</small>
         </div>
-        {#if !installed}<button onclick={install} disabled={busy || !selected}
-            >{busy ? 'Adding bot…' : 'Authorize and add bot'}</button
+        {#if invite.application.supported_install_types.includes('guild_install') && !installed}<button
+            onclick={install}
+            disabled={busy || !selected}>{busy ? 'Adding bot…' : 'Authorize and add bot'}</button
           >{/if}
       </footer>
     </article>{/if}
@@ -264,6 +538,29 @@
     font-size: 0.75rem;
     background: var(--surface-hover);
   }
+  .context-options {
+    display: grid;
+    gap: 0.55rem;
+    border: 0;
+    margin: 1rem 0;
+    padding: 0;
+  }
+  .context-options legend {
+    margin-bottom: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 800;
+  }
+  .context-options label {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-weight: 650;
+  }
+  .context-options input {
+    width: 1rem;
+    height: 1rem;
+    accent-color: var(--accent);
+  }
   details {
     margin-top: 1rem;
   }
@@ -292,6 +589,7 @@
     color: var(--text-muted);
   }
   footer button,
+  .personal-install,
   .success a {
     border: 0;
     border-radius: 9px;
@@ -303,7 +601,9 @@
     text-decoration: none;
     cursor: pointer;
   }
-  footer button:disabled {
+  footer button:disabled,
+  .personal-install:disabled {
+    cursor: not-allowed;
     opacity: 0.5;
   }
   .success {

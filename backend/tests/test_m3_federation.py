@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import httpx
 import pytest
@@ -20,6 +20,8 @@ from starlette.requests import Request
 from starlette.websockets import WebSocket
 
 import app.api.federation as federation_api
+import app.chat.guild_revision as guild_revision
+import app.federation.delivery as federation_delivery
 from app.api.federation import (
     _guild_snapshot_cursor_changed,
     federation_user_profile_by_ref,
@@ -27,7 +29,10 @@ from app.api.federation import (
     well_known,
 )
 from app.chat.e2ee import E2EE_PROTOCOL_MLS_10, E2EE_SUITE_MLS_128
+from app.core.dm import group_dm_key
 from app.core.federation import (
+    DEVELOPER_TEAM_SNAPSHOT_EVENT,
+    DURABLE_LATEST_STATE_EVENTS,
     SECURITY_CRITICAL_GUILD_EVENTS,
     SigningInput,
     block_covers_domain,
@@ -38,6 +43,7 @@ from app.core.federation import (
     verify_envelope,
 )
 from app.core.gateway_ops import EVENT_NAMES
+from app.core.permissions import PERMISSION_SCHEMA, PERMISSION_SCHEMA_CAPABILITY
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import Channel, FederationEvent, FederationOutbox, Instance, PeerKey, User
@@ -50,14 +56,16 @@ from app.federation.client import (
 )
 from app.federation.delivery import (
     BACKOFF_SECONDS,
+    bound_delivered_projection_retention,
     drain_destination,
+    due_ordered_prefix,
     expired_guild_context,
     group_state_rejection_is_upgrade_retryable,
     lock_outbox_destinations,
     publish_dm_delivery_update,
     rearm_failed_media_delete_outbox,
     retry_delay,
-    retry_rejected_media_delete,
+    retry_rejected_durable_event,
     without_event_id_collisions,
 )
 from app.federation.events import build_envelope, ensure_queue_destination
@@ -120,6 +128,7 @@ from app.federation.security import (
     lock_block_policy_shared,
     refresh_event_signing_keys,
     require_guild_federation_access,
+    require_permission_schema,
     require_pinned_request_nonce,
     validated_event_envelope,
 )
@@ -134,6 +143,8 @@ async def test_search_capability_is_advertised_only_when_enabled() -> None:
     enabled = await well_known(settings(search_enabled=True, search_master_key="s" * 32))
     assert "message-search/1" not in disabled["capabilities"]
     assert "message-search/1" in enabled["capabilities"]
+    assert enabled["permission_schema"] == PERMISSION_SCHEMA
+    assert PERMISSION_SCHEMA_CAPABILITY in enabled["capabilities"]
 
 
 def settings(**overrides: object) -> Settings:
@@ -154,7 +165,7 @@ def settings(**overrides: object) -> Settings:
 
 
 @pytest.mark.asyncio
-async def test_envelope_builder_only_allows_authority_attested_remote_group_actors(
+async def test_envelope_builder_requires_an_explicit_remote_actor_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configured = settings()
@@ -169,6 +180,29 @@ async def test_envelope_builder_only_allows_authority_attested_remote_group_acto
         AsyncMock(return_value=("ed25519:test", object())),
     )
     monkeypatch.setattr("app.federation.events.sign_envelope", lambda *_args: "signature")
+    group_content = {
+        "conversation": {
+            "id": "12",
+            "origin_domain": "alpha.localhost",
+            "pair_key": group_dm_key("alpha.localhost", 12),
+            "type": "group",
+            "authority_domain": "alpha.localhost",
+            "owner": {"id": "42", "origin_domain": "beta.localhost"},
+            "name": "Remote group",
+            "state_version": "2",
+            "deleted": False,
+            "encryption_policy": {
+                "mode": "plaintext",
+                "state": "plaintext",
+                "generation": "0",
+                "protocol": None,
+                "suite": None,
+                "group_id": None,
+                "epoch": None,
+            },
+        },
+        "participants": [{"id": "42", "origin_domain": "beta.localhost"}],
+    }
 
     with pytest.raises(ValueError, match="only sign events for its own users"):
         await build_envelope(
@@ -176,7 +210,7 @@ async def test_envelope_builder_only_allows_authority_attested_remote_group_acto
             configured,
             "dm.group.state",
             remote_actor,
-            {},
+            group_content,
         )
     with pytest.raises(ValueError, match="only sign events for its own users"):
         await build_envelope(
@@ -193,13 +227,112 @@ async def test_envelope_builder_only_allows_authority_attested_remote_group_acto
         configured,
         "dm.group.state",
         remote_actor,
-        {},
+        group_content,
         authority_attested_actor=True,
     )
 
     assert envelope["origin"] == "alpha.localhost"
     assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
     assert envelope["signatures"] == {"alpha.localhost": {"ed25519:test": "signature"}}
+
+
+@pytest.mark.asyncio
+async def test_envelope_builder_limits_retained_remote_actor_to_exact_media_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings()
+    remote_uploader = User(
+        id=42,
+        origin_domain="beta.localhost",
+        username="remote",
+        is_local=False,
+    )
+    monkeypatch.setattr(
+        "app.federation.events.self_private_key",
+        AsyncMock(return_value=("ed25519:test", object())),
+    )
+    monkeypatch.setattr("app.federation.events.sign_envelope", lambda *_args: "signature")
+    content = {
+        "attachment_id": "41",
+        "origin_domain": configured.domain,
+        "generation": "1",
+    }
+
+    envelope = await build_envelope(
+        cast(Any, SimpleNamespace()),
+        configured,
+        "media.delete",
+        remote_uploader,
+        content,
+        retained_authority_attested_actor=True,
+    )
+
+    assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
+    for forged in (
+        {**content, "origin_domain": "beta.localhost"},
+        {**content, "extra": True},
+        {**content, "generation": "0"},
+    ):
+        with pytest.raises(ValueError, match="only sign events for its own users"):
+            await build_envelope(
+                cast(Any, SimpleNamespace()),
+                configured,
+                "media.delete",
+                remote_uploader,
+                forged,
+                retained_authority_attested_actor=True,
+            )
+
+
+@pytest.mark.asyncio
+async def test_envelope_builder_allows_only_exact_remote_owner_terminal_guild_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings()
+    remote_actor = User(
+        id=42,
+        origin_domain="beta.localhost",
+        username="remote",
+        is_local=False,
+    )
+    monkeypatch.setattr(
+        "app.federation.events.self_private_key",
+        AsyncMock(return_value=("ed25519:test", object())),
+    )
+    monkeypatch.setattr("app.federation.events.sign_envelope", lambda *_args: "signature")
+    content = {
+        "target_domain": "beta.localhost",
+        "reason": "guild_deleted",
+        "_terminal_generation": "1",
+    }
+    context = {"guild_id": "9", "guild_domain": configured.domain}
+
+    envelope = await build_envelope(
+        cast(Any, SimpleNamespace()),
+        configured,
+        "guild.instance_access.revoked",
+        remote_actor,
+        content,
+        context=context,
+        retained_authority_attested_actor=True,
+    )
+
+    assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
+
+    for forged_content in (
+        {**content, "reason": "instance_banned"},
+        {key: value for key, value in content.items() if key != "_terminal_generation"},
+    ):
+        with pytest.raises(ValueError, match="only sign events for its own users"):
+            await build_envelope(
+                cast(Any, SimpleNamespace()),
+                configured,
+                "guild.instance_access.revoked",
+                remote_actor,
+                forged_content,
+                context=context,
+                retained_authority_attested_actor=True,
+            )
 
 
 @pytest.mark.asyncio
@@ -355,7 +488,7 @@ async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
         is_self=False,
         display_name="Trusted beta",
         software_version="1.0",
-        capabilities=["request-nonce/1"],
+        capabilities=[PERMISSION_SCHEMA_CAPABILITY, "request-nonce/1"],
         current_key_id="ed25519:old",
         last_seen_at=now,
     )
@@ -381,7 +514,12 @@ async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
         httpx.Response(
             200,
             request=httpx.Request("GET", "http://beta-api:8000/.well-known/kaede/server"),
-            json={"server": "beta.localhost", "versions": ["1"], "capabilities": []},
+            json={
+                "server": "beta.localhost",
+                "versions": ["1"],
+                "permission_schema": PERMISSION_SCHEMA,
+                "capabilities": [PERMISSION_SCHEMA_CAPABILITY],
+            },
         ),
         httpx.Response(
             200,
@@ -406,12 +544,91 @@ async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
 
     assert instance.display_name == "Trusted beta"
     assert instance.software_version == "1.0"
-    assert instance.capabilities == ["request-nonce/1"]
+    assert instance.capabilities == [PERMISSION_SCHEMA_CAPABILITY, "request-nonce/1"]
     assert instance.current_key_id == "ed25519:old"
     assert old_key.public_key == old_material
     assert old_key.expired_at is None
     session.add.assert_not_awaited()
     session.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "discovery_payload",
+    [
+        {
+            "server": "beta.localhost",
+            "versions": ["1"],
+            "capabilities": [PERMISSION_SCHEMA_CAPABILITY],
+        },
+        {
+            "server": "beta.localhost",
+            "versions": ["1"],
+            "permission_schema": "discord-api-v10",
+            "capabilities": [PERMISSION_SCHEMA_CAPABILITY],
+        },
+        {
+            "server": "beta.localhost",
+            "versions": ["1"],
+            "permission_schema": PERMISSION_SCHEMA,
+            "capabilities": [],
+        },
+    ],
+)
+async def test_peer_refresh_rejects_missing_or_mismatched_permission_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    discovery_payload: dict[str, object],
+) -> None:
+    now = datetime.now(UTC)
+    instance = Instance(
+        domain="beta.localhost",
+        is_self=False,
+        display_name="Beta",
+        software_version="1.0",
+        capabilities=[],
+        current_key_id="ed25519:old",
+        last_seen_at=now,
+    )
+    known_key = PeerKey(
+        domain="beta.localhost",
+        key_id="ed25519:old",
+        public_key=bytes(range(32)),
+        fetched_at=now,
+    )
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=instance),
+        scalar=AsyncMock(side_effect=[known_key, True, known_key]),
+    )
+    client = httpx.AsyncClient()
+    monkeypatch.setattr(
+        "app.federation.network.peer_http_client",
+        AsyncMock(return_value=("http://beta-api:8000", client)),
+    )
+    monkeypatch.setattr(
+        "app.federation.network.bounded_http_request",
+        AsyncMock(
+            return_value=httpx.Response(
+                200,
+                request=httpx.Request("GET", "http://beta-api:8000/.well-known/kaede/server"),
+                json=discovery_payload,
+            )
+        ),
+    )
+
+    with pytest.raises(FederationNetworkError, match="permission schema"):
+        await ensure_peer(cast(Any, session), settings(), "beta.localhost", force=True)
+
+
+def test_federation_import_requires_negotiated_permission_schema() -> None:
+    require_permission_schema(
+        cast(Any, SimpleNamespace(capabilities=[PERMISSION_SCHEMA_CAPABILITY]))
+    )
+    with pytest.raises(HTTPException) as missing:
+        require_permission_schema(cast(Any, SimpleNamespace(capabilities=[])))
+    assert missing.value.status_code == 426
+    assert cast(dict[str, object], missing.value.detail)["code"] == (
+        "KAED_FED_PERMISSION_SCHEMA_REQUIRED"
+    )
 
 
 @pytest.mark.asyncio
@@ -612,6 +829,50 @@ def test_delivery_batch_stops_at_cross_origin_event_id_collision() -> None:
     ]
 
 
+def test_delivery_due_batch_stops_at_an_earlier_retry_barrier() -> None:
+    now = datetime.now(UTC)
+    rows = [
+        FederationOutbox(
+            id=1,
+            destination="delta.localhost",
+            event_origin_domain="alpha.localhost",
+            event_id="kcfe_due",
+            status="pending",
+            next_retry_at=now,
+        ),
+        FederationOutbox(
+            id=2,
+            destination="delta.localhost",
+            event_origin_domain="alpha.localhost",
+            event_id="kcfe_retry_barrier",
+            status="retry",
+            next_retry_at=now + timedelta(minutes=1),
+        ),
+        FederationOutbox(
+            id=3,
+            destination="delta.localhost",
+            event_origin_domain="alpha.localhost",
+            event_id="kcfe_later_due",
+            status="pending",
+            next_retry_at=now,
+        ),
+    ]
+
+    assert [row.id for row in due_ordered_prefix(rows, now)] == [1]
+    assert due_ordered_prefix(rows[1:], now) == []
+
+
+def test_developer_projection_survives_the_ordinary_delivery_cutoff() -> None:
+    predicate = federation_delivery._durable_outbox_event_exists()
+
+    compiled_values = predicate.compile().params.values()
+    assert any(
+        set(value) == DURABLE_LATEST_STATE_EVENTS
+        for value in compiled_values
+        if isinstance(value, (list, tuple, set, frozenset))
+    )
+
+
 def test_rejected_media_delete_remains_retryable_after_upgrade_window() -> None:
     now = datetime.now(UTC)
     event = FederationEvent(
@@ -630,7 +891,7 @@ def test_rejected_media_delete_remains_retryable_after_upgrade_window() -> None:
         next_retry_at=now,
     )
 
-    assert retry_rejected_media_delete(
+    assert retry_rejected_durable_event(
         event,
         row,
         "KAED_FED_EVENT_REJECTED",
@@ -640,6 +901,102 @@ def test_rejected_media_delete_remains_retryable_after_upgrade_window() -> None:
     assert row.attempts == 4
     assert row.next_retry_at == now + timedelta(hours=1)
     assert row.last_error == "KAED_FED_EVENT_REJECTED"
+
+
+def test_rejected_developer_projection_remains_retryable_after_upgrade_window() -> None:
+    now = datetime.now(UTC)
+    event = FederationEvent(
+        event_id="kcfe_developer_snapshot",
+        origin_domain="alpha.localhost",
+        event_type=DEVELOPER_TEAM_SNAPSHOT_EVENT,
+        envelope={},
+        expires_at=None,
+    )
+    row = FederationOutbox(
+        destination="beta.localhost",
+        event_origin_domain=event.origin_domain,
+        event_id=event.event_id,
+        status="pending",
+        attempts=3,
+        created_at=now - timedelta(days=30),
+        next_retry_at=now,
+    )
+
+    assert retry_rejected_durable_event(
+        event,
+        row,
+        "KAED_FED_EVENT_REJECTED",
+        now,
+    )
+    assert row.status == "circuit"
+    assert row.next_retry_at == now + timedelta(hours=1)
+
+
+def test_rejected_bot_device_snapshot_remains_retryable_until_ack() -> None:
+    now = datetime.now(UTC)
+    event = FederationEvent(
+        event_id="kcfe_bot_device_snapshot",
+        origin_domain="alpha.localhost",
+        event_type="e2ee.device-list.changed",
+        envelope={},
+        expires_at=None,
+    )
+    row = FederationOutbox(
+        destination="beta.localhost",
+        event_origin_domain=event.origin_domain,
+        event_id=event.event_id,
+        status="pending",
+        attempts=3,
+        created_at=now - timedelta(days=30),
+        next_retry_at=now,
+    )
+
+    assert retry_rejected_durable_event(
+        event,
+        row,
+        "KAED_FED_EVENT_REJECTED",
+        now,
+    )
+    assert row.status == "circuit"
+    assert row.next_retry_at == now + timedelta(hours=1)
+
+
+def test_acknowledged_developer_projection_returns_to_bounded_retention() -> None:
+    now = datetime.now(UTC)
+    event = FederationEvent(
+        event_id="kcfe_developer_snapshot",
+        origin_domain="alpha.localhost",
+        event_type=DEVELOPER_TEAM_SNAPSHOT_EVENT,
+        envelope={},
+        expires_at=None,
+    )
+
+    bound_delivered_projection_retention(
+        event,
+        cast(Any, SimpleNamespace(federation_event_retention_days=14)),
+        now,
+    )
+
+    assert event.expires_at == now + timedelta(days=14)
+
+
+def test_acknowledged_bot_device_snapshot_returns_to_bounded_retention() -> None:
+    now = datetime.now(UTC)
+    event = FederationEvent(
+        event_id="kcfe_bot_device_snapshot",
+        origin_domain="alpha.localhost",
+        event_type="e2ee.device-list.changed",
+        envelope={},
+        expires_at=None,
+    )
+
+    bound_delivered_projection_retention(
+        event,
+        cast(Any, SimpleNamespace(federation_event_retention_days=14)),
+        now,
+    )
+
+    assert event.expires_at == now + timedelta(days=14)
 
 
 @pytest.mark.asyncio
@@ -1077,6 +1434,8 @@ def test_remote_attachment_variants_are_fixed_and_sanitized() -> None:
                 "width": 128,
                 "height": 64,
                 "processing_version": 2,
+                "animated": True,
+                "duration_ms": 900,
             },
             "future_unrecognized_variant": {"arbitrary": "data"},
         },
@@ -1084,6 +1443,8 @@ def test_remote_attachment_variants_are_fixed_and_sanitized() -> None:
     )
     assert set(variants) == {"thumbnail_128"}
     assert "object_key" not in variants["thumbnail_128"]
+    assert variants["thumbnail_128"]["animated"] is True
+    assert variants["thumbnail_128"]["duration_ms"] == 900
     with pytest.raises(ValueError, match="variant size"):
         sanitized_remote_variants(
             {
@@ -1182,12 +1543,33 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.role.update",
         "guild.role.delete",
         "guild.emoji.create",
+        "guild.emoji.update",
         "guild.emoji.delete",
         "guild.sticker.create",
+        "guild.sticker.update",
         "guild.sticker.delete",
+        "guild.stage.instance.create",
+        "guild.stage.instance.update",
+        "guild.stage.instance.delete",
+        "guild.scheduled_event.create",
+        "guild.scheduled_event.update",
+        "guild.scheduled_event.delete",
+        "guild.scheduled_event.user.add",
+        "guild.scheduled_event.user.remove",
+        "guild.soundboard.sound.create",
+        "guild.soundboard.sound.update",
+        "guild.soundboard.sound.delete",
+        "guild.soundboard.sounds.update",
+        "guild.voice_channel_status.update",
+        "guild.voice_channel_start_time.update",
+        "guild.automod.rule.create",
+        "guild.automod.rule.update",
+        "guild.automod.rule.delete",
+        "guild.automod.execution",
         "guild.overwrite.upsert",
         "guild.overwrite.delete",
         "guild.member.update",
+        "guild.member.profile.relay",
         "guild.member.remove",
         "guild.members.origin.remove",
         "guild.member.role.add",
@@ -1196,9 +1578,14 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.ban.remove",
         "guild.message.update",
         "guild.message.delete",
+        "guild.message.bulk_delete",
         "guild.message.purge",
         "guild.reaction.add",
         "guild.reaction.remove",
+        "guild.reaction.clear",
+        "guild.poll.vote.add",
+        "guild.poll.vote.remove",
+        "guild.poll.finalize",
         "guild.pin.add",
         "guild.pin.remove",
     } == GUILD_MUTATION_EVENT_TYPES
@@ -1211,6 +1598,369 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
     }
     assert guild_event_requires_snapshot(event)
     assert guild_event_channel_ref(event) == (42, "alpha.localhost")
+
+
+def granular_replica_guild() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+        sync_status="stale",
+        permission_generation=0,
+        snapshot_generation=1,
+    )
+
+
+def granular_guild_event(
+    event_type: str,
+    content: dict[str, object],
+    *,
+    channel_id: int = 80,
+) -> dict[str, object]:
+    return {
+        "type": event_type,
+        "context": {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "channel_id": str(channel_id),
+            "channel_domain": "alpha.localhost",
+            "seq": "1",
+        },
+        "actor": {"id": "7", "domain": "alpha.localhost"},
+        "content": content,
+    }
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_mutation_projects_one_discord_bulk_gateway_event() -> None:
+    guild = granular_replica_guild()
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    channel = SimpleNamespace(
+        id=80,
+        origin_domain="alpha.localhost",
+        guild_id=42,
+        guild_domain="alpha.localhost",
+        type=0,
+    )
+    first = SimpleNamespace(
+        id=81,
+        origin_domain="alpha.localhost",
+        channel_id=80,
+        channel_domain="alpha.localhost",
+        content="one",
+        e2ee=None,
+        deleted_at=None,
+    )
+    second = SimpleNamespace(
+        id=82,
+        origin_domain="member.example",
+        channel_id=80,
+        channel_domain="alpha.localhost",
+        content="two",
+        e2ee=None,
+        deleted_at=None,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        scalars=AsyncMock(return_value=[first, second]),
+        get=AsyncMock(side_effect=[actor, channel]),
+    )
+    deleted_at = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    event = granular_guild_event(
+        "guild.message.bulk_delete",
+        {
+            "messages": [
+                {"id": "81", "origin_domain": "alpha.localhost"},
+                {"id": "82", "origin_domain": "member.example"},
+            ],
+            "deleted_at": deleted_at.isoformat(),
+        },
+    )
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        event,
+    )
+
+    assert dispatch == (
+        "MESSAGE_DELETE_BULK",
+        {
+            "ids": [
+                {"id": "81", "origin_domain": "alpha.localhost"},
+                {"id": "82", "origin_domain": "member.example"},
+            ],
+            "channel_id": "80",
+            "channel_domain": "alpha.localhost",
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+        },
+    )
+    assert first.content is None and first.deleted_at == deleted_at
+    assert second.content is None and second.deleted_at == deleted_at
+
+
+@pytest.mark.asyncio
+async def test_message_purge_does_not_invent_a_singular_gateway_delete() -> None:
+    guild = granular_replica_guild()
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        scalars=AsyncMock(side_effect=[[], []]),
+        get=AsyncMock(return_value=actor),
+        execute=AsyncMock(),
+        flush=AsyncMock(),
+    )
+    event = granular_guild_event(
+        "guild.message.purge",
+        {
+            "author": {"id": "9", "origin_domain": "member.example"},
+            "created_after": "2026-08-22T12:00:00+00:00",
+            "deleted_at": "2026-08-29T12:00:00+00:00",
+        },
+    )
+    event["context"] = {
+        "guild_id": "42",
+        "guild_domain": "alpha.localhost",
+        "seq": "1",
+    }
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        event,
+    )
+
+    assert dispatch is None
+    assert guild.last_event_seq == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type",
+    ["guild.poll.vote.add", "guild.poll.vote.remove", "guild.poll.finalize"],
+)
+async def test_poll_mutations_reject_a_context_channel_mismatch(event_type: str) -> None:
+    guild = granular_replica_guild()
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    voter = SimpleNamespace(id=9, origin_domain="member.example")
+    message = SimpleNamespace(
+        id=81,
+        origin_domain="alpha.localhost",
+        channel_id=80,
+        channel_domain="alpha.localhost",
+        deleted_at=None,
+        created_at=datetime(2026, 8, 29, 11, 0, tzinfo=UTC),
+    )
+    wrong_context_channel = SimpleNamespace(
+        id=80,
+        origin_domain="alpha.localhost",
+        guild_id=42,
+        guild_domain="alpha.localhost",
+    )
+    poll = SimpleNamespace(finalized_at=None, allow_multiselect=True)
+    content: dict[str, object] = {
+        "message": {"id": "81", "origin_domain": "alpha.localhost"},
+    }
+    if event_type.startswith("guild.poll.vote"):
+        content.update(
+            {
+                "user": {"id": "9", "origin_domain": "member.example"},
+                "answer_id": 1,
+            }
+        )
+        get_results = [
+            actor,
+            message,
+            voter,
+            wrong_context_channel,
+            poll,
+            SimpleNamespace(id=1),
+            SimpleNamespace(),
+        ]
+    else:
+        content["finalized_at"] = "2026-08-29T12:00:00+00:00"
+        get_results = [actor, message, poll, wrong_context_channel]
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=get_results),
+        execute=AsyncMock(),
+    )
+    event = granular_guild_event(event_type, content, channel_id=99)
+
+    with pytest.raises(ValueError, match="wrong guild"):
+        await apply_guild_mutation_event(
+            cast(Any, session),
+            settings(domain="beta.localhost"),
+            cast(Any, guild),
+            event,
+        )
+
+    assert guild.last_event_seq == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_finalize_mutation_dispatches_the_full_authority_message_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = granular_replica_guild()
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    message = SimpleNamespace(
+        id=81,
+        origin_domain="alpha.localhost",
+        channel_id=80,
+        channel_domain="alpha.localhost",
+        created_at=datetime(2026, 8, 29, 11, 0, tzinfo=UTC),
+    )
+    poll = SimpleNamespace(finalized_at=None)
+    channel = SimpleNamespace(
+        id=80,
+        origin_domain="alpha.localhost",
+        guild_id=42,
+        guild_domain="alpha.localhost",
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[actor, message, poll, channel]),
+    )
+    finalized_at = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    rendered = {
+        "id": "81",
+        "origin_domain": "alpha.localhost",
+        "channel_id": "80",
+        "channel_domain": "alpha.localhost",
+        "content": "Choose one",
+        "created_at": message.created_at.isoformat(),
+        "attachments": [],
+        "poll": {
+            "question": {"text": "Ship it?"},
+            "finalized_at": finalized_at.isoformat(),
+            "results": {
+                "is_finalized": True,
+                "answer_counts": [{"id": 1, "count": 2, "me_voted": True}],
+            },
+        },
+    }
+    render = AsyncMock(return_value=rendered)
+    monkeypatch.setattr("app.federation.guilds.render_message_payload", render)
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        granular_guild_event(
+            "guild.poll.finalize",
+            {
+                "message": {"id": "81", "origin_domain": "alpha.localhost"},
+                "finalized_at": finalized_at.isoformat(),
+            },
+        ),
+    )
+
+    assert dispatch == ("MESSAGE_UPDATE", rendered)
+    assert poll.finalized_at == finalized_at
+    render.assert_awaited_once_with(session, message, viewer=actor)
+    assert "poll_finalized" not in rendered
+    assert rendered["poll"]["results"]["is_finalized"] is True
+
+
+@pytest.mark.asyncio
+async def test_poll_finalize_without_retained_history_does_not_emit_a_sparse_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = granular_replica_guild()
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[actor, None, None]),
+    )
+    render = AsyncMock()
+    monkeypatch.setattr("app.federation.guilds.render_message_payload", render)
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        granular_guild_event(
+            "guild.poll.finalize",
+            {
+                "message": {"id": "81", "origin_domain": "alpha.localhost"},
+                "finalized_at": "2026-08-29T12:00:00+00:00",
+            },
+        ),
+    )
+
+    assert dispatch is None
+    assert guild.last_event_seq == 1
+    render.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_channel_mutation_materializes_authority_version_before_signing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_version = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        snapshot_generation=1,
+        permission_generation=1,
+        updated_at=authority_version,
+    )
+    actor = SimpleNamespace(
+        id=7,
+        origin_domain="alpha.localhost",
+        is_local=True,
+    )
+    channel = SimpleNamespace(
+        id=80,
+        origin_domain="alpha.localhost",
+        unavailable=False,
+        updated_at=authority_version,
+    )
+    session = SimpleNamespace(flush=AsyncMock(), refresh=AsyncMock())
+    signed = AsyncMock(
+        return_value={
+            "event_id": "kcge_channel_version",
+            "content": {},
+        }
+    )
+    monkeypatch.setattr(guild_revision, "lock_current_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(guild_revision, "assign_guild_sequence", AsyncMock(return_value=1))
+    monkeypatch.setattr(guild_revision, "build_envelope", signed)
+    monkeypatch.setattr(guild_revision, "store_guild_event", lambda *args: None)
+    monkeypatch.setattr(
+        guild_revision,
+        "remote_guild_destinations",
+        AsyncMock(return_value=set()),
+    )
+    monkeypatch.setattr(
+        guild_revision,
+        "remote_destinations_with_channel_access",
+        AsyncMock(return_value=set()),
+    )
+
+    await guild_revision.queue_guild_mutation(
+        cast(Any, session),
+        settings(domain="alpha.localhost"),
+        cast(Any, guild),
+        cast(Any, actor),
+        "guild.channel.create",
+        {"channel": {"id": "80", "origin_domain": "alpha.localhost"}},
+        channel=cast(Any, channel),
+    )
+
+    signed_content = signed.await_args.args[4]
+    assert signed_content["channel"]["version"] == authority_version.isoformat()
+    assert signed.await_args.args[3] is actor
+    assert signed.await_args.kwargs["context"]["guild_version"] == authority_version.isoformat()
+    assert session.refresh.await_args_list == [
+        call(channel, attribute_names=("updated_at",)),
+        call(guild, attribute_names=("updated_at",)),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1236,6 +1986,7 @@ async def test_authoritative_pin_event_preserves_the_remote_pinner() -> None:
         channel_id=80,
         channel_domain="alpha.localhost",
         deleted_at=None,
+        message_type=0,
     )
     channel = SimpleNamespace(
         id=80,
@@ -1244,8 +1995,8 @@ async def test_authoritative_pin_event_preserves_the_remote_pinner() -> None:
         guild_domain=guild.origin_domain,
     )
     session = SimpleNamespace(
-        scalar=AsyncMock(return_value=guild),
-        get=AsyncMock(side_effect=[owner, message, channel]),
+        scalar=AsyncMock(side_effect=[guild, 0, None]),
+        get=AsyncMock(side_effect=[owner, channel, message, None]),
         execute=AsyncMock(),
     )
     event = {
@@ -1274,15 +2025,113 @@ async def test_authoritative_pin_event_preserves_the_remote_pinner() -> None:
     assert statement.compile().params["pinned_by_id"] == 66
     assert statement.compile().params["pinned_by_domain"] == "member.example"
     assert dispatch == (
-        "MESSAGE_UPDATE",
+        "CHANNEL_PINS_UPDATE",
         {
-            "id": str(message.id),
-            "origin_domain": message.origin_domain,
             "channel_id": str(channel.id),
             "channel_domain": channel.origin_domain,
+            "guild_id": str(guild.id),
+            "guild_domain": guild.origin_domain,
+            "last_pin_timestamp": None,
+            "message_id": str(message.id),
+            "message_domain": message.origin_domain,
             "pinned": True,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_guild_profile_relay_requires_current_member_and_dispatches_full_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        owner_id=7,
+        owner_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+        sync_status="stale",
+        permission_generation=0,
+        snapshot_generation=1,
+    )
+    owner = User(
+        id=7,
+        origin_domain="alpha.localhost",
+        username="owner",
+        is_local=False,
+    )
+    member = SimpleNamespace()
+    profile_user = User(
+        id=66,
+        origin_domain="member.example",
+        username="maple",
+        is_local=False,
+    )
+    profile = RemoteUserProfile(
+        id="66",
+        origin_domain="member.example",
+        username="maple",
+        display_name="Maple",
+        profile_version=4,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[owner, member]),
+    )
+    validate_source = AsyncMock(return_value=profile)
+    upsert = AsyncMock(return_value=profile_user)
+    render = AsyncMock(return_value={"guild_id": "42", "user": {"id": "66"}})
+    monkeypatch.setattr(
+        "app.federation.guilds.validated_guild_profile_source",
+        validate_source,
+    )
+    monkeypatch.setattr("app.federation.guilds.upsert_remote_user", upsert)
+    monkeypatch.setattr("app.federation.guilds.guild_profile_member_payload", render)
+    event = {
+        "type": "guild.member.profile.relay",
+        "context": {
+            "guild_id": str(guild.id),
+            "guild_domain": guild.origin_domain,
+            "seq": "1",
+            "snapshot_generation": "2",
+        },
+        "actor": {"id": str(owner.id), "domain": owner.origin_domain},
+        "content": {"source": {"signed": "user-home-event"}},
+    }
+    apply_settings = settings(domain="beta.localhost")
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        apply_settings,
+        cast(Any, guild),
+        event,
+    )
+
+    assert dispatch == ("GUILD_MEMBER_UPDATE", {"guild_id": "42", "user": {"id": "66"}})
+    validate_source.assert_awaited_once_with(
+        session,
+        apply_settings,
+        {"signed": "user-home-event"},
+        guild_ref=(42, "alpha.localhost"),
+    )
+    upsert.assert_awaited_once_with(session, apply_settings, profile)
+    assert guild.last_event_seq == 1
+    assert guild.snapshot_generation == 2
+
+    missing_member_session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[owner, None]),
+    )
+    guild.last_event_seq = 0
+    guild.next_event_seq = 1
+    guild.snapshot_generation = 1
+    with pytest.raises(ValueError, match="non-member"):
+        await apply_guild_mutation_event(
+            cast(Any, missing_member_session),
+            apply_settings,
+            cast(Any, guild),
+            event,
+        )
 
 
 def test_legacy_guild_update_reference_inherits_only_a_missing_authoritative_domain() -> None:
@@ -1315,6 +2164,7 @@ def test_legacy_guild_update_reference_inherits_only_a_missing_authoritative_dom
 async def test_legacy_asset_update_applies_and_unblocks_the_guild_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    authority_version = datetime(2026, 8, 29, 13, 0, tzinfo=UTC)
     purge_history = AsyncMock(return_value=0)
     monkeypatch.setattr(
         "app.federation.history.purge_ineligible_federated_history",
@@ -1333,6 +2183,7 @@ async def test_legacy_asset_update_applies_and_unblocks_the_guild_sequence(
         banner_hash=None,
         federated_history_policy="disabled",
         history_policy_generation=0,
+        updated_at=datetime(2026, 8, 28, 13, 0, tzinfo=UTC),
     )
     actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
     session = SimpleNamespace(
@@ -1351,6 +2202,7 @@ async def test_legacy_asset_update_applies_and_unblocks_the_guild_sequence(
             "guild": {
                 "id": "42",
                 "icon_hash": "a" * 64,
+                "version": authority_version.isoformat(),
             }
         },
     }
@@ -1369,14 +2221,331 @@ async def test_legacy_asset_update_applies_and_unblocks_the_guild_sequence(
             "guild_domain": "alpha.localhost",
             "id": "42",
             "icon_hash": "a" * 64,
+            "version": authority_version.isoformat(),
         },
     )
     assert guild.icon_hash == "a" * 64
+    assert guild.updated_at == authority_version
     assert guild.last_event_seq == 27
     assert guild.next_event_seq == 28
     assert guild.snapshot_generation == 2
     assert guild.sync_status == "ready"
     purge_history.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "resource_key", "resource", "raw"),
+    [
+        (
+            "guild.role.update",
+            "role",
+            SimpleNamespace(
+                id=90,
+                origin_domain="alpha.localhost",
+                guild_id=42,
+                guild_domain="alpha.localhost",
+            ),
+            {
+                "id": "90",
+                "origin_domain": "alpha.localhost",
+                "guild_id": "42",
+                "guild_domain": "alpha.localhost",
+                "name": "moderator",
+                "icon_hash": None,
+                "color": 0,
+                "permissions": "0",
+                "position": 1,
+                "hoist": False,
+                "mentionable": False,
+            },
+        ),
+        (
+            "guild.emoji.update",
+            "emoji",
+            SimpleNamespace(
+                id=91,
+                origin_domain="alpha.localhost",
+                guild_id=42,
+                guild_domain="alpha.localhost",
+            ),
+            {
+                "id": "91",
+                "origin_domain": "alpha.localhost",
+                "guild_id": "42",
+                "guild_domain": "alpha.localhost",
+                "name": "lantern",
+                "animated": False,
+                "available": True,
+                "media_hash": "a" * 64,
+                "roles": [],
+            },
+        ),
+        (
+            "guild.sticker.update",
+            "sticker",
+            SimpleNamespace(
+                id=92,
+                origin_domain="alpha.localhost",
+                guild_id=42,
+                guild_domain="alpha.localhost",
+            ),
+            {
+                "id": "92",
+                "origin_domain": "alpha.localhost",
+                "guild_id": "42",
+                "guild_domain": "alpha.localhost",
+                "name": "paper",
+                "description": None,
+                "animated": False,
+                "available": True,
+                "tags": ["paper"],
+                "media_hash": "b" * 64,
+            },
+        ),
+    ],
+)
+async def test_live_guild_resources_preserve_authority_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    resource_key: str,
+    resource: SimpleNamespace,
+    raw: dict[str, object],
+) -> None:
+    authority_version = datetime(2026, 8, 29, 14, 0, tzinfo=UTC)
+    raw = {**raw, "version": authority_version.isoformat()}
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+        sync_status="stale",
+        permission_generation=0,
+        snapshot_generation=1,
+    )
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    scalar_results = [guild, None] if resource_key in {"emoji", "sticker"} else [guild]
+    session = SimpleNamespace(
+        scalar=AsyncMock(side_effect=scalar_results),
+        get=AsyncMock(side_effect=[actor, resource]),
+        execute=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.federation.history.purge_ineligible_federated_history",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "app.federation.guilds.pause_guild_e2ee_for_membership_change",
+        AsyncMock(return_value=[]),
+    )
+    event = {
+        "type": event_type,
+        "context": {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "seq": "1",
+            "snapshot_generation": "2",
+        },
+        "actor": {"id": "7", "domain": "alpha.localhost"},
+        "content": {resource_key: raw},
+    }
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        event,
+    )
+
+    assert resource.updated_at == authority_version
+    assert dispatch is not None and dispatch[1]["version"] == authority_version.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_live_channel_event_preserves_channel_and_guild_authority_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_version = datetime(2026, 8, 29, 15, 0, tzinfo=UTC)
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+        sync_status="stale",
+        permission_generation=0,
+        snapshot_generation=1,
+        updated_at=datetime(2026, 8, 28, 15, 0, tzinfo=UTC),
+    )
+    channel = SimpleNamespace(
+        id=80,
+        origin_domain="alpha.localhost",
+        guild_id=42,
+        guild_domain="alpha.localhost",
+        type=0,
+        encryption_mode="plaintext",
+        encryption_state="plaintext",
+        encryption_policy_generation=0,
+        encryption_protocol=None,
+        encryption_suite=None,
+        encryption_group_id=None,
+        encryption_epoch=None,
+        created_at=datetime(2026, 8, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 28, 15, 0, tzinfo=UTC),
+    )
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[actor, channel]),
+    )
+    monkeypatch.setattr(
+        "app.federation.history.purge_ineligible_federated_history",
+        AsyncMock(return_value=0),
+    )
+    raw_channel = {
+        "id": "80",
+        "origin_domain": "alpha.localhost",
+        "guild_id": "42",
+        "guild_domain": "alpha.localhost",
+        "type": 15,
+        "name": "forum",
+        "topic": None,
+        "position": 0,
+        "parent_id": None,
+        "parent_domain": None,
+        "permissions_synced": False,
+        "rate_limit_per_user": 0,
+        "federated_history_policy": "inherit",
+        "encryption_policy": {
+            "mode": "plaintext",
+            "state": "plaintext",
+            "generation": "0",
+            "protocol": None,
+            "suite": None,
+            "group_id": None,
+            "epoch": None,
+        },
+        "created_floor_id": "80",
+        "default_auto_archive_duration": 1440,
+        "default_thread_rate_limit_per_user": 0,
+        "default_reaction_emoji": {"emoji_id": None, "emoji_name": "❤️"},
+        "default_forum_layout": 0,
+        "version": authority_version.isoformat(),
+    }
+    event = {
+        "type": "guild.channel.update",
+        "context": {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "seq": "1",
+            "snapshot_generation": "2",
+            "guild_version": authority_version.isoformat(),
+        },
+        "actor": {"id": "7", "domain": "alpha.localhost"},
+        "content": {"channel": raw_channel},
+    }
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        event,
+    )
+
+    assert dispatch == (
+        "CHANNEL_UPDATE",
+        {
+            **raw_channel,
+            "default_reaction_emoji": {"emoji_id": None, "emoji_name": "❤"},
+        },
+    )
+    assert channel.default_reaction_emoji == {"emoji_id": None, "emoji_name": "❤"}
+    assert channel.updated_at == authority_version
+    assert guild.updated_at == authority_version
+
+
+@pytest.mark.asyncio
+async def test_live_guild_version_rejects_naive_timestamp() -> None:
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value=guild))
+    event = {
+        "type": "guild.channel.update",
+        "context": {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "seq": "1",
+            "guild_version": "2026-08-29T15:00:00",
+        },
+    }
+
+    with pytest.raises(ValueError, match="guild version timestamp lacks a timezone"):
+        await apply_guild_mutation_event(
+            cast(Any, session),
+            settings(domain="beta.localhost"),
+            cast(Any, guild),
+            event,
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_resource_version_rejects_naive_timestamp() -> None:
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+        sync_status="stale",
+        permission_generation=0,
+        snapshot_generation=1,
+    )
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    role = SimpleNamespace(
+        id=90,
+        origin_domain="alpha.localhost",
+        guild_id=42,
+        guild_domain="alpha.localhost",
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[actor, role]),
+    )
+    event = {
+        "type": "guild.role.update",
+        "context": {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "seq": "1",
+        },
+        "actor": {"id": "7", "domain": "alpha.localhost"},
+        "content": {
+            "role": {
+                "id": "90",
+                "origin_domain": "alpha.localhost",
+                "guild_id": "42",
+                "guild_domain": "alpha.localhost",
+                "name": "moderator",
+                "icon_hash": None,
+                "color": 0,
+                "permissions": "0",
+                "position": 1,
+                "hoist": False,
+                "mentionable": False,
+                "version": "2026-08-29T14:00:00",
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="role version timestamp lacks a timezone"):
+        await apply_guild_mutation_event(
+            cast(Any, session),
+            settings(domain="beta.localhost"),
+            cast(Any, guild),
+            event,
+        )
 
 
 def test_snapshot_rate_scope_is_bound_to_the_structural_revision() -> None:
@@ -1484,6 +2653,139 @@ def test_event_envelope_signature_excludes_only_signatures() -> None:
     assert not verify_envelope(envelope, signature, private.public_key())
 
 
+def _room_policy_envelope(
+    *,
+    generation: int,
+    state: str = "active",
+    group_id: str = "g" * 43,
+) -> EventEnvelope:
+    return EventEnvelope.model_validate(
+        {
+            "event_id": "kcfe_roompolicy0123456789",
+            "origin": "alpha.localhost",
+            "type": "e2ee.room-policy.changed",
+            "ts": 42,
+            "actor": {"id": "7", "domain": "beta.localhost"},
+            "context": {
+                "reason": "e2ee.device-list.changed",
+                "actor": {"id": "7", "domain": "beta.localhost"},
+                "channel": {"id": "11", "domain": "alpha.localhost"},
+                "scope": {"type": "guild", "id": "13", "domain": "alpha.localhost"},
+            },
+            "content": {
+                "channel_id": "11",
+                "channel_domain": "alpha.localhost",
+                "encryption_policy": {
+                    "mode": "e2ee",
+                    "state": state,
+                    "generation": str(generation),
+                    "protocol": "mls10",
+                    "suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+                    "group_id": group_id,
+                    "epoch": "1",
+                },
+            },
+            "signatures": {"alpha.localhost": {"ed25519:test": "signature"}},
+        }
+    )
+
+
+def _projected_e2ee_channel(*, generation: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=11,
+        origin_domain="alpha.localhost",
+        unavailable=False,
+        type=0,
+        guild_id=13,
+        guild_domain="alpha.localhost",
+        encryption_mode="e2ee",
+        encryption_state="active",
+        encryption_policy_generation=generation,
+        encryption_protocol="mls10",
+        encryption_suite="MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+        encryption_group_id="g" * 43,
+        encryption_epoch=1,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incoming_generation", [2, 3])
+async def test_room_policy_stale_or_current_state_acks_after_actor_left(
+    incoming_generation: int,
+) -> None:
+    channel = _projected_e2ee_channel()
+
+    async def get_model(model: object, _key: object, **_kwargs: object) -> object | None:
+        if model is Channel:
+            return channel
+        raise AssertionError("idempotent policy must not recheck mutable membership")
+
+    session = SimpleNamespace(get=get_model)
+    changed = await federation_api._apply_authoritative_e2ee_room_policy(
+        cast(Any, session),
+        settings(),
+        _room_policy_envelope(generation=incoming_generation),
+    )
+
+    assert changed is None
+    assert channel.encryption_policy_generation == 3
+
+
+@pytest.mark.asyncio
+async def test_room_policy_equal_generation_equivocation_still_rejects() -> None:
+    channel = _projected_e2ee_channel()
+
+    async def get_model(model: object, _key: object, **_kwargs: object) -> object | None:
+        if model is Channel:
+            return channel
+        raise AssertionError("equivocation must fail before membership lookup")
+
+    with pytest.raises(ValueError, match="equivocated"):
+        await federation_api._apply_authoritative_e2ee_room_policy(
+            cast(Any, SimpleNamespace(get=get_model)),
+            settings(),
+            _room_policy_envelope(generation=3, group_id="x" * 43),
+        )
+
+
+@pytest.mark.asyncio
+async def test_room_policy_terminal_guild_receipt_acks_deleted_channel() -> None:
+    lookups: list[str] = []
+
+    async def get_model(model: object, key: object, **_kwargs: object) -> object | None:
+        lookups.append(getattr(model, "__name__", ""))
+        if model is Channel:
+            return None
+        assert key == ("guild", 13, "alpha.localhost", "gamma.localhost")
+        return SimpleNamespace(event_type="guild.instance_access.revoked")
+
+    changed = await federation_api._apply_authoritative_e2ee_room_policy(
+        cast(Any, SimpleNamespace(get=get_model)),
+        settings(domain="gamma.localhost"),
+        _room_policy_envelope(generation=3),
+    )
+
+    assert changed is None
+    assert lookups == ["Channel", "TerminalRoomDeletion"]
+
+
+@pytest.mark.asyncio
+async def test_room_policy_new_state_still_rechecks_current_membership() -> None:
+    channel = _projected_e2ee_channel()
+
+    async def get_model(model: object, _key: object, **_kwargs: object) -> object | None:
+        if model is Channel:
+            return channel
+        return None
+
+    with pytest.raises(ValueError, match="not a room participant"):
+        await federation_api._apply_authoritative_e2ee_room_policy(
+            cast(Any, SimpleNamespace(get=get_model)),
+            settings(),
+            _room_policy_envelope(generation=4),
+        )
+
+
 def test_event_validation_preserves_signed_extension_members() -> None:
     private = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
     raw: dict[str, Any] = {
@@ -1515,14 +2817,14 @@ async def test_gap_fill_event_verification_rejects_expired_keys(
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     raw: dict[str, Any] = {
         "event_id": "kcfe_0123456789abcdef",
-        "origin": "alpha.localhost",
+        "origin": "beta.localhost",
         "type": "guild.message.create",
         "ts": now_ms,
-        "actor": {"id": "123", "domain": "alpha.localhost"},
-        "context": {"guild_id": "456", "guild_domain": "alpha.localhost", "seq": "1"},
+        "actor": {"id": "123", "domain": "beta.localhost"},
+        "context": {"guild_id": "456", "guild_domain": "beta.localhost", "seq": "1"},
         "content": {},
     }
-    raw["signatures"] = {"alpha.localhost": {"ed25519:test": sign_envelope(raw, private)}}
+    raw["signatures"] = {"beta.localhost": {"ed25519:test": sign_envelope(raw, private)}}
 
     class FakeSession:
         async def get(self, _model: object, _identity: object) -> object:
@@ -1531,7 +2833,7 @@ async def test_gap_fill_event_verification_rejects_expired_keys(
             )
 
     parsed = await validated_event_envelope(
-        cast(Any, FakeSession()), settings(), "alpha.localhost", raw
+        cast(Any, FakeSession()), settings(), "beta.localhost", raw
     )
     assert parsed.event_id == raw["event_id"]
 
@@ -1543,15 +2845,49 @@ async def test_gap_fill_event_verification_rejects_expired_keys(
     monkeypatch.setattr("app.federation.security.ensure_peer", refresh)
     with pytest.raises(ValueError, match="signature"):
         await validated_event_envelope(
-            cast(Any, ExpiredSession()), settings(), "alpha.localhost", raw
+            cast(Any, ExpiredSession()), settings(), "beta.localhost", raw
         )
     refresh.assert_awaited_once()
 
     raw["ts"] = now_ms + 301_000
-    raw["signatures"] = {"alpha.localhost": {"ed25519:test": sign_envelope(raw, private)}}
+    raw["signatures"] = {"beta.localhost": {"ed25519:test": sign_envelope(raw, private)}}
     with pytest.raises(ValueError, match="timestamp"):
-        await validated_event_envelope(cast(Any, FakeSession()), settings(), "alpha.localhost", raw)
+        await validated_event_envelope(cast(Any, FakeSession()), settings(), "beta.localhost", raw)
     refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_outbound_envelope_verification_uses_the_local_key_without_peer_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    raw: dict[str, Any] = {
+        "event_id": "kcfe_selfauthority0001",
+        "origin": "alpha.localhost",
+        "type": "bot.dm.installation-capability",
+        "ts": int(datetime.now(UTC).timestamp() * 1000),
+        "actor": {"id": "123", "domain": "alpha.localhost"},
+        "context": {},
+        "content": {},
+    }
+    raw["signatures"] = {"alpha.localhost": {"ed25519:self": sign_envelope(raw, private)}}
+
+    self_key = AsyncMock(return_value=("ed25519:self", private))
+    discover_peer = AsyncMock()
+    monkeypatch.setattr("app.federation.security.self_private_key", self_key)
+    monkeypatch.setattr("app.federation.security.ensure_peer", discover_peer)
+
+    class NoPeerSession:
+        async def get(self, _model: object, _identity: object) -> object:
+            raise AssertionError("a current local signature must not query the peer-key cache")
+
+    envelope = await validated_event_envelope(
+        cast(Any, NoPeerSession()), settings(), "alpha.localhost", raw
+    )
+
+    assert envelope.event_id == raw["event_id"]
+    self_key.assert_awaited_once()
+    discover_peer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1605,6 +2941,21 @@ def test_block_policy_holds_durable_traffic_and_protects_reconciliation() -> Non
     assert federation_policy_holds_event("suspend", "guild.message.create")
     assert not federation_policy_holds_event("silence", "dm.message.create")
     assert federation_policy_holds_event("silence", "guild.message.create")
+    assert federation_policy_holds_event(
+        "silence",
+        "e2ee.room-policy.changed",
+        context={"scope": {"type": "guild", "id": "42", "domain": "alpha.localhost"}},
+    )
+    assert not federation_policy_holds_event(
+        "silence",
+        "e2ee.room-policy.changed",
+        context={"scope": {"type": "group_dm", "id": "42", "domain": "alpha.localhost"}},
+    )
+    assert federation_policy_holds_event(
+        "silence",
+        "announcement.crosspost.sync",
+        context={"guild_id": "42", "guild_domain": "alpha.localhost"},
+    )
     assert {
         "guild.access.revoked",
         "guild.instance_access.revoked",
@@ -1615,6 +2966,13 @@ def test_block_policy_holds_durable_traffic_and_protects_reconciliation() -> Non
         "e2ee.device-list.changed",
         "e2ee.room-policy.changed",
         "media.delete",
+        "bot.application.runtime.changed",
+        "bot.dm.installation-capability",
+        "guild.announcement.follow.accepted",
+        "guild.announcement.follow.finalized",
+        "guild.announcement.follow.rejected",
+        "guild.announcement.follow.revoked",
+        "guild.announcement.follow.updated",
     } == SECURITY_CRITICAL_GUILD_EVENTS
 
 
@@ -1673,8 +3031,13 @@ async def test_federation_policy_fence_uses_the_shared_global_lock() -> None:
     assert "kaede-instance-blocks" in statements[0]
 
 
-def test_local_silence_blocks_symmetric_guild_federation_surfaces() -> None:
-    assert silence_blocks_path("/_kaede/v1/users/lookup")
+def test_local_silence_blocks_only_guild_federation_surfaces() -> None:
+    assert not silence_blocks_path("/_kaede/v1/users/lookup")
+    assert not silence_blocks_path("/_kaede/v1/users/profile")
+    assert not silence_blocks_path("/_kaede/v1/applications/123/manifest")
+    assert not silence_blocks_path("/_kaede/v1/applications/123/runtime-manifest")
+    assert not silence_blocks_path("/_kaede/v1/voice/dm-token")
+    assert not silence_blocks_path("/_kaede/v1/channels/123/interactions")
     assert silence_blocks_path("/_kaede/v1/invites/resolve")
     assert silence_blocks_path("/_kaede/v1/guilds/123/snapshot")
     assert silence_blocks_path("/_kaede/v1/guilds/123/events")
@@ -1683,8 +3046,44 @@ def test_local_silence_blocks_symmetric_guild_federation_surfaces() -> None:
     assert silence_blocks_path("/_kaede/v1/guilds/123/proxy-reaction")
     assert silence_blocks_path("/_kaede/v1/guilds/123/proxy-thread")
     assert silence_blocks_path("/_kaede/v1/guilds/123/join")
+    assert silence_blocks_path("/_kaede/v1/guilds/123/pins")
+    assert silence_blocks_path("/_kaede/v1/guilds/123/bot-install")
+    assert silence_blocks_path("/_kaede/v1/applications/7/guilds/123/commands")
+    assert silence_blocks_path("/_kaede/v1/application-directory/search")
+    assert silence_blocks_path("/_kaede/v1/voice/token")
+    assert silence_blocks_path("/_kaede/v1/voice/state")
+    assert silence_blocks_path("/_kaede/v1/channels/123/announcement-follow-create")
     assert not silence_blocks_path("/_kaede/v1/inbox")
     assert not silence_blocks_path("/_kaede/v1/dms/open")
+
+
+@pytest.mark.asyncio
+async def test_local_silence_blocks_contextual_guild_surface_before_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure = AsyncMock()
+    monkeypatch.setattr("app.federation.client.lock_block_policy_shared", AsyncMock())
+    monkeypatch.setattr(
+        "app.federation.client.matching_block",
+        AsyncMock(return_value=SimpleNamespace(level="silence")),
+    )
+    monkeypatch.setattr("app.federation.client.ensure_peer", ensure)
+
+    with pytest.raises(FederationNetworkError, match="silenced"):
+        await _prepare_signed_request(
+            cast(Any, SimpleNamespace()),
+            settings(),
+            "POST",
+            "beta.localhost",
+            "/_kaede/v1/typing/publish",
+            payload={},
+            query=None,
+            request_timeout=3,
+            hop=1,
+            guild_context=True,
+        )
+
+    ensure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1717,6 +3116,40 @@ async def test_mixed_inbox_rechecks_silence_for_each_event(
         == "KAED_FED_INSTANCE_SUSPENDED"
     )
     assert policies.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_inbox_silence_uses_shared_event_guild_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        async def scalar(self, _statement: object) -> object:
+            return None
+
+    monkeypatch.setattr(
+        "app.federation.security.matching_block",
+        AsyncMock(return_value=SimpleNamespace(level="silence")),
+    )
+    session = cast(Any, FakeSession())
+
+    assert (
+        await federation_event_policy_code(
+            session,
+            "beta.localhost",
+            "e2ee.room-policy.changed",
+            event_context={"scope": {"type": "guild"}},
+        )
+        == "KAED_FED_INSTANCE_SILENCED"
+    )
+    assert (
+        await federation_event_policy_code(
+            session,
+            "beta.localhost",
+            "e2ee.room-policy.changed",
+            event_context={"scope": {"type": "group_dm"}},
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -1907,7 +3340,7 @@ async def test_authenticated_origin_is_limited_before_nonce_allocation(
         "X-Kaede-Timestamp": str(timestamp),
     }
     instance = SimpleNamespace(
-        capabilities=["request-nonce/1"],
+        capabilities=[PERMISSION_SCHEMA_CAPABILITY, "request-nonce/1"],
         federation_mode="open",
         last_seen_at=None,
     )
@@ -2888,7 +4321,7 @@ async def test_exact_profile_endpoint_signs_the_requested_local_composite_identi
     result = await federation_user_profile_by_ref(
         user_id=42,
         user_domain="alpha.localhost",
-        principal=FederationPrincipal("beta.localhost", "ed25519:test"),
+        principal=FederationPrincipal("beta.localhost", "ed25519:test", silenced=True),
         session=cast(Any, session),
         redis=cast(Any, redis),
         settings=configured,
@@ -2926,6 +4359,7 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
             "owner_id": "11",
             "owner_domain": "beta.localhost",
             "permission_generation": "1",
+            "version": "2026-07-17T00:00:00+00:00",
         },
         "roles": [
             {
@@ -2937,6 +4371,7 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
                 "position": 0,
                 "hoist": False,
                 "mentionable": False,
+                "version": "2026-07-17T00:00:01+00:00",
             }
         ],
         "channels": [
@@ -2951,6 +4386,7 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
                 "parent_domain": None,
                 "rate_limit_per_user": 0,
                 "created_floor_id": "12",
+                "version": "2026-07-17T00:00:02+00:00",
             }
         ],
         "members": [
@@ -2977,10 +4413,40 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
                 "name": "lantern",
                 "animated": False,
                 "media_hash": "a" * 64,
+                "version": "2026-07-17T00:00:03+00:00",
+            }
+        ],
+        "stickers": [
+            {
+                "id": "14",
+                "origin_domain": "beta.localhost",
+                "guild_id": "10",
+                "guild_domain": "beta.localhost",
+                "name": "paper",
+                "description": None,
+                "animated": False,
+                "media_hash": "b" * 64,
+                "version": "2026-07-17T00:00:04+00:00",
             }
         ],
     }
     validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+    for collection, index in (
+        ("guild", None),
+        ("roles", 0),
+        ("channels", 0),
+        ("emojis", 0),
+        ("stickers", 0),
+    ):
+        malformed = deepcopy(snapshot)
+        resource = malformed[collection] if index is None else malformed[collection][index]
+        resource["version"] = "2026-07-17T00:00:00"
+        with pytest.raises(ValueError, match="version timestamp lacks a timezone"):
+            validate_guild_snapshot(
+                malformed,
+                expected_origin="beta.localhost",
+                expected_guild_id=10,
+            )
     snapshot["roles"][0]["icon_hash"] = "b" * 64
     validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
     snapshot["roles"][0]["icon_hash"] = "not-a-digest"
@@ -3065,6 +4531,7 @@ def test_guild_snapshot_rejects_invalid_custom_emoji_identity() -> None:
 
 
 def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
+    resource_version = datetime(2026, 7, 18, 10, 30, tzinfo=UTC)
     guild = SimpleNamespace(
         id=10,
         origin_domain="beta.localhost",
@@ -3078,6 +4545,7 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
         permission_generation=1,
         federated_history_policy="disabled",
         history_policy_generation=1,
+        updated_at=resource_version,
     )
     visible_child = SimpleNamespace(
         id=12,
@@ -3089,6 +4557,11 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
         parent_id=13,
         parent_domain="beta.localhost",
         rate_limit_per_user=0,
+        bitrate=None,
+        user_limit=None,
+        rtc_region=None,
+        video_quality_mode=None,
+        voice_status=None,
         federated_history_policy="inherit",
         created_floor_id=12,
         permissions_synced=False,
@@ -3118,16 +4591,52 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
         e2ee_required=False,
         encryption_mode="plaintext",
         created_at=datetime(2026, 7, 18, 11, 0, tzinfo=UTC),
+        updated_at=resource_version,
+    )
+    role = SimpleNamespace(
+        id=10,
+        origin_domain="beta.localhost",
+        name="@everyone",
+        icon_hash=None,
+        color=0,
+        permissions=0,
+        position=0,
+        hoist=False,
+        mentionable=False,
+        updated_at=resource_version,
+    )
+    emoji = SimpleNamespace(
+        id=14,
+        origin_domain="beta.localhost",
+        guild_id=10,
+        guild_domain="beta.localhost",
+        name="lantern",
+        animated=False,
+        media_hash="a" * 64,
+        updated_at=resource_version,
+    )
+    sticker = SimpleNamespace(
+        id=15,
+        origin_domain="beta.localhost",
+        guild_id=10,
+        guild_domain="beta.localhost",
+        name="paper",
+        description=None,
+        animated=False,
+        media_hash="b" * 64,
+        updated_at=resource_version,
     )
 
     snapshot_at = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
     payload = guild_snapshot_payload(
         cast(Any, guild),
-        [],
+        [cast(Any, role)],
         [cast(Any, visible_child)],
         [],
         [],
         [],
+        emojis=[cast(Any, emoji)],
+        stickers=[cast(Any, sticker)],
         member_snapshot_at=snapshot_at,
         next_member_cursor=("gamma.localhost", 77),
     )
@@ -3135,6 +4644,11 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
     assert payload["channels"][0]["parent_id"] is None
     assert payload["channels"][0]["parent_domain"] is None
     assert payload["member_snapshot_at"] == snapshot_at.isoformat()
+    assert payload["guild"]["version"] == resource_version.isoformat()
+    assert payload["roles"][0]["version"] == resource_version.isoformat()
+    assert payload["channels"][0]["version"] == resource_version.isoformat()
+    assert payload["emojis"][0]["version"] == resource_version.isoformat()
+    assert payload["stickers"][0]["version"] == resource_version.isoformat()
     assert payload["next_member_cursor"] == {
         "user_domain": "gamma.localhost",
         "user_id": "77",
@@ -3155,12 +4669,14 @@ def test_guild_snapshot_does_not_export_private_moderation_state() -> None:
         permission_generation=1,
         federated_history_policy="disabled",
         history_policy_generation=1,
+        updated_at=datetime(2026, 7, 18, 11, 30, tzinfo=UTC),
     )
     member = SimpleNamespace(
         user_id=11,
         user_domain="alpha.localhost",
         nickname=None,
         joined_at=datetime(2026, 7, 18, tzinfo=UTC),
+        temporary=False,
         timeout_until=datetime(2026, 7, 19, tzinfo=UTC),
         timeout_indefinite=False,
         timeout_reason="private moderator note",
@@ -3171,8 +4687,14 @@ def test_guild_snapshot_does_not_export_private_moderation_state() -> None:
         id=11,
         origin_domain="alpha.localhost",
         username="alice",
-        display_name=None,
-        avatar_hash=None,
+        account_type="bot",
+        display_name="Alice Bot",
+        avatar_hash="a" * 64,
+        banner_hash="b" * 64,
+        bio="Automates snapshot checks",
+        custom_status="Testing federation",
+        profile_version=7,
+        e2ee_device_generation=9,
     )
 
     payload = guild_snapshot_payload(
@@ -3188,3 +4710,12 @@ def test_guild_snapshot_does_not_export_private_moderation_state() -> None:
     projected_member = payload["members"][0]
     assert "timeout_reason" not in projected_member
     assert "voice_flags" not in projected_member
+    projected_profile = RemoteUserProfile.model_validate(projected_member["user"])
+    assert projected_profile.account_type == "bot"
+    assert projected_profile.profile_version == 7
+    assert projected_profile.e2ee_device_generation == 9
+    assert projected_profile.banner_hash == "b" * 64
+    assert projected_profile.bio == "Automates snapshot checks"
+    assert projected_profile.custom_status == "Testing federation"
+    assert type(projected_member["user"]["profile_version"]) is int
+    assert type(projected_member["user"]["e2ee_device_generation"]) is int

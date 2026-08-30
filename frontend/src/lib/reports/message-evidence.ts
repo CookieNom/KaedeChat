@@ -9,10 +9,10 @@ export type EncryptedReportDisclosure =
  * this device. Attachment-only encrypted messages legitimately use `""`.
  */
 export function encryptedReportDisclosure(
-  message: Pick<Message, 'decrypted_content'>
+  message: Pick<Message, 'e2ee' | 'e2ee_verified' | 'decrypted_content'>
 ): EncryptedReportDisclosure {
   const content = message.decrypted_content;
-  return typeof content === 'string'
+  return message.e2ee && message.e2ee_verified === true && typeof content === 'string'
     ? { available: true, content }
     : { available: false, content: null };
 }

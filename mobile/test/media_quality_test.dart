@@ -32,6 +32,40 @@ void main() {
     expect(studio.audioPublishOptions.dtx, isFalse);
   });
 
+  test('caps microphone publish and republish settings to channel bitrate', () {
+    const studio = MobileMediaQuality(audio: VoiceAudioQuality.studio);
+    const dataSaver = MobileMediaQuality(audio: VoiceAudioQuality.dataSaver);
+
+    expect(studio.audioPublishOptionsForChannel(32000).audioBitrate, 32000);
+    expect(dataSaver.audioPublishOptionsForChannel(96000).audioBitrate, 24000);
+    expect(studio.audioPublishOptionsForChannel(32000).dtx, isFalse);
+  });
+
+  test('camera channel modes do not change screen-share preferences', () {
+    const quality = MobileMediaQuality(screen: ScreenShareQuality.sharp);
+    final automatic = cameraCaptureOptionsForMode(1);
+    final full = cameraCaptureOptionsForMode(2);
+
+    expect(automatic.params.dimensions.width, 640);
+    expect(automatic.params.dimensions.height, 360);
+    expect(full.params.dimensions.width, 1280);
+    expect(full.params.dimensions.height, 720);
+    expect(
+      quality.videoPublishOptionsForCameraMode(1).videoEncoding?.maxBitrate,
+      lessThan(
+        quality.videoPublishOptionsForCameraMode(2).videoEncoding?.maxBitrate ??
+            0,
+      ),
+    );
+    expect(
+      quality
+          .videoPublishOptionsForCameraMode(2)
+          .screenShareEncoding
+          ?.maxBitrate,
+      4500000,
+    );
+  });
+
   test('iOS broadcast extension receives validated capture bounds', () async {
     const channel = MethodChannel('chat.kaede.mobile/screen_share');
     final messenger =

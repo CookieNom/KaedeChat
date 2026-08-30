@@ -138,6 +138,50 @@ void main() {
   });
 
   group('gateway trust boundary', () {
+    test('self deafen publishes the exact implied-mute payload', () {
+      expect(
+        selfVoiceStatePayload(selfMute: false, selfDeaf: true),
+        <String, Object?>{'self_mute': true, 'self_deaf': true},
+      );
+      expect(
+        selfVoiceStatePayload(selfMute: false, selfDeaf: false).keys,
+        <String>['self_mute', 'self_deaf'],
+      );
+    });
+
+    test('voice info and soundboard request payloads match gateway contracts',
+        () {
+      expect(
+        channelInfoRequestPayload(
+          '10@remote.test',
+          <String>['status', 'voice_start_time'],
+        ),
+        <String, Object?>{
+          'guild_id': '10@remote.test',
+          'fields': <String>['status', 'voice_start_time'],
+        },
+      );
+      expect(
+        soundboardSoundsRequestPayload(
+          <String>['10@remote.test', '11@remote.test'],
+        ),
+        <String, Object?>{
+          'guild_ids': <String>['10@remote.test', '11@remote.test'],
+        },
+      );
+      expect(
+        () => channelInfoRequestPayload(
+          '10@remote.test',
+          <String>['status', 'status'],
+        ),
+        throwsArgumentError,
+      );
+      expect(
+        () => soundboardSoundsRequestPayload(<String>[]),
+        throwsArgumentError,
+      );
+    });
+
     final tokens = SessionTokens(
       instance: Domain('chat.example'),
       accessToken: 'access-token',
@@ -161,6 +205,32 @@ void main() {
       expect(ready.eventName, 'READY');
       expect(ready.sequence, 17);
       expect(ready.objectData['session_id'], 'session-1');
+    });
+
+    test('strips peer-asserted decrypted state from dispatch data', () {
+      final message = decodeGatewayEnvelope(jsonEncode(<String, Object?>{
+        'op': GatewayOp.dispatch.value,
+        's': 18,
+        't': 'MESSAGE_CREATE',
+        'd': <String, Object?>{
+          'id': '1',
+          'e2ee_verified': true,
+          'decrypted_content': 'peer-injected plaintext',
+          'attachments': <Object?>[
+            <String, Object?>{
+              'id': '2',
+              'encrypted_manifest': <String, Object?>{'key': 'secret'},
+            },
+          ],
+        },
+      }));
+
+      expect(message.objectData, <String, Object?>{
+        'id': '1',
+        'attachments': <Object?>[
+          <String, Object?>{'id': '2'},
+        ],
+      });
     });
 
     test('rejects malformed and semantically invalid envelopes', () {
@@ -414,6 +484,37 @@ void main() {
         ],
       );
       expect(() => result.add(later), throwsUnsupportedError);
+    });
+
+    test('deletion copy clears client-only decrypted and forwarded state', () {
+      final source = _message(id: '101', domain: 'chat.example').copyWith(
+        e2ee: <String, Object?>{'ciphertext': 'opaque'},
+        e2eeVerified: true,
+        forwardedMessageRef: EntityRef.parse('102@remote.example'),
+        forwardedMessage: _message(id: '102', domain: 'remote.example'),
+        decryptedForwardSnapshot: <String, Object?>{'content': 'secret'},
+        decryptedAllowedMentions: <String, Object?>{
+          'parse': <String>['users']
+        },
+      );
+
+      final deleted = source.copyWith(
+        clearContent: true,
+        clearE2ee: true,
+        e2eeVerified: false,
+        clearForwardedMessageRef: true,
+        clearForwardedMessage: true,
+        clearDecryptedForwardSnapshot: true,
+        clearDecryptedAllowedMentions: true,
+        deletedAt: DateTime.utc(2026, 8, 29),
+      );
+
+      expect(deleted.e2ee, isNull);
+      expect(deleted.e2eeVerified, isFalse);
+      expect(deleted.forwardedMessageRef, isNull);
+      expect(deleted.forwardedMessage, isNull);
+      expect(deleted.decryptedForwardSnapshot, isNull);
+      expect(deleted.decryptedAllowedMentions, isNull);
     });
   });
 }

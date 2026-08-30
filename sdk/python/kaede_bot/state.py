@@ -11,11 +11,8 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .refs import EntityRef
-
-
-def _b64(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode().rstrip("=")
+from ._encoding import encode_base64url as _b64
+from .refs import EntityRef, canonical_federation_domain
 
 
 def canonical_target_origin(value: str) -> str:
@@ -37,7 +34,10 @@ def canonical_target_origin(value: str) -> str:
         or parsed.hostname.endswith(".")
     ):
         raise ValueError("bot targets must be canonical HTTPS origins")
-    authority = parsed.hostname.lower()
+    try:
+        authority = canonical_federation_domain(parsed.hostname.lower())
+    except ValueError:
+        raise ValueError("bot targets must be canonical HTTPS origins") from None
     port_suffix = f":{port}" if port not in {None, 443} else ""
     return f"https://{authority}{port_suffix}"
 
@@ -134,6 +134,60 @@ class WorkerState:
         path = self.directory / "gateway-cursors.json"
         temporary = self.directory / ".gateway-cursors.json.tmp"
         temporary.write_text(json.dumps(cursors, separators=(",", ":"), sort_keys=True))
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+
+    def load_e2ee_control_checkpoints(self) -> dict[str, tuple[str, str]]:
+        """Load cursor/state-digest pairs for durable MLS control recovery."""
+
+        if self.directory is None:
+            return {}
+        path = self.directory / "e2ee-control-checkpoints.json"
+        if not path.exists():
+            return {}
+        if path.stat().st_mode & 0o077:
+            raise PermissionError(
+                f"{path} must not be accessible to group or other users"
+            )
+        payload = json.loads(path.read_text())
+        if not isinstance(payload, dict):
+            raise ValueError("E2EE control checkpoint state must be an object")
+        checkpoints: dict[str, tuple[str, str]] = {}
+        for key, value in payload.items():
+            if (
+                not isinstance(key, str)
+                or not 1 <= len(key) <= 2048
+                or not isinstance(value, dict)
+                or set(value) != {"cursor", "state_sha256"}
+                or not isinstance(value.get("cursor"), str)
+                or not isinstance(value.get("state_sha256"), str)
+            ):
+                raise ValueError("E2EE control checkpoint state is invalid")
+            cursor = value["cursor"]
+            digest = value["state_sha256"]
+            EntityRef.parse(cursor)
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError("E2EE control checkpoint digest is invalid")
+            checkpoints[key] = (cursor, digest)
+        return checkpoints
+
+    def save_e2ee_control_checkpoints(
+        self,
+        checkpoints: dict[str, tuple[str, str]],
+    ) -> None:
+        """Atomically persist only successfully applied control cursors."""
+
+        if self.directory is None:
+            return
+        path = self.directory / "e2ee-control-checkpoints.json"
+        temporary = self.directory / ".e2ee-control-checkpoints.json.tmp"
+        payload = {
+            key: {"cursor": cursor, "state_sha256": digest}
+            for key, (cursor, digest) in checkpoints.items()
+        }
+        temporary.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
         os.chmod(temporary, 0o600)
         temporary.replace(path)
 

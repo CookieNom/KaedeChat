@@ -142,7 +142,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       _dismissTrackerOverlay();
     }
     _gatewayRefresh?.cancel();
-    _gatewayRefresh = Timer(const Duration(milliseconds: 180), () {
+    _gatewayRefresh = Timer(Duration(milliseconds: 180), () {
       if (mounted) unawaited(_load(background: true));
     });
   }
@@ -259,7 +259,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
           content: Text(conflict
               ? 'This tracker changed on another client. It has been refreshed; try again.'
               : userFacingError(error, summary: failureSummary)),
-          backgroundColor: KaedeColors.dangerSoft,
+          backgroundColor: context.kaede.dangerSoft,
           action: retry == null
               ? null
               : SnackBarAction(
@@ -370,7 +370,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       await _load(background: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Task saved')),
+          SnackBar(content: Text('Task saved')),
         );
       }
     } on Object catch (error) {
@@ -385,7 +385,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                 : userFacingError(error, summary: 'Could not save the task');
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(message),
-          backgroundColor: KaedeColors.dangerSoft,
+          backgroundColor: context.kaede.dangerSoft,
         ));
       }
     } finally {
@@ -462,7 +462,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         .where((lane) => lane.completed != task.completed)
         .firstOrNull;
     if (target == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
             'Add both an active lane and a completed lane to use this shortcut.'),
       ));
@@ -590,16 +590,16 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         builder: builder,
       ),
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Tracker settings'),
+        title: Text('Tracker settings'),
         content: Form(
           key: formKey,
           child: TextFormField(
-            key: const ValueKey('tracker-prefix-field'),
+            key: ValueKey('tracker-prefix-field'),
             controller: controller,
             autofocus: true,
             maxLength: 10,
             textCapitalization: TextCapitalization.characters,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: 'Task key prefix',
               helperText: '2–10 letters or digits; starts with a letter.',
               prefixIcon: Icon(Icons.tag_rounded),
@@ -613,7 +613,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
+            child: Text('Cancel'),
           ),
           FilledButton(
             onPressed: () {
@@ -622,7 +622,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                     dialogContext, controller.text.trim().toUpperCase());
               }
             },
-            child: const Text('Save'),
+            child: Text('Save'),
           ),
         ],
       ),
@@ -654,11 +654,12 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
+              child: Text('Cancel'),
             ),
             FilledButton(
               style: destructive
-                  ? FilledButton.styleFrom(backgroundColor: KaedeColors.danger)
+                  ? FilledButton.styleFrom(
+                      backgroundColor: context.kaede.danger)
                   : null,
               onPressed: () => Navigator.pop(dialogContext, true),
               child: Text(destructive ? 'Delete' : 'Continue'),
@@ -676,7 +677,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         child: Semantics(
           liveRegion: true,
           label: 'Loading task tracker',
-          child: const CircularProgressIndicator(),
+          child: CircularProgressIndicator(),
         ),
       );
     }
@@ -691,7 +692,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
     final canCreate = board.allows(TrackerPermission.createTasks);
     final canManage = board.allows(TrackerPermission.manageTracker);
     return ColoredBox(
-      color: KaedeColors.canvas,
+      color: context.kaede.canvas,
       child: Column(
         children: [
           _TrackerToolbar(
@@ -711,7 +712,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
             MaterialBanner(
               content: Text(_error!),
               actions: [
-                TextButton(onPressed: _load, child: const Text('Retry')),
+                TextButton(onPressed: _load, child: Text('Retry')),
               ],
             ),
           Expanded(
@@ -719,7 +720,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
               onRefresh: _load,
               child: board.lanes.isEmpty
                   ? ListView(
-                      physics: const AlwaysScrollableScrollPhysics(),
+                      physics: AlwaysScrollableScrollPhysics(),
                       children: [
                         _TrackerEmpty(
                           icon: Icons.view_kanban_outlined,
@@ -736,8 +737,8 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                       key: PageStorageKey<String>(
                         'tracker-${widget.channel.ref.wire}',
                       ),
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 100),
+                      physics: AlwaysScrollableScrollPhysics(),
+                      padding: EdgeInsets.fromLTRB(12, 10, 12, 100),
                       itemCount: board.lanes.length,
                       itemBuilder: (context, index) {
                         final lane = board.lanes[index];
@@ -808,15 +809,15 @@ final class _TrackerToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-        color: KaedeColors.panel,
+        color: context.kaede.panel,
         child: SafeArea(
           bottom: false,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+            padding: EdgeInsets.fromLTRB(16, 10, 8, 10),
             child: Row(
               children: [
-                const Icon(Icons.view_kanban_rounded, color: KaedeColors.coral),
-                const SizedBox(width: 10),
+                Icon(Icons.view_kanban_rounded, color: context.kaede.coral),
+                SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -839,10 +840,10 @@ final class _TrackerToolbar extends StatelessWidget {
                 ),
                 if (canCreate)
                   FilledButton.icon(
-                    key: const ValueKey('tracker-create-task'),
+                    key: ValueKey('tracker-create-task'),
                     onPressed: busy ? null : createTask,
-                    icon: const Icon(Icons.add_task_rounded, size: 19),
-                    label: const Text('Task'),
+                    icon: Icon(Icons.add_task_rounded, size: 19),
+                    label: Text('Task'),
                   ),
                 PopupMenuButton<String>(
                   tooltip: 'Tracker actions',
@@ -853,7 +854,7 @@ final class _TrackerToolbar extends StatelessWidget {
                     _ => refresh(),
                   },
                   itemBuilder: (_) => [
-                    const PopupMenuItem(
+                    PopupMenuItem(
                       value: 'refresh',
                       child: ListTile(
                         dense: true,
@@ -863,7 +864,7 @@ final class _TrackerToolbar extends StatelessWidget {
                       ),
                     ),
                     if (canManage)
-                      const PopupMenuItem(
+                      PopupMenuItem(
                         value: 'lane',
                         child: ListTile(
                           dense: true,
@@ -873,7 +874,7 @@ final class _TrackerToolbar extends StatelessWidget {
                         ),
                       ),
                     if (canManage)
-                      const PopupMenuItem(
+                      PopupMenuItem(
                         value: 'settings',
                         child: ListTile(
                           dense: true,
@@ -944,14 +945,14 @@ final class _TrackerLaneSection extends StatelessWidget {
       label:
           '${lane.name}, ${tasks.length} tasks, ${collapsed ? 'collapsed' : 'expanded'}',
       child: Padding(
-        padding: const EdgeInsets.only(bottom: 14),
+        padding: EdgeInsets.only(bottom: 14),
         child: Column(
           children: [
             Material(
-              color: KaedeColors.panel,
+              color: context.kaede.panel,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                side: const BorderSide(color: KaedeColors.border),
+                side: BorderSide(color: context.kaede.border),
               ),
               clipBehavior: Clip.antiAlias,
               child: InkWell(
@@ -960,7 +961,7 @@ final class _TrackerLaneSection extends StatelessWidget {
                   child: Row(
                     children: [
                       SizedBox(width: 4, child: ColoredBox(color: color)),
-                      const SizedBox(width: 8),
+                      SizedBox(width: 8),
                       SizedBox.square(
                         dimension: 44,
                         child: Icon(
@@ -970,7 +971,7 @@ final class _TrackerLaneSection extends StatelessWidget {
                         ),
                       ),
                       Icon(_laneIcon(lane), color: color, size: 21),
-                      const SizedBox(width: 9),
+                      SizedBox(width: 9),
                       Expanded(
                         child: Text(
                           lane.name,
@@ -983,10 +984,10 @@ final class _TrackerLaneSection extends StatelessWidget {
                         ),
                       ),
                       Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 9, vertical: 4),
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                         decoration: BoxDecoration(
-                          color: KaedeColors.raised,
+                          color: context.kaede.raised,
                           borderRadius:
                               BorderRadius.circular(KaedeRadius.small),
                         ),
@@ -1004,29 +1005,30 @@ final class _TrackerLaneSection extends StatelessWidget {
                             _ => null,
                           },
                           itemBuilder: (_) => [
-                            const PopupMenuItem(
+                            PopupMenuItem(
                                 value: 'edit', child: Text('Edit lane')),
                             PopupMenuItem(
                               value: 'up',
                               enabled: moveLaneUp != null,
-                              child: const Text('Move up'),
+                              child: Text('Move up'),
                             ),
                             PopupMenuItem(
                               value: 'down',
                               enabled: moveLaneDown != null,
-                              child: const Text('Move down'),
+                              child: Text('Move down'),
                             ),
-                            const PopupMenuDivider(),
+                            PopupMenuDivider(),
                             PopupMenuItem(
                               value: 'delete',
                               enabled: canDeleteLane,
-                              child: const Text('Delete lane',
-                                  style: TextStyle(color: KaedeColors.danger)),
+                              child: Text('Delete lane',
+                                  style:
+                                      TextStyle(color: context.kaede.danger)),
                             ),
                           ],
                         )
                       else
-                        const SizedBox(width: 10),
+                        SizedBox(width: 10),
                     ],
                   ),
                 ),
@@ -1035,21 +1037,21 @@ final class _TrackerLaneSection extends StatelessWidget {
             if (!collapsed) ...[
               if (tasks.isEmpty)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 14, 12, 6),
+                  padding: EdgeInsets.fromLTRB(12, 14, 12, 6),
                   child: Row(
                     children: [
-                      const Icon(Icons.inbox_outlined,
-                          size: 18, color: KaedeColors.muted),
-                      const SizedBox(width: 8),
-                      const Expanded(
+                      Icon(Icons.inbox_outlined,
+                          size: 18, color: context.kaede.muted),
+                      SizedBox(width: 8),
+                      Expanded(
                         child: Text('No tasks in this lane.',
-                            style: TextStyle(color: KaedeColors.muted)),
+                            style: TextStyle(color: context.kaede.muted)),
                       ),
                       if (canCreate)
                         TextButton.icon(
                           onPressed: busy ? null : createTask,
-                          icon: const Icon(Icons.add_rounded),
-                          label: const Text('Add task'),
+                          icon: Icon(Icons.add_rounded),
+                          label: Text('Add task'),
                         ),
                     ],
                   ),
@@ -1072,7 +1074,7 @@ final class _TrackerLaneSection extends StatelessWidget {
                   alignment: Alignment.centerLeft,
                   child: TextButton.icon(
                     onPressed: busy ? null : createTask,
-                    icon: const Icon(Icons.add_rounded),
+                    icon: Icon(Icons.add_rounded),
                     label: Text('Add task to ${lane.name}'),
                   ),
                 ),
@@ -1112,7 +1114,7 @@ final class _TrackerTaskRow extends StatelessWidget {
     final due = task.dueAt;
     final overdue =
         !task.completed && due != null && due.isBefore(DateTime.now());
-    final priorityColor = _priorityColor(task.priority);
+    final priorityColor = _priorityColor(context, task.priority);
     final dueLabel = due == null
         ? 'no due date'
         : 'due ${DateFormat.yMMMd().add_jm().format(due.toLocal())}'
@@ -1130,7 +1132,7 @@ final class _TrackerTaskRow extends StatelessWidget {
           onTap: !busy ? open : null,
           borderRadius: BorderRadius.circular(KaedeRadius.small),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 8, 2, 8),
+            padding: EdgeInsets.fromLTRB(10, 8, 2, 8),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1142,7 +1144,7 @@ final class _TrackerTaskRow extends StatelessWidget {
                         ? Icons.check_circle_rounded
                         : _laneIcon(lane),
                     color: task.completed
-                        ? KaedeColors.mint
+                        ? context.kaede.mint
                         : Color(0xFF000000 | lane.color),
                     size: 20,
                   ),
@@ -1150,7 +1152,7 @@ final class _TrackerTaskRow extends StatelessWidget {
                 SizedBox(
                   width: 62,
                   child: Padding(
-                    padding: const EdgeInsets.only(top: 14),
+                    padding: EdgeInsets.only(top: 14),
                     child: Text(
                       task.key,
                       maxLines: 1,
@@ -1161,7 +1163,7 @@ final class _TrackerTaskRow extends StatelessWidget {
                 ),
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.only(top: 10),
+                    padding: EdgeInsets.only(top: 10),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1174,13 +1176,13 @@ final class _TrackerTaskRow extends StatelessWidget {
                                 ? TextDecoration.lineThrough
                                 : null,
                             color: task.completed
-                                ? KaedeColors.muted
-                                : KaedeColors.text,
+                                ? context.kaede.muted
+                                : context.kaede.text,
                           ),
                         ),
                         if (task.priority != TrackerPriority.none ||
                             due != null) ...[
-                          const SizedBox(height: 5),
+                          SizedBox(height: 5),
                           Wrap(
                             spacing: 7,
                             runSpacing: 5,
@@ -1196,8 +1198,8 @@ final class _TrackerTaskRow extends StatelessWidget {
                                   label:
                                       DateFormat.MMMd().format(due.toLocal()),
                                   color: overdue
-                                      ? KaedeColors.danger
-                                      : KaedeColors.muted,
+                                      ? context.kaede.danger
+                                      : context.kaede.muted,
                                 ),
                             ],
                           ),
@@ -1206,7 +1208,7 @@ final class _TrackerTaskRow extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 6),
+                SizedBox(width: 6),
                 _AssigneeAvatar(user: task.assignee),
                 if (canEdit)
                   PopupMenuButton<String>(
@@ -1220,25 +1222,24 @@ final class _TrackerTaskRow extends StatelessWidget {
                       _ => null,
                     },
                     itemBuilder: (_) => [
-                      const PopupMenuItem(
-                          value: 'edit', child: Text('Edit task')),
-                      const PopupMenuItem(
+                      PopupMenuItem(value: 'edit', child: Text('Edit task')),
+                      PopupMenuItem(
                           value: 'move', child: Text('Move or reorder')),
                       PopupMenuItem(
                         value: 'toggle',
                         child: Text(
                             task.completed ? 'Reopen task' : 'Mark complete'),
                       ),
-                      const PopupMenuDivider(),
-                      const PopupMenuItem(
+                      PopupMenuDivider(),
+                      PopupMenuItem(
                         value: 'delete',
                         child: Text('Delete task',
-                            style: TextStyle(color: KaedeColors.danger)),
+                            style: TextStyle(color: context.kaede.danger)),
                       ),
                     ],
                   )
                 else
-                  const SizedBox(width: 12),
+                  SizedBox(width: 12),
               ],
             ),
           ),
@@ -1257,7 +1258,7 @@ final class _MetaChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        padding: EdgeInsets.symmetric(horizontal: 7, vertical: 3),
         decoration: BoxDecoration(
           color: color.withValues(alpha: .14),
           borderRadius: BorderRadius.circular(KaedeRadius.pill),
@@ -1267,7 +1268,7 @@ final class _MetaChip extends StatelessWidget {
           children: [
             if (icon != null) ...[
               Icon(icon, size: 12, color: color),
-              const SizedBox(width: 4),
+              SizedBox(width: 4),
             ],
             Text(
               label,
@@ -1290,10 +1291,10 @@ final class _AssigneeAvatar extends StatelessWidget {
     return Tooltip(
       message: user == null ? 'Unassigned' : 'Assigned to $name',
       child: user == null
-          ? const CircleAvatar(
+          ? CircleAvatar(
               radius: 15,
-              backgroundColor: KaedeColors.raised,
-              foregroundColor: KaedeColors.muted,
+              backgroundColor: context.kaede.raised,
+              foregroundColor: context.kaede.muted,
               child: Icon(Icons.person_outline_rounded, size: 16),
             )
           : UserAvatar(user: user!, radius: 15),
@@ -1302,7 +1303,7 @@ final class _AssigneeAvatar extends StatelessWidget {
 }
 
 final class TrackerTaskDraft {
-  const TrackerTaskDraft({
+  TrackerTaskDraft({
     required this.lane,
     required this.title,
     required this.priority,
@@ -1322,7 +1323,7 @@ final class TrackerTaskDraft {
 }
 
 final class TrackerTaskMoveDraft {
-  const TrackerTaskMoveDraft({required this.lane, required this.position});
+  TrackerTaskMoveDraft({required this.lane, required this.position});
 
   final EntityRef lane;
   final int position;
@@ -1354,7 +1355,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 8, 12),
+              padding: EdgeInsets.fromLTRB(20, 0, 8, 12),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1364,7 +1365,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                       children: [
                         Text(task.key,
                             style: Theme.of(context).textTheme.labelLarge),
-                        const SizedBox(height: 4),
+                        SizedBox(height: 4),
                         Text(task.title,
                             style: Theme.of(context).textTheme.headlineSmall),
                       ],
@@ -1373,32 +1374,32 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                   IconButton(
                     tooltip: 'Close task details',
                     onPressed: () => Navigator.pop(context, false),
-                    icon: const Icon(Icons.close_rounded),
+                    icon: Icon(Icons.close_rounded),
                   ),
                 ],
               ),
             ),
-            const Divider(height: 1),
+            Divider(height: 1),
             Flexible(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+                padding: EdgeInsets.fromLTRB(20, 18, 20, 12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Text('Description',
                         style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 7),
+                    SizedBox(height: 7),
                     SelectableText(
                       description?.isNotEmpty == true
                           ? description!
                           : 'No description provided.',
                       style: TextStyle(
                         color: description?.isNotEmpty == true
-                            ? KaedeColors.text
-                            : KaedeColors.muted,
+                            ? context.kaede.text
+                            : context.kaede.muted,
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    SizedBox(height: 20),
                     _TaskDetailRow(
                       icon: _laneIcon(lane),
                       label: 'Lane',
@@ -1409,7 +1410,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                       icon: Icons.flag_outlined,
                       label: 'Priority',
                       value: trackerPriorityLabel(task.priority),
-                      color: _priorityColor(task.priority),
+                      color: _priorityColor(context, task.priority),
                     ),
                     _TaskDetailRow(
                       icon: Icons.event_outlined,
@@ -1434,12 +1435,12 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
             ),
             if (canEdit)
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+                padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
                 child: FilledButton.icon(
-                  key: const ValueKey('tracker-task-details-edit'),
+                  key: ValueKey('tracker-task-details-edit'),
                   onPressed: () => Navigator.pop(context, true),
-                  icon: const Icon(Icons.edit_outlined),
-                  label: const Text('Edit task'),
+                  icon: Icon(Icons.edit_outlined),
+                  label: Text('Edit task'),
                 ),
               ),
           ],
@@ -1454,26 +1455,25 @@ final class _TaskDetailRow extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.value,
-    this.color = KaedeColors.muted,
+    this.color,
   });
 
   final IconData icon;
   final String label;
   final String value;
-  final Color color;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
+        padding: EdgeInsets.only(bottom: 12),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, size: 20, color: color),
-            const SizedBox(width: 12),
+            Icon(icon, size: 20, color: color ?? context.kaede.muted),
+            SizedBox(width: 12),
             SizedBox(
               width: 82,
-              child:
-                  Text(label, style: const TextStyle(color: KaedeColors.muted)),
+              child: Text(label, style: TextStyle(color: context.kaede.muted)),
             ),
             Expanded(child: Text(value)),
           ],
@@ -1546,15 +1546,15 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
                 IconButton(
                   tooltip: 'Close',
                   onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close_rounded),
+                  icon: Icon(Icons.close_rounded),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             DropdownButtonFormField<EntityRef>(
-              key: const ValueKey('tracker-task-move-lane'),
+              key: ValueKey('tracker-task-move-lane'),
               initialValue: _lane,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Lane',
                 prefixIcon: Icon(Icons.view_week_outlined),
               ),
@@ -1570,11 +1570,11 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
                 });
               },
             ),
-            const SizedBox(height: 14),
+            SizedBox(height: 14),
             DropdownButtonFormField<int>(
               key: ValueKey('tracker-task-move-position-${_lane.wire}'),
               initialValue: _position,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Position',
                 prefixIcon: Icon(Icons.vertical_align_center_rounded),
               ),
@@ -1591,9 +1591,9 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
                 if (position != null) setState(() => _position = position);
               },
             ),
-            const SizedBox(height: 18),
+            SizedBox(height: 18),
             FilledButton.icon(
-              key: const ValueKey('tracker-task-move-submit'),
+              key: ValueKey('tracker-task-move-submit'),
               onPressed: unchanged
                   ? null
                   : () => Navigator.pop(
@@ -1603,8 +1603,8 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
                           position: _position,
                         ),
                       ),
-              icon: const Icon(Icons.drive_file_move_outline),
-              label: const Text('Move task'),
+              icon: Icon(Icons.drive_file_move_outline),
+              label: Text('Move task'),
             ),
           ],
         ),
@@ -1656,7 +1656,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
     _assignee = widget.task?.assignee?.ref;
     // Keep one idempotency key for the whole editor lifecycle. If a caller
     // retries after a lost response, the server returns the original task.
-    _clientNonce = const Uuid().v4();
+    _clientNonce = Uuid().v4();
   }
 
   @override
@@ -1723,7 +1723,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
         widget.task?.assignee == null ||
         widget.task?.assignee?.ref == widget.actor?.ref;
     return AnimatedPadding(
-      duration: const Duration(milliseconds: 180),
+      duration: Duration(milliseconds: 180),
       padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: media.size.height * .9),
@@ -1733,7 +1733,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 12, 12),
+                padding: EdgeInsets.fromLTRB(20, 0, 12, 12),
                 child: Row(
                   children: [
                     Expanded(
@@ -1747,26 +1747,26 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                     IconButton(
                       tooltip: 'Close',
                       onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close_rounded),
+                      icon: Icon(Icons.close_rounded),
                     ),
                   ],
                 ),
               ),
-              const Divider(height: 1),
+              Divider(height: 1),
               Flexible(
                 child: SingleChildScrollView(
                   keyboardDismissBehavior:
                       ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
+                  padding: EdgeInsets.fromLTRB(20, 18, 20, 14),
                   child: Column(
                     children: [
                       TextFormField(
-                        key: const ValueKey('tracker-task-title'),
+                        key: ValueKey('tracker-task-title'),
                         controller: _title,
                         autofocus: widget.task == null,
                         maxLength: 200,
                         textCapitalization: TextCapitalization.sentences,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Title',
                           prefixIcon: Icon(Icons.task_alt_rounded),
                         ),
@@ -1774,23 +1774,23 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                             ? 'Enter a task title'
                             : null,
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: 10),
                       TextFormField(
                         controller: _description,
                         minLines: 3,
                         maxLines: 7,
                         maxLength: 10000,
                         textCapitalization: TextCapitalization.sentences,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Description (optional)',
                           alignLabelWithHint: true,
                         ),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: 10),
                       DropdownButtonFormField<EntityRef>(
-                        key: const ValueKey('tracker-task-lane'),
+                        key: ValueKey('tracker-task-lane'),
                         initialValue: _lane,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Lane',
                           prefixIcon: Icon(Icons.view_week_outlined),
                         ),
@@ -1802,10 +1802,10 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         onChanged: (value) =>
                             setState(() => _lane = value ?? _lane),
                       ),
-                      const SizedBox(height: 14),
+                      SizedBox(height: 14),
                       DropdownButtonFormField<TrackerPriority>(
                         initialValue: _priority,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Priority',
                           prefixIcon: Icon(Icons.flag_outlined),
                         ),
@@ -1819,19 +1819,19 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         onChanged: (value) =>
                             setState(() => _priority = value ?? _priority),
                       ),
-                      const SizedBox(height: 14),
+                      SizedBox(height: 14),
                       DropdownButtonFormField<String>(
-                        key: const ValueKey('tracker-task-assignee'),
+                        key: ValueKey('tracker-task-assignee'),
                         initialValue: _assignee?.wire ?? '',
                         decoration: InputDecoration(
                           labelText: 'Assignee',
                           helperText: assigneeEditable
                               ? 'One member can own a task.'
                               : 'You do not have permission to reassign this task.',
-                          prefixIcon: const Icon(Icons.person_outline_rounded),
+                          prefixIcon: Icon(Icons.person_outline_rounded),
                         ),
                         items: [
-                          const DropdownMenuItem(
+                          DropdownMenuItem(
                               value: '', child: Text('Unassigned')),
                           for (final user in users)
                             DropdownMenuItem(
@@ -1845,14 +1845,14 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                                       : null;
                                 }),
                       ),
-                      const SizedBox(height: 14),
+                      SizedBox(height: 14),
                       ListTile(
                         contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.event_outlined),
+                        leading: Icon(Icons.event_outlined),
                         title: Text(_dueAt == null
                             ? 'No due date'
                             : DateFormat.yMMMd().format(_dueAt!.toLocal())),
-                        subtitle: const Text('Due at 5:00 PM local time'),
+                        subtitle: Text('Due at 5:00 PM local time'),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -1860,14 +1860,14 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                               IconButton(
                                 tooltip: 'Clear due date',
                                 onPressed: () => setState(() => _dueAt = null),
-                                icon: const Icon(Icons.clear_rounded),
+                                icon: Icon(Icons.clear_rounded),
                               ),
                             IconButton(
                               tooltip: _dueAt == null
                                   ? 'Set due date'
                                   : 'Change due date',
                               onPressed: _pickDate,
-                              icon: const Icon(Icons.edit_calendar_outlined),
+                              icon: Icon(Icons.edit_calendar_outlined),
                             ),
                           ],
                         ),
@@ -1877,11 +1877,11 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+                padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
                 child: SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
-                    key: const ValueKey('tracker-task-save'),
+                    key: ValueKey('tracker-task-save'),
                     onPressed: _save,
                     icon: Icon(widget.task == null
                         ? Icons.add_rounded
@@ -1900,7 +1900,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
 }
 
 final class TrackerLaneDraft {
-  const TrackerLaneDraft({
+  TrackerLaneDraft({
     required this.name,
     required this.color,
     required this.kind,
@@ -1974,7 +1974,7 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
         child: Form(
           key: _formKey,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 18),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
@@ -1983,13 +1983,13 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   widget.lane == null ? 'Create lane' : 'Edit lane',
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
-                const SizedBox(height: 18),
+                SizedBox(height: 18),
                 TextFormField(
-                  key: const ValueKey('tracker-lane-name'),
+                  key: ValueKey('tracker-lane-name'),
                   controller: _name,
                   autofocus: widget.lane == null,
                   maxLength: 100,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Lane name',
                     prefixIcon: Icon(Icons.view_week_outlined),
                   ),
@@ -1997,10 +1997,10 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                       ? 'Enter a lane name'
                       : null,
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: 10),
                 DropdownButtonFormField<TrackerLaneKind>(
                   initialValue: _kind,
-                  decoration: const InputDecoration(labelText: 'Lane type'),
+                  decoration: InputDecoration(labelText: 'Lane type'),
                   items: [
                     for (final kind in TrackerLaneKind.values)
                       DropdownMenuItem(
@@ -2008,9 +2008,9 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   ],
                   onChanged: (value) => setState(() => _kind = value ?? _kind),
                 ),
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
                 Text('Color', style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 Wrap(
                   spacing: 10,
                   runSpacing: 10,
@@ -2032,33 +2032,39 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                               color: Color(0xFF000000 | color),
                               border: Border.all(
                                 color: _color == color
-                                    ? Colors.white
+                                    ? readableForeground(
+                                        Color(0xFF000000 | color),
+                                      )
                                     : Colors.transparent,
                                 width: 3,
                               ),
                             ),
                             child: _color == color
-                                ? const Icon(Icons.check_rounded,
-                                    color: Colors.black)
+                                ? Icon(
+                                    Icons.check_rounded,
+                                    color: readableForeground(
+                                      Color(0xFF000000 | color),
+                                    ),
+                                  )
                                 : null,
                           ),
                         ),
                       ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   value: _completed,
                   onChanged: (value) => setState(() => _completed = value),
-                  title: const Text('Completed lane'),
-                  subtitle: const Text(
+                  title: Text('Completed lane'),
+                  subtitle: Text(
                     'Tasks moved here are marked complete automatically.',
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: 10),
                 FilledButton.icon(
-                  key: const ValueKey('tracker-lane-save'),
+                  key: ValueKey('tracker-lane-save'),
                   onPressed: _save,
                   icon: Icon(widget.lane == null
                       ? Icons.add_rounded
@@ -2090,21 +2096,21 @@ final class _TrackerEmpty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(28, 100, 28, 32),
+        padding: EdgeInsets.fromLTRB(28, 100, 28, 32),
         child: Column(
           children: [
-            Icon(icon, size: 48, color: KaedeColors.muted),
-            const SizedBox(height: 14),
+            Icon(icon, size: 48, color: context.kaede.muted),
+            SizedBox(height: 14),
             Text(title, style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 6),
+            SizedBox(height: 6),
             Text(message,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: KaedeColors.muted)),
+                style: TextStyle(color: context.kaede.muted)),
             if (action != null) ...[
-              const SizedBox(height: 18),
+              SizedBox(height: 18),
               FilledButton.icon(
                 onPressed: action,
-                icon: const Icon(Icons.add_rounded),
+                icon: Icon(Icons.add_rounded),
                 label: Text(actionLabel ?? 'Create'),
               ),
             ],
@@ -2122,19 +2128,19 @@ final class _TrackerFailure extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
-          padding: const EdgeInsets.all(28),
+          padding: EdgeInsets.all(28),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.sync_problem_rounded,
-                  size: 46, color: KaedeColors.danger),
-              const SizedBox(height: 12),
+              Icon(Icons.sync_problem_rounded,
+                  size: 46, color: context.kaede.danger),
+              SizedBox(height: 12),
               Text(message, textAlign: TextAlign.center),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               FilledButton.icon(
                 onPressed: () => retry(),
-                icon: const Icon(Icons.refresh_rounded),
-                label: const Text('Try again'),
+                icon: Icon(Icons.refresh_rounded),
+                label: Text('Try again'),
               ),
             ],
           ),
@@ -2160,10 +2166,11 @@ String _laneKindLabel(TrackerLaneKind kind) => switch (kind) {
       TrackerLaneKind.custom => 'Custom',
     };
 
-Color _priorityColor(TrackerPriority priority) => switch (priority) {
-      TrackerPriority.none => KaedeColors.muted,
-      TrackerPriority.low => KaedeColors.mint,
-      TrackerPriority.medium => KaedeColors.warning,
-      TrackerPriority.high => KaedeColors.coralText,
-      TrackerPriority.urgent => KaedeColors.danger,
+Color _priorityColor(BuildContext context, TrackerPriority priority) =>
+    switch (priority) {
+      TrackerPriority.none => context.kaede.muted,
+      TrackerPriority.low => context.kaede.mint,
+      TrackerPriority.medium => context.kaede.warning,
+      TrackerPriority.high => context.kaede.coralText,
+      TrackerPriority.urgent => context.kaede.danger,
     };

@@ -44,6 +44,36 @@ def test_settings_normalize_domain_and_hide_secrets() -> None:
     assert VALID_KEY not in repr(configured)
 
 
+def test_voice_region_catalog_is_typed_and_unambiguous() -> None:
+    configured = settings(
+        voice_regions=[
+            {
+                "id": "edge-eu-1",
+                "name": "  Europe Edge  ",
+                "optimal": True,
+                "deprecated": False,
+                "custom": True,
+            }
+        ]
+    )
+    assert configured.voice_regions[0].id == "edge-eu-1"
+    assert configured.voice_regions[0].name == "Europe Edge"
+    with pytest.raises(ValidationError, match="unique"):
+        settings(
+            voice_regions=[
+                {"id": "edge", "name": "Edge"},
+                {"id": "EDGE", "name": "Duplicate"},
+            ]
+        )
+    with pytest.raises(ValidationError, match="at most one"):
+        settings(
+            voice_regions=[
+                {"id": "one", "name": "One", "optimal": True},
+                {"id": "two", "name": "Two", "optimal": True},
+            ]
+        )
+
+
 @pytest.mark.asyncio
 async def test_mobile_link_associations_are_configuration_backed() -> None:
     configured = settings(
@@ -58,6 +88,11 @@ async def test_mobile_link_associations_are_configuration_backed() -> None:
         "sha256_cert_fingerprints": ["AA:BB", "CC:DD"],
     }
     assert apple["applinks"]["details"][0]["appIDs"] == ["TEAM.chat.kaede.mobile"]
+    assert {component["/"] for component in apple["applinks"]["details"][0]["components"]} >= {
+        "/applications/*",
+        "/g/*",
+        "/home/*",
+    }
 
 
 @pytest.mark.asyncio
@@ -442,8 +477,25 @@ def test_unknown_kaede_environment_setting_is_rejected(monkeypatch: pytest.Monke
         settings()
 
 
-def test_deployment_only_voice_switch_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KAEDE_VOICE_ENABLED", "false")
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("KAEDE_VOICE_ENABLED", "false"),
+        ("KAEDE_LANDING_PAGE", "custom"),
+        ("KAEDE_LEGAL_INSTANCE_NAME", "Kaede Test"),
+        ("KAEDE_LEGAL_OPERATOR_NAME", "Test Operator"),
+        ("KAEDE_LEGAL_CONTACT_EMAIL", "operator@chat.test"),
+        ("KAEDE_LEGAL_EFFECTIVE_DATE", "2026-08-29"),
+        ("KAEDE_LEGAL_MINIMUM_AGE", "16"),
+        ("KAEDE_LEGAL_JURISDICTION", "Test Jurisdiction"),
+    ],
+)
+def test_deployment_only_setting_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
     assert settings().environment == "test"
 
 

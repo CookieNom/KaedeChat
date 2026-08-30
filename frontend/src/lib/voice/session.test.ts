@@ -1,4 +1,4 @@
-import type { Room } from 'livekit-client';
+import { Track, type Room } from 'livekit-client';
 import { describe, expect, it, vi } from 'vitest';
 import type { Channel } from '$lib/chat/types';
 
@@ -29,7 +29,12 @@ class FakeVoiceRoom {
   readonly disconnect = vi.fn(async () => undefined);
   readonly on = vi.fn(() => this);
   readonly localParticipant = {
-    setMicrophoneEnabled: vi.fn(async () => undefined)
+    setMicrophoneEnabled: vi.fn(async () => undefined),
+    setCameraEnabled: vi.fn(async () => undefined),
+    setScreenShareEnabled: vi.fn(async () => undefined),
+    getTrackPublication: vi.fn(() => undefined as unknown),
+    unpublishTrack: vi.fn(async () => undefined),
+    publishTrack: vi.fn(async () => undefined)
   };
 
   constructor(connect: () => Promise<void> = async () => undefined) {
@@ -116,6 +121,60 @@ describe('voice connection generation fence', () => {
   });
 });
 
+describe('self voice-state publication', () => {
+  it('keeps a local mute when the authoritative update fails', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const publish = vi.fn(async () => {
+      throw new Error('gateway offline');
+    });
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room, publish);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+
+    await expect(voice.toggleMicrophone()).rejects.toThrow('gateway offline');
+
+    expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
+    expect(voice.microphone).toBe(false);
+    expect(publish).toHaveBeenCalledWith({ self_mute: true, self_deaf: false });
+  });
+
+  it('does not open capture when an authoritative unmute cannot be sent', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const publish = vi
+      .fn<() => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('gateway offline'));
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room, publish);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+    await voice.toggleMicrophone();
+    candidate.localParticipant.setMicrophoneEnabled.mockClear();
+
+    await expect(voice.toggleMicrophone()).rejects.toThrow('gateway offline');
+
+    expect(candidate.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(voice.microphone).toBe(false);
+  });
+
+  it('publishes deafen with the implied mute and keeps mute after undeafening', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const publish = vi.fn(async () => undefined);
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room, publish);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+
+    await voice.toggleDeafen();
+    expect(voice.deafened).toBe(true);
+    expect(voice.microphone).toBe(false);
+    expect(publish).toHaveBeenLastCalledWith({ self_mute: true, self_deaf: true });
+
+    await voice.toggleDeafen();
+    expect(voice.deafened).toBe(false);
+    expect(voice.microphone).toBe(false);
+    expect(publish).toHaveBeenLastCalledWith({ self_mute: true, self_deaf: false });
+  });
+});
+
 function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
   return {
     token: 'a'.repeat(64),
@@ -127,6 +186,10 @@ function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
     can_speak: true,
     can_stream: true,
     can_use_vad: true,
+    bitrate: 64_000,
+    user_limit: 0,
+    rtc_region: null,
+    video_quality_mode: 1,
     e2ee: false,
     channel_id: '2',
     channel_domain: 'chat.example',
@@ -152,6 +215,19 @@ describe('voice grant validation', () => {
       false
     );
     expect(isUsableVoiceToken(grant({ channel_id: null }), 0)).toBe(false);
+  });
+
+  it('requires a complete and bounded effective media policy', () => {
+    expect(isUsableVoiceToken(grant({ bitrate: 7_999 }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ bitrate: 384_001 }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ user_limit: 100 }), 0)).toBe(true);
+    expect(isUsableVoiceToken(grant({ user_limit: 10_001 }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ rtc_region: '' }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ rtc_region: 'x'.repeat(65) }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ video_quality_mode: 3 as 1 }), 0)).toBe(false);
+    expect(isUsableVoiceToken({ ...grant(), bitrate: undefined } as unknown as VoiceToken, 0)).toBe(
+      false
+    );
   });
 
   it('requires a complete, internally consistent encrypted media context', () => {
@@ -268,5 +344,117 @@ describe('voice media key rotation', () => {
     expect(
       voiceGrantMatchesExpectedPolicy({ ...current, media_session_id: 'b'.repeat(43) }, expected)
     ).toBe(false);
+  });
+
+  it('binds every effective channel policy field and preserves opaque regions', () => {
+    const configuredChannel = {
+      ...plaintextChannel,
+      bitrate: 32_000,
+      user_limit: 17,
+      rtc_region: 'future-region/alpha',
+      video_quality_mode: 2 as const
+    } satisfies VoiceChannelPolicy;
+    const configured = grant({
+      bitrate: 32_000,
+      user_limit: 17,
+      rtc_region: 'future-region/alpha',
+      video_quality_mode: 2,
+      expires_at: '2099-07-19T12:15:00Z'
+    });
+
+    expect(voiceGrantMatchesChannelPolicy(configured, configuredChannel)).toBe(true);
+    expect(
+      voiceGrantMatchesChannelPolicy({ ...configured, bitrate: 48_000 }, configuredChannel)
+    ).toBe(false);
+    expect(
+      voiceGrantMatchesChannelPolicy({ ...configured, user_limit: 18 }, configuredChannel)
+    ).toBe(false);
+    expect(
+      voiceGrantMatchesChannelPolicy({ ...configured, rtc_region: 'other' }, configuredChannel)
+    ).toBe(false);
+    expect(
+      voiceGrantMatchesChannelPolicy({ ...configured, video_quality_mode: 1 }, configuredChannel)
+    ).toBe(false);
+
+    const expected = expectedVoicePolicy(configured, configuredChannel);
+    expect(expected).toMatchObject({
+      bitrate: 32_000,
+      user_limit: 17,
+      rtc_region: 'future-region/alpha',
+      video_quality_mode: 2
+    });
+    expect(voiceGrantMatchesExpectedPolicy(configured, expected)).toBe(true);
+    expect(voiceGrantMatchesExpectedPolicy({ ...configured, bitrate: 24_000 }, expected)).toBe(
+      false
+    );
+  });
+
+  it('uses the grant bitrate and video mode for browser publication defaults', async () => {
+    const configuredChannel = {
+      ...plaintextChannel,
+      bitrate: 32_000,
+      video_quality_mode: 2 as const
+    } satisfies VoiceChannelPolicy;
+    const options: Array<ConstructorParameters<typeof Room>[0]> = [];
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession((roomOptions) => {
+      options.push(roomOptions);
+      return rooms.shift() as unknown as Room;
+    });
+
+    await voice.connect(
+      grant({
+        bitrate: 32_000,
+        video_quality_mode: 2,
+        expires_at: '2099-07-19T12:15:00Z'
+      }),
+      configuredChannel
+    );
+
+    expect(options[1]?.publishDefaults).toMatchObject({
+      audioPreset: { maxBitrate: 32_000 },
+      videoEncoding: { maxBitrate: 1_700_000 }
+    });
+    expect(options[1]?.videoCaptureDefaults?.resolution).toMatchObject({
+      width: 1280,
+      height: 720
+    });
+    expect(voice.voiceMediaPolicy).toEqual({
+      bitrate: 32_000,
+      user_limit: 0,
+      rtc_region: null,
+      video_quality_mode: 2
+    });
+
+    const microphone = {
+      isMuted: false,
+      mute: vi.fn(async () => undefined)
+    };
+    candidate.localParticipant.getTrackPublication.mockReturnValue({
+      track: microphone,
+      options: { audioPreset: { maxBitrate: 32_000 } }
+    });
+    await voice.startScreenShare({
+      screenProfile: 'sharp',
+      audioQuality: 'studio',
+      shareAudio: true
+    });
+
+    expect(candidate.localParticipant.getTrackPublication).toHaveBeenCalledWith(
+      Track.Source.Microphone
+    );
+    expect(candidate.localParticipant.publishTrack).toHaveBeenCalledWith(
+      microphone,
+      expect.objectContaining({ audioPreset: { maxBitrate: 32_000 } })
+    );
+    expect(candidate.localParticipant.setScreenShareEnabled).toHaveBeenCalledWith(
+      true,
+      expect.any(Object),
+      expect.objectContaining({
+        audioPreset: { maxBitrate: 128_000 },
+        screenShareEncoding: { maxBitrate: 4_500_000, maxFramerate: 30 }
+      })
+    );
   });
 });

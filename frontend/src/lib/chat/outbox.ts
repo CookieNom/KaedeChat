@@ -1,4 +1,6 @@
 import type { EncryptedFileManifest } from '$lib/e2ee/media';
+import type { EncryptedAllowedMentions } from '$lib/e2ee/client';
+import type { StickerItem } from './types';
 
 export interface PendingMessageSend {
   clientNonce: string;
@@ -7,6 +9,11 @@ export interface PendingMessageSend {
   mentionUserIds: string[];
   referencedMessageId: string | null;
   encryptedAttachments: EncryptedFileManifest[];
+  tts: boolean;
+  stickerIds: string[];
+  stickerItems: StickerItem[];
+  encryptedAllowedMentions: EncryptedAllowedMentions | null;
+  repliedUserRef: string | null;
 }
 
 export function pendingMessageSend(
@@ -15,7 +22,12 @@ export function pendingMessageSend(
   mentionUserIds: readonly string[],
   clientNonce: string = crypto.randomUUID(),
   referencedMessageId: string | null = null,
-  encryptedAttachments: readonly EncryptedFileManifest[] = []
+  encryptedAttachments: readonly EncryptedFileManifest[] = [],
+  tts = false,
+  stickerIds: readonly string[] = [],
+  stickerItems: readonly StickerItem[] = [],
+  encryptedAllowedMentions: EncryptedAllowedMentions | null = null,
+  repliedUserRef: string | null = null
 ): PendingMessageSend {
   return {
     clientNonce,
@@ -23,7 +35,12 @@ export function pendingMessageSend(
     attachmentIds: [...attachmentIds],
     mentionUserIds: [...mentionUserIds],
     referencedMessageId,
-    encryptedAttachments: [...encryptedAttachments]
+    encryptedAttachments: [...encryptedAttachments],
+    tts,
+    stickerIds: [...stickerIds],
+    stickerItems: [...stickerItems],
+    encryptedAllowedMentions,
+    repliedUserRef
   };
 }
 

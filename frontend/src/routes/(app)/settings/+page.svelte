@@ -9,6 +9,7 @@
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
   import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
   import E2EESettings from '$lib/components/E2EESettings.svelte';
+  import UserApplicationInstallations from '$lib/components/UserApplicationInstallations.svelte';
   import { clearActiveE2EEState } from '$lib/e2ee/client';
   import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
   import { assetUrl } from '$lib/media/assets';
@@ -18,8 +19,15 @@
     browserNotificationsFromSettings
   } from '$lib/notifications/browser.svelte';
   import { developerMode, developerModeFromSettings } from '$lib/ui/developer-mode.svelte';
+  import {
+    applyTtsPreferences,
+    ttsPreferencesFromSettings,
+    type TtsPlaybackMode,
+    type TtsPreferences
+  } from '$lib/chat/tts';
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { onMount } from 'svelte';
 
   interface UserProfile extends UserSummary {
@@ -29,12 +37,14 @@
     email: string | null;
     email_verified: boolean;
     mfa_enabled: boolean;
+    age_assurance_state: 'unknown' | 'adult' | 'minor';
   }
 
   interface UserSettings {
     locale: string;
     theme: ThemePreference;
     dm_privacy: 'everyone' | 'shared_guild' | 'friends';
+    age_restricted_dm_commands_enabled: boolean;
     notification_settings: Record<string, unknown>;
   }
 
@@ -48,6 +58,7 @@
     locale: 'en-US',
     theme: 'system',
     dm_privacy: 'shared_guild',
+    age_restricted_dm_commands_enabled: false,
     notification_settings: {}
   });
   let emailEnabled = $state<boolean | null>(null);
@@ -67,6 +78,9 @@
   let developerModeDraft = $state(false);
   let browserNotificationsDraft = $state(false);
   let testingNotification = $state(false);
+  let ttsEnabledDraft = $state(false);
+  let ttsPlaybackDraft = $state<TtsPlaybackMode>('never');
+  let ttsRateDraft = $state(1);
 
   let nextEmail = $state('');
   let emailPassword = $state('');
@@ -103,6 +117,11 @@
           loadedSettings.notification_settings
         );
         browserNotifications.apply(loadedSettings.notification_settings);
+        const tts = ttsPreferencesFromSettings(loadedSettings.notification_settings);
+        ttsEnabledDraft = tts.enabled;
+        ttsPlaybackDraft = tts.playback;
+        ttsRateDraft = tts.rate;
+        applyTtsPreferences(tts);
         savedTheme = loadedSettings.theme;
         emailEnabled = authConfiguration.password_recovery_enabled;
         loaded = true;
@@ -173,7 +192,8 @@
         body: JSON.stringify({
           locale: settings.locale,
           theme: settings.theme,
-          dm_privacy: settings.dm_privacy
+          dm_privacy: settings.dm_privacy,
+          age_restricted_dm_commands_enabled: settings.age_restricted_dm_commands_enabled
         })
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
@@ -380,6 +400,53 @@
     }
   }
 
+  async function changeTtsPreferences(patch: Partial<TtsPreferences>) {
+    const controller = routeController;
+    if (busy || !loaded || !controller) return;
+    const generation = lifecycle;
+    const previous = ttsPreferencesFromSettings(settings.notification_settings);
+    const next: TtsPreferences = {
+      enabled: patch.enabled ?? ttsEnabledDraft,
+      playback: patch.playback ?? ttsPlaybackDraft,
+      rate: patch.rate ?? ttsRateDraft
+    };
+    ttsEnabledDraft = next.enabled;
+    ttsPlaybackDraft = next.playback;
+    ttsRateDraft = next.rate;
+    beginAction();
+    try {
+      const updated = await api<UserSettings>('/users/@me/settings', {
+        method: 'PATCH',
+        signal: controller.signal,
+        body: JSON.stringify({
+          notification_settings: {
+            ...settings.notification_settings,
+            tts_enabled: next.enabled,
+            tts_playback: next.playback,
+            tts_rate: next.rate
+          }
+        })
+      });
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      settings = updated;
+      const saved = ttsPreferencesFromSettings(updated.notification_settings);
+      ttsEnabledDraft = saved.enabled;
+      ttsPlaybackDraft = saved.playback;
+      ttsRateDraft = saved.rate;
+      applyTtsPreferences(saved);
+      notice = 'Text-to-Speech preferences updated.';
+    } catch (caught) {
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      ttsEnabledDraft = previous.enabled;
+      ttsPlaybackDraft = previous.playback;
+      ttsRateDraft = previous.rate;
+      applyTtsPreferences(previous);
+      actionError(caught, 'Could not update Text-to-Speech preferences.');
+    } finally {
+      if (generation === lifecycle) busy = false;
+    }
+  }
+
   async function requestEmailChange() {
     const controller = routeController;
     if (busy || !loaded || !controller || !nextEmail.trim() || !emailPassword) return;
@@ -583,6 +650,30 @@
       }
     }
   }
+
+  async function removeAsset(kind: 'avatar' | 'banner') {
+    const controller = routeController;
+    if (busy || !loaded || !controller) return;
+    const label = kind === 'avatar' ? 'avatar' : 'banner';
+    if (!window.confirm(`Remove your ${label}? You can upload a new one at any time.`)) return;
+    const generation = lifecycle;
+    beginAction();
+    try {
+      const updated = await api<UserProfile>(`/users/@me/assets/${kind}`, {
+        method: 'DELETE',
+        signal: controller.signal
+      });
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      profile = updated;
+      chatEntities.applyUserProfile(updated);
+      notice = `${kind === 'avatar' ? 'Avatar' : 'Banner'} removed.`;
+    } catch (caught) {
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      actionError(caught, `Could not remove your ${label}.`);
+    } finally {
+      if (generation === lifecycle) busy = false;
+    }
+  }
 </script>
 
 <svelte:head><title>Settings · Kaede Chat</title></svelte:head>
@@ -610,9 +701,11 @@
       <p>Account</p>
       <a href="#profile"><Icon name="user" size={18} />Profile</a>
       <a href="#security"><Icon name="shield" size={18} />Security</a>
+      <a href="#authorized-apps"><Icon name="server" size={18} />Authorized apps</a>
       <a href={resolve('/reports')}><Icon name="shield" size={18} />My reports</a>
       <p>Preferences</p>
       <a href="#appearance"><Icon name="palette" size={18} />Appearance</a>
+      <a href="#accessibility"><Icon name="volume" size={18} />Accessibility</a>
       {#if isNativeDesktop()}<a href="#voice-devices"
           ><Icon name="volume" size={18} />Voice & devices</a
         >{/if}
@@ -755,6 +848,16 @@
                   }}
                 />
               </label>
+              {#if profile?.avatar_hash}
+                <button
+                  class="secondary-button"
+                  type="button"
+                  disabled={busy}
+                  onclick={() => void removeAsset('avatar')}
+                >
+                  <Icon name="trash" size={16} />Remove avatar
+                </button>
+              {/if}
               <label class="secondary-button">
                 <Icon name="image" size={16} />Change banner
                 <input
@@ -769,6 +872,16 @@
                   }}
                 />
               </label>
+              {#if profile?.banner_hash}
+                <button
+                  class="secondary-button"
+                  type="button"
+                  disabled={busy}
+                  onclick={() => void removeAsset('banner')}
+                >
+                  <Icon name="trash" size={16} />Remove banner
+                </button>
+              {/if}
             </div>
           </div>
           {#if busy && assetStage}
@@ -847,12 +960,32 @@
             </label>
           </fieldset>
           <label class="form-field">
-            <span>Language</span>
-            <small>Used for dates. Full interface translation is still being completed.</small>
+            <span>Locale and formats</span>
+            <small>
+              Controls dates and localized app-command labels. Kaede interface text is currently
+              English.
+            </small>
             <select bind:value={settings.locale} disabled={busy}>
               <option value="en-US">English (United States)</option>
-              <option value="ja-JP">日本語</option>
+              <option value="ja-JP">Japanese formats (Japan)</option>
             </select>
+          </label>
+          <label class="settings-toggle-row">
+            <span>
+              <strong>Age-restricted commands in direct messages</strong>
+              <small>
+                {profile?.age_assurance_state === 'adult'
+                  ? 'Allow age-restricted application commands in DMs and group DMs.'
+                  : profile?.age_assurance_state === 'minor'
+                    ? 'Unavailable because this account is age-assured as a minor.'
+                    : 'Unavailable until your instance has completed age assurance for this account.'}
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              bind:checked={settings.age_restricted_dm_commands_enabled}
+              disabled={busy || profile?.age_assurance_state !== 'adult'}
+            />
           </label>
           <div class="form-actions">
             <button class="primary-button" disabled={busy}>
@@ -863,6 +996,46 @@
       </section>
 
       <NativeVoiceSettings />
+
+      <section id="accessibility" class="settings-section">
+        <div class="settings-section-heading">
+          <span class="section-icon"><Icon name="volume" /></span>
+          <div>
+            <h2>Accessibility</h2>
+            <p>Control Text-to-Speech playback and reading speed.</p>
+          </div>
+        </div>
+        <div class="settings-card settings-form">
+          <label class="settings-toggle-row">
+            <span>
+              <strong>Allow playback and usage of /tts command</strong>
+              <small>
+                When off, Kaede will not send or speak Text-to-Speech messages on this device.
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              checked={ttsEnabledDraft}
+              disabled={busy}
+              onchange={(event) =>
+                void changeTtsPreferences({ enabled: event.currentTarget.checked })}
+            />
+          </label>
+          <label class="form-field">
+            <span>Text-to-Speech rate · {ttsRateDraft.toFixed(1)}×</span>
+            <input
+              type="range"
+              min="0.5"
+              max="2"
+              step="0.1"
+              value={ttsRateDraft}
+              disabled={busy || !ttsEnabledDraft}
+              onchange={(event) =>
+                void changeTtsPreferences({ rate: Number(event.currentTarget.value) })}
+            />
+          </label>
+        </div>
+      </section>
 
       {#if isNativeDesktop()}<NativeDesktopSettings />{/if}
 
@@ -924,6 +1097,22 @@
               test to check Windows delivery without minimizing the app.
             </p>
           {/if}
+          <label class="form-field">
+            <span>Text-to-Speech</span>
+            <small>Choose which incoming TTS messages this device reads aloud.</small>
+            <select
+              value={ttsPlaybackDraft}
+              disabled={busy || !ttsEnabledDraft}
+              onchange={(event) =>
+                void changeTtsPreferences({
+                  playback: event.currentTarget.value as TtsPlaybackMode
+                })}
+            >
+              <option value="all">For all channels</option>
+              <option value="current">For current selected channel</option>
+              <option value="never">Never</option>
+            </select>
+          </label>
         </div>
       </section>
 
@@ -961,6 +1150,8 @@
           </div>
         </form>
       </section>
+
+      <UserApplicationInstallations />
 
       <section id="advanced" class="settings-section">
         <div class="settings-section-heading">
