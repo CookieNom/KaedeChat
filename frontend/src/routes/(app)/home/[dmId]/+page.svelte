@@ -2909,6 +2909,7 @@
             const target = event.currentTarget;
             if (target.files) void queueFiles(target.files);
             target.value = '';
+            composerInput?.focus();
           }}
         />
         <ComposerActionMenu
