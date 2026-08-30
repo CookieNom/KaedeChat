@@ -81,7 +81,7 @@
 <!-- eslint-disable svelte/no-navigation-without-resolve -- guildChannelPath resolves the typed route -->
 <details class="threads-panel" bind:open ontoggle={opened}>
   <summary class="icon-button" aria-label="Threads" title="Threads">
-    <Icon name="threads" size={17} /><span>Threads</span>
+    <Icon name="threads" size={19} />
   </summary>
   <div class="threads-popover">
     <header>
@@ -175,15 +175,14 @@
   }
 
   summary {
-    display: inline-flex;
-    width: auto;
+    display: grid;
+    width: 38px;
     min-width: 38px;
+    height: 38px;
+    place-items: center;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0 0.55rem;
+    padding: 0;
     list-style: none;
-    font-size: 0.7rem;
-    font-weight: 750;
   }
 
   summary::-webkit-details-marker {

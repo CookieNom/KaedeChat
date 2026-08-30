@@ -113,7 +113,6 @@
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
   import CommandOptionComposer from '$lib/components/CommandOptionComposer.svelte';
-  import ApplicationCommandLauncher from '$lib/components/ApplicationCommandLauncher.svelte';
   import ComposerActionMenu from '$lib/components/ComposerActionMenu.svelte';
   import CreatePollDialog from '$lib/components/CreatePollDialog.svelte';
   import DmBotE2eeParticipation from '$lib/components/DmBotE2eeParticipation.svelte';
@@ -3015,14 +3014,6 @@
               gifPickerOpen = false;
             }}>☺</button
           >
-        {/if}
-        {#if !editingMessage && !selectedApplicationCommand}
-          <ApplicationCommandLauncher
-            commands={applicationCommands}
-            accountRef={currentUser ? entityRef(currentUser) : null}
-            disabled={busy || !channelReady || !channel}
-            onSelect={selectApplicationCommand}
-          />
         {/if}
         <small class="composer-count"
           >{selectedApplicationCommand ? '' : `${content.length}/4000`}</small

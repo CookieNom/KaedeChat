@@ -316,6 +316,22 @@ def test_channel_ticket_provenance_cannot_be_rebound() -> None:
 
     attachment.upload_channel_id = channel.id
     require_attachment_upload_channel(attachment, channel)
+
+    thread = Channel(
+        id=32,
+        origin_domain="guild.example",
+        guild_id=40,
+        guild_domain="guild.example",
+        type=11,
+        name="forum post",
+        parent_id=channel.id,
+        parent_domain=channel.origin_domain,
+        created_floor_id=1,
+    )
+    require_attachment_upload_channel(attachment, thread, allow_parent=True)
+    with pytest.raises(HTTPException):
+        require_attachment_upload_channel(attachment, thread)
+
     with pytest.raises(ValueError):
         MessageCreate(content="hello", attachment_ids=["1", "1"])
 

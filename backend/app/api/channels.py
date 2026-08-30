@@ -1190,13 +1190,19 @@ WEBHOOK_CAPABILITY_MESSAGE_PERMISSIONS = int(
 )
 
 
-def require_attachment_upload_channel(attachment: Attachment, channel: Channel) -> None:
+def require_attachment_upload_channel(
+    attachment: Attachment,
+    channel: Channel,
+    *,
+    allow_parent: bool = False,
+) -> None:
     """Keep a channel-scoped upload ticket bound to its authorized channel."""
 
-    if attachment.upload_channel_id is not None and (
-        attachment.upload_channel_id,
-        attachment.upload_channel_domain,
-    ) != (channel.id, channel.origin_domain):
+    upload_ref = (attachment.upload_channel_id, attachment.upload_channel_domain)
+    allowed_refs = {(channel.id, channel.origin_domain)}
+    if allow_parent and channel.parent_id is not None and channel.parent_domain is not None:
+        allowed_refs.add((channel.parent_id, channel.parent_domain))
+    if attachment.upload_channel_id is not None and upload_ref not in allowed_refs:
         raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
 
 
@@ -5559,7 +5565,11 @@ async def prepare_message_create_attachments(
                 required_purpose=options.required_attachment_purpose,
                 federated_guild_upload=options.federated_guild_upload,
             )
-            require_attachment_upload_channel(attachment, channel)
+            require_attachment_upload_channel(
+                attachment,
+                channel,
+                allow_parent=options.mark_thread_starter,
+            )
             if (
                 attachment.message_id is not None
                 or attachment.message_domain is not None

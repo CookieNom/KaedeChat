@@ -44,6 +44,7 @@
     locale = preferredLocale(),
     open = $bindable(false),
     showTrigger = true,
+    compact = false,
     onSelect
   }: {
     commands: ApplicationCommand[];
@@ -52,6 +53,7 @@
     locale?: string;
     open?: boolean;
     showTrigger?: boolean;
+    compact?: boolean;
     onSelect: (command: ApplicationCommand) => void;
   } = $props();
 
@@ -298,7 +300,7 @@
   });
 
   $effect(() => {
-    const shouldLoad = open;
+    const shouldLoad = open && !compact;
     const search = trimmedQuery;
     const requestedDomain = directoryDomain.trim();
     const domain = canonicalDirectoryDomain(requestedDomain);
@@ -438,6 +440,7 @@
     <div
       bind:this={launcherElement}
       class="launcher"
+      class:compact
       role="dialog"
       tabindex="-1"
       aria-modal="true"
@@ -446,7 +449,7 @@
     >
       <header>
         <div>
-          <small>Choose an app</small>
+          <small>{compact ? 'Voice channel' : 'Choose an app'}</small>
           <h2 id="apps-launcher-title">Apps</h2>
         </div>
         <button type="button" aria-label="Close Apps" onclick={() => close()}>×</button>
@@ -457,21 +460,23 @@
           bind:value={query}
           type="search"
           aria-label="Search installed commands and the App Directory"
-          placeholder="Search apps and commands"
+          placeholder={compact ? 'Search app commands' : 'Search apps and commands'}
         />
-        <label class="directory-instance">
-          <span>Directory instance</span>
-          <input
-            bind:value={directoryDomain}
-            aria-invalid={directoryDomain.trim() !== '' &&
-              !canonicalDirectoryDomain(directoryDomain)}
-            maxlength="253"
-            placeholder="Local"
-            autocapitalize="none"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
+        {#if !compact}
+          <label class="directory-instance">
+            <span>Directory instance</span>
+            <input
+              bind:value={directoryDomain}
+              aria-invalid={directoryDomain.trim() !== '' &&
+                !canonicalDirectoryDomain(directoryDomain)}
+              maxlength="253"
+              placeholder="Local"
+              autocapitalize="none"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+        {/if}
       </div>
       <p class="visually-hidden" role="status" aria-live="polite">{resultStatus}</p>
       <div class="launcher-content">
@@ -531,7 +536,7 @@
           </section>
         {/if}
 
-        {#if trimmedQuery && searchedApplications.length}
+        {#if !compact && trimmedQuery && searchedApplications.length}
           <section class="catalog" aria-labelledby="launcher-search-title">
             <h3 id="launcher-search-title">Apps from the Directory</h3>
             <div class="app-cards">
@@ -550,7 +555,7 @@
               {/each}
             </div>
           </section>
-        {:else if !trimmedQuery}
+        {:else if !compact && !trimmedQuery}
           {#each collectionGroups as group, index (group.collection?.slug ?? 'explore')}
             <section class="catalog" aria-labelledby={`launcher-collection-${index}`}>
               <div class="collection-heading">
@@ -578,12 +583,16 @@
           {/each}
         {/if}
 
-        {#if catalogLoading}<p class="catalog-state" role="status">Loading Directory apps…</p>{/if}
-        {#if catalogError}<p class="catalog-error" role="status">{catalogError}</p>{/if}
-        {#if !catalogLoading && !catalogError && trimmedQuery && !groups.length && !searchedApplications.length}
+        {#if !compact && catalogLoading}<p class="catalog-state" role="status">
+            Loading Directory apps…
+          </p>{/if}
+        {#if !compact && catalogError}<p class="catalog-error" role="status">{catalogError}</p>{/if}
+        {#if !compact && !catalogLoading && !catalogError && trimmedQuery && !groups.length && !searchedApplications.length}
           <p class="catalog-state" role="status">No apps or commands match “{query}”.</p>
         {/if}
-        {#if !catalogLoading && !catalogError && !trimmedQuery && !groups.length && !collectionGroups.length}
+        {#if compact && !groups.length}
+          <p class="catalog-state">No app commands are available in this voice channel.</p>
+        {:else if !compact && !catalogLoading && !catalogError && !trimmedQuery && !groups.length && !collectionGroups.length}
           <p class="catalog-state">No apps are available yet.</p>
         {/if}
       </div>
@@ -634,6 +643,13 @@
     color: var(--text);
     background: var(--surface);
     box-shadow: 0 24px 80px rgb(0 0 0 / 45%);
+  }
+  .launcher.compact {
+    width: min(30rem, 100%);
+    max-height: min(34rem, 80vh);
+  }
+  .launcher.compact .launcher-search-controls {
+    grid-template-columns: 1fr;
   }
   header,
   .collection-heading {

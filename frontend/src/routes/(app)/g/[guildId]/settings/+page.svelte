@@ -316,7 +316,6 @@
   let channelRtcRegion = $state('');
   let channelVoiceRegions = $state<VoiceRegion[]>([]);
   let channelVoiceRegionsError = $state('');
-  let channelVideoQualityMode = $state<1 | 2>(1);
   let channelHistoryPolicy = $state<'inherit' | 'disabled' | 'full_retained'>('inherit');
   let channelForumTags = $state<EditableForumTag[]>([]);
   let newForumTagName = $state('');
@@ -785,7 +784,6 @@
     channelBitrate = channel.bitrate ?? 64000;
     channelUserLimit = channel.user_limit ?? 0;
     channelRtcRegion = channel.rtc_region ?? '';
-    channelVideoQualityMode = channel.video_quality_mode === 2 ? 2 : 1;
     channelHistoryPolicy = channel.federated_history_policy ?? 'inherit';
     channelForumTags = [...(channel.available_tags ?? [])];
     newForumTagName = '';
@@ -2005,8 +2003,7 @@
                   user_limit: channelUserLimit,
                   // Region IDs are deliberately opaque. Empty keeps automatic
                   // selection and remains compatible with future providers.
-                  rtc_region: channelRtcRegion.trim() || null,
-                  video_quality_mode: channelVideoQualityMode
+                  rtc_region: channelRtcRegion.trim() || null
                 }
               : {})
           })
@@ -3960,13 +3957,6 @@
                                 disabled={busy}
                               />
                               <small>0 means no explicit limit.</small>
-                            </label>
-                            <label class="form-field compact-field">
-                              <span>Video quality</span>
-                              <select bind:value={channelVideoQualityMode} disabled={busy}>
-                                <option value={1}>Automatic</option>
-                                <option value={2}>Full resolution</option>
-                              </select>
                             </label>
                           </div>
                           <label class="form-field compact-field">

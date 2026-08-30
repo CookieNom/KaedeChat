@@ -497,12 +497,7 @@
   } | null>(null);
   let voiceMemberMenuElement = $state<HTMLElement | null>(null);
   let voiceModerationBusy = $state(false);
-  let voiceStatusCurrent = $state<string | null>(null);
-  let voiceStatusDraft = $state('');
-  let voiceStatusBusy = $state(false);
-  let voiceStatusError = $state('');
-  let voiceStatusChannelKey = '';
-  let voiceStatusEmojiPickerOpen = $state(false);
+  let voiceChannelKey = '';
   let voiceStartedAt = $state<number | null>(null);
   const uploadControllers = new SvelteMap<string, AbortController>();
   const forumUploadControllers = new SvelteMap<string, AbortController>();
@@ -672,63 +667,16 @@
     return target?.type === 2 || target?.type === 13;
   }
 
-  const canSetVoiceStatus = $derived.by(() => {
-    if (!channel || channel.type !== 2) return false;
-    const connected = occupantsFor(channel).some(
-      (occupant) =>
-        occupant.user_id === currentUser?.id && occupant.user_domain === currentUser?.origin_domain
-    );
-    return (
-      channelHasPermission(channel, Permission.SET_VOICE_CHANNEL_STATUS) &&
-      (connected || channelHasPermission(channel, Permission.MANAGE_CHANNELS))
-    );
-  });
-
   $effect(() => {
     const key = channel ? entityKey(channel) : '';
-    if (key !== voiceStatusChannelKey) {
-      voiceStatusChannelKey = key;
-      voiceStatusCurrent = null;
-      voiceStatusDraft = '';
-      voiceStatusError = '';
-      voiceStatusEmojiPickerOpen = false;
+    if (key !== voiceChannelKey) {
+      voiceChannelKey = key;
       voiceStartedAt = null;
       if (guild && isVoiceLikeChannel(channel)) {
         authenticatedGateway.client.requestChannelInfo(entityRef(guild));
       }
-      if (channel?.type === 2) {
-        const expectedKey = key;
-        void api<{ status: string | null }>(
-          `/channels/${encodeURIComponent(entityRef(channel))}/voice-status`
-        )
-          .then((loaded) => {
-            if (voiceStatusChannelKey !== expectedKey) return;
-            voiceStatusCurrent = loaded.status;
-            voiceStatusDraft = loaded.status ?? '';
-          })
-          .catch(() => undefined);
-      }
     }
   });
-
-  async function saveVoiceStatus() {
-    if (!channel || channel.type !== 2 || !canSetVoiceStatus || voiceStatusBusy) return;
-    voiceStatusBusy = true;
-    voiceStatusError = '';
-    try {
-      const normalized = voiceStatusDraft.trim() || null;
-      await api<void>(`/channels/${encodeURIComponent(entityRef(channel))}/voice-status`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: normalized })
-      });
-      voiceStatusCurrent = normalized;
-      voiceStatusDraft = normalized ?? '';
-    } catch (caught) {
-      voiceStatusError = userErrorMessage(caught, 'Could not update the voice channel status.');
-    } finally {
-      voiceStatusBusy = false;
-    }
-  }
 
   function guildHasPermission(permission: bigint): boolean {
     if (!guild) return false;
@@ -2901,25 +2849,6 @@
       if (channel && isVoiceLikeChannel(channel)) {
         const updated = voiceStartTimeFromDispatch(dispatch.t, dispatch.d, channel);
         if (updated !== undefined) voiceStartedAt = updated;
-      }
-    } else if (dispatch.t === 'VOICE_CHANNEL_STATUS_UPDATE') {
-      const updated = dispatch.d as {
-        id: string;
-        guild_id: string;
-        guild_domain: string;
-        origin_domain?: string;
-        status: string | null;
-      };
-      if (
-        guild &&
-        channel &&
-        updated.guild_id === guild.id &&
-        updated.guild_domain === guild.origin_domain &&
-        updated.id === channel.id &&
-        (updated.origin_domain ?? guild.origin_domain) === channel.origin_domain
-      ) {
-        voiceStatusCurrent = updated.status;
-        voiceStatusDraft = updated.status ?? '';
       }
     } else if (dispatch.t === 'GUILD_UPDATE') {
       const updated = dispatch.d as Guild;
@@ -6548,69 +6477,9 @@
             </span>
             <div>
               <strong>{channel?.name ?? 'Channel'}</strong>
-              {#if channel?.type === 2 && voiceStatusCurrent}<span>{voiceStatusCurrent}</span>{/if}
               {#if channel?.topic && !isThreadChannel(channel)}<span>{channel.topic}</span>{/if}
             </div>
           </div>
-          {#if channel?.type === 2 && canSetVoiceStatus}
-            <form
-              class="voice-status-editor"
-              onsubmit={(event) => {
-                event.preventDefault();
-                void saveVoiceStatus();
-              }}
-            >
-              <span class="voice-status-emoji-options" aria-label="Status emoji">
-                {#each ['😊', '🎮', '🎵', '🎉'] as emoji (emoji)}
-                  <button
-                    type="button"
-                    aria-label={`Add ${emoji}`}
-                    disabled={voiceStatusBusy || voiceStatusDraft.length >= 500}
-                    onclick={() =>
-                      (voiceStatusDraft = `${emoji} ${voiceStatusDraft}`.slice(0, 500))}
-                    >{emoji}</button
-                  >
-                {/each}
-                <button
-                  type="button"
-                  aria-label="Choose status emoji"
-                  aria-expanded={voiceStatusEmojiPickerOpen}
-                  disabled={voiceStatusBusy || voiceStatusDraft.length >= 500}
-                  onclick={() => (voiceStatusEmojiPickerOpen = !voiceStatusEmojiPickerOpen)}
-                  >More…</button
-                >
-              </span>
-              <input
-                bind:value={voiceStatusDraft}
-                maxlength="500"
-                placeholder="Set voice channel status"
-                aria-label="Voice channel status"
-                disabled={voiceStatusBusy}
-              />
-              <button type="submit" disabled={voiceStatusBusy}>Save</button>
-              {#if voiceStatusCurrent}
-                <button
-                  type="button"
-                  disabled={voiceStatusBusy}
-                  onclick={() => {
-                    voiceStatusDraft = '';
-                    void saveVoiceStatus();
-                  }}>Clear</button
-                >
-              {/if}
-              {#if voiceStatusError}<span class="field-error">{voiceStatusError}</span>{/if}
-              {#if voiceStatusEmojiPickerOpen}
-                <EmojiPicker
-                  customEmojis={pickerEmojis}
-                  onSelect={(value) => {
-                    voiceStatusDraft = `${value} ${voiceStatusDraft}`.slice(0, 500);
-                    voiceStatusEmojiPickerOpen = false;
-                  }}
-                  onClose={() => (voiceStatusEmojiPickerOpen = false)}
-                />
-              {/if}
-            </form>
-          {/if}
         </div>
         <div class="channel-header-actions">
           {#if canFollowAnnouncements}
@@ -7176,15 +7045,6 @@
                     }}>☺</button
                   >
                 {/if}
-                {#if !editingMessage && !nativeThreadComposer && !selectedApplicationCommand}
-                  <ApplicationCommandLauncher
-                    bind:open={applicationLauncherOpen}
-                    commands={usableApplicationCommands}
-                    accountRef={currentUser ? entityRef(currentUser) : null}
-                    disabled={busy || !channelReady || !channel || channel.archived}
-                    onSelect={selectApplicationCommand}
-                  />
-                {/if}
                 {#if nativeThreadComposer || selectedApplicationCommand}
                   <small class="composer-count"></small>
                 {:else if slowmodeRemaining > 0}
@@ -7303,6 +7163,7 @@
   <ApplicationCommandLauncher
     bind:open={applicationLauncherOpen}
     showTrigger={false}
+    compact
     commands={usableApplicationCommands}
     accountRef={currentUser ? entityRef(currentUser) : null}
     disabled={busy || !channelReady || channel.archived}
@@ -7716,7 +7577,7 @@
 {/if}
 
 {#if announcementFollowOpen && channel && canFollowAnnouncements}
-  <div class="channel-dialog-layer">
+  <div use:portal class="channel-dialog-layer">
     <button
       class="channel-dialog-backdrop"
       type="button"

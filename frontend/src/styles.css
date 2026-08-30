@@ -3854,6 +3854,12 @@ progress {
   margin-top: 0.8rem;
 }
 
+.settings-page .settings-card {
+  display: grid;
+  gap: 1.3rem;
+  padding: 1.35rem;
+}
+
 .native-device-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -34,8 +34,9 @@ describe('voice Apps launcher', () => {
     expect(guildChannelRoute).toContain(
       'onApps={channelReady ? () => (applicationLauncherOpen = true) : undefined}'
     );
-    expect(guildChannelRoute.match(/bind:open=\{applicationLauncherOpen\}/gu)).toHaveLength(2);
+    expect(guildChannelRoute.match(/bind:open=\{applicationLauncherOpen\}/gu)).toHaveLength(1);
     expect(guildChannelRoute).toContain('showTrigger={false}');
+    expect(guildChannelRoute).toContain('compact');
     expect(guildChannelRoute).toContain('class="channel-dialog voice-command-dialog"');
     expect(guildChannelRoute).toContain(
       '{@render applicationCommandFields(selectedApplicationCommand)}'
