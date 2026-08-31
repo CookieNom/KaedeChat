@@ -107,6 +107,7 @@ impl GifFavorites {
 /// CPAL/Nokhwa identifiers are not guaranteed to be stable across reboots.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)] // Persisted toggles are independent user settings.
 pub struct DesktopPreferences {
     pub input_device: Option<DevicePreference>,
     pub output_device: Option<DevicePreference>,
