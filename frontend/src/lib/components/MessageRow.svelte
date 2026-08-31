@@ -61,6 +61,7 @@
   import {
     attachmentMediaPath,
     authenticatedMedia,
+    copyAuthenticatedImage,
     downloadAuthenticatedMedia
   } from '$lib/media/authenticated';
   import { onDestroy, tick } from 'svelte';
@@ -385,6 +386,26 @@
         caught,
         `Could not download ${attachment.filename}. Try again.`
       );
+    }
+  }
+
+  async function copyImage(attachment: Attachment, event: MouseEvent) {
+    event.stopPropagation();
+    closeMenu(false);
+    feedback = '';
+    try {
+      await copyAuthenticatedImage({
+        path: attachmentMediaPath(
+          attachment.origin_domain,
+          attachment.id,
+          'original',
+          attachment.history_media_url
+        ),
+        contentType: attachment.content_type
+      });
+      feedback = 'Image copied to clipboard.';
+    } catch (caught) {
+      feedback = userErrorMessage(caught, 'Could not copy this image on this device.');
     }
   }
 
@@ -1400,6 +1421,21 @@
           }}
         />
       {:else}
+        {#if contextAttachment?.attachment.content_type.startsWith('image/')}
+          <button
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            onclick={(event) => copyImage(contextAttachment!.attachment, event)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <circle cx="9" cy="10" r="2" />
+              <path d="m5 18 4-4 3 3 2-2 5 3" />
+            </svg>
+            <span>Copy image</span>
+          </button>
+        {/if}
         {#if !groupSystemNotice}
           {#if canReact && onToggleReaction && !message.deleted_at}
             <div class="quick-reactions" aria-label="Recent reactions">

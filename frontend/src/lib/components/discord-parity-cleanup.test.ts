@@ -83,6 +83,12 @@ describe('Discord parity cleanup', () => {
     expect(globalStyles).toMatch(/\.message-reactions button\.add-reaction\.labeled\s*\{/u);
   });
 
+  it('uses the full message menu for mobile images and exposes image copying', () => {
+    expect(messageRow).toContain('<span>Copy image</span>');
+    expect(messageRow).toContain('copyAuthenticatedImage');
+    expect(globalStyles).toMatch(/\.attachment-preview-button[^}]*-webkit-touch-callout: none;/u);
+  });
+
   it('uses a detail-pane post header and a Discord-style starter footer', () => {
     expect(guildRoute).toContain('class:forum-thread-pane=');
     expect(guildRoute.indexOf('<ThreadHeader')).toBeGreaterThan(

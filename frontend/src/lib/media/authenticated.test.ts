@@ -1,11 +1,35 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   attachmentMediaPath,
+  copyAuthenticatedImage,
   dmHistoryAttachmentMediaPath,
   privateInteractionAttachmentMediaPath,
   isSafeSameOriginMediaPath,
   mediaCapacityRetryDelay
 } from './authenticated';
+
+describe('authenticated image clipboard', () => {
+  it('copies fetched image bytes through the platform clipboard', async () => {
+    const write = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { write } });
+    vi.stubGlobal(
+      'ClipboardItem',
+      class {
+        constructor(readonly data: Record<string, Blob>) {}
+      }
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]), { status: 200 }))
+    );
+    try {
+      await copyAuthenticatedImage({ path: '/media/image/original', contentType: 'image/png' });
+      expect(write).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe('authenticated media capacity retry', () => {
   it('uses bounded Retry-After timing only for declared temporary capacity errors', () => {

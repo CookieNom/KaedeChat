@@ -2231,7 +2231,7 @@ async def list_parent_threads(
     cursor: str | None = Query(default=None, min_length=1, max_length=512),
     limit: int = Query(default=50, ge=1, le=100),
     tag_id: list[WireSnowflake] | None = Query(default=None, max_length=20),
-    sort_order: Literal[0, 1] | None = None,
+    sort_order: int | None = Query(default=None, ge=0, le=1),
     query: str | None = Query(default=None, min_length=1, max_length=100),
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
@@ -3615,7 +3615,7 @@ async def bot_list_parent_threads(
     cursor: str | None = Query(default=None, min_length=1, max_length=512),
     limit: int = Query(default=50, ge=1, le=100),
     tag_id: list[WireSnowflake] | None = Query(default=None, max_length=20),
-    sort_order: Literal[0, 1] | None = None,
+    sort_order: int | None = Query(default=None, ge=0, le=1),
     query: str | None = Query(default=None, min_length=1, max_length=100),
     e2ee_device_id: str | None = Header(default=None, alias="X-Kaede-E2EE-Device"),
 ) -> dict[str, object]:

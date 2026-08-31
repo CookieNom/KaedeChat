@@ -6580,6 +6580,7 @@ async def apply_guild_snapshot(
         role_version = _apply_event_resource_version(loaded_role, raw, "role")
         if role_version is not None:
             versioned_resources.append((loaded_role, role_version))
+    snapshot_channel_parents: list[tuple[Channel, int | None, str | None]] = []
     for raw in snapshot["channels"]:
         loaded_channel = await session.get(Channel, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_channel is None:
@@ -6606,8 +6607,18 @@ async def apply_guild_snapshot(
         loaded_channel.name = raw.get("name")
         loaded_channel.topic = raw.get("topic")
         loaded_channel.position = int(raw["position"])
-        loaded_channel.parent_id = int(raw["parent_id"]) if raw.get("parent_id") else None
-        loaded_channel.parent_domain = raw.get("parent_domain")
+        # Stage every channel before restoring the self-referential parent
+        # keys. Otherwise the next session.get() can autoflush a forum post
+        # before its parent forum has been inserted.
+        loaded_channel.parent_id = None
+        loaded_channel.parent_domain = None
+        snapshot_channel_parents.append(
+            (
+                loaded_channel,
+                int(raw["parent_id"]) if raw.get("parent_id") else None,
+                raw.get("parent_domain"),
+            )
+        )
         loaded_channel.permissions_synced = bool(raw.get("permissions_synced", False))
         loaded_channel.rate_limit_per_user = int(raw["rate_limit_per_user"])
         voice_state = _validated_voice_channel_state(raw, loaded_channel.type)
@@ -6644,6 +6655,10 @@ async def apply_guild_snapshot(
         channel_version = _apply_event_resource_version(loaded_channel, raw, "channel")
         if channel_version is not None:
             versioned_resources.append((loaded_channel, channel_version))
+    await session.flush()
+    for loaded_channel, parent_id, parent_domain in snapshot_channel_parents:
+        loaded_channel.parent_id = parent_id
+        loaded_channel.parent_domain = parent_domain
     for raw in snapshot.get("emojis", []):
         loaded_emoji = await session.get(Emoji, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_emoji is None:

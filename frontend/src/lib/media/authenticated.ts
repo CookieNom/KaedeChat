@@ -348,6 +348,15 @@ export async function authenticatedMediaBlob(
   return new Blob([asBlobPart(bytes)], { type: source.contentType });
 }
 
+export async function copyAuthenticatedImage(source: AuthenticatedMediaSource): Promise<void> {
+  if (!source.contentType.startsWith('image/')) throw new TypeError('Media is not an image.');
+  if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+    throw new Error('Image copying is not supported on this device.');
+  }
+  const blob = await authenticatedMediaBlob(source);
+  await navigator.clipboard.write([new ClipboardItem({ [blob.type || source.contentType]: blob })]);
+}
+
 export async function downloadAuthenticatedMedia(
   source: AuthenticatedMediaSource,
   filename: string

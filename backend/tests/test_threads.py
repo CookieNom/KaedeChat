@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 import app.tasks as tasks
@@ -121,6 +122,30 @@ def channel(**overrides: object) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_forum_sort_query_coerces_numeric_query_strings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AsyncMock(
+        return_value={"threads": [], "members": [], "has_more": False, "next_cursor": None}
+    )
+    monkeypatch.setattr(threads_api, "list_parent_threads_service", service)
+    app = FastAPI()
+    app.include_router(threads_api.router)
+    app.dependency_overrides[threads_api.require_user] = lambda: SimpleNamespace(
+        user=SimpleNamespace()
+    )
+    app.dependency_overrides[threads_api.get_session] = lambda: SimpleNamespace()
+    app.dependency_overrides[threads_api.get_redis] = lambda: SimpleNamespace()
+    app.dependency_overrides[threads_api.get_settings] = lambda: SimpleNamespace(
+        domain="home.example"
+    )
+
+    response = TestClient(app).get("/api/v1/channels/2%40home.example/threads?sort_order=0")
+
+    assert response.status_code == 200
+    assert service.await_args.kwargs["sort_order"] == 0
 
 
 @pytest.mark.asyncio
