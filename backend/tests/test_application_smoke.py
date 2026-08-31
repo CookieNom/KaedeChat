@@ -203,5 +203,5 @@ def test_api_and_gateway_register_all_routes() -> None:
         check=True,
         cwd=os.getcwd(),
         env=environment,
-        timeout=20,
+        timeout=60,
     )

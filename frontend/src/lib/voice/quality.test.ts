@@ -38,17 +38,30 @@ describe('media quality preferences', () => {
     const preferences = {
       screenProfile: 'sharp' as const,
       audioQuality: 'high' as const,
-      shareAudio: false
+      shareAudio: false,
+      dtx: false
     };
     saveMediaQuality(preferences, storage);
     expect(loadMediaQuality(storage)).toEqual(preferences);
+  });
+
+  it('enables DTX when loading preferences saved before the setting existed', () => {
+    const storage = new MemoryStorage();
+    storage.value = JSON.stringify({
+      screenProfile: 'smooth',
+      audioQuality: 'studio',
+      shareAudio: true
+    });
+
+    expect(loadMediaQuality(storage).dtx).toBe(true);
   });
 
   it('maps capture and encoder settings independently', () => {
     const preferences = {
       screenProfile: 'smooth' as const,
       audioQuality: 'studio' as const,
-      shareAudio: true
+      shareAudio: true,
+      dtx: false
     };
     const screen = webScreenShareOptions(preferences);
     expect(screen.capture.resolution).toEqual({ width: 1280, height: 720, frameRate: 30 });
@@ -61,6 +74,14 @@ describe('media quality preferences', () => {
       forceStereo: true,
       dtx: false
     });
+  });
+
+  it('enables DTX by default for mono and stereo audio', () => {
+    expect(webAudioPublishOptions(DEFAULT_MEDIA_QUALITY).dtx).toBe(true);
+    expect(webAudioPublishOptions({ ...DEFAULT_MEDIA_QUALITY, audioQuality: 'studio' }).dtx).toBe(
+      true
+    );
+    expect(webAudioPublishOptions({ ...DEFAULT_MEDIA_QUALITY, dtx: false }).dtx).toBe(false);
   });
 
   it('caps microphone audio to the effective channel bitrate', () => {

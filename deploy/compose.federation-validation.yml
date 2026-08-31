@@ -1,0 +1,6 @@
+services:
+  alpha-worker:
+    command: ["taskiq", "worker", "app.tasks:broker"]
+
+  beta-worker:
+    command: ["taskiq", "worker", "app.tasks:broker"]

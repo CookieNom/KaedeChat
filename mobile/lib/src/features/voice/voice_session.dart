@@ -1066,6 +1066,31 @@ final class VoiceSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setOpusDtx(bool enabled) async {
+    final previous = _mediaQuality;
+    final stored = await MobileMediaQuality.load();
+    final next = MobileMediaQuality(
+      screen: stored.screen,
+      audio: stored.audio,
+      dtx: enabled,
+    );
+    _mediaQuality = next;
+    try {
+      await next.save();
+      final publication = _room?.localParticipant?.getTrackPublicationBySource(
+        TrackSource.microphone,
+      );
+      if (publication?.track case final LocalAudioTrack track) {
+        track.lastPublishOptions =
+            next.audioPublishOptionsForChannel(_voiceMediaPolicy.bitrate);
+      }
+      notifyListeners();
+    } on Object {
+      _mediaQuality = previous;
+      rethrow;
+    }
+  }
+
   Future<void> _applyAudioQuality(LocalParticipant participant) async {
     final publication = participant.getTrackPublicationBySource(
       TrackSource.microphone,
@@ -1095,7 +1120,7 @@ final class VoiceSession extends ChangeNotifier {
       throw StateError('The microphone encoder rejected that bitrate.');
     }
     // LiveKit uses this on a future transport negotiation/reconnect, at which
-    // point Studio's DTX preference is applied as well as the bitrate ceiling.
+    // point the DTX preference is applied as well as the bitrate ceiling.
     track.lastPublishOptions =
         _mediaQuality.audioPublishOptionsForChannel(_voiceMediaPolicy.bitrate);
   }

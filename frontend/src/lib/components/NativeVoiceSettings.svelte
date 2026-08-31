@@ -327,6 +327,13 @@
           <div class="toggle-list">
             <label class="toggle-row"
               ><span
+                ><strong>Opus discontinuous transmission</strong><small
+                  >Reduces outgoing bandwidth while you are not speaking. Recommended.</small
+                ></span
+              ><input type="checkbox" bind:checked={preferences.opus_dtx} /></label
+            >
+            <label class="toggle-row"
+              ><span
                 ><strong>Echo cancellation</strong><small
                   >Uses speaker audio as the far-end reference.</small
                 ></span

@@ -47,6 +47,7 @@ export interface NativePreferences {
   automatic_gain_control: boolean;
   screen_share_profile: 'data_saver' | 'smooth' | 'sharp' | 'source';
   audio_quality: 'data_saver' | 'standard' | 'high' | 'studio';
+  opus_dtx: boolean;
   share_system_audio: boolean;
 }
 

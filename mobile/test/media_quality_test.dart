@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:livekit_client/livekit_client.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -22,14 +23,25 @@ void main() {
         DegradationPreference.maintainResolution);
   });
 
-  test('audio presets use bounded Opus bitrates and studio disables DTX', () {
+  test('audio presets use bounded Opus bitrates and enable DTX by default', () {
     const standard = MobileMediaQuality();
     const studio = MobileMediaQuality(audio: VoiceAudioQuality.studio);
 
     expect(standard.audioPublishOptions.audioBitrate, 48000);
     expect(standard.audioPublishOptions.dtx, isTrue);
     expect(studio.audioPublishOptions.audioBitrate, 128000);
-    expect(studio.audioPublishOptions.dtx, isFalse);
+    expect(studio.audioPublishOptions.dtx, isTrue);
+    expect(
+        const MobileMediaQuality(dtx: false).audioPublishOptions.dtx, isFalse);
+  });
+
+  test('DTX defaults on for legacy preferences and persists an override',
+      () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    expect((await MobileMediaQuality.load()).dtx, isTrue);
+
+    await const MobileMediaQuality(dtx: false).save();
+    expect((await MobileMediaQuality.load()).dtx, isFalse);
   });
 
   test('caps microphone publish and republish settings to channel bitrate', () {
@@ -38,7 +50,7 @@ void main() {
 
     expect(studio.audioPublishOptionsForChannel(32000).audioBitrate, 32000);
     expect(dataSaver.audioPublishOptionsForChannel(96000).audioBitrate, 24000);
-    expect(studio.audioPublishOptionsForChannel(32000).dtx, isFalse);
+    expect(studio.audioPublishOptionsForChannel(32000).dtx, isTrue);
   });
 
   test('camera channel modes do not change screen-share preferences', () {

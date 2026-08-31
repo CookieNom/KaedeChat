@@ -5,8 +5,9 @@ CONFIG_GUARD := test ! -e .kaede-setup.in-progress || { echo 'setup transaction 
 COMPOSE := $(CONFIG_GUARD); KAEDE_OPERATOR_ENV_FILE="$(OPERATOR_ENV_FILE)" docker compose --env-file "$(ENV_FILE)" -f deploy/compose.yml $(GENERATED_COMPOSE)
 DEV_COMPOSE := docker compose -f deploy/compose.dev.yml
 VALIDATION_RUN_ID := $(shell date +%s%N)
-FEDERATION_COMPOSE := docker compose --project-name kaede-federation-validation-$(VALIDATION_RUN_ID) -f deploy/compose.dev.yml
-FEDERATION_TLS_COMPOSE := docker compose --project-name kaede-federation-tls-validation-$(VALIDATION_RUN_ID) -f deploy/compose.dev.yml -f deploy/compose.federation-tls.yml
+FEDERATION_COMPOSE_FILES := -f deploy/compose.dev.yml -f deploy/compose.federation-validation.yml
+FEDERATION_COMPOSE := docker compose --project-name kaede-federation-validation-$(VALIDATION_RUN_ID) $(FEDERATION_COMPOSE_FILES)
+FEDERATION_TLS_COMPOSE := docker compose --project-name kaede-federation-tls-validation-$(VALIDATION_RUN_ID) $(FEDERATION_COMPOSE_FILES) -f deploy/compose.federation-tls.yml
 VALIDATION_COMPOSE := ALLOW_NONPRODUCTION_DEPLOYMENT=true KAEDE_OPERATOR_ENV_FILE="$(abspath deploy/.env.schema)" docker compose --env-file deploy/.env.schema -f deploy/compose.yml
 CHECK_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-check-validation-$(VALIDATION_RUN_ID)
 TEST_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-test-validation-$(VALIDATION_RUN_ID)

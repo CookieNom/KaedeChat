@@ -444,6 +444,7 @@ export class VoiceSession extends EventTarget {
     channel: VoiceChannelPolicy,
     encryptionKey?: ArrayBuffer
   ): Promise<void> {
+    this.#mediaQuality = loadMediaQuality();
     const generation = ++this.#connectGeneration;
     const expected = expectedVoicePolicy(grant, channel);
     if (grant.e2ee && !encryptionKey) {
@@ -828,7 +829,7 @@ export class VoiceSession extends EventTarget {
       this.#changed();
       return;
     }
-    if (previous.audioQuality !== preferences.audioQuality) {
+    if (previous.audioQuality !== preferences.audioQuality || previous.dtx !== preferences.dtx) {
       try {
         await this.#republishMicrophoneWithQuality();
       } catch (caught) {

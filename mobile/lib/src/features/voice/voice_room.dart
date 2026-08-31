@@ -1117,6 +1117,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
   ) async {
     var screen = session.mediaQuality.screen;
     var audio = session.mediaQuality.audio;
+    final dtx = session.mediaQuality.dtx;
     var starting = false;
     await showModalBottomSheet<void>(
       context: context,
@@ -1252,6 +1253,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                           await session.startScreenShare(MobileMediaQuality(
                             screen: screen,
                             audio: audio,
+                            dtx: dtx,
                           ));
                           final chooserWasPresented = !kIsWeb &&
                               defaultTargetPlatform == TargetPlatform.iOS;

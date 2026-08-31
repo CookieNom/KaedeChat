@@ -2261,6 +2261,7 @@ fn capture_settings(preferences: &DesktopPreferences) -> CaptureSettings {
 
 fn media_publish_settings(preferences: &DesktopPreferences) -> MediaPublishSettings {
     MediaPublishSettings {
+        opus_dtx: preferences.opus_dtx,
         audio_max_bitrate: match preferences.audio_quality {
             AudioQualityPreference::DataSaver => 24_000,
             AudioQualityPreference::Standard => 48_000,
@@ -2808,7 +2809,8 @@ async fn native_preferences_set(
         || previous.noise_suppression != preferences.noise_suppression
         || previous.echo_cancellation != preferences.echo_cancellation
         || previous.automatic_gain_control != preferences.automatic_gain_control
-        || previous.audio_quality != preferences.audio_quality;
+        || previous.audio_quality != preferences.audio_quality
+        || previous.opus_dtx != preferences.opus_dtx;
     let hotkey_result = {
         let mut hotkey = state.hotkey.lock();
         replace_global_hotkeys(

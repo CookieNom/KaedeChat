@@ -27,6 +27,7 @@
   } from '$lib/chat/tts';
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
+  import { loadMediaQuality, saveMediaQuality } from '$lib/voice/quality';
   import { chatEntities } from '$lib/stores/entities.svelte';
   import { onMount } from 'svelte';
 
@@ -76,6 +77,7 @@
   let bio = $state('');
   let customStatus = $state('');
   let developerModeDraft = $state(false);
+  let opusDtxDraft = $state(true);
   let browserNotificationsDraft = $state(false);
   let testingNotification = $state(false);
   let ttsEnabledDraft = $state(false);
@@ -93,6 +95,7 @@
   let disableCode = $state('');
 
   onMount(() => {
+    opusDtxDraft = loadMediaQuality().dtx;
     void api('/administration/@me')
       .then(() => (administrationAvailable = true))
       .catch(() => (administrationAvailable = false));
@@ -312,6 +315,13 @@
     } finally {
       if (generation === lifecycle) busy = false;
     }
+  }
+
+  function changeOpusDtx(enabled: boolean) {
+    const preferences = loadMediaQuality();
+    saveMediaQuality({ ...preferences, dtx: enabled });
+    opusDtxDraft = enabled;
+    notice = `Opus DTX ${enabled ? 'enabled' : 'disabled'} for future microphone publications.`;
   }
 
   async function changeBrowserNotifications(enabled: boolean) {
@@ -1163,6 +1173,19 @@
         </div>
         <div class="settings-card">
           <div class="toggle-list">
+            {#if !isNativeDesktop()}
+              <label class="toggle-row">
+                <span>
+                  <strong>Opus discontinuous transmission</strong>
+                  <small>Reduce outgoing bandwidth while you are not speaking. Recommended.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={opusDtxDraft}
+                  onchange={(event) => changeOpusDtx(event.currentTarget.checked)}
+                />
+              </label>
+            {/if}
             <label class="toggle-row">
               <span>
                 <strong>Developer mode</strong>

@@ -274,6 +274,7 @@ pub enum VoiceCommand {
 #[derive(Clone, Copy, Debug)]
 pub struct MediaPublishSettings {
     pub audio_max_bitrate: u64,
+    pub opus_dtx: bool,
 }
 
 pub struct VoiceMediaSettings {
@@ -298,6 +299,7 @@ impl Default for MediaPublishSettings {
     fn default() -> Self {
         Self {
             audio_max_bitrate: 48_000,
+            opus_dtx: true,
         }
     }
 }
@@ -506,6 +508,7 @@ async fn join(
                 LocalTrack::Audio(track),
                 TrackPublishOptions {
                     source: TrackSource::Microphone,
+                    dtx: media.publish.opus_dtx,
                     audio_encoding: Some(AudioEncoding {
                         max_bitrate: effective_microphone_bitrate(
                             media.publish.audio_max_bitrate,

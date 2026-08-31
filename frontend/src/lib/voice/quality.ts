@@ -31,6 +31,7 @@ export interface MediaQualityPreferences {
   screenProfile: ScreenShareProfileId;
   audioQuality: AudioQualityId;
   shareAudio: boolean;
+  dtx: boolean;
 }
 
 export const SCREEN_SHARE_PROFILES: readonly ScreenShareProfile[] = [
@@ -110,7 +111,8 @@ export const AUDIO_QUALITIES: readonly AudioQuality[] = [
 export const DEFAULT_MEDIA_QUALITY: MediaQualityPreferences = {
   screenProfile: 'smooth',
   audioQuality: 'standard',
-  shareAudio: true
+  shareAudio: true,
+  dtx: true
 };
 
 const STORAGE_KEY = 'kaede.media-quality.v1';
@@ -140,7 +142,8 @@ export function loadMediaQuality(storage?: Pick<Storage, 'getItem'>): MediaQuali
       shareAudio:
         typeof candidate.shareAudio === 'boolean'
           ? candidate.shareAudio
-          : DEFAULT_MEDIA_QUALITY.shareAudio
+          : DEFAULT_MEDIA_QUALITY.shareAudio,
+      dtx: typeof candidate.dtx === 'boolean' ? candidate.dtx : DEFAULT_MEDIA_QUALITY.dtx
     };
   } catch {
     return { ...DEFAULT_MEDIA_QUALITY };
@@ -202,7 +205,7 @@ export function webAudioPublishOptions(
   return {
     audioPreset: { maxBitrate: Math.min(quality.maxBitrate, channelBitrate) },
     forceStereo: quality.stereo,
-    dtx: !quality.stereo,
+    dtx: preferences.dtx,
     red: true
   };
 }

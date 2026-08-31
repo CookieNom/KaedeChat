@@ -121,6 +121,7 @@ pub struct DesktopPreferences {
     pub automatic_gain_control: bool,
     pub screen_share_profile: ScreenShareProfilePreference,
     pub audio_quality: AudioQualityPreference,
+    pub opus_dtx: bool,
     pub share_system_audio: bool,
 }
 
@@ -140,6 +141,7 @@ impl Default for DesktopPreferences {
             automatic_gain_control: true,
             screen_share_profile: ScreenShareProfilePreference::Smooth,
             audio_quality: AudioQualityPreference::Standard,
+            opus_dtx: true,
             share_system_audio: true,
         }
     }
@@ -881,6 +883,7 @@ mod tests {
             automatic_gain_control: false,
             screen_share_profile: ScreenShareProfilePreference::Sharp,
             audio_quality: AudioQualityPreference::High,
+            opus_dtx: false,
             share_system_audio: false,
         };
         preferences.save(&paths).await.expect("save preferences");
@@ -898,5 +901,12 @@ mod tests {
             assert_eq!(metadata.permissions().mode() & 0o077, 0);
         }
         let _ = tokio::fs::remove_dir_all(paths.config_dir.parent().expect("root path")).await;
+    }
+
+    #[test]
+    fn legacy_preferences_enable_opus_dtx_by_default() {
+        let preferences: DesktopPreferences =
+            serde_json::from_value(serde_json::json!({})).expect("legacy preferences");
+        assert!(preferences.opus_dtx);
     }
 }

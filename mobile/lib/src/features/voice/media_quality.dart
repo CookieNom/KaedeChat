@@ -85,8 +85,6 @@ extension VoiceAudioQualityDetails on VoiceAudioQuality {
         VoiceAudioQuality.high => 96000,
         VoiceAudioQuality.studio => 128000,
       };
-
-  bool get continuousTransmission => this == VoiceAudioQuality.studio;
 }
 
 @immutable
@@ -94,13 +92,16 @@ final class MobileMediaQuality {
   const MobileMediaQuality({
     this.screen = ScreenShareQuality.smooth,
     this.audio = VoiceAudioQuality.standard,
+    this.dtx = true,
   });
 
   static const _screenKey = 'voice.screen_share_quality.v1';
   static const _audioKey = 'voice.audio_quality.v1';
+  static const _dtxKey = 'voice.opus_dtx.v1';
 
   final ScreenShareQuality screen;
   final VoiceAudioQuality audio;
+  final bool dtx;
 
   static const _iosBroadcastChannel =
       MethodChannel('chat.kaede.mobile/screen_share');
@@ -118,6 +119,7 @@ final class MobileMediaQuality {
         storage.getString(_audioKey),
         VoiceAudioQuality.standard,
       ),
+      dtx: storage.getBool(_dtxKey) ?? true,
     );
   }
 
@@ -126,6 +128,7 @@ final class MobileMediaQuality {
     await Future.wait(<Future<bool>>[
       storage.setString(_screenKey, screen.name),
       storage.setString(_audioKey, audio.name),
+      storage.setBool(_dtxKey, dtx),
     ]);
   }
 
@@ -156,7 +159,7 @@ final class MobileMediaQuality {
       AudioPublishOptions(
         audioBitrate:
             audio.bitrate < channelBitrate ? audio.bitrate : channelBitrate,
-        dtx: !audio.continuousTransmission,
+        dtx: dtx,
         red: true,
       );
 

@@ -19,6 +19,8 @@ import 'package:kaede_mobile/src/features/settings/instance_administration_scree
 import 'package:kaede_mobile/src/features/settings/reports_screen.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/features/voice/media_quality.dart';
+import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -45,6 +47,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   var _saving = false;
   var _biometricLock = false;
   var _biometricLockTimeout = 30;
+  var _opusDtx = true;
   var _adminAvailable = false;
   String? _loadError;
   String? _versionLabel;
@@ -335,6 +338,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ]);
       final user = ref.read(mobileControllerProvider).user;
       final preferences = await SharedPreferences.getInstance();
+      final mediaQuality = await MobileMediaQuality.load();
       if (!mounted) return;
       setState(() {
         _settings = Map<String, Object?>.from(results[0] as Map);
@@ -348,6 +352,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _biometricLock = preferences.getBool('biometric_lock') ?? false;
         _biometricLockTimeout =
             preferences.getInt('biometric_lock_timeout_seconds') ?? 30;
+        _opusDtx = mediaQuality.dtx;
         _loadError = null;
         _loading = false;
       });
@@ -1134,6 +1139,17 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       _manageUserApplication(_applicationInstallations[index]),
             ),
           SettingsSectionHeader(
+            'Advanced',
+            subheading: 'Optional media and troubleshooting controls.',
+          ),
+          SettingsSwitchRow(
+            title: 'Opus discontinuous transmission',
+            subtitle:
+                'Reduce outgoing bandwidth while you are not speaking. Recommended.',
+            value: _opusDtx,
+            onChanged: _setOpusDtx,
+          ),
+          SettingsSectionHeader(
             'Developer',
             subheading:
                 'Build applications and reveal qualified technical IDs in context menus.',
@@ -1770,6 +1786,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       if (mounted) setState(() => _biometricLock = enabled);
     } on Object catch (error) {
       _showError(error, summary: 'Could not save the app lock setting');
+    }
+  }
+
+  Future<void> _setOpusDtx(bool enabled) async {
+    try {
+      await ref.read(voiceSessionProvider).setOpusDtx(enabled);
+      if (mounted) setState(() => _opusDtx = enabled);
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not save the Opus DTX setting');
     }
   }
 

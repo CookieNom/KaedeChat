@@ -438,7 +438,8 @@ describe('voice media key rotation', () => {
     await voice.startScreenShare({
       screenProfile: 'sharp',
       audioQuality: 'studio',
-      shareAudio: true
+      shareAudio: true,
+      dtx: false
     });
 
     expect(candidate.localParticipant.getTrackPublication).toHaveBeenCalledWith(
