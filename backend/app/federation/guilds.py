@@ -6,6 +6,7 @@ import secrets
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from graphlib import CycleError, TopologicalSorter
 from typing import Any, cast
 
 from fastapi import HTTPException
@@ -235,6 +236,26 @@ def expected_channel_parent_types(channel_type: int) -> frozenset[int]:
     if channel_type == 12:
         return frozenset({0})
     return frozenset({4})
+
+
+def _snapshot_channels_parent_first(
+    channels: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    channels_by_ref = {
+        (int(channel["id"]), str(channel["origin_domain"])): channel for channel in channels
+    }
+    dependencies = {
+        ref: (
+            {(int(channel["parent_id"]), str(channel["parent_domain"]))}
+            if channel.get("parent_id") is not None
+            else set()
+        )
+        for ref, channel in channels_by_ref.items()
+    }
+    try:
+        return [channels_by_ref[ref] for ref in TopologicalSorter(dependencies).static_order()]
+    except (CycleError, KeyError) as exc:
+        raise ValueError("guild snapshot channel parent graph is invalid") from exc
 
 
 def local_guild_membership_exists(local_domain: str) -> ColumnElement[bool]:
@@ -6368,6 +6389,7 @@ async def apply_guild_snapshot(
         expected_guild_id=expected_guild_id,
         required_member=required_member,
     )
+    snapshot_channels = _snapshot_channels_parent_first(snapshot["channels"])
     raw_guild = snapshot["guild"]
     guild_version = _event_resource_version(raw_guild, "guild")
     origin = str(raw_guild["origin_domain"])
@@ -6473,7 +6495,7 @@ async def apply_guild_snapshot(
     if guild_version is not None:
         versioned_resources.append((guild, guild_version))
     role_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot["roles"]}
-    channel_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot["channels"]}
+    channel_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot_channels}
     member_refs = {
         (int(raw["user"]["id"]), str(raw["user"]["origin_domain"])) for raw in snapshot_members
     }
@@ -6580,8 +6602,7 @@ async def apply_guild_snapshot(
         role_version = _apply_event_resource_version(loaded_role, raw, "role")
         if role_version is not None:
             versioned_resources.append((loaded_role, role_version))
-    snapshot_channel_parents: list[tuple[Channel, int | None, str | None]] = []
-    for raw in snapshot["channels"]:
+    for raw in snapshot_channels:
         loaded_channel = await session.get(Channel, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_channel is None:
             loaded_channel = Channel(
@@ -6607,18 +6628,8 @@ async def apply_guild_snapshot(
         loaded_channel.name = raw.get("name")
         loaded_channel.topic = raw.get("topic")
         loaded_channel.position = int(raw["position"])
-        # Stage every channel before restoring the self-referential parent
-        # keys. Otherwise the next session.get() can autoflush a forum post
-        # before its parent forum has been inserted.
-        loaded_channel.parent_id = None
-        loaded_channel.parent_domain = None
-        snapshot_channel_parents.append(
-            (
-                loaded_channel,
-                int(raw["parent_id"]) if raw.get("parent_id") else None,
-                raw.get("parent_domain"),
-            )
-        )
+        loaded_channel.parent_id = int(raw["parent_id"]) if raw.get("parent_id") else None
+        loaded_channel.parent_domain = raw.get("parent_domain")
         loaded_channel.permissions_synced = bool(raw.get("permissions_synced", False))
         loaded_channel.rate_limit_per_user = int(raw["rate_limit_per_user"])
         voice_state = _validated_voice_channel_state(raw, loaded_channel.type)
@@ -6655,10 +6666,6 @@ async def apply_guild_snapshot(
         channel_version = _apply_event_resource_version(loaded_channel, raw, "channel")
         if channel_version is not None:
             versioned_resources.append((loaded_channel, channel_version))
-    await session.flush()
-    for loaded_channel, parent_id, parent_domain in snapshot_channel_parents:
-        loaded_channel.parent_id = parent_id
-        loaded_channel.parent_domain = parent_domain
     for raw in snapshot.get("emojis", []):
         loaded_emoji = await session.get(Emoji, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_emoji is None:

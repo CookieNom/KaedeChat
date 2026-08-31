@@ -85,6 +85,9 @@ describe('Discord parity cleanup', () => {
 
   it('uses the full message menu for mobile images and exposes image copying', () => {
     expect(messageRow).toContain('<span>Copy image</span>');
+    expect(messageRow.indexOf('<span>Copy image</span>')).toBeGreaterThan(
+      messageRow.indexOf('<span>Report message</span>')
+    );
     expect(messageRow).toContain('copyAuthenticatedImage');
     expect(globalStyles).toMatch(/\.attachment-preview-button[^}]*-webkit-touch-callout: none;/u);
   });

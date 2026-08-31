@@ -1421,21 +1421,6 @@
           }}
         />
       {:else}
-        {#if contextAttachment?.attachment.content_type.startsWith('image/')}
-          <button
-            type="button"
-            role="menuitem"
-            tabindex="-1"
-            onclick={(event) => copyImage(contextAttachment!.attachment, event)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <circle cx="9" cy="10" r="2" />
-              <path d="m5 18 4-4 3 3 2-2 5 3" />
-            </svg>
-            <span>Copy image</span>
-          </button>
-        {/if}
         {#if !groupSystemNotice}
           {#if canReact && onToggleReaction && !message.deleted_at}
             <div class="quick-reactions" aria-label="Recent reactions">
@@ -1616,6 +1601,21 @@
                 <path d="M5 21V4m0 1h11l-2 4 2 4H5" />
               </svg>
               <span>Report message</span>
+            </button>
+          {/if}
+          {#if contextAttachment?.attachment.content_type.startsWith('image/')}
+            <button
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={(event) => copyImage(contextAttachment!.attachment, event)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <circle cx="9" cy="10" r="2" />
+                <path d="m5 18 4-4 3 3 2-2 5 3" />
+              </svg>
+              <span>Copy image</span>
             </button>
           {/if}
           {#if editAvailable}

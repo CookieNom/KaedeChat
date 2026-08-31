@@ -72,6 +72,7 @@ from app.federation.events import build_envelope, ensure_queue_destination
 from app.federation.guilds import (
     GUILD_MUTATION_EVENT_TYPES,
     _event_ref,
+    _snapshot_channels_parent_first,
     apply_guild_mutation_event,
     fetch_guild_snapshot,
     guild_event_channel_ref,
@@ -4483,6 +4484,33 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
     snapshot["channels"][0]["origin_domain"] = "evil.example"
     with pytest.raises(ValueError, match="channel identity"):
         validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+
+
+def test_snapshot_channels_are_applied_parent_first() -> None:
+    channels = [
+        {
+            "id": "30",
+            "origin_domain": "beta.localhost",
+            "parent_id": "20",
+            "parent_domain": "beta.localhost",
+        },
+        {
+            "id": "20",
+            "origin_domain": "beta.localhost",
+            "parent_id": "10",
+            "parent_domain": "beta.localhost",
+        },
+        {
+            "id": "10",
+            "origin_domain": "beta.localhost",
+            "parent_id": None,
+            "parent_domain": None,
+        },
+    ]
+
+    ordered = _snapshot_channels_parent_first(channels)
+
+    assert [channel["id"] for channel in ordered] == ["10", "20", "30"]
 
 
 def test_guild_snapshot_rejects_invalid_custom_emoji_identity() -> None:
