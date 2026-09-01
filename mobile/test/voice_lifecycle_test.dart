@@ -1,9 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/platform/voice_background_service.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart' as protocol;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -69,6 +71,55 @@ void main() {
         guilds: const <KaedeGuild>[],
       ),
       same(directMessage),
+    );
+  });
+
+  test('voice activity requires both Speak and Use Voice Activity', () {
+    KaedeChannel channel(int permissions) => KaedeChannel(
+          ref: EntityRef.parse('92@alpha.example'),
+          type: ChannelType.voice,
+          position: 0,
+          permissions: BigInt.from(permissions),
+        );
+
+    expect(voiceChannelCanUseVad(channel(protocol.Permission.useVad)), isFalse);
+    expect(voiceChannelCanUseVad(channel(protocol.Permission.speak)), isFalse);
+    expect(
+      voiceChannelCanUseVad(
+        channel(protocol.Permission.speak | protocol.Permission.useVad),
+      ),
+      isTrue,
+    );
+  });
+
+  test('Stage speaking and streaming follow authoritative occupant grants', () {
+    final stage = KaedeChannel(
+      ref: EntityRef.parse('93@alpha.example'),
+      type: ChannelType.stage,
+      position: 0,
+      permissions: BigInt.from(protocol.Permission.connect),
+    );
+
+    final audience = voiceChannelCapabilities(
+      stage,
+      authoritativeCanSpeak: false,
+      authoritativeCanStream: false,
+    );
+    expect(audience.canSpeak, isFalse);
+    expect(audience.canStream, isFalse);
+    expect(audience.canUseVad, isFalse);
+
+    final speaker = voiceChannelCapabilities(
+      stage,
+      authoritativeCanSpeak: true,
+      authoritativeCanStream: true,
+    );
+    expect(speaker.canSpeak, isTrue);
+    expect(speaker.canStream, isTrue);
+    expect(speaker.canUseVad, isTrue);
+    expect(
+      voiceChannelCanUseVad(stage, stageCanSpeak: true),
+      isTrue,
     );
   });
 

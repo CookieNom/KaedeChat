@@ -162,6 +162,7 @@ async def test_stage_create_emits_start_message_and_visible_notification_marker(
     system_message = AsyncMock(return_value={"message_type": 27})
     mutation = AsyncMock()
     dispatch = Mock()
+    interactions_allowed = AsyncMock()
     monkeypatch.setattr(
         "app.api.stage_instances.stage_channel_and_guild",
         AsyncMock(return_value=(channel, current_guild)),
@@ -178,6 +179,10 @@ async def test_stage_create_emits_start_message_and_visible_notification_marker(
         ),
     )
     monkeypatch.setattr("app.api.stage_instances.add_audit_entry", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.stage_instances.require_member_interactions_allowed",
+        interactions_allowed,
+    )
     monkeypatch.setattr("app.api.stage_instances.queue_guild_mutation", mutation)
     monkeypatch.setattr("app.api.stage_instances.persist_stage_system_message", system_message)
     monkeypatch.setattr("app.api.stage_instances.queue_postcommit_dispatch", dispatch)
@@ -216,6 +221,7 @@ async def test_stage_create_emits_start_message_and_visible_notification_marker(
         "id": "1",
         "origin_domain": "alpha.localhost",
     }
+    assert interactions_allowed.await_args.args[-1] == Permission.MENTION_EVERYONE
 
 
 @pytest.mark.parametrize(

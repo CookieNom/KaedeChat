@@ -289,7 +289,7 @@ _CONTRACTS = (
         "tracker.task.assign",
         Permission.VIEW_CHANNEL | Permission.ASSIGN_TRACKER_TASKS,
         "channel",
-        "members may assign or unassign themselves while editing their own task",
+        "members may claim any unassigned task or unassign themselves without this permission",
     ),
     EndpointPermissionContract(
         "tracker.lane.manage",

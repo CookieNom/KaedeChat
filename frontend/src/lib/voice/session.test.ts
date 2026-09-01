@@ -122,6 +122,187 @@ describe('voice connection generation fence', () => {
 });
 
 describe('self voice-state publication', () => {
+  it('enforces no-VAD grants with hold-to-talk instead of opening the microphone', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const publish = vi.fn(async () => undefined);
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room, publish);
+
+    await voice.connect(
+      grant({ can_use_vad: false, expires_at: '2099-07-19T12:15:00Z' }),
+      plaintextChannel
+    );
+
+    expect(voice.canSpeak).toBe(true);
+    expect(voice.pushToTalkRequired).toBe(true);
+    expect(voice.microphone).toBe(false);
+    expect(candidate.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+
+    await voice.toggleMicrophone();
+    expect(candidate.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+
+    await voice.startPushToTalk();
+    expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(true);
+    expect(voice.microphone).toBe(true);
+
+    await voice.stopPushToTalk();
+    expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
+    expect(voice.microphone).toBe(false);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('serializes a release behind an in-flight push-to-talk track enable', async () => {
+    const enabled = deferred<undefined>();
+    const candidate = new FakeVoiceRoom();
+    candidate.localParticipant.setMicrophoneEnabled.mockImplementationOnce(() => enabled.promise);
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+    await voice.connect(
+      grant({ can_use_vad: false, expires_at: '2099-07-19T12:15:00Z' }),
+      plaintextChannel
+    );
+
+    const pressing = voice.startPushToTalk();
+    await vi.waitFor(() =>
+      expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true)
+    );
+    const releasing = voice.stopPushToTalk();
+    enabled.resolve(undefined);
+    await Promise.all([pressing, releasing]);
+
+    expect(candidate.localParticipant.setMicrophoneEnabled.mock.calls).toEqual([[true], [false]]);
+    expect(voice.microphone).toBe(false);
+  });
+
+  it('closes an open VAD microphone when USE_VAD is revoked mid-session', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+
+    await voice.reconcileBrowserPermissions({
+      canConnect: true,
+      canSpeak: true,
+      canStream: true,
+      canUseVad: false
+    });
+
+    expect(candidate.localParticipant.setMicrophoneEnabled.mock.calls).toEqual([[true], [false]]);
+    expect(voice.canSpeak).toBe(true);
+    expect(voice.pushToTalkRequired).toBe(true);
+    expect(voice.microphone).toBe(false);
+  });
+
+  it('closes microphone capture when SPEAK is revoked mid-session', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+
+    await voice.reconcileBrowserPermissions({
+      canConnect: true,
+      canSpeak: false,
+      canStream: true,
+      canUseVad: false
+    });
+
+    expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
+    expect(voice.canSpeak).toBe(false);
+    expect(voice.pushToTalkRequired).toBe(false);
+    expect(voice.microphone).toBe(false);
+  });
+
+  it('leaves the room when CONNECT is revoked mid-session', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+
+    await voice.reconcileBrowserPermissions({
+      canConnect: false,
+      canSpeak: false,
+      canStream: false,
+      canUseVad: false
+    });
+
+    expect(candidate.disconnect).toHaveBeenCalled();
+    expect(voice.connected).toBe(false);
+  });
+
+  it('stops published video when STREAM is revoked mid-session', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+    await voice.toggleCamera();
+    await voice.startScreenShare({
+      screenProfile: 'smooth',
+      audioQuality: 'standard',
+      shareAudio: false,
+      dtx: true
+    });
+
+    await voice.reconcileBrowserPermissions({
+      canConnect: true,
+      canSpeak: true,
+      canStream: false,
+      canUseVad: true
+    });
+
+    expect(candidate.localParticipant.setCameraEnabled).toHaveBeenLastCalledWith(false);
+    expect(candidate.localParticipant.setScreenShareEnabled).toHaveBeenLastCalledWith(false);
+    expect(voice.canStream).toBe(false);
+    expect(voice.camera).toBe(false);
+    expect(voice.screen).toBe(false);
+  });
+
+  it('gives promoted Stage speakers VAD and closes every track on demotion', async () => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+    await voice.connect(
+      grant({
+        can_speak: false,
+        can_stream: false,
+        can_use_vad: false,
+        expires_at: '2099-07-19T12:15:00Z'
+      }),
+      plaintextChannel
+    );
+
+    await voice.reconcileParticipantPermissions({
+      canSpeak: true,
+      canStream: true,
+      canUseVad: true
+    });
+    expect(voice.canSpeak).toBe(true);
+    expect(voice.canStream).toBe(true);
+    expect(voice.pushToTalkRequired).toBe(false);
+
+    await voice.toggleMicrophone();
+    await voice.toggleCamera();
+    await voice.startScreenShare({
+      screenProfile: 'smooth',
+      audioQuality: 'standard',
+      shareAudio: false,
+      dtx: true
+    });
+    await voice.reconcileParticipantPermissions({
+      canSpeak: false,
+      canStream: false,
+      canUseVad: false
+    });
+
+    expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
+    expect(candidate.localParticipant.setCameraEnabled).toHaveBeenLastCalledWith(false);
+    expect(candidate.localParticipant.setScreenShareEnabled).toHaveBeenLastCalledWith(false);
+    expect(voice.canSpeak).toBe(false);
+    expect(voice.canStream).toBe(false);
+    expect(voice.microphone).toBe(false);
+    expect(voice.camera).toBe(false);
+    expect(voice.screen).toBe(false);
+  });
+
   it('keeps a local mute when the authoritative update fails', async () => {
     const candidate = new FakeVoiceRoom();
     const rooms = [new FakeVoiceRoom(), candidate];
@@ -212,6 +393,15 @@ describe('voice grant validation', () => {
       isUsableVoiceToken(grant({ move_session_id: ['a'.repeat(32)] as unknown as string }), 0)
     ).toBe(false);
     expect(isUsableVoiceToken({ ...grant(), e2ee: undefined } as unknown as VoiceToken, 0)).toBe(
+      false
+    );
+    expect(isUsableVoiceToken({ ...grant(), can_speak: 'yes' } as unknown as VoiceToken, 0)).toBe(
+      false
+    );
+    expect(isUsableVoiceToken({ ...grant(), can_stream: 1 } as unknown as VoiceToken, 0)).toBe(
+      false
+    );
+    expect(isUsableVoiceToken({ ...grant(), can_use_vad: null } as unknown as VoiceToken, 0)).toBe(
       false
     );
     expect(isUsableVoiceToken(grant({ channel_id: null }), 0)).toBe(false);

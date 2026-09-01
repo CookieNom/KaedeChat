@@ -9,6 +9,7 @@ import {
   createGuildWebhook,
   deleteGuildWebhook,
   isChannelFollowerWebhook,
+  listChannelWebhooks,
   listGuildWebhooks,
   manageableWebhookChannels,
   rotateGuildWebhook,
@@ -58,6 +59,7 @@ describe('guild webhook management', () => {
 
   it('uses qualified authority routes for list, create, edit, rotate, and delete', async () => {
     await listGuildWebhooks('1@remote.example');
+    await listChannelWebhooks('1@remote.example', '2@remote.example');
     await createGuildWebhook('1@remote.example', '2@remote.example', 'Builds');
     await updateGuildWebhook('1@remote.example', webhook, {
       name: 'Deploys',
@@ -68,6 +70,7 @@ describe('guild webhook management', () => {
 
     expect(apiMock.mock.calls).toEqual([
       ['/guilds/1%40remote.example/webhooks', { signal: undefined }],
+      ['/guilds/1%40remote.example/channels/2%40remote.example/webhooks', { signal: undefined }],
       [
         '/guilds/1%40remote.example/channels/2%40remote.example/webhooks',
         { method: 'POST', body: JSON.stringify({ name: 'Builds' }) }

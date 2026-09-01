@@ -121,6 +121,13 @@ export interface SelfVoiceState {
 
 export type VoiceStatePublisher = (state: SelfVoiceState) => Promise<void>;
 
+export interface BrowserVoicePermissions {
+  canConnect: boolean;
+  canSpeak: boolean;
+  canStream: boolean;
+  canUseVad: boolean;
+}
+
 const VOICE_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_VOICE_MEDIA_POLICY: VoiceMediaPolicy = {
   bitrate: 64_000,
@@ -236,6 +243,9 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
     (value.move_session_id == null ||
       (typeof value.move_session_id === 'string' &&
         /^[A-Za-z0-9_-]{32,64}$/.test(value.move_session_id))) &&
+    typeof value.can_speak === 'boolean' &&
+    typeof value.can_stream === 'boolean' &&
+    typeof value.can_use_vad === 'boolean' &&
     typeof value.e2ee === 'boolean' &&
     voiceMediaPolicyFromGrant(value) !== null &&
     (!value.e2ee
@@ -352,6 +362,7 @@ export class VoiceSession extends EventTarget {
   screen = false;
   canSpeak = false;
   canStream = false;
+  pushToTalkRequired = false;
   moveSessionId: string | null = null;
   error = '';
   #nativePoll: ReturnType<typeof setInterval> | null = null;
@@ -364,6 +375,8 @@ export class VoiceSession extends EventTarget {
   #activeSpeakers = new Set<string>();
   #remoteAudio = new Set<HTMLMediaElement>();
   #connectGeneration = 0;
+  #pushToTalkDesired = false;
+  #pushToTalkQueue: Promise<void> = Promise.resolve();
   #candidateRoom: Room | null = null;
   #candidateWorker: Worker | null = null;
   #e2eeWorker: Worker | null = null;
@@ -423,6 +436,8 @@ export class VoiceSession extends EventTarget {
       this.moveSessionId = null;
       this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
       this.microphone = false;
+      this.pushToTalkRequired = false;
+      this.#pushToTalkDesired = false;
       this.deafened = false;
       this.camera = false;
       this.screen = false;
@@ -445,6 +460,8 @@ export class VoiceSession extends EventTarget {
     encryptionKey?: ArrayBuffer
   ): Promise<void> {
     this.#mediaQuality = loadMediaQuality();
+    this.#pushToTalkDesired = false;
+    await this.#pushToTalkQueue;
     const generation = ++this.#connectGeneration;
     const expected = expectedVoicePolicy(grant, channel);
     if (grant.e2ee && !encryptionKey) {
@@ -475,6 +492,8 @@ export class VoiceSession extends EventTarget {
     this.error = '';
     this.canSpeak = grant.can_speak;
     this.canStream = grant.can_stream;
+    this.pushToTalkRequired = grant.can_speak && !grant.can_use_vad;
+    this.#pushToTalkDesired = false;
     this.#changed();
 
     let candidate: Room | null = null;
@@ -512,7 +531,7 @@ export class VoiceSession extends EventTarget {
       );
       if (generation !== this.#connectGeneration) return;
 
-      if (grant.can_speak) {
+      if (grant.can_speak && grant.can_use_vad) {
         if (generation !== this.#connectGeneration) return;
         await candidate.localParticipant.setMicrophoneEnabled(true);
         if (generation !== this.#connectGeneration) {
@@ -536,7 +555,7 @@ export class VoiceSession extends EventTarget {
         video_quality_mode: expected.video_quality_mode
       };
       this.moveSessionId = grant.move_session_id ?? null;
-      this.microphone = grant.can_speak;
+      this.microphone = grant.can_speak && grant.can_use_vad;
     } catch (caught) {
       if (generation !== this.#connectGeneration) return;
       this.error = userErrorMessage(
@@ -571,6 +590,7 @@ export class VoiceSession extends EventTarget {
     if (!isNativeDesktop()) throw new Error('Native voice is unavailable.');
     if (this.connected || this.connecting) return;
     this.connecting = true;
+    this.pushToTalkRequired = false;
     this.error = '';
     this.#changed();
     try {
@@ -683,7 +703,7 @@ export class VoiceSession extends EventTarget {
   }
 
   async toggleMicrophone(): Promise<void> {
-    if (!this.connected || !this.canSpeak) return;
+    if (!this.connected || !this.canSpeak || this.pushToTalkRequired) return;
     const wasDeafened = this.deafened;
     const nextMuted = this.microphone;
     const nextDeafened = nextMuted ? wasDeafened : false;
@@ -744,9 +764,62 @@ export class VoiceSession extends EventTarget {
     }
   }
 
+  async startPushToTalk(): Promise<void> {
+    if (
+      !this.connected ||
+      !this.canSpeak ||
+      !this.pushToTalkRequired ||
+      this.deafened ||
+      isNativeDesktop()
+    )
+      return;
+    this.#pushToTalkDesired = true;
+    return this.#queuePushToTalkTransition();
+  }
+
+  async stopPushToTalk(): Promise<void> {
+    if (!this.pushToTalkRequired || isNativeDesktop()) return;
+    this.#pushToTalkDesired = false;
+    return this.#queuePushToTalkTransition();
+  }
+
+  #queuePushToTalkTransition(): Promise<void> {
+    const operation = this.#pushToTalkQueue.then(() => this.#applyPushToTalkState());
+    this.#pushToTalkQueue = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async #applyPushToTalkState(): Promise<void> {
+    const shouldOpen =
+      this.#pushToTalkDesired &&
+      this.connected &&
+      this.canSpeak &&
+      this.pushToTalkRequired &&
+      !this.deafened;
+    if (!shouldOpen) {
+      if (this.microphone) {
+        await this.room.localParticipant.setMicrophoneEnabled(false);
+        this.microphone = false;
+        this.#changed();
+      }
+      return;
+    }
+    if (this.microphone) return;
+    await this.room.localParticipant.setMicrophoneEnabled(true);
+    this.microphone = true;
+    this.#changed();
+    if (!this.#pushToTalkDesired || !this.connected || this.deafened) {
+      await this.room.localParticipant.setMicrophoneEnabled(false);
+      this.microphone = false;
+      this.#changed();
+      return;
+    }
+  }
+
   async toggleDeafen(): Promise<void> {
     if (!this.connected) return;
     const nextDeafened = !this.deafened;
+    if (nextDeafened && this.pushToTalkRequired) await this.stopPushToTalk();
     if (!nextDeafened) {
       await this.#publishVoiceState({ self_mute: true, self_deaf: false });
     }
@@ -866,6 +939,73 @@ export class VoiceSession extends EventTarget {
     this.#changed();
   }
 
+  /**
+   * Immediately applies capability losses from the latest channel projection.
+   * Capability gains require a fresh token and are handled by the caller by
+   * leaving the room; this method never promotes an older media grant.
+   */
+  async reconcileBrowserPermissions(permissions: BrowserVoicePermissions): Promise<void> {
+    if (isNativeDesktop() || !this.connected) return;
+    if (!permissions.canConnect) {
+      await this.disconnect();
+      return;
+    }
+
+    const revokeSpeak = this.canSpeak && !permissions.canSpeak;
+    const requirePushToTalk =
+      this.canSpeak && permissions.canSpeak && !permissions.canUseVad && !this.pushToTalkRequired;
+    const revokeStream = this.canStream && !permissions.canStream;
+    if (!revokeSpeak && !requirePushToTalk && !revokeStream) return;
+
+    if (revokeSpeak) {
+      this.canSpeak = false;
+      this.pushToTalkRequired = false;
+      this.#pushToTalkDesired = false;
+    } else if (requirePushToTalk) {
+      this.pushToTalkRequired = true;
+      this.#pushToTalkDesired = false;
+    }
+    if (revokeStream) this.canStream = false;
+    this.#changed();
+
+    try {
+      if (revokeSpeak || requirePushToTalk) await this.#queuePushToTalkTransition();
+      if (revokeStream && this.screen) {
+        await this.room.localParticipant.setScreenShareEnabled(false);
+        this.screen = false;
+      }
+      if (revokeStream && this.camera) {
+        await this.room.localParticipant.setCameraEnabled(false);
+        this.camera = false;
+      }
+      this.#changed();
+    } catch (caught) {
+      // A failed track shutdown must not leave revoked media live.
+      await this.disconnect().catch(() => undefined);
+      throw caught;
+    }
+  }
+
+  /** Apply authoritative, in-room Stage promotion and demotion updates. */
+  async reconcileParticipantPermissions(
+    permissions: Omit<BrowserVoicePermissions, 'canConnect'>
+  ): Promise<void> {
+    if (isNativeDesktop() || !this.connected) return;
+    const gainedSpeak = !this.canSpeak && permissions.canSpeak;
+    const gainedStream = !this.canStream && permissions.canStream;
+
+    await this.reconcileBrowserPermissions({ canConnect: true, ...permissions });
+    if (!this.connected || (!gainedSpeak && !gainedStream)) return;
+
+    if (gainedSpeak) {
+      this.canSpeak = true;
+      this.pushToTalkRequired = !permissions.canUseVad;
+      this.#pushToTalkDesired = false;
+    }
+    if (gainedStream) this.canStream = true;
+    this.#changed();
+  }
+
   async toggleScreen(): Promise<void> {
     if (this.screen) return this.stopScreenShare();
     return this.startScreenShare(this.#mediaQuality);
@@ -894,6 +1034,8 @@ export class VoiceSession extends EventTarget {
   }
 
   async disconnect(): Promise<void> {
+    if (this.pushToTalkRequired) await this.stopPushToTalk().catch(() => undefined);
+    this.#pushToTalkDesired = false;
     if (isNativeDesktop()) {
       if (this.#nativePoll) clearInterval(this.#nativePoll);
       this.#nativePoll = null;
@@ -908,6 +1050,7 @@ export class VoiceSession extends EventTarget {
       this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
       this.connecting = false;
       this.microphone = false;
+      this.pushToTalkRequired = false;
       this.deafened = false;
       this.camera = false;
       this.screen = false;
@@ -938,6 +1081,7 @@ export class VoiceSession extends EventTarget {
     this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
     this.connecting = false;
     this.microphone = false;
+    this.pushToTalkRequired = false;
     this.deafened = false;
     this.camera = false;
     this.screen = false;

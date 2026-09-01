@@ -36,6 +36,7 @@ from app.db.models import (
 from app.federation.guild_management import (
     GuildManagementOperation,
     proxy_remote_guild_management,
+    qualified_management_ref,
 )
 from app.federation.tracker import hydrate_replicated_tracker
 from app.tracker.federation import queue_tracker_federation_invalidation
@@ -81,6 +82,35 @@ class PositionedTrackerResource(Protocol):
     updated_at: datetime
 
 
+def qualified_remote_tracker_payload(
+    payload: dict[str, object],
+    *,
+    request_domain: str,
+    channel_domain: str,
+) -> dict[str, object]:
+    """Remove receiver-relative identity defaults before a tracker RPC."""
+
+    qualified = dict(payload)
+    resource_ref = qualified.get("resource_ref")
+    if resource_ref is not None:
+        qualified["resource_ref"] = qualified_management_ref(
+            EntityRef(str(resource_ref)), channel_domain
+        )
+    raw_data = qualified.get("data")
+    if isinstance(raw_data, dict):
+        data = dict(raw_data)
+        lane_id = data.get("lane_id")
+        if lane_id is not None:
+            data["lane_id"] = qualified_management_ref(EntityRef(str(lane_id)), channel_domain)
+        assignee_id = data.get("assignee_id")
+        if assignee_id is not None:
+            data["assignee_id"] = qualified_management_ref(
+                EntityRef(str(assignee_id)), request_domain
+            )
+        qualified["data"] = data
+    return qualified
+
+
 async def proxy_remote_tracker_mutation(
     session: AsyncSession,
     settings: Settings,
@@ -115,6 +145,11 @@ async def proxy_remote_tracker_mutation(
     if access.channel.type != TRACKER_CHANNEL_TYPE or access.guild is None:
         raise HTTPException(status_code=404, detail={"code": "TRACKER_NOT_FOUND"})
     guild_ref = EntityRef(f"{access.guild.id}@{access.guild.origin_domain}")
+    qualified_payload = qualified_remote_tracker_payload(
+        payload,
+        request_domain=settings.domain,
+        channel_domain=access.channel.origin_domain,
+    )
     result = await proxy_remote_guild_management(
         session,
         settings,
@@ -123,7 +158,7 @@ async def proxy_remote_tracker_mutation(
         operation,
         {
             "channel_ref": f"{access.channel.id}@{access.channel.origin_domain}",
-            **payload,
+            **qualified_payload,
         },
     )
     if result is None:
@@ -920,10 +955,26 @@ async def require_task_edit(
     if permissions & required_permissions("tracker.task.update.other") == required_permissions(
         "tracker.task.update.other"
     ):
+        from app.automod.service import require_member_interactions_allowed
+
+        await require_member_interactions_allowed(
+            session,
+            guild,
+            actor,
+            required_permissions("tracker.task.update.other"),
+        )
         return permissions
     if own and permissions & required_permissions(
         "tracker.task.update.own"
     ) == required_permissions("tracker.task.update.own"):
+        from app.automod.service import require_member_interactions_allowed
+
+        await require_member_interactions_allowed(
+            session,
+            guild,
+            actor,
+            required_permissions("tracker.task.update.own"),
+        )
         return permissions
     await require_permissions(
         session,
@@ -964,11 +1015,21 @@ async def require_assignment_permission(
     self_only = (old == (None, None) and new == actor_ref) or (
         old == actor_ref and new == (None, None)
     )
-    if old == new or self_only:
+    if old == new:
         return
     guild = context.access.guild
     if guild is None:
         raise RuntimeError("tracker channel is not guild-scoped")
+    if self_only:
+        from app.automod.service import require_member_interactions_allowed
+
+        await require_member_interactions_allowed(
+            session,
+            guild,
+            actor,
+            Permission.EDIT_OWN_TRACKER_TASKS,
+        )
+        return
     await require_permissions(
         session,
         redis,
@@ -1140,8 +1201,12 @@ async def update_task(
     )
     task = await task_by_ref(session, context.board, task_ref, settings)
     require_tracker_version(task.updated_at, if_match)
-    await require_task_edit(session, redis, context, auth.user, task)
     values = payload.model_dump(exclude_unset=True)
+    # Assignment is an independent task capability.  Requiring general task
+    # edit authority first made ASSIGN_TRACKER_TASKS, and the explicit
+    # unassigned-to-self exception, impossible to exercise on existing tasks.
+    if set(values) - {"assignee_id"}:
+        await require_task_edit(session, redis, context, auth.user, task)
     users: dict[UserKey, User] = {(auth.user.id, auth.user.origin_domain): auth.user}
     assignee_changed = False
     if "assignee_id" in values:

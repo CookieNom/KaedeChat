@@ -240,7 +240,12 @@ async def test_user_install_invocations_survive_missing_use_application_commands
         else SimpleNamespace(definition={})
     )
     granular = AsyncMock()
+    interactions_allowed = AsyncMock()
     monkeypatch.setattr(interactions, "require_guild_command_permission", granular)
+    monkeypatch.setattr(
+        "app.automod.service.require_member_interactions_allowed",
+        interactions_allowed,
+    )
     context = SimpleNamespace(
         session=SimpleNamespace(),
         redis=SimpleNamespace(),
@@ -270,6 +275,9 @@ async def test_user_install_invocations_survive_missing_use_application_commands
     await interactions.validate_interaction_command_access(cast(Any, context))
 
     granular.assert_not_awaited()
+    assert interactions_allowed.await_args.args[-1] == (
+        Permission.USE_APPLICATION_COMMANDS | Permission.USE_EXTERNAL_APPS
+    )
 
 
 @pytest.mark.asyncio
@@ -332,7 +340,13 @@ async def test_guild_install_invocations_are_blocked_without_use_application_com
 
 
 @pytest.mark.asyncio
-async def test_user_install_invocation_still_enforces_command_defaults() -> None:
+async def test_user_install_invocation_still_enforces_command_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.automod.service.require_member_interactions_allowed",
+        AsyncMock(),
+    )
     context = SimpleNamespace(
         session=SimpleNamespace(),
         redis=SimpleNamespace(),

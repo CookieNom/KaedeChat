@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/announcement_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/announcements.dart';
@@ -17,6 +18,7 @@ final class AnnouncementManagementTab extends StatefulWidget {
     required this.repository,
     this.sourceChannel,
     this.createOnly = false,
+    this.liveController,
     super.key,
   });
 
@@ -26,6 +28,7 @@ final class AnnouncementManagementTab extends StatefulWidget {
   final KaedeRepository repository;
   final KaedeChannel? sourceChannel;
   final bool createOnly;
+  final MobileController? liveController;
 
   @override
   State<AnnouncementManagementTab> createState() =>
@@ -42,49 +45,93 @@ final class _AnnouncementManagementTabState
   String? _error;
   String? _notice;
   var _requestGeneration = 0;
+  void Function()? _removeLiveListener;
 
-  List<KaedeChannel> get _sources => (widget.sourceChannel == null
-          ? widget.guild.channels
-          : <KaedeChannel>[widget.sourceChannel!])
-      .where((channel) => canReadAnnouncementChannel(
-            widget.guild,
-            channel,
-            widget.currentUser,
-          ))
-      .toList(growable: false)
-    ..sort((left, right) => left.position.compareTo(right.position));
+  MobileState? get _liveState => widget.liveController?.currentState;
+
+  KaedeUser? get _currentUser => _liveState?.user ?? widget.currentUser;
+
+  KaedeGuild? get _guild {
+    final state = _liveState;
+    if (state == null) return widget.guild;
+    return state.guilds
+        .where((guild) => guild.ref == widget.guild.ref)
+        .firstOrNull;
+  }
+
+  List<KaedeChannel> get _sources {
+    final guild = _guild;
+    if (guild == null) return const <KaedeChannel>[];
+    final candidates = widget.sourceChannel == null
+        ? guild.channels
+        : guild.channels
+            .where((channel) => channel.ref == widget.sourceChannel!.ref)
+            .toList(growable: false);
+    return candidates
+        .where((channel) => canReadAnnouncementChannel(
+              guild,
+              channel,
+              _currentUser,
+            ))
+        .toList(growable: false)
+      ..sort((left, right) => left.position.compareTo(right.position));
+  }
 
   List<KaedeGuild> get _guilds {
+    final live = _liveState?.guilds ?? widget.guilds;
+    final guild = _guild;
     final available = <EntityRef, KaedeGuild>{
-      for (final guild in widget.guilds) guild.ref: guild,
-      widget.guild.ref: widget.guild,
+      for (final guild in live) guild.ref: guild,
+      if (guild != null) guild.ref: guild,
     };
     return available.values.toList(growable: false);
   }
 
   List<AnnouncementTarget> get _availableTargets {
     final followed = _follows.map((follow) => follow.targetChannel).toSet();
-    return announcementTargets(_guilds, widget.currentUser)
+    return announcementTargets(_guilds, _currentUser)
         .where((target) => !followed.contains(target.ref))
         .toList(growable: false);
   }
 
   Map<EntityRef, AnnouncementTarget> get _targetByRef =>
       <EntityRef, AnnouncementTarget>{
-        for (final target in announcementTargets(_guilds, widget.currentUser))
+        for (final target in announcementTargets(_guilds, _currentUser))
           target.ref: target,
       };
 
   @override
   void initState() {
     super.initState();
+    _listenLive();
     _source = widget.sourceChannel?.ref ?? _sources.firstOrNull?.ref;
     if (_source != null) unawaited(_load());
+  }
+
+  void _listenLive() {
+    _removeLiveListener?.call();
+    _removeLiveListener = widget.liveController?.addListener((_) {
+      if (!mounted) return;
+      setState(() {
+        final sources = _sources;
+        if (_source == null ||
+            !sources.any((channel) => channel.ref == _source)) {
+          _requestGeneration += 1;
+          _source = sources.firstOrNull?.ref;
+          _target = null;
+          _follows = const <AnnouncementFollow>[];
+          _loading = false;
+        }
+      });
+    }, fireImmediately: false);
   }
 
   @override
   void didUpdateWidget(covariant AnnouncementManagementTab oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.liveController, widget.liveController)) {
+      _listenLive();
+    }
     final sources = _sources;
     if (_source == null || !sources.any((channel) => channel.ref == _source)) {
       _source = sources.firstOrNull?.ref;
@@ -93,6 +140,18 @@ final class _AnnouncementManagementTabState
       if (_source != null) unawaited(_load());
     }
   }
+
+  @override
+  void dispose() {
+    _removeLiveListener?.call();
+    super.dispose();
+  }
+
+  bool _sourceAuthorized(EntityRef source) =>
+      _sources.any((channel) => channel.ref == source);
+
+  bool _targetAuthorized(EntityRef target) =>
+      _availableTargets.any((candidate) => candidate.ref == target);
 
   String _followLabel(AnnouncementFollow follow) =>
       _targetByRef[follow.targetChannel]?.label ??
@@ -105,7 +164,7 @@ final class _AnnouncementManagementTabState
 
   Future<void> _load() async {
     final source = _source;
-    if (source == null) return;
+    if (source == null || !_sourceAuthorized(source)) return;
     final generation = ++_requestGeneration;
     setState(() {
       _loading = true;
@@ -115,7 +174,10 @@ final class _AnnouncementManagementTabState
     });
     try {
       final follows = await widget.repository.announcementFollowers(source);
-      if (!mounted || generation != _requestGeneration || _source != source) {
+      if (!mounted ||
+          generation != _requestGeneration ||
+          _source != source ||
+          !_sourceAuthorized(source)) {
         return;
       }
       setState(() => _follows = follows);
@@ -139,15 +201,22 @@ final class _AnnouncementManagementTabState
   Future<void> _create() async {
     final source = _source;
     final target = _target;
-    if (source == null || target == null || _busyFollow != null) return;
+    if (source == null ||
+        target == null ||
+        _busyFollow != null ||
+        !_sourceAuthorized(source) ||
+        !_targetAuthorized(target)) {
+      return;
+    }
     setState(() {
       _busyFollow = 'create';
       _error = null;
       _notice = null;
     });
     try {
+      if (!_sourceAuthorized(source) || !_targetAuthorized(target)) return;
       final follow = await widget.repository.followAnnouncement(source, target);
-      if (!mounted) return;
+      if (!mounted || !_sourceAuthorized(source)) return;
       setState(() {
         _follows = <AnnouncementFollow>[
           ..._follows.where((item) => item.ref != follow.ref),
@@ -175,7 +244,7 @@ final class _AnnouncementManagementTabState
         !canDeleteAnnouncementFollow(
           follow,
           _guilds,
-          widget.currentUser,
+          _currentUser,
         )) {
       return;
     }
@@ -197,13 +266,22 @@ final class _AnnouncementManagementTabState
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true ||
+        !mounted ||
+        !_sourceAuthorized(follow.sourceChannel) ||
+        !canDeleteAnnouncementFollow(follow, _guilds, _currentUser)) {
+      return;
+    }
     setState(() {
       _busyFollow = follow.ref.wire;
       _error = null;
       _notice = null;
     });
     try {
+      if (!_sourceAuthorized(follow.sourceChannel) ||
+          !canDeleteAnnouncementFollow(follow, _guilds, _currentUser)) {
+        return;
+      }
       await widget.repository.deleteAnnouncementFollow(
         follow.sourceChannel,
         follow.ref,
@@ -400,7 +478,7 @@ final class _AnnouncementManagementTabState
                         message: canDeleteAnnouncementFollow(
                           follow,
                           _guilds,
-                          widget.currentUser,
+                          _currentUser,
                         )
                             ? 'Remove follower'
                             : 'Manage Webhooks is required in the destination',
@@ -409,7 +487,7 @@ final class _AnnouncementManagementTabState
                                   canDeleteAnnouncementFollow(
                                     follow,
                                     _guilds,
-                                    widget.currentUser,
+                                    _currentUser,
                                   )
                               ? () => _remove(follow)
                               : null,

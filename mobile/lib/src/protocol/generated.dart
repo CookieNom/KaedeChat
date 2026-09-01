@@ -425,7 +425,7 @@ const permissionMetadata = <PermissionMetadata>[
     group: "Text",
     resourceScopes: ["channel"],
     channelTypes: [0, 2, 5, 10, 11, 12, 13, 15],
-    dependencies: <int>[1024, 65536],
+    dependencies: <int>[1024],
     danger: PermissionDanger.elevated,
   ),
   PermissionMetadata(
@@ -525,7 +525,7 @@ const permissionMetadata = <PermissionMetadata>[
     group: "Voice moderation",
     resourceScopes: ["channel"],
     channelTypes: [2, 13],
-    dependencies: <int>[1048576],
+    dependencies: <int>[],
     danger: PermissionDanger.elevated,
   ),
   PermissionMetadata(
@@ -536,7 +536,7 @@ const permissionMetadata = <PermissionMetadata>[
     group: "Voice moderation",
     resourceScopes: ["channel"],
     channelTypes: [2],
-    dependencies: <int>[1048576],
+    dependencies: <int>[],
     danger: PermissionDanger.elevated,
   ),
   PermissionMetadata(
@@ -603,15 +603,16 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Create, edit, rotate, and revoke channel webhooks.",
     group: "Management",
     resourceScopes: ["guild", "channel"],
-    channelTypes: [0, 2, 5, 13, 15],
+    channelTypes: [0, 5, 15],
     dependencies: <int>[],
     danger: PermissionDanger.critical,
   ),
   PermissionMetadata(
     name: "MANAGE_EMOJIS",
     bit: 1073741824,
-    label: "Manage emoji and stickers",
-    description: "Create and remove guild emoji and stickers.",
+    label: "Manage guild expressions",
+    description:
+        "Edit and remove emoji, stickers, and soundboard sounds created by other members.",
     group: "Management",
     resourceScopes: ["guild"],
     channelTypes: [],
@@ -796,7 +797,7 @@ const permissionMetadata = <PermissionMetadata>[
     group: "Voice",
     resourceScopes: ["channel"],
     channelTypes: [2],
-    dependencies: <int>[1024, 1048576],
+    dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
   PermissionMetadata(

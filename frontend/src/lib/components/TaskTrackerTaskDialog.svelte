@@ -8,6 +8,7 @@
     TrackerTask,
     UpdateTrackerTaskRequest
   } from '$lib/task-tracker/types';
+  import { trackerCanChangeAssignee } from '$lib/task-tracker/board';
   import { portal } from '$lib/ui/portal';
   import { onMount, untrack } from 'svelte';
   import Icon from './Icon.svelte';
@@ -20,6 +21,7 @@
     currentUser = null,
     canAssign = false,
     canDelete = false,
+    assignmentOnly = false,
     readOnly = false,
     busy = false,
     error = '',
@@ -34,6 +36,7 @@
     currentUser?: UserSummary | null;
     canAssign?: boolean;
     canDelete?: boolean;
+    assignmentOnly?: boolean;
     readOnly?: boolean;
     busy?: boolean;
     error?: string;
@@ -89,12 +92,7 @@
       )
       .sort((left, right) => memberName(left).localeCompare(memberName(right)));
   });
-  const canChangeAssignee = $derived(
-    canAssign ||
-      Boolean(
-        currentUser && (!task?.assignee || entityKey(task.assignee) === entityKey(currentUser))
-      )
-  );
+  const canChangeAssignee = $derived(trackerCanChangeAssignee(task, currentUser, canAssign));
 
   onMount(() => {
     if (titleInput?.disabled) dialog?.focus();
@@ -124,7 +122,11 @@
   }
 
   function submit() {
-    if (!title.trim() || busy || readOnly) return;
+    if (busy || readOnly || (!assignmentOnly && !title.trim())) return;
+    if (assignmentOnly) {
+      void onSave({ assignee_id: assigneeKey || null }, initialLane);
+      return;
+    }
     const common = {
       title: title.trim(),
       description: description.trim() || null,
@@ -186,7 +188,13 @@
       <div>
         <span>{task ? task.key : 'New task'}</span>
         <h2 id="task-dialog-title">
-          {readOnly ? 'Task details' : task ? 'Edit task' : 'Create task'}
+          {readOnly
+            ? 'Task details'
+            : assignmentOnly
+              ? 'Assign task'
+              : task
+                ? 'Edit task'
+                : 'Create task'}
         </h2>
       </div>
       <button type="button" disabled={busy} aria-label="Close" onclick={onClose}>
@@ -208,7 +216,7 @@
           maxlength="200"
           autocomplete="off"
           required
-          disabled={busy || readOnly}
+          disabled={busy || readOnly || assignmentOnly}
         />
       </label>
       <label class="wide-field">
@@ -218,12 +226,12 @@
           maxlength="10000"
           rows="5"
           placeholder="Add context, acceptance criteria, or links…"
-          disabled={busy || readOnly}
+          disabled={busy || readOnly || assignmentOnly}
         ></textarea>
       </label>
       <label>
         <span>Status</span>
-        <select bind:value={laneKey} disabled={busy || readOnly}>
+        <select bind:value={laneKey} disabled={busy || readOnly || assignmentOnly}>
           {#each lanes as lane (entityKey(lane))}
             <option value={entityKey(lane)}>{lane.name}</option>
           {/each}
@@ -231,7 +239,7 @@
       </label>
       <label>
         <span>Priority</span>
-        <select bind:value={priority} disabled={busy || readOnly}>
+        <select bind:value={priority} disabled={busy || readOnly || assignmentOnly}>
           <option value="none">No priority</option>
           <option value="low">Low</option>
           <option value="medium">Medium</option>
@@ -241,7 +249,11 @@
       </label>
       <label>
         <span>Due date</span>
-        <input bind:value={due} type="datetime-local" disabled={busy || readOnly} />
+        <input
+          bind:value={due}
+          type="datetime-local"
+          disabled={busy || readOnly || assignmentOnly}
+        />
       </label>
       <label>
         <span>Assignee</span>
@@ -264,7 +276,7 @@
 
       <footer class="wide-field">
         <div>
-          {#if task && canDelete && !readOnly && onDelete}
+          {#if task && canDelete && !readOnly && !assignmentOnly && onDelete}
             {#if confirmDelete}
               <span class="delete-confirm">Delete this task permanently?</span>
               <button
@@ -293,8 +305,14 @@
             >{readOnly ? 'Close' : 'Cancel'}</button
           >
           {#if !readOnly}
-            <button class="save-button" disabled={busy || !title.trim()}>
-              {busy ? 'Saving…' : task ? 'Save changes' : 'Create task'}
+            <button class="save-button" disabled={busy || (!assignmentOnly && !title.trim())}>
+              {busy
+                ? 'Saving…'
+                : assignmentOnly
+                  ? 'Save assignee'
+                  : task
+                    ? 'Save changes'
+                    : 'Create task'}
             </button>
           {/if}
         </div>

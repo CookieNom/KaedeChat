@@ -180,6 +180,7 @@ final class MessageSearchScreen extends StatefulWidget {
     required this.scopeRef,
     required this.channel,
     required this.accountRef,
+    this.historyAvailable = true,
     this.users = const <KaedeUser>[],
     required this.onJump,
     super.key,
@@ -190,6 +191,7 @@ final class MessageSearchScreen extends StatefulWidget {
   final EntityRef? scopeRef;
   final KaedeChannel? channel;
   final EntityRef? accountRef;
+  final bool historyAvailable;
   final List<KaedeUser> users;
   final Future<void> Function(MessageSearchResult result) onJump;
 
@@ -276,6 +278,13 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   @override
   void didUpdateWidget(covariant MessageSearchScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.historyAvailable && !widget.historyAvailable) {
+      _searchRequestGeneration += 1;
+      _page = null;
+      _pageSignature = null;
+      _loading = false;
+      _error = null;
+    }
     if (!identical(oldWidget.repository, widget.repository) ||
         oldWidget.scope != widget.scope ||
         oldWidget.scopeRef != widget.scopeRef) {
@@ -545,7 +554,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   }
 
   Future<void> _search({bool more = false}) async {
-    if (_loading ||
+    if (!widget.historyAvailable ||
+        _loading ||
         _encrypted ||
         _featureAvailable == false ||
         (!more && !_canSearch)) {
@@ -588,6 +598,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         cursor: more ? previousPage!.nextCursor : null,
       );
       if (!mounted ||
+          !widget.historyAvailable ||
           !messageSearchResponseIsCurrent(
             requestGeneration: generation,
             currentGeneration: _searchRequestGeneration,
@@ -661,317 +672,346 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                 ),
               ),
             )
-          : _featureAvailable == false
+          : !widget.historyAvailable
               ? Center(
                   child: Padding(
                     padding: EdgeInsets.all(28),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.search_off_rounded, size: 44),
+                        Icon(Icons.history_toggle_off_rounded, size: 44),
                         SizedBox(height: 16),
-                        Text(
-                          'Message search is disabled on this instance.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.w800),
-                        ),
+                        Text('Message history is unavailable in this channel.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                fontSize: 18, fontWeight: FontWeight.w800)),
                         SizedBox(height: 8),
                         Text(
-                          'Your instance administrator can enable the private search service during setup.',
+                          'New messages can still appear live, but retained history cannot be searched.',
                           textAlign: TextAlign.center,
                         ),
                       ],
                     ),
                   ),
                 )
-              : ListView(
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: EdgeInsets.fromLTRB(16, 16, 16, 28),
-                  children: [
-                    SearchBar(
-                      key: ValueKey('message-search-query'),
-                      controller: _query,
-                      focusNode: _queryFocus,
-                      hintText: 'Search messages or type from:',
-                      leading: Icon(Icons.search_rounded),
-                      trailing: _query.text.isEmpty
-                          ? null
-                          : <Widget>[
-                              IconButton(
-                                tooltip: 'Clear search text',
-                                onPressed: () {
-                                  _query.clear();
-                                  _queryChanged('');
-                                },
-                                icon: Icon(Icons.close_rounded),
-                              ),
-                            ],
-                      onChanged: _queryChanged,
-                      onSubmitted: (_) => _submitQuery(),
-                    ),
-                    if (_queryFocus.hasFocus) ...[
-                      SizedBox(height: 8),
-                      _operatorSuggestions(),
-                    ],
-                    SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            key: ValueKey('search-sort-$_sort'),
-                            initialValue: _sort,
-                            isExpanded: true,
-                            decoration: InputDecoration(labelText: 'Sort'),
-                            items: const [
-                              DropdownMenuItem(
-                                  value: 'relevance',
-                                  child: Text('Most relevant')),
-                              DropdownMenuItem(
-                                  value: 'newest', child: Text('Newest')),
-                              DropdownMenuItem(
-                                  value: 'oldest', child: Text('Oldest')),
-                            ],
-                            onChanged: (value) => _changeCriteria(
-                                () => _sort = value ?? 'relevance'),
-                          ),
-                        ),
-                        SizedBox(width: 12),
-                        Expanded(
-                          child: DropdownButtonFormField<bool?>(
-                            key: ValueKey('search-pinned-$_pinned'),
-                            initialValue: _pinned,
-                            isExpanded: true,
-                            decoration: InputDecoration(labelText: 'Pinned'),
-                            items: const [
-                              DropdownMenuItem(
-                                  value: null, child: Text('Either')),
-                              DropdownMenuItem(
-                                  value: true, child: Text('Pinned')),
-                              DropdownMenuItem(
-                                  value: false, child: Text('Not pinned')),
-                            ],
-                            onChanged: (value) =>
-                                _changeCriteria(() => _pinned = value),
-                          ),
-                        ),
-                      ],
-                    ),
-                    SizedBox(height: 10),
-                    DropdownButtonFormField<String?>(
-                      key: ValueKey('search-author-type-$_authorType'),
-                      initialValue: _authorType,
-                      isExpanded: true,
-                      decoration: InputDecoration(labelText: 'Author type'),
-                      items: const <DropdownMenuItem<String?>>[
-                        DropdownMenuItem<String?>(
-                            value: null, child: Text('Anyone')),
-                        DropdownMenuItem<String?>(
-                            value: 'user', child: Text('People')),
-                        DropdownMenuItem<String?>(
-                            value: 'bot', child: Text('Bots')),
-                        DropdownMenuItem<String?>(
-                            value: 'webhook', child: Text('Webhooks')),
-                      ],
-                      onChanged: (value) =>
-                          _changeCriteria(() => _authorType = value),
-                    ),
-                    SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _UserFilterField(
-                            key: ValueKey('search-author'),
-                            label: 'From',
-                            user: _userFor(_author),
-                            loading: _loadingUsers,
-                            onTap: () => _pickUser(mentions: false),
-                            onClear: _author == null
-                                ? null
-                                : () => _changeCriteria(() => _author = null),
-                          ),
-                        ),
-                        SizedBox(width: 12),
-                        Expanded(
-                          child: _UserFilterField(
-                            key: ValueKey('search-mention'),
-                            label: 'Mentions',
-                            user: _userFor(_mention),
-                            loading: _loadingUsers,
-                            onTap: () => _pickUser(mentions: true),
-                            onClear: _mention == null
-                                ? null
-                                : () => _changeCriteria(() => _mention = null),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (_userLoadError != null && _users.isEmpty)
-                      Padding(
-                        padding: EdgeInsets.only(top: 6),
-                        child: Text(
-                          _userLoadError!,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                    SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            icon: Icon(Icons.date_range_rounded),
-                            label: Text(_after == null
-                                ? 'After date'
-                                : MaterialLocalizations.of(context)
-                                    .formatMediumDate(_after!)),
-                            onPressed: () async {
-                              final value = await showDatePicker(
-                                context: context,
-                                firstDate: DateTime(2020),
-                                lastDate: DateTime.now(),
-                                initialDate: _after ?? DateTime.now(),
-                              );
-                              if (value != null && mounted) {
-                                _changeCriteria(() => _after = value);
-                              }
-                            },
-                          ),
-                        ),
-                        SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            icon: Icon(Icons.event_rounded),
-                            label: Text(_before == null
-                                ? 'Before date'
-                                : MaterialLocalizations.of(context)
-                                    .formatMediumDate(_before!)),
-                            onPressed: () async {
-                              final value = await showDatePicker(
-                                context: context,
-                                firstDate: DateTime(2020),
-                                lastDate: DateTime.now(),
-                                initialDate: _before ?? DateTime.now(),
-                              );
-                              if (value != null && mounted) {
-                                _changeCriteria(() => _before = value);
-                              }
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                    SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      children: [
-                        for (final kind in _contentKinds)
-                          FilterChip(
-                            label: Text(kind),
-                            selected: _has.contains(kind),
-                            onSelected: (selected) => _changeCriteria(() {
-                              if (selected) {
-                                _has.add(kind);
-                              } else {
-                                _has.remove(kind);
-                              }
-                            }),
-                          ),
-                      ],
-                    ),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                        onPressed: _clearFilters,
-                        child: Text('Clear filters'),
-                      ),
-                    ),
-                    FilledButton.icon(
-                      onPressed: _loading || !_canSearch ? null : _search,
-                      icon: Icon(Icons.search_rounded),
-                      label: Text(_loading ? 'Searching…' : 'Search'),
-                    ),
-                    if (_history.isNotEmpty) ...[
-                      SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text('Recent searches',
-                                style: TextStyle(fontWeight: FontWeight.w700)),
-                          ),
-                          TextButton(
-                              onPressed: _clearHistory, child: Text('Clear')),
-                        ],
-                      ),
-                      Wrap(
-                        spacing: 8,
-                        children: [
-                          for (final item in _history)
-                            ActionChip(
-                              label: Text(item),
-                              onPressed: () {
-                                _query.text = item;
-                                _query.selection = TextSelection.collapsed(
-                                    offset: _query.text.length);
-                                _queryChanged(item);
-                                _search();
-                              },
+              : _featureAvailable == false
+                  ? Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(28),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.search_off_rounded, size: 44),
+                            SizedBox(height: 16),
+                            Text(
+                              'Message search is disabled on this instance.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 18, fontWeight: FontWeight.w800),
                             ),
-                        ],
-                      ),
-                    ],
-                    if (_error case final error?)
-                      Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(error,
-                            style: TextStyle(
-                                color: Theme.of(context).colorScheme.error)),
-                      ),
-                    if (_page?.authorityCoverage
-                        case 'unavailable' || 'unsupported')
-                      Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                            'Showing locally cached matches. The home instance could not provide complete results.'),
-                      ),
-                    if (_page?.localCoverage == 'cached' &&
-                        _page?.authorityCoverage == 'not_queried')
-                      Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                            'Account-wide direct-message search uses this home’s recent federated cache. Search inside a conversation for complete results from its authority.'),
-                      ),
-                    if (_page?.indexing == true)
-                      Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                            'Search is catching up with recent messages. Results may be incomplete for a moment.'),
-                      ),
-                    if (_page?.encryptedChannelRefs.isNotEmpty == true)
-                      Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                            'Encrypted conversations were excluded from these results.'),
-                      ),
-                    if (_page != null && _page!.results.isEmpty)
-                      Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text(
-                          'No messages matched those filters.',
-                          textAlign: TextAlign.center,
+                            SizedBox(height: 8),
+                            Text(
+                              'Your instance administrator can enable the private search service during setup.',
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
                         ),
                       ),
-                    for (final result
-                        in _page?.results ?? const <MessageSearchResult>[])
-                      _resultTile(context, result),
-                    if (_page?.nextCursor != null)
-                      TextButton(
-                        onPressed: _loading ? null : () => _search(more: true),
-                        child: Text('Load more'),
-                      ),
-                  ],
-                ),
+                    )
+                  : ListView(
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
+                      padding: EdgeInsets.fromLTRB(16, 16, 16, 28),
+                      children: [
+                        SearchBar(
+                          key: ValueKey('message-search-query'),
+                          controller: _query,
+                          focusNode: _queryFocus,
+                          hintText: 'Search messages or type from:',
+                          leading: Icon(Icons.search_rounded),
+                          trailing: _query.text.isEmpty
+                              ? null
+                              : <Widget>[
+                                  IconButton(
+                                    tooltip: 'Clear search text',
+                                    onPressed: () {
+                                      _query.clear();
+                                      _queryChanged('');
+                                    },
+                                    icon: Icon(Icons.close_rounded),
+                                  ),
+                                ],
+                          onChanged: _queryChanged,
+                          onSubmitted: (_) => _submitQuery(),
+                        ),
+                        if (_queryFocus.hasFocus) ...[
+                          SizedBox(height: 8),
+                          _operatorSuggestions(),
+                        ],
+                        SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                key: ValueKey('search-sort-$_sort'),
+                                initialValue: _sort,
+                                isExpanded: true,
+                                decoration: InputDecoration(labelText: 'Sort'),
+                                items: const [
+                                  DropdownMenuItem(
+                                      value: 'relevance',
+                                      child: Text('Most relevant')),
+                                  DropdownMenuItem(
+                                      value: 'newest', child: Text('Newest')),
+                                  DropdownMenuItem(
+                                      value: 'oldest', child: Text('Oldest')),
+                                ],
+                                onChanged: (value) => _changeCriteria(
+                                    () => _sort = value ?? 'relevance'),
+                              ),
+                            ),
+                            SizedBox(width: 12),
+                            Expanded(
+                              child: DropdownButtonFormField<bool?>(
+                                key: ValueKey('search-pinned-$_pinned'),
+                                initialValue: _pinned,
+                                isExpanded: true,
+                                decoration:
+                                    InputDecoration(labelText: 'Pinned'),
+                                items: const [
+                                  DropdownMenuItem(
+                                      value: null, child: Text('Either')),
+                                  DropdownMenuItem(
+                                      value: true, child: Text('Pinned')),
+                                  DropdownMenuItem(
+                                      value: false, child: Text('Not pinned')),
+                                ],
+                                onChanged: (value) =>
+                                    _changeCriteria(() => _pinned = value),
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: 10),
+                        DropdownButtonFormField<String?>(
+                          key: ValueKey('search-author-type-$_authorType'),
+                          initialValue: _authorType,
+                          isExpanded: true,
+                          decoration: InputDecoration(labelText: 'Author type'),
+                          items: const <DropdownMenuItem<String?>>[
+                            DropdownMenuItem<String?>(
+                                value: null, child: Text('Anyone')),
+                            DropdownMenuItem<String?>(
+                                value: 'user', child: Text('People')),
+                            DropdownMenuItem<String?>(
+                                value: 'bot', child: Text('Bots')),
+                            DropdownMenuItem<String?>(
+                                value: 'webhook', child: Text('Webhooks')),
+                          ],
+                          onChanged: (value) =>
+                              _changeCriteria(() => _authorType = value),
+                        ),
+                        SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _UserFilterField(
+                                key: ValueKey('search-author'),
+                                label: 'From',
+                                user: _userFor(_author),
+                                loading: _loadingUsers,
+                                onTap: () => _pickUser(mentions: false),
+                                onClear: _author == null
+                                    ? null
+                                    : () =>
+                                        _changeCriteria(() => _author = null),
+                              ),
+                            ),
+                            SizedBox(width: 12),
+                            Expanded(
+                              child: _UserFilterField(
+                                key: ValueKey('search-mention'),
+                                label: 'Mentions',
+                                user: _userFor(_mention),
+                                loading: _loadingUsers,
+                                onTap: () => _pickUser(mentions: true),
+                                onClear: _mention == null
+                                    ? null
+                                    : () =>
+                                        _changeCriteria(() => _mention = null),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_userLoadError != null && _users.isEmpty)
+                          Padding(
+                            padding: EdgeInsets.only(top: 6),
+                            child: Text(
+                              _userLoadError!,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                        SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                icon: Icon(Icons.date_range_rounded),
+                                label: Text(_after == null
+                                    ? 'After date'
+                                    : MaterialLocalizations.of(context)
+                                        .formatMediumDate(_after!)),
+                                onPressed: () async {
+                                  final value = await showDatePicker(
+                                    context: context,
+                                    firstDate: DateTime(2020),
+                                    lastDate: DateTime.now(),
+                                    initialDate: _after ?? DateTime.now(),
+                                  );
+                                  if (value != null && mounted) {
+                                    _changeCriteria(() => _after = value);
+                                  }
+                                },
+                              ),
+                            ),
+                            SizedBox(width: 12),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                icon: Icon(Icons.event_rounded),
+                                label: Text(_before == null
+                                    ? 'Before date'
+                                    : MaterialLocalizations.of(context)
+                                        .formatMediumDate(_before!)),
+                                onPressed: () async {
+                                  final value = await showDatePicker(
+                                    context: context,
+                                    firstDate: DateTime(2020),
+                                    lastDate: DateTime.now(),
+                                    initialDate: _before ?? DateTime.now(),
+                                  );
+                                  if (value != null && mounted) {
+                                    _changeCriteria(() => _before = value);
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          children: [
+                            for (final kind in _contentKinds)
+                              FilterChip(
+                                label: Text(kind),
+                                selected: _has.contains(kind),
+                                onSelected: (selected) => _changeCriteria(() {
+                                  if (selected) {
+                                    _has.add(kind);
+                                  } else {
+                                    _has.remove(kind);
+                                  }
+                                }),
+                              ),
+                          ],
+                        ),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton(
+                            onPressed: _clearFilters,
+                            child: Text('Clear filters'),
+                          ),
+                        ),
+                        FilledButton.icon(
+                          onPressed: _loading || !_canSearch ? null : _search,
+                          icon: Icon(Icons.search_rounded),
+                          label: Text(_loading ? 'Searching…' : 'Search'),
+                        ),
+                        if (_history.isNotEmpty) ...[
+                          SizedBox(height: 10),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text('Recent searches',
+                                    style:
+                                        TextStyle(fontWeight: FontWeight.w700)),
+                              ),
+                              TextButton(
+                                  onPressed: _clearHistory,
+                                  child: Text('Clear')),
+                            ],
+                          ),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              for (final item in _history)
+                                ActionChip(
+                                  label: Text(item),
+                                  onPressed: () {
+                                    _query.text = item;
+                                    _query.selection = TextSelection.collapsed(
+                                        offset: _query.text.length);
+                                    _queryChanged(item);
+                                    _search();
+                                  },
+                                ),
+                            ],
+                          ),
+                        ],
+                        if (_error case final error?)
+                          Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: Text(error,
+                                style: TextStyle(
+                                    color:
+                                        Theme.of(context).colorScheme.error)),
+                          ),
+                        if (_page?.authorityCoverage
+                            case 'unavailable' || 'unsupported')
+                          Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: Text(
+                                'Showing locally cached matches. The home instance could not provide complete results.'),
+                          ),
+                        if (_page?.localCoverage == 'cached' &&
+                            _page?.authorityCoverage == 'not_queried')
+                          Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: Text(
+                                'Account-wide direct-message search uses this home’s recent federated cache. Search inside a conversation for complete results from its authority.'),
+                          ),
+                        if (_page?.indexing == true)
+                          Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: Text(
+                                'Search is catching up with recent messages. Results may be incomplete for a moment.'),
+                          ),
+                        if (_page?.encryptedChannelRefs.isNotEmpty == true)
+                          Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: Text(
+                                'Encrypted conversations were excluded from these results.'),
+                          ),
+                        if (_page != null && _page!.results.isEmpty)
+                          Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Text(
+                              'No messages matched those filters.',
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        for (final result
+                            in _page?.results ?? const <MessageSearchResult>[])
+                          _resultTile(context, result),
+                        if (_page?.nextCursor != null)
+                          TextButton(
+                            onPressed:
+                                _loading ? null : () => _search(more: true),
+                            child: Text('Load more'),
+                          ),
+                      ],
+                    ),
     );
   }
 

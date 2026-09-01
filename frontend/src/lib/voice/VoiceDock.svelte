@@ -8,6 +8,7 @@
   import { initializeE2EE } from '$lib/e2ee/client';
   import { base64url, randomBytes } from '$lib/e2ee/encoding';
   import { entityKey, entityRef } from '$lib/chat/refs';
+  import { guildMemberOutranks } from '$lib/chat/moderation';
   import { userDisplayName } from '$lib/chat/users';
   import type { Channel } from '$lib/chat/types';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
@@ -96,6 +97,13 @@
   const activeSoundboardAudio = new SvelteSet<HTMLAudioElement>();
   const soundboardObjectUrls = new SvelteMap<HTMLAudioElement, string>();
   let mounted = false;
+  let lastBrowserPermissionProjection: {
+    reference: string;
+    canConnect: boolean;
+    canSpeak: boolean;
+    canStream: boolean;
+    canUseVad: boolean;
+  } | null = null;
   const connectionFence = new VoiceConnectionFence();
   let connectionId = base64url(randomBytes(32));
   let joinController: AbortController | null = null;
@@ -140,6 +148,10 @@
   const permittedToStream = $derived(
     permissionBits === null ||
       Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.STREAM))
+  );
+  const permittedToUseVad = $derived(
+    permissionBits === null ||
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.USE_VAD))
   );
   const permittedToUseSoundboard = $derived(
     soundboardChannelSupported(selectedChannel()?.type, Boolean(callRef)) &&
@@ -186,10 +198,67 @@
       screen: voice.screen,
       canSpeak: voice.canSpeak,
       canStream: voice.canStream,
+      pushToTalkRequired: voice.pushToTalkRequired,
       participants: voice.participants(),
       prioritySpeakers: voice.prioritySpeakers(),
       tiles: voice.tiles()
     };
+  });
+  $effect(() => {
+    const connected = view.connected;
+    const bits = permissionBits;
+    if (isNativeDesktop() || !connected || bits === null) {
+      lastBrowserPermissionProjection = null;
+      return;
+    }
+    // Stage occupant state is the authoritative live media grant. Ordinary
+    // SPEAK/STREAM/USE_VAD bits must not revoke a moderator's promotion; this
+    // projection only retains the channel-level CONNECT revocation for Stage.
+    if (isStageChannel) {
+      lastBrowserPermissionProjection = null;
+      if (!canConnect) {
+        void voice.reconcileBrowserPermissions({
+          canConnect: false,
+          canSpeak: view.canSpeak,
+          canStream: view.canStream,
+          canUseVad: !view.pushToTalkRequired
+        });
+      }
+      return;
+    }
+    const next = {
+      reference: channelRef ?? '',
+      canConnect,
+      canSpeak: permittedToSpeak,
+      canStream: permittedToStream,
+      canUseVad: permittedToUseVad
+    };
+    const previous = lastBrowserPermissionProjection;
+    lastBrowserPermissionProjection = next;
+    const capabilityGained =
+      previous?.reference === next.reference &&
+      ((!previous.canSpeak && next.canSpeak) ||
+        (!previous.canStream && next.canStream) ||
+        (!previous.canUseVad && next.canUseVad));
+    if (capabilityGained) {
+      void requireFreshBrowserVoiceGrant();
+      return;
+    }
+    void voice.reconcileBrowserPermissions(next).then(
+      () => {
+        if (mounted && !next.canConnect) {
+          error = 'Your permission to connect to this voice channel was removed.';
+        }
+      },
+      (caught) => {
+        if (mounted) {
+          error = userErrorMessage(
+            caught,
+            'A voice permission changed and the media connection was closed.'
+          );
+        }
+      }
+    );
   });
   const elapsedVoiceTime = $derived(formatVoiceElapsed(startedAt, elapsedClock));
   $effect(() => {
@@ -245,6 +314,25 @@
         entities.currentUser?.origin_domain === occupant.user_domain
     ) ?? null
   );
+  $effect(() => {
+    const state = currentStageVoiceState;
+    if (isNativeDesktop() || !view.connected || !isStageChannel || !state) return;
+    const canSpeak = state.can_speak === true && state.suppressed !== true;
+    void voice
+      .reconcileParticipantPermissions({
+        canSpeak,
+        canStream: state.can_stream === true && state.suppressed !== true,
+        canUseVad: canSpeak
+      })
+      .catch((caught) => {
+        if (mounted) {
+          error = userErrorMessage(
+            caught,
+            'A Stage permission changed and the media connection was closed.'
+          );
+        }
+      });
+  });
   const targetSoundboardGuildRef = $derived.by(() => {
     const channel = selectedChannel();
     return channel?.guild_id && channel.guild_domain
@@ -307,6 +395,21 @@
     );
   }
 
+  function canModerateStageOccupant(occupant: VoiceOccupant): boolean {
+    if (!canModerateStage) return false;
+    const channel = selectedChannel();
+    if (!channel?.guild_id || !channel.guild_domain) return false;
+    const guild = entities.guilds.get(`${channel.guild_id}@${channel.guild_domain}`);
+    const currentUser = entities.currentUser;
+    const target = entities.users.get(`${occupant.user_id}@${occupant.user_domain}`);
+    if (!guild || !currentUser || !target) return false;
+    const guildMembers = entities.members.values.filter(
+      (member) =>
+        member.guild_id === channel.guild_id && member.guild_domain === channel.guild_domain
+    );
+    return guildMemberOutranks(guild, currentUser, target, guildMembers);
+  }
+
   async function updateStageVoiceState(
     occupant: VoiceOccupant | null,
     patch: {
@@ -317,6 +420,7 @@
     const channel = selectedChannel();
     if (!channel?.guild_id || !channel.guild_domain || stageVoiceBusy) return;
     const self = occupant === null;
+    if (!self && !canModerateStageOccupant(occupant)) return;
     const userRef = self
       ? entities.currentUser
         ? entityRef(entities.currentUser)
@@ -475,12 +579,22 @@
     stageLoaded = true;
   };
 
+  const releasePushToTalk = () => {
+    if (voice.pushToTalkRequired) void voice.stopPushToTalk().catch(() => undefined);
+  };
+
+  const releasePushToTalkWhenHidden = () => {
+    if (document.visibilityState !== 'visible') releasePushToTalk();
+  };
+
   onMount(() => {
     mounted = true;
     voice.addEventListener('change', changed);
     window.addEventListener('kaede:voice-token', moved);
     window.addEventListener('kaede:voice-soundboard', soundboardPlayed);
     window.addEventListener('kaede:stage-instance', stageChanged);
+    window.addEventListener('blur', releasePushToTalk);
+    document.addEventListener('visibilitychange', releasePushToTalkWhenHidden);
     if (audioHost) detachAudio = voice.attachAudio(audioHost);
     if (selectedChannel()?.type === 13) void loadStageInstance();
   });
@@ -514,6 +628,8 @@
     window.removeEventListener('kaede:voice-token', moved);
     window.removeEventListener('kaede:voice-soundboard', soundboardPlayed);
     window.removeEventListener('kaede:stage-instance', stageChanged);
+    window.removeEventListener('blur', releasePushToTalk);
+    document.removeEventListener('visibilitychange', releasePushToTalkWhenHidden);
     for (const audio of activeSoundboardAudio) {
       audio.pause();
       audio.removeAttribute('src');
@@ -532,6 +648,14 @@
     joinController?.abort();
     joinController = null;
     await voice.disconnect();
+  }
+
+  async function requireFreshBrowserVoiceGrant() {
+    connectionFence.invalidate();
+    joinController?.abort();
+    joinController = null;
+    await voice.disconnect();
+    if (mounted) error = 'Voice permissions changed. Rejoin to refresh your media access.';
   }
 
   async function join(takeover = false) {
@@ -633,6 +757,29 @@
     } catch (caught) {
       if (mounted) error = userErrorMessage(caught, 'Voice control failed. Try again.');
     }
+  }
+
+  function pushToTalkPointerDown(event: PointerEvent) {
+    event.preventDefault();
+    (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
+    void safely(() => voice.startPushToTalk());
+  }
+
+  function pushToTalkPointerUp(event: PointerEvent) {
+    event.preventDefault();
+    void safely(() => voice.stopPushToTalk());
+  }
+
+  function pushToTalkKeyDown(event: KeyboardEvent) {
+    if ((event.key !== ' ' && event.key !== 'Enter') || event.repeat) return;
+    event.preventDefault();
+    void safely(() => voice.startPushToTalk());
+  }
+
+  function pushToTalkKeyUp(event: KeyboardEvent) {
+    if (event.key !== ' ' && event.key !== 'Enter') return;
+    event.preventDefault();
+    void safely(() => voice.stopPushToTalk());
   }
 
   async function toggleSoundboard() {
@@ -844,7 +991,7 @@
               <strong>{stageOccupantName(occupant)}</strong>
               {#if self}<small>You</small>{/if}
             </div>
-            {#if canModerateStage && !self}
+            {#if !self && canModerateStageOccupant(occupant)}
               <button
                 class="secondary"
                 disabled={Boolean(stageVoiceBusy)}
@@ -1122,21 +1269,41 @@
           <Icon name="sparkles" size={20} />
         </button>
       {/if}
-      <button
-        class:off={!view.microphone}
-        class="control-button"
-        disabled={!view.canSpeak}
-        aria-pressed={view.microphone}
-        aria-label={view.microphone ? 'Mute microphone' : 'Unmute microphone'}
-        title={!view.canSpeak
-          ? 'You do not have permission to speak in this channel.'
-          : view.microphone
-            ? 'Mute'
-            : 'Unmute'}
-        onclick={() => safely(() => voice.toggleMicrophone())}
-      >
-        <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
-      </button>
+      {#if view.pushToTalkRequired}
+        <button
+          class:active={view.microphone}
+          class:off={!view.microphone}
+          class="control-button push-to-talk-button"
+          disabled={!view.canSpeak || view.deafened}
+          aria-pressed={view.microphone}
+          aria-label="Hold to talk"
+          title={view.deafened ? 'Undeafen before talking.' : 'Hold to talk'}
+          onpointerdown={pushToTalkPointerDown}
+          onpointerup={pushToTalkPointerUp}
+          onpointercancel={pushToTalkPointerUp}
+          onkeydown={pushToTalkKeyDown}
+          onkeyup={pushToTalkKeyUp}
+        >
+          <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
+          <span>Hold</span>
+        </button>
+      {:else}
+        <button
+          class:off={!view.microphone}
+          class="control-button"
+          disabled={!view.canSpeak}
+          aria-pressed={view.microphone}
+          aria-label={view.microphone ? 'Mute microphone' : 'Unmute microphone'}
+          title={!view.canSpeak
+            ? 'You do not have permission to speak in this channel.'
+            : view.microphone
+              ? 'Mute'
+              : 'Unmute'}
+          onclick={() => safely(() => voice.toggleMicrophone())}
+        >
+          <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
+        </button>
+      {/if}
       <button
         class:off={view.deafened}
         class="control-button"
@@ -1793,6 +1960,19 @@
   .control-button.active {
     color: var(--on-accent);
     background: var(--maple);
+  }
+
+  .push-to-talk-button {
+    width: auto;
+    gap: 0.35rem;
+    padding-inline: 0.7rem;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .push-to-talk-button span {
+    font-size: 0.72rem;
+    font-weight: 760;
   }
 
   .control-button.off,

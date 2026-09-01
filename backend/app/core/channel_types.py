@@ -21,6 +21,9 @@ GUILD_TEXT_PERMISSION_CHANNEL_TYPES = GUILD_MESSAGE_CHANNEL_TYPES | {15}
 # permission for their post threads, while embedded voice and Stage chats do
 # not expose pin operations despite otherwise supporting messages.
 GUILD_PINNABLE_CHANNEL_TYPES = frozenset({0, 5, 10, 11, 12, 15})
+# Incoming webhooks can target text and announcement channels or create posts
+# in forum channels. Embedded voice and Stage text chats do not host webhooks.
+GUILD_WEBHOOK_CHANNEL_TYPES = frozenset({0, 5, 15})
 # Channel types whose text permission dependency is SEND_MESSAGES. Threads use
 # SEND_MESSAGES_IN_THREADS instead; forums use SEND_MESSAGES to create posts.
 GUILD_SEND_MESSAGES_CHANNEL_TYPES = frozenset({0, 2, 5, 13, 15})

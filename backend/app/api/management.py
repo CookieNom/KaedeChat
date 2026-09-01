@@ -345,6 +345,15 @@ async def update_channel(
             if parent.type != 4:
                 raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
             await require_bot_channel_grant(session, guild, auth.user, parent)
+            if parent_changed:
+                await require_permissions(
+                    session,
+                    redis,
+                    guild,
+                    auth.user,
+                    Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS,
+                    channel=parent,
+                )
             target_parent = parent
         values["parent_domain"] = settings.domain if parent_id is not None else None
         if parent_changed:

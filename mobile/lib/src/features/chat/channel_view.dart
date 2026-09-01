@@ -1141,10 +1141,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             (channel.isThread
                 ? canSendInThread(channel)
                 : channel.allows(Permission.sendMessages)));
+    final canReadHistory = canReadRetainedChannelHistory(channel);
     final stateMessages = state.messages;
-    final messages = threadTimelineMessages(channel, stateMessages);
+    final messages = canReadHistory
+        ? threadTimelineMessages(channel, stateMessages)
+        : stateMessages;
     final detachedStarter =
-        messages.length == stateMessages.length ? null : channel.starterMessage;
+        !canReadHistory || messages.length == stateMessages.length
+            ? null
+            : channel.starterMessage;
     final pending = state.pendingMessages;
     final jump = state.messageJump;
     final channelChanged = _renderedChannel != channel.ref;
@@ -1175,7 +1180,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         if (mounted) unawaited(_revealRequestedMessage(jump));
       });
     }
-    if (state.channelsWithOlderMessages.contains(channel.ref) &&
+    if (canReadHistory &&
+        state.channelsWithOlderMessages.contains(channel.ref) &&
         !state.loadingMessages &&
         state.error == null) {
       _scheduleAutomaticHistoryCheck();
@@ -1228,6 +1234,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               title: historySyncWarning.$1,
               message: historySyncWarning.$2,
             ),
+          if (!canReadHistory)
+            const _FederationStatusStrip(
+              title: 'Message history is unavailable.',
+              message: 'New messages will appear here while you are connected.',
+            ),
           if (moderationStatus != null)
             _FederationStatusStrip(
               title: moderationStatus.timeoutIndefinite
@@ -1257,7 +1268,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                           pending.isEmpty &&
                           !state.loadingMessages &&
                           !channel.historyTruncated
-                      ? _ConversationStart(channel: channel)
+                      ? canReadHistory
+                          ? _ConversationStart(channel: channel)
+                          : const SizedBox.shrink()
                       : ListView.builder(
                           controller: _scroll,
                           reverse: true,
@@ -1274,12 +1287,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                           },
                           itemCount: messages.length +
                               pending.length +
-                              (state.channelsWithOlderMessages
-                                          .contains(channel.ref) ||
-                                      (channel.historyTruncated &&
-                                          messages.isEmpty) ||
-                                      (channel.historyTruncated &&
-                                          !channel.historyRemoteAvailable)
+                              (canReadHistory &&
+                                      (state.channelsWithOlderMessages
+                                              .contains(channel.ref) ||
+                                          (channel.historyTruncated &&
+                                              messages.isEmpty) ||
+                                          (channel.historyTruncated &&
+                                              !channel.historyRemoteAvailable))
                                   ? 1
                                   : 0),
                           itemBuilder: (context, index) {
@@ -2330,6 +2344,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   }
 
   Future<void> _loadEarlier() async {
+    final channel = ref.read(mobileControllerProvider).activeChannel;
+    if (channel == null || !canReadRetainedChannelHistory(channel)) return;
     await ref.read(mobileControllerProvider.notifier).loadMessages(older: true);
     // A reversed list appends older rows at its far edge, so Flutter retains
     // the visible content and offset without a compensating jump.
@@ -4112,7 +4128,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         );
     final canManageReactions =
         !channelFollowNotice && canClearMessageReactions(channel);
-    final canPin = canPinMessage(channel, message);
+    final canPin = canReadRetainedChannelHistory(channel) &&
+        canPinMessage(channel, message);
     final canDelete = (message.authorRef == me || canManage) &&
         (!channel.archived || !channel.locked || canManageThreads(channel));
     final canStartThread =

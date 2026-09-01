@@ -13,3 +13,7 @@ export function hasAnyPermission(effective: bigint, requested: bigint): boolean 
     (effective & requested) !== 0n
   );
 }
+
+export function canReadChannelHistory(effective: bigint): boolean {
+  return hasAllPermissions(effective, Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY);
+}

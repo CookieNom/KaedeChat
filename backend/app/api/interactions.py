@@ -6127,6 +6127,23 @@ async def validate_interaction_command_access(context: InteractionCreateContext)
                 "permissions": str(int(required)),
             },
         )
+    if context.access.guild is not None:
+        # Application permission checks above use a captured effective mask, so
+        # apply the live member-interaction guard explicitly.  User-installed
+        # applications use USE_EXTERNAL_APPS for public responses rather than as
+        # an invocation prerequisite, but profile quarantine blocks both forms
+        # of guild application interaction.
+        from app.automod.service import require_member_interactions_allowed
+
+        blocked_action = Permission.USE_APPLICATION_COMMANDS
+        if isinstance(installation, BotUserInstallation):
+            blocked_action |= Permission.USE_EXTERNAL_APPS
+        await require_member_interactions_allowed(
+            context.session,
+            context.access.guild,
+            context.actor,
+            blocked_action,
+        )
     if (
         context.access.guild is not None
         and command is not None

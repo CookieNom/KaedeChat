@@ -1,5 +1,6 @@
 import pytest
 
+from app.core.channel_types import GUILD_WEBHOOK_CHANNEL_TYPES
 from app.core.permission_contract import PERMISSION_CONTRACT, required_permissions
 from app.core.permissions import (
     ALL_PERMISSIONS,
@@ -42,6 +43,10 @@ def test_endpoint_permission_contract_is_unique_known_and_nonempty() -> None:
 def test_announcement_follow_only_manages_the_destination_webhook() -> None:
     assert required_permissions("announcement.follow.source") == Permission.VIEW_CHANNEL
     assert required_permissions("webhook.manage") == Permission.MANAGE_WEBHOOKS
+    metadata = next(
+        item for item in PERMISSION_METADATA if item.permission == Permission.MANAGE_WEBHOOKS
+    )
+    assert set(metadata.channel_types) == GUILD_WEBHOOK_CHANNEL_TYPES == {0, 5, 15}
 
 
 def test_federated_instance_bans_use_a_dedicated_critical_permission() -> None:
@@ -238,6 +243,17 @@ def test_soundboard_playback_requires_voice_speaking_permissions() -> None:
         item for item in PERMISSION_METADATA if item.permission == Permission.USE_EXTERNAL_SOUNDS
     )
     assert external_sounds.dependencies == (*use_soundboard.dependencies, Permission.USE_SOUNDBOARD)
+
+
+def test_manage_expressions_metadata_does_not_promise_the_separate_create_capability() -> None:
+    manage = next(
+        item for item in PERMISSION_METADATA if item.permission == Permission.MANAGE_EMOJIS
+    )
+
+    assert manage.label == "Manage guild expressions"
+    assert manage.description == (
+        "Edit and remove emoji, stickers, and soundboard sounds created by other members."
+    )
 
 
 def test_discord_compatibility_names_are_explicit_same_bit_aliases() -> None:

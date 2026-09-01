@@ -16,6 +16,44 @@ export interface ChannelPositionRequest {
   parent_id?: string | null;
 }
 
+/** Channel-scoped resources the reorder endpoint will authorize for this batch. */
+export function channelOrderPermissionTargets(
+  previous: Channel[],
+  next: Channel[],
+  movedKey: string
+): Channel[] | null {
+  const previousByKey = new Map(previous.map((channel) => [entityKey(channel), channel]));
+  if (!previousByKey.has(movedKey)) return null;
+  const nextByKey = new Map(next.map((channel) => [entityKey(channel), channel]));
+  const targets = new Map<string, Channel>();
+
+  for (const request of channelPositionRequest(previous, next, movedKey)) {
+    const after = next.find((channel) => channel.id === request.id);
+    const before = after ? previousByKey.get(entityKey(after)) : undefined;
+    if (!before || !after) return null;
+
+    if (Object.hasOwn(request, 'parent_id')) {
+      targets.set(entityKey(before), before);
+      if (request.parent_id !== null) {
+        const parent = next.find(
+          (channel) =>
+            channel.type === 4 &&
+            channel.id === request.parent_id &&
+            channel.origin_domain === after.parent_domain
+        );
+        if (!parent) return null;
+        targets.set(entityKey(parent), parent);
+      }
+    } else if (before.parent_id && before.parent_domain) {
+      const parent = nextByKey.get(`${before.parent_id}@${before.parent_domain}`);
+      if (!parent || parent.type !== 4) return null;
+      targets.set(entityKey(parent), parent);
+    }
+  }
+
+  return [...targets.values()];
+}
+
 function compareChannels(left: Channel, right: Channel): number {
   return left.position - right.position || compareEntityRefs(left, right);
 }
@@ -96,23 +134,35 @@ function normalized(channels: Channel[]): Channel[] {
 
 export function channelPositionRequest(
   previous: Channel[],
-  next: Channel[]
+  next: Channel[],
+  movedKey: string
 ): ChannelPositionRequest[] {
   const previousByKey = new Map(previous.map((channel) => [entityKey(channel), channel]));
-  return next.map((channel) => {
+  const moved = previousByKey.get(movedKey);
+  if (!moved) return [];
+  const movedKeys = new Set(
+    moved.type === 4
+      ? previous
+          .filter((channel) => entityKey(channel) === movedKey || belongsTo(channel, moved))
+          .map(entityKey)
+      : [movedKey]
+  );
+  return next.flatMap((channel) => {
+    if (!movedKeys.has(entityKey(channel))) return [];
     const before = previousByKey.get(entityKey(channel));
+    const parentChanged =
+      !before ||
+      channel.parent_id !== before.parent_id ||
+      channel.parent_domain !== before.parent_domain;
+    if (before && channel.position === before.position && !parentChanged) return [];
     const request: ChannelPositionRequest = {
       id: channel.id,
       position: channel.position
     };
-    if (
-      !before ||
-      channel.parent_id !== before.parent_id ||
-      channel.parent_domain !== before.parent_domain
-    ) {
+    if (parentChanged) {
       request.parent_id = channel.parent_id;
     }
-    return request;
+    return [request];
   });
 }
 

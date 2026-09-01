@@ -11,6 +11,7 @@ export interface VoiceOccupant {
   server_mute: boolean;
   server_deaf: boolean;
   can_speak?: boolean;
+  can_stream?: boolean;
   suppressed?: boolean;
   request_to_speak_timestamp?: string | null;
 }

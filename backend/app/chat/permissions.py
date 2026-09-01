@@ -21,7 +21,7 @@ from app.core.channel_types import (
     GUILD_SEND_MESSAGES_CHANNEL_TYPES,
     GUILD_VOICE_CHANNEL_TYPES,
 )
-from app.core.permissions import ALL_PERMISSIONS, Permission
+from app.core.permissions import ALL_PERMISSIONS, PERMISSION_METADATA, Permission
 from app.db.models import (
     Channel,
     ChannelOverwrite,
@@ -187,6 +187,7 @@ VOICE_DEPENDENT = int(
     | Permission.MOVE_MEMBERS
 )
 TIMEOUT_ALLOWED = int(Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY)
+PERMISSION_CACHE_NAMESPACE = "perm:v2"
 RELEASE_PERMISSION_LOCK = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('DEL', KEYS[1])
@@ -201,6 +202,12 @@ def normalize_permission_dependencies(
 ) -> int:
     """Strip permission bits whose prerequisite did not survive resolution."""
 
+    # Guild-scoped capabilities do not depend on the channel-only VIEW_CHANNEL
+    # bit, and member timeouts restrict channel interaction rather than guild
+    # administration.  Channel dependency and timeout masks therefore have no
+    # place in a guild-only calculation.
+    if channel_type is None:
+        return permissions
     if not permissions & Permission.VIEW_CHANNEL:
         return 0
     if (
@@ -214,6 +221,29 @@ def normalize_permission_dependencies(
         permissions &= ~VOICE_DEPENDENT
     if channel_type == 2 and not permissions & Permission.SPEAK:
         permissions &= ~Permission.PRIORITY_SPEAKER
+    # Metadata is the published dependency contract.  Iterate to a fixpoint so
+    # chains such as CONNECT -> SPEAK -> USE_SOUNDBOARD -> USE_EXTERNAL_SOUNDS
+    # cannot leave a transitive dependent bit behind.  The channel-type-specific
+    # masks above remain necessary for Discord's SEND_MESSAGES vs
+    # SEND_MESSAGES_IN_THREADS conditional semantics, which metadata cannot
+    # express as one static dependency tuple.
+    changed = True
+    while changed:
+        changed = False
+        for metadata in PERMISSION_METADATA:
+            if not permissions & metadata.permission:
+                continue
+            missing_dependency = any(
+                (
+                    not permissions & Permission.SEND_MESSAGES_IN_THREADS
+                    if dependency == Permission.SEND_MESSAGES and channel_type in {10, 11, 12}
+                    else permissions & dependency != dependency
+                )
+                for dependency in metadata.dependencies
+            )
+            if missing_dependency:
+                permissions &= ~metadata.permission
+                changed = True
     if timed_out:
         permissions &= TIMEOUT_ALLOWED
     return permissions
@@ -264,8 +294,13 @@ def resolve_permissions(
 
         role_deny = 0
         role_allow = 0
+        everyone_ref = (everyone_role_id, everyone_role_domain)
         for item in overwrites:
-            if item.target_type == "role" and (item.target_id, item.target_domain) in role_ids:
+            if (
+                item.target_type == "role"
+                and (item.target_id, item.target_domain) != everyone_ref
+                and (item.target_id, item.target_domain) in role_ids
+            ):
                 role_deny |= item.deny
                 role_allow |= item.allow
         permissions = (permissions & ~role_deny) | role_allow
@@ -449,12 +484,13 @@ async def get_permissions(
         # must not survive a missing, moved, or cross-guild thread parent.
         return 0
     scope = f"{channel.origin_domain}:{channel.id}" if channel is not None else "guild"
-    key = (
-        f"perm:{guild.origin_domain}:{guild.id}:{guild.permission_generation}:"
+    cache_scope = (
+        f"{guild.origin_domain}:{guild.id}:{guild.permission_generation}:"
         f"{actor.origin_domain}:{actor.id}:{member.member_version}:{scope}"
     )
     if bot_grant is not None:
-        key = f"{key}:{bot_grant.cache_identity()}"
+        cache_scope = f"{cache_scope}:{bot_grant.cache_identity()}"
+    key = f"{PERMISSION_CACHE_NAMESPACE}:{cache_scope}"
     cached = await redis.get(key)
     if cached is not None:
         try:
@@ -462,8 +498,8 @@ async def get_permissions(
         except ValueError:
             await redis.delete(key)
     stable_scope = f"{guild.origin_domain}:{guild.id}:{actor.origin_domain}:{actor.id}:{scope}"
-    stale_key = f"perm-stale:{stable_scope}"
-    lock_key = f"perm-lock:{key}"
+    stale_key = f"{PERMISSION_CACHE_NAMESPACE}:stale:{stable_scope}"
+    lock_key = f"{PERMISSION_CACHE_NAMESPACE}:lock:{cache_scope}"
     owner = secrets.token_urlsafe(12)
     acquired = await redis.set(lock_key, owner, ex=5, nx=True)
     if not acquired:

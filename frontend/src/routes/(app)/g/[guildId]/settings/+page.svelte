@@ -4,6 +4,7 @@
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { firstNavigableChannel, groupChannels } from '$lib/chat/channels';
+  import { canReadAnnouncementChannel } from '$lib/chat/announcements';
   import {
     canAccessGuildExpressionSettings,
     canEditGuildExpression,
@@ -17,6 +18,7 @@
     guildInviteUrl
   } from '$lib/chat/invites';
   import { hasAllPermissions } from '$lib/chat/permissions';
+  import { guildMemberOutranks, guildRoleOutranks } from '$lib/chat/moderation';
   import { entityKey, entityRef } from '$lib/chat/refs';
   import {
     commitGuildWebhookAvatar,
@@ -24,6 +26,8 @@
     createGuildWebhookAvatarTicket,
     deleteGuildWebhook,
     deleteGuildWebhookAvatar,
+    canManageWebhookChannel,
+    listChannelWebhooks,
     listGuildWebhooks,
     manageableWebhookChannels,
     rotateGuildWebhook,
@@ -75,7 +79,7 @@
   } from '$lib/navigation/routes';
   import { formatDateTime } from '$lib/ui/locale';
   import { portal } from '$lib/ui/portal';
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
 
   interface GuildView extends Guild {
@@ -259,12 +263,14 @@
   let webhookNameDrafts = $state<Record<string, string>>({});
   let webhookChannelDrafts = $state<Record<string, string>>({});
   let revealedWebhookToken = $state('');
+  let webhookProjectionReady = false;
   let loading = $state(true);
   let busy = $state(false);
   let error = $state('');
   let notice = $state('');
   let loadGeneration = 0;
   let routeController: AbortController | null = null;
+  let observedGuildProjectionRef = '';
   let guildAssetKind = $state<GuildAssetKind | null>(null);
   let guildAssetStage = $state<GuildAssetStage | null>(null);
   let guildAssetProgress = $state(0);
@@ -380,6 +386,13 @@
       )
     })
   );
+  const permissionLabels = new Map<string, string>(
+    PERMISSION_METADATA.map((item) => [item.permission, item.label])
+  );
+
+  function permissionDependencies(dependencies: readonly string[]): string {
+    return dependencies.map((name) => permissionLabels.get(name) ?? name).join(', ');
+  }
   const filteredPermissionGroups = $derived(
     permissionGroups
       .map((group) => ({
@@ -414,13 +427,11 @@
     )
   );
   const filteredMembers = $derived(
-    members
-      .map(latestMember)
-      .filter((member) =>
-        `${member.nickname ?? ''} ${userDisplayName(member.user)} ${userPublicHandle(member.user) ?? ''}`
-          .toLowerCase()
-          .includes(overwriteSearch.trim().toLowerCase())
-      )
+    liveMemberRows(members, true).filter((member) =>
+      `${member.nickname ?? ''} ${userDisplayName(member.user)} ${userPublicHandle(member.user) ?? ''}`
+        .toLowerCase()
+        .includes(overwriteSearch.trim().toLowerCase())
+    )
   );
 
   const channelGroups = $derived(groupChannels(guild?.channels ?? []));
@@ -433,6 +444,125 @@
     } catch {
       return 0n;
     }
+  });
+  const normalizedGuildPermissionProjection = $derived(
+    guild ? (entities.guilds.get(entityKey(guild)) ?? null) : null
+  );
+
+  function revokeGuildSettingsAccess() {
+    routeController?.abort();
+    routeController = null;
+    loadGeneration += 1;
+    memberModerationGeneration += 1;
+    memberModerationController?.abort();
+    memberModerationController = null;
+    guild = null;
+    members = [];
+    membersHaveMore = false;
+    memberSearch = '';
+    memberSearchResults = [];
+    memberSearchError = '';
+    roleMemberSearch = '';
+    roleMemberSearchResults = [];
+    roleMemberSearchError = '';
+    bans = [];
+    instanceBans = [];
+    invites = [];
+    scheduledEvents = [];
+    webhooks = [];
+    webhookNameDrafts = {};
+    webhookChannelDrafts = {};
+    revealedWebhookToken = '';
+    emojiDrafts = {};
+    stickerDrafts = {};
+    name = '';
+    description = '';
+    selectedChannel = null;
+    channelName = '';
+    channelTopic = '';
+    channelParent = '';
+    channelOverwrites = [];
+    overwriteTarget = '';
+    overwriteAllow = '0';
+    overwriteDeny = '0';
+    channelSafetyNumber = '';
+    selectedRole = null;
+    roleName = '';
+    rolePermissions = '0';
+    createdInvite = null;
+    inviteTargetUser = '';
+    inviteRoleIds = [];
+    ownershipTarget = '';
+    memberModerationDialog = null;
+    memberModerationBusy = false;
+    memberModerationElement = null;
+    memberModerationCancel = null;
+    memberModerationPreviousFocus = null;
+    destructiveConfirmation = null;
+    confirmationDialog = null;
+    confirmationCancelButton = null;
+    confirmationPreviousFocus = null;
+    webhookProjectionReady = false;
+    busy = false;
+    loading = false;
+    error = 'This guild is unavailable or you no longer have access.';
+    notice = '';
+  }
+
+  $effect(() => {
+    const current = guild;
+    const projection = normalizedGuildPermissionProjection;
+    if (!current) return;
+    const currentRef = entityKey(current);
+    if (!projection) {
+      if (observedGuildProjectionRef === currentRef) {
+        observedGuildProjectionRef = '';
+        untrack(revokeGuildSettingsAccess);
+      }
+      return;
+    }
+    observedGuildProjectionRef = currentRef;
+    const roles = projection.roles ?? current.roles;
+    const projectionChannels = projection.channels;
+    const channels = projectionChannels
+      ? (() => {
+          const currentChannels = new Map(
+            (current.channels ?? []).map((item) => [entityKey(item), item])
+          );
+          return projectionChannels.map((item) => ({
+            ...(currentChannels.get(entityKey(item)) ?? item),
+            permissions: item.permissions
+          }));
+        })()
+      : (current.channels ?? []);
+    const changed =
+      current.permissions !== projection.permissions ||
+      current.actor_highest_role_id !== projection.actor_highest_role_id ||
+      current.permission_generation !== projection.permission_generation ||
+      roles?.length !== current.roles?.length ||
+      roles?.some((item, index) => item !== current.roles?.[index]) ||
+      channels.length !== (current.channels?.length ?? 0) ||
+      channels.some((item, index) => item !== current.channels?.[index]);
+    if (!changed) return;
+    untrack(() => {
+      guild = {
+        ...current,
+        permissions: projection.permissions,
+        actor_highest_role_id: projection.actor_highest_role_id,
+        permission_generation: projection.permission_generation,
+        roles,
+        channels
+      };
+      if (selectedChannel) {
+        const projected = channels.find((item) => entityKey(item) === entityKey(selectedChannel!));
+        selectedChannel = projected
+          ? { ...selectedChannel, permissions: projected.permissions }
+          : null;
+      }
+      if (selectedRole) {
+        selectedRole = roles?.find((role) => entityKey(role) === entityKey(selectedRole!)) ?? null;
+      }
+    });
   });
 
   const isGuildOwner = $derived(isQualifiedGuildOwner(guild, currentUserRef));
@@ -451,6 +581,33 @@
   function latestMember(member: MemberSummary): MemberSummary {
     const user = entities.users.get(entityKey(member.user));
     return user ? { ...member, user: { ...member.user, ...user } } : member;
+  }
+
+  function cacheMemberRows(rows: MemberSummary[]): MemberSummary[] {
+    entities.members.upsertMany(rows);
+    return rows;
+  }
+
+  function removeCachedMember(member: MemberSummary) {
+    entities.members.remove(`${member.guild_id}@${member.guild_domain}:${entityKey(member.user)}`);
+  }
+
+  function liveMemberRows(rows: MemberSummary[], includeUnlisted = false): MemberSummary[] {
+    if (!guild) return [];
+    const live = entities.members.values.filter(
+      (member) => member.guild_id === guild?.id && member.guild_domain === guild?.origin_domain
+    );
+    const liveByUser = new Map(live.map((member) => [entityKey(member.user), member]));
+    const rowKeys = new Set(rows.map((member) => entityKey(member.user)));
+    return [
+      ...rows.flatMap((member) => {
+        const projected = liveByUser.get(entityKey(member.user));
+        return projected ? [latestMember(projected)] : [];
+      }),
+      ...(includeUnlisted
+        ? live.filter((member) => !rowKeys.has(entityKey(member.user))).map(latestMember)
+        : [])
+    ];
   }
 
   function initializeExpressionDrafts(target: Guild) {
@@ -474,9 +631,9 @@
       ])
     );
   }
-  const currentMembers = $derived(members.map(latestMember));
-  const currentMemberSearchResults = $derived(memberSearchResults.map(latestMember));
-  const currentRoleMemberSearchResults = $derived(roleMemberSearchResults.map(latestMember));
+  const currentMembers = $derived(liveMemberRows(members, true));
+  const currentMemberSearchResults = $derived(liveMemberRows(memberSearchResults));
+  const currentRoleMemberSearchResults = $derived(liveMemberRows(roleMemberSearchResults));
   const ownershipCandidates = $derived(
     currentMembers.filter(
       (member) =>
@@ -486,6 +643,7 @@
     )
   );
   const canManageChannels = $derived(hasPermission(Permission.MANAGE_CHANNELS));
+  const CHANNEL_MOVE_PERMISSIONS = Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS;
   const canManageRoles = $derived(hasPermission(Permission.MANAGE_ROLES));
   const canCreateExpressions = $derived(hasPermission(Permission.CREATE_GUILD_EXPRESSIONS));
   const canAccessExpressions = $derived(
@@ -544,29 +702,38 @@
     return Boolean(guild && role.id !== guild.id && canManageRole(role));
   }
 
-  function highestRoleFor(member: MemberSummary): Role | null {
-    if (!guild) return null;
+  function canManageMember(member: MemberSummary): boolean {
+    if (!guild || !signedInUser || !canManageRoles) return false;
+    if (entityRef(member.user) === currentUserRef) return true;
+    return guildMemberOutranks(guild, signedInUser, member.user, currentMembers);
+  }
+
+  function canManageOverwriteRole(role: Role): boolean {
     return (
-      (guild.roles ?? [])
-        .filter((role) => role.id === guild?.id || member.role_ids.includes(role.id))
-        .sort(compareRoleRank)
-        .at(-1) ?? null
+      canEditSelectedPermissions && guildRoleOutranks(guild, signedInUser, role, currentMembers)
     );
   }
 
-  function canManageMember(member: MemberSummary): boolean {
-    if (!guild || !canManageRoles) return false;
-    if (entityRef(member.user) === currentUserRef) return true;
-    if (
-      member.user.id === guild.owner_id &&
-      member.user.origin_domain === (guild.owner_domain ?? guild.origin_domain)
-    )
-      return false;
-    if (isGuildOwner) return true;
-    const targetHighest = highestRoleFor(member);
-    return Boolean(
-      actorHighestRole && targetHighest && compareRoleRank(actorHighestRole, targetHighest) > 0
+  function canManageOverwriteMember(member: MemberSummary): boolean {
+    return (
+      canEditSelectedPermissions &&
+      guildMemberOutranks(guild, signedInUser, member.user, currentMembers)
     );
+  }
+
+  function canManageOverwriteTarget(value = overwriteTarget): boolean {
+    if (!guild || !value || !canEditSelectedPermissions) return false;
+    const [targetType, ...refParts] = value.split(':');
+    const targetRef = refParts.join(':');
+    if (targetType === 'role') {
+      const role = guild.roles?.find((candidate) => entityRef(candidate) === targetRef);
+      return Boolean(role && canManageOverwriteRole(role));
+    }
+    if (targetType === 'member') {
+      const member = currentMembers.find((candidate) => entityRef(candidate.user) === targetRef);
+      return Boolean(member && canManageOverwriteMember(member));
+    }
+    return false;
   }
 
   const canManageSelectedRole = $derived(Boolean(selectedRole && canManageRole(selectedRole)));
@@ -586,33 +753,26 @@
     roleMemberSearch.trim() ? currentRoleMemberSearchResults : currentMembers
   );
   const memberPageCount = $derived(
-    Math.max(1, Math.ceil(members.length / MEMBER_PAGE_SIZE) + (membersHaveMore ? 1 : 0))
+    Math.max(1, Math.ceil(currentMembers.length / MEMBER_PAGE_SIZE) + (membersHaveMore ? 1 : 0))
   );
   const memberHasPreviousPage = $derived(!memberSearch.trim() && memberPage > 0);
   const memberHasNextPage = $derived(
     !memberSearch.trim() &&
-      ((memberPage + 1) * MEMBER_PAGE_SIZE < members.length || membersHaveMore)
+      ((memberPage + 1) * MEMBER_PAGE_SIZE < currentMembers.length || membersHaveMore)
   );
   const canCreateInvites = $derived(hasPermission(Permission.CREATE_INVITE));
   const canAccessInvites = $derived(canManageGuild || canCreateInvites);
   const canManageWebhooks = $derived(hasPermission(Permission.MANAGE_WEBHOOKS));
-  const canAccessGuildIntegrations = $derived(
-    canManageGuild ||
+  const canAccessGuildIntegrations = $derived.by(() => {
+    const current = guild;
+    return (
+      canManageGuild ||
       canManageWebhooks ||
       Boolean(
-        guild?.channels?.some((channel) => {
-          if (channel.type !== 5) return false;
-          try {
-            return hasAllPermissions(
-              BigInt(channel.permissions ?? guild?.permissions ?? '0'),
-              Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
-            );
-          } catch {
-            return false;
-          }
-        })
+        current && current.channels?.some((channel) => canReadAnnouncementChannel(channel, current))
       )
-  );
+    );
+  });
   const selectedEffectivePermissions = $derived.by(() => {
     try {
       return BigInt(selectedChannel?.permissions ?? guild?.permissions ?? '0');
@@ -622,7 +782,31 @@
   });
 
   function selectedHasPermission(permission: bigint): boolean {
-    return Boolean(selectedEffectivePermissions & (permission | Permission.ADMINISTRATOR));
+    return hasAllPermissions(selectedEffectivePermissions, permission);
+  }
+
+  function channelHasPermission(channel: Channel, permission: bigint): boolean {
+    try {
+      return hasAllPermissions(
+        BigInt(channel.permissions ?? guild?.permissions ?? '0'),
+        permission
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function editableChannelParents(target: Channel | null): Channel[] {
+    const currentParent =
+      target?.parent_id && target.parent_domain
+        ? `${target.parent_id}@${target.parent_domain}`
+        : '';
+    return (guild?.channels ?? []).filter(
+      (channel) =>
+        channel.type === 4 &&
+        (entityKey(channel) === currentParent ||
+          channelHasPermission(channel, CHANNEL_MOVE_PERMISSIONS))
+    );
   }
 
   const canEditSelectedChannel = $derived(selectedHasPermission(Permission.MANAGE_CHANNELS));
@@ -630,13 +814,11 @@
   const canEditSelectedPermissions = $derived(selectedHasPermission(Permission.MANAGE_ROLES));
   const canCreateSelectedInvite = $derived(selectedHasPermission(Permission.CREATE_INVITE));
   const canManageSelectedWebhooks = $derived(
-    selectedChannel?.encryption_mode !== 'e2ee' && selectedHasPermission(Permission.MANAGE_WEBHOOKS)
+    Boolean(guild && selectedChannel && canManageWebhookChannel(selectedChannel, guild))
   );
   const manageableWebhookTargets = $derived(guild ? manageableWebhookChannels(guild) : []);
   const canReadSelectedAnnouncementFollows = $derived(
-    selectedChannel?.type === 5 &&
-      selectedHasPermission(Permission.VIEW_CHANNEL) &&
-      selectedHasPermission(Permission.READ_MESSAGE_HISTORY)
+    Boolean(guild && selectedChannel && canReadAnnouncementChannel(selectedChannel, guild))
   );
   const canAccessSelectedIntegrations = $derived(
     canManageSelectedWebhooks || canReadSelectedAnnouncementFollows
@@ -659,6 +841,46 @@
         )
       : []
   );
+
+  function canManageWebhook(webhook: WebhookSummary): boolean {
+    if (!guild) return false;
+    const target = guild.channels?.find(
+      (channel) =>
+        channel.id === webhook.channel_id && channel.origin_domain === webhook.channel_domain
+    );
+    return Boolean(target && canManageWebhookChannel(target, guild));
+  }
+
+  function initializeWebhookDrafts(value: WebhookSummary[]) {
+    webhooks = value;
+    webhookNameDrafts = Object.fromEntries(value.map((item) => [item.id, item.name]));
+    webhookChannelDrafts = Object.fromEntries(
+      value.map((item) => [item.id, `${item.channel_id}@${item.channel_domain}`])
+    );
+  }
+
+  async function loadSelectedChannelWebhooks(channel: Channel) {
+    if (!guild || !canManageWebhookChannel(channel, guild)) return;
+    const generation = loadGeneration;
+    const guildRef = entityRef(guild);
+    try {
+      const value = await listChannelWebhooks(
+        guildRef,
+        entityRef(channel),
+        routeController?.signal
+      );
+      if (generation !== loadGeneration || !guild || entityRef(guild) !== guildRef) return;
+      initializeWebhookDrafts([
+        ...webhooks.filter(
+          (item) => item.channel_id !== channel.id || item.channel_domain !== channel.origin_domain
+        ),
+        ...value
+      ]);
+    } catch (caught) {
+      if (generation !== loadGeneration || routeController?.signal.aborted) return;
+      error = userErrorMessage(caught, 'Could not load this channel’s webhooks. Try again.');
+    }
+  }
 
   function channelPath(channel: Channel): string {
     if (!guild) return resolve('/home');
@@ -808,6 +1030,9 @@
     overwriteAllow = '0';
     overwriteDeny = '0';
     if (guild && canEditSelectedPermissions) void loadChannelOverwrites(channel);
+    if (channelOnly && webhookProjectionReady && channelEditorPanel === 'integrations') {
+      void loadSelectedChannelWebhooks(channel);
+    }
   }
 
   function addForumTag() {
@@ -858,6 +1083,9 @@
     if (panel === 'delete' && !canEditSelectedChannel) return;
     if (panel === 'invites' && selectedChannel) inviteChannel = entityKey(selectedChannel);
     channelEditorPanel = panel;
+    if (panel === 'integrations' && channelOnly && selectedChannel && webhookProjectionReady) {
+      void loadSelectedChannelWebhooks(selectedChannel);
+    }
   }
 
   async function loadChannelOverwrites(channel: Channel) {
@@ -870,8 +1098,16 @@
       );
       if (!selectedChannel || entityKey(selectedChannel) !== entityKey(channel)) return;
       channelOverwrites = loaded;
-      if (!overwriteTarget && loaded[0]) {
-        overwriteTarget = `${loaded[0].target_type}:${loaded[0].target_id}@${loaded[0].target_domain}`;
+      if (overwriteTarget && !canManageOverwriteTarget(overwriteTarget)) {
+        overwriteTarget = '';
+        overwriteAllow = '0';
+        overwriteDeny = '0';
+      }
+      const firstManageable = loaded.find((item) =>
+        canManageOverwriteTarget(`${item.target_type}:${item.target_id}@${item.target_domain}`)
+      );
+      if (!overwriteTarget && firstManageable) {
+        overwriteTarget = `${firstManageable.target_type}:${firstManageable.target_id}@${firstManageable.target_domain}`;
         selectOverwriteTarget(overwriteTarget);
       }
     } catch (caught) {
@@ -881,6 +1117,7 @@
   }
 
   function selectOverwriteTarget(value: string) {
+    if (!canManageOverwriteTarget(value)) return;
     overwriteTarget = value;
     const [targetType, ...refParts] = value.split(':');
     const targetRef = refParts.join(':');
@@ -912,6 +1149,7 @@
   }
 
   function setOverwritePermission(permission: bigint, value: string) {
+    if (!canEditSelectedPermissions || !selectedHasPermission(permission)) return;
     let allow = BigInt(overwriteAllow);
     let deny = BigInt(overwriteDeny);
     allow &= ~permission;
@@ -923,7 +1161,13 @@
   }
 
   function saveChannelOverwrite() {
-    if (!guild || !selectedChannel || !overwriteTarget) return;
+    if (
+      !guild ||
+      !selectedChannel ||
+      !overwriteTarget ||
+      !canManageOverwriteTarget(overwriteTarget)
+    )
+      return;
     const [targetType, ...refParts] = overwriteTarget.split(':');
     const targetRef = refParts.join(':');
     const channel = selectedChannel;
@@ -947,7 +1191,17 @@
   }
 
   function resetChannelOverwrite() {
-    if (!guild || !selectedChannel || !overwriteTarget) return;
+    if (
+      !guild ||
+      !selectedChannel ||
+      !overwriteTarget ||
+      !canManageOverwriteTarget(overwriteTarget) ||
+      !hasAllPermissions(
+        selectedEffectivePermissions,
+        BigInt(overwriteAllow) | BigInt(overwriteDeny)
+      )
+    )
+      return;
     const [targetType, ...refParts] = overwriteTarget.split(':');
     const targetRef = refParts.join(':');
     const channel = selectedChannel;
@@ -1082,6 +1336,7 @@
     signal: AbortSignal
   ) {
     loading = true;
+    webhookProjectionReady = false;
     try {
       const [loaded, currentUser, notificationSettings, authConfiguration] = await Promise.all([
         api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}`, { signal }),
@@ -1100,6 +1355,7 @@
       void initializeE2EE(currentUser).catch(() => {
         // Guild settings remain available on clients without secure device storage.
       });
+      entities.ingestGuilds([loaded]);
       guild = loaded;
       initializeExpressionDrafts(loaded);
       name = loaded.name;
@@ -1109,6 +1365,16 @@
       const requestedChannel = loaded.channels?.find(
         (channel) => entityRef(channel) === targetChannel
       );
+      let requestedChannelPermissions = 0n;
+      try {
+        requestedChannelPermissions = BigInt(
+          requestedChannel?.permissions ?? loaded.permissions ?? '0'
+        );
+      } catch {
+        requestedChannelPermissions = 0n;
+      }
+      const requestedChannelAllows = (permission: bigint) =>
+        Boolean(requestedChannel && hasAllPermissions(requestedChannelPermissions, permission));
       selectedChannel = channelOnly ? (requestedChannel ?? null) : (loaded.channels?.[0] ?? null);
       channelEditorPanel =
         requestedPanel === 'permissions' ||
@@ -1135,8 +1401,11 @@
       channelVoiceRegions = [];
       channelVoiceRegionsError = '';
       if (
-        allows(Permission.MANAGE_CHANNELS) &&
-        loaded.channels?.some((channel) => channel.type === 2 || channel.type === 13)
+        (allows(Permission.MANAGE_CHANNELS) &&
+          loaded.channels?.some((channel) => channel.type === 2 || channel.type === 13)) ||
+        (channelOnly &&
+          (requestedChannel?.type === 2 || requestedChannel?.type === 13) &&
+          requestedChannelAllows(Permission.MANAGE_CHANNELS))
       ) {
         optional.push(
           api<VoiceRegion[]>(`/voice/regions?guild_ref=${encodeURIComponent(targetGuild)}`, {
@@ -1180,7 +1449,7 @@
             { signal }
           ).then((value) => {
             if (generation === loadGeneration) {
-              members = value.slice(0, MEMBER_PAGE_SIZE);
+              members = cacheMemberRows(value.slice(0, MEMBER_PAGE_SIZE));
               membersHaveMore = value.length > MEMBER_PAGE_SIZE;
               memberPage = 0;
             }
@@ -1196,13 +1465,7 @@
           })
         );
       } else if (channelOnly && requestedChannel) {
-        let channelPermissions = 0n;
-        try {
-          channelPermissions = BigInt(requestedChannel.permissions ?? loaded.permissions ?? '0');
-        } catch {
-          channelPermissions = 0n;
-        }
-        if (hasAllPermissions(channelPermissions, Permission.MANAGE_CHANNELS)) {
+        if (requestedChannelAllows(Permission.MANAGE_CHANNELS)) {
           optional.push(
             api<InviteSummary[]>(channelInviteListPath(entityRef(requestedChannel)), {
               signal
@@ -1215,13 +1478,17 @@
       if (allows(Permission.MANAGE_WEBHOOKS)) {
         optional.push(
           listGuildWebhooks(targetGuild, signal).then((value) => {
-            if (generation === loadGeneration) {
-              webhooks = value;
-              webhookNameDrafts = Object.fromEntries(value.map((item) => [item.id, item.name]));
-              webhookChannelDrafts = Object.fromEntries(
-                value.map((item) => [item.id, `${item.channel_id}@${item.channel_domain}`])
-              );
-            }
+            if (generation === loadGeneration) initializeWebhookDrafts(value);
+          })
+        );
+      } else if (
+        channelOnly &&
+        requestedChannel &&
+        canManageWebhookChannel(requestedChannel, loaded)
+      ) {
+        optional.push(
+          listChannelWebhooks(targetGuild, entityRef(requestedChannel), signal).then((value) => {
+            if (generation === loadGeneration) initializeWebhookDrafts(value);
           })
         );
       }
@@ -1246,6 +1513,7 @@
       }
       await Promise.all(optional);
       if (generation !== loadGeneration || targetGuild !== guildId) return;
+      webhookProjectionReady = true;
     } catch (caught) {
       if (signal.aborted || generation !== loadGeneration || targetGuild !== guildId) return;
       error = userErrorMessage(caught, 'Could not load guild settings. Try again.');
@@ -1958,31 +2226,52 @@
     if (!canEditSelectedChannel || !selectedChannel) return;
     const target = selectedChannel;
     return run(async (targetGuild, generation) => {
+      const current = guild?.channels?.find((channel) => entityKey(channel) === entityKey(target));
+      if (!current || !channelHasPermission(current, CHANNEL_MOVE_PERMISSIONS)) {
+        error = 'You no longer have permission to edit this channel.';
+        return;
+      }
       const parent = guild?.channels?.find(
         (channel) => entityKey(channel) === channelParent && channel.type === 4
       );
+      if (channelParent && !parent) {
+        error = 'That category is no longer available.';
+        return;
+      }
+      const currentParent =
+        current.parent_id && current.parent_domain
+          ? `${current.parent_id}@${current.parent_domain}`
+          : '';
+      if (
+        channelParent !== currentParent &&
+        parent &&
+        !channelHasPermission(parent, CHANNEL_MOVE_PERMISSIONS)
+      ) {
+        error = 'You cannot move this channel to that category.';
+        return;
+      }
       const updated = await api<Channel>(
-        `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(target))}`,
+        `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(current))}`,
         {
           method: 'PATCH',
-          headers: target.version ? { 'If-Match': `"${target.version}"` } : undefined,
+          headers: current.version ? { 'If-Match': `"${current.version}"` } : undefined,
           body: JSON.stringify({
             name: channelName,
             topic: channelTopic.trim() || null,
             nsfw: channelNsfw,
-            parent_id: target.type === 4 ? null : (parent?.id ?? null),
-            rate_limit_per_user: target.type === 4 ? 0 : channelSlowmode,
+            parent_id: current.type === 4 ? null : (parent?.id ?? null),
+            rate_limit_per_user: current.type === 4 ? 0 : channelSlowmode,
             federated_history_policy:
-              target.type === 0 || target.type === 5 ? channelHistoryPolicy : 'inherit',
-            ...(target.type === 0 || target.type === 5
+              current.type === 0 || current.type === 5 ? channelHistoryPolicy : 'inherit',
+            ...(current.type === 0 || current.type === 5
               ? {
                   default_auto_archive_duration: channelForumArchive,
-                  ...(target.type === 0
+                  ...(current.type === 0
                     ? { default_thread_rate_limit_per_user: channelForumSlowmode }
                     : {})
                 }
               : {}),
-            ...(target.type === 15
+            ...(current.type === 15
               ? {
                   available_tags: channelForumTags,
                   default_reaction_emoji: forumDefaultReactionPayload(
@@ -1993,11 +2282,11 @@
                   default_thread_rate_limit_per_user: channelForumSlowmode,
                   default_sort_order: channelForumSort,
                   default_forum_layout: channelForumLayout,
-                  e2ee_required: target.e2ee_required ? true : channelForumE2EE,
+                  e2ee_required: current.e2ee_required ? true : channelForumE2EE,
                   flags: channelForumRequireTag ? 1 << 4 : 0
                 }
               : {}),
-            ...(target.type === 2 || target.type === 13
+            ...(current.type === 2 || current.type === 13
               ? {
                   bitrate: channelBitrate,
                   user_limit: channelUserLimit,
@@ -2024,7 +2313,7 @@
   }
 
   function deleteChannel() {
-    if (!canManageChannels || !selectedChannel || !guild) return;
+    if (!canDeleteSelectedChannel || !selectedChannel || !guild) return;
     const target = selectedChannel;
     const label = target.type === 4 ? 'category' : 'channel';
     const name = target.name ?? 'Untitled';
@@ -2041,6 +2330,8 @@
   }
 
   function deleteConfirmedChannel(target: Channel) {
+    const current = guild?.channels?.find((channel) => entityKey(channel) === entityKey(target));
+    if (!current || !channelHasPermission(current, Permission.MANAGE_CHANNELS)) return false;
     return run(async (targetGuild, generation) => {
       await api(
         `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(target))}`,
@@ -2071,6 +2362,13 @@
     rolePermissions = value.toString();
   }
 
+  function setGuildRoles(roles: Role[]) {
+    if (!guild) return;
+    const targetGuild = entityKey(guild);
+    guild = { ...guild, roles };
+    entities.guilds.update(targetGuild, (current) => ({ ...current, roles }));
+  }
+
   function createRole() {
     if (!canManageRoles) return;
     return run(async (targetGuild, generation) => {
@@ -2080,17 +2378,12 @@
       });
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       if (guild) {
-        guild = {
-          ...guild,
-          roles: [
-            ...(guild.roles ?? []).map((existing) =>
-              existing.id === guild?.id
-                ? existing
-                : { ...existing, position: existing.position + 1 }
-            ),
-            role
-          ]
-        };
+        setGuildRoles([
+          ...(guild.roles ?? []).map((existing) =>
+            existing.id === guild?.id ? existing : { ...existing, position: existing.position + 1 }
+          ),
+          role
+        ]);
       }
       newRoleName = '';
       selectRole(role, true);
@@ -2118,12 +2411,11 @@
       );
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       if (guild) {
-        guild = {
-          ...guild,
-          roles: guild.roles?.map((role) =>
+        setGuildRoles(
+          (guild.roles ?? []).map((role) =>
             entityKey(role) === entityKey(updated) ? updated : role
           )
-        };
+        );
       }
       selectRole(updated, true);
       notice = 'Role saved.';
@@ -2165,12 +2457,11 @@
         { signal, maxAttempts: 30, rejectedMessage: 'The role icon did not pass media processing.' }
       );
       if (guild) {
-        guild = {
-          ...guild,
-          roles: guild.roles?.map((role) =>
+        setGuildRoles(
+          (guild.roles ?? []).map((role) =>
             entityKey(role) === entityKey(updated) ? updated : role
           )
-        };
+        );
       }
       selectRole(updated, true);
       notice = 'Role icon updated.';
@@ -2191,10 +2482,9 @@
     const path = `/guilds/${encodeURIComponent(guildId)}/roles/${encodeURIComponent(entityRef(target))}/icon`;
     try {
       const updated = await api<Role>(path, { method: 'DELETE' });
-      guild = {
-        ...guild,
-        roles: guild.roles?.map((role) => (entityKey(role) === entityKey(updated) ? updated : role))
-      };
+      setGuildRoles(
+        (guild.roles ?? []).map((role) => (entityKey(role) === entityKey(updated) ? updated : role))
+      );
       selectRole(updated, true);
       notice = 'Role icon removed.';
     } catch (caught) {
@@ -2275,7 +2565,7 @@
     const targetGuild = guildId;
     const generation = loadGeneration;
     const defaultRole = previous.find((role) => role.id === guild?.id);
-    guild = { ...guild, roles: defaultRole ? [defaultRole, ...ordered] : ordered };
+    setGuildRoles(defaultRole ? [defaultRole, ...ordered] : ordered);
     busy = true;
     reorderingRoles = true;
     error = '';
@@ -2293,10 +2583,7 @@
       });
       if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
       const savedByKey = new Map(updated.map((role) => [entityKey(role), role]));
-      guild = {
-        ...guild,
-        roles: (guild.roles ?? []).map((role) => savedByKey.get(entityKey(role)) ?? role)
-      };
+      setGuildRoles((guild.roles ?? []).map((role) => savedByKey.get(entityKey(role)) ?? role));
       if (selectedRole) {
         const selected = guild.roles?.find((role) => entityKey(role) === entityKey(selectedRole!));
         if (selected) selectRole(selected, true);
@@ -2304,7 +2591,7 @@
       notice = 'Role order saved.';
     } catch (caught) {
       if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
-      guild = { ...guild, roles: previous };
+      setGuildRoles(previous);
       error = userErrorMessage(caught, 'Could not save the role order. Reload and try again.');
       notice = '';
     } finally {
@@ -2335,13 +2622,15 @@
       );
       if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
       const remaining = (guild.roles ?? []).filter((role) => entityKey(role) !== entityKey(target));
-      guild = { ...guild, roles: remaining };
+      setGuildRoles(remaining);
       selectedRole = remaining.find((role) => role.id !== guild?.id) ?? remaining[0] ?? null;
       if (selectedRole) selectRole(selectedRole, true);
-      members = members.map((member) => ({
-        ...member,
-        role_ids: member.role_ids.filter((id) => id !== target.id)
-      }));
+      members = cacheMemberRows(
+        members.map((member) => ({
+          ...member,
+          role_ids: member.role_ids.filter((id) => id !== target.id)
+        }))
+      );
       notice = 'Role deleted.';
     });
   }
@@ -2352,8 +2641,16 @@
       const channel =
         channelOnly && selectedChannel?.type !== 4
           ? selectedChannel
-          : guild?.channels?.find((item) => entityKey(item) === inviteChannel && item.type !== 4);
-      if (channelOnly && !channel) return;
+          : guild?.channels?.find(
+              (item) =>
+                entityKey(item) === inviteChannel &&
+                item.type !== 4 &&
+                channelHasPermission(item, Permission.CREATE_INVITE)
+            );
+      if ((channelOnly || inviteChannel) && !channel) {
+        error = 'Choose a channel where you can create invites.';
+        return;
+      }
       const invite = await api<InviteSummary>(
         `/guilds/${encodeURIComponent(targetGuild)}/invites`,
         {
@@ -2379,7 +2676,7 @@
   }
 
   function createChannelWebhook() {
-    if (!canManageWebhooks || !selectedChannel || selectedChannel.type === 4) return;
+    if (!canManageSelectedWebhooks || !selectedChannel || selectedChannel.type === 4) return;
     const channel = selectedChannel;
     return run(async (targetGuild, generation) => {
       const created = await createGuildWebhook(targetGuild, entityRef(channel), newWebhookName);
@@ -2397,7 +2694,7 @@
   }
 
   function rotateWebhook(webhook: WebhookSummary) {
-    if (!canManageWebhooks) return;
+    if (!canManageWebhook(webhook)) return;
     if (
       !confirm(
         `Rotate the token for “${webhook.name}”? The current token will stop working immediately.`
@@ -2414,7 +2711,7 @@
   }
 
   function updateWebhook(webhook: WebhookSummary) {
-    if (!canManageWebhooks) return;
+    if (!canManageWebhook(webhook)) return;
     const nextName = (webhookNameDrafts[webhook.id] ?? webhook.name).trim();
     if (!nextName) {
       error = 'Webhook names cannot be blank.';
@@ -2450,7 +2747,7 @@
     file: File | null,
     input: HTMLInputElement
   ) {
-    if (!file || !canManageWebhooks) return;
+    if (!file || !canManageWebhook(webhook)) return;
     if (!acceptedImageTypes.has(file.type)) {
       error = 'Choose a PNG, JPEG, GIF, or WebP image.';
       input.value = '';
@@ -2499,7 +2796,7 @@
   }
 
   function deleteWebhookAvatar(webhook: WebhookSummary) {
-    if (!canManageWebhooks || !webhook.avatar_hash) return;
+    if (!canManageWebhook(webhook) || !webhook.avatar_hash) return;
     if (!confirm(`Remove the avatar for “${webhook.name}”?`)) return;
     return run(async (targetGuild, generation) => {
       const updated = await deleteGuildWebhookAvatar(targetGuild, webhook);
@@ -2510,7 +2807,7 @@
   }
 
   function deleteWebhook(webhook: WebhookSummary) {
-    if (!canManageWebhooks) return;
+    if (!canManageWebhook(webhook)) return;
     if (!confirm(`Delete the webhook “${webhook.name}”? This cannot be undone.`)) return;
     return run(async (targetGuild, generation) => {
       await deleteGuildWebhook(targetGuild, webhook);
@@ -2700,23 +2997,34 @@
   }
 
   function toggleMemberRole(member: MemberSummary, role: Role, enabled: boolean) {
-    if (!canManageRole(role) || !canManageMember(member)) return;
+    const currentRole = guild?.roles?.find((candidate) => entityKey(candidate) === entityKey(role));
+    const currentMember = currentMembers.find(
+      (candidate) => entityKey(candidate.user) === entityKey(member.user)
+    );
+    if (
+      !currentRole ||
+      !currentMember ||
+      !canManageRole(currentRole) ||
+      !canManageMember(currentMember)
+    )
+      return;
     return run(async (targetGuild, generation) => {
       await api(
-        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}/roles/${encodeURIComponent(entityRef(role))}`,
+        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(currentMember.user))}/roles/${encodeURIComponent(entityRef(currentRole))}`,
         { method: enabled ? 'PUT' : 'DELETE' }
       );
       if (generation !== loadGeneration || targetGuild !== guildId) return;
-      members = members.map((item) => {
-        if (entityKey(item.user) !== entityKey(member.user)) return item;
-        return {
-          ...item,
-          role_ids: enabled
-            ? [...new Set([...item.role_ids, role.id])]
-            : item.role_ids.filter((id) => id !== role.id)
-        };
-      });
-      notice = `${role.name} ${enabled ? 'assigned' : 'removed'}.`;
+      const updatedMember = {
+        ...currentMember,
+        role_ids: enabled
+          ? [...new Set([...currentMember.role_ids, currentRole.id])]
+          : currentMember.role_ids.filter((id) => id !== currentRole.id)
+      };
+      entities.members.upsert(updatedMember);
+      members = members.map((item) =>
+        entityKey(item.user) === entityKey(currentMember.user) ? updatedMember : item
+      );
+      notice = `${currentRole.name} ${enabled ? 'assigned' : 'removed'}.`;
     });
   }
 
@@ -2726,13 +3034,7 @@
   }
 
   function isModeratableMember(member: MemberSummary): boolean {
-    return (
-      entityRef(member.user) !== currentUserRef &&
-      !(
-        member.user.id === guild?.owner_id &&
-        member.user.origin_domain === (guild?.owner_domain ?? guild?.origin_domain)
-      )
-    );
+    return guildMemberOutranks(guild, signedInUser, member.user, currentMembers);
   }
 
   function memberModerationTitle(dialog: MemberModerationDialog): string {
@@ -2832,7 +3134,7 @@
   function clampMemberPage() {
     memberPage = Math.min(
       memberPage,
-      Math.max(0, Math.ceil(members.length / MEMBER_PAGE_SIZE) - 1)
+      Math.max(0, Math.ceil(currentMembers.length / MEMBER_PAGE_SIZE) - 1)
     );
   }
 
@@ -2868,6 +3170,7 @@
           })
         });
         if (!stillCurrent()) return;
+        entities.members.upsert(updated);
         members = members.map((item) =>
           entityKey(item.user) === entityKey(dialog.member.user) ? updated : item
         );
@@ -2878,6 +3181,7 @@
       } else if (dialog.action === 'kick') {
         await api(memberPath, { method: 'DELETE', headers, signal: controller.signal });
         if (!stillCurrent()) return;
+        removeCachedMember(dialog.member);
         members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
         clampMemberPage();
         notice = `${userDisplayName(dialog.member.user)} was kicked.`;
@@ -2897,6 +3201,7 @@
           }
         );
         if (!stillCurrent()) return;
+        removeCachedMember(dialog.member);
         members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
         clampMemberPage();
         bans = [
@@ -2961,6 +3266,15 @@
         }
       );
       if (generation !== loadGeneration) return;
+      for (const member of entities.members.values) {
+        if (
+          member.guild_id === guild?.id &&
+          member.guild_domain === guild?.origin_domain &&
+          member.user.origin_domain === domain
+        ) {
+          removeCachedMember(member);
+        }
+      }
       members = members.filter((member) => member.user.origin_domain !== domain);
       instanceBans = [
         {
@@ -3001,7 +3315,7 @@
         `/guilds/${encodeURIComponent(targetGuild)}/members?limit=${MEMBER_PAGE_SIZE + 1}&after=${encodeURIComponent(after)}`
       );
       if (generation !== loadGeneration || targetGuild !== guildId) return false;
-      const next = page.slice(0, MEMBER_PAGE_SIZE);
+      const next = cacheMemberRows(page.slice(0, MEMBER_PAGE_SIZE));
       const existing = new Set(members.map((member) => entityKey(member.user)));
       members = [...members, ...next.filter((member) => !existing.has(entityKey(member.user)))];
       membersHaveMore = page.length > MEMBER_PAGE_SIZE;
@@ -3023,8 +3337,8 @@
   async function showNextMemberPage() {
     if (!memberHasNextPage || membersLoadingMore) return;
     const nextStart = (memberPage + 1) * MEMBER_PAGE_SIZE;
-    if (nextStart >= members.length && !(await loadMoreMembers())) return;
-    if (nextStart < members.length) memberPage += 1;
+    if (nextStart >= currentMembers.length && !(await loadMoreMembers())) return;
+    if (nextStart < currentMembers.length) memberPage += 1;
   }
 
   $effect(() => {
@@ -3046,7 +3360,7 @@
       )
         .then((results) => {
           if (controller.signal.aborted || targetGuild !== guildId) return;
-          memberSearchResults = results;
+          memberSearchResults = cacheMemberRows(results);
         })
         .catch((caught: unknown) => {
           if (controller.signal.aborted || targetGuild !== guildId) return;
@@ -3085,7 +3399,7 @@
       )
         .then((results) => {
           if (controller.signal.aborted || targetGuild !== guildId) return;
-          roleMemberSearchResults = results;
+          roleMemberSearchResults = cacheMemberRows(results);
         })
         .catch((caught: unknown) => {
           if (controller.signal.aborted || targetGuild !== guildId) return;
@@ -3206,7 +3520,7 @@
             onclick={() => selectChannelPanel('invites')}>Invites</button
           >
         {/if}
-        {#if canAccessSelectedIntegrations && (selectedChannel?.type === 0 || selectedChannel?.type === 5)}
+        {#if canAccessSelectedIntegrations && [0, 5, 15].includes(selectedChannel?.type ?? -1)}
           <button
             class:active={channelEditorPanel === 'integrations'}
             type="button"
@@ -3681,7 +3995,7 @@
                       onclick={() => selectChannelPanel('invites')}>Invites</button
                     >
                   {/if}
-                  {#if canAccessSelectedIntegrations && (selectedChannel.type === 0 || selectedChannel.type === 5)}
+                  {#if canAccessSelectedIntegrations && [0, 5, 15].includes(selectedChannel.type)}
                     <button
                       class:active={channelEditorPanel === 'integrations'}
                       type="button"
@@ -4042,7 +4356,7 @@
                         <span>Category</span>
                         <select bind:value={channelParent} disabled={busy}>
                           <option value="">No category</option>
-                          {#each (guild.channels ?? []).filter((channel) => channel.type === 4) as category (entityKey(category))}
+                          {#each editableChannelParents(selectedChannel) as category (entityKey(category))}
                             <option value={entityKey(category)}>{category.name}</option>
                           {/each}
                         </select>
@@ -4121,7 +4435,7 @@
                             <button
                               class:active={overwriteTarget === `role:${entityRef(role)}`}
                               type="button"
-                              disabled={busy}
+                              disabled={busy || !canManageOverwriteRole(role)}
                               aria-pressed={overwriteTarget === `role:${entityRef(role)}`}
                               onclick={() => selectOverwriteTarget(`role:${entityRef(role)}`)}
                             >
@@ -4139,7 +4453,7 @@
                                 class:active={overwriteTarget ===
                                   `member:${entityRef(member.user)}`}
                                 type="button"
-                                disabled={busy}
+                                disabled={busy || !canManageOverwriteMember(member)}
                                 aria-pressed={overwriteTarget ===
                                   `member:${entityRef(member.user)}`}
                                 onclick={() =>
@@ -4191,10 +4505,17 @@
                                 <legend>{group.name}</legend>
                                 {#each group.permissions as permission (permission[0])}
                                   <div class="overwrite-permission-row">
-                                    <span
-                                      ><strong>{permission[0]}</strong><small>{permission[1]}</small
-                                      ></span
-                                    >
+                                    <span>
+                                      <strong>{permission[0]}</strong>
+                                      <small>{permission[1]}</small>
+                                      {#if permission[3].dependencies.length}
+                                        <small class="permission-dependencies">
+                                          Also requires: {permissionDependencies(
+                                            permission[3].dependencies
+                                          )}
+                                        </small>
+                                      {/if}
+                                    </span>
                                     <div
                                       class="permission-tristate"
                                       role="group"
@@ -4204,7 +4525,7 @@
                                         class="deny"
                                         class:active={overwritePermission(permission[2]) === 'deny'}
                                         type="button"
-                                        disabled={busy || !hasPermission(permission[2])}
+                                        disabled={busy || !selectedHasPermission(permission[2])}
                                         aria-label="Deny in this channel"
                                         title="Deny"
                                         onclick={() =>
@@ -4214,7 +4535,7 @@
                                         class:active={overwritePermission(permission[2]) ===
                                           'inherit'}
                                         type="button"
-                                        disabled={busy || !hasPermission(permission[2])}
+                                        disabled={busy || !selectedHasPermission(permission[2])}
                                         aria-label="Inherit guild setting"
                                         title="Inherit"
                                         onclick={() =>
@@ -4226,7 +4547,7 @@
                                         class:active={overwritePermission(permission[2]) ===
                                           'allow'}
                                         type="button"
-                                        disabled={busy || !hasPermission(permission[2])}
+                                        disabled={busy || !selectedHasPermission(permission[2])}
                                         aria-label="Allow in this channel"
                                         title="Allow"
                                         onclick={() =>
@@ -4242,13 +4563,18 @@
                             <button
                               class="secondary-button"
                               type="button"
-                              disabled={busy}
+                              disabled={busy ||
+                                !canManageOverwriteTarget(overwriteTarget) ||
+                                !hasAllPermissions(
+                                  selectedEffectivePermissions,
+                                  BigInt(overwriteAllow) | BigInt(overwriteDeny)
+                                )}
                               onclick={() => void resetChannelOverwrite()}>Reset override</button
                             >
                             <button
                               class="primary-button"
                               type="button"
-                              disabled={busy}
+                              disabled={busy || !canManageOverwriteTarget(overwriteTarget)}
                               onclick={() => void saveChannelOverwrite()}>Save permissions</button
                             >
                           </div>
@@ -4538,61 +4864,63 @@
             </div>
           </div>
 
-          <form
-            class="settings-card quick-create"
-            onsubmit={(event) => {
-              event.preventDefault();
-              void createChannel();
-            }}
-          >
-            <div>
-              <strong>Create a channel</strong>
-              <p>Add a text, voice, announcement, forum, task tracker, or category.</p>
-            </div>
-            <label class="form-field compact-field">
-              <span>Name</span>
-              <input bind:value={newChannelName} maxlength="100" required disabled={busy} />
-            </label>
-            <label class="form-field compact-field">
-              <span>Type</span>
-              <select bind:value={newChannelType} disabled={busy}>
-                <option value={0}>Text</option>
-                <option value={2}>Voice</option>
-                <option value={4}>Category</option>
-                <option value={5}>Announcement</option>
-                <option value={15}>Forum</option>
-                <option value={TRACKER_CHANNEL_TYPE}>Task tracker</option>
-              </select>
-            </label>
-            {#if newChannelType === TRACKER_CHANNEL_TYPE}
+          {#if canManageChannels}
+            <form
+              class="settings-card quick-create"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void createChannel();
+              }}
+            >
+              <div>
+                <strong>Create a channel</strong>
+                <p>Add a text, voice, announcement, forum, task tracker, or category.</p>
+              </div>
               <label class="form-field compact-field">
-                <span>Task key prefix</span>
-                <small>Optional; defaults from the channel name</small>
-                <input
-                  bind:value={newChannelTrackerPrefix}
-                  minlength="2"
-                  maxlength="10"
-                  pattern="[A-Za-z][A-Za-z0-9]*"
-                  placeholder="e.g. RAID"
-                  disabled={busy}
-                />
+                <span>Name</span>
+                <input bind:value={newChannelName} maxlength="100" required disabled={busy} />
               </label>
-            {/if}
-            {#if newChannelType !== 4}
               <label class="form-field compact-field">
-                <span>Category</span>
-                <select bind:value={newChannelParent} disabled={busy}>
-                  <option value="">No category</option>
-                  {#each (guild.channels ?? []).filter((channel) => channel.type === 4) as category (entityKey(category))}
-                    <option value={entityKey(category)}>{category.name}</option>
-                  {/each}
+                <span>Type</span>
+                <select bind:value={newChannelType} disabled={busy}>
+                  <option value={0}>Text</option>
+                  <option value={2}>Voice</option>
+                  <option value={4}>Category</option>
+                  <option value={5}>Announcement</option>
+                  <option value={15}>Forum</option>
+                  <option value={TRACKER_CHANNEL_TYPE}>Task tracker</option>
                 </select>
               </label>
-            {/if}
-            <button class="primary-button" disabled={busy}>
-              <Icon name="plus" size={16} />Create
-            </button>
-          </form>
+              {#if newChannelType === TRACKER_CHANNEL_TYPE}
+                <label class="form-field compact-field">
+                  <span>Task key prefix</span>
+                  <small>Optional; defaults from the channel name</small>
+                  <input
+                    bind:value={newChannelTrackerPrefix}
+                    minlength="2"
+                    maxlength="10"
+                    pattern="[A-Za-z][A-Za-z0-9]*"
+                    placeholder="e.g. RAID"
+                    disabled={busy}
+                  />
+                </label>
+              {/if}
+              {#if newChannelType !== 4}
+                <label class="form-field compact-field">
+                  <span>Category</span>
+                  <select bind:value={newChannelParent} disabled={busy}>
+                    <option value="">No category</option>
+                    {#each (guild.channels ?? []).filter((channel) => channel.type === 4) as category (entityKey(category))}
+                      <option value={entityKey(category)}>{category.name}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+              <button class="primary-button" disabled={busy}>
+                <Icon name="plus" size={16} />Create
+              </button>
+            </form>
+          {/if}
         </section>
       {/if}
 
@@ -5240,10 +5568,17 @@
                           <legend>{group.name}</legend>
                           {#each group.permissions as permission (permission[0])}
                             <label class="permission-row">
-                              <span
-                                ><strong>{permission[0]}</strong><small>{permission[1]}</small
-                                ></span
-                              >
+                              <span>
+                                <strong>{permission[0]}</strong>
+                                <small>{permission[1]}</small>
+                                {#if permission[3].dependencies.length}
+                                  <small class="permission-dependencies">
+                                    Also requires: {permissionDependencies(
+                                      permission[3].dependencies
+                                    )}
+                                  </small>
+                                {/if}
+                              </span>
                               <input
                                 type="checkbox"
                                 checked={permissionChecked(permission[2])}
@@ -5364,7 +5699,10 @@
             <span class="section-icon"><Icon name="users" /></span>
             <div>
               <h2>Members</h2>
-              <p>{members.length} loaded member{members.length === 1 ? '' : 's'} in this guild.</p>
+              <p>
+                {currentMembers.length} loaded member{currentMembers.length === 1 ? '' : 's'} in this
+                guild.
+              </p>
             </div>
           </div>
           <label class="form-field member-search-field settings-card">
@@ -5480,7 +5818,7 @@
                 </p>
               </div>
             {/each}
-            {#if members.length && !memberSearch.trim()}
+            {#if currentMembers.length && !memberSearch.trim()}
               <nav class="member-pagination" aria-label="Guild member pages">
                 <button
                   class="secondary-button small-button"
@@ -5656,7 +5994,7 @@
                 <span>Destination</span>
                 <select bind:value={inviteChannel} disabled={busy}>
                   <option value="">Guild landing channel</option>
-                  {#each (guild.channels ?? []).filter((channel) => channel.type !== 4) as channel (entityKey(channel))}
+                  {#each (guild.channels ?? []).filter((channel) => channel.type !== 4 && channelHasPermission(channel, Permission.CREATE_INVITE)) as channel (entityKey(channel))}
                     <option value={entityKey(channel)}>{channel.name}</option>
                   {/each}
                 </select>

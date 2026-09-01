@@ -50,6 +50,22 @@ bool trackerTaskCanEdit(
   return task.creator.ref == actor || task.assignee?.ref == actor;
 }
 
+bool trackerTaskCanAssign(
+  TrackerBoard board,
+  TrackerTask task,
+  EntityRef? actor,
+) =>
+    board.allows(TrackerPermission.assignTasks) ||
+    (actor != null && (task.assignee == null || task.assignee?.ref == actor));
+
+bool trackerTaskCanOpenEditor(
+  TrackerBoard board,
+  TrackerTask task,
+  EntityRef? actor,
+) =>
+    trackerTaskCanEdit(board, task, actor) ||
+    trackerTaskCanAssign(board, task, actor);
+
 bool trackerLaneCanDelete(TrackerBoard board, TrackerLane lane) =>
     board.lanes.length > 1 && board.tasksFor(lane).isEmpty;
 
@@ -316,6 +332,11 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
     final board = _board;
     if (board == null) return;
     final state = ref.read(mobileControllerProvider);
+    final canEditDetails = trackerTaskCanEdit(board, task, state.user?.ref);
+    if (!canEditDetails &&
+        !trackerTaskCanAssign(board, task, state.user?.ref)) {
+      return;
+    }
     final lane = board.lanes
         .where((candidate) => candidate.ref == task.laneRef)
         .firstOrNull;
@@ -335,28 +356,38 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         actor: state.user,
         members: state.activeGuildMembers,
         canAssignOthers: board.allows(TrackerPermission.assignTasks),
+        canEditDetails: canEditDetails,
       ),
     );
     if (draft == null) return;
+    if (!canEditDetails && draft.assignee == task.assignee?.ref) return;
     if (_mutating) return;
     setState(() => _mutating = true);
     var detailsSaved = false;
     try {
-      final updated = await _repository.updateTrackerTask(
-        widget.channel.ref,
-        task.ref,
-        task.version,
-        title: draft.title,
-        description: draft.description,
-        clearDescription: draft.description == null,
-        priority: draft.priority,
-        dueAt: draft.dueAt,
-        clearDueAt: draft.dueAt == null,
-        assignee: draft.assignee,
-        clearAssignee: draft.assignee == null,
-      );
+      final updated = canEditDetails
+          ? await _repository.updateTrackerTask(
+              widget.channel.ref,
+              task.ref,
+              task.version,
+              title: draft.title,
+              description: draft.description,
+              clearDescription: draft.description == null,
+              priority: draft.priority,
+              dueAt: draft.dueAt,
+              clearDueAt: draft.dueAt == null,
+              assignee: draft.assignee,
+              clearAssignee: draft.assignee == null,
+            )
+          : await _repository.updateTrackerTask(
+              widget.channel.ref,
+              task.ref,
+              task.version,
+              assignee: draft.assignee,
+              clearAssignee: draft.assignee == null,
+            );
       detailsSaved = true;
-      if (draft.lane != task.laneRef) {
+      if (canEditDetails && draft.lane != task.laneRef) {
         await _repository.moveTrackerTask(
           widget.channel.ref,
           task.ref,
@@ -433,6 +464,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         .firstOrNull;
     if (lane == null) return;
     final actor = ref.read(mobileControllerProvider).user?.ref;
+    final canEdit = trackerTaskCanEdit(board, task, actor);
     final shouldEdit = await _showTrackerOverlay<bool>(
       show: (builder) => showModalBottomSheet<bool>(
         context: context,
@@ -444,7 +476,8 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       builder: (_) => TrackerTaskDetailsSheet(
         task: task,
         lane: lane,
-        canEdit: trackerTaskCanEdit(board, task, actor),
+        canEdit: canEdit || trackerTaskCanAssign(board, task, actor),
+        assignmentOnly: !canEdit,
       ),
     );
     if (shouldEdit == true && mounted) {
@@ -1062,6 +1095,7 @@ final class _TrackerLaneSection extends StatelessWidget {
                     task: task,
                     lane: lane,
                     canEdit: trackerTaskCanEdit(board, task, actor),
+                    canAssign: trackerTaskCanAssign(board, task, actor),
                     busy: busy,
                     open: () => viewTask(task),
                     edit: () => editTask(task),
@@ -1091,6 +1125,7 @@ final class _TrackerTaskRow extends StatelessWidget {
     required this.task,
     required this.lane,
     required this.canEdit,
+    required this.canAssign,
     required this.busy,
     required this.open,
     required this.edit,
@@ -1102,6 +1137,7 @@ final class _TrackerTaskRow extends StatelessWidget {
   final TrackerTask task;
   final TrackerLane lane;
   final bool canEdit;
+  final bool canAssign;
   final bool busy;
   final VoidCallback open;
   final VoidCallback edit;
@@ -1210,7 +1246,7 @@ final class _TrackerTaskRow extends StatelessWidget {
                 ),
                 SizedBox(width: 6),
                 _AssigneeAvatar(user: task.assignee),
-                if (canEdit)
+                if (canEdit || canAssign)
                   PopupMenuButton<String>(
                     tooltip: 'Actions for ${task.key}',
                     enabled: !busy,
@@ -1222,20 +1258,25 @@ final class _TrackerTaskRow extends StatelessWidget {
                       _ => null,
                     },
                     itemBuilder: (_) => [
-                      PopupMenuItem(value: 'edit', child: Text('Edit task')),
                       PopupMenuItem(
-                          value: 'move', child: Text('Move or reorder')),
-                      PopupMenuItem(
-                        value: 'toggle',
-                        child: Text(
-                            task.completed ? 'Reopen task' : 'Mark complete'),
+                        value: 'edit',
+                        child: Text(canEdit ? 'Edit task' : 'Assign task'),
                       ),
-                      PopupMenuDivider(),
-                      PopupMenuItem(
-                        value: 'delete',
-                        child: Text('Delete task',
-                            style: TextStyle(color: context.kaede.danger)),
-                      ),
+                      if (canEdit) ...[
+                        PopupMenuItem(
+                            value: 'move', child: Text('Move or reorder')),
+                        PopupMenuItem(
+                          value: 'toggle',
+                          child: Text(
+                              task.completed ? 'Reopen task' : 'Mark complete'),
+                        ),
+                        PopupMenuDivider(),
+                        PopupMenuItem(
+                          value: 'delete',
+                          child: Text('Delete task',
+                              style: TextStyle(color: context.kaede.danger)),
+                        ),
+                      ],
                     ],
                   )
                 else
@@ -1335,11 +1376,13 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
     required this.task,
     required this.lane,
     required this.canEdit,
+    this.assignmentOnly = false,
   });
 
   final TrackerTask task;
   final TrackerLane lane;
   final bool canEdit;
+  final bool assignmentOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -1440,7 +1483,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                   key: ValueKey('tracker-task-details-edit'),
                   onPressed: () => Navigator.pop(context, true),
                   icon: Icon(Icons.edit_outlined),
-                  label: Text('Edit task'),
+                  label: Text(assignmentOnly ? 'Assign task' : 'Edit task'),
                 ),
               ),
           ],
@@ -1620,6 +1663,7 @@ final class TrackerTaskEditorSheet extends StatefulWidget {
     required this.initialLane,
     required this.members,
     required this.canAssignOthers,
+    this.canEditDetails = true,
     this.task,
     this.actor,
   });
@@ -1630,6 +1674,7 @@ final class TrackerTaskEditorSheet extends StatefulWidget {
   final KaedeUser? actor;
   final List<GuildMember> members;
   final bool canAssignOthers;
+  final bool canEditDetails;
 
   @override
   State<TrackerTaskEditorSheet> createState() => _TrackerTaskEditorSheetState();
@@ -1740,7 +1785,9 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                       child: Text(
                         widget.task == null
                             ? 'Create task'
-                            : 'Edit ${widget.task!.key}',
+                            : !widget.canEditDetails
+                                ? 'Assign ${widget.task!.key}'
+                                : 'Edit ${widget.task!.key}',
                         style: Theme.of(context).textTheme.headlineSmall,
                       ),
                     ),
@@ -1763,6 +1810,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                       TextFormField(
                         key: ValueKey('tracker-task-title'),
                         controller: _title,
+                        enabled: widget.canEditDetails,
                         autofocus: widget.task == null,
                         maxLength: 200,
                         textCapitalization: TextCapitalization.sentences,
@@ -1777,6 +1825,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                       SizedBox(height: 10),
                       TextFormField(
                         controller: _description,
+                        enabled: widget.canEditDetails,
                         minLines: 3,
                         maxLines: 7,
                         maxLength: 10000,
@@ -1799,8 +1848,9 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                             DropdownMenuItem(
                                 value: lane.ref, child: Text(lane.name)),
                         ],
-                        onChanged: (value) =>
-                            setState(() => _lane = value ?? _lane),
+                        onChanged: !widget.canEditDetails
+                            ? null
+                            : (value) => setState(() => _lane = value ?? _lane),
                       ),
                       SizedBox(height: 14),
                       DropdownButtonFormField<TrackerPriority>(
@@ -1816,8 +1866,10 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                               child: Text(trackerPriorityLabel(priority)),
                             ),
                         ],
-                        onChanged: (value) =>
-                            setState(() => _priority = value ?? _priority),
+                        onChanged: !widget.canEditDetails
+                            ? null
+                            : (value) =>
+                                setState(() => _priority = value ?? _priority),
                       ),
                       SizedBox(height: 14),
                       DropdownButtonFormField<String>(
@@ -1859,14 +1911,17 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                             if (_dueAt != null)
                               IconButton(
                                 tooltip: 'Clear due date',
-                                onPressed: () => setState(() => _dueAt = null),
+                                onPressed: !widget.canEditDetails
+                                    ? null
+                                    : () => setState(() => _dueAt = null),
                                 icon: Icon(Icons.clear_rounded),
                               ),
                             IconButton(
                               tooltip: _dueAt == null
                                   ? 'Set due date'
                                   : 'Change due date',
-                              onPressed: _pickDate,
+                              onPressed:
+                                  widget.canEditDetails ? _pickDate : null,
                               icon: Icon(Icons.edit_calendar_outlined),
                             ),
                           ],
@@ -1885,9 +1940,14 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                     onPressed: _save,
                     icon: Icon(widget.task == null
                         ? Icons.add_rounded
-                        : Icons.save_outlined),
-                    label:
-                        Text(widget.task == null ? 'Create task' : 'Save task'),
+                        : !widget.canEditDetails
+                            ? Icons.person_add_alt_1_rounded
+                            : Icons.save_outlined),
+                    label: Text(widget.task == null
+                        ? 'Create task'
+                        : !widget.canEditDetails
+                            ? 'Save assignment'
+                            : 'Save task'),
                   ),
                 ),
               ),

@@ -7,6 +7,8 @@ import {
   TrackerPermission,
   trackerHasPermission,
   trackerTaskBelongsToUser,
+  trackerCanChangeAssignee,
+  trackerTaskEditMode,
   trackerColor,
   trackerDispatchRequiresRefresh,
   trackerDispatchTargetsChannel,
@@ -215,5 +217,24 @@ describe('task tracker board helpers', () => {
     expect(
       trackerTaskBelongsToUser(value.tasks[0], { id: '50', origin_domain: 'other.example' })
     ).toBe(false);
+  });
+
+  it('keeps assignment-only access editable without exposing task details', () => {
+    expect(trackerTaskEditMode(true, false)).toBe('details');
+    expect(trackerTaskEditMode(false, true)).toBe('assignment');
+    expect(trackerTaskEditMode(false, false)).toBe('read-only');
+  });
+
+  it('allows self-service claiming and unassigning without assignment moderation', () => {
+    const value = board();
+    const currentUser = { id: '60', origin_domain: domain };
+    expect(trackerCanChangeAssignee({ assignee: null }, currentUser, false)).toBe(true);
+    expect(trackerCanChangeAssignee(value.tasks[0], currentUser, false)).toBe(true);
+    expect(
+      trackerCanChangeAssignee(value.tasks[0], { id: '70', origin_domain: domain }, false)
+    ).toBe(false);
+    expect(
+      trackerCanChangeAssignee(value.tasks[0], { id: '70', origin_domain: domain }, true)
+    ).toBe(true);
   });
 });

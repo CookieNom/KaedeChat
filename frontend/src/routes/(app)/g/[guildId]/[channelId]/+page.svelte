@@ -91,7 +91,8 @@
     type ReactionClearUpdate,
     type ReactionDispatchName
   } from '$lib/chat/reaction-state';
-  import { guildModerationActions } from '$lib/chat/moderation';
+  import { guildMemberOutranks, guildModerationActions } from '$lib/chat/moderation';
+  import { canReadChannelHistory, hasAllPermissions } from '$lib/chat/permissions';
   import { currentTtsPreferences, speakTtsMessage, ttsCommand } from '$lib/chat/tts';
   import { canCreateScheduledEventInChannel } from '$lib/voice/stage-permissions';
   import { voiceStartTimeFromDispatch } from '$lib/voice/elapsed';
@@ -110,6 +111,7 @@
     withoutSubmittedUploads
   } from '$lib/chat/outbox';
   import {
+    channelOrderPermissionTargets,
     channelPositionRequest,
     firstNavigableChannel,
     groupChannels,
@@ -273,6 +275,8 @@
   const channelId = $derived(page.params.channelId ?? '');
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname;
   let guild = $state<Guild | null>(null);
+  let observedGuildProjectionRef = '';
+  let revokedGuildAccessRef = '';
   let selfModeration = $state<SelfModerationStatus | null>(null);
   let selfModerationWarning = $state('');
   let selfModerationRequest = 0;
@@ -518,6 +522,58 @@
     guild?.channels?.find((item) => matchesEntityRef(channelId, item, localDomain)) ??
       loadedRouteChannel
   );
+  const normalizedGuildPermissionProjection = $derived(
+    guild ? (entities.guilds.get(entityKey(guild)) ?? null) : null
+  );
+
+  $effect(() => {
+    const current = guild;
+    const projection = normalizedGuildPermissionProjection;
+    if (!current) return;
+    const currentRef = entityKey(current);
+    if (!projection) {
+      if (observedGuildProjectionRef === currentRef) {
+        untrack(() => revokeActiveGuildAccess(current));
+      }
+      return;
+    }
+    observedGuildProjectionRef = currentRef;
+    if (revokedGuildAccessRef === currentRef) revokedGuildAccessRef = '';
+    const projectionChannels = projection.channels;
+    const channels = projectionChannels
+      ? (() => {
+          const currentChannels = new Map(
+            (current.channels ?? []).map((item) => [entityKey(item), item])
+          );
+          const projectedChannelKeys = new Set(projectionChannels.map(entityKey));
+          return [
+            ...projectionChannels.map((item) => ({
+              ...(currentChannels.get(entityKey(item)) ?? item),
+              permissions: item.permissions
+            })),
+            ...(current.channels ?? []).filter(
+              (item) => isThreadChannel(item) && !projectedChannelKeys.has(entityKey(item))
+            )
+          ];
+        })()
+      : (current.channels ?? []);
+    const changed =
+      current.permissions !== projection.permissions ||
+      current.actor_highest_role_id !== projection.actor_highest_role_id ||
+      current.permission_generation !== projection.permission_generation ||
+      channels.length !== (current.channels?.length ?? 0) ||
+      channels.some((item, index) => item !== current.channels?.[index]);
+    if (!changed) return;
+    untrack(() => {
+      guild = {
+        ...current,
+        permissions: projection.permissions,
+        actor_highest_role_id: projection.actor_highest_role_id,
+        permission_generation: projection.permission_generation,
+        channels
+      };
+    });
+  });
   const parentChannel = $derived(
     channel?.parent_id && guild
       ? (guild.channels?.find(
@@ -543,7 +599,8 @@
     forumParent?.available_tags?.filter((tag) => channel?.applied_tag_ids?.includes(tag.id)) ?? []
   );
   const threadTimelineStarter = $derived.by(() => {
-    if (!channel || !isThreadChannel(channel) || !channel.starter_message) return null;
+    if (!canReadMessageHistory || !channel || !isThreadChannel(channel) || !channel.starter_message)
+      return null;
     const starter = channel.starter_message;
     return messages.some((message) => entityKey(message) === entityKey(starter)) ? null : starter;
   });
@@ -605,6 +662,7 @@
   const USE_APPLICATION_COMMANDS = dynamicPermission('USE_APPLICATION_COMMANDS', 1n << 32n);
   const PIN_MESSAGES = dynamicPermission('PIN_MESSAGES', Permission.MANAGE_MESSAGES);
   const BYPASS_SLOWMODE = dynamicPermission('BYPASS_SLOWMODE', 1n << 52n);
+  const CHANNEL_MOVE_PERMISSIONS = Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS;
   const canManageChannels = $derived.by(() => {
     if (!guild) return false;
     if (
@@ -645,11 +703,59 @@
       return true;
     try {
       const effective = BigInt(target.permissions ?? guild.permissions ?? '0');
-      return Boolean(effective & (Permission.ADMINISTRATOR | permission));
+      return hasAllPermissions(effective, permission);
     } catch {
       return false;
     }
   }
+
+  function currentGuildChannel(target: Channel): Channel | null {
+    return guild?.channels?.find((item) => entityKey(item) === entityKey(target)) ?? null;
+  }
+
+  function channelParentOptions(target: Channel | null): Channel[] {
+    const currentParent =
+      target?.parent_id && target.parent_domain
+        ? `${target.parent_id}@${target.parent_domain}`
+        : '';
+    return (guild?.channels ?? []).filter(
+      (item) =>
+        item.type === 4 &&
+        (!target ||
+          entityKey(item) === currentParent ||
+          channelHasPermission(item, CHANNEL_MOVE_PERMISSIONS))
+    );
+  }
+
+  const canReadMessageHistory = $derived(
+    Boolean(
+      channel &&
+      channelHasPermission(channel, Permission.VIEW_CHANNEL) &&
+      channelHasPermission(channel, Permission.READ_MESSAGE_HISTORY)
+    )
+  );
+  let previouslyCouldReadMessageHistory = false;
+
+  $effect(() => {
+    const allowed = canReadMessageHistory;
+    const lostAccess = previouslyCouldReadMessageHistory && !allowed;
+    const gainedAccess = !previouslyCouldReadMessageHistory && allowed && channelReady;
+    previouslyCouldReadMessageHistory = allowed;
+    if (lostAccess) {
+      untrack(() => {
+        setMessages([]);
+        pinnedMessages = [];
+        pinsOpen = false;
+        messageSearchOpen = false;
+        hasEarlier = false;
+        hasLater = false;
+        readAcknowledgements.reset();
+        readStateWarning = '';
+      });
+    } else if (gainedAccess) {
+      untrack(recoverCurrentRoute);
+    }
+  });
 
   function isVoiceLikeChannel(
     target: Channel | null | undefined
@@ -845,6 +951,7 @@
   const canPinMessages = $derived(
     Boolean(
       channel &&
+      canReadMessageHistory &&
       channelSupportsMessagePins(channel) &&
       !channel.archived &&
       channelHasPermission(channel, PIN_MESSAGES)
@@ -1013,7 +1120,19 @@
     );
   };
   const setReadStates = (items: ReadStateStatus[]) => entities.readStates.replace(items);
-  const setMembers = (items: GuildMemberSummary[]) => entities.ingestMembers(items);
+  const setMembers = (items: GuildMemberSummary[]) => {
+    entities.members.replaceWhere(items, (member) =>
+      matchesEntityRef(
+        guildId,
+        { id: member.guild_id, origin_domain: member.guild_domain },
+        localDomain
+      )
+    );
+    for (const member of items) {
+      entities.users.upsert(member.user);
+      if (member.presence) entities.setPresence(member.user, member.presence);
+    }
+  };
   const preserveHistorySync = (item: Guild): Guild => {
     const current = entities.guilds.get(entityKey(item));
     if (!current?.history_sync_status || item.history_sync_status) return item;
@@ -1037,6 +1156,92 @@
     guild = { ...guild, channels: reconciled };
     entities.guilds.upsert(guild);
     entities.channels.upsertMany(reconciled);
+  }
+
+  function revokeActiveGuildAccess(removed: Pick<Guild, 'id' | 'origin_domain'>) {
+    const removedRef = entityKey(removed);
+    if (revokedGuildAccessRef === removedRef) return;
+    revokedGuildAccessRef = removedRef;
+    loadGeneration += 1;
+    snapshotGeneration += 1;
+    voiceRefreshSequence += 1;
+    forumRequestSequence += 1;
+    selfModerationRequest += 1;
+    dispatchBuffer = null;
+    moderationGeneration += 1;
+    moderationController?.abort();
+    moderationController = null;
+    if (selfModerationExpiryTimer !== null) window.clearTimeout(selfModerationExpiryTimer);
+    selfModerationExpiryTimer = null;
+    if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
+    selfModerationRetryTimer = null;
+    if (slowmodeTimer !== null) window.clearInterval(slowmodeTimer);
+    slowmodeTimer = null;
+    if (forumRefreshTimer !== null) window.clearTimeout(forumRefreshTimer);
+    forumRefreshTimer = null;
+    readAcknowledgements.reset();
+    resetTyping();
+    resetUploads();
+    resetForumUploads();
+    pendingSends.clear();
+    setMessages([]);
+    setMembers([]);
+    entities.removeGuild(removed);
+
+    guild = null;
+    loadedRouteChannel = null;
+    selfModeration = null;
+    selfModerationWarning = '';
+    content = '';
+    applicationCommands = [];
+    applicationLauncherOpen = false;
+    selectedApplicationCommand = null;
+    messageSearchOpen = false;
+    gifPickerOpen = false;
+    emojiPickerOpen = false;
+    commandOptionValues = {};
+    commandNotice = '';
+    availableEmojis = [];
+    availableStickers = [];
+    forwardingMessage = null;
+    replyingMessage = null;
+    editingMessage = null;
+    composerDraftBeforeEdit = null;
+    pinnedMessages = [];
+    pinsOpen = false;
+    readStateWarning = '';
+    timelineAtBottom = false;
+    hasEarlier = false;
+    loadingEarlier = false;
+    hasLater = false;
+    loadingLater = false;
+    forumPosts = [];
+    forumHasMore = false;
+    forumCursor = '';
+    threadMembers = [];
+    threadCreateSource = null;
+    threadDirectoryActive = [];
+    threadDirectoryArchived = [];
+    pendingEncryptedForumStarter = null;
+    scheduledEvents = [];
+    channelMenu = null;
+    channelDialogOpen = false;
+    channelDialogTarget = null;
+    channelDeleteTarget = null;
+    inviteDialogOpen = false;
+    inviteLink = '';
+    profile = null;
+    moderationDialog = null;
+    moderationBusy = false;
+    voiceOccupancy = {};
+    voiceOccupancyErrors = {};
+    voiceOccupancyLoading = {};
+    e2eeClient = null;
+    e2eeSafetyNumber = '';
+    channelReady = false;
+    busy = false;
+    error = 'This guild is unavailable or you no longer have access.';
+    window.location.assign(resolve('/home'));
   }
 
   function withCurrentThreads(channels: Channel[]): Channel[] {
@@ -1214,6 +1419,11 @@
     target: Channel | null = null,
     invoker: HTMLElement | null = null
   ) {
+    if (target) {
+      const current = currentGuildChannel(target);
+      if (!current || !channelHasPermission(current, Permission.MANAGE_CHANNELS)) return;
+      target = current;
+    } else if (!canManageChannels) return;
     const returnFocus = channelMenuReturnFocus ?? invoker ?? activeElement();
     channelDialogReturnFocus = mobileNavigationOpen ? mobileNavigationToggle : returnFocus;
     closeChannelMenu(false);
@@ -1374,6 +1584,9 @@
   }
 
   function requestChannelDeletion(target: Channel) {
+    const current = currentGuildChannel(target);
+    if (!current || !channelHasPermission(current, Permission.MANAGE_CHANNELS)) return;
+    target = current;
     channelDeleteReturnFocus = channelMenuReturnFocus ?? activeElement();
     closeChannelMenu(false);
     channelDeleteTarget = target;
@@ -1427,6 +1640,10 @@
     const targetGuild = entityRef(guild);
     const routeGeneration = loadGeneration;
     const target = channelDialogTarget;
+    const currentTarget = target ? currentGuildChannel(target) : null;
+    if (target) {
+      if (!currentTarget || !channelHasPermission(currentTarget, CHANNEL_MOVE_PERMISSIONS)) return;
+    } else if (!canManageChannels) return;
     const stillCurrent = () =>
       routeGeneration === loadGeneration &&
       guild !== null &&
@@ -1435,18 +1652,33 @@
     const parent = guild.channels?.find(
       (item) => entityKey(item) === channelDialogParent && item.type === 4
     );
+    if (channelDialogParent && !parent) {
+      channelDialogError = 'That category is no longer available.';
+      return;
+    }
+    const parentChanged = Boolean(
+      currentTarget &&
+      channelDialogParent !==
+        (currentTarget.parent_id && currentTarget.parent_domain
+          ? `${currentTarget.parent_id}@${currentTarget.parent_domain}`
+          : '')
+    );
+    if (parentChanged && parent && !channelHasPermission(parent, CHANNEL_MOVE_PERMISSIONS)) {
+      channelDialogError = 'You cannot move this channel to that category.';
+      return;
+    }
     channelDialogBusy = true;
     channelDialogError = '';
     let saved = false;
     try {
-      if (target) {
+      if (target && currentTarget) {
         const updated = await api<Channel>(
-          `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(target))}`,
+          `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(currentTarget))}`,
           {
             method: 'PATCH',
             body: JSON.stringify({
               name: channelDialogName.trim(),
-              parent_id: target.type === 4 ? null : (parent?.id ?? null)
+              parent_id: currentTarget.type === 4 ? null : (parent?.id ?? null)
             })
           }
         );
@@ -1487,7 +1719,15 @@
   }
 
   async function removeChannel(target: Channel) {
-    if (!guild || channelDeleteBusy || channelDeleteTarget !== target) return;
+    const current = currentGuildChannel(target);
+    if (
+      !guild ||
+      channelDeleteBusy ||
+      channelDeleteTarget !== target ||
+      !current ||
+      !channelHasPermission(current, Permission.MANAGE_CHANNELS)
+    )
+      return;
     const label = target.type === 4 ? 'category' : 'channel';
     const targetGuild = entityRef(guild);
     const routeGeneration = loadGeneration;
@@ -1526,7 +1766,13 @@
 
   async function markChannelRead(target: Channel) {
     closeChannelMenu(true);
-    if (!target.last_message_id || !target.last_message_domain) return;
+    if (
+      !target.last_message_id ||
+      !target.last_message_domain ||
+      !channelHasPermission(target, Permission.VIEW_CHANNEL) ||
+      !channelHasPermission(target, Permission.READ_MESSAGE_HISTORY)
+    )
+      return;
     try {
       await api(`/channels/${encodeURIComponent(entityRef(target))}/ack`, {
         method: 'POST',
@@ -1546,8 +1792,53 @@
     }
   }
 
+  function canStartChannelMove(target: Channel): boolean {
+    if (!guild || !canManageChannels || reorderingChannels) return false;
+    const current = currentGuildChannel(target);
+    if (!current) return false;
+    if (current.parent_id && current.parent_domain) {
+      const parent = guild.channels?.find(
+        (item) =>
+          item.type === 4 &&
+          item.id === current.parent_id &&
+          item.origin_domain === current.parent_domain
+      );
+      return Boolean(parent && channelHasPermission(parent, CHANNEL_MOVE_PERMISSIONS));
+    }
+    if (current.type === 4) {
+      const hasChildren = guild.channels?.some(
+        (item) => item.parent_id === current.id && item.parent_domain === current.origin_domain
+      );
+      if (hasChildren) return channelHasPermission(current, CHANNEL_MOVE_PERMISSIONS);
+    }
+    return true;
+  }
+
+  function canPersistChannelOrder(previous: Channel[], next: Channel[], movedKey: string): boolean {
+    if (!canManageChannels) return false;
+    const targets = channelOrderPermissionTargets(previous, next, movedKey);
+    return Boolean(
+      targets &&
+      targets.every((target) => {
+        const current = currentGuildChannel(target);
+        return Boolean(current && channelHasPermission(current, CHANNEL_MOVE_PERMISSIONS));
+      })
+    );
+  }
+
+  function channelDropPlacement(
+    event: DragEvent,
+    dragged: Channel,
+    target: Channel | null
+  ): ChannelDropPlacement {
+    if (!target) return 'ungrouped';
+    if (target.type === 4 && dragged.type !== 4) return 'inside';
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    return event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
+  }
+
   function channelDragStart(event: DragEvent, target: Channel) {
-    if (!canManageChannels || reorderingChannels) {
+    if (!canStartChannelMove(target)) {
       event.preventDefault();
       return;
     }
@@ -1567,9 +1858,21 @@
       voiceChannelDragOver(event, target);
       return;
     }
-    if (!draggedChannelKey || !canManageChannels || reorderingChannels) return;
+    if (!draggedChannelKey || !guild || reorderingChannels) return;
     const dragged = guild?.channels?.find((item) => entityKey(item) === draggedChannelKey);
     if (!dragged) return;
+    const previous = ordinaryGuildChannels(guild.channels ?? []);
+    const next = moveChannel(
+      previous,
+      draggedChannelKey,
+      target ? entityKey(target) : null,
+      channelDropPlacement(event, dragged, target)
+    );
+    if (
+      !channelOrderChanged(previous, next) ||
+      !canPersistChannelOrder(previous, next, draggedChannelKey)
+    )
+      return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     dragOverChannelKey = target ? entityKey(target) : 'ungrouped';
@@ -1580,26 +1883,20 @@
       await voiceChannelDrop(event, target);
       return;
     }
-    if (!draggedChannelKey || !guild || !canManageChannels || reorderingChannels) return;
+    if (!draggedChannelKey || !guild || reorderingChannels) return;
     event.preventDefault();
     const dragged = guild.channels?.find((item) => entityKey(item) === draggedChannelKey);
     if (!dragged) return;
-    let placement: ChannelDropPlacement = target ? 'before' : 'ungrouped';
-    if (target?.type === 4 && dragged.type !== 4) {
-      placement = 'inside';
-    } else if (target) {
-      const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
-      placement = event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
-    }
     const previous = ordinaryGuildChannels(guild.channels ?? []);
     const next = moveChannel(
       previous,
       draggedChannelKey,
       target ? entityKey(target) : null,
-      placement
+      channelDropPlacement(event, dragged, target)
     );
+    const movedKey = draggedChannelKey;
     channelDragEnd();
-    await persistChannelOrder(previous, next, 'Channel order saved.');
+    await persistChannelOrder(previous, next, movedKey, 'Channel order saved.');
   }
 
   function channelReorderSiblings(target: Channel): Channel[] {
@@ -1614,10 +1911,19 @@
   }
 
   function canMoveChannel(target: Channel, direction: -1 | 1): boolean {
-    if (!canManageChannels || reorderingChannels) return false;
+    if (!guild || !canStartChannelMove(target)) return false;
     const siblings = channelReorderSiblings(target);
     const index = siblings.findIndex((item) => entityKey(item) === entityKey(target));
-    return index >= 0 && index + direction >= 0 && index + direction < siblings.length;
+    const neighbor = siblings[index + direction];
+    if (index < 0 || !neighbor) return false;
+    const previous = ordinaryGuildChannels(guild.channels ?? []);
+    const next = moveChannel(
+      previous,
+      entityKey(target),
+      entityKey(neighbor),
+      direction < 0 ? 'before' : 'after'
+    );
+    return canPersistChannelOrder(previous, next, entityKey(target));
   }
 
   async function moveChannelByStep(target: Channel, direction: -1 | 1) {
@@ -1639,6 +1945,7 @@
     await persistChannelOrder(
       previous,
       next,
+      entityKey(target),
       `${label} “${target.name}” moved ${direction < 0 ? 'up' : 'down'} to position ${destination}.`
     );
   }
@@ -1656,8 +1963,18 @@
     );
   }
 
-  async function persistChannelOrder(previous: Channel[], next: Channel[], successMessage: string) {
+  async function persistChannelOrder(
+    previous: Channel[],
+    next: Channel[],
+    movedKey: string,
+    successMessage: string
+  ) {
     if (!guild || reorderingChannels || !channelOrderChanged(previous, next)) return;
+    if (!canPersistChannelOrder(previous, next, movedKey)) {
+      error = 'You do not have permission to move channels in that location.';
+      channelOrderStatus = 'Channel order was not changed.';
+      return;
+    }
     const reorderGeneration = ++channelReorderGeneration;
     const routeGeneration = loadGeneration;
     const targetGuild = entityRef(guild);
@@ -1674,7 +1991,7 @@
       await api<void>(`/guilds/${encodeURIComponent(targetGuild)}/channels`, {
         method: 'PATCH',
         body: JSON.stringify({
-          channels: channelPositionRequest(previous, next)
+          channels: channelPositionRequest(previous, next, movedKey)
         })
       });
       if (!stillCurrent()) return;
@@ -1859,25 +2176,7 @@
   }
 
   function actorOutranks(user: UserSummary): boolean {
-    if (!guild || !currentUser || entityKey(user) === entityKey(currentUser)) return false;
-    if (
-      user.id === guild.owner_id &&
-      user.origin_domain === (guild.owner_domain ?? guild.origin_domain)
-    )
-      return false;
-    const actorIsOwner =
-      currentUser.id === guild.owner_id &&
-      currentUser.origin_domain === (guild.owner_domain ?? guild.origin_domain);
-    if (actorIsOwner) return true;
-    const targetMember = memberFor(user.id, user.origin_domain);
-    const actorMember = memberFor(currentUser.id, currentUser.origin_domain);
-    const actorHighest =
-      highestRoleFor(actorMember) ??
-      (guild.roles ?? []).find((role) => role.id === guild?.actor_highest_role_id);
-    const targetHighest = highestRoleFor(targetMember);
-    return Boolean(
-      actorHighest && targetHighest && compareRoleRank(actorHighest, targetHighest) > 0
-    );
+    return guildMemberOutranks(guild, currentUser, user, members);
   }
 
   function manageableRolesFor(user: UserSummary): Role[] {
@@ -2750,6 +3049,7 @@
       availableStickers = availableStickers.filter(
         (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
       );
+      if (matchesEntityRef(guildId, removed, localDomain)) revokeActiveGuildAccess(removed);
     } else if (dispatch.t === 'GUILD_MEMBER_UPDATE') {
       const update = dispatch.d as {
         user_id?: string;
@@ -2829,11 +3129,28 @@
       if (guild && deleted.guild_id === guild.id && deleted.guild_domain === guild.origin_domain) {
         const deletedId = deleted.id ?? deleted.channel_id;
         const deletedDomain = deleted.origin_domain ?? deleted.channel_domain;
-        setCurrentChannels(
-          (guild.channels ?? []).filter(
-            (item) => item.id !== deletedId || item.origin_domain !== deletedDomain
-          )
+        const remaining = (guild.channels ?? []).filter(
+          (item) => item.id !== deletedId || item.origin_domain !== deletedDomain
         );
+        const revokedCurrent = Boolean(
+          deletedId &&
+          deletedDomain &&
+          matchesEntityRef(channelId, { id: deletedId, origin_domain: deletedDomain }, localDomain)
+        );
+        setCurrentChannels(remaining);
+        if (deletedId && deletedDomain) {
+          entities.removeChannel({ id: deletedId, origin_domain: deletedDomain });
+        }
+        if (revokedCurrent) {
+          loadedRouteChannel = null;
+          pinnedMessages = [];
+          pinsOpen = false;
+          messageSearchOpen = false;
+          channelReady = false;
+          readAcknowledgements.reset();
+          const next = firstNavigableChannel(remaining);
+          window.location.assign(guild && next ? guildChannelPath(guild, next) : resolve('/home'));
+        }
       }
     } else if (dispatch.t === 'CHANNEL_INFO' || dispatch.t === 'VOICE_CHANNEL_START_TIME_UPDATE') {
       if (channel && isVoiceLikeChannel(channel)) {
@@ -3412,10 +3729,11 @@
     targetAround: string | null
   ) {
     try {
-      const [loadedGuild, routeChannel] = await Promise.all([
+      const [loadedGuildResponse, routeChannel] = await Promise.all([
         api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
         fetchChannel(targetChannel).catch(() => null)
       ]);
+      let loadedGuild = loadedGuildResponse;
       if (
         routeGeneration !== loadGeneration ||
         snapshot !== snapshotGeneration ||
@@ -3427,6 +3745,17 @@
         loadedGuild.channels?.find((item) => matchesEntityRef(targetChannel, item, localDomain)) ??
         routeChannel;
       const trackerRoute = initialChannel?.type === TRACKER_CHANNEL_TYPE;
+      let initialEffectivePermissions = 0n;
+      try {
+        initialEffectivePermissions = BigInt(
+          initialChannel?.permissions ?? loadedGuild.permissions ?? '0'
+        );
+      } catch {
+        initialEffectivePermissions = 0n;
+      }
+      const historyAccessible = Boolean(
+        initialChannel && canReadChannelHistory(initialEffectivePermissions)
+      );
       const [
         loadedGuilds,
         loadedMessages,
@@ -3439,7 +3768,7 @@
         activeGuildThreads
       ] = await Promise.all([
         api<Guild[]>('/users/@me/guilds'),
-        trackerRoute
+        trackerRoute || !historyAccessible
           ? Promise.resolve([] as Message[])
           : api<Message[]>(
               `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
@@ -3452,7 +3781,7 @@
         trackerRoute
           ? Promise.resolve([] as GuildSticker[])
           : api<GuildSticker[]>('/users/@me/stickers'),
-        trackerRoute
+        trackerRoute || !historyAccessible
           ? Promise.resolve([] as Message[])
           : loadPinnedMessages(targetChannel).catch(() => []),
         trackerRoute
@@ -3460,12 +3789,19 @@
           : api<unknown>(`/channels/${encodeURIComponent(targetChannel)}/application-commands`)
               .then(parseApplicationCommands)
               .catch(() => []),
-        fetchActiveGuildThreads(targetGuild).catch(() => ({
-          threads: [],
-          members: [],
-          has_more: false,
-          next_cursor: null
-        }))
+        historyAccessible
+          ? fetchActiveGuildThreads(targetGuild).catch(() => ({
+              threads: [],
+              members: [],
+              has_more: false,
+              next_cursor: null
+            }))
+          : Promise.resolve({
+              threads: [],
+              members: [],
+              has_more: false,
+              next_cursor: null
+            })
       ]);
       if (
         routeGeneration !== loadGeneration ||
@@ -3483,7 +3819,9 @@
       if (loadedChannel && isThreadChannel(loadedChannel)) {
         loadedGuild.channels = mergeThreadIntoChannels(loadedGuild.channels ?? [], loadedChannel);
       }
-      guild = preserveHistorySync(loadedGuild);
+      loadedGuild = preserveHistorySync(loadedGuild);
+      entities.ingestGuilds([loadedGuild]);
+      guild = loadedGuild;
       loadedRouteChannel = loadedChannel;
       if (trackerRoute && !preserveMessages) memberRosterOpen = false;
       availableEmojis = loadedEmojis;
@@ -3504,9 +3842,13 @@
             : 'online'
       );
       void loadVoiceOccupancy(loadedGuild.channels ?? [], routeGeneration);
-      hasEarlier = targetAround ? loadedMessages.length > 0 : loadedMessages.length === 50;
-      hasLater = Boolean(targetAround && loadedMessages.length > 0);
-      if (loadedChannel && isForumChannel(loadedChannel)) {
+      hasEarlier = historyAccessible
+        ? targetAround
+          ? loadedMessages.length > 0
+          : loadedMessages.length === 50
+        : false;
+      hasLater = Boolean(historyAccessible && targetAround && loadedMessages.length > 0);
+      if (historyAccessible && loadedChannel && isForumChannel(loadedChannel)) {
         forumLoading = true;
         try {
           const feed = await fetchThreads(loadedChannel, { includeArchived: true });
@@ -3526,7 +3868,7 @@
         } finally {
           forumLoading = false;
         }
-      } else if (loadedChannel && isThreadChannel(loadedChannel)) {
+      } else if (historyAccessible && loadedChannel && isThreadChannel(loadedChannel)) {
         threadMembers = await fetchThreadMembers(loadedChannel).catch(() => []);
         const loadedParent = loadedGuild.channels?.find(
           (item) =>
@@ -3615,13 +3957,15 @@
         e2eeSafetyNumber = '';
       }
       setMessages(
-        preserveMessages
-          ? mergeMessageSnapshot(messages, orderedMessages, {
-              authoritative: true,
-              complete: loadedMessages.length < 50,
-              preserveNonces: new Set(pendingSends.keys())
-            })
-          : orderedMessages
+        preserveMessages && !historyAccessible
+          ? messages
+          : preserveMessages
+            ? mergeMessageSnapshot(messages, orderedMessages, {
+                authoritative: true,
+                complete: loadedMessages.length < 50,
+                preserveNonces: new Set(pendingSends.keys())
+              })
+            : orderedMessages
       );
       for (const dispatch of buffered) applyDispatch(dispatch);
       forgetConfirmedSends();
@@ -3670,7 +4014,14 @@
     const generation = loadGeneration;
     const targetChannel = channelId;
     const oldest = messages[0];
-    if (!oldest || loadingEarlier || !hasEarlier || messages.length >= 1_000) return;
+    if (
+      !canReadMessageHistory ||
+      !oldest ||
+      loadingEarlier ||
+      !hasEarlier ||
+      messages.length >= 1_000
+    )
+      return;
     loadingEarlier = true;
     try {
       const older = await api<Message[]>(
@@ -3698,7 +4049,7 @@
     const generation = loadGeneration;
     const targetChannel = channelId;
     const newest = messages.at(-1);
-    if (!newest || loadingLater || !hasLater) return;
+    if (!canReadMessageHistory || !newest || loadingLater || !hasLater) return;
     loadingLater = true;
     try {
       const newer = await api<Message[]>(
@@ -3750,6 +4101,7 @@
   }
 
   function acknowledge(message: Message): Promise<void> {
+    if (!canReadMessageHistory) return Promise.resolve();
     return readAcknowledgements.acknowledge(message);
   }
 
@@ -5338,7 +5690,7 @@
   }
 
   async function loadPins() {
-    if (!channel) return;
+    if (!channel || !canReadMessageHistory) return;
     pinsLoading = true;
     pinsError = '';
     try {
@@ -5354,6 +5706,7 @@
   }
 
   function togglePins() {
+    if (!canReadMessageHistory) return;
     pinsOpen = !pinsOpen;
     if (pinsOpen) void loadPins();
   }
@@ -6129,7 +6482,7 @@
         </div>
       </div>
       <div class="channel-header-actions">
-        {#if !isVoiceLikeChannel(channel) && channel?.type !== 4}
+        {#if canReadMessageHistory && !isVoiceLikeChannel(channel) && channel?.type !== 4}
           <button
             class:active={pinsOpen}
             class="icon-button"
@@ -6176,7 +6529,7 @@
               class:drag-over={dragOverChannelKey === entityKey(group.category)}
               class="channel-category-heading"
               role="group"
-              draggable={canManageChannels && !reorderingChannels}
+              draggable={canStartChannelMove(group.category)}
               ondragstart={(event) => channelDragStart(event, group.category!)}
               ondragend={channelDragEnd}
               ondragover={(event) => channelDragOver(event, group.category)}
@@ -6239,7 +6592,7 @@
                       class:channel-unread-dot={unread.showUnreadDot}
                       class:drag-over={dragOverChannelKey === entityKey(item) ||
                         voiceDropChannelKey === entityKey(item)}
-                      draggable={canManageChannels && !reorderingChannels}
+                      draggable={canStartChannelMove(item)}
                       href={guild ? guildChannelPath(guild, item) : resolve('/home')}
                       aria-haspopup="menu"
                       aria-current={matchesEntityRef(channelId, item, localDomain)
@@ -6333,7 +6686,7 @@
                   class:channel-unread-dot={unread.showUnreadDot}
                   class:drag-over={dragOverChannelKey === entityKey(item) ||
                     voiceDropChannelKey === entityKey(item)}
-                  draggable={canManageChannels && !reorderingChannels}
+                  draggable={canStartChannelMove(item)}
                   href={guild ? guildChannelPath(guild, item) : resolve('/home')}
                   aria-haspopup="menu"
                   aria-current={matchesEntityRef(channelId, item, localDomain) ? 'page' : undefined}
@@ -6529,7 +6882,7 @@
               <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
             </button>
           {/if}
-          {#if !isForumChannel(channel) && channel?.type !== TRACKER_CHANNEL_TYPE}
+          {#if canReadMessageHistory && !isForumChannel(channel) && channel?.type !== TRACKER_CHANNEL_TYPE}
             <MessageSearch
               bind:open={messageSearchOpen}
               scope="guild"
@@ -6722,7 +7075,11 @@
                 <section class="channel-welcome">
                   <span class="welcome-mark" aria-hidden="true">#</span>
                   <h2>Welcome to #{channel.name}</h2>
-                  <p>This is the beginning of the conversation.</p>
+                  <p>
+                    {canReadMessageHistory
+                      ? 'This is the beginning of the conversation.'
+                      : 'Message history is unavailable. New messages will appear here while you are connected.'}
+                  </p>
                 </section>
               {/if}
             {/snippet}
@@ -7183,7 +7540,7 @@
               </div>
             {/if}
           </footer>
-          {#if pinsOpen}
+          {#if pinsOpen && canReadMessageHistory}
             <PinnedMessagesPanel
               messages={pinnedMessages}
               loading={pinsLoading}
@@ -7517,9 +7874,21 @@
   >
     {#if channelMenu.channel}
       {@const target = channelMenu.channel}
-      {@const canEditChannel =
-        canManageChannels || channelHasPermission(target, Permission.MANAGE_CHANNELS)}
+      {@const canEditChannel = channelHasPermission(target, Permission.MANAGE_CHANNELS)}
       {@const canEditPermissions = channelHasPermission(target, Permission.MANAGE_ROLES)}
+      {@const canManageChannelWebhooks =
+        [0, 5, 15].includes(target.type) &&
+        target.encryption_mode !== 'e2ee' &&
+        channelHasPermission(target, Permission.MANAGE_WEBHOOKS)}
+      {@const canCreateChannelInvite =
+        target.type !== 4 && channelHasPermission(target, Permission.CREATE_INVITE)}
+      {@const settingsPanel = canEditChannel
+        ? 'overview'
+        : canEditPermissions
+          ? 'permissions'
+          : canManageChannelWebhooks
+            ? 'integrations'
+            : 'invites'}
       {#if target.type !== 4 && guild}
         <a
           role="menuitem"
@@ -7530,12 +7899,12 @@
           <span>Open channel</span>
         </a>
       {/if}
-      {#if target.type !== 4 && target.last_message_id}
+      {#if target.type !== 4 && target.last_message_id && channelHasPermission(target, Permission.VIEW_CHANNEL) && channelHasPermission(target, Permission.READ_MESSAGE_HISTORY)}
         <button type="button" role="menuitem" tabindex="-1" onclick={() => markChannelRead(target)}>
           <span>Mark as read</span>
         </button>
       {/if}
-      {#if canEditChannel && target.type === 4}
+      {#if canManageChannels && target.type === 4}
         <button
           type="button"
           role="menuitem"
@@ -7545,36 +7914,41 @@
           <span>Create channel</span>
         </button>
       {/if}
-      {#if guild && (canEditChannel || canEditPermissions)}
+      {#if guild && (canEditChannel || canEditPermissions || canManageChannelWebhooks || canCreateChannelInvite)}
         <a
           class="menu-separator"
           role="menuitem"
           tabindex="-1"
-          href={channelSettingsPath(guild, target, canEditChannel ? 'overview' : 'permissions')}
+          href={channelSettingsPath(guild, target, settingsPanel)}
           onclick={() => closeChannelMenu(false)}
         >
-          <span>Edit {target.type === 4 ? 'category' : 'channel'}</span>
+          <span
+            >{canEditChannel || canEditPermissions ? 'Edit' : 'Manage'}
+            {target.type === 4 ? 'category' : 'channel'}</span
+          >
         </a>
       {/if}
       {#if canEditChannel}
-        <button
-          type="button"
-          role="menuitem"
-          tabindex="-1"
-          disabled={!canMoveChannel(target, -1)}
-          onclick={() => moveChannelByStep(target, -1)}
-        >
-          <span>Move up</span>
-        </button>
-        <button
-          type="button"
-          role="menuitem"
-          tabindex="-1"
-          disabled={!canMoveChannel(target, 1)}
-          onclick={() => moveChannelByStep(target, 1)}
-        >
-          <span>Move down</span>
-        </button>
+        {#if canManageChannels}
+          <button
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            disabled={!canMoveChannel(target, -1)}
+            onclick={() => moveChannelByStep(target, -1)}
+          >
+            <span>Move up</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            disabled={!canMoveChannel(target, 1)}
+            onclick={() => moveChannelByStep(target, 1)}
+          >
+            <span>Move down</span>
+          </button>
+        {/if}
         <button
           class="danger-item"
           type="button"
@@ -7880,7 +8254,7 @@
             Category
             <select bind:value={channelDialogParent}>
               <option value="">No category</option>
-              {#each (guild?.channels ?? []).filter((item) => item.type === 4) as category (entityKey(category))}
+              {#each channelParentOptions(channelDialogTarget) as category (entityKey(category))}
                 <option value={entityKey(category)}>{category.name}</option>
               {/each}
             </select>

@@ -86,6 +86,7 @@ from app.chat.rich_content import (
 )
 from app.chat.schemas import MessageCreate, MessageEdit, RequestModel, meaningful_optional_content
 from app.chat.webhook_limits import require_webhook_capacity
+from app.core.channel_types import GUILD_WEBHOOK_CHANNEL_TYPES
 from app.core.json_limits import JsonTreeLimits, validate_json_tree
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
@@ -250,7 +251,6 @@ WEBHOOK_MESSAGE_FLAG_MASK = (
     | MESSAGE_FLAG_SUPPRESS_NOTIFICATIONS
     | MESSAGE_FLAG_IS_COMPONENTS_V2
 )
-WEBHOOK_DESTINATION_CHANNEL_TYPES = frozenset({0, 5, 15})
 
 
 class WebhookExecute(RequestModel):
@@ -1494,7 +1494,7 @@ async def create_webhook(
         return cast(dict[str, object], proxied.body)
     guild = await local_guild(session, settings, guild_id)
     channel = await guild_channel(session, settings, guild_id, channel_id)
-    if channel.type not in WEBHOOK_DESTINATION_CHANNEL_TYPES:
+    if channel.type not in GUILD_WEBHOOK_CHANNEL_TYPES:
         raise HTTPException(status_code=400, detail={"code": "WEBHOOK_REQUIRES_TEXT_CHANNEL"})
     await require_permissions(
         session,
@@ -1863,7 +1863,7 @@ async def patch_webhook(
             EntityReference(webhook.guild_id),
             target_ref,
         )
-        if target.type not in WEBHOOK_DESTINATION_CHANNEL_TYPES:
+        if target.type not in GUILD_WEBHOOK_CHANNEL_TYPES:
             raise HTTPException(status_code=400, detail={"code": "WEBHOOK_REQUIRES_TEXT_CHANNEL"})
         await require_permissions(
             session,
@@ -2706,7 +2706,7 @@ async def execute_webhook(
         EntityReference(webhook.guild_id),
         EntityReference(webhook.channel_id),
     )
-    if webhook_channel.type not in WEBHOOK_DESTINATION_CHANNEL_TYPES:
+    if webhook_channel.type not in GUILD_WEBHOOK_CHANNEL_TYPES:
         raise HTTPException(
             status_code=400,
             detail={"code": "WEBHOOK_REQUIRES_TEXT_CHANNEL"},

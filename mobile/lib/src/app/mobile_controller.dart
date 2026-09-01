@@ -23,6 +23,7 @@ import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/domain/reaction_management.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
 import 'package:kaede_mobile/src/domain/text_to_speech.dart';
+import 'package:kaede_mobile/src/domain/thread_permissions.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/forwarding.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
@@ -86,6 +87,14 @@ KaedeChannel applyThreadPermissionUpdate(
       ...current.toJson(),
       'permissions': '$permissions',
     });
+
+bool canReadRetainedChannelHistory(KaedeChannel channel) {
+  if (channel.guildRef == null) return true;
+  final required =
+      BigInt.from(Permission.viewChannel | Permission.readMessageHistory);
+  return channel.allows(Permission.administrator) ||
+      channel.permissions & required == required;
+}
 
 /// Required forum children fail closed before activation even though their
 /// server projection is still plaintext. An active required room must also
@@ -681,6 +690,113 @@ final mobileControllerProvider =
   return controller..restore();
 });
 
+@visibleForTesting
+EntityRef? guildDeleteRef(Map<String, Object?> data) {
+  final id = data['id'] ?? data['guild_id'];
+  final domain = data['origin_domain'] ?? data['guild_domain'];
+  if (id == null || domain == null) return null;
+  try {
+    return EntityRef(Snowflake('$id'), Domain('$domain'));
+  } on Object {
+    return null;
+  }
+}
+
+@visibleForTesting
+Set<EntityRef> deletedGuildChannelRefs(
+  MobileState current,
+  EntityRef guild,
+) =>
+    <EntityRef>{
+      for (final model in current.guilds)
+        if (model.ref == guild)
+          for (final channel in model.channels) channel.ref,
+      for (final thread in current.threads)
+        if (thread.guildRef == guild) thread.ref,
+    };
+
+@visibleForTesting
+MobileState purgeDeletedGuildProjection(
+  MobileState current,
+  EntityRef guild,
+) {
+  final channels = deletedGuildChannelRefs(current, guild);
+  final channelWires = channels.map((channel) => channel.wire).toSet();
+  final guilds = current.guilds
+      .where((candidate) => candidate.ref != guild)
+      .toList(growable: false);
+  final removedSelection = current.selectedGuild == guild ||
+      channels.contains(current.selectedChannel);
+  return current.copyWith(
+    guilds: List.unmodifiable(guilds),
+    guildNavigation: reconcileGuildNavigation(current.guildNavigation, guilds),
+    threads: List.unmodifiable(
+      current.threads.where((thread) => thread.guildRef != guild),
+    ),
+    messageStore: Map.unmodifiable(
+      Map<EntityRef, List<KaedeMessage>>.of(current.messageStore)
+        ..removeWhere((channel, _) => channels.contains(channel)),
+    ),
+    drafts: Map.unmodifiable(
+      Map<EntityRef, String>.of(current.drafts)
+        ..removeWhere((channel, _) => channels.contains(channel)),
+    ),
+    loadingChannels: Set.unmodifiable(
+      current.loadingChannels.where((channel) => !channels.contains(channel)),
+    ),
+    channelsWithOlderMessages: Set.unmodifiable(
+      current.channelsWithOlderMessages
+          .where((channel) => !channels.contains(channel)),
+    ),
+    outbox: List.unmodifiable(
+      current.outbox.where((item) => !channelWires.contains(item.channelRef)),
+    ),
+    guildNotificationLevels: Map.unmodifiable(
+      Map<String, String>.of(current.guildNotificationLevels)
+        ..remove(guild.wire),
+    ),
+    unreadCounts: Map.unmodifiable(
+      Map<EntityRef, int>.of(current.unreadCounts)
+        ..removeWhere((channel, _) => channels.contains(channel)),
+    ),
+    mentionCounts: Map.unmodifiable(
+      Map<EntityRef, int>.of(current.mentionCounts)
+        ..removeWhere((channel, _) => channels.contains(channel)),
+    ),
+    typingByChannel: Map.unmodifiable(
+      Map<EntityRef, List<TypingParticipant>>.of(current.typingByChannel)
+        ..removeWhere((channel, _) => channels.contains(channel)),
+    ),
+    guildMembers: Map.unmodifiable(
+      Map<EntityRef, List<GuildMember>>.of(current.guildMembers)..remove(guild),
+    ),
+    selfModerationByGuild: Map.unmodifiable(
+      Map<EntityRef, GuildSelfModerationStatus>.of(
+        current.selfModerationByGuild,
+      )..remove(guild),
+    ),
+    interactionResponses: Map.unmodifiable(
+      Map<String, MobileInteractionResponse>.of(current.interactionResponses)
+        ..removeWhere((_, response) => channels.contains(response.channelRef)),
+    ),
+    interactionRequests: Map.unmodifiable(
+      Map<String, MobileInteractionRequest>.of(current.interactionRequests)
+        ..removeWhere((_, request) => channels.contains(request.channel)),
+    ),
+    clearGuild: removedSelection,
+    clearChannel: removedSelection,
+    clearMessageJump: removedSelection ||
+        current.messageJump != null &&
+            channels.contains(current.messageJump!.channel),
+    clearIncomingCall: current.incomingCall != null &&
+        channels.contains(current.incomingCall!.channel),
+    clearPendingCallJoin: current.pendingCallJoin != null &&
+        channels.contains(current.pendingCallJoin!.channel),
+    error:
+        removedSelection ? 'Access to this guild was removed.' : current.error,
+  );
+}
+
 final class MobileController extends StateNotifier<MobileState> {
   MobileController(
     this.repository,
@@ -691,6 +807,7 @@ final class MobileController extends StateNotifier<MobileState> {
   ) : super(const MobileState());
 
   final KaedeRepository repository;
+  MobileState get currentState => state;
   final KaedeApiClient api;
   final GatewayClient gateway;
   final LocalDatabase database;
@@ -740,6 +857,9 @@ final class MobileController extends StateNotifier<MobileState> {
   var _conversationPaneVisible = false;
   DateTime? _backgroundedAt;
   final Map<EntityRef, int> _messageRequestGenerations = <EntityRef, int>{};
+  final Set<EntityRef> _removedGuilds = <EntityRef>{};
+  final Map<EntityRef, EntityRef> _removedGuildChannels =
+      <EntityRef, EntityRef>{};
   final Set<String> _presentedInteractionResponses = <String>{};
   final Set<String> _dismissedInteractionResponses = <String>{};
   final Map<String, _PendingInteractionResponse> _pendingInteractionResponses =
@@ -863,6 +983,7 @@ final class MobileController extends StateNotifier<MobileState> {
     } on FormatException {
       return;
     }
+    if (_removedGuildChannels.containsKey(response.channelRef)) return;
     final expectedOperation =
         eventName.substring('INTERACTION_RESPONSE_'.length);
     if (response.operation != expectedOperation ||
@@ -1416,6 +1537,8 @@ final class MobileController extends StateNotifier<MobileState> {
   void _acknowledgeVisibleConversation() {
     final channel = state.selectedChannel;
     if (channel == null || !_isChannelVisible(channel)) return;
+    final active = _channel(channel);
+    if (active == null || !canReadRetainedChannelHistory(active)) return;
     final messages = state.messageStore[channel];
     if (messages == null || messages.isEmpty) {
       unawaited(loadMessages());
@@ -1578,6 +1701,8 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> _loadSession(SessionTokens tokens) async {
     final generation = ++_sessionLoadGeneration;
     _messageRequestGenerations.clear();
+    _removedGuilds.clear();
+    _removedGuildChannels.clear();
     _clearInteractionPresentation();
     _pushRegistrationWarning = null;
     _pushRemoteDeliveryWarning = null;
@@ -1834,6 +1959,12 @@ final class MobileController extends StateNotifier<MobileState> {
 
   void _upsertThread(KaedeChannel thread) {
     if (!thread.isThread) return;
+    if (thread.guildRef case final guild?
+        when _removedGuilds.contains(guild) ||
+            !state.guilds.any((candidate) => candidate.ref == guild)) {
+      return;
+    }
+    final previous = _channel(thread.ref);
     final threads = <KaedeChannel>[
       for (final current in state.threads)
         if (current.ref != thread.ref) current,
@@ -1858,6 +1989,7 @@ final class MobileController extends StateNotifier<MobileState> {
       messageStore:
           messageStore == null ? null : Map.unmodifiable(messageStore),
     );
+    _reconcileChannelHistoryAccess(previous, thread);
   }
 
   KaedeChannel _upsertThreadBroadcast(KaedeChannel thread) {
@@ -1909,6 +2041,15 @@ final class MobileController extends StateNotifier<MobileState> {
     String? query,
     int? sortOrder,
   }) async {
+    final parentChannel = _channel(parent);
+    if (parentChannel == null ||
+        !canReadRetainedChannelHistory(parentChannel)) {
+      return const ThreadPage(
+        threads: <KaedeChannel>[],
+        members: <ThreadMember>[],
+        hasMore: false,
+      );
+    }
     final page = await repository.threads(
       parent,
       archived: archived,
@@ -1921,6 +2062,15 @@ final class MobileController extends StateNotifier<MobileState> {
       query: query,
       sortOrder: sortOrder,
     );
+    final currentParent = _channel(parent);
+    if (currentParent == null ||
+        !canReadRetainedChannelHistory(currentParent)) {
+      return const ThreadPage(
+        threads: <KaedeChannel>[],
+        members: <ThreadMember>[],
+        hasMore: false,
+      );
+    }
     final decorated = page.threads
         .map((thread) => _withMyThreadMembership(thread, page.members))
         .toList(growable: false);
@@ -1936,10 +2086,27 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> loadActiveThreads(EntityRef guild) async {
+    final guildModel =
+        state.guilds.where((item) => item.ref == guild).firstOrNull;
+    if (guildModel == null ||
+        !guildModel.channels.any(canReadRetainedChannelHistory)) {
+      return;
+    }
     try {
       final page = await repository.activeThreads(guild);
+      final currentGuild =
+          state.guilds.where((item) => item.ref == guild).firstOrNull;
+      if (currentGuild == null) return;
+      final readableParents = currentGuild.channels
+          .where(canReadRetainedChannelHistory)
+          .map((channel) => channel.ref)
+          .toSet();
       final incoming = page.threads
           .map((thread) => _withMyThreadMembership(thread, page.members))
+          .where((thread) =>
+              thread.parentRef != null &&
+              readableParents.contains(thread.parentRef) &&
+              canReadRetainedChannelHistory(thread))
           .toList(growable: false);
       final incomingRefs = incoming.map((thread) => thread.ref).toSet();
       final threads = <KaedeChannel>[
@@ -2239,8 +2406,22 @@ final class MobileController extends StateNotifier<MobileState> {
       );
       final refreshedGuilds = preserveGuildHistorySync(
         state.guilds,
-        results[1] as List<KaedeGuild>,
+        (results[1] as List<KaedeGuild>)
+            .where((guild) => !_removedGuilds.contains(guild.ref))
+            .toList(growable: false),
       );
+      final unread = Map<EntityRef, int>.of(badges.unread)
+        ..removeWhere(
+          (channel, _) => _removedGuildChannels.containsKey(channel),
+        );
+      final mentions = Map<EntityRef, int>.of(badges.mentions)
+        ..removeWhere(
+          (channel, _) => _removedGuildChannels.containsKey(channel),
+        );
+      final previousChannels = <EntityRef, KaedeChannel>{
+        for (final guild in state.guilds)
+          for (final channel in guild.channels) channel.ref: channel,
+      };
       state = state.copyWith(
         user: results[0] as KaedeUser,
         guilds: refreshedGuilds,
@@ -2249,11 +2430,19 @@ final class MobileController extends StateNotifier<MobileState> {
           refreshedGuilds,
         ),
         dms: results[2] as List<KaedeChannel>,
-        unreadCounts: badges.unread,
-        mentionCounts: badges.mentions,
+        unreadCounts: Map.unmodifiable(unread),
+        mentionCounts: Map.unmodifiable(mentions),
         offline: false,
         clearError: true,
       );
+      for (final guild in refreshedGuilds) {
+        for (final channel in guild.channels) {
+          _reconcileChannelHistoryAccess(
+            previousChannels[channel.ref],
+            channel,
+          );
+        }
+      }
       for (final dm in state.dms) {
         for (final recipient in dm.recipients) {
           _displayNameIndex[recipient.ref] = recipient.name;
@@ -2691,7 +2880,11 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> loadMessages({bool older = false}) async {
     final channel = state.activeChannel;
-    if (channel == null || state.loadingChannels.contains(channel.ref)) return;
+    if (channel == null ||
+        !canReadRetainedChannelHistory(channel) ||
+        state.loadingChannels.contains(channel.ref)) {
+      return;
+    }
     final accountKey = api.tokens?.accountKey;
     final sessionGeneration = _sessionLoadGeneration;
     if (accountKey == null ||
@@ -2720,6 +2913,14 @@ final class MobileController extends StateNotifier<MobileState> {
       var ordered = page.reversed.toList();
       if (channel.encryptionMode == 'e2ee') {
         ordered = await (await e2eeClient()).decryptMessages(channel, ordered);
+      }
+      if (!_messageRequestIsCurrent(
+        channelRef,
+        generation,
+        accountKey,
+        sessionGeneration,
+      )) {
+        return;
       }
       for (final message in ordered) {
         if (message.thread case final thread?) _upsertThreadBroadcast(thread);
@@ -3231,6 +3432,12 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> setMessagePinned(KaedeMessage message, bool pinned) async {
+    final channel = _channel(message.channelRef);
+    if (channel == null ||
+        !canReadRetainedChannelHistory(channel) ||
+        !canPinMessages(channel)) {
+      return;
+    }
     if (pinned) {
       await repository.pin(message.channelRef, message.ref);
     } else {
@@ -3273,7 +3480,7 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> loadAround(EntityRef message) async {
     final channel = state.activeChannel;
-    if (channel == null) return;
+    if (channel == null || !canReadRetainedChannelHistory(channel)) return;
     final accountKey = api.tokens?.accountKey;
     final sessionGeneration = _sessionLoadGeneration;
     if (accountKey == null ||
@@ -3368,7 +3575,9 @@ final class MobileController extends StateNotifier<MobileState> {
   }) async {
     if (shouldContinue?.call() == false) return false;
     final channel = state.activeChannel;
-    if (channel == null) return false;
+    if (channel == null || !canReadRetainedChannelHistory(channel)) {
+      return false;
+    }
     final channelRef = channel.ref;
     if (expectedChannel != null && channelRef != expectedChannel) return false;
     if (expectedSelectionGeneration != null &&
@@ -3422,6 +3631,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
+    _removedGuilds.clear();
+    _removedGuildChannels.clear();
     _clearInteractionPresentation();
     final accountKey = api.tokens?.accountKey;
     final accountRef = state.user?.ref.wire ?? api.tokens?.userRef?.wire;
@@ -3576,6 +3787,8 @@ final class MobileController extends StateNotifier<MobileState> {
   ) async {
     final generation = ++_sessionLoadGeneration;
     _messageRequestGenerations.clear();
+    _removedGuilds.clear();
+    _removedGuildChannels.clear();
     final identities = await database.snapshots(tokens.accountKey, 'identity');
     if (identities.isEmpty ||
         authenticationGeneration != _authenticationGeneration ||
@@ -3685,6 +3898,8 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _cacheMessages(EntityRef channel) async {
+    final target = _channel(channel);
+    if (target == null || !canReadRetainedChannelHistory(target)) return;
     final tokens = api.tokens;
     if (tokens == null) return;
     final generation = _sessionLoadGeneration;
@@ -3724,6 +3939,8 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _cacheMessage(KaedeMessage message) async {
+    final channel = _channel(message.channelRef);
+    if (channel == null || !canReadRetainedChannelHistory(channel)) return;
     final tokens = api.tokens;
     if (tokens == null) return;
     final generation = _sessionLoadGeneration;
@@ -3796,11 +4013,17 @@ final class MobileController extends StateNotifier<MobileState> {
     int generation,
   ) async {
     if (!_sessionIsCurrent(accountKey, generation)) return false;
+    final target = _channel(channel);
+    if (target == null || !canReadRetainedChannelHistory(target)) return false;
     final cached = await database.snapshots(
       accountKey,
       'messages:${channel.wire}',
     );
-    if (cached.isEmpty || !_sessionIsCurrent(accountKey, generation)) {
+    final current = _channel(channel);
+    if (cached.isEmpty ||
+        !_sessionIsCurrent(accountKey, generation) ||
+        current == null ||
+        !canReadRetainedChannelHistory(current)) {
       return false;
     }
     _setChannelMessages(
@@ -3899,7 +4122,8 @@ final class MobileController extends StateNotifier<MobileState> {
           for (final raw in rawStates.whereType<Map<Object?, Object?>>()) {
             final data = Map<String, Object?>.from(raw);
             final channel = _channelRef(data);
-            if (channel != null) {
+            if (channel != null &&
+                !_removedGuildChannels.containsKey(channel)) {
               final mentionCount = _asInt(data['mention_count']);
               final hasUnread = data.containsKey('unread_count') ||
                   data.containsKey('unread');
@@ -3943,6 +4167,7 @@ final class MobileController extends StateNotifier<MobileState> {
             event.data['message'] is Map ? event.data['message'] : event.data;
         final message =
             KaedeMessage.fromJson(Map<String, Object?>.from(raw as Map));
+        if (_removedGuildChannels.containsKey(message.channelRef)) break;
         if (message.thread case final thread?) _upsertThreadBroadcast(thread);
         final existing = state.messageStore[message.channelRef];
         if (existing != null || message.channelRef == state.selectedChannel) {
@@ -4118,7 +4343,7 @@ final class MobileController extends StateNotifier<MobileState> {
         break;
       case 'READ_STATE_UPDATE':
         final channel = _channelRef(event.data);
-        if (channel != null) {
+        if (channel != null && !_removedGuildChannels.containsKey(channel)) {
           final mentions = Map<EntityRef, int>.of(state.mentionCounts);
           final mentionCount = _asInt(event.data['mention_count']);
           if (mentionCount > 0) {
@@ -4161,7 +4386,10 @@ final class MobileController extends StateNotifier<MobileState> {
       case 'TYPING_START':
         final channel = _channelRef(event.data);
         final user = _userRef(event.data);
-        if (channel != null && user != null && user != state.user?.ref) {
+        if (channel != null &&
+            !_removedGuildChannels.containsKey(channel) &&
+            user != null &&
+            user != state.user?.ref) {
           _setTyping(channel, user);
         }
         break;
@@ -4264,11 +4492,17 @@ final class MobileController extends StateNotifier<MobileState> {
           }
         }
         break;
-      case 'GUILD_CREATE' ||
-            'GUILD_UPDATE' ||
-            'GUILD_DELETE' ||
-            'CHANNEL_CREATE' ||
-            'CHANNEL_DELETE':
+      case 'GUILD_CREATE':
+        if (guildDeleteRef(event.data) case final guild?) {
+          _removedGuilds.remove(guild);
+          _removedGuildChannels.removeWhere((_, owner) => owner == guild);
+        }
+        _scheduleNavigationRefresh();
+        break;
+      case 'GUILD_DELETE':
+        _applyGuildDelete(event.data);
+        break;
+      case 'GUILD_UPDATE' || 'CHANNEL_CREATE' || 'CHANNEL_DELETE':
         _scheduleNavigationRefresh();
         break;
       case 'CHANNEL_UPDATE':
@@ -4433,11 +4667,11 @@ final class MobileController extends StateNotifier<MobileState> {
         }
         break;
       case 'CHANNEL_PERMISSION_UPDATE':
-        final threadRef = _entityRef(
+        final channelRef = _entityRef(
           event.data['channel_id'],
           event.data['channel_domain'],
         );
-        final current = threadRef == null ? null : _channel(threadRef);
+        final current = channelRef == null ? null : _channel(channelRef);
         if (current?.isThread == true) {
           _upsertThread(
             applyThreadPermissionUpdate(
@@ -4445,9 +4679,26 @@ final class MobileController extends StateNotifier<MobileState> {
               event.data['permissions'],
             ),
           );
-        } else {
-          _scheduleNavigationRefresh();
+        } else if (current != null && event.data['permissions'] != null) {
+          final updated = KaedeChannel.fromJson(<String, Object?>{
+            ...current.toJson(),
+            'permissions': '${event.data['permissions']}',
+          });
+          state = state.copyWith(
+            guilds: List<KaedeGuild>.unmodifiable(
+              state.guilds.map(
+                (guild) => guild.ref != current.guildRef
+                    ? guild
+                    : guild.withChannels(List<KaedeChannel>.unmodifiable([
+                        for (final channel in guild.channels)
+                          channel.ref == updated.ref ? updated : channel,
+                      ])),
+              ),
+            ),
+          );
+          _reconcileChannelHistoryAccess(current, updated);
         }
+        _scheduleNavigationRefresh();
         break;
       case 'CALL_CREATE':
         _scheduleNavigationRefresh();
@@ -4931,6 +5182,105 @@ final class MobileController extends StateNotifier<MobileState> {
     );
   }
 
+  void _applyGuildDelete(Map<String, Object?> data) {
+    final guild = guildDeleteRef(data);
+    if (guild == null) return;
+    final channels = deletedGuildChannelRefs(state, guild);
+    final attachments = <EntityRef>{
+      for (final channel in channels)
+        for (final message
+            in state.messageStore[channel] ?? const <KaedeMessage>[])
+          for (final attachment in message.attachments) attachment.ref,
+    };
+    final outboxNonces = <String>[
+      for (final item in state.outbox)
+        if (channels.any((channel) => channel.wire == item.channelRef))
+          item.nonce,
+    ];
+    final calls = <IncomingCall>{
+      if (state.incomingCall case final call?
+          when channels.contains(call.channel))
+        call,
+      if (state.pendingCallJoin case final call?
+          when channels.contains(call.channel))
+        call,
+    };
+
+    _removedGuilds.add(guild);
+    _selfModerationRequestGeneration += 1;
+    _conversationSelectionGeneration += 1;
+    _messageJumpGeneration += 1;
+    for (final channel in channels) {
+      _removedGuildChannels[channel] = guild;
+      _messageRequestGenerations[channel] =
+          (_messageRequestGenerations[channel] ?? 0) + 1;
+      _dirtyMessageRows.remove(channel);
+      _pendingAcknowledgements.remove(channel);
+      _acknowledgementsInFlight.remove(channel);
+      _requiredThreadActivations.remove(channel);
+    }
+
+    final responseKeys = <String>{
+      for (final entry in _interactionResponseIdentities.entries)
+        if (channels.contains(entry.value.channel)) entry.key,
+      for (final entry in _pendingInteractionResponses.entries)
+        if (channels.contains(entry.value.response.channelRef)) entry.key,
+      for (final entry in state.interactionResponses.entries)
+        if (channels.contains(entry.value.channelRef)) entry.key,
+    };
+    for (final key in responseKeys) {
+      _presentedInteractionResponses.remove(key);
+      _pendingInteractionResponses.remove(key);
+      _interactionResponseRevisions.remove(key);
+      _interactionResponseIdentities.remove(key);
+      _interactionResponseTombstones.remove(key);
+      _decryptingInteractionResponses.remove(key);
+    }
+
+    final removedSelection = state.selectedGuild == guild ||
+        channels.contains(state.selectedChannel);
+    state = purgeDeletedGuildProjection(state, guild);
+    if (removedSelection) {
+      _selfModerationExpiryTimer?.cancel();
+      _selfModerationRetryTimer?.cancel();
+      _selfModerationExpiryTimer = null;
+      _selfModerationRetryTimer = null;
+      push.setAppVisibility(active: _appActive);
+    }
+    for (final call in calls) {
+      unawaited(systemCalls.end(call.call.wire));
+    }
+
+    final tokens = api.tokens;
+    if (tokens != null) {
+      final accountKey = tokens.accountKey;
+      final generation = _sessionLoadGeneration;
+      unawaited(_queueCacheWrite(() async {
+        if (!_cacheSessionIsCurrent(accountKey, generation)) return;
+        for (final channel in channels) {
+          await database.clearSnapshots(
+            accountKey,
+            'messages:${channel.wire}',
+          );
+          await database.removeSnapshot(
+            accountKey,
+            'drafts',
+            channel.wire,
+          );
+        }
+        for (final nonce in outboxNonces) {
+          await database.deleteOutbox(nonce);
+        }
+      }));
+      _dirtyCacheGroups.addAll(const <String>{'guilds', 'preferences'});
+      unawaited(_cacheLists());
+    }
+    if (attachments.isNotEmpty) {
+      unawaited(_purgeDownloadedAttachments(attachments));
+    }
+    _scheduleNavigationRefresh();
+  }
+
   /// Asks the gateway for a guild's member list so presence arrives with it.
   void requestGuildMembers(EntityRef guild, {String query = ''}) {
     if (!state.gatewayHealth.isConnected) return;
@@ -5018,6 +5368,8 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _acknowledge(EntityRef channel, EntityRef message) async {
+    final target = _channel(channel);
+    if (target == null || !canReadRetainedChannelHistory(target)) return;
     final existing = _pendingAcknowledgements[channel];
     final currentUnread = state.unreadCounts[channel] ?? 0;
     final currentMentions = state.mentionCounts[channel] ?? 0;
@@ -5062,6 +5414,11 @@ final class MobileController extends StateNotifier<MobileState> {
           }
         } on Object catch (error) {
           if (state.phase != SessionPhase.ready || api.tokens == null) return;
+          final target = _channel(channel);
+          if (target == null || !canReadRetainedChannelHistory(target)) {
+            _pendingAcknowledgements.remove(channel);
+            break;
+          }
           final latest = _pendingAcknowledgements[channel] ?? pending;
           final retry = latest.copyWith(
             attempt: latest.attempt + 1,
@@ -5303,7 +5660,10 @@ final class MobileController extends StateNotifier<MobileState> {
 
   void _receiveIncomingCall(Map<String, Object?> data) {
     final incoming = _incomingCallFrom(data);
-    if (incoming == null) return;
+    if (incoming == null ||
+        _removedGuildChannels.containsKey(incoming.channel)) {
+      return;
+    }
     state = state.copyWith(incomingCall: incoming);
     unawaited(systemCalls.showIncoming(
       callId: incoming.call.wire,
@@ -5746,6 +6106,12 @@ final class MobileController extends StateNotifier<MobileState> {
       if (!_sessionIsCurrent(accountKey, generation)) return;
       final unread = Map<EntityRef, int>.of(badges.unread);
       final mentions = Map<EntityRef, int>.of(badges.mentions);
+      unread.removeWhere(
+        (channel, _) => _removedGuildChannels.containsKey(channel),
+      );
+      mentions.removeWhere(
+        (channel, _) => _removedGuildChannels.containsKey(channel),
+      );
       for (final entry in _pendingAcknowledgements.entries) {
         final pending = entry.value;
         if (pending.restored) {
@@ -5875,6 +6241,57 @@ final class MobileController extends StateNotifier<MobileState> {
     state = state.copyWith(messageStore: Map.unmodifiable(store));
   }
 
+  void _reconcileChannelHistoryAccess(
+    KaedeChannel? previous,
+    KaedeChannel current,
+  ) {
+    if (previous == null) return;
+    final couldRead = canReadRetainedChannelHistory(previous);
+    final canRead = canReadRetainedChannelHistory(current);
+    if (couldRead && !canRead) {
+      _purgeRetainedChannelHistory(current.ref);
+    } else if (!couldRead && canRead && state.selectedChannel == current.ref) {
+      unawaited(loadMessages());
+    }
+  }
+
+  void _purgeRetainedChannelHistory(EntityRef channel) {
+    final attachments = <EntityRef>{
+      for (final message
+          in state.messageStore[channel] ?? const <KaedeMessage>[])
+        for (final attachment in message.attachments) attachment.ref,
+    };
+    _messageRequestGenerations[channel] =
+        (_messageRequestGenerations[channel] ?? 0) + 1;
+    _dirtyMessageRows.remove(channel);
+    _pendingAcknowledgements.remove(channel);
+    final store = Map<EntityRef, List<KaedeMessage>>.of(state.messageStore)
+      ..remove(channel);
+    final older = Set<EntityRef>.of(state.channelsWithOlderMessages)
+      ..remove(channel);
+    final loading = Set<EntityRef>.of(state.loadingChannels)..remove(channel);
+    state = state.copyWith(
+      messageStore: Map.unmodifiable(store),
+      channelsWithOlderMessages: Set.unmodifiable(older),
+      loadingChannels: Set.unmodifiable(loading),
+      clearMessageJump: state.selectedChannel == channel,
+    );
+    final tokens = api.tokens;
+    if (tokens == null) return;
+    final accountKey = tokens.accountKey;
+    final generation = _sessionLoadGeneration;
+    unawaited(_queueCacheWrite(() async {
+      if (!_cacheSessionIsCurrent(accountKey, generation)) return;
+      await database.clearSnapshots(
+        accountKey,
+        'messages:${channel.wire}',
+      );
+    }));
+    if (attachments.isNotEmpty) {
+      unawaited(_purgeDownloadedAttachments(attachments));
+    }
+  }
+
   void _setChannelLoading(EntityRef channel, bool loading) {
     final channels = Set<EntityRef>.of(state.loadingChannels);
     if (loading) {
@@ -5922,6 +6339,11 @@ final class MobileController extends StateNotifier<MobileState> {
       return;
     }
     final channel = EntityRef.parse(item.channelRef);
+    if (_removedGuildChannels.containsKey(channel)) {
+      await database.deleteOutbox(item.nonce);
+      await _syncOutbox();
+      return;
+    }
     final payload = item.payload;
     try {
       final result = await repository.sendMessage(
@@ -5953,6 +6375,11 @@ final class MobileController extends StateNotifier<MobileState> {
         voiceMessage: payload['voice_message'] == true,
       );
       if (!_sessionIsCurrent(activeAccount, activeGeneration)) return;
+      if (_removedGuildChannels.containsKey(channel)) {
+        await database.deleteOutbox(item.nonce);
+        await _syncOutbox();
+        return;
+      }
       await database.completeOutbox(item.nonce);
       if (!_sessionIsCurrent(activeAccount, activeGeneration)) return;
       await _syncOutbox();
@@ -6000,7 +6427,16 @@ final class MobileController extends StateNotifier<MobileState> {
     if (tokens == null) return;
     final items = await database.outboxForAccount(tokens.accountKey);
     if (api.tokens?.accountKey == tokens.accountKey) {
-      state = state.copyWith(outbox: items);
+      state = state.copyWith(
+        outbox: items.where((item) {
+          try {
+            return !_removedGuildChannels
+                .containsKey(EntityRef.parse(item.channelRef));
+          } on FormatException {
+            return false;
+          }
+        }).toList(growable: false),
+      );
     }
   }
 
@@ -6025,7 +6461,11 @@ final class MobileController extends StateNotifier<MobileState> {
     int sessionGeneration,
   ) =>
       _messageRequestGenerations[channel] == requestGeneration &&
-      _sessionIsCurrent(accountKey, sessionGeneration);
+      _sessionIsCurrent(accountKey, sessionGeneration) &&
+      switch (_channel(channel)) {
+        final current? => canReadRetainedChannelHistory(current),
+        null => false,
+      };
 
   Future<void> _queueCacheWrite(Future<void> Function() operation) {
     final run = _cacheWriteTail.then((_) => operation());
@@ -6040,6 +6480,8 @@ final class MobileController extends StateNotifier<MobileState> {
   void dispose() {
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
+    _removedGuilds.clear();
+    _removedGuildChannels.clear();
     _clearInteractionPresentation();
     _gatewaySubscription?.cancel();
     _pushTokenSubscription?.cancel();
@@ -6101,6 +6543,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
+    _removedGuilds.clear();
+    _removedGuildChannels.clear();
     _clearInteractionPresentation();
     _outboxTimer?.cancel();
     _outboxTimer = null;

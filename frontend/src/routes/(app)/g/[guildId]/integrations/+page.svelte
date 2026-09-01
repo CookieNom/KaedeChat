@@ -13,7 +13,7 @@
   import GuildWebhooks from '$lib/components/GuildWebhooks.svelte';
   import { Permission } from '$lib/generated/permissions';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
   interface Installation {
@@ -45,7 +45,10 @@
   let loadedGuildRef = $state('');
   let loadController = new AbortController();
   let loadGeneration = 0;
+  let observedGuildProjectionRef = '';
+  let revokedGuildAccessRef = '';
   const routeIsLoaded = $derived(loadedGuildRef === guildRef);
+  const normalizedGuild = $derived(entities.guilds.get(guildRef) ?? null);
   const canManageCommandPermissions = $derived(
     hasAllPermissions(
       permissionBits(guild?.permissions),
@@ -90,6 +93,20 @@
     );
   }
 
+  function revokeGuildIntegrationsAccess(targetGuildRef: string) {
+    if (revokedGuildAccessRef === targetGuildRef) return;
+    revokedGuildAccessRef = targetGuildRef;
+    loadGeneration += 1;
+    loadController.abort();
+    guild = null;
+    installations = [];
+    busyRef = '';
+    botsLoading = false;
+    notice = '';
+    error = 'This guild is unavailable or you no longer have access.';
+    window.location.assign(resolve('/home'));
+  }
+
   async function load(targetGuildRef: string) {
     loadController.abort();
     const controller = new AbortController();
@@ -102,6 +119,7 @@
         signal: controller.signal
       });
       if (!loadIsCurrent(targetGuildRef, controller, generation)) return;
+      entities.ingestGuilds([loadedGuild]);
       guild = loadedGuild;
       installations = [];
       if (hasAllPermissions(permissionBits(loadedGuild.permissions), Permission.MANAGE_GUILD)) {
@@ -248,6 +266,19 @@
         busyRef = '';
     }
   }
+
+  $effect(() => {
+    const targetGuildRef = guildRef;
+    const projection = normalizedGuild;
+    if (!projection) {
+      if (observedGuildProjectionRef === targetGuildRef) {
+        untrack(() => revokeGuildIntegrationsAccess(targetGuildRef));
+      }
+      return;
+    }
+    observedGuildProjectionRef = targetGuildRef;
+    if (revokedGuildAccessRef === targetGuildRef) revokedGuildAccessRef = '';
+  });
 
   $effect(() => {
     const targetGuildRef = guildRef;

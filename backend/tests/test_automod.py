@@ -734,8 +734,18 @@ async def test_member_profile_evaluation_quarantines_all_profile_fields_and_fede
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "permission",
+    [
+        Permission.SEND_MESSAGES,
+        Permission.MENTION_EVERYONE,
+        Permission.CREATE_EVENTS,
+        Permission.SET_VOICE_CHANNEL_STATUS,
+    ],
+)
 async def test_member_profile_quarantine_denies_interactions_with_clear_remediation(
     monkeypatch: pytest.MonkeyPatch,
+    permission: Permission,
 ) -> None:
     guild, user, member, rule, block = _profile_runtime_models("Blocked Name")
 
@@ -757,7 +767,7 @@ async def test_member_profile_quarantine_denies_interactions_with_clear_remediat
             fake_session,
             guild,
             user,
-            Permission.SEND_MESSAGES,
+            permission,
         )
     assert exc.value.detail["code"] == "AUTO_MOD_MEMBER_INTERACTION_BLOCKED"
     assert exc.value.detail["profile_field"] == "display_name"

@@ -96,6 +96,34 @@ void main() {
         isFalse,
       );
     });
+
+    test('assignment-only access includes manager and self-service claims', () {
+      final viewerBoard = TrackerBoard.fromJson(<String, Object?>{
+        ..._boardJson(),
+        'permissions': '0',
+      });
+      final unassigned = viewerBoard.tasks.first;
+      final assigned = viewerBoard.tasks.last;
+      final viewer = EntityRef.parse('999@chat.example');
+
+      expect(trackerTaskCanEdit(viewerBoard, unassigned, viewer), isFalse);
+      expect(trackerTaskCanAssign(viewerBoard, unassigned, viewer), isTrue);
+      expect(trackerTaskCanOpenEditor(viewerBoard, unassigned, viewer), isTrue);
+      expect(
+        trackerTaskCanAssign(viewerBoard, assigned, assigned.assignee?.ref),
+        isTrue,
+      );
+      expect(trackerTaskCanAssign(viewerBoard, assigned, viewer), isFalse);
+
+      final managerBoard = TrackerBoard.fromJson(<String, Object?>{
+        ..._boardJson(),
+        'permissions': TrackerPermission.assignTasks.toString(),
+      });
+      expect(
+        trackerTaskCanAssign(managerBoard, managerBoard.tasks.last, viewer),
+        isTrue,
+      );
+    });
   });
 
   group('tracker API contract', () {
@@ -176,6 +204,28 @@ void main() {
       expect(request.data, containsPair('description', null));
       expect(request.data, containsPair('due_at', null));
       expect(request.data, containsPair('assignee_id', null));
+    });
+
+    test('assignment-only patch omits task editing fields', () async {
+      final adapter = _RecordingJsonAdapter(jsonEncode(_taskJson(
+        id: '22',
+        laneId: '10',
+        position: 0,
+        key: 'LOU-22',
+        title: 'Assigned',
+      )));
+      final repository = _repository(adapter);
+
+      await repository.updateTrackerTask(
+        EntityRef.parse('3@chat.example'),
+        EntityRef.parse('22@chat.example'),
+        'task-version',
+        assignee: EntityRef.parse('43@chat.example'),
+      );
+
+      expect(adapter.requests.single.data, <String, Object?>{
+        'assignee_id': '43@chat.example',
+      });
     });
 
     test('moves a task within its lane at an explicit insertion position',
@@ -436,6 +486,87 @@ void main() {
         r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
       )),
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('assignment-only editor locks task details but saves assignee',
+      (tester) async {
+    TrackerTaskDraft? result;
+    final board = TrackerBoard.fromJson(_boardJson());
+    final lane = board.lanes.first;
+    final task = board.tasks.first;
+    final actor = KaedeUser.fromJson(_userJson('99', 'Morgan'));
+    final assignee = KaedeUser.fromJson(_userJson('43', 'Casey'));
+
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: FilledButton(
+            onPressed: () async {
+              result = await showModalBottomSheet<TrackerTaskDraft>(
+                context: context,
+                isScrollControlled: true,
+                builder: (_) => TrackerTaskEditorSheet(
+                  lanes: board.lanes,
+                  initialLane: lane,
+                  task: task,
+                  actor: actor,
+                  members: <GuildMember>[
+                    GuildMember(user: assignee, roleIds: const <String>[]),
+                  ],
+                  canAssignOthers: true,
+                  canEditDetails: false,
+                ),
+              );
+            },
+            child: const Text('Open assignment editor'),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Open assignment editor'));
+    await tester.pumpAndSettle();
+    expect(find.text('Assign ${task.key}'), findsOneWidget);
+    expect(find.text('Save assignment'), findsOneWidget);
+    expect(
+      tester
+          .widget<TextFormField>(
+              find.byKey(const ValueKey('tracker-task-title')))
+          .enabled,
+      isFalse,
+    );
+    expect(
+      tester
+          .widget<DropdownButtonFormField<EntityRef>>(
+              find.byKey(const ValueKey('tracker-task-lane')))
+          .onChanged,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<IconButton>(find.byWidgetPredicate(
+            (widget) =>
+                widget is IconButton && widget.tooltip == 'Change due date',
+          ))
+          .onPressed,
+      isNull,
+    );
+
+    final assigneeField = find.byKey(const ValueKey('tracker-task-assignee'));
+    await tester.ensureVisible(assigneeField);
+    await tester.tap(assigneeField);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Casey').last);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const ValueKey('tracker-task-save')));
+    await tester.tap(find.byKey(const ValueKey('tracker-task-save')));
+    await tester.pumpAndSettle();
+
+    expect(result?.title, task.title);
+    expect(result?.lane, task.laneRef);
+    expect(result?.assignee, assignee.ref);
     expect(tester.takeException(), isNull);
   });
 

@@ -7,12 +7,14 @@ import 'package:intl/intl.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/api/scheduled_events_repository.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/scheduled_events.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 final class GuildScheduledEventsTab extends StatefulWidget {
@@ -23,6 +25,7 @@ final class GuildScheduledEventsTab extends StatefulWidget {
     required this.canCreateExternal,
     required this.canManageExternal,
     this.startCreating = false,
+    this.liveController,
     super.key,
   });
 
@@ -32,6 +35,7 @@ final class GuildScheduledEventsTab extends StatefulWidget {
   final bool canCreateExternal;
   final bool canManageExternal;
   final bool startCreating;
+  final MobileController? liveController;
 
   @override
   State<GuildScheduledEventsTab> createState() =>
@@ -45,16 +49,66 @@ final class _GuildScheduledEventsTabState
   EntityRef? _busy;
   final _subscriptions = <EntityRef, bool>{};
   var _startedInitialEditor = false;
+  var _requestGeneration = 0;
+  void Function()? _removeLiveListener;
+
+  MobileState? get _liveState => widget.liveController?.currentState;
+
+  KaedeUser? get _currentUser => _liveState?.user ?? widget.currentUser;
+
+  KaedeGuild? get _guild {
+    final state = _liveState;
+    if (state == null) return widget.guild;
+    return state.guilds
+        .where((guild) => guild.ref == widget.guild.ref)
+        .firstOrNull;
+  }
+
+  bool get _canCreateExternal {
+    final guild = _guild;
+    if (guild == null) return false;
+    if (_liveState == null) return widget.canCreateExternal;
+    return _currentUser?.ref == guild.ownerRef ||
+        guild.allows(Permission.createEvents);
+  }
+
+  bool get _canManageExternal {
+    final guild = _guild;
+    if (guild == null) return false;
+    if (_liveState == null) return widget.canManageExternal;
+    return _currentUser?.ref == guild.ownerRef ||
+        guild.allows(Permission.manageEvents);
+  }
 
   @override
   void initState() {
     super.initState();
+    _listenLive();
     _load();
+  }
+
+  void _listenLive() {
+    _removeLiveListener?.call();
+    _removeLiveListener = widget.liveController?.addListener((_) {
+      if (!mounted) return;
+      setState(() {
+        if (_guild == null) {
+          _requestGeneration += 1;
+          _events = const <GuildScheduledEvent>[];
+          _subscriptions.clear();
+          _loading = false;
+          _busy = null;
+        }
+      });
+    }, fireImmediately: false);
   }
 
   @override
   void didUpdateWidget(covariant GuildScheduledEventsTab oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.liveController, widget.liveController)) {
+      _listenLive();
+    }
     if (oldWidget.guild.ref != widget.guild.ref) {
       _events = const [];
       _subscriptions.clear();
@@ -63,10 +117,21 @@ final class _GuildScheduledEventsTabState
     }
   }
 
+  @override
+  void dispose() {
+    _removeLiveListener?.call();
+    super.dispose();
+  }
+
   Future<void> _load() async {
+    final guild = _guild;
+    if (guild == null) return;
+    final generation = ++_requestGeneration;
     try {
-      final events = await widget.repository.scheduledEvents(widget.guild.ref);
-      if (!mounted) return;
+      final events = await widget.repository.scheduledEvents(guild.ref);
+      if (!mounted || generation != _requestGeneration || _guild == null) {
+        return;
+      }
       setState(() {
         _events = _sorted(events);
         _subscriptions
@@ -83,7 +148,9 @@ final class _GuildScheduledEventsTabState
         });
       }
     } on Object catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _requestGeneration || _guild == null) {
+        return;
+      }
       setState(() => _loading = false);
       _showError('Could not load scheduled events', error);
     }
@@ -96,12 +163,13 @@ final class _GuildScheduledEventsTabState
           return time != 0 ? time : left.ref.wire.compareTo(right.ref.wire);
         });
 
-  bool get _canCreate =>
-      widget.canCreateExternal || _eventChannelsFor().isNotEmpty;
+  bool get _canCreate => _canCreateExternal || _eventChannelsFor().isNotEmpty;
 
   List<KaedeChannel> _eventChannelsFor([GuildScheduledEvent? event]) {
-    final own = event?.creatorRef == widget.currentUser?.ref;
-    return widget.guild.channels.where((channel) {
+    final guild = _guild;
+    if (guild == null) return const <KaedeChannel>[];
+    final own = event?.creatorRef == _currentUser?.ref;
+    return guild.channels.where((channel) {
       final expectedType = event?.entityType == ScheduledEventEntityType.stage
           ? ChannelType.stage
           : ChannelType.voice;
@@ -118,11 +186,13 @@ final class _GuildScheduledEventsTabState
   }
 
   bool _canManageEvent(GuildScheduledEvent event) {
-    final own = event.creatorRef == widget.currentUser?.ref;
+    final guild = _guild;
+    if (guild == null) return false;
+    final own = event.creatorRef == _currentUser?.ref;
     if (event.entityType == ScheduledEventEntityType.external) {
-      return widget.canManageExternal || (widget.canCreateExternal && own);
+      return _canManageExternal || (_canCreateExternal && own);
     }
-    final channel = widget.guild.channels
+    final channel = guild.channels
         .where((candidate) => candidate.ref == event.channelRef)
         .firstOrNull;
     final expectedType = event.entityType == ScheduledEventEntityType.stage
@@ -134,60 +204,62 @@ final class _GuildScheduledEventsTabState
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        backgroundColor: settingsSurface(context),
-        body: RefreshIndicator(
-          onRefresh: _load,
-          child: _loading
-              ? Center(child: CircularProgressIndicator())
-              : _events.isEmpty
-                  ? ListView(
-                      padding: EdgeInsets.all(32),
-                      children: [
-                        SizedBox(height: 80),
-                        Icon(
-                          Icons.event_available_outlined,
-                          size: 48,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                        SizedBox(height: 14),
-                        Text(
-                          'No upcoming events',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
+  Widget build(BuildContext context) => _guild == null
+      ? Center(child: Text('This guild is no longer available.'))
+      : Scaffold(
+          backgroundColor: settingsSurface(context),
+          body: RefreshIndicator(
+            onRefresh: _load,
+            child: _loading
+                ? Center(child: CircularProgressIndicator())
+                : _events.isEmpty
+                    ? ListView(
+                        padding: EdgeInsets.all(32),
+                        children: [
+                          SizedBox(height: 80),
+                          Icon(
+                            Icons.event_available_outlined,
+                            size: 48,
+                            color: Theme.of(context).colorScheme.primary,
                           ),
-                        ),
-                        SizedBox(height: 6),
-                        Text(
-                          _canCreate
-                              ? 'Create one when your community has something planned.'
-                              : 'Nothing is scheduled yet.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: context.kaede.muted),
-                        ),
-                      ],
-                    )
-                  : ListView.separated(
-                      padding: EdgeInsets.fromLTRB(14, 14, 14, 100),
-                      itemCount: _events.length,
-                      separatorBuilder: (_, __) => SizedBox(height: 10),
-                      itemBuilder: (context, index) =>
-                          _eventCard(_events[index]),
-                    ),
-        ),
-        floatingActionButton: _canCreate
-            ? FloatingActionButton.extended(
-                onPressed: _busy == null ? () => _openEditor() : null,
-                icon: Icon(Icons.add_rounded),
-                label: Text('Create event'),
-              )
-            : null,
-      );
+                          SizedBox(height: 14),
+                          Text(
+                            'No upcoming events',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          SizedBox(height: 6),
+                          Text(
+                            _canCreate
+                                ? 'Create one when your community has something planned.'
+                                : 'Nothing is scheduled yet.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: context.kaede.muted),
+                          ),
+                        ],
+                      )
+                    : ListView.separated(
+                        padding: EdgeInsets.fromLTRB(14, 14, 14, 100),
+                        itemCount: _events.length,
+                        separatorBuilder: (_, __) => SizedBox(height: 10),
+                        itemBuilder: (context, index) =>
+                            _eventCard(_events[index]),
+                      ),
+          ),
+          floatingActionButton: _canCreate
+              ? FloatingActionButton.extended(
+                  onPressed: _busy == null ? () => _openEditor() : null,
+                  icon: Icon(Icons.add_rounded),
+                  label: Text('Create event'),
+                )
+              : null,
+        );
 
   Widget _eventCard(GuildScheduledEvent event) {
-    final channel = widget.guild.channels
+    final channel = _guild!.channels
         .where((candidate) => candidate.ref == event.channelRef)
         .firstOrNull;
     final live = event.status == ScheduledEventStatus.active;
@@ -422,22 +494,44 @@ final class _GuildScheduledEventsTabState
   }
 
   Future<void> _openEditor([GuildScheduledEvent? event]) async {
+    if (event != null && !_canManageEvent(event) ||
+        event == null && !_canCreate) {
+      return;
+    }
     final result = await showScheduledEventEditor(
       context,
       event: event,
       eventChannels: _eventChannelsFor(event),
-      allowExternal: widget.canCreateExternal ||
+      allowExternal: _canCreateExternal ||
           event?.entityType == ScheduledEventEntityType.external,
     );
     if (result == null || !mounted) return;
-    setState(() => _busy = event?.ref ?? widget.guild.ref);
+    final guild = _guild;
+    final targetAllowed =
+        result.draft.entityType == ScheduledEventEntityType.external
+            ? event == null
+                ? _canCreateExternal
+                : _canManageEvent(event)
+            : _eventChannelsFor(event).any(
+                (channel) => channel.ref == result.draft.channelRef,
+              );
+    if (guild == null ||
+        !targetAllowed ||
+        (event != null && !_canManageEvent(event))) {
+      _showError(
+        'Could not save the scheduled event',
+        UserInputException('Event permissions changed. Try again.'),
+      );
+      return;
+    }
+    setState(() => _busy = event?.ref ?? guild.ref);
     var detailsSaved = false;
     try {
       var saved = event == null
           ? await widget.repository
-              .createScheduledEvent(widget.guild.ref, result.draft)
+              .createScheduledEvent(guild.ref, result.draft)
           : await widget.repository
-              .updateScheduledEvent(widget.guild.ref, event, result.draft);
+              .updateScheduledEvent(guild.ref, event, result.draft);
       if (!mounted) return;
       setState(() {
         _events = _sorted([
@@ -446,9 +540,10 @@ final class _GuildScheduledEventsTabState
         ]);
       });
       detailsSaved = true;
+      if (!_canManageEvent(saved)) return;
       if (result.coverFile case final cover?) {
         saved = await widget.repository.uploadScheduledEventImage(
-          guild: widget.guild.ref,
+          guild: guild.ref,
           event: saved,
           filename: cover.name,
           contentType: cover.mimeType,
@@ -456,7 +551,7 @@ final class _GuildScheduledEventsTabState
         );
       } else if (result.removeCover && saved.imageHash != null) {
         saved = await widget.repository.deleteScheduledEventImage(
-          widget.guild.ref,
+          guild.ref,
           saved,
         );
       }
@@ -484,10 +579,13 @@ final class _GuildScheduledEventsTabState
     GuildScheduledEvent event,
     ScheduledEventStatus status,
   ) async {
+    final guild = _guild;
+    if (guild == null || !_canManageEvent(event)) return;
     setState(() => _busy = event.ref);
     try {
+      if (!_canManageEvent(event)) return;
       final updated = await widget.repository.transitionScheduledEvent(
-        widget.guild.ref,
+        guild.ref,
         event,
         status,
       );
@@ -515,9 +613,12 @@ final class _GuildScheduledEventsTabState
   }
 
   Future<void> _delete(GuildScheduledEvent event) async {
+    final guild = _guild;
+    if (guild == null || !_canManageEvent(event)) return;
     setState(() => _busy = event.ref);
     try {
-      await widget.repository.deleteScheduledEvent(widget.guild.ref, event);
+      if (!_canManageEvent(event)) return;
+      await widget.repository.deleteScheduledEvent(guild.ref, event);
       if (!mounted) return;
       setState(() => _events =
           _events.where((candidate) => candidate.ref != event.ref).toList());
@@ -530,12 +631,14 @@ final class _GuildScheduledEventsTabState
   }
 
   Future<void> _toggleSubscription(GuildScheduledEvent event) async {
+    final guild = _guild;
+    if (guild == null) return;
     final known = _subscriptions[event.ref] ?? event.meSubscribed;
     final next = !known;
     setState(() => _busy = event.ref);
     try {
       await widget.repository.setScheduledEventSubscription(
-        widget.guild.ref,
+        guild.ref,
         event,
         subscribed: next,
       );
@@ -566,6 +669,8 @@ final class _GuildScheduledEventsTabState
   }
 
   Future<void> _showSubscribers(GuildScheduledEvent event) async {
+    final guild = _guild;
+    if (guild == null) return;
     var subscribers = <ScheduledEventSubscriber>[];
     var loading = true;
     var initialLoadRequested = false;
@@ -577,7 +682,7 @@ final class _GuildScheduledEventsTabState
       });
       try {
         final page = await widget.repository.scheduledEventSubscribers(
-          widget.guild.ref,
+          guild.ref,
           event,
           after: subscribers.lastOrNull?.user.ref,
         );
@@ -588,8 +693,7 @@ final class _GuildScheduledEventsTabState
                 .any((existing) => existing.user.ref == item.user.ref),
           ),
         ];
-        if (subscribers
-            .any((item) => item.user.ref == widget.currentUser?.ref)) {
+        if (subscribers.any((item) => item.user.ref == _currentUser?.ref)) {
           _subscriptions[event.ref] = true;
         } else if (page.length < 100 || subscribers.length >= event.userCount) {
           _subscriptions[event.ref] = false;

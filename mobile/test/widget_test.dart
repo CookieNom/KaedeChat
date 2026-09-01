@@ -38,7 +38,9 @@ void main() {
         name: 'general',
         topic: 'News and useful updates',
         position: 0,
-        permissions: BigInt.zero,
+        permissions: BigInt.from(
+          Permission.viewChannel | Permission.readMessageHistory,
+        ),
       );
 
       expect(conversationHeaderTitle(channel), '#general');
@@ -61,6 +63,36 @@ void main() {
 
       expect(conversationHeaderTitle(voice), '#Lounge');
       expect(supportsPinnedMessages(voice), isFalse);
+    });
+
+    test('channel settings use the current channel effective grant', () {
+      final actor = EntityRef.parse('30@home.example');
+      final server = KaedeGuild(
+        ref: guild,
+        name: 'Guild',
+        ownerRef: EntityRef.parse('40@home.example'),
+        permissions: BigInt.zero,
+        unavailable: false,
+      );
+      final managed = KaedeChannel(
+        ref: EntityRef.parse('12@home.example'),
+        guildRef: guild,
+        type: ChannelType.text,
+        position: 0,
+        permissions: BigInt.from(Permission.manageChannels),
+      );
+      final denied = KaedeChannel(
+        ref: EntityRef.parse('13@home.example'),
+        guildRef: guild,
+        type: ChannelType.text,
+        position: 1,
+        permissions: BigInt.zero,
+      );
+
+      expect(server.allows(Permission.manageChannels), isFalse);
+      expect(canManageChannelSettings(server, managed, actor), isTrue);
+      expect(canManageChannelSettings(server, denied, actor), isFalse);
+      expect(canManageChannelSettings(server, denied, server.ownerRef), isTrue);
     });
 
     testWidgets('guild create action visibly says what it adds',

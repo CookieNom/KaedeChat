@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { entityKey } from './refs';
 import {
+  channelOrderPermissionTargets,
   channelPositionRequest,
   firstNavigableChannel,
   groupChannels,
@@ -67,10 +68,8 @@ describe('channel grouping and reordering', () => {
     expect(moved.map((item) => item.id)).toEqual(['20', '40', '30']);
     expect(moved[1].parent_id).toBe('20');
     expect(moved.map((item) => item.position)).toEqual([0, 1, 2]);
-    expect(channelPositionRequest([category, first, second], moved)).toEqual([
-      { id: '20', position: 0 },
-      { id: '40', position: 1 },
-      { id: '30', position: 2 }
+    expect(channelPositionRequest([category, first, second], moved, entityKey(second))).toEqual([
+      { id: '40', position: 1 }
     ]);
   });
 
@@ -81,11 +80,31 @@ describe('channel grouping and reordering', () => {
     const previous = [ungrouped, category, child];
     const moved = moveChannel(previous, entityKey(ungrouped), entityKey(category), 'inside');
 
-    expect(channelPositionRequest(previous, moved)).toEqual([
-      { id: '20', position: 0 },
-      { id: '30', position: 1 },
+    expect(channelPositionRequest(previous, moved, entityKey(ungrouped))).toEqual([
       { id: '10', position: 2, parent_id: '20' }
     ]);
+    expect(
+      channelOrderPermissionTargets(previous, moved, entityKey(ungrouped))?.map(entityKey)
+    ).toEqual([entityKey(ungrouped), entityKey(category)]);
+  });
+
+  it('requires the source channel and destination category for a parent move', () => {
+    const source = channel('10', 0);
+    const category = channel('20', 1, 4);
+    const moved = moveChannel([source, category], entityKey(source), entityKey(category), 'inside');
+
+    expect(
+      channelOrderPermissionTargets([source, category], moved, entityKey(source))?.map(entityKey)
+    ).toEqual([entityKey(source), entityKey(category)]);
+  });
+
+  it('fails closed when a reorder references an unresolved category', () => {
+    const missingParent = channel('20', 0, 4);
+    const child = channel('30', 1, 0, missingParent);
+
+    expect(
+      channelOrderPermissionTargets([child], [{ ...child, position: 0 }], entityKey(child))
+    ).toBeNull();
   });
 
   it('moves a category together with its children', () => {
@@ -102,6 +121,33 @@ describe('channel grouping and reordering', () => {
 
     expect(moved.map((item) => item.id)).toEqual(['20', '21', '10', '11']);
     expect(moved.map((item) => item.position)).toEqual([0, 1, 2, 3]);
+    expect(
+      channelPositionRequest(
+        [firstCategory, firstChild, secondCategory, secondChild],
+        moved,
+        entityKey(firstCategory)
+      )
+    ).toEqual([
+      { id: '10', position: 2 },
+      { id: '11', position: 3 }
+    ]);
+  });
+
+  it('does not request permission on unrelated categories shifted by a move', () => {
+    const destination = channel('20', 1, 4);
+    const destinationChild = channel('21', 2, 0, destination);
+    const unrelated = channel('30', 3, 4);
+    const unrelatedChild = channel('31', 4, 0, unrelated);
+    const source = channel('10', 0);
+    const previous = [source, destination, destinationChild, unrelated, unrelatedChild];
+    const moved = moveChannel(previous, entityKey(source), entityKey(destination), 'inside');
+
+    expect(channelPositionRequest(previous, moved, entityKey(source))).toEqual([
+      { id: '10', position: 2, parent_id: '20' }
+    ]);
+    expect(
+      channelOrderPermissionTargets(previous, moved, entityKey(source))?.map(entityKey)
+    ).toEqual([entityKey(source), entityKey(destination)]);
   });
 
   it('preserves categories above uncategorized channels', () => {

@@ -12,6 +12,8 @@
     trackerDispatchRequiresRefresh,
     trackerDropPosition,
     trackerHasPermission,
+    trackerCanChangeAssignee,
+    trackerTaskEditMode,
     trackerTaskBelongsToUser,
     trackerTasksForLane
   } from '$lib/task-tracker/board';
@@ -163,6 +165,14 @@
 
   function canEditTask(task: TrackerTask): boolean {
     return canManageTasks || (canEditOwn && trackerTaskBelongsToUser(task, currentUser));
+  }
+
+  function canChangeTaskAssignee(task: TrackerTask): boolean {
+    return trackerCanChangeAssignee(task, currentUser, canAssign);
+  }
+
+  function taskEditMode(task: TrackerTask) {
+    return trackerTaskEditMode(canEditTask(task), canChangeTaskAssignee(task));
   }
 
   function isVersionConflict(caught: unknown): boolean {
@@ -905,7 +915,8 @@
       {canAssign}
       {currentUser}
       canDelete={Boolean(editingTask && canEditTask(editingTask))}
-      readOnly={Boolean(editingTask && !canEditTask(editingTask))}
+      assignmentOnly={Boolean(editingTask && taskEditMode(editingTask) === 'assignment')}
+      readOnly={Boolean(editingTask && taskEditMode(editingTask) === 'read-only')}
       busy={actionBusy}
       error={actionError}
       onSave={saveTask}

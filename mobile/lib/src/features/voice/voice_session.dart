@@ -56,6 +56,36 @@ enum VoiceResumeAction {
 }
 
 @visibleForTesting
+bool voiceChannelCanUseVad(
+  KaedeChannel channel, {
+  bool stageCanSpeak = false,
+}) =>
+    channel.type == ChannelType.stage
+        ? stageCanSpeak
+        : channel.allows(Permission.speak) && channel.allows(Permission.useVad);
+
+@visibleForTesting
+({bool canSpeak, bool canStream, bool canUseVad}) voiceChannelCapabilities(
+  KaedeChannel channel, {
+  required bool authoritativeCanSpeak,
+  required bool authoritativeCanStream,
+}) {
+  final stage = channel.type == ChannelType.stage;
+  final canSpeak =
+      authoritativeCanSpeak && (stage || channel.allows(Permission.speak));
+  final canStream =
+      authoritativeCanStream && (stage || channel.allows(Permission.stream));
+  return (
+    canSpeak: canSpeak,
+    canStream: canStream,
+    canUseVad: voiceChannelCanUseVad(
+      channel,
+      stageCanSpeak: canSpeak,
+    ),
+  );
+}
+
+@visibleForTesting
 bool validSoundboardMediaCapability({
   required Uri? download,
   required String authorityDomain,
@@ -516,8 +546,8 @@ final class VoiceSession extends ChangeNotifier {
     _activeElsewhereClient = null;
     _recoverableDisconnect = false;
     _retryJoinOnResume = false;
-    _canUseVad = callRef != null || target.allows(Permission.useVad);
-    if (!_canUseVad) _pushToTalk = true;
+    _canUseVad = callRef != null || voiceChannelCanUseVad(target);
+    if (!_canUseVad && target.type != ChannelType.stage) _pushToTalk = true;
     notifyListeners();
 
     Room? candidate;
@@ -725,10 +755,20 @@ final class VoiceSession extends ChangeNotifier {
 
       await room.connect(url, token);
       if (generation != _generation) return;
-      _canSpeak = grant['can_speak'] == true &&
-          (callRef != null || target.allows(Permission.speak));
-      _canStream = grant['can_stream'] == true &&
-          (callRef != null || target.allows(Permission.stream));
+      final capabilities = callRef != null
+          ? (
+              canSpeak: grant['can_speak'] == true,
+              canStream: grant['can_stream'] == true,
+              canUseVad: true,
+            )
+          : voiceChannelCapabilities(
+              target,
+              authoritativeCanSpeak: grant['can_speak'] == true,
+              authoritativeCanStream: grant['can_stream'] == true,
+            );
+      _canSpeak = capabilities.canSpeak;
+      _canStream = capabilities.canStream;
+      _canUseVad = capabilities.canUseVad;
       await selectAudioRoute(_audioRoute);
       // Route selection may yield to a newer join/leave while this connected
       // room is still only a local candidate. Never publish that stale room;
@@ -834,10 +874,15 @@ final class VoiceSession extends ChangeNotifier {
       );
       return;
     }
+    if (fresh.type == ChannelType.stage) {
+      _canUseVad = _canSpeak;
+      notifyListeners();
+      return;
+    }
     final speak = fresh.allows(Permission.speak);
     final stream = fresh.allows(Permission.stream);
     final gainedServerGrant = (speak && !_canSpeak) || (stream && !_canStream);
-    _canUseVad = fresh.allows(Permission.useVad);
+    _canUseVad = voiceChannelCanUseVad(fresh);
     if (!speak && _canSpeak) {
       _canSpeak = false;
       _muted = true;
@@ -1225,6 +1270,42 @@ final class VoiceSession extends ChangeNotifier {
       _occupants
         ..clear()
         ..addAll(next);
+      if (target.type == ChannelType.stage) {
+        final room = _room;
+        final identity = room?.localParticipant?.identity;
+        final local = identity == null ? null : next[identity];
+        final capabilities = voiceChannelCapabilities(
+          target,
+          authoritativeCanSpeak: local?['can_speak'] == true,
+          authoritativeCanStream: local?['can_stream'] == true,
+        );
+        final gainedSpeak = capabilities.canSpeak && !_canSpeak;
+        _canSpeak = capabilities.canSpeak;
+        _canStream = capabilities.canStream;
+        _canUseVad = capabilities.canUseVad;
+        if (!_canSpeak) {
+          _muted = true;
+          _pushHeld = false;
+          await room?.localParticipant?.setMicrophoneEnabled(false);
+        } else if (gainedSpeak) {
+          final microphone = await permissions.Permission.microphone.request();
+          if (_channel?.ref != target.ref || _room != room) return;
+          if (microphone.isGranted) {
+            await room?.localParticipant?.setMicrophoneEnabled(
+              _microphoneShouldPublish,
+            );
+          } else {
+            _muted = true;
+            _error = 'Joined listen-only. Allow microphone access to speak.';
+          }
+        }
+        if (!_canStream) {
+          _camera = false;
+          _screen = false;
+          await room?.localParticipant?.setCameraEnabled(false);
+          await room?.localParticipant?.setScreenShareEnabled(false);
+        }
+      }
       notifyListeners();
     } on Object {
       // Occupancy is best-effort and must never tear down healthy audio.

@@ -6,6 +6,7 @@ vi.mock('$lib/api/client', () => ({ api: apiMock }));
 import { Permission } from '$lib/generated/permissions';
 import {
   announcementTargets,
+  canReadAnnouncementChannel,
   canPublishAnnouncementMessage,
   channelFollowSystemMessageText,
   createAnnouncementFollow,
@@ -105,6 +106,18 @@ function follow() {
 
 describe('announcement client', () => {
   beforeEach(() => apiMock.mockReset());
+
+  it('allows announcement-follow discovery with View Channel alone', () => {
+    const news = channel('2', 5, Permission.VIEW_CHANNEL);
+
+    expect(canReadAnnouncementChannel(news, guild('1', 'Local', [news]))).toBe(true);
+    expect(
+      canReadAnnouncementChannel(
+        channel('3', 5, Permission.READ_MESSAGE_HISTORY),
+        guild('1', 'Local', [news])
+      )
+    ).toBe(false);
+  });
 
   it('uses canonical encoded routes for list, create, delete, and publish', async () => {
     apiMock

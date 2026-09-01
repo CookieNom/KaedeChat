@@ -174,8 +174,20 @@ async def test_external_sound_requires_external_sound_permission(
         guild_domain="chat.example",
         version=1,
     )
-    base = Permission.VIEW_CHANNEL | Permission.CONNECT | Permission.USE_SOUNDBOARD
-    monkeypatch.setattr(soundboard_api, "get_permissions", AsyncMock(return_value=int(base)))
+    required = (
+        Permission.VIEW_CHANNEL
+        | Permission.CONNECT
+        | Permission.SPEAK
+        | Permission.USE_SOUNDBOARD
+        | Permission.USE_EXTERNAL_SOUNDS
+    )
+    guard = AsyncMock(
+        side_effect=HTTPException(
+            status_code=403,
+            detail={"code": "MISSING_PERMISSIONS", "permissions": str(int(required))},
+        )
+    )
+    monkeypatch.setattr(soundboard_api, "require_permissions", guard)
     session = SimpleNamespace(scalar=AsyncMock(return_value=sound))
 
     with pytest.raises(HTTPException) as raised:
@@ -193,6 +205,7 @@ async def test_external_sound_requires_external_sound_permission(
 
     assert raised.value.status_code == 403
     assert int(raised.value.detail["permissions"]) & Permission.USE_EXTERNAL_SOUNDS
+    assert guard.await_args.args[4] == required
 
 
 def test_user_installed_guild_application_without_external_apps_is_ephemeral() -> None:

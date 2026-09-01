@@ -1523,9 +1523,16 @@ async def livekit_webhook(
                     GuildMember,
                     (guild.id, guild.origin_domain, actor.id, actor.origin_domain),
                 )
-                permissions = await get_permissions(session, redis, guild, actor, channel=channel)
                 required = Permission.VIEW_CHANNEL | Permission.CONNECT
-                if member is None or permissions & required != required:
+                permissions = await require_permissions(
+                    session,
+                    redis,
+                    guild,
+                    actor,
+                    required,
+                    channel=channel,
+                )
+                if member is None:
                     raise HTTPException(status_code=403, detail={"code": "VOICE_JOIN_REVOKED"})
                 live_priority = priority_speaking_granted(
                     channel_type=channel.type,

@@ -21,6 +21,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.automod.service import require_member_interactions_allowed
 from app.bots.auth import BotPrincipal, require_bot
 from app.bots.installations import (
     installation_allows_channel,
@@ -259,8 +260,15 @@ async def create_local_stage_instance(
         STAGE_INSTANCE_MODERATOR_PERMISSIONS,
         channel=channel,
     )
-    if payload.send_start_notification and not permissions & Permission.MENTION_EVERYONE:
-        raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    if payload.send_start_notification:
+        if not permissions & Permission.MENTION_EVERYONE:
+            raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+        await require_member_interactions_allowed(
+            session,
+            guild,
+            actor,
+            Permission.MENTION_EVERYONE,
+        )
     locked_channel = await session.scalar(
         select(Channel)
         .where(

@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_admin.dart';
+import 'package:kaede_mobile/src/domain/guild_hierarchy.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/stage_instances.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
@@ -34,6 +35,32 @@ String voiceParticipantLabel({
   if (resolvedKnownName.isNotEmpty) return resolvedKnownName;
   return identity.split('@').first;
 }
+
+bool voiceChannelAllows(KaedeChannel channel, int permission) =>
+    channel.allows(Permission.administrator) || channel.allows(permission);
+
+bool canSetVoiceChannelStatusNow(
+  KaedeChannel channel, {
+  required bool joined,
+}) =>
+    channel.type == ChannelType.voice &&
+    voiceChannelAllows(channel, Permission.setVoiceChannelStatus) &&
+    (joined || voiceChannelAllows(channel, Permission.manageChannels));
+
+bool canStartStageNow(KaedeChannel channel, {required bool notify}) =>
+    canManageStageChannel(channel) &&
+    (!notify || voiceChannelAllows(channel, Permission.mentionEveryone));
+
+List<KaedeChannel> voiceMoveDestinationChannels(
+  KaedeGuild guild,
+  KaedeChannel source,
+) =>
+    guild.channels
+        .where((channel) =>
+            channel.type.isVoiceLike &&
+            channel.ref != source.ref &&
+            voiceChannelAllows(channel, Permission.moveMembers))
+        .toList(growable: false);
 
 String? _knownVoiceParticipantName(MobileState state, String identity) {
   EntityRef reference;
@@ -179,9 +206,10 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         .listen(_onVoiceChannelInfo);
     final guildRef = channel.guildRef;
     if (guildRef != null) {
-      ref
-          .read(mobileControllerProvider.notifier)
-          .requestVoiceChannelInfo(guildRef);
+      final controller = ref.read(mobileControllerProvider.notifier);
+      controller
+        ..requestVoiceChannelInfo(guildRef)
+        ..requestGuildMembers(guildRef);
     }
     if (channel.type == ChannelType.stage) {
       Future<void>.microtask(_loadStage);
@@ -213,9 +241,10 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
       if (channel.type == ChannelType.stage) Future<void>.microtask(_loadStage);
       final guildRef = channel.guildRef;
       if (guildRef != null) {
-        ref
-            .read(mobileControllerProvider.notifier)
-            .requestVoiceChannelInfo(guildRef);
+        final controller = ref.read(mobileControllerProvider.notifier);
+        controller
+          ..requestVoiceChannelInfo(guildRef)
+          ..requestGuildMembers(guildRef);
       }
     }
   }
@@ -230,9 +259,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         session.channel?.ref == channel.ref && session.callRef == callRef;
     final connected = thisRoom && session.connected;
     final joined = thisRoom && session.joined;
-    final canSetVoiceStatus = channel.type == ChannelType.voice &&
-        channel.allows(Permission.setVoiceChannelStatus) &&
-        (joined || channel.allows(Permission.manageChannels));
+    final canSetVoiceStatus =
+        canSetVoiceChannelStatusNow(channel, joined: joined);
     final reconnecting = thisRoom && session.reconnecting;
     final participants = joined ? session.participants : const <Participant>[];
     final voiceElapsed = voiceElapsedLabel(_voiceStartedAt);
@@ -386,6 +414,14 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                               ),
                               session: session,
                               guild: guild,
+                              actorRef: mobile.user?.ref,
+                              targetMember: guild == null
+                                  ? null
+                                  : guildMemberByIdentity(
+                                      mobile.guildMembers[guild.ref] ??
+                                          const <GuildMember>[],
+                                      participants[index].identity,
+                                    ),
                               channel: channel,
                             ),
                           ),
@@ -472,6 +508,15 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
     );
     controller.dispose();
     if (value == null || !mounted) return;
+    final session = ref.read(voiceSessionProvider);
+    final joined = session.channel?.ref == channel.ref && session.joined;
+    if (!canSetVoiceChannelStatusNow(channel, joined: joined)) {
+      _showVoiceError(
+        UserInputException('Voice channel permissions changed. Try again.'),
+        'Could not update the voice channel status',
+      );
+      return;
+    }
     setState(() => _voiceStatusBusy = true);
     try {
       final normalized = value.trim().isEmpty ? null : value.trim();
@@ -760,6 +805,13 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
   Future<void> _startStage() async {
     final options = await _stageStartDialog();
     if (options == null || !mounted) return;
+    if (!canStartStageNow(channel, notify: options.notify)) {
+      _showVoiceError(
+        UserInputException('Stage permissions changed. Try again.'),
+        'Could not start this Stage',
+      );
+      return;
+    }
     setState(() => _stageLoading = true);
     try {
       final instance = await ref
@@ -821,6 +873,13 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
       initial: current.topic,
     );
     if (topic == null || topic == current.topic || !mounted) return;
+    if (!_canManageStage || _stageInstance?.ref != current.ref) {
+      _showVoiceError(
+        UserInputException('Stage permissions changed. Try again.'),
+        'Could not update the Stage topic',
+      );
+      return;
+    }
     setState(() => _stageLoading = true);
     try {
       final instance = await ref
@@ -857,6 +916,14 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         ) ??
         false;
     if (!confirmed || !mounted) return;
+    final current = _stageInstance;
+    if (!_canManageStage || current == null) {
+      _showVoiceError(
+        UserInputException('Stage permissions changed. Try again.'),
+        'Could not end this Stage',
+      );
+      return;
+    }
     setState(() => _stageLoading = true);
     try {
       await ref
@@ -1525,6 +1592,13 @@ final class _StageParticipantRoster extends StatelessWidget {
               ),
               session: session,
               guild: guild,
+              actorRef: mobile.user?.ref,
+              targetMember: guild == null
+                  ? null
+                  : guildMemberByIdentity(
+                      mobile.guildMembers[guild!.ref] ?? const <GuildMember>[],
+                      items[index].identity,
+                    ),
               channel: channel,
             ),
           ),
@@ -1540,6 +1614,8 @@ final class _ParticipantTile extends StatefulWidget {
     required this.knownName,
     required this.session,
     required this.channel,
+    required this.actorRef,
+    required this.targetMember,
     this.guild,
   });
 
@@ -1547,6 +1623,8 @@ final class _ParticipantTile extends StatefulWidget {
   final String? knownName;
   final VoiceSession session;
   final KaedeGuild? guild;
+  final EntityRef? actorRef;
+  final GuildMember? targetMember;
   final KaedeChannel channel;
 
   @override
@@ -1664,6 +1742,7 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
       // expose moderation actions for an ambiguous target.
     }
     final occupancy = widget.session.occupant(identity);
+    final canModerate = user != null && _canModerateTarget(user);
     var volume = widget.session.participantVolume(identity);
     if (!context.mounted) return;
     await showModalBottomSheet<void>(
@@ -1687,7 +1766,7 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                     widget.session.setParticipantVolume(identity, value);
                   },
                 ),
-                if (guild != null && user != null) ...[
+                if (guild != null && user != null && canModerate) ...[
                   Divider(),
                   if (canManageStageChannel(widget.channel))
                     ListTile(
@@ -1704,9 +1783,13 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                           user!,
                           occupancy?['suppressed'] == false,
                         ),
+                        authorized: () =>
+                            _canModerateTarget(user!) &&
+                            canManageStageChannel(widget.channel),
                       ),
                     ),
-                  if (widget.channel.allows(Permission.muteMembers))
+                  if (voiceChannelAllows(
+                      widget.channel, Permission.muteMembers))
                     ListTile(
                       leading: Icon(Icons.mic_off_rounded),
                       title: Text(occupancy?['server_mute'] == true
@@ -1719,6 +1802,10 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                           user!,
                           occupancy?['server_mute'] != true,
                         ),
+                        authorized: () =>
+                            _canModerateTarget(user!) &&
+                            voiceChannelAllows(
+                                widget.channel, Permission.muteMembers),
                       ),
                     ),
                   if (canServerDeafenInChannel(widget.channel))
@@ -1734,12 +1821,15 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                           user!,
                           occupancy?['server_deaf'] != true,
                         ),
+                        authorized: () =>
+                            _canModerateTarget(user!) &&
+                            canServerDeafenInChannel(widget.channel),
                       ),
                     ),
-                  if (widget.channel.allows(Permission.moveMembers)) ...[
-                    for (final target in guild.channels.where((candidate) =>
-                        candidate.type.isVoiceLike &&
-                        candidate.ref != widget.channel.ref))
+                  if (voiceChannelAllows(
+                      widget.channel, Permission.moveMembers)) ...[
+                    for (final target
+                        in voiceMoveDestinationChannels(guild, widget.channel))
                       ListTile(
                         leading: Icon(Icons.drive_file_move_rounded),
                         title: Text('Move to ${target.name ?? 'voice'}'),
@@ -1750,6 +1840,12 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                             user!,
                             target.ref,
                           ),
+                          authorized: () =>
+                              _canModerateTarget(user!) &&
+                              voiceChannelAllows(
+                                  widget.channel, Permission.moveMembers) &&
+                              voiceChannelAllows(
+                                  target, Permission.moveMembers),
                         ),
                       ),
                     ListTile(
@@ -1762,6 +1858,10 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                         sheetContext,
                         () => widget.session
                             .disconnectParticipant(guild.ref, user!),
+                        authorized: () =>
+                            _canModerateTarget(user!) &&
+                            voiceChannelAllows(
+                                widget.channel, Permission.moveMembers),
                       ),
                     ),
                   ],
@@ -1776,8 +1876,10 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
 
   Future<void> _moderate(
     BuildContext context,
-    Future<void> Function() operation,
-  ) async {
+    Future<void> Function() operation, {
+    required bool Function() authorized,
+  }) async {
+    if (!authorized()) return;
     Navigator.of(context).pop();
     try {
       await operation();
@@ -1792,6 +1894,19 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
         ),
       );
     }
+  }
+
+  bool _canModerateTarget(EntityRef user) {
+    final guild = widget.guild;
+    final target = widget.targetMember;
+    return guild != null &&
+        target?.user.ref == user &&
+        guildActorCanManageMember(
+          guild: guild,
+          actorRef: widget.actorRef,
+          actorHighestRole: guildActorHighestRole(guild),
+          target: target!,
+        );
   }
 }
 

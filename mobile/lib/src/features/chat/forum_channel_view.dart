@@ -40,6 +40,14 @@ bool canSubmitForumPost({
 }
 
 @visibleForTesting
+bool canCreateForumPostNow(
+  KaedeChannel channel, {
+  required bool hasAttachments,
+}) =>
+    canCreateForumPost(channel) &&
+    (!hasAttachments || channel.allows(Permission.attachFiles));
+
+@visibleForTesting
 List<KaedeChannel> mergeForumPostPages(
   Iterable<KaedeChannel> current,
   Iterable<KaedeChannel> next,
@@ -126,6 +134,19 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
   @override
   void didUpdateWidget(covariant ForumChannelView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final couldRead = canReadRetainedChannelHistory(oldWidget.channel);
+    final canRead = canReadRetainedChannelHistory(widget.channel);
+    if (couldRead && !canRead) {
+      _requestGeneration += 1;
+      _posts = const [];
+      _hasMore = false;
+      _cursor = null;
+      _loading = false;
+      _loadingMore = false;
+      _error = null;
+    } else if (!couldRead && canRead) {
+      unawaited(_load());
+    }
     if (oldWidget.channel.ref != widget.channel.ref) {
       _selectedTags.clear();
       _search.clear();
@@ -161,7 +182,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
             : ForumViewMode.list;
       });
     }
-    await _load();
+    if (canReadRetainedChannelHistory(widget.channel)) await _load();
   }
 
   void _searchChanged() {
@@ -197,6 +218,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
   }
 
   Future<void> _load({bool silent = false}) async {
+    if (!canReadRetainedChannelHistory(widget.channel)) return;
     final generation = ++_requestGeneration;
     if (mounted && !silent) {
       setState(() {
@@ -232,7 +254,12 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
   }
 
   Future<void> _loadMore() async {
-    if (_loadingMore || !_hasMore || _cursor == null) return;
+    if (!canReadRetainedChannelHistory(widget.channel) ||
+        _loadingMore ||
+        !_hasMore ||
+        _cursor == null) {
+      return;
+    }
     final generation = _requestGeneration;
     setState(() => _loadingMore = true);
     try {
@@ -403,9 +430,12 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
         (state) => forumThreadFeedRevision(state.threads, widget.channel.ref),
       ),
       (previous, next) {
-        if (previous != next) _scheduleLiveReload();
+        if (previous != next && canReadRetainedChannelHistory(widget.channel)) {
+          _scheduleLiveReload();
+        }
       },
     );
+    final canReadHistory = canReadRetainedChannelHistory(widget.channel);
     final canPost = canCreateForumPost(widget.channel);
     return Column(
       children: [
@@ -413,17 +443,20 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
           padding: EdgeInsets.fromLTRB(12, 10, 12, 4),
           child: Row(
             children: [
-              Expanded(
-                child: TextField(
-                  key: ValueKey('forum-search'),
-                  controller: _search,
-                  textInputAction: TextInputAction.search,
-                  decoration: InputDecoration(
-                    hintText: 'Search',
-                    prefixIcon: Icon(Icons.search_rounded),
+              if (canReadHistory)
+                Expanded(
+                  child: TextField(
+                    key: ValueKey('forum-search'),
+                    controller: _search,
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      hintText: 'Search',
+                      prefixIcon: Icon(Icons.search_rounded),
+                    ),
                   ),
-                ),
-              ),
+                )
+              else
+                Spacer(),
               if (canPost) ...[
                 SizedBox(width: 8),
                 FilledButton.icon(
@@ -436,7 +469,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
             ],
           ),
         ),
-        if (widget.channel.availableTags.isNotEmpty)
+        if (canReadHistory && widget.channel.availableTags.isNotEmpty)
           SizedBox(
             height: 48,
             child: ListView.separated(
@@ -457,22 +490,36 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
               },
             ),
           ),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
-            child: OutlinedButton.icon(
-              key: ValueKey('forum-sort-view'),
-              onPressed: _showSortAndView,
-              icon: Icon(Icons.swap_vert_rounded, size: 18),
-              label: Text('Sort & View'),
+        if (canReadHistory)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: OutlinedButton.icon(
+                key: ValueKey('forum-sort-view'),
+                onPressed: _showSortAndView,
+                icon: Icon(Icons.swap_vert_rounded, size: 18),
+                label: Text('Sort & View'),
+              ),
             ),
           ),
-        ),
         Divider(height: 1),
-        if ((_loading && _posts.isNotEmpty) || _loadingMore)
+        if (canReadHistory && ((_loading && _posts.isNotEmpty) || _loadingMore))
           LinearProgressIndicator(minHeight: 2),
-        Expanded(child: _buildPosts()),
+        Expanded(
+          child: canReadHistory
+              ? _buildPosts()
+              : Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(28),
+                    child: Text(
+                      'Message history is unavailable. New posts will appear when history access is restored.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: context.kaede.muted),
+                    ),
+                  ),
+                ),
+        ),
       ],
     );
   }
@@ -707,7 +754,26 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
   List<EntityRef> _encryptedClaimAttachments = const <EntityRef>[];
   List<EntityRef> _encryptedClaimMentions = const <EntityRef>[];
 
-  bool get _requiresTag => widget.channel.flags & 16 != 0;
+  KaedeChannel? get _channel {
+    final state = ref.read(mobileControllerProvider);
+    for (final guild in state.guilds) {
+      for (final channel in guild.channels) {
+        if (channel.ref == widget.channel.ref) return channel;
+      }
+    }
+    return null;
+  }
+
+  bool get _requiresTag => (_channel?.flags ?? 0) & 16 != 0;
+
+  bool get _authorized {
+    final channel = _channel;
+    return channel != null &&
+        canCreateForumPostNow(
+          channel,
+          hasAttachments: _attachments.isNotEmpty,
+        );
+  }
 
   @override
   void dispose() {
@@ -717,12 +783,22 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
   }
 
   Future<void> _pickFiles() async {
+    final before = _channel;
+    if (before == null ||
+        !canCreateForumPostNow(before, hasAttachments: true)) {
+      return;
+    }
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
       withData: false,
       withReadStream: false,
     );
     if (result == null || !mounted) return;
+    final current = _channel;
+    if (current == null ||
+        !canCreateForumPostNow(current, hasAttachments: true)) {
+      return;
+    }
     final additions = <_ForumAttachment>[];
     for (final selected in result.files.take(10 - _attachments.length)) {
       if (selected.path case final path?) {
@@ -738,6 +814,15 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
 
   Future<void> _post() async {
     if (_busy) return;
+    final forum = _channel;
+    if (forum == null ||
+        !canCreateForumPostNow(
+          forum,
+          hasAttachments: _attachments.isNotEmpty,
+        )) {
+      setState(() => _error = 'Forum permissions changed. Try again.');
+      return;
+    }
     final title = _title.text.trim();
     final message = _message.text.trim();
     if (!canSubmitForumPost(
@@ -752,10 +837,10 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       }
       return;
     }
-    final encryptedStarter = deferThreadStarterUntilE2eeActive(widget.channel);
+    final encryptedStarter = deferThreadStarterUntilE2eeActive(forum);
     final sortedTags = _selectedTags.toList()..sort();
     final encryptedDraftKey = jsonEncode(<String, Object?>{
-      'forum': widget.channel.ref.wire,
+      'forum': forum.ref.wire,
       'title': title,
       'message': message,
       'tags': sortedTags,
@@ -782,14 +867,16 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
     });
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
+      if (!_authorized) return;
       if (encryptedStarter) {
         _encryptedDraftKey ??= encryptedDraftKey;
         _encryptedReservation ??= await controller.reserveEncryptedForumThread(
-          parent: widget.channel,
+          parent: forum,
           name: title,
           clientNonce: const Uuid().v4(),
           appliedTagIds: sortedTags,
         );
+        if (!_authorized) return;
         var thread = await controller.ensureRequiredThreadEncryption(
           _encryptedReservation!.channel,
         );
@@ -806,6 +893,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
         if (_encryptedClaimEnvelope == null) {
           final encryptedUploads = <EncryptedMobileUpload>[];
           for (final attachment in _attachments) {
+            if (!_authorized) return;
             encryptedUploads.add(await uploadEncryptedFile(
               repository: controller.repository,
               channel: thread.ref,
@@ -814,6 +902,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
               contentType: attachment.contentType,
             ));
           }
+          if (!_authorized) return;
           final allowedMentions = <String, Object?>{
             'parse': const <String>['everyone', 'roles', 'users'],
             'users': const <String>[],
@@ -861,6 +950,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
             ),
           );
         }
+        if (!_authorized) return;
         thread = await controller.claimEncryptedForumStarter(
           thread: thread,
           clientNonce: _encryptedReservation!.clientNonce,
@@ -873,15 +963,24 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       }
       final uploaded = <EntityRef>[];
       for (final attachment in _attachments) {
+        if (!_authorized) return;
         uploaded.add(await controller.repository.uploadAttachmentFile(
-          channel: widget.channel.ref,
+          channel: forum.ref,
           filename: attachment.name,
           contentType: attachment.contentType,
           file: attachment.file,
         ));
       }
+      final current = _channel;
+      if (current == null ||
+          !canCreateForumPostNow(
+            current,
+            hasAttachments: _attachments.isNotEmpty,
+          )) {
+        return;
+      }
       final created = await controller.createThread(
-        parent: widget.channel,
+        parent: current,
         name: title,
         content: message,
         appliedTagIds: sortedTags,
@@ -900,9 +999,19 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final canManage = canManageThreads(widget.channel);
-    final guidelines = widget.channel.topic?.trim();
-    final canAttach = widget.channel.allows(Permission.attachFiles);
+    ref.watch(mobileControllerProvider.select((state) => state.guilds));
+    final channel = _channel;
+    if (channel == null || !canCreateForumPost(channel)) {
+      return Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('Forum permissions changed. Close and try again.'),
+        ),
+      );
+    }
+    final canManage = canManageThreads(channel);
+    final guidelines = channel.topic?.trim();
+    final canAttach = channel.allows(Permission.attachFiles);
     return PopScope(
       canPop: !_busy && _encryptedReservation == null,
       child: Padding(
@@ -1009,7 +1118,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                   counterText: '',
                 ),
               ),
-              if (widget.channel.availableTags.isNotEmpty) ...[
+              if (channel.availableTags.isNotEmpty) ...[
                 SizedBox(height: 14),
                 Text(_requiresTag ? 'Tags · Required' : 'Tags',
                     style: TextStyle(fontWeight: FontWeight.w700)),
@@ -1018,11 +1127,11 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                   spacing: 7,
                   runSpacing: 7,
                   children: [
-                    for (final tag in widget.channel.availableTags)
+                    for (final tag in channel.availableTags)
                       FilterChip(
                         label: ForumTagLabel(
                           tag: tag,
-                          originDomain: widget.channel.ref.domain,
+                          originDomain: channel.ref.domain,
                         ),
                         selected: _selectedTags.contains(tag.id),
                         onSelected: tag.moderated && !canManage

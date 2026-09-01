@@ -62,13 +62,45 @@ String conversationHeaderTitle(KaedeChannel channel) {
 bool _isVoiceLikeChannel(KaedeChannel channel) => channel.type.isVoiceLike;
 
 bool supportsPinnedMessages(KaedeChannel channel) =>
-    channel.type == ChannelType.dm ||
-    channel.type == ChannelType.groupDm ||
-    channel.type == ChannelType.text ||
-    channel.type == ChannelType.announcement ||
-    channel.isThread;
+    canReadRetainedChannelHistory(channel) &&
+    (channel.type == ChannelType.dm ||
+        channel.type == ChannelType.groupDm ||
+        channel.type == ChannelType.text ||
+        channel.type == ChannelType.announcement ||
+        channel.isThread);
 
 bool conversationCallUsesOverflow(double width) => width <= 360;
+
+bool canManageChannelSettings(
+  KaedeGuild? guild,
+  KaedeChannel channel,
+  EntityRef? actor,
+) =>
+    guild != null &&
+    canManageEffectiveChannel(
+      channel,
+      Permission.manageChannels,
+      isOwner: actor == guild.ownerRef,
+    );
+
+bool canViewGuildMemberRoster(KaedeGuild guild, EntityRef? actor) =>
+    actor == guild.ownerRef ||
+    guild.allows(Permission.administrator) ||
+    guild.allows(Permission.viewChannel);
+
+KaedeGuild? liveGuildByRef(MobileState state, EntityRef ref) =>
+    state.guilds.where((guild) => guild.ref == ref).firstOrNull;
+
+KaedeChannel? liveChannelByRef(MobileState state, EntityRef ref) {
+  for (final channel in <KaedeChannel>[
+    ...state.dms,
+    for (final guild in state.guilds) ...guild.channels,
+    ...state.threads,
+  ]) {
+    if (channel.ref == ref) return channel;
+  }
+  return null;
+}
 
 @visibleForTesting
 bool messageSearchRouteCanDismiss(BuildContext context) =>
@@ -315,9 +347,12 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     // Only the open conversation belongs to this build. Banners and the voice
     // strip watch their own slices, so an arriving message or presence update
     // cannot rebuild the page view while a swipe is still in flight.
-    final activeChannel = ref.watch(
-      mobileControllerProvider.select((state) => state.activeChannel),
-    );
+    final conversation = ref.watch(mobileControllerProvider.select((state) => (
+          channel: state.activeChannel,
+          guild: state.activeGuild,
+          actor: state.user?.ref,
+        )));
+    final activeChannel = conversation.channel;
     final body = SafeArea(
       bottom: false,
       child: Column(
@@ -348,9 +383,14 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                             channel: activeChannel,
                             visible: _conversationVisible,
                             onBack: _openNavigation,
-                            onMembers: activeChannel.guildRef == null
-                                ? null
-                                : _openMembers,
+                            onMembers: activeChannel.guildRef != null &&
+                                    conversation.guild != null &&
+                                    canViewGuildMemberRoster(
+                                      conversation.guild!,
+                                      conversation.actor,
+                                    )
+                                ? _openMembers
+                                : null,
                           ),
                   ],
                 ),
@@ -445,8 +485,11 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
   }
 
   void _openMembers() {
-    final guild = ref.read(mobileControllerProvider).activeGuild;
-    if (guild == null) return;
+    final state = ref.read(mobileControllerProvider);
+    final guild = state.activeGuild;
+    if (guild == null || !canViewGuildMemberRoster(guild, state.user?.ref)) {
+      return;
+    }
     unawaited(Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => _GuildMemberRoute(guild: guild)),
     ));
@@ -769,12 +812,19 @@ final class _ConversationScreenState
     );
   }
 
-  Future<void> _showPinnedMessages() => showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (_) => _PinnedMessagesSheet(channel: widget.channel),
-      );
+  Future<void> _showPinnedMessages() async {
+    final current = ref.read(mobileControllerProvider).activeChannel;
+    if (current?.ref != widget.channel.ref ||
+        !canReadRetainedChannelHistory(current!)) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _PinnedMessagesSheet(channel: current),
+    );
+  }
 
   Future<void> _showAnnouncementFollow() async {
     final state = ref.read(mobileControllerProvider);
@@ -795,6 +845,7 @@ final class _ConversationScreenState
           guilds: state.guilds,
           currentUser: state.user,
           repository: ref.read(mobileControllerProvider.notifier).repository,
+          liveController: ref.read(mobileControllerProvider.notifier),
           sourceChannel: widget.channel,
           createOnly: true,
         ),
@@ -810,21 +861,28 @@ final class _ConversationScreenState
         builder: (_) => _ThreadMembersSheet(thread: widget.channel),
       );
 
-  Future<void> _showThreads() => showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        showDragHandle: true,
-        builder: (_) => _ThreadsSheet(
-          parent: widget.channel,
-          onOpen: (thread) {
-            Navigator.pop(context);
-            unawaited(ref
-                .read(mobileControllerProvider.notifier)
-                .selectChannel(thread));
-          },
-        ),
-      );
+  Future<void> _showThreads() async {
+    final current = ref.read(mobileControllerProvider).activeChannel;
+    if (current?.ref != widget.channel.ref ||
+        !canReadRetainedChannelHistory(current!)) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) => _ThreadsSheet(
+        parent: current,
+        onOpen: (thread) {
+          Navigator.pop(context);
+          unawaited(ref
+              .read(mobileControllerProvider.notifier)
+              .selectChannel(thread));
+        },
+      ),
+    );
+  }
 
   Future<void> _toggleThreadFollow() async {
     if (_threadBusy || widget.channel.archived) return;
@@ -844,38 +902,61 @@ final class _ConversationScreenState
     }
   }
 
-  Future<void> _showMessageSearch() => Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (searchContext) => MessageSearchScreen(
-            repository: ref.read(mobileControllerProvider.notifier).repository,
-            scope: widget.channel.guildRef == null ? 'channel' : 'guild',
-            scopeRef: widget.channel.guildRef ?? widget.channel.ref,
-            channel: widget.channel,
-            accountRef:
-                ref.read(mobileControllerProvider.notifier).api.tokens?.userRef,
-            users: messageSearchUserCandidates(<KaedeUser?>[
-              ref.read(mobileControllerProvider).user,
-              ...ref.read(mobileControllerProvider).userProfiles.values,
-              ...widget.channel.recipients,
-            ]),
-            onJump: (result) async {
-              final controller = ref.read(mobileControllerProvider.notifier);
-              final opened = await controller.selectAndJumpToMessage(
-                result.channel,
-                result.message.ref,
-                shouldContinue: () =>
-                    messageSearchRouteCanDismiss(searchContext),
-              );
-              if (!searchContext.mounted ||
-                  !opened ||
-                  !messageSearchRouteCanDismiss(searchContext)) {
-                return;
-              }
-              Navigator.of(searchContext).pop();
-            },
-          ),
+  Future<void> _showMessageSearch() {
+    final current = ref.read(mobileControllerProvider).activeChannel;
+    if (current?.ref != widget.channel.ref ||
+        !canReadRetainedChannelHistory(current!)) {
+      return Future<void>.value();
+    }
+    return Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (searchContext) => Consumer(
+          builder: (context, routeRef, _) {
+            final state = routeRef.watch(mobileControllerProvider);
+            final active = state.activeChannel;
+            final historyAvailable = active?.ref == widget.channel.ref &&
+                canReadRetainedChannelHistory(active!);
+            return MessageSearchScreen(
+              repository:
+                  routeRef.read(mobileControllerProvider.notifier).repository,
+              scope: widget.channel.guildRef == null ? 'channel' : 'guild',
+              scopeRef: widget.channel.guildRef ?? widget.channel.ref,
+              channel: widget.channel,
+              historyAvailable: historyAvailable,
+              accountRef: routeRef
+                  .read(mobileControllerProvider.notifier)
+                  .api
+                  .tokens
+                  ?.userRef,
+              users: messageSearchUserCandidates(<KaedeUser?>[
+                state.user,
+                ...state.userProfiles.values,
+                ...widget.channel.recipients,
+              ]),
+              onJump: (result) async {
+                if (!historyAvailable) return;
+                final controller =
+                    routeRef.read(mobileControllerProvider.notifier);
+                final opened = await controller.selectAndJumpToMessage(
+                  result.channel,
+                  result.message.ref,
+                  shouldContinue: () =>
+                      historyAvailable &&
+                      messageSearchRouteCanDismiss(searchContext),
+                );
+                if (!searchContext.mounted ||
+                    !opened ||
+                    !messageSearchRouteCanDismiss(searchContext)) {
+                  return;
+                }
+                Navigator.of(searchContext).pop();
+              },
+            );
+          },
         ),
-      );
+      ),
+    );
+  }
 
   /// Encryption is a one-way decision for a room, so it lives inside the
   /// channel or conversation settings sheet rather than the header.
@@ -883,9 +964,6 @@ final class _ConversationScreenState
     if (widget.channel.guildRef != null) {
       final state = ref.read(mobileControllerProvider);
       final guild = state.activeGuild;
-      final canManage = guild != null &&
-          (state.user?.ref == guild.ownerRef ||
-              guild.allows(Permission.manageChannels));
       if (widget.channel.isThread) {
         await showModalBottomSheet<void>(
           context: context,
@@ -894,7 +972,6 @@ final class _ConversationScreenState
           showDragHandle: true,
           builder: (_) => _ThreadDetailsSheet(
             thread: widget.channel,
-            canManage: canManageThreads(widget.channel),
             onPins: () {
               Navigator.of(context).pop();
               unawaited(_showPinnedMessages());
@@ -911,7 +988,6 @@ final class _ConversationScreenState
         builder: (_) => _ChannelDetailsSheet(
           channel: widget.channel,
           guild: guild,
-          canManageChannels: canManage,
           onPins: () {
             Navigator.of(context).pop();
             unawaited(_showPinnedMessages());
@@ -951,8 +1027,10 @@ final class _ConversationScreenState
     final callUsesOverflow = conversationCallUsesOverflow(width);
     final isDm = widget.channel.type == ChannelType.dm ||
         widget.channel.type == ChannelType.groupDm;
-    final supportsThreads = widget.channel.type == ChannelType.text ||
-        widget.channel.type == ChannelType.announcement;
+    final canReadHistory = canReadRetainedChannelHistory(widget.channel);
+    final supportsThreads = canReadHistory &&
+        (widget.channel.type == ChannelType.text ||
+            widget.channel.type == ChannelType.announcement);
     final overflowItems = <PopupMenuEntry<String>>[
       if (supportsPinnedMessages(widget.channel))
         PopupMenuItem(
@@ -1083,7 +1161,8 @@ final class _ConversationScreenState
                 onPressed: _showThreads,
                 icon: Icon(Icons.forum_outlined),
               ),
-            if (!widget.channel.isForum &&
+            if (canReadHistory &&
+                !widget.channel.isForum &&
                 widget.channel.type != ChannelType.tracker)
               IconButton(
                 tooltip: 'Search this conversation',
@@ -1165,6 +1244,18 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
   String? _error;
   var _busy = false;
 
+  KaedeChannel? get _currentParent {
+    final state = ref.read(mobileControllerProvider);
+    return state.activeGuild?.channels
+        .where((channel) => channel.ref == widget.parent.ref)
+        .firstOrNull;
+  }
+
+  bool get _historyAvailable {
+    final parent = _currentParent;
+    return parent != null && canReadRetainedChannelHistory(parent);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1172,13 +1263,14 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
   }
 
   Future<void> _load() async {
+    if (!_historyAvailable) return;
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
       final pages = await Future.wait<ThreadPage>([
         controller.loadThreads(widget.parent.ref),
         controller.loadThreads(widget.parent.ref, archived: true),
       ]);
-      if (!mounted) return;
+      if (!mounted || !_historyAvailable) return;
       setState(() {
         _active = pages[0].threads;
         _archived = pages[1].threads;
@@ -1267,6 +1359,24 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final historyAvailable = ref.watch(mobileControllerProvider.select(
+      (state) {
+        final parent = state.activeGuild?.channels
+            .where((channel) => channel.ref == widget.parent.ref)
+            .firstOrNull;
+        return parent != null && canReadRetainedChannelHistory(parent);
+      },
+    ));
+    if (!historyAvailable && (_active != null || _archived != null)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_historyAvailable) {
+          setState(() {
+            _active = null;
+            _archived = null;
+          });
+        }
+      });
+    }
     final canCreate = canCreatePublicThread(widget.parent) ||
         (widget.parent.type == ChannelType.text &&
             canCreatePrivateThread(widget.parent));
@@ -1296,39 +1406,52 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
               child: Text(error, style: TextStyle(color: context.kaede.danger)),
             ),
           Expanded(
-            child: _active == null || _archived == null
-                ? Center(child: CircularProgressIndicator())
-                : RefreshIndicator(
-                    onRefresh: _load,
-                    child: ListView(
-                      padding: EdgeInsets.fromLTRB(12, 4, 12, 20),
-                      children: [
-                        const _ThreadSectionLabel('Active Threads'),
-                        if (_active!.isEmpty)
-                          ListTile(
-                            title: Text('No active threads',
-                                style: TextStyle(color: context.kaede.muted)),
-                          ),
-                        for (final thread in _active!)
-                          _ThreadBrowseRow(
-                            thread: thread,
-                            onOpen: () => widget.onOpen(thread),
-                          ),
-                        SizedBox(height: 12),
-                        const _ThreadSectionLabel('Archived Threads'),
-                        if (_archived!.isEmpty)
-                          ListTile(
-                            title: Text('No archived threads',
-                                style: TextStyle(color: context.kaede.muted)),
-                          ),
-                        for (final thread in _archived!)
-                          _ThreadBrowseRow(
-                            thread: thread,
-                            onOpen: () => widget.onOpen(thread),
-                          ),
-                      ],
+            child: !historyAvailable
+                ? Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(28),
+                      child: Text(
+                        'Message history is unavailable in this channel.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: context.kaede.muted),
+                      ),
                     ),
-                  ),
+                  )
+                : _active == null || _archived == null
+                    ? Center(child: CircularProgressIndicator())
+                    : RefreshIndicator(
+                        onRefresh: _load,
+                        child: ListView(
+                          padding: EdgeInsets.fromLTRB(12, 4, 12, 20),
+                          children: [
+                            const _ThreadSectionLabel('Active Threads'),
+                            if (_active!.isEmpty)
+                              ListTile(
+                                title: Text('No active threads',
+                                    style:
+                                        TextStyle(color: context.kaede.muted)),
+                              ),
+                            for (final thread in _active!)
+                              _ThreadBrowseRow(
+                                thread: thread,
+                                onOpen: () => widget.onOpen(thread),
+                              ),
+                            SizedBox(height: 12),
+                            const _ThreadSectionLabel('Archived Threads'),
+                            if (_archived!.isEmpty)
+                              ListTile(
+                                title: Text('No archived threads',
+                                    style:
+                                        TextStyle(color: context.kaede.muted)),
+                              ),
+                            for (final thread in _archived!)
+                              _ThreadBrowseRow(
+                                thread: thread,
+                                onOpen: () => widget.onOpen(thread),
+                              ),
+                          ],
+                        ),
+                      ),
           ),
         ],
       ),
@@ -1377,12 +1500,10 @@ final class _ThreadBrowseRow extends StatelessWidget {
 final class _ThreadDetailsSheet extends ConsumerStatefulWidget {
   const _ThreadDetailsSheet({
     required this.thread,
-    required this.canManage,
     required this.onPins,
   });
 
   final KaedeChannel thread;
-  final bool canManage;
   final VoidCallback onPins;
 
   @override
@@ -1395,33 +1516,44 @@ final class _ThreadDetailsSheetState
   var _busy = false;
   String? _error;
 
-  KaedeChannel get _thread {
-    for (final candidate in ref.read(mobileControllerProvider).threads) {
-      if (candidate.ref == widget.thread.ref) return candidate;
-    }
-    return widget.thread;
-  }
+  KaedeChannel? get _liveThread => liveChannelByRef(
+        ref.read(mobileControllerProvider),
+        widget.thread.ref,
+      );
 
   KaedeChannel? get _parent {
-    final parent = _thread.parentRef;
+    final parent = _liveThread?.parentRef;
     if (parent == null) return null;
     final state = ref.read(mobileControllerProvider);
-    for (final channel in <KaedeChannel>[
-      ...?state.activeGuild?.channels,
-      ...state.threads,
-    ]) {
-      if (channel.ref == parent) return channel;
-    }
-    return null;
+    return liveChannelByRef(state, parent);
   }
 
-  Future<void> _run(Future<void> Function() action) async {
-    if (_busy) return;
+  bool get _canManage {
+    final thread = _liveThread;
+    return thread != null && canManageThreads(thread);
+  }
+
+  bool get _canEdit {
+    final state = ref.read(mobileControllerProvider);
+    final thread = liveChannelByRef(state, widget.thread.ref);
+    if (thread == null) return false;
+    return canManageThreads(thread) ||
+        (!thread.locked &&
+            thread.ownerRef == state.user?.ref &&
+            hasSendMessagesInThreads(thread));
+  }
+
+  Future<void> _run(
+    Future<void> Function() action, {
+    bool Function()? authorized,
+  }) async {
+    if (_busy || authorized?.call() == false) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
+      if (authorized?.call() == false) return;
       await action();
     } on Object catch (error) {
       if (mounted) setState(() => _error = userFacingError(error));
@@ -1431,7 +1563,9 @@ final class _ThreadDetailsSheetState
   }
 
   Future<void> _edit() async {
-    final thread = _thread;
+    final thread = _liveThread;
+    if (thread == null || !_canEdit) return;
+    final canManage = _canManage;
     final forum = _parent?.isForum == true ? _parent : null;
     final name = TextEditingController(text: thread.name ?? '');
     var duration = thread.autoArchiveDuration;
@@ -1485,7 +1619,7 @@ final class _ThreadDetailsSheetState
                           originDomain: forum.ref.domain,
                         ),
                         selected: appliedTags.contains(tag.id),
-                        onSelected: tag.moderated && !widget.canManage
+                        onSelected: tag.moderated && !canManage
                             ? null
                             : (_) => setDialogState(() {
                                   if (!appliedTags.remove(tag.id) &&
@@ -1528,18 +1662,21 @@ final class _ThreadDetailsSheetState
       ),
     );
     name.dispose();
-    if (result == null) return;
-    await _run(() => ref
-            .read(mobileControllerProvider.notifier)
-            .updateThread(thread, <String, Object?>{
-          'name': result.$1,
-          'auto_archive_duration': result.$2,
-          if (forum != null) 'applied_tag_ids': result.$3,
-        }));
+    if (result == null || !_canEdit) return;
+    await _run(
+        () => ref
+                .read(mobileControllerProvider.notifier)
+                .updateThread(thread, <String, Object?>{
+              'name': result.$1,
+              'auto_archive_duration': result.$2,
+              if (forum != null) 'applied_tag_ids': result.$3,
+            }),
+        authorized: () => _canEdit);
   }
 
   Future<void> _notifications() async {
-    final thread = _thread;
+    final thread = _liveThread;
+    if (thread == null) return;
     final current = thread.member?.notificationLevel ?? 'inherit';
     final selected = await showModalBottomSheet<String>(
       context: context,
@@ -1603,6 +1740,7 @@ final class _ThreadDetailsSheetState
       };
 
   Future<void> _delete() async {
+    if (!_canManage) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1621,11 +1759,13 @@ final class _ThreadDetailsSheetState
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !_canManage) return;
     await _run(() async {
-      await ref.read(mobileControllerProvider.notifier).deleteThread(_thread);
+      final thread = _liveThread;
+      if (thread == null) return;
+      await ref.read(mobileControllerProvider.notifier).deleteThread(thread);
       if (mounted) Navigator.pop(context);
-    });
+    }, authorized: () => _canManage);
   }
 
   @override
@@ -1636,11 +1776,14 @@ final class _ThreadDetailsSheetState
           state.e2eeActivationEnabled,
         )));
     final state = ref.read(mobileControllerProvider);
-    final thread = _thread;
+    final thread = _liveThread;
+    if (thread == null) return SizedBox.shrink();
     final isPost = _parent?.isForum == true;
     final isOwner = state.user?.ref == thread.ownerRef;
-    final canEdit = widget.canManage || (!thread.locked && isOwner);
-    final canReopen = !thread.locked || widget.canManage;
+    final canManage = canManageThreads(thread);
+    final canEdit = canManage ||
+        (!thread.locked && isOwner && hasSendMessagesInThreads(thread));
+    final canReopen = !thread.locked || canManage;
     final showEncryption =
         thread.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
     return SafeArea(
@@ -1653,12 +1796,13 @@ final class _ThreadDetailsSheetState
             Text(isPost ? 'Post settings' : 'Thread settings',
                 style: Theme.of(context).textTheme.headlineSmall),
             SizedBox(height: 16),
-            _SettingsRow(
-              icon: Icons.push_pin_outlined,
-              title: 'Pins',
-              subtitle: 'Messages saved in this conversation',
-              onTap: widget.onPins,
-            ),
+            if (canReadRetainedChannelHistory(thread))
+              _SettingsRow(
+                icon: Icons.push_pin_outlined,
+                title: 'Pins',
+                subtitle: 'Messages saved in this conversation',
+                onTap: widget.onPins,
+              ),
             if (canEdit)
               _SettingsRow(
                 icon: Icons.edit_outlined,
@@ -1698,7 +1842,7 @@ final class _ThreadDetailsSheetState
                     : Icons.archive_outlined,
                 title: thread.archived
                     ? (isPost ? 'Reopen Post' : 'Unarchive Thread')
-                    : isPost && widget.canManage
+                    : isPost && canManage
                         ? 'Close Post'
                         : 'Archive Thread',
                 subtitle: thread.locked && thread.archived
@@ -1706,16 +1850,19 @@ final class _ThreadDetailsSheetState
                     : null,
                 onTap: _busy || (thread.archived && !canReopen)
                     ? null
-                    : () => _run(() => ref
-                            .read(mobileControllerProvider.notifier)
-                            .updateThread(thread, <String, Object?>{
-                          'archived': !thread.archived,
-                          if (thread.archived && thread.locked) 'locked': false,
-                          if (!thread.archived && isPost && widget.canManage)
-                            'locked': true,
-                        })),
+                    : () => _run(
+                        () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .updateThread(thread, <String, Object?>{
+                              'archived': !thread.archived,
+                              if (thread.archived && thread.locked)
+                                'locked': false,
+                              if (!thread.archived && isPost && canManage)
+                                'locked': true,
+                            }),
+                        authorized: () => _canEdit),
               ),
-            if (widget.canManage)
+            if (canManage)
               _SettingsRow(
                 icon: thread.locked
                     ? Icons.lock_open_outlined
@@ -1726,15 +1873,17 @@ final class _ThreadDetailsSheetState
                     : 'Only moderators can send or reopen',
                 onTap: _busy
                     ? null
-                    : () => _run(() => ref
-                            .read(mobileControllerProvider.notifier)
-                            .updateThread(thread, <String, Object?>{
-                          'locked': !thread.locked,
-                          if (thread.locked && thread.archived)
-                            'archived': false,
-                        })),
+                    : () => _run(
+                        () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .updateThread(thread, <String, Object?>{
+                              'locked': !thread.locked,
+                              if (thread.locked && thread.archived)
+                                'archived': false,
+                            }),
+                        authorized: () => _canManage),
               ),
-            if (widget.canManage && isPost)
+            if (canManage && isPost)
               _SettingsRow(
                 icon: thread.pinned
                     ? Icons.push_pin_rounded
@@ -1745,11 +1894,13 @@ final class _ThreadDetailsSheetState
                     : 'Only one post can be pinned in this forum',
                 onTap: _busy || thread.archived
                     ? null
-                    : () => _run(() => ref
-                            .read(mobileControllerProvider.notifier)
-                            .updateThread(thread, <String, Object?>{
-                          'pinned': !thread.pinned,
-                        })),
+                    : () => _run(
+                        () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .updateThread(thread, <String, Object?>{
+                              'pinned': !thread.pinned,
+                            }),
+                        authorized: () => _canManage),
               ),
             if (thread.type == ChannelType.privateThread && canEdit)
               SwitchListTile(
@@ -1757,11 +1908,13 @@ final class _ThreadDetailsSheetState
                 value: thread.invitable,
                 onChanged: _busy || thread.archived
                     ? null
-                    : (value) => _run(() => ref
-                            .read(mobileControllerProvider.notifier)
-                            .updateThread(thread, <String, Object?>{
-                          'invitable': value,
-                        })),
+                    : (value) => _run(
+                        () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .updateThread(thread, <String, Object?>{
+                              'invitable': value,
+                            }),
+                        authorized: () => _canEdit),
                 title: Text('Allow members to invite'),
               ),
             if (showEncryption)
@@ -1787,7 +1940,7 @@ final class _ThreadDetailsSheetState
                           canManage: canEdit,
                         ),
               ),
-            if (widget.canManage)
+            if (canManage)
               _SettingsRow(
                 icon: Icons.delete_outline_rounded,
                 iconColor: context.kaede.danger,
@@ -1823,6 +1976,11 @@ final class _ThreadMembersSheetState
   var _busy = false;
   String? _error;
 
+  KaedeChannel? get _thread => liveChannelByRef(
+        ref.read(mobileControllerProvider),
+        widget.thread.ref,
+      );
+
   @override
   void initState() {
     super.initState();
@@ -1849,7 +2007,13 @@ final class _ThreadMembersSheetState
 
   Future<void> _add() async {
     final handle = _invite.text.trim();
-    if (_busy || handle.isEmpty) return;
+    final thread = _thread;
+    if (_busy ||
+        handle.isEmpty ||
+        thread == null ||
+        !canAddThreadMember(thread)) {
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -1857,8 +2021,39 @@ final class _ThreadMembersSheetState
     try {
       final repository = ref.read(mobileControllerProvider.notifier).repository;
       final user = await repository.lookupUser(handle);
-      await repository.addThreadMember(widget.thread.ref, user.ref);
+      final current = _thread;
+      if (current == null || !canAddThreadMember(current)) return;
+      await repository.addThreadMember(current.ref, user.ref);
       _invite.clear();
+      await _load();
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _remove(ThreadMember member) async {
+    final state = ref.read(mobileControllerProvider);
+    final thread = liveChannelByRef(state, widget.thread.ref);
+    if (_busy ||
+        thread == null ||
+        member.userRef == state.user?.ref ||
+        !canRemoveThreadMember(thread, state.user?.ref)) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final currentState = ref.read(mobileControllerProvider);
+      final current = liveChannelByRef(currentState, widget.thread.ref);
+      if (current == null ||
+          !canRemoveThreadMember(current, currentState.user?.ref)) {
+        return;
+      }
+      await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .removeThreadMember(current.ref, member.userRef);
       await _load();
     } on Object catch (error) {
       if (mounted) setState(() => _error = userFacingError(error));
@@ -1871,8 +2066,10 @@ final class _ThreadMembersSheetState
   Widget build(BuildContext context) {
     final state = ref.watch(mobileControllerProvider);
     final members = _members;
-    final canInvite = canAddThreadMember(widget.thread);
-    final canRemove = canRemoveThreadMember(widget.thread, state.user?.ref);
+    final thread = liveChannelByRef(state, widget.thread.ref);
+    if (thread == null) return SizedBox.shrink();
+    final canInvite = canAddThreadMember(thread);
+    final canRemove = canRemoveThreadMember(thread, state.user?.ref);
     return SafeArea(
       child: Padding(
         padding: EdgeInsets.fromLTRB(
@@ -1940,32 +2137,8 @@ final class _ThreadMembersSheetState
                                       member.userRef != state.user?.ref
                                   ? IconButton(
                                       tooltip: 'Remove member',
-                                      onPressed: _busy
-                                          ? null
-                                          : () async {
-                                              setState(() => _busy = true);
-                                              try {
-                                                await ref
-                                                    .read(
-                                                        mobileControllerProvider
-                                                            .notifier)
-                                                    .repository
-                                                    .removeThreadMember(
-                                                      widget.thread.ref,
-                                                      member.userRef,
-                                                    );
-                                                await _load();
-                                              } on Object catch (error) {
-                                                if (mounted) {
-                                                  setState(() => _error =
-                                                      userFacingError(error));
-                                                }
-                                              } finally {
-                                                if (mounted) {
-                                                  setState(() => _busy = false);
-                                                }
-                                              }
-                                            },
+                                      onPressed:
+                                          _busy ? null : () => _remove(member),
                                       icon: Icon(Icons.person_remove_outlined),
                                     )
                                   : null,
@@ -2097,13 +2270,11 @@ final class _ChannelDetailsSheet extends ConsumerStatefulWidget {
   const _ChannelDetailsSheet({
     required this.channel,
     required this.guild,
-    required this.canManageChannels,
     required this.onPins,
   });
 
   final KaedeChannel channel;
   final KaedeGuild? guild;
-  final bool canManageChannels;
   final VoidCallback onPins;
 
   @override
@@ -2115,23 +2286,43 @@ final class _ChannelDetailsSheetState
     extends ConsumerState<_ChannelDetailsSheet> {
   var _busy = false;
 
-  KaedeChannel get _channel {
-    for (final guild in ref.read(mobileControllerProvider).guilds) {
-      for (final candidate in guild.channels) {
-        if (candidate.ref == widget.channel.ref) return candidate;
-      }
-    }
-    return widget.channel;
+  KaedeGuild? get _guild => widget.guild == null
+      ? null
+      : liveGuildByRef(
+          ref.read(mobileControllerProvider),
+          widget.guild!.ref,
+        );
+
+  KaedeChannel? get _channel => liveChannelByRef(
+        ref.read(mobileControllerProvider),
+        widget.channel.ref,
+      );
+
+  bool get _canManage {
+    final state = ref.read(mobileControllerProvider);
+    final guild =
+        widget.guild == null ? null : liveGuildByRef(state, widget.guild!.ref);
+    final channel = liveChannelByRef(state, widget.channel.ref);
+    return channel != null &&
+        canManageChannelSettings(guild, channel, state.user?.ref);
   }
 
   Future<void> _edit() async {
-    final guild = widget.guild;
-    if (guild == null) return;
+    final guild = _guild;
     final channel = _channel;
+    if (guild == null || channel == null || !_canManage) return;
+    final isOwner =
+        ref.read(mobileControllerProvider).user?.ref == guild.ownerRef;
+    final categories = <KaedeChannel>[
+      for (final candidate in guild.channels)
+        if (channelCategoryTargetEligible(candidate, isOwner: isOwner) ||
+            candidate.ref == channel.parentRef)
+          candidate,
+    ];
     final draft = await showGuildChannelEditorSheet(
       context,
       channel: channel,
-      channels: guild.channels,
+      channels: categories,
       e2eeActivationEnabled:
           ref.read(mobileControllerProvider).e2eeActivationEnabled,
       loadVoiceRegions: () => ref
@@ -2140,13 +2331,35 @@ final class _ChannelDetailsSheetState
           .voiceRegions(guild.ref),
     );
     if (draft == null || !mounted) return;
+    final state = ref.read(mobileControllerProvider);
+    final currentGuild = liveGuildByRef(state, guild.ref);
+    final current = liveChannelByRef(state, channel.ref);
+    final currentOwner = state.user?.ref == currentGuild?.ownerRef;
+    final parentChanged = draft.parentRef != current?.parentRef;
+    final parentAllowed = draft.parentRef == null ||
+        currentGuild?.channels.any((candidate) =>
+                candidate.ref == draft.parentRef &&
+                channelCategoryTargetEligible(
+                  candidate,
+                  isOwner: currentOwner,
+                )) ==
+            true;
+    if (currentGuild == null ||
+        current == null ||
+        !canManageChannelSettings(currentGuild, current, state.user?.ref) ||
+        (parentChanged && !parentAllowed)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Channel permissions changed. Try again.')),
+      );
+      return;
+    }
     setState(() => _busy = true);
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
       await controller.repository.updateChannel(
-        guild.ref,
-        channel.ref,
-        channel.version ?? '*',
+        currentGuild.ref,
+        current.ref,
+        current.version ?? '*',
         draft.json,
       );
       await controller.refreshNavigation();
@@ -2171,10 +2384,12 @@ final class _ChannelDetailsSheetState
 
   @override
   Widget build(BuildContext context) {
-    final channel = _channel;
-    ref.watch(mobileControllerProvider
-        .select((state) => state.e2eeActivationEnabled));
-    final state = ref.read(mobileControllerProvider);
+    final state = ref.watch(mobileControllerProvider);
+    final channel = liveChannelByRef(state, widget.channel.ref);
+    final guild =
+        widget.guild == null ? null : liveGuildByRef(state, widget.guild!.ref);
+    if (channel == null) return SizedBox.shrink();
+    final canManage = canManageChannelSettings(guild, channel, state.user?.ref);
     final showEncryption = !channel.isForum &&
         channel.type != ChannelType.tracker &&
         (channel.encryptionMode == 'e2ee' || state.e2eeActivationEnabled);
@@ -2228,7 +2443,7 @@ final class _ChannelDetailsSheetState
                 subtitle: 'Messages saved in this channel',
                 onTap: widget.onPins,
               ),
-            if (widget.canManageChannels)
+            if (canManage)
               _SettingsRow(
                 icon: Icons.edit_outlined,
                 title: 'Edit channel',
@@ -2251,19 +2466,22 @@ final class _ChannelDetailsSheetState
                     : 'Off · permanent once enabled',
                 onTap: _busy
                     ? null
-                    : () => _showE2eeRoomSettings(
+                    : () {
+                        if (!_canManage) return;
+                        _showE2eeRoomSettings(
                           context,
                           ref,
                           channel,
-                          canManage: widget.canManageChannels,
-                        ),
+                          canManage: true,
+                        );
+                      },
               ),
-            if (!widget.canManageChannels && !showEncryption)
+            if (!canManage && !showEncryption)
               Text(
                 'You do not have permission to change this channel.',
                 style: TextStyle(color: context.kaede.muted, fontSize: 13),
               ),
-            if (widget.guild != null && widget.canManageChannels)
+            if (guild != null && canManage)
               _SettingsRow(
                 icon: Icons.tune_rounded,
                 title: 'Guild settings',
@@ -2274,8 +2492,7 @@ final class _ChannelDetailsSheetState
                         Navigator.pop(context);
                         Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) =>
-                                GuildManagementScreen(guild: widget.guild!),
+                            builder: (_) => GuildManagementScreen(guild: guild),
                           ),
                         );
                       },
@@ -2498,7 +2715,21 @@ final class _PinnedMessagesSheetState
   var _loading = true;
   String? _error;
 
-  bool get _canManage => canPinMessages(widget.channel);
+  KaedeChannel? get _currentChannel => liveChannelByRef(
+        ref.read(mobileControllerProvider),
+        widget.channel.ref,
+      );
+
+  bool get _canManage {
+    final channel = _currentChannel;
+    return channel != null && canPinMessages(channel);
+  }
+
+  bool get _historyAvailable {
+    final channel = _currentChannel;
+    return channel?.ref == widget.channel.ref &&
+        canReadRetainedChannelHistory(channel!);
+  }
 
   @override
   void initState() {
@@ -2520,6 +2751,16 @@ final class _PinnedMessagesSheetState
   }
 
   Future<void> _load() async {
+    if (!_historyAvailable) {
+      if (mounted) {
+        setState(() {
+          _messages = const [];
+          _loading = false;
+          _error = null;
+        });
+      }
+      return;
+    }
     setState(() {
       _loading = true;
       _error = null;
@@ -2531,6 +2772,7 @@ final class _PinnedMessagesSheetState
         messages = await (await controller.e2eeClient())
             .decryptMessages(widget.channel, messages);
       }
+      if (!_historyAvailable) return;
       messages.sort((a, b) =>
           (b.pinnedAt ?? b.createdAt).compareTo(a.pinnedAt ?? a.createdAt));
       if (mounted) setState(() => _messages = List.unmodifiable(messages));
@@ -2547,6 +2789,7 @@ final class _PinnedMessagesSheetState
   }
 
   Future<void> _jump(KaedeMessage message) async {
+    if (!_historyAvailable) return;
     Navigator.of(context).pop();
     await ref
         .read(mobileControllerProvider.notifier)
@@ -2554,7 +2797,9 @@ final class _PinnedMessagesSheetState
   }
 
   Future<void> _unpin(KaedeMessage message) async {
-    if (_unpinning.contains(message.ref)) return;
+    if (!_historyAvailable || !_canManage || _unpinning.contains(message.ref)) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -2572,12 +2817,15 @@ final class _PinnedMessagesSheetState
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !mounted || !_historyAvailable || !_canManage) {
+      return;
+    }
     setState(() {
       _unpinning.add(message.ref);
       _error = null;
     });
     try {
+      if (!_historyAvailable || !_canManage) return;
       await ref
           .read(mobileControllerProvider.notifier)
           .setMessagePinned(message, false);
@@ -2599,130 +2847,160 @@ final class _PinnedMessagesSheetState
   }
 
   @override
-  Widget build(BuildContext context) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * .72,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: EdgeInsets.fromLTRB(20, 2, 8, 12),
-                child: Row(
-                  children: [
-                    Icon(Icons.push_pin_rounded),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Pinned messages',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w800,
-                        ),
+  Widget build(BuildContext context) {
+    final authority = ref.watch(mobileControllerProvider.select((state) {
+      final channel = liveChannelByRef(state, widget.channel.ref);
+      return (
+        history: channel != null &&
+            state.activeChannel?.ref == channel.ref &&
+            canReadRetainedChannelHistory(channel),
+        canManage: channel != null && canPinMessages(channel),
+      );
+    }));
+    final historyAvailable = authority.history;
+    final canManage = authority.canManage;
+    if (!historyAvailable && _messages.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_historyAvailable) setState(() => _messages = const []);
+      });
+    }
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * .72,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: EdgeInsets.fromLTRB(20, 2, 8, 12),
+              child: Row(
+                children: [
+                  Icon(Icons.push_pin_rounded),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Pinned messages',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
-                    IconButton(
-                      tooltip: 'Close',
-                      onPressed: () => Navigator.pop(context),
-                      icon: Icon(Icons.close_rounded),
-                    ),
-                  ],
-                ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close',
+                    onPressed: () => Navigator.pop(context),
+                    icon: Icon(Icons.close_rounded),
+                  ),
+                ],
               ),
-              if (_error case final error?)
-                Material(
-                  color: Theme.of(context).colorScheme.errorContainer,
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(16, 8, 8, 8),
-                    child: Row(
-                      children: [
-                        Expanded(child: Text(error)),
-                        TextButton(onPressed: _load, child: Text('Retry')),
-                      ],
-                    ),
+            ),
+            if (_error case final error?)
+              Material(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(16, 8, 8, 8),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(error)),
+                      TextButton(onPressed: _load, child: Text('Retry')),
+                    ],
                   ),
                 ),
-              Expanded(
-                child: _loading
-                    ? Center(child: CircularProgressIndicator())
-                    : _error != null && _messages.isEmpty
-                        ? Center(
-                            child: Padding(
-                              padding: EdgeInsets.all(28),
-                              child: Text(
-                                'Pinned messages are unavailable right now.',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: context.kaede.muted),
-                              ),
-                            ),
-                          )
-                        : _messages.isEmpty
-                            ? const _EmptyPinnedMessages()
-                            : ListView.separated(
-                                padding: EdgeInsets.fromLTRB(12, 8, 12, 20),
-                                itemCount: _messages.length,
-                                separatorBuilder: (_, __) =>
-                                    SizedBox(height: 8),
-                                itemBuilder: (context, index) {
-                                  final message = _messages[index];
-                                  final author = message.author?.name ??
-                                      message.authorRef.wire;
-                                  final content = message.content?.trim();
-                                  final preview = content?.isNotEmpty == true
-                                      ? content!
-                                      : message.attachments.isNotEmpty
-                                          ? '${message.attachments.length} attachment${message.attachments.length == 1 ? '' : 's'}'
-                                          : 'Message';
-                                  return Card(
-                                    margin: EdgeInsets.zero,
-                                    child: ListTile(
-                                      key: ValueKey(
-                                          'pinned-${message.ref.wire}'),
-                                      onTap: () => _jump(message),
-                                      onLongPress: _canManage &&
-                                              !_unpinning.contains(message.ref)
-                                          ? () => _unpin(message)
-                                          : null,
-                                      title: Text(
-                                        author,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        preview,
-                                        maxLines: 3,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      trailing: _canManage
-                                          ? IconButton(
-                                              tooltip: 'Unpin message',
-                                              onPressed: _unpinning
-                                                      .contains(message.ref)
-                                                  ? null
-                                                  : () => _unpin(message),
-                                              icon: _unpinning
-                                                      .contains(message.ref)
-                                                  ? SizedBox.square(
-                                                      dimension: 18,
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                      ),
-                                                    )
-                                                  : Icon(Icons.close_rounded),
-                                            )
-                                          : Icon(Icons.chevron_right_rounded),
-                                    ),
-                                  );
-                                },
-                              ),
               ),
-            ],
-          ),
+            Expanded(
+              child: !historyAvailable
+                  ? Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(28),
+                        child: Text(
+                          'Message history is unavailable in this channel.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: context.kaede.muted),
+                        ),
+                      ),
+                    )
+                  : _loading
+                      ? Center(child: CircularProgressIndicator())
+                      : _error != null && _messages.isEmpty
+                          ? Center(
+                              child: Padding(
+                                padding: EdgeInsets.all(28),
+                                child: Text(
+                                  'Pinned messages are unavailable right now.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: context.kaede.muted),
+                                ),
+                              ),
+                            )
+                          : _messages.isEmpty
+                              ? const _EmptyPinnedMessages()
+                              : ListView.separated(
+                                  padding: EdgeInsets.fromLTRB(12, 8, 12, 20),
+                                  itemCount: _messages.length,
+                                  separatorBuilder: (_, __) =>
+                                      SizedBox(height: 8),
+                                  itemBuilder: (context, index) {
+                                    final message = _messages[index];
+                                    final author = message.author?.name ??
+                                        message.authorRef.wire;
+                                    final content = message.content?.trim();
+                                    final preview = content?.isNotEmpty == true
+                                        ? content!
+                                        : message.attachments.isNotEmpty
+                                            ? '${message.attachments.length} attachment${message.attachments.length == 1 ? '' : 's'}'
+                                            : 'Message';
+                                    return Card(
+                                      margin: EdgeInsets.zero,
+                                      child: ListTile(
+                                        key: ValueKey(
+                                            'pinned-${message.ref.wire}'),
+                                        onTap: () => _jump(message),
+                                        onLongPress: canManage &&
+                                                !_unpinning
+                                                    .contains(message.ref)
+                                            ? () => _unpin(message)
+                                            : null,
+                                        title: Text(
+                                          author,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          preview,
+                                          maxLines: 3,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        trailing: canManage
+                                            ? IconButton(
+                                                tooltip: 'Unpin message',
+                                                onPressed: _unpinning
+                                                        .contains(message.ref)
+                                                    ? null
+                                                    : () => _unpin(message),
+                                                icon: _unpinning
+                                                        .contains(message.ref)
+                                                    ? SizedBox.square(
+                                                        dimension: 18,
+                                                        child:
+                                                            CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                        ),
+                                                      )
+                                                    : Icon(Icons.close_rounded),
+                                              )
+                                            : Icon(Icons.chevron_right_rounded),
+                                      ),
+                                    );
+                                  },
+                                ),
+            ),
+          ],
         ),
-      );
+      ),
+    );
+  }
 }
 
 final class _EmptyPinnedMessages extends StatelessWidget {
@@ -3152,13 +3430,19 @@ final class _GuildMemberRoute extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Keeps roles and the guild name live while the route is open, ignoring a
-    // selection that moved on to some other guild underneath it.
-    final live = ref.watch(mobileControllerProvider.select((state) =>
-        state.activeGuild?.ref == guild.ref ? state.activeGuild : null));
+    final state = ref.watch(mobileControllerProvider);
+    final live = liveGuildByRef(state, guild.ref);
+    if (live == null || !canViewGuildMemberRoster(live, state.user?.ref)) {
+      return Scaffold(
+        appBar: AppBar(title: Text('Members')),
+        body: Center(
+          child: Text('The member list is no longer available.'),
+        ),
+      );
+    }
     return Scaffold(
       body: _GuildMemberPane(
-        guild: live ?? guild,
+        guild: live,
         onBack: () => Navigator.of(context).pop(),
       ),
     );
@@ -3205,7 +3489,12 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
     _requestRoster(controller, requestedGuild.ref);
     try {
       final members = await controller.repository.members(requestedGuild.ref);
-      if (mounted && widget.guild.ref == requestedGuild.ref) {
+      final state = ref.read(mobileControllerProvider);
+      final live = liveGuildByRef(state, requestedGuild.ref);
+      if (mounted &&
+          widget.guild.ref == requestedGuild.ref &&
+          live != null &&
+          canViewGuildMemberRoster(live, state.user?.ref)) {
         setState(() {
           _members = members;
           _error = null;
@@ -3215,6 +3504,10 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
     } on Object catch (error) {
       if (mounted && widget.guild.ref == requestedGuild.ref) {
         final state = ref.read(mobileControllerProvider);
+        final live = liveGuildByRef(state, requestedGuild.ref);
+        if (live == null || !canViewGuildMemberRoster(live, state.user?.ref)) {
+          return;
+        }
         final channelRefs =
             requestedGuild.channels.map((channel) => channel.ref).toSet();
         final known = <EntityRef, KaedeUser>{};
@@ -4384,18 +4677,20 @@ final class _GuildBrowser extends ConsumerWidget {
     final controller = ref.read(mobileControllerProvider.notifier);
     final channels = [...guild.channels]
       ..sort((left, right) => left.position.compareTo(right.position));
-    final canManageChannels = state.user?.ref == guild.ownerRef ||
-        guild.allows(Permission.manageChannels);
+    final isOwner = state.user?.ref == guild.ownerRef;
+    final canManageChannels =
+        isOwner || guild.allows(Permission.manageChannels);
     final inviteTargets = guildInviteCreationTargets(
       channels,
-      isOwner: state.user?.ref == guild.ownerRef,
+      isOwner: isOwner,
     );
     final canCreateInvite = inviteTargets.isNotEmpty;
-    final canCreateExternalEvents = state.user?.ref == guild.ownerRef ||
-        guild.allows(Permission.createEvents);
-    final canManageExternalEvents = state.user?.ref == guild.ownerRef ||
-        guild.allows(Permission.manageEvents);
-    final canOpenSettings = state.user?.ref == guild.ownerRef ||
+    final canSearchHistory = channels.any(canReadRetainedChannelHistory);
+    final canCreateExternalEvents =
+        isOwner || guild.allows(Permission.createEvents);
+    final canManageExternalEvents =
+        isOwner || guild.allows(Permission.manageEvents);
+    final canOpenSettings = isOwner ||
         guild.allows(Permission.manageGuild) ||
         guild.allows(Permission.manageChannels) ||
         guild.allows(Permission.manageRoles) ||
@@ -4407,7 +4702,22 @@ final class _GuildBrowser extends ConsumerWidget {
         guild.allows(Permission.createGuildExpressions) ||
         guild.allows(Permission.manageGuildExpressions) ||
         guild.allows(Permission.manageWebhooks) ||
-        guild.allows(Permission.viewAuditLog);
+        guild.allows(Permission.viewAuditLog) ||
+        guildHasEffectiveChannelPermission(
+          guild,
+          Permission.manageChannels,
+          isOwner: false,
+        ) ||
+        guildHasEffectiveChannelPermission(
+          guild,
+          Permission.manageRoles,
+          isOwner: false,
+        ) ||
+        guildHasEffectiveChannelPermission(
+          guild,
+          Permission.manageWebhooks,
+          isOwner: false,
+        );
     final banner = publicAssetUri(guild.ref.domain, guild.bannerHash,
         variant: 'thumbnail_1024');
     final canCreateScheduledEvents = canCreateExternalEvents ||
@@ -4424,6 +4734,7 @@ final class _GuildBrowser extends ConsumerWidget {
               canCreateExternal: canCreateExternalEvents,
               canManageExternal: canManageExternalEvents,
               startCreating: startCreating,
+              liveController: controller,
             ),
           ),
         ),
@@ -4445,6 +4756,7 @@ final class _GuildBrowser extends ConsumerWidget {
       final parent = thread.parentRef;
       if (thread.guildRef != guild.ref ||
           thread.archived ||
+          !canReadRetainedChannelHistory(thread) ||
           parent == null ||
           forumRefs.contains(parent)) {
         continue;
@@ -4473,42 +4785,70 @@ final class _GuildBrowser extends ConsumerWidget {
             padding: EdgeInsets.fromLTRB(12, 10, 12, 2),
             child: Row(
               children: [
-                Expanded(
-                  child: _SearchField(
-                    hint: 'Search ${guild.name}',
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (searchContext) => MessageSearchScreen(
-                          repository: controller.repository,
-                          scope: 'guild',
-                          scopeRef: guild.ref,
-                          channel: null,
-                          accountRef: controller.api.tokens?.userRef,
-                          users: messageSearchUserCandidates(<KaedeUser?>[
-                            state.user,
-                            ...state.userProfiles.values,
-                          ]),
-                          onJump: (result) async {
-                            final opened =
-                                await controller.selectAndJumpToMessage(
-                              result.channel,
-                              result.message.ref,
-                              shouldContinue: () =>
-                                  messageSearchRouteCanDismiss(searchContext),
-                            );
-                            if (!searchContext.mounted ||
-                                !opened ||
-                                !messageSearchRouteCanDismiss(searchContext)) {
-                              return;
-                            }
-                            Navigator.of(searchContext).pop();
-                            onOpenChannel();
-                          },
+                if (canSearchHistory)
+                  Expanded(
+                    child: _SearchField(
+                      hint: 'Search ${guild.name}',
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (searchContext) => Consumer(
+                            builder: (context, routeRef, _) {
+                              final routeState =
+                                  routeRef.watch(mobileControllerProvider);
+                              final currentGuild = routeState.guilds
+                                  .where((item) => item.ref == guild.ref)
+                                  .firstOrNull;
+                              final historyAvailable = currentGuild?.channels
+                                      .any(canReadRetainedChannelHistory) ==
+                                  true;
+                              return MessageSearchScreen(
+                                repository: routeRef
+                                    .read(mobileControllerProvider.notifier)
+                                    .repository,
+                                scope: 'guild',
+                                scopeRef: guild.ref,
+                                channel: null,
+                                historyAvailable: historyAvailable,
+                                accountRef: routeRef
+                                    .read(mobileControllerProvider.notifier)
+                                    .api
+                                    .tokens
+                                    ?.userRef,
+                                users: messageSearchUserCandidates(<KaedeUser?>[
+                                  routeState.user,
+                                  ...routeState.userProfiles.values,
+                                ]),
+                                onJump: (result) async {
+                                  if (!historyAvailable) return;
+                                  final routeController = routeRef
+                                      .read(mobileControllerProvider.notifier);
+                                  final opened = await routeController
+                                      .selectAndJumpToMessage(
+                                    result.channel,
+                                    result.message.ref,
+                                    shouldContinue: () =>
+                                        historyAvailable &&
+                                        messageSearchRouteCanDismiss(
+                                            searchContext),
+                                  );
+                                  if (!searchContext.mounted ||
+                                      !opened ||
+                                      !messageSearchRouteCanDismiss(
+                                          searchContext)) {
+                                    return;
+                                  }
+                                  Navigator.of(searchContext).pop();
+                                  onOpenChannel();
+                                },
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                  )
+                else
+                  Spacer(),
                 if (canCreateInvite) ...[
                   SizedBox(width: 8),
                   _SquareAction(
@@ -4521,14 +4861,14 @@ final class _GuildBrowser extends ConsumerWidget {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                             content: Text(
-                              'Create a text or announcement channel before '
-                              'creating an invite.',
+                              'You do not have permission to create an invite '
+                              'in any channel.',
                             ),
                           ),
                         );
                         return;
                       }
-                      final channel = await showGuildTextChannelPicker(
+                      final channel = await showGuildChannelPicker(
                         context,
                         channels: targets,
                         title: 'Invite people to…',
@@ -5858,9 +6198,29 @@ Future<void> _createAndShowInvite(BuildContext context,
     MobileController controller, KaedeGuild guild, KaedeChannel channel) async {
   final restrictions = await showInviteRestrictions(context);
   if (restrictions == null || !context.mounted) return;
+  final liveGuild = liveGuildByRef(controller.currentState, guild.ref);
+  final liveChannel = liveGuild?.channels
+      .where((candidate) => candidate.ref == channel.ref)
+      .firstOrNull;
+  final stillAllowed = liveGuild != null &&
+      liveChannel != null &&
+      guildInviteCreationTargets(
+        liveGuild.channels,
+        isOwner: controller.currentState.user?.ref == liveGuild.ownerRef,
+      ).any((candidate) => candidate.ref == liveChannel.ref);
+  if (!stillAllowed) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Invite permissions changed before the invite was created.',
+        ),
+      ),
+    );
+    return;
+  }
   try {
-    final result = await controller.repository.createInvite(guild.ref, {
-      'channel_id': channel.ref.wire,
+    final result = await controller.repository.createInvite(liveGuild.ref, {
+      'channel_id': liveChannel.ref.wire,
       'max_age_seconds': restrictions.$1,
       'max_uses': restrictions.$2,
     });
@@ -5868,7 +6228,7 @@ Future<void> _createAndShowInvite(BuildContext context,
     final code = '${result['code'] ?? ''}';
     final link = code.isEmpty
         ? null
-        : 'https://${guild.ref.domain.value}/invite/${Uri.encodeComponent(code)}';
+        : 'https://${liveGuild.ref.domain.value}/invite/${Uri.encodeComponent(code)}';
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -5878,8 +6238,8 @@ Future<void> _createAndShowInvite(BuildContext context,
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-                'Anyone with this link can join #${channel.name ?? 'channel'}.'),
+            Text('Anyone with this link can join '
+                '#${liveChannel.name ?? 'channel'}.'),
             SizedBox(height: 14),
             Container(
               width: double.infinity,

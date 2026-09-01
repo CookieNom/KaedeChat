@@ -621,6 +621,75 @@ async def test_track_webhook_cannot_evict_a_joined_participant(monkeypatch: Any)
     assert removed == []
 
 
+async def test_guild_join_admission_uses_the_full_permission_guard(monkeypatch: Any) -> None:
+    metadata = {
+        "generation": 4,
+        "connection_id": "c" * 43,
+        "client_kind": "web",
+        "user_id": "78",
+        "user_domain": "alpha.localhost",
+        "guild_id": "12",
+        "channel_id": "34",
+        "channel_domain": "alpha.localhost",
+        "e2ee": False,
+        "can_speak": True,
+        "can_stream": False,
+        "can_use_vad": True,
+        "server_mute": False,
+        "server_deaf": False,
+    }
+    channel = SimpleNamespace(
+        id=34, origin_domain="alpha.localhost", type=2, encryption_mode="plaintext"
+    )
+    guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
+    actor = SimpleNamespace(
+        id=78,
+        origin_domain="alpha.localhost",
+        account_type="human",
+        disabled_at=None,
+    )
+    member = SimpleNamespace(voice_flags=0)
+    session = AsyncMock()
+    session.get.side_effect = [actor, member]
+    guard = AsyncMock(
+        side_effect=HTTPException(
+            status_code=403,
+            detail={"code": "AUTOMOD_MEMBER_PROFILE_BLOCKED"},
+        )
+    )
+    removed: list[tuple[str, str]] = []
+
+    async def remove(_self: object, room: str, identity: str) -> None:
+        removed.append((room, identity))
+
+    monkeypatch.setattr(
+        "app.api.voice.receive_webhook",
+        lambda *_args: webhook_event("participant_joined", metadata=json.dumps(metadata)),
+    )
+    monkeypatch.setattr("app.api.voice.current_generation", AsyncMock(return_value=4))
+    monkeypatch.setattr("app.api.voice.voice_connection_matches", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.api.voice.load_voice_channel",
+        AsyncMock(return_value=(channel, guild)),
+    )
+    monkeypatch.setattr("app.api.voice.require_permissions", guard)
+    monkeypatch.setattr("app.api.voice.bump_generation", AsyncMock())
+    monkeypatch.setattr("app.api.voice.release_voice_connection", AsyncMock())
+    monkeypatch.setattr("app.api.voice.LiveKitControl.remove_participant", remove)
+
+    response = await livekit_webhook(
+        request=webhook_request(),
+        authorization="signed",
+        session=session,
+        redis=AsyncMock(),
+        settings=settings(),
+    )
+
+    assert response.status_code == 204
+    assert guard.await_args.args[4] == (Permission.VIEW_CHANNEL | Permission.CONNECT)
+    assert removed == [("g.12.34", "78@alpha.localhost")]
+
+
 async def test_participant_left_without_connection_metadata_cannot_remove_new_lease(
     monkeypatch: Any,
 ) -> None:

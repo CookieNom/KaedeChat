@@ -6,11 +6,13 @@ from app.core.channel_types import (
     GUILD_PINNABLE_CHANNEL_TYPES,
     GUILD_SEND_MESSAGES_CHANNEL_TYPES,
     GUILD_TEXT_PERMISSION_CHANNEL_TYPES,
+    GUILD_WEBHOOK_CHANNEL_TYPES,
 )
 
 TEXT_PERMISSION_CHANNEL_TYPES = tuple(sorted(GUILD_TEXT_PERMISSION_CHANNEL_TYPES))
 SEND_MESSAGES_CHANNEL_TYPES = tuple(sorted(GUILD_SEND_MESSAGES_CHANNEL_TYPES))
 PIN_MESSAGES_CHANNEL_TYPES = tuple(sorted(GUILD_PINNABLE_CHANNEL_TYPES))
+WEBHOOK_CHANNEL_TYPES = tuple(sorted(GUILD_WEBHOOK_CHANNEL_TYPES))
 
 # Permission integers are a published Kaede protocol, storage, and federation
 # contract. They intentionally are not raw Discord API v10 permission masks:
@@ -106,6 +108,7 @@ BLOCKED_MEMBER_INTERACTION_PERMISSIONS = Permission(
     | Permission.PRIORITY_SPEAKER
     | Permission.SEND_MESSAGES
     | Permission.SEND_TTS_MESSAGES
+    | Permission.MENTION_EVERYONE
     | Permission.CONNECT
     | Permission.SPEAK
     | Permission.USE_VAD
@@ -117,7 +120,9 @@ BLOCKED_MEMBER_INTERACTION_PERMISSIONS = Permission(
     | Permission.SEND_MESSAGES_IN_THREADS
     | Permission.USE_SOUNDBOARD
     | Permission.USE_EXTERNAL_SOUNDS
+    | Permission.CREATE_EVENTS
     | Permission.SEND_VOICE_MESSAGES
+    | Permission.SET_VOICE_CHANNEL_STATUS
     | Permission.SEND_POLLS
     | Permission.USE_EXTERNAL_APPS
     | Permission.CREATE_TRACKER_TASKS
@@ -316,7 +321,10 @@ PERMISSION_METADATA = (
         "Text",
         ("channel",),
         channel_types=TEXT_PERMISSION_CHANNEL_TYPES,
-        dependencies=(Permission.VIEW_CHANNEL, Permission.READ_MESSAGE_HISTORY),
+        # Moderators may act on a known/current message without permission to
+        # enumerate retained history.  Endpoint contracts intentionally require
+        # MANAGE_MESSAGES alone after channel visibility is established.
+        dependencies=(Permission.VIEW_CHANNEL,),
         danger="elevated",
     ),
     _permission(
@@ -399,7 +407,8 @@ PERMISSION_METADATA = (
         "Voice moderation",
         ("channel",),
         channel_types=(2, 13),
-        dependencies=(Permission.CONNECT,),
+        # Server moderation is also supported while the target is offline; the
+        # moderator does not need to join the target channel.
         danger="elevated",
     ),
     _permission(
@@ -409,7 +418,8 @@ PERMISSION_METADATA = (
         "Voice moderation",
         ("channel",),
         channel_types=(2,),
-        dependencies=(Permission.CONNECT,),
+        # Server moderation is also supported while the target is offline; the
+        # moderator does not need to join the target channel.
         danger="elevated",
     ),
     _permission(
@@ -461,13 +471,13 @@ PERMISSION_METADATA = (
         "Create, edit, rotate, and revoke channel webhooks.",
         "Management",
         ("guild", "channel"),
-        channel_types=SEND_MESSAGES_CHANNEL_TYPES,
+        channel_types=WEBHOOK_CHANNEL_TYPES,
         danger="critical",
     ),
     _permission(
         Permission.MANAGE_EMOJIS,
-        "Manage emoji and stickers",
-        "Create and remove guild emoji and stickers.",
+        "Manage guild expressions",
+        "Edit and remove emoji, stickers, and soundboard sounds created by other members.",
         "Management",
         ("guild",),
         danger="elevated",
@@ -616,7 +626,9 @@ PERMISSION_METADATA = (
         "Voice",
         ("channel",),
         channel_types=(2,),
-        dependencies=(Permission.VIEW_CHANNEL, Permission.CONNECT),
+        # Connected members may set status directly, while disconnected channel
+        # managers use SET_VOICE_CHANNEL_STATUS + MANAGE_CHANNELS.
+        dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
         Permission.SEND_POLLS,

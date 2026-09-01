@@ -833,6 +833,56 @@ void main() {
     expect(result?.containsKey('target_type'), isFalse);
     expect(result?['scheduled_event_id'], '95@chat.example');
   });
+
+  testWidgets('advanced invite hides channel-overwrite denied destinations',
+      (tester) async {
+    final inviteGuild = KaedeGuild(
+      ref: EntityRef.parse('1@chat.example'),
+      name: 'Guild',
+      ownerRef: EntityRef.parse('4@chat.example'),
+      permissions: BigInt.from(Permission.createInvite),
+      unavailable: false,
+      channels: <KaedeChannel>[
+        KaedeChannel(
+          ref: EntityRef.parse('2@chat.example'),
+          guildRef: EntityRef.parse('1@chat.example'),
+          type: ChannelType.voice,
+          position: 0,
+          permissions: BigInt.from(Permission.createInvite),
+          name: 'Allowed voice',
+        ),
+        KaedeChannel(
+          ref: EntityRef.parse('3@chat.example'),
+          guildRef: EntityRef.parse('1@chat.example'),
+          type: ChannelType.voice,
+          position: 1,
+          permissions: BigInt.from(Permission.viewChannel),
+          name: 'Denied voice',
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: FilledButton(
+            onPressed: () => showAdvancedInviteEditor(context, inviteGuild),
+            child: const Text('Open invite editor'),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Open invite editor'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Guild landing (no channel)'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Allowed voice'), findsOneWidget);
+    expect(find.textContaining('Denied voice'), findsNothing);
+    expect(find.text('Guild landing (no channel)'), findsWidgets);
+  });
 }
 
 Map<String, Object?> _ruleJson() => <String, Object?>{

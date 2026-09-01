@@ -1877,6 +1877,10 @@ final class KaedeRepository {
 
   Future<List<Map<String, Object?>>> webhooks(EntityRef guild) =>
       api.getList('/api/v1/guilds/${guild.wire}/webhooks');
+  Future<List<Map<String, Object?>>> channelWebhooks(
+          EntityRef guild, EntityRef channel) =>
+      api.getList(
+          '/api/v1/guilds/${guild.wire}/channels/${channel.wire}/webhooks');
   Future<Map<String, Object?>> createWebhook(
           EntityRef guild, EntityRef channel, String name) =>
       api.sendJson(

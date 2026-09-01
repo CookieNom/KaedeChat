@@ -17,6 +17,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_admin.dart';
+import 'package:kaede_mobile/src/domain/guild_hierarchy.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/permission_selection.dart';
 import 'package:kaede_mobile/src/domain/scheduled_events.dart';
@@ -31,6 +32,156 @@ import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+
+BigInt get allPermissionBits => permissionMetadata.fold(
+      BigInt.zero,
+      (mask, permission) => mask | BigInt.from(permission.bit),
+    );
+
+BigInt effectiveChannelPermissionCeiling(
+  KaedeChannel channel, {
+  required bool isOwner,
+}) {
+  if (!isOwner && !channel.allows(Permission.administrator)) {
+    return channel.permissions;
+  }
+  return allPermissionBits;
+}
+
+BigInt effectiveGuildPermissionCeiling(
+  KaedeGuild guild, {
+  required EntityRef? actorRef,
+}) =>
+    actorRef == guild.ownerRef || guild.allows(Permission.administrator)
+        ? allPermissionBits
+        : guild.permissions;
+
+bool rolePermissionCanChange(BigInt heldPermissions, int bit) =>
+    heldPermissions & BigInt.from(bit) != BigInt.zero;
+
+bool rolePermissionChangesWithinCeiling(
+  BigInt original,
+  BigInt updated,
+  BigInt heldPermissions,
+) =>
+    (original ^ updated) & ~heldPermissions == BigInt.zero;
+
+bool canManageEffectiveChannel(
+  KaedeChannel channel,
+  int permission, {
+  required bool isOwner,
+}) =>
+    effectiveChannelPermissionCeiling(channel, isOwner: isOwner) &
+        BigInt.from(permission) !=
+    BigInt.zero;
+
+bool channelCategoryTargetEligible(
+  KaedeChannel channel, {
+  required bool isOwner,
+}) =>
+    canManageEffectiveChannel(
+      channel,
+      Permission.viewChannel,
+      isOwner: isOwner,
+    ) &&
+    canManageEffectiveChannel(
+      channel,
+      Permission.manageChannels,
+      isOwner: isOwner,
+    );
+
+bool channelPositionReorderAllowed(
+  KaedeChannel channel,
+  Iterable<KaedeChannel> channels, {
+  required bool canManageGuildChannels,
+  required bool isOwner,
+}) {
+  if (!canManageGuildChannels) return false;
+  final parentRef = channel.parentRef;
+  if (channel.type == ChannelType.category || parentRef == null) return true;
+  final parent =
+      channels.where((candidate) => candidate.ref == parentRef).firstOrNull;
+  return parent != null &&
+      canManageEffectiveChannel(
+        parent,
+        Permission.manageChannels,
+        isOwner: isOwner,
+      );
+}
+
+bool guildHasEffectiveChannelPermission(
+  KaedeGuild guild,
+  int permission, {
+  required bool isOwner,
+}) =>
+    isOwner ||
+    guild.channels.any((channel) => canManageEffectiveChannel(
+          channel,
+          permission,
+          isOwner: false,
+        ));
+
+List<String> channelPermissionDependencyLabels(PermissionMetadata metadata) =>
+    metadata.dependencies
+        .map((bit) => permissionMetadata
+            .where((candidate) => candidate.bit == bit)
+            .map((candidate) => candidate.label)
+            .firstOrNull)
+        .whereType<String>()
+        .toList(growable: false);
+
+bool channelOverwritePermissionCanChange(BigInt heldPermissions, int bit) =>
+    heldPermissions & BigInt.from(bit) != BigInt.zero;
+
+bool channelOverwriteCanReset(
+  BigInt allow,
+  BigInt deny,
+  BigInt heldPermissions,
+) =>
+    (allow | deny) & ~heldPermissions == BigInt.zero;
+
+Set<EntityRef> removedGuildManagementMemberRefs(
+  Iterable<GuildMember> previous,
+  Iterable<GuildMember> current,
+) {
+  final currentRefs = current.map((member) => member.user.ref).toSet();
+  return previous
+      .map((member) => member.user.ref)
+      .where((ref) => !currentRefs.contains(ref))
+      .toSet();
+}
+
+List<GuildMember> reconcileGuildManagementMembers({
+  required Iterable<GuildMember> members,
+  required Iterable<GuildMember> liveMembers,
+  required Set<EntityRef> removedRefs,
+  String query = '',
+}) {
+  final normalizedQuery = query.trim().toLowerCase();
+  bool matches(GuildMember member) =>
+      normalizedQuery.isEmpty ||
+      <String?>[
+        member.nickname,
+        member.user.name,
+        member.user.username,
+        member.user.handle,
+      ].any((value) => value?.toLowerCase().contains(normalizedQuery) == true);
+
+  final reconciled = <EntityRef, GuildMember>{};
+  for (final member in members) {
+    if (!removedRefs.contains(member.user.ref) && matches(member)) {
+      reconciled[member.user.ref] = member;
+    }
+  }
+  for (final member in liveMembers) {
+    if (!removedRefs.contains(member.user.ref) && matches(member)) {
+      reconciled[member.user.ref] = member;
+    } else {
+      reconciled.remove(member.user.ref);
+    }
+  }
+  return List.unmodifiable(reconciled.values);
+}
 
 final class GuildManagementScreen extends ConsumerStatefulWidget {
   const GuildManagementScreen({required this.guild, super.key});
@@ -47,6 +198,8 @@ final class _GuildManagementScreenState
   late KaedeGuild _guild = widget.guild;
   var _loading = true;
   var _selectedSection = 0;
+  var _reloadGeneration = 0;
+  var _sawLiveGuild = false;
 
   KaedeRepository get _repository =>
       ref.read(mobileControllerProvider.notifier).repository;
@@ -69,11 +222,32 @@ final class _GuildManagementScreenState
   }
 
   Future<void> _reload() async {
+    final generation = ++_reloadGeneration;
+    final live = ref
+        .read(mobileControllerProvider)
+        .guilds
+        .where((guild) => guild.ref == widget.guild.ref)
+        .firstOrNull;
+    if (live != null) {
+      _sawLiveGuild = true;
+      if (mounted && generation == _reloadGeneration) {
+        setState(() {
+          _guild = live;
+          _loading = false;
+        });
+      }
+      return;
+    }
     try {
       final guild = await _repository.guild(widget.guild.ref);
-      if (mounted) {
+      final current = ref
+          .read(mobileControllerProvider)
+          .guilds
+          .where((item) => item.ref == widget.guild.ref)
+          .firstOrNull;
+      if (mounted && generation == _reloadGeneration) {
         setState(() {
-          _guild = guild;
+          _guild = current ?? guild;
           _loading = false;
         });
       }
@@ -86,6 +260,31 @@ final class _GuildManagementScreenState
   @override
   Widget build(BuildContext context) {
     final mobile = ref.watch(mobileControllerProvider);
+    final live = mobile.guilds
+        .where((guild) => guild.ref == widget.guild.ref)
+        .firstOrNull;
+    if (live != null) {
+      _sawLiveGuild = true;
+      if (!identical(live, _guild)) {
+        _reloadGeneration += 1;
+        _guild = live;
+        _loading = false;
+      }
+    } else if (_sawLiveGuild) {
+      _reloadGeneration += 1;
+      return Scaffold(
+        appBar: AppBar(title: Text('Guild settings')),
+        body: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              'This guild is no longer available.',
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      );
+    }
     final actorRef = mobile.user?.ref;
     final isOwner = actorRef != null && actorRef == _guild.ownerRef;
     final canManageGuild = isOwner || _guild.allows(Permission.manageGuild);
@@ -104,6 +303,22 @@ final class _GuildManagementScreenState
                     BigInt.zero))
         .toList(growable: false);
     final canManageRoles = isOwner || _guild.allows(Permission.manageRoles);
+    final hasChannelManagement = guildHasEffectiveChannelPermission(
+      _guild,
+      Permission.manageChannels,
+      isOwner: isOwner,
+    );
+    final hasChannelPermissionManagement = guildHasEffectiveChannelPermission(
+      _guild,
+      Permission.manageRoles,
+      isOwner: isOwner,
+    );
+    final canManageWebhooks =
+        isOwner || _guild.allows(Permission.manageWebhooks);
+    final managedWebhookChannels = guildWebhookManagementTargets(
+      _guild.channels,
+      isOwner: isOwner,
+    );
     final canManageMembers = isOwner ||
         _guild.allows(Permission.kickMembers) ||
         _guild.allows(Permission.banMembers) ||
@@ -125,17 +340,20 @@ final class _GuildManagementScreenState
           isOwner: isOwner,
         ),
       ),
-      if (canManageChannels || canManageRoles)
+      if (canManageChannels ||
+          hasChannelManagement ||
+          hasChannelPermissionManagement)
         (
           label: 'Channels',
           description: 'Create channels, reorder them and set permissions.',
           icon: Icons.tag_rounded,
           page: _ChannelsTab(
             guild: _guild,
+            actorRef: actorRef,
             repository: _repository,
             changed: _changed,
             canManageChannels: canManageChannels,
-            canManagePermissions: canManageRoles,
+            isOwner: isOwner,
             e2eeClient: () =>
                 ref.read(mobileControllerProvider.notifier).e2eeClient(),
           ),
@@ -159,6 +377,8 @@ final class _GuildManagementScreenState
           page: _MembersTab(
               guild: _guild,
               actorRef: actorRef,
+              liveMembers:
+                  mobile.guildMembers[_guild.ref] ?? const <GuildMember>[],
               userProfiles: mobile.userProfiles,
               repository: _repository,
               changed: _changed)
@@ -223,6 +443,11 @@ final class _GuildManagementScreenState
             canListGuild: canListGuildInvites,
             managedChannels: managedInviteChannels,
             canManageRoles: canManageRoles,
+            currentGuild: () => ref
+                .read(mobileControllerProvider)
+                .guilds
+                .where((guild) => guild.ref == _guild.ref)
+                .firstOrNull,
           )
         ),
       if (canCreateExpressions || canManageExpressions)
@@ -265,7 +490,7 @@ final class _GuildManagementScreenState
             canManage: canManageExpressions,
           )
         ),
-      if (isOwner || _guild.allows(Permission.manageWebhooks))
+      if (canManageWebhooks || managedWebhookChannels.isNotEmpty)
         (
           label: 'Integrations · Webhooks',
           description: 'Outgoing integrations that post here.',
@@ -273,7 +498,8 @@ final class _GuildManagementScreenState
           page: _WebhooksTab(
             guild: _guild,
             repository: _repository,
-            canManage: isOwner || _guild.allows(Permission.manageWebhooks),
+            canManageGuild: canManageWebhooks,
+            managedChannels: managedWebhookChannels,
           )
         ),
       if (_guild.channels.any(
@@ -288,6 +514,7 @@ final class _GuildManagementScreenState
             guilds: mobile.guilds,
             currentUser: mobile.user,
             repository: _repository,
+            liveController: ref.read(mobileControllerProvider.notifier),
           ),
         ),
       if (canManageGuild)
@@ -1217,7 +1444,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
         context, 'Transfer ownership', 'Member reference (ID@instance)',
         warning:
             'Choose an eligible human member. Ownership moves immediately and you remain a member.');
-    if (value == null) return;
+    if (value == null || !mounted) return;
     try {
       late final EntityRef member;
       try {
@@ -1270,17 +1497,19 @@ final class _OverviewTabState extends State<_OverviewTab> {
 final class _ChannelsTab extends StatefulWidget {
   const _ChannelsTab({
     required this.guild,
+    required this.actorRef,
     required this.repository,
     required this.changed,
     required this.canManageChannels,
-    required this.canManagePermissions,
+    required this.isOwner,
     required this.e2eeClient,
   });
   final KaedeGuild guild;
+  final EntityRef? actorRef;
   final KaedeRepository repository;
   final Future<KaedeGuild> Function([String?]) changed;
   final bool canManageChannels;
-  final bool canManagePermissions;
+  final bool isOwner;
   final Future<MobileE2EEClient> Function() e2eeClient;
   @override
   State<_ChannelsTab> createState() => _ChannelsTabState();
@@ -1333,7 +1562,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
             'inside it.',
           ),
           itemCount: _channels.length,
-          onReorder: widget.canManageChannels ? _reorder : (_, __) {},
+          onReorder: _reorder,
           itemBuilder: (context, index) {
             final channel = _channels[index];
             final parent = channel.parentRef == null
@@ -1344,10 +1573,10 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
             return ReorderableDelayedDragStartListener(
               key: ValueKey(channel.ref.wire),
               index: index,
-              enabled: widget.canManageChannels,
+              enabled: _canReorderChannel(channel),
               child: _ManagementRow(
                 indented: channel.parentRef != null,
-                onTap: widget.canManageChannels ? () => _edit(channel) : null,
+                onTap: _canManageChannel(channel) ? () => _edit(channel) : null,
                 leading: Icon(
                   switch (channel.type) {
                     ChannelType.category => Icons.folder_outlined,
@@ -1382,7 +1611,9 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       );
 
   Widget _channelActions(KaedeChannel channel, int index) {
-    if (!widget.canManageChannels && !widget.canManagePermissions) {
+    final canManageChannel = _canManageChannel(channel);
+    final canManagePermissions = _canManagePermissions(channel);
+    if (!canManageChannel && !canManagePermissions) {
       return SizedBox.square(
         dimension: 44,
         child: Icon(Icons.lock_outline_rounded,
@@ -1401,13 +1632,15 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                         ? _moveToCategory(channel)
                         : _edit(channel),
         itemBuilder: (_) => [
-          if (widget.canManageChannels)
+          if (canManageChannel)
             PopupMenuItem(value: 'edit', child: Text('Edit channel')),
-          if (widget.canManageChannels && channel.type != ChannelType.category)
-            PopupMenuItem(value: 'move', child: Text('Move to category')),
-          if (widget.canManagePermissions)
-            PopupMenuItem(value: 'permissions', child: Text('Permissions')),
           if (widget.canManageChannels &&
+              canManageChannel &&
+              channel.type != ChannelType.category)
+            PopupMenuItem(value: 'move', child: Text('Move to category')),
+          if (canManagePermissions)
+            PopupMenuItem(value: 'permissions', child: Text('Permissions')),
+          if (canManageChannel &&
               {
                 ChannelType.text,
                 ChannelType.announcement,
@@ -1420,14 +1653,14 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                   ? 'Encryption settings'
                   : 'Enable encryption'),
             ),
-          if (widget.canManageChannels)
+          if (canManageChannel)
             PopupMenuItem(
                 value: 'delete',
                 child: Text('Delete',
                     style: TextStyle(color: context.kaede.danger))),
         ],
       ),
-      if (widget.canManageChannels) ...[
+      if (_canReorderChannel(channel)) ...[
         if (channel.type == ChannelType.category)
           Tooltip(
             message: 'Add a channel to this category',
@@ -1456,7 +1689,37 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
     ]);
   }
 
+  bool _canManageChannel(KaedeChannel channel) => canManageEffectiveChannel(
+        channel,
+        Permission.manageChannels,
+        isOwner: widget.isOwner,
+      );
+
+  bool _canManagePermissions(KaedeChannel channel) => canManageEffectiveChannel(
+        channel,
+        Permission.manageRoles,
+        isOwner: widget.isOwner,
+      );
+
+  bool _canUseCategory(KaedeChannel channel) =>
+      channelCategoryTargetEligible(channel, isOwner: widget.isOwner);
+
+  bool _canReorderChannel(KaedeChannel channel) {
+    return channelPositionReorderAllowed(
+      channel,
+      _channels,
+      canManageGuildChannels: widget.canManageChannels,
+      isOwner: widget.isOwner,
+    );
+  }
+
   Future<void> _reorder(int oldIndex, int newIndex) async {
+    if (oldIndex < 0 ||
+        oldIndex >= _channels.length ||
+        !_canReorderChannel(_channels[oldIndex])) {
+      return;
+    }
+    final movedRef = _channels[oldIndex].ref;
     if (newIndex > oldIndex) newIndex--;
     final previous = [..._channels];
     setState(() {
@@ -1464,9 +1727,20 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       _channels.insert(newIndex, item);
     });
     try {
+      final request = guildChannelPositionRequest(
+        previous,
+        _channels,
+        movedRef: movedRef,
+      );
+      final requestRefs = request.map((item) => '${item['id']}').toSet();
+      if (_channels.any((channel) =>
+          requestRefs.contains(channel.ref.id.value) &&
+          !_canReorderChannel(channel))) {
+        throw UserInputException('Channel permissions changed. Try again.');
+      }
       await widget.repository.reorderChannels(
         widget.guild.ref,
-        guildChannelPositionRequest(previous, _channels),
+        request,
       );
       await widget.changed();
     } on Object catch (error) {
@@ -1489,7 +1763,8 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
     final categories = [
       for (final candidate in _channels)
         if (candidate.type == ChannelType.category &&
-            candidate.ref != channel.ref)
+            candidate.ref != channel.ref &&
+            _canUseCategory(candidate))
           candidate,
     ]..sort((a, b) => a.position.compareTo(b.position));
     final current = channel.parentRef?.wire ?? '';
@@ -1507,9 +1782,24 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       ],
     );
     if (chosen == null) return;
-    final target = chosen.isEmpty
+    final currentCategories = _channels.where((candidate) =>
+        candidate.type == ChannelType.category && _canUseCategory(candidate));
+    final selected = chosen.isEmpty
         ? null
-        : categories.firstWhere((category) => category.ref.wire == chosen).ref;
+        : currentCategories
+            .where((category) => category.ref.wire == chosen)
+            .firstOrNull;
+    if (!_canUseCategory(channel) || (chosen.isNotEmpty && selected == null)) {
+      if (mounted) {
+        _tabError(
+          context,
+          'Could not move the channel',
+          UserInputException('Channel permissions changed. Try again.'),
+        );
+      }
+      return;
+    }
+    final target = selected?.ref;
     if (target == channel.parentRef) return;
     final previous = [..._channels];
     final index = _channels.indexWhere((item) => item.ref == channel.ref);
@@ -1521,7 +1811,11 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       // it persists the full ordering — including the new parent — atomically.
       await widget.repository.reorderChannels(
         widget.guild.ref,
-        guildChannelPositionRequest(previous, next),
+        guildChannelPositionRequest(
+          previous,
+          next,
+          movedRef: channel.ref,
+        ),
       );
       if (!mounted) return;
       setState(() => _channels = next);
@@ -1614,17 +1908,39 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
   }
 
   Future<void> _edit(KaedeChannel channel) async {
+    final categories = <KaedeChannel>[
+      for (final candidate in _channels)
+        if (_canUseCategory(candidate) || candidate.ref == channel.parentRef)
+          candidate,
+    ];
     final value = await showGuildChannelEditorSheet(
       context,
       channel: channel,
-      channels: _channels,
+      channels: categories,
       e2eeActivationEnabled: _e2eeActivationEnabled,
       loadVoiceRegions: () => widget.repository.voiceRegions(widget.guild.ref),
     );
-    if (value == null) return;
+    if (value == null || !mounted) return;
+    final current = _channels
+        .where((candidate) => candidate.ref == channel.ref)
+        .firstOrNull;
+    final changingParent = value.parentRef != current?.parentRef;
+    final parentAllowed = value.parentRef == null ||
+        _channels.any((candidate) =>
+            candidate.ref == value.parentRef && _canUseCategory(candidate));
+    if (current == null ||
+        !_canManageChannel(current) ||
+        (changingParent && !parentAllowed)) {
+      _tabError(
+        context,
+        'Could not save channel',
+        UserInputException('Channel permissions changed. Try again.'),
+      );
+      return;
+    }
     try {
       final updated = await widget.repository.updateChannel(
-          widget.guild.ref, channel.ref, channel.version ?? '*', value.json);
+          widget.guild.ref, current.ref, current.version ?? '*', value.json);
       if (!mounted) return;
       _upsertChannel(updated);
       final refreshed = await widget.changed('Channel saved');
@@ -1834,7 +2150,13 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         MaterialPageRoute<void>(
             builder: (_) => _PermissionScreen(
                   guild: widget.guild,
+                  actorRef: widget.actorRef,
+                  actorHighestRole: guildActorHighestRole(widget.guild),
                   channel: channel,
+                  heldPermissions: effectiveChannelPermissionCeiling(
+                    channel,
+                    isOwner: widget.isOwner,
+                  ),
                   members: members,
                   existing: existing,
                   repository: widget.repository,
@@ -1993,20 +2315,52 @@ final class _RolesTabState extends State<_RolesTab> {
 
   bool _canMove(KaedeRole role) {
     if (_isEveryoneRole(role)) return false;
-    if (widget.actorRef == widget.guild.ownerRef) return true;
-    final ceiling = _actorRolePosition(widget.guild);
     return widget.guild.allows(Permission.manageRoles) &&
-        ceiling != null &&
-        role.position < ceiling;
+            guildActorCanManageRole(
+              guild: widget.guild,
+              actorRef: widget.actorRef,
+              actorHighestRole: guildActorHighestRole(widget.guild),
+              target: role,
+            ) ||
+        widget.actorRef == widget.guild.ownerRef;
   }
 
   bool _isEveryoneRole(KaedeRole role) =>
       role.position == 0 || role.ref == widget.guild.ref;
 
   Future<void> _edit(KaedeRole? role) async {
+    final heldPermissions = effectiveGuildPermissionCeiling(
+      widget.guild,
+      actorRef: widget.actorRef,
+    );
     final draft = await Navigator.push<_RoleDraft>(
-        context, MaterialPageRoute(builder: (_) => _RoleEditor(role: role)));
+        context,
+        MaterialPageRoute(
+            builder: (_) => _RoleEditor(
+                  role: role,
+                  heldPermissions: heldPermissions,
+                )));
     if (draft == null) return;
+    if (!draft.delete) {
+      final updatedPermissions =
+          BigInt.tryParse('${draft.json['permissions'] ?? ''}');
+      final currentCeiling = effectiveGuildPermissionCeiling(
+        widget.guild,
+        actorRef: widget.actorRef,
+      );
+      if (updatedPermissions == null ||
+          !rolePermissionChangesWithinCeiling(
+            role?.permissions ?? BigInt.zero,
+            updatedPermissions,
+            currentCeiling,
+          )) {
+        if (mounted) {
+          _tabError(context, 'Could not update role',
+              'You can only change permissions you currently hold.');
+        }
+        return;
+      }
+    }
     KaedeRole? saved;
     try {
       if (draft.delete && role != null) {
@@ -2093,11 +2447,13 @@ final class _MembersTab extends StatefulWidget {
   const _MembersTab(
       {required this.guild,
       required this.actorRef,
+      required this.liveMembers,
       required this.userProfiles,
       required this.repository,
       required this.changed});
   final KaedeGuild guild;
   final EntityRef? actorRef;
+  final List<GuildMember> liveMembers;
   final Map<EntityRef, KaedeUser> userProfiles;
   final KaedeRepository repository;
   final Future<KaedeGuild> Function([String?]) changed;
@@ -2113,6 +2469,7 @@ final class _MembersTabState extends State<_MembersTab> {
   var _loadingMore = false;
   var _hasMore = true;
   var _requestGeneration = 0;
+  final Set<EntityRef> _removedMemberRefs = <EntityRef>{};
   Timer? _searchDebounce;
 
   @override
@@ -2126,8 +2483,24 @@ final class _MembersTabState extends State<_MembersTab> {
   @override
   void didUpdateWidget(covariant _MembersTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.guild.ref != widget.guild.ref ||
-        oldWidget.guild.version != widget.guild.version) {
+    final changedGuild = oldWidget.guild.ref != widget.guild.ref;
+    if (changedGuild) {
+      _removedMemberRefs.clear();
+    } else if (!identical(oldWidget.liveMembers, widget.liveMembers)) {
+      _removedMemberRefs.addAll(removedGuildManagementMemberRefs(
+        oldWidget.liveMembers,
+        widget.liveMembers,
+      ));
+      _removedMemberRefs
+          .removeAll(widget.liveMembers.map((member) => member.user.ref));
+      _members = reconcileGuildManagementMembers(
+        members: _members,
+        liveMembers: widget.liveMembers,
+        removedRefs: _removedMemberRefs,
+        query: _search.text,
+      );
+    }
+    if (changedGuild || oldWidget.guild.version != widget.guild.version) {
       unawaited(_load(reset: true));
     }
   }
@@ -2183,10 +2556,15 @@ final class _MembersTabState extends State<_MembersTab> {
           ? <EntityRef>{}
           : _members.map((member) => member.user.ref).toSet();
       setState(() {
-        _members = <GuildMember>[
-          if (!reset) ..._members,
-          ...data.where((member) => known.add(member.user.ref)),
-        ];
+        _members = reconcileGuildManagementMembers(
+          members: <GuildMember>[
+            if (!reset) ..._members,
+            ...data.where((member) => known.add(member.user.ref)),
+          ],
+          liveMembers: widget.liveMembers,
+          removedRefs: _removedMemberRefs,
+          query: query,
+        );
         _hasMore = data.length == 100;
       });
     } on Object catch (error) {
@@ -2345,7 +2723,7 @@ final class _MembersTabState extends State<_MembersTab> {
     if (_canAssignRoles(member)) {
       items.add(PopupMenuItem(value: 'roles', child: Text('Manage roles')));
     }
-    if (self || widget.guild.allows(Permission.manageNicknames)) {
+    if (_canChangeNickname(member)) {
       items.add(
           PopupMenuItem(value: 'nickname', child: Text('Change nickname')));
     }
@@ -2369,27 +2747,34 @@ final class _MembersTabState extends State<_MembersTab> {
     final owner = widget.guild.ownerRef == widget.actorRef;
     final self = member.user.ref == widget.actorRef;
     return (owner || widget.guild.allows(Permission.manageRoles)) &&
-        (_canManageMember(member) || (self && owner));
+        (self || _canManageMember(member));
   }
 
-  bool _canManageMember(GuildMember member) {
-    if (member.user.ref == widget.guild.ownerRef) return false;
-    if (widget.guild.ownerRef == widget.actorRef) return true;
-    final actorPosition = _actorRolePosition(widget.guild);
-    if (actorPosition == null) return false;
-    final targetPosition = member.roleIds
-        .map((id) => _roleByMemberId(widget.guild, id)?.position ?? 0)
-        .fold(0, (highest, value) => value > highest ? value : highest);
-    return actorPosition > targetPosition;
-  }
+  bool _canManageMember(GuildMember member) => guildActorCanManageMember(
+        guild: widget.guild,
+        actorRef: widget.actorRef,
+        actorHighestRole: guildActorHighestRole(widget.guild),
+        target: member,
+      );
+
+  bool _canChangeNickname(GuildMember member) => canChangeGuildMemberNickname(
+        guild: widget.guild,
+        actorRef: widget.actorRef,
+        actorHighestRole: guildActorHighestRole(widget.guild),
+        target: member,
+      );
+
+  GuildMember? _currentMember(EntityRef ref) => guildMemberByRef(_members, ref);
 
   Future<void> _action(GuildMember member, String action) async {
     try {
+      final currentAtOpen = _currentMember(member.user.ref);
+      if (currentAtOpen == null) return;
+      member = currentAtOpen;
       switch (action) {
         case 'roles':
-          final actorPosition = widget.guild.ownerRef == widget.actorRef
-              ? null
-              : _actorRolePosition(widget.guild);
+          if (!_canAssignRoles(member)) return;
+          final actorHighestRole = guildActorHighestRole(widget.guild);
           final selected = await showDialog<Set<String>>(
               context: context,
               builder: (_) => _RoleAssignmentDialog(
@@ -2398,33 +2783,54 @@ final class _MembersTabState extends State<_MembersTab> {
                       .where((role) =>
                           role.position != 0 &&
                           role.ref != widget.guild.ref &&
-                          (actorPosition == null ||
-                              role.position < actorPosition))
+                          guildActorCanManageRole(
+                            guild: widget.guild,
+                            actorRef: widget.actorRef,
+                            actorHighestRole: actorHighestRole,
+                            target: role,
+                          ))
                       .toList()));
           if (selected == null) return;
+          final current = _currentMember(member.user.ref);
+          if (current == null || !_canAssignRoles(current)) return;
           await widget.repository
-              .replaceMemberRoles(widget.guild.ref, member.user.ref, selected);
+              .replaceMemberRoles(widget.guild.ref, current.user.ref, selected);
           break;
         case 'nickname':
+          if (!_canChangeNickname(member)) return;
           final nickname =
               await _prompt(context, 'Change nickname', 'Nickname');
           if (nickname == null) return;
+          final current = _currentMember(member.user.ref);
+          if (current == null || !_canChangeNickname(current)) return;
           await widget.repository.updateMember(
               widget.guild.ref,
-              member.user.ref,
+              current.user.ref,
               {'nickname': nickname.isEmpty ? null : nickname});
           break;
         case 'timeout':
+          if (!_canManageMember(member) ||
+              (widget.guild.ownerRef != widget.actorRef &&
+                  !widget.guild.allows(Permission.moderateMembers))) {
+            return;
+          }
           final choice = await showModerationOptions(
             context,
             title: 'Timeout ${member.user.name}',
             timeout: true,
           );
           if (choice == null) return;
+          final current = _currentMember(member.user.ref);
+          if (current == null ||
+              !_canManageMember(current) ||
+              (widget.guild.ownerRef != widget.actorRef &&
+                  !widget.guild.allows(Permission.moderateMembers))) {
+            return;
+          }
           final indefinite = choice.durationSeconds < 0;
           await widget.repository.updateMember(
             widget.guild.ref,
-            member.user.ref,
+            current.user.ref,
             <String, Object?>{
               'timeout_until': indefinite
                   ? null
@@ -2438,22 +2844,46 @@ final class _MembersTabState extends State<_MembersTab> {
           );
           break;
         case 'kick':
+          if (!_canManageMember(member) ||
+              (widget.guild.ownerRef != widget.actorRef &&
+                  !widget.guild.allows(Permission.kickMembers))) {
+            return;
+          }
           final reason = await _prompt(
               context, 'Kick ${member.user.name}?', 'Reason (optional)');
           if (reason == null) return;
+          final current = _currentMember(member.user.ref);
+          if (current == null ||
+              !_canManageMember(current) ||
+              (widget.guild.ownerRef != widget.actorRef &&
+                  !widget.guild.allows(Permission.kickMembers))) {
+            return;
+          }
           await widget.repository
-              .kick(widget.guild.ref, member.user.ref, reason: reason);
+              .kick(widget.guild.ref, current.user.ref, reason: reason);
           break;
         case 'ban':
+          if (!_canManageMember(member) ||
+              (widget.guild.ownerRef != widget.actorRef &&
+                  !widget.guild.allows(Permission.banMembers))) {
+            return;
+          }
           final choice = await showModerationOptions(
             context,
             title: 'Ban ${member.user.name}?',
             includeDeleteHistory: true,
           );
           if (choice == null) return;
+          final current = _currentMember(member.user.ref);
+          if (current == null ||
+              !_canManageMember(current) ||
+              (widget.guild.ownerRef != widget.actorRef &&
+                  !widget.guild.allows(Permission.banMembers))) {
+            return;
+          }
           await widget.repository.ban(
             widget.guild.ref,
-            member.user.ref,
+            current.user.ref,
             reason: choice.reason,
             expiresAt: choice.durationSeconds == 0
                 ? null
@@ -2737,6 +3167,7 @@ final class _InvitesTab extends StatefulWidget {
     required this.canListGuild,
     required this.managedChannels,
     required this.canManageRoles,
+    required this.currentGuild,
   });
   final KaedeGuild guild;
   final KaedeRepository repository;
@@ -2746,6 +3177,7 @@ final class _InvitesTab extends StatefulWidget {
   final bool canListGuild;
   final List<KaedeChannel> managedChannels;
   final bool canManageRoles;
+  final KaedeGuild? Function() currentGuild;
   @override
   State<_InvitesTab> createState() => _InvitesTabState();
 }
@@ -2951,13 +3383,52 @@ final class _InvitesTabState extends State<_InvitesTab> {
       canManageRoles: widget.canManageRoles,
     );
     if (request == null || !mounted) return;
+    final currentGuild = widget.currentGuild();
+    if (currentGuild == null ||
+        !inviteRequestStillAuthorized(
+          currentGuild,
+          widget.actorRef,
+          request,
+        )) {
+      _tabError(
+        context,
+        'Could not create invite',
+        UserInputException(
+          'Invite permissions changed before the invite was created.',
+        ),
+      );
+      return;
+    }
     try {
-      await widget.repository.createInvite(widget.guild.ref, request);
+      await widget.repository.createInvite(currentGuild.ref, request);
       await _load();
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not create invite', error);
     }
   }
+}
+
+bool inviteRequestStillAuthorized(
+  KaedeGuild guild,
+  EntityRef? actorRef,
+  Map<String, Object?> request,
+) {
+  final rawChannel = '${request['channel_id'] ?? ''}'.trim();
+  if (rawChannel.isEmpty) {
+    return actorRef == guild.ownerRef || guild.allows(Permission.createInvite);
+  }
+  EntityRef target;
+  try {
+    target = rawChannel.contains('@')
+        ? EntityRef.parse(rawChannel)
+        : EntityRef(Snowflake(rawChannel), guild.ref.domain);
+  } on FormatException {
+    return false;
+  }
+  return guildInviteCreationTargets(
+    guild.channels,
+    isOwner: actorRef == guild.ownerRef,
+  ).any((channel) => channel.ref == target);
 }
 
 Future<(int?, int?)?> showInviteRestrictions(BuildContext context) async {
@@ -3035,25 +3506,22 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
   EntityRef? scheduledEventRef;
   final selectedRoleRefs = <EntityRef>{};
   String? validationError;
-  final channels = guild.channels
-      .where((channel) => {
-            ChannelType.text,
-            ChannelType.voice,
-            ChannelType.stage,
-            ChannelType.announcement,
-            ChannelType.forum,
-            ChannelType.tracker,
-          }.contains(channel.type))
-      .toList()
-    ..sort((a, b) => a.position.compareTo(b.position));
-  final actorRolePosition = _actorRolePosition(guild);
+  final channels = guildInviteCreationTargets(
+    guild.channels,
+    isOwner: actorRef == guild.ownerRef,
+  );
+  final actorHighestRole = guildActorHighestRole(guild);
   final assignableRoles = guild.roles
       .where((role) =>
           role.position != 0 &&
           role.ref != guild.ref &&
           canManageRoles &&
-          (actorRef == guild.ownerRef ||
-              (actorRolePosition != null && role.position < actorRolePosition)))
+          guildActorCanManageRole(
+            guild: guild,
+            actorRef: actorRef,
+            actorHighestRole: actorHighestRole,
+            target: role,
+          ))
       .toList()
     ..sort((a, b) => b.position.compareTo(a.position));
   final result = await showDialog<Map<String, Object?>>(
@@ -4925,11 +5393,13 @@ final class _WebhooksTab extends StatefulWidget {
   const _WebhooksTab({
     required this.guild,
     required this.repository,
-    required this.canManage,
+    required this.canManageGuild,
+    required this.managedChannels,
   });
   final KaedeGuild guild;
   final KaedeRepository repository;
-  final bool canManage;
+  final bool canManageGuild;
+  final List<KaedeChannel> managedChannels;
   @override
   State<_WebhooksTab> createState() => _WebhooksTabState();
 }
@@ -4950,20 +5420,35 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.guild.ref != widget.guild.ref ||
         oldWidget.guild.version != widget.guild.version ||
-        oldWidget.canManage != widget.canManage) {
+        oldWidget.canManageGuild != widget.canManageGuild ||
+        !listEquals(
+          oldWidget.managedChannels.map((channel) => channel.ref).toList(),
+          widget.managedChannels.map((channel) => channel.ref).toList(),
+        )) {
       setState(() => _loading = true);
       unawaited(_load());
     }
   }
 
+  bool get _canManage => widget.managedChannels.isNotEmpty;
+
   Future<void> _load() async {
     try {
-      final items = widget.canManage
+      final items = widget.canManageGuild
           ? await widget.repository.webhooks(widget.guild.ref)
-          : const <Map<String, Object?>>[];
+          : (await Future.wait(widget.managedChannels.map(
+              (channel) => widget.repository
+                  .channelWebhooks(widget.guild.ref, channel.ref),
+            )))
+              .expand((items) => items)
+              .toList(growable: false);
+      final managed =
+          widget.managedChannels.map((channel) => channel.ref).toSet();
       if (mounted) {
         setState(() {
-          _items = items;
+          _items = items
+              .where((item) => managed.contains(_webhookChannelRef(item)))
+              .toList(growable: false);
           _loading = false;
         });
       }
@@ -4982,7 +5467,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
           : ListView(padding: EdgeInsets.all(14), children: [
               const _TabHint(
                   'Authorized server managers can copy a webhook URL whenever an external website needs it.'),
-              if (!widget.canManage)
+              if (!_canManage)
                 Padding(
                   padding: EdgeInsets.only(top: 8),
                   child: Row(
@@ -5005,7 +5490,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                     title: '${item['name'] ?? 'Webhook'}',
                     subtitle: _webhookChannelLabel(item),
                     trailing: PopupMenuButton<String>(
-                      enabled: widget.canManage && _busyWebhook == null,
+                      enabled: _canManage && _busyWebhook == null,
                       onSelected: (value) => _handleAction(item, value),
                       itemBuilder: (_) => [
                         if (item['type'] != 2) ...[
@@ -5061,7 +5546,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                 ),
             ]),
       floatingActionButton: FloatingActionButton.extended(
-          onPressed: widget.canManage ? _create : null,
+          onPressed: _canManage ? _create : null,
           icon: Icon(Icons.add_rounded),
           label: Text('Webhook')));
 
@@ -5092,6 +5577,13 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
     return 'Following $sourceGuildName · $sourceChannelName into $destination';
   }
 
+  EntityRef _webhookChannelRef(Map<String, Object?> webhook) => EntityRef(
+        Snowflake('${webhook['channel_id']}'),
+        Domain(
+          '${webhook['channel_domain'] ?? widget.guild.ref.domain.value}',
+        ),
+      );
+
   EntityRef _webhookRef(Map<String, Object?> webhook) {
     final qualified = '${webhook['ref'] ?? ''}'.trim();
     if (qualified.isNotEmpty) return EntityRef.parse(qualified);
@@ -5120,7 +5612,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
           }
           return;
         case 'edit':
-          final channels = guildTextChannelTargets(widget.guild.channels);
+          final channels = widget.managedChannels;
           if (channels.isEmpty) {
             throw UserInputException(
               'Create a text, announcement, or forum channel before moving this webhook.',
@@ -5272,7 +5764,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
   Future<void> _create() async {
     final name = await _prompt(context, 'Create webhook', 'Webhook name');
     if (name == null || !mounted) return;
-    final channels = guildTextChannelTargets(widget.guild.channels);
+    final channels = widget.managedChannels;
     if (channels.isEmpty) {
       _tabError(
         context,
@@ -5283,7 +5775,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
       );
       return;
     }
-    final channel = await showGuildTextChannelPicker(
+    final channel = await showGuildChannelPicker(
       context,
       channels: channels,
       title: 'Post this webhook in…',
@@ -6746,12 +7238,18 @@ final class _AuditInlineError extends StatelessWidget {
 final class _PermissionScreen extends StatefulWidget {
   const _PermissionScreen(
       {required this.guild,
+      required this.actorRef,
+      required this.actorHighestRole,
       required this.channel,
+      required this.heldPermissions,
       required this.members,
       required this.existing,
       required this.repository});
   final KaedeGuild guild;
+  final EntityRef? actorRef;
+  final KaedeRole? actorHighestRole;
   final KaedeChannel channel;
+  final BigInt heldPermissions;
   final List<GuildMember> members;
   final List<Map<String, Object?>> existing;
   final KaedeRepository repository;
@@ -6933,15 +7431,31 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
     final query = _search.text.trim().toLowerCase();
     final targets = <(String, EntityRef, String, KaedeUser?)>[
       for (final role in widget.guild.roles)
-        if (query.isEmpty || role.name.toLowerCase().contains(query))
+        if ((query.isEmpty || role.name.toLowerCase().contains(query)) &&
+            channelOverwriteTargetEligible(
+              guild: widget.guild,
+              actorRef: widget.actorRef,
+              actorHighestRole: widget.actorHighestRole,
+              target: role.ref,
+              targetType: 'role',
+              members: _members,
+            ))
           (role.name, role.ref, 'role', null),
       for (final member in _members)
-        (
-          member.nickname ?? member.user.name,
-          member.user.ref,
-          'member',
-          member.user
-        ),
+        if (channelOverwriteTargetEligible(
+          guild: widget.guild,
+          actorRef: widget.actorRef,
+          actorHighestRole: widget.actorHighestRole,
+          target: member.user.ref,
+          targetType: 'member',
+          members: _members,
+        ))
+          (
+            member.nickname ?? member.user.name,
+            member.user.ref,
+            'member',
+            member.user
+          ),
     ];
     return Scaffold(
       appBar: AppBar(title: Text('#${widget.channel.name} permissions')),
@@ -7058,6 +7572,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
                     .contains(_channelNumber(widget.channel.type))))
         .toList(growable: false);
     final groups = relevant.map((item) => item.group).toSet();
+    final targetEligible = _selectedTargetEligible;
     return ListView(padding: EdgeInsets.all(16), children: [
       Text('Channel override',
           style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
@@ -7066,6 +7581,13 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
         'Deny blocks the role permission here. Inherit keeps the role value. Allow grants it here.',
         style: TextStyle(color: context.kaede.muted),
       ),
+      if (!targetEligible) ...[
+        SizedBox(height: 8),
+        Text(
+          'You can no longer manage this target.',
+          style: TextStyle(color: context.kaede.danger),
+        ),
+      ],
       SizedBox(height: 14),
       for (final group in groups)
         Card(
@@ -7084,6 +7606,10 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
                 _PermissionRow(
                     metadata: permission,
                     value: _permissionValue(permission.bit),
+                    enabled: channelOverwritePermissionCanChange(
+                      widget.heldPermissions,
+                      permission.bit,
+                    ),
                     changed: (value) =>
                         setState(() => _set(permission.bit, value))),
             ],
@@ -7093,14 +7619,22 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
       Row(children: [
         Expanded(
           child: FilledButton.icon(
-              onPressed: _mutating ? null : _save,
+              onPressed: _mutating || !targetEligible ? null : _save,
               icon: Icon(Icons.save_outlined),
               label: Text(_mutating ? 'Saving…' : 'Save overwrite')),
         ),
         if (_hasOverwrite) ...[
           SizedBox(width: 10),
           OutlinedButton.icon(
-            onPressed: _mutating ? null : _delete,
+            onPressed: _mutating ||
+                    !targetEligible ||
+                    !channelOverwriteCanReset(
+                      _allow,
+                      _deny,
+                      widget.heldPermissions,
+                    )
+                ? null
+                : _delete,
             icon: Icon(Icons.restart_alt_rounded),
             label: Text('Reset'),
           ),
@@ -7111,6 +7645,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
   }
 
   void _select(EntityRef target, String type) {
+    if (!_targetEligible(target, type)) return;
     _target = target;
     _type = type;
     _loadSelectedOverwrite();
@@ -7151,7 +7686,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
 
   Future<void> _save() async {
     final target = _target;
-    if (target == null || _mutating) return;
+    if (target == null || _mutating || !_targetEligible(target, _type)) return;
     final targetType = _type;
     final allow = _allow;
     final deny = _deny;
@@ -7193,7 +7728,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
 
   Future<void> _delete() async {
     final target = _target;
-    if (target == null || _mutating) return;
+    if (target == null || _mutating || !_targetEligible(target, _type)) return;
     final targetType = _type;
     setState(() => _mutating = true);
     try {
@@ -7245,6 +7780,69 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
       ),
     );
   }
+
+  bool get _selectedTargetEligible {
+    final target = _target;
+    return target != null && _targetEligible(target, _type);
+  }
+
+  bool _targetEligible(EntityRef target, String type) =>
+      channelOverwriteTargetEligible(
+        guild: widget.guild,
+        actorRef: widget.actorRef,
+        actorHighestRole: widget.actorHighestRole,
+        target: target,
+        targetType: type,
+        members: <GuildMember>[...widget.members, ..._members],
+      );
+}
+
+bool channelOverwriteTargetEligible({
+  required KaedeGuild guild,
+  required EntityRef? actorRef,
+  required KaedeRole? actorHighestRole,
+  required EntityRef target,
+  required String targetType,
+  required Iterable<GuildMember> members,
+}) {
+  if (targetType == 'role') {
+    final role = guild.roles.where((item) => item.ref == target).firstOrNull;
+    return role != null &&
+        guildActorCanManageRole(
+          guild: guild,
+          actorRef: actorRef,
+          actorHighestRole: actorHighestRole,
+          target: role,
+        );
+  }
+  if (targetType != 'member') return false;
+  final member = members.where((item) => item.user.ref == target).firstOrNull;
+  return member != null &&
+      guildActorCanManageMember(
+        guild: guild,
+        actorRef: actorRef,
+        actorHighestRole: actorHighestRole,
+        target: member,
+      );
+}
+
+bool canChangeGuildMemberNickname({
+  required KaedeGuild guild,
+  required EntityRef? actorRef,
+  required KaedeRole? actorHighestRole,
+  required GuildMember target,
+}) {
+  final owner = actorRef != null && actorRef == guild.ownerRef;
+  if (target.user.ref == actorRef) {
+    return owner || guild.allows(Permission.changeNickname);
+  }
+  return (owner || guild.allows(Permission.manageNicknames)) &&
+      guildActorCanManageMember(
+        guild: guild,
+        actorRef: actorRef,
+        actorHighestRole: actorHighestRole,
+        target: target,
+      );
 }
 
 Map<String, Object?> channelOverwriteRequest({
@@ -7330,22 +7928,35 @@ List<Map<String, Object?>> removeChannelOverwrite(
 ///
 /// Channel position IDs and parents are guild-local snowflakes, not composite
 /// entity references. An omitted [parent_id] preserves the existing category,
-/// so only the channel whose composite parent actually changed includes it.
+/// so unrelated rows shifted by the local list animation stay out of the
+/// authority-checked request. Moving a category carries its children as a
+/// group.
 List<Map<String, Object?>> guildChannelPositionRequest(
   List<KaedeChannel> previous,
-  List<KaedeChannel> next,
-) {
+  List<KaedeChannel> next, {
+  required EntityRef movedRef,
+}) {
   final previousByRef = <EntityRef, KaedeChannel>{
     for (final channel in previous) channel.ref: channel,
   };
+  final moved = next.where((channel) => channel.ref == movedRef).firstOrNull;
+  if (moved == null) return const <Map<String, Object?>>[];
+  final includedRefs = <EntityRef>{
+    movedRef,
+    if (moved.type == ChannelType.category)
+      for (final channel in next)
+        if (channel.parentRef == movedRef) channel.ref,
+  };
   return <Map<String, Object?>>[
     for (var index = 0; index < next.length; index++)
-      <String, Object?>{
-        'id': next[index].ref.id.value,
-        'position': index,
-        if (previousByRef[next[index].ref]?.parentRef != next[index].parentRef)
-          'parent_id': next[index].parentRef?.id.value,
-      },
+      if (includedRefs.contains(next[index].ref))
+        <String, Object?>{
+          'id': next[index].ref.id.value,
+          'position': index,
+          if (previousByRef[next[index].ref]?.parentRef !=
+              next[index].parentRef)
+            'parent_id': next[index].parentRef?.id.value,
+        },
   ];
 }
 
@@ -8161,25 +8772,15 @@ String guildAuditChangeDescription(Map<String, Object?> change) {
   return '${display(change['old_value'])} → ${display(change['new_value'])}';
 }
 
-KaedeRole? _roleByMemberId(KaedeGuild guild, String roleId) {
-  final normalized = roleId.contains('@') ? roleId.split('@').first : roleId;
-  return guild.roles
-      .where(
-          (role) => role.ref.wire == roleId || role.ref.id.value == normalized)
-      .firstOrNull;
-}
-
-int? _actorRolePosition(KaedeGuild guild) {
-  final id = guild.actorHighestRoleId;
-  if (id == null) return null;
-  return _roleByMemberId(guild, id)?.position;
-}
-
 final class _PermissionRow extends StatelessWidget {
   const _PermissionRow(
-      {required this.metadata, required this.value, required this.changed});
+      {required this.metadata,
+      required this.value,
+      required this.enabled,
+      required this.changed});
   final PermissionMetadata metadata;
   final int value;
+  final bool enabled;
   final ValueChanged<int> changed;
 
   Widget _selector(BuildContext context) => SegmentedButton<int>(
@@ -8197,7 +8798,7 @@ final class _PermissionRow extends StatelessWidget {
               tooltip: 'Allow')
         ],
         selected: {value},
-        onSelectionChanged: (value) => changed(value.first),
+        onSelectionChanged: enabled ? (value) => changed(value.first) : null,
       );
 
   @override
@@ -8211,6 +8812,17 @@ final class _PermissionRow extends StatelessWidget {
               SizedBox(height: 2),
               Text(metadata.description,
                   style: TextStyle(color: context.kaede.muted, fontSize: 13)),
+              if (channelPermissionDependencyLabels(metadata)
+                  case final dependencies when dependencies.isNotEmpty)
+                Text(
+                  'Also requires: ${dependencies.join(', ')}',
+                  style: TextStyle(color: context.kaede.muted, fontSize: 12),
+                ),
+              if (!enabled)
+                Text(
+                  'You can only change permissions you currently hold here.',
+                  style: TextStyle(color: context.kaede.muted, fontSize: 12),
+                ),
             ],
           );
           return Padding(
@@ -8270,18 +8882,41 @@ List<KaedeChannel> guildTextChannelTargets(Iterable<KaedeChannel> channels) =>
         .toList(growable: false)
       ..sort((a, b) => a.position.compareTo(b.position));
 
-List<KaedeChannel> guildInviteCreationTargets(
+List<KaedeChannel> guildWebhookManagementTargets(
   Iterable<KaedeChannel> channels, {
   required bool isOwner,
 }) =>
     guildTextChannelTargets(channels)
         .where((channel) =>
+            channel.encryptionMode != 'e2ee' &&
+            canManageEffectiveChannel(
+              channel,
+              Permission.manageWebhooks,
+              isOwner: isOwner,
+            ))
+        .toList(growable: false);
+
+List<KaedeChannel> guildInviteCreationTargets(
+  Iterable<KaedeChannel> channels, {
+  required bool isOwner,
+}) =>
+    channels
+        .where((channel) => {
+              ChannelType.text,
+              ChannelType.voice,
+              ChannelType.announcement,
+              ChannelType.stage,
+              ChannelType.forum,
+              ChannelType.tracker,
+            }.contains(channel.type))
+        .where((channel) =>
             isOwner ||
             channel.allows(Permission.administrator) ||
             channel.allows(Permission.createInvite))
-        .toList(growable: false);
+        .toList(growable: false)
+      ..sort((a, b) => a.position.compareTo(b.position));
 
-Future<KaedeChannel?> showGuildTextChannelPicker(
+Future<KaedeChannel?> showGuildChannelPicker(
   BuildContext context, {
   required List<KaedeChannel> channels,
   required String title,
@@ -8312,12 +8947,18 @@ Future<KaedeChannel?> showGuildTextChannelPicker(
                     leading: Icon(switch (channel.type) {
                       ChannelType.announcement => Icons.campaign_rounded,
                       ChannelType.forum => Icons.forum_outlined,
+                      ChannelType.voice => Icons.volume_up_rounded,
+                      ChannelType.stage => Icons.podcasts_rounded,
+                      ChannelType.tracker => Icons.view_kanban_outlined,
                       _ => Icons.tag_rounded,
                     }),
                     title: Text(channel.name ?? 'channel'),
                     subtitle: Text(switch (channel.type) {
                       ChannelType.announcement => 'Announcement channel',
                       ChannelType.forum => 'Forum channel',
+                      ChannelType.voice => 'Voice channel',
+                      ChannelType.stage => 'Stage channel',
+                      ChannelType.tracker => 'Task tracker channel',
                       _ => 'Text channel',
                     }),
                     trailing: Icon(Icons.chevron_right_rounded),
@@ -9438,8 +10079,9 @@ List<PermissionMetadata> guildRolePermissionMetadata([String query = '']) {
 }
 
 final class _RoleEditor extends StatefulWidget {
-  const _RoleEditor({this.role});
+  const _RoleEditor({this.role, required this.heldPermissions});
   final KaedeRole? role;
+  final BigInt heldPermissions;
   @override
   State<_RoleEditor> createState() => _RoleEditorState();
 }
@@ -9689,37 +10331,54 @@ final class _RoleEditorState extends State<_RoleEditor> {
                       SwitchListTile(
                           contentPadding: EdgeInsets.symmetric(horizontal: 16),
                           title: Text(permission.label),
-                          subtitle: Text(permission.description),
+                          subtitle: Text(rolePermissionCanChange(
+                                  widget.heldPermissions, permission.bit)
+                              ? permission.description
+                              : '${permission.description}\nYou can only change permissions you currently hold.'),
                           value: _permissions & BigInt.from(permission.bit) !=
                               BigInt.zero,
-                          onChanged: (value) => setState(() {
-                                final bit = BigInt.from(permission.bit);
-                                value
-                                    ? _permissions |= bit
-                                    : _permissions &= ~bit;
-                              })),
+                          onChanged: !rolePermissionCanChange(
+                                  widget.heldPermissions, permission.bit)
+                              ? null
+                              : (value) => setState(() {
+                                    final bit = BigInt.from(permission.bit);
+                                    value
+                                        ? _permissions |= bit
+                                        : _permissions &= ~bit;
+                                  })),
                   ],
                 ),
               ),
           SizedBox(height: 90),
         ]),
         floatingActionButton: FloatingActionButton.extended(
-          onPressed: _name.text.trim().isEmpty
-              ? null
-              : () => Navigator.pop(
-                    context,
-                    _RoleDraft({
-                      'name': _name.text.trim(),
-                      'color': _color,
-                      'permissions': '$_permissions',
-                      'hoist': _hoist,
-                      'mentionable': _mentionable
-                    }, iconFile: _iconFile, removeIcon: _removeIcon),
-                  ),
+          onPressed: _name.text.trim().isEmpty ? null : _submit,
           icon: Icon(
               widget.role == null ? Icons.add_rounded : Icons.save_outlined),
           label: Text(widget.role == null ? 'Create role' : 'Save role'),
         ));
+  }
+
+  void _submit() {
+    if (!rolePermissionChangesWithinCeiling(
+      widget.role?.permissions ?? BigInt.zero,
+      _permissions,
+      widget.heldPermissions,
+    )) {
+      _tabError(context, 'Could not update role',
+          'You can only change permissions you currently hold.');
+      return;
+    }
+    Navigator.pop(
+      context,
+      _RoleDraft({
+        'name': _name.text.trim(),
+        'color': _color,
+        'permissions': '$_permissions',
+        'hoist': _hoist,
+        'mentionable': _mentionable
+      }, iconFile: _iconFile, removeIcon: _removeIcon),
+    );
   }
 
   Future<void> _pickRoleIcon() async {

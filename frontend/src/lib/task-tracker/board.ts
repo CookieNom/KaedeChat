@@ -67,6 +67,31 @@ export function trackerTaskBelongsToUser(
   );
 }
 
+export type TrackerTaskEditMode = 'details' | 'assignment' | 'read-only';
+
+export function trackerCanChangeAssignee(
+  task: Pick<TrackerTask, 'assignee'> | null,
+  user: { id: string; origin_domain: string } | null,
+  canAssignOthers: boolean
+): boolean {
+  return (
+    canAssignOthers ||
+    Boolean(user && (!task?.assignee || entityKey(task.assignee) === entityKey(user)))
+  );
+}
+
+/**
+ * Assignment is an independent moderation capability. It must not implicitly
+ * unlock the task's other fields, but it still needs a saveable editor.
+ */
+export function trackerTaskEditMode(
+  canEditDetails: boolean,
+  canAssign: boolean
+): TrackerTaskEditMode {
+  if (canEditDetails) return 'details';
+  return canAssign ? 'assignment' : 'read-only';
+}
+
 export function orderedTrackerLanes(board: TrackerBoard | null): TrackerLane[] {
   return [...(board?.lanes ?? [])].sort(compareTrackerLanes);
 }

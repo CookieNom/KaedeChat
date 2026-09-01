@@ -2542,9 +2542,7 @@ async def _soundboard_play_capability(
         guild.origin_domain,
     )
     required = _soundboard_play_permissions(external=external)
-    permissions = await get_permissions(session, redis, guild, actor, channel=channel)
-    if permissions & required != required:
-        raise _missing_permissions(required)
+    await require_permissions(session, redis, guild, actor, required, channel=channel)
     identity = await _require_soundboard_speaker(
         redis,
         settings,

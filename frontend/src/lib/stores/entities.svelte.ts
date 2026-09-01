@@ -1,4 +1,5 @@
 import { entityKey } from '$lib/chat/refs';
+import { SvelteSet } from 'svelte/reactivity';
 import type {
   Channel,
   Guild,
@@ -117,6 +118,43 @@ export class ChatEntityStore {
     }));
   }
 
+  updateChannelPermissions(
+    channel: Pick<Channel, 'id' | 'origin_domain'>,
+    permissions: string
+  ): void {
+    const key = entityKey(channel);
+    this.channels.update(key, (current) => ({ ...current, permissions }));
+    this.guilds.replace(
+      this.guilds.values.map((guild) => ({
+        ...guild,
+        channels: (guild.channels ?? []).map((current) =>
+          entityKey(current) === key ? { ...current, permissions } : current
+        )
+      }))
+    );
+  }
+
+  invalidateGuildPermissionProjection(guildRef: string): void {
+    this.guilds.update(guildRef, (guild) => ({
+      ...guild,
+      permissions: undefined,
+      actor_highest_role_id: undefined,
+      channels: (guild.channels ?? []).map((channel) => ({
+        ...channel,
+        permissions: undefined
+      }))
+    }));
+    this.channels.replace(
+      this.channels.values.map((channel) =>
+        channel.guild_id &&
+        channel.guild_domain &&
+        `${channel.guild_id}@${channel.guild_domain}` === guildRef
+          ? { ...channel, permissions: undefined }
+          : channel
+      )
+    );
+  }
+
   removeChannel(channel: Pick<Channel, 'id' | 'origin_domain'>): void {
     const key = entityKey(channel);
     this.channels.remove(key);
@@ -132,6 +170,35 @@ export class ChatEntityStore {
         channels: (guild.channels ?? []).filter((item) => entityKey(item) !== key)
       }))
     );
+  }
+
+  removeGuild(guild: Pick<Guild, 'id' | 'origin_domain'>): void {
+    const guildRef = entityKey(guild);
+    const belongsToGuild = (guildId: string | null, guildDomain: string | null) =>
+      guildId === guild.id && guildDomain === guild.origin_domain;
+    const channelKeys = new SvelteSet(
+      [
+        ...this.channels.values.filter((channel) =>
+          belongsToGuild(channel.guild_id, channel.guild_domain)
+        ),
+        ...(this.guilds.get(guildRef)?.channels ?? [])
+      ].map(entityKey)
+    );
+
+    this.guilds.remove(guildRef);
+    this.channels.replaceWhere([], (channel) =>
+      belongsToGuild(channel.guild_id, channel.guild_domain)
+    );
+    this.messages.replaceWhere([], (message) =>
+      channelKeys.has(`${message.channel_id}@${message.channel_domain}`)
+    );
+    this.readStates.replaceWhere(
+      [],
+      (state) =>
+        belongsToGuild(state.guild_id, state.guild_domain) ||
+        channelKeys.has(`${state.channel_id}@${state.channel_domain}`)
+    );
+    this.members.replaceWhere([], (member) => belongsToGuild(member.guild_id, member.guild_domain));
   }
 
   ingestCurrentUser(user: UserSummary): void {

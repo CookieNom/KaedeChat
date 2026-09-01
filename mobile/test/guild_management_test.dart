@@ -302,10 +302,10 @@ void main() {
         guildChannelPositionRequest(
           <KaedeChannel>[category, child],
           <KaedeChannel>[child, category],
+          movedRef: child.ref,
         ),
         <Map<String, Object?>>[
           <String, Object?>{'id': '12', 'position': 0},
-          <String, Object?>{'id': '11', 'position': 1},
         ],
       );
     });
@@ -338,9 +338,9 @@ void main() {
         guildChannelPositionRequest(
           <KaedeChannel>[category, ungrouped],
           <KaedeChannel>[category, moved],
+          movedRef: moved.ref,
         ),
         <Map<String, Object?>>[
-          <String, Object?>{'id': '11', 'position': 0},
           <String, Object?>{'id': '12', 'position': 1, 'parent_id': '11'},
         ],
       );
@@ -348,15 +348,80 @@ void main() {
         guildChannelPositionRequest(
           <KaedeChannel>[category, moved],
           <KaedeChannel>[category, ungrouped],
+          movedRef: ungrouped.ref,
         ),
         <Map<String, Object?>>[
-          <String, Object?>{'id': '11', 'position': 0},
           <String, Object?>{'id': '12', 'position': 1, 'parent_id': null},
         ],
       );
     });
 
-    test('invite and webhook pickers include text, announcement, and forums',
+    test('reorder omits unrelated channels shifted by the moved row', () {
+      KaedeChannel channel(String id, ChannelType type, int position,
+              {EntityRef? parent}) =>
+          KaedeChannel(
+            ref: EntityRef.parse('$id@chat.example'),
+            guildRef: EntityRef.parse('1@chat.example'),
+            parentRef: parent,
+            type: type,
+            position: position,
+            permissions: BigInt.zero,
+          );
+      final deniedCategory = channel('20', ChannelType.category, 0);
+      final deniedChild = channel(
+        '21',
+        ChannelType.text,
+        1,
+        parent: deniedCategory.ref,
+      );
+      final moved = channel('22', ChannelType.text, 2);
+
+      expect(
+        guildChannelPositionRequest(
+          <KaedeChannel>[deniedCategory, deniedChild, moved],
+          <KaedeChannel>[moved, deniedCategory, deniedChild],
+          movedRef: moved.ref,
+        ),
+        <Map<String, Object?>>[
+          <String, Object?>{'id': '22', 'position': 0},
+        ],
+      );
+    });
+
+    test('moving a category carries only that category and its children', () {
+      KaedeChannel channel(String id, ChannelType type, int position,
+              {EntityRef? parent}) =>
+          KaedeChannel(
+            ref: EntityRef.parse('$id@chat.example'),
+            guildRef: EntityRef.parse('1@chat.example'),
+            parentRef: parent,
+            type: type,
+            position: position,
+            permissions: BigInt.zero,
+          );
+      final unrelated = channel('30', ChannelType.category, 0);
+      final category = channel('31', ChannelType.category, 1);
+      final child = channel(
+        '32',
+        ChannelType.text,
+        2,
+        parent: category.ref,
+      );
+
+      expect(
+        guildChannelPositionRequest(
+          <KaedeChannel>[unrelated, category, child],
+          <KaedeChannel>[category, child, unrelated],
+          movedRef: category.ref,
+        ),
+        <Map<String, Object?>>[
+          <String, Object?>{'id': '31', 'position': 0},
+          <String, Object?>{'id': '32', 'position': 1},
+        ],
+      );
+    });
+
+    test('invite and webhook targets include their supported channel types',
         () {
       KaedeChannel channel(
         String id,
@@ -374,7 +439,9 @@ void main() {
               ChannelType.voice => 2,
               ChannelType.category => 4,
               ChannelType.announcement => 5,
+              ChannelType.stage => 13,
               ChannelType.forum => 15,
+              ChannelType.tracker => 17,
               _ => -1,
             },
             'position': position,
@@ -407,10 +474,29 @@ void main() {
           2,
           permissions: Permission.administrator,
         ),
+        channel(
+          '10',
+          ChannelType.voice,
+          3,
+          permissions: Permission.createInvite,
+        ),
+        channel(
+          '11',
+          ChannelType.stage,
+          4,
+          permissions: Permission.createInvite,
+        ),
+        channel(
+          '12',
+          ChannelType.tracker,
+          5,
+          permissions: Permission.createInvite,
+        ),
+        channel('13', ChannelType.voice, 6),
       ], isOwner: false);
       expect(
         creatable.map((channel) => channel.ref.id.value),
-        <String>['8', '9'],
+        <String>['8', '9', '10', '11', '12'],
       );
     });
   });
@@ -572,6 +658,121 @@ void main() {
     expect(request, containsPair('target_id', '42@chat.example'));
     expect(request, containsPair('target_type', 'member'));
     expect(request, isNot(contains('type')));
+  });
+
+  test('channel management gates use each channel effective permission mask',
+      () {
+    final managed = KaedeChannel(
+      ref: EntityRef.parse('10@chat.example'),
+      guildRef: EntityRef.parse('1@chat.example'),
+      type: ChannelType.text,
+      position: 0,
+      permissions: BigInt.from(
+        Permission.manageChannels |
+            Permission.manageRoles |
+            Permission.manageWebhooks,
+      ),
+      name: 'managed',
+    );
+    final guild = KaedeGuild(
+      ref: EntityRef.parse('1@chat.example'),
+      name: 'Guild',
+      ownerRef: EntityRef.parse('2@chat.example'),
+      permissions: BigInt.zero,
+      unavailable: false,
+      channels: <KaedeChannel>[managed],
+    );
+
+    expect(guild.allows(Permission.manageChannels), isFalse);
+    expect(
+      guildHasEffectiveChannelPermission(
+        guild,
+        Permission.manageChannels,
+        isOwner: false,
+      ),
+      isTrue,
+    );
+    expect(
+      canManageEffectiveChannel(
+        managed,
+        Permission.manageRoles,
+        isOwner: false,
+      ),
+      isTrue,
+    );
+  });
+
+  test('webhook management targets stay channel-scoped and plaintext', () {
+    KaedeChannel channel(
+      String id,
+      ChannelType type,
+      int permissions, {
+      String encryption = 'plaintext',
+    }) =>
+        KaedeChannel(
+          ref: EntityRef.parse('$id@chat.example'),
+          guildRef: EntityRef.parse('1@chat.example'),
+          type: type,
+          position: int.parse(id),
+          permissions: BigInt.from(permissions),
+          encryptionMode: encryption,
+          name: 'channel-$id',
+        );
+
+    final allowed = channel('10', ChannelType.text, Permission.manageWebhooks);
+    final encrypted = channel(
+      '11',
+      ChannelType.text,
+      Permission.manageWebhooks,
+      encryption: 'e2ee',
+    );
+    final denied = channel('12', ChannelType.forum, Permission.viewChannel);
+    final voice = channel('13', ChannelType.voice, Permission.manageWebhooks);
+
+    expect(
+      guildWebhookManagementTargets(
+        <KaedeChannel>[allowed, encrypted, denied, voice],
+        isOwner: false,
+      ),
+      <KaedeChannel>[allowed],
+    );
+  });
+
+  test('overwrite controls enforce the held-bit ceiling and show dependencies',
+      () {
+    final held = BigInt.from(Permission.viewChannel | Permission.manageRoles);
+
+    expect(
+      channelOverwritePermissionCanChange(held, Permission.manageRoles),
+      isTrue,
+    );
+    expect(
+      channelOverwritePermissionCanChange(held, Permission.sendMessages),
+      isFalse,
+    );
+    expect(
+      channelOverwriteCanReset(
+        BigInt.from(Permission.viewChannel),
+        BigInt.zero,
+        held,
+      ),
+      isTrue,
+    );
+    expect(
+      channelOverwriteCanReset(
+        BigInt.from(Permission.sendMessages),
+        BigInt.zero,
+        held,
+      ),
+      isFalse,
+    );
+
+    final useVad = permissionMetadata
+        .firstWhere((permission) => permission.bit == Permission.useVad);
+    expect(
+      channelPermissionDependencyLabels(useVad),
+      <String>['Speak'],
+    );
   });
 
   test('saved and removed overwrites update the local editor snapshot', () {

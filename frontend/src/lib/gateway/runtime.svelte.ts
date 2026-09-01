@@ -1,4 +1,5 @@
 import { entityKey } from '$lib/chat/refs';
+import { api } from '$lib/api/client';
 import {
   applyBulkMessageDelete,
   tombstoneMessage,
@@ -40,6 +41,7 @@ import {
   type InteractionResponseEventName
 } from '$lib/chat/interaction-responses.svelte';
 import { GATEWAY_STATUS_EVENT, GatewayClient, type Dispatch, type GatewayStatus } from './client';
+import { SvelteMap } from 'svelte/reactivity';
 
 type ReadyPayload = {
   user: UserSummary;
@@ -53,6 +55,39 @@ type ReadyPayload = {
   read_states: ReadStateStatus[];
   presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
 };
+
+const guildProjectionRefreshGenerations = new SvelteMap<string, number>();
+let guildProjectionSession = 0;
+
+function refreshGuildPermissionProjection(guildId: string, guildDomain: string): void {
+  if (!guildId || !guildDomain) return;
+  const guildRef = `${guildId}@${guildDomain}`;
+  const generation = (guildProjectionRefreshGenerations.get(guildRef) ?? 0) + 1;
+  const session = guildProjectionSession;
+  guildProjectionRefreshGenerations.set(guildRef, generation);
+  chatEntities.invalidateGuildPermissionProjection(guildRef);
+  void api<Guild>(`/guilds/${encodeURIComponent(guildRef)}`)
+    .then((guild) => {
+      if (
+        guildProjectionSession === session &&
+        guildProjectionRefreshGenerations.get(guildRef) === generation
+      ) {
+        chatEntities.ingestGuilds([guild]);
+      }
+    })
+    .catch(() => {
+      // Keep the projection fail-closed until the route or a later dispatch refreshes it.
+    });
+}
+
+function cancelGuildProjectionRefresh(guildId?: string, guildDomain?: string): void {
+  if (!guildId || !guildDomain) return;
+  const guildRef = `${guildId}@${guildDomain}`;
+  guildProjectionRefreshGenerations.set(
+    guildRef,
+    (guildProjectionRefreshGenerations.get(guildRef) ?? 0) + 1
+  );
+}
 
 function applyOwnPresencePreference(
   preference: 'online' | 'idle' | 'dnd' | 'invisible' | undefined
@@ -85,6 +120,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
   switch (dispatch.t) {
     case 'READY': {
       const ready = dispatch.d as ReadyPayload;
+      guildProjectionSession += 1;
+      guildProjectionRefreshGenerations.clear();
       // A full gateway re-identify may happen after a tab has slept or a resume
       // cursor expires. The route reload restores messages over HTTP, while the
       // roster is a separate gateway request. Keep the same account's last
@@ -208,14 +245,24 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         channel_domain: string;
         permissions: string;
       };
-      chatEntities.channels.update(`${update.channel_id}@${update.channel_domain}`, (channel) => ({
-        ...channel,
-        permissions: update.permissions
-      }));
+      chatEntities.updateChannelPermissions(
+        { id: update.channel_id, origin_domain: update.channel_domain },
+        update.permissions
+      );
       return;
     }
     case 'CHANNEL_ACCESS_REVOKED': {
-      const revoked = dispatch.d as { channel_id: string; channel_domain: string };
+      const revoked = dispatch.d as {
+        channel_id: string;
+        channel_domain: string;
+        guild_id?: string;
+        guild_domain?: string;
+      };
+      const current = chatEntities.channels.get(`${revoked.channel_id}@${revoked.channel_domain}`);
+      cancelGuildProjectionRefresh(
+        revoked.guild_id ?? current?.guild_id ?? undefined,
+        revoked.guild_domain ?? current?.guild_domain ?? undefined
+      );
       chatEntities.removeChannel({
         id: revoked.channel_id,
         origin_domain: revoked.channel_domain
@@ -223,7 +270,17 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     }
     case 'CHANNEL_DELETE': {
-      const channel = dispatch.d as { id: string; origin_domain: string };
+      const channel = dispatch.d as {
+        id: string;
+        origin_domain: string;
+        guild_id?: string;
+        guild_domain?: string;
+      };
+      const current = chatEntities.channels.get(entityKey(channel));
+      cancelGuildProjectionRefresh(
+        channel.guild_id ?? current?.guild_id ?? undefined,
+        channel.guild_domain ?? current?.guild_domain ?? undefined
+      );
       chatEntities.removeChannel(channel);
       return;
     }
@@ -355,6 +412,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
           role
         ]
       }));
+      refreshGuildPermissionProjection(role.guild_id, role.guild_domain);
       return;
     }
     case 'GUILD_ROLE_DELETE': {
@@ -368,6 +426,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         ...guild,
         roles: (guild.roles ?? []).filter((candidate) => entityKey(candidate) !== entityKey(role))
       }));
+      refreshGuildPermissionProjection(role.guild_id, role.guild_domain);
       return;
     }
     case 'GUILD_EMOJI_CREATE':
@@ -418,7 +477,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     }
     case 'GUILD_DELETE': {
       const target = dispatch.d as { id: string; origin_domain: string };
-      chatEntities.guilds.remove(entityKey(target));
+      cancelGuildProjectionRefresh(target.id, target.origin_domain);
+      chatEntities.removeGuild(target);
       return;
     }
     case 'GUILD_NAVIGATION_UPDATE':
@@ -426,12 +486,29 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     case 'GUILD_MEMBER_ADD':
     case 'GUILD_MEMBER_UPDATE': {
-      const member = dispatch.d as Partial<GuildMemberSummary>;
+      const member = dispatch.d as Partial<GuildMemberSummary> & {
+        user_id?: string;
+        user_domain?: string;
+      };
       // Older replicas emitted only user_id/role_id for role changes. Ignore
       // those incomplete projections instead of corrupting the normalized
       // member store; the next member chunk repairs the stale row.
       if (member.user && member.guild_id && member.guild_domain) {
         chatEntities.members.upsert(member as GuildMemberSummary);
+      }
+      const updatedUser =
+        member.user ??
+        (member.user_id && member.user_domain
+          ? { id: member.user_id, origin_domain: member.user_domain }
+          : null);
+      if (
+        member.guild_id &&
+        member.guild_domain &&
+        updatedUser &&
+        chatEntities.currentUser &&
+        entityKey(updatedUser) === entityKey(chatEntities.currentUser)
+      ) {
+        refreshGuildPermissionProjection(member.guild_id, member.guild_domain);
       }
       return;
     }
@@ -540,6 +617,8 @@ class AuthenticatedGatewayRuntime {
     this.#readStateSync?.close();
     this.#readStateSync = null;
     this.status = { state: 'connecting', message: '' };
+    guildProjectionSession += 1;
+    guildProjectionRefreshGenerations.clear();
     chatEntities.clearSession();
     interactionResponses.reset();
   }

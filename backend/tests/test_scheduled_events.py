@@ -28,6 +28,7 @@ from app.api.scheduled_events import (
     scheduled_event_payload,
     subscribe_scheduled_event,
 )
+from app.core.permissions import Permission
 from app.db.models import GuildScheduledEvent, GuildScheduledEventSubscription, Invite
 from app.scheduled_events.recurrence import next_recurrence_start
 from app.scheduled_events.service import (
@@ -368,6 +369,100 @@ async def test_subscribe_locks_event_before_terminal_state_check(
 
     assert terminal.value.detail["code"] == "SCHEDULED_EVENT_TERMINAL"
     assert lookup.await_args.kwargs == {"for_update": True}
+
+
+@pytest.mark.asyncio
+async def test_subscribe_applies_member_interaction_guard_after_creating_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(id=10, origin_domain="chat.example")
+    event = event_model()
+    actor = SimpleNamespace(id=2, origin_domain="users.example")
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=actor.id),
+        commit=AsyncMock(),
+    )
+    interactions_allowed = AsyncMock()
+    monkeypatch.setattr(
+        "app.api.scheduled_events._proxy_human",
+        AsyncMock(return_value=(False, None)),
+    )
+    monkeypatch.setattr(
+        "app.api.scheduled_events.local_guild",
+        AsyncMock(return_value=guild),
+    )
+    monkeypatch.setattr(
+        "app.api.scheduled_events.scheduled_event_for_guild",
+        AsyncMock(return_value=event),
+    )
+    monkeypatch.setattr("app.api.scheduled_events._require_event_view", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.scheduled_events.require_member_interactions_allowed",
+        interactions_allowed,
+    )
+    monkeypatch.setattr(
+        "app.api.scheduled_events._queue_scheduled_event_subscription_projection",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("app.api.scheduled_events.queue_postcommit_dispatch", Mock())
+    monkeypatch.setattr("app.api.scheduled_events.publish_committed_dispatches", AsyncMock())
+    monkeypatch.setattr("app.api.scheduled_events.wake_queued_guild_federation", AsyncMock())
+
+    response = await subscribe_scheduled_event(
+        guild_ref=SimpleNamespace(),
+        event_ref=SimpleNamespace(),
+        auth=SimpleNamespace(user=actor),
+        session=session,
+        redis=SimpleNamespace(),
+        settings=SimpleNamespace(),
+    )
+
+    assert response.status_code == 204
+    assert interactions_allowed.await_args.args[-1] == Permission.ADD_REACTIONS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manage_events", [False, True])
+async def test_own_event_management_applies_only_the_creator_interaction_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    manage_events: bool,
+) -> None:
+    guild = SimpleNamespace(id=10, origin_domain="chat.example")
+    actor = SimpleNamespace(id=2, origin_domain="users.example")
+    event = event_model(
+        entity_type=EXTERNAL,
+        channel_id=None,
+        channel_domain=None,
+        creator_id=actor.id,
+        creator_domain=actor.origin_domain,
+    )
+    permissions = Permission.CREATE_EVENTS
+    if manage_events:
+        permissions |= Permission.MANAGE_EVENTS
+    monkeypatch.setattr(
+        scheduled_events_api,
+        "get_permissions",
+        AsyncMock(return_value=int(permissions)),
+    )
+    interactions_allowed = AsyncMock()
+    monkeypatch.setattr(
+        scheduled_events_api,
+        "require_member_interactions_allowed",
+        interactions_allowed,
+    )
+
+    await scheduled_events_api._require_event_management(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        guild,
+        actor,
+        event,
+    )
+
+    if manage_events:
+        interactions_allowed.assert_not_awaited()
+    else:
+        assert interactions_allowed.await_args.args[-1] == Permission.CREATE_EVENTS
 
 
 @pytest.mark.asyncio

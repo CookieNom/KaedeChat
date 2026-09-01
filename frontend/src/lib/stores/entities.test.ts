@@ -94,6 +94,51 @@ describe('normalized entity collections', () => {
     expect(store.channels.get('3@alpha.test')?.name).toBe('general');
   });
 
+  it('keeps normalized and nested channel permission projections coherent', () => {
+    const store = new ChatEntityStore();
+    const target = {
+      id: '3',
+      origin_domain: 'alpha.test',
+      guild_id: '1',
+      guild_domain: 'alpha.test',
+      type: 0,
+      name: 'general',
+      topic: null,
+      position: 0,
+      parent_id: null,
+      parent_domain: null,
+      permissions: '1',
+      rate_limit_per_user: 0,
+      last_message_id: null,
+      last_message_domain: null
+    } satisfies Channel;
+    store.ingestGuilds([
+      {
+        id: '1',
+        origin_domain: 'alpha.test',
+        name: 'Lanterns',
+        description: null,
+        icon_hash: null,
+        owner_id: '2',
+        permissions: '1',
+        actor_highest_role_id: '9',
+        permission_generation: '1',
+        unavailable: false,
+        channels: [target]
+      }
+    ]);
+
+    store.updateChannelPermissions(target, '16');
+    expect(store.channels.get('3@alpha.test')?.permissions).toBe('16');
+    expect(store.guilds.get('1@alpha.test')?.channels?.[0]?.permissions).toBe('16');
+
+    store.invalidateGuildPermissionProjection('1@alpha.test');
+    expect(store.guilds.get('1@alpha.test')?.permissions).toBeUndefined();
+    expect(store.guilds.get('1@alpha.test')?.actor_highest_role_id).toBeUndefined();
+    expect(store.channels.get('3@alpha.test')?.permissions).toBeUndefined();
+    expect(store.guilds.get('1@alpha.test')?.channels?.[0]?.permissions).toBeUndefined();
+  });
+
   it('purges revoked thread content and nested guild projections', () => {
     const store = new ChatEntityStore();
     const thread = {
@@ -150,6 +195,125 @@ describe('normalized entity collections', () => {
     expect(store.channels.get('3@alpha.test')).toBeUndefined();
     expect(store.messages.values).toEqual([]);
     expect(store.guilds.get('1@alpha.test')?.channels).toEqual([]);
+  });
+
+  it('purges every guild-scoped entity when guild access is revoked', () => {
+    const store = new ChatEntityStore();
+    const guildChannel = {
+      id: '3',
+      origin_domain: 'alpha.test',
+      guild_id: '1',
+      guild_domain: 'alpha.test',
+      type: 0,
+      name: 'private',
+      topic: null,
+      position: 0,
+      parent_id: null,
+      parent_domain: null,
+      rate_limit_per_user: 0,
+      last_message_id: null,
+      last_message_domain: null
+    } satisfies Channel;
+    const directMessage = {
+      ...guildChannel,
+      id: '4',
+      guild_id: null,
+      guild_domain: null,
+      type: 1
+    } satisfies Channel;
+    const user = {
+      id: '7',
+      origin_domain: 'alpha.test',
+      username: 'mio',
+      display_name: 'Mio',
+      avatar_hash: null,
+      handle: 'mio@alpha.test'
+    } satisfies UserSummary;
+    const message = (id: string, target: Channel): Message => ({
+      id,
+      origin_domain: 'alpha.test',
+      channel_id: target.id,
+      channel_domain: target.origin_domain,
+      author_id: user.id,
+      author_domain: user.origin_domain,
+      author: user,
+      content: id,
+      message_type: 0,
+      flags: 0,
+      client_nonce: null,
+      referenced_message_id: null,
+      referenced_message_domain: null,
+      mention_user_refs: [],
+      attachments: [],
+      edited_at: null,
+      deleted_at: null,
+      created_at: '2026-08-24T10:00:00Z'
+    });
+    store.ingestGuilds([
+      {
+        id: '1',
+        origin_domain: 'alpha.test',
+        name: 'Lanterns',
+        description: null,
+        icon_hash: null,
+        owner_id: '2',
+        permission_generation: '1',
+        unavailable: false,
+        channels: [guildChannel]
+      }
+    ]);
+    store.channels.upsert(directMessage);
+    store.messages.upsertMany([message('9', guildChannel), message('10', directMessage)]);
+    store.readStates.upsertMany([
+      {
+        channel_id: guildChannel.id,
+        channel_domain: guildChannel.origin_domain,
+        guild_id: '1',
+        guild_domain: 'alpha.test',
+        last_message_id: '9',
+        last_message_domain: 'alpha.test',
+        read_message_id: null,
+        read_message_domain: null,
+        mention_count: 1,
+        unread: true
+      },
+      {
+        channel_id: directMessage.id,
+        channel_domain: directMessage.origin_domain,
+        guild_id: null,
+        guild_domain: null,
+        last_message_id: '10',
+        last_message_domain: 'alpha.test',
+        read_message_id: '10',
+        read_message_domain: 'alpha.test',
+        mention_count: 0,
+        unread: false
+      }
+    ]);
+    store.members.replace([
+      {
+        guild_id: '1',
+        guild_domain: 'alpha.test',
+        user,
+        nickname: null,
+        role_ids: []
+      },
+      {
+        guild_id: '2',
+        guild_domain: 'alpha.test',
+        user,
+        nickname: null,
+        role_ids: []
+      }
+    ]);
+
+    store.removeGuild({ id: '1', origin_domain: 'alpha.test' });
+
+    expect(store.guilds.get('1@alpha.test')).toBeUndefined();
+    expect(store.channels.values).toEqual([directMessage]);
+    expect(store.messages.values.map((item) => item.id)).toEqual(['10']);
+    expect(store.readStates.values.map((item) => item.channel_id)).toEqual(['4']);
+    expect(store.members.values.map((item) => item.guild_id)).toEqual(['2']);
   });
 
   it('ingests initial member presence and applies live updates', () => {

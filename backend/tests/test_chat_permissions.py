@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.bots.installations import usable_guild_installation
 from app.chat import permissions as permission_service
 from app.chat.permissions import (
+    PERMISSION_CACHE_NAMESPACE,
     BotGuildPermissionGrant,
     PermissionOverwrite,
     bot_guild_permission_grant,
@@ -93,6 +94,48 @@ def test_overwrite_order_is_everyone_roles_then_member() -> None:
     assert not result & Permission.SEND_MESSAGES
 
 
+def test_everyone_allow_does_not_override_a_custom_role_deny() -> None:
+    result = resolve(
+        base=Permission.VIEW_CHANNEL,
+        roles={(10, DOMAIN), (11, DOMAIN)},
+        overwrites=[
+            overwrite(10, "role", allow=Permission.ASSIGN_TRACKER_TASKS),
+            overwrite(11, "role", deny=Permission.ASSIGN_TRACKER_TASKS),
+        ],
+    )
+
+    assert result & Permission.VIEW_CHANNEL
+    assert not result & Permission.ASSIGN_TRACKER_TASKS
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_guild_permissions_do_not_implicitly_require_view_channel(timed_out: bool) -> None:
+    permissions = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(
+            Permission.KICK_MEMBERS
+            | Permission.MANAGE_GUILD
+            | Permission.MODERATE_MEMBERS
+            | Permission.BAN_INSTANCES
+        ),
+        overwrites=[],
+        channel_type=None,
+        timed_out=timed_out,
+    )
+
+    assert permissions == (
+        Permission.KICK_MEMBERS
+        | Permission.MANAGE_GUILD
+        | Permission.MODERATE_MEMBERS
+        | Permission.BAN_INSTANCES
+    )
+
+
 def test_implicit_masks_remove_dependent_permissions() -> None:
     without_view = resolve(base=Permission.SEND_MESSAGES | Permission.ATTACH_FILES)
     assert without_view == 0
@@ -141,6 +184,342 @@ def test_forum_send_dependencies_and_read_only_thread_reactions() -> None:
     assert thread & Permission.USE_EXTERNAL_EMOJIS
     assert thread & Permission.ADD_REACTIONS
     assert not thread & Permission.ATTACH_FILES
+
+    thread_tts = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(
+            Permission.VIEW_CHANNEL
+            | Permission.SEND_MESSAGES_IN_THREADS
+            | Permission.SEND_TTS_MESSAGES
+        ),
+        overwrites=[],
+        channel_type=11,
+        timed_out=False,
+    )
+    assert thread_tts & Permission.SEND_MESSAGES_IN_THREADS
+    assert thread_tts & Permission.SEND_TTS_MESSAGES
+
+
+@pytest.mark.parametrize(
+    ("permission", "base", "channel_type"),
+    [
+        (
+            Permission.ADD_REACTIONS,
+            Permission.VIEW_CHANNEL | Permission.ADD_REACTIONS,
+            0,
+        ),
+        (
+            Permission.SEND_TTS_MESSAGES,
+            Permission.VIEW_CHANNEL | Permission.SEND_TTS_MESSAGES,
+            0,
+        ),
+        (
+            Permission.USE_VAD,
+            Permission.VIEW_CHANNEL | Permission.CONNECT | Permission.USE_VAD,
+            2,
+        ),
+        (
+            Permission.REQUEST_TO_SPEAK,
+            Permission.VIEW_CHANNEL | Permission.REQUEST_TO_SPEAK,
+            13,
+        ),
+        (
+            Permission.USE_SOUNDBOARD,
+            Permission.VIEW_CHANNEL | Permission.CONNECT | Permission.USE_SOUNDBOARD,
+            2,
+        ),
+        (
+            Permission.USE_EXTERNAL_SOUNDS,
+            Permission.VIEW_CHANNEL
+            | Permission.CONNECT
+            | Permission.SPEAK
+            | Permission.USE_EXTERNAL_SOUNDS,
+            2,
+        ),
+        (
+            Permission.PIN_MESSAGES,
+            Permission.VIEW_CHANNEL | Permission.PIN_MESSAGES,
+            0,
+        ),
+    ],
+)
+def test_published_permission_dependencies_are_enforced_to_a_fixpoint(
+    permission: Permission,
+    base: Permission,
+    channel_type: int,
+) -> None:
+    permissions = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(base),
+        overwrites=[],
+        channel_type=channel_type,
+        timed_out=False,
+    )
+
+    assert not permissions & permission
+
+
+@pytest.mark.parametrize(
+    ("permission", "channel_type"),
+    [
+        (Permission.MANAGE_MESSAGES, 0),
+        (Permission.MUTE_MEMBERS, 2),
+        (Permission.DEAFEN_MEMBERS, 2),
+        (Permission.SET_VOICE_CHANNEL_STATUS, 2),
+    ],
+)
+def test_operation_specific_permissions_survive_without_unrelated_dependencies(
+    permission: Permission,
+    channel_type: int,
+) -> None:
+    permissions = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(Permission.VIEW_CHANNEL | permission),
+        overwrites=[],
+        channel_type=channel_type,
+        timed_out=False,
+    )
+
+    assert permissions & permission
+
+
+def test_disconnected_channel_manager_keeps_voice_status_capability() -> None:
+    permissions = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(
+            Permission.VIEW_CHANNEL
+            | Permission.MANAGE_CHANNELS
+            | Permission.SET_VOICE_CHANNEL_STATUS
+        ),
+        overwrites=[],
+        channel_type=2,
+        timed_out=False,
+    )
+
+    assert permissions & Permission.MANAGE_CHANNELS
+    assert permissions & Permission.SET_VOICE_CHANNEL_STATUS
+    assert not permissions & Permission.CONNECT
+
+
+@pytest.mark.parametrize(
+    ("permission", "dependencies", "channel_type"),
+    [
+        (Permission.CREATE_INVITE, Permission.VIEW_CHANNEL, 0),
+        (Permission.DEAFEN_MEMBERS, Permission.VIEW_CHANNEL, 2),
+        (Permission.CREATE_PUBLIC_THREADS, Permission.VIEW_CHANNEL, 0),
+        (Permission.CREATE_PRIVATE_THREADS, Permission.VIEW_CHANNEL, 0),
+        (Permission.MANAGE_EVENTS, Permission.VIEW_CHANNEL, 2),
+        (
+            Permission.PIN_MESSAGES,
+            Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY,
+            0,
+        ),
+        (Permission.BYPASS_SLOWMODE, Permission.VIEW_CHANNEL, 0),
+    ],
+)
+def test_catalog_channel_permissions_follow_real_overwrite_precedence(
+    permission: Permission,
+    dependencies: Permission,
+    channel_type: int,
+) -> None:
+    allowed = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN), (11, DOMAIN)},
+        base_permissions=int(dependencies),
+        overwrites=[overwrite(11, "role", allow=permission)],
+        channel_type=channel_type,
+        timed_out=False,
+    )
+    denied = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN), (11, DOMAIN)},
+        base_permissions=int(dependencies),
+        overwrites=[
+            overwrite(11, "role", allow=permission),
+            overwrite(22, "member", deny=permission),
+        ],
+        channel_type=channel_type,
+        timed_out=False,
+    )
+
+    assert allowed & permission
+    assert not denied & permission
+
+
+@pytest.mark.parametrize(
+    "permission",
+    [
+        Permission.KICK_MEMBERS,
+        Permission.MODERATE_MEMBERS,
+        Permission.BAN_INSTANCES,
+    ],
+)
+def test_catalog_guild_permissions_preserve_real_role_grants(permission: Permission) -> None:
+    allowed = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(permission),
+        overwrites=[],
+        channel_type=None,
+        timed_out=False,
+    )
+    denied = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=0,
+        overwrites=[],
+        channel_type=None,
+        timed_out=False,
+    )
+
+    assert allowed & permission
+    assert not denied & permission
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("granted", [True, False])
+@pytest.mark.parametrize(
+    ("permission", "channel_type", "dependencies"),
+    [
+        (Permission.CREATE_INVITE, 0, Permission.VIEW_CHANNEL),
+        (Permission.KICK_MEMBERS, None, Permission(0)),
+        (Permission.DEAFEN_MEMBERS, 2, Permission.VIEW_CHANNEL),
+        (Permission.CREATE_PUBLIC_THREADS, 0, Permission.VIEW_CHANNEL),
+        (Permission.CREATE_PRIVATE_THREADS, 0, Permission.VIEW_CHANNEL),
+        (Permission.MANAGE_EVENTS, None, Permission(0)),
+        (Permission.MODERATE_MEMBERS, None, Permission(0)),
+        (Permission.BAN_INSTANCES, None, Permission(0)),
+        (
+            Permission.PIN_MESSAGES,
+            0,
+            Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY,
+        ),
+        (Permission.BYPASS_SLOWMODE, 0, Permission.VIEW_CHANNEL),
+    ],
+)
+async def test_catalog_permissions_pass_and_fail_the_real_permission_guard(
+    permission: Permission,
+    channel_type: int | None,
+    dependencies: Permission,
+    granted: bool,
+) -> None:
+    guild = SimpleNamespace(
+        id=10,
+        origin_domain=DOMAIN,
+        owner_id=999,
+        owner_domain=DOMAIN,
+        permission_generation=1,
+    )
+    actor = SimpleNamespace(
+        id=22,
+        origin_domain=DOMAIN,
+        account_type="human",
+    )
+    member = SimpleNamespace(
+        member_version=1,
+        timeout_until=None,
+        timeout_indefinite=False,
+    )
+    role = SimpleNamespace(
+        id=guild.id,
+        origin_domain=guild.origin_domain,
+        permissions=int(dependencies | (permission if granted else Permission(0))),
+    )
+    channel = (
+        SimpleNamespace(
+            id=30,
+            origin_domain=DOMAIN,
+            guild_id=guild.id,
+            guild_domain=guild.origin_domain,
+            type=channel_type,
+            parent_id=None,
+            parent_domain=None,
+            permissions_synced=False,
+        )
+        if channel_type is not None
+        else None
+    )
+    scalar_results = [member, member]
+    scalars_results: list[list[object]] = [[role]]
+    if channel is not None:
+        scalars_results.append([])
+    session = SimpleNamespace(
+        scalar=AsyncMock(side_effect=scalar_results),
+        scalars=AsyncMock(side_effect=scalars_results),
+        get=AsyncMock(return_value=member),
+        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
+    )
+    pipeline = SimpleNamespace(set=Mock(), execute=AsyncMock())
+    redis = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        set=AsyncMock(return_value=True),
+        delete=AsyncMock(),
+        eval=AsyncMock(),
+        pipeline=Mock(return_value=pipeline),
+    )
+
+    if granted:
+        resolved = await require_permissions(
+            session,
+            redis,
+            guild,
+            actor,
+            permission,
+            channel=channel,
+        )
+        assert resolved & permission
+    else:
+        with pytest.raises(HTTPException) as denied:
+            await require_permissions(
+                session,
+                redis,
+                guild,
+                actor,
+                permission,
+                channel=channel,
+            )
+        assert denied.value.status_code == 403
+        assert denied.value.detail["permissions"] == str(int(permission))
+    assert redis.set.await_args.args[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:lock:")
+    cached_keys = [call.args[0] for call in pipeline.set.call_args_list]
+    assert cached_keys[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:")
+    assert cached_keys[1].startswith(f"{PERMISSION_CACHE_NAMESPACE}:stale:")
 
 
 def test_timeout_reduces_member_to_read_only() -> None:
@@ -587,6 +966,7 @@ async def test_permission_cache_revalidates_category_restricted_thread_ancestry(
     assert permissions == (cached_permissions if parent_available else 0)
     if parent_available:
         redis.get.assert_awaited_once()
+        assert redis.get.await_args.args[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:")
     else:
         redis.get.assert_not_awaited()
 

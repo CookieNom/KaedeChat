@@ -75,6 +75,17 @@ export function listGuildWebhooks(
   return api<WebhookSummary[]>(`/guilds/${encodeURIComponent(guildRef)}/webhooks`, { signal });
 }
 
+export function listChannelWebhooks(
+  guildRef: string,
+  channelRef: string,
+  signal?: AbortSignal
+): Promise<WebhookSummary[]> {
+  return api<WebhookSummary[]>(
+    `/guilds/${encodeURIComponent(guildRef)}/channels/${encodeURIComponent(channelRef)}/webhooks`,
+    { signal }
+  );
+}
+
 export function createGuildWebhook(
   guildRef: string,
   channelRef: string,

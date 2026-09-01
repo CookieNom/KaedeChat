@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -134,6 +134,31 @@ def test_tracker_task_schema_requires_aware_dates_and_semantic_updates() -> None
     assert payload.title == "Ship it"
     assert task_request_fingerprint(payload) == task_request_fingerprint(payload.model_copy())
     assert len(task_request_fingerprint(payload)) == 64
+
+
+def test_remote_tracker_payload_qualifies_nested_authorities() -> None:
+    payload = {
+        "resource_ref": "52",
+        "data": {"lane_id": "51", "assignee_id": "8"},
+    }
+
+    qualified = tracker_service.qualified_remote_tracker_payload(
+        payload,
+        request_domain="home.example",
+        channel_domain="remote.example",
+    )
+
+    assert qualified == {
+        "resource_ref": "52@remote.example",
+        "data": {
+            "lane_id": "51@remote.example",
+            "assignee_id": "8@home.example",
+        },
+    }
+    assert payload == {
+        "resource_ref": "52",
+        "data": {"lane_id": "51", "assignee_id": "8"},
+    }
 
 
 def test_tracker_dispatch_is_queued_in_the_mutation_transaction() -> None:
@@ -598,6 +623,55 @@ async def test_remote_human_tracker_mutation_is_proxied_to_guild_authority(
 
 
 @pytest.mark.asyncio
+async def test_remote_task_assignment_qualifies_actor_and_resource_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = user()
+    access = SimpleNamespace(
+        channel=SimpleNamespace(id=50, origin_domain="remote.example", type=17),
+        guild=SimpleNamespace(id=10, origin_domain="remote.example"),
+    )
+    proxy = AsyncMock(
+        return_value=GuildManagementResult(
+            request_id="kagm_" + "a" * 32,
+            operation="tracker.task.update",
+            guild={"id": "10", "domain": "remote.example"},
+            status_code=200,
+            body={"id": "52", "assignee": {"id": str(actor.id)}},
+        )
+    )
+    monkeypatch.setattr(tracker_service, "load_channel_access", AsyncMock(return_value=access))
+    monkeypatch.setattr(tracker_service, "proxy_remote_guild_management", proxy)
+    local_context = AsyncMock()
+    monkeypatch.setattr(tracker_service, "tracker_context", local_context)
+
+    rendered = await tracker_service.update_task(
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        settings(),
+        auth(actor),
+        EntityRef("50@remote.example"),
+        EntityRef("52"),
+        TrackerTaskUpdate(assignee_id=EntityRef(str(actor.id))),
+        '"version"',
+    )
+
+    assert rendered == {"id": "52", "assignee": {"id": str(actor.id)}}
+    local_context.assert_not_awaited()
+    assert proxy.await_args.args[2:] == (
+        EntityRef("10@remote.example"),
+        actor,
+        "tracker.task.update",
+        {
+            "channel_ref": "50@remote.example",
+            "resource_ref": "52@remote.example",
+            "data": {"assignee_id": "8@home.example"},
+            "if_match": '"version"',
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_remote_bot_tracker_mutation_requires_direct_authority_target() -> None:
     actor = user(domain="apps.example")
     actor.account_type = "bot"
@@ -657,6 +731,45 @@ async def test_tracker_authority_dispatch_validates_and_reuses_local_service(
     assert create.await_args.args[5] == EntityRef("50@home.example")
     assert create.await_args.args[6].name == "Ready"
     assert create.await_args.args[6].color == 42
+
+
+@pytest.mark.asyncio
+async def test_tracker_authority_dispatch_preserves_qualified_task_assignee(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = user(domain="remote.example")
+    update = AsyncMock(return_value={"id": "52", "origin_domain": "home.example"})
+    monkeypatch.setattr(tracker_service, "update_task", update)
+    request = GuildManagementRequest.model_validate(
+        {
+            "guild": {"id": "10", "domain": "home.example"},
+            "actor": {"id": str(actor.id), "domain": actor.origin_domain},
+            "requesting_instance": actor.origin_domain,
+            "request_id": "kagm_" + "a" * 32,
+            "issued_at": 10,
+            "deadline": 20,
+            "operation": "tracker.task.update",
+            "payload": {
+                "channel_ref": "50@home.example",
+                "resource_ref": "52@home.example",
+                "data": {"assignee_id": "8@remote.example"},
+                "if_match": '"version"',
+            },
+        }
+    )
+
+    result = await guild_management_api._dispatch_tracker(
+        request,
+        actor,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        settings(),
+    )
+
+    assert result.status_code == 200
+    assert update.await_args.args[5] == EntityRef("52@home.example")
+    assert update.await_args.args[6].assignee_id == EntityRef("8@remote.example")
 
 
 @pytest.mark.asyncio
@@ -905,6 +1018,11 @@ async def test_task_edit_permission_distinguishes_own_and_managed_tasks(
     )
     monkeypatch.setattr(tracker_service, "get_permissions", get_permissions)
     monkeypatch.setattr(tracker_service, "require_permissions", denied)
+    interactions_allowed = AsyncMock()
+    monkeypatch.setattr(
+        "app.automod.service.require_member_interactions_allowed",
+        interactions_allowed,
+    )
 
     own = await tracker_service.require_task_edit(
         cast(Any, SimpleNamespace()),
@@ -915,6 +1033,9 @@ async def test_task_edit_permission_distinguishes_own_and_managed_tasks(
     )
     assert own & Permission.EDIT_OWN_TRACKER_TASKS
     denied.assert_not_awaited()
+    assert interactions_allowed.await_args.args[-1] == (
+        Permission.VIEW_CHANNEL | Permission.EDIT_OWN_TRACKER_TASKS
+    )
 
     with pytest.raises(HTTPException) as missing:
         await tracker_service.require_task_edit(
@@ -935,6 +1056,108 @@ async def test_task_edit_permission_distinguishes_own_and_managed_tasks(
         task,
     )
     assert managed & Permission.MANAGE_TRACKER_TASKS
+    assert interactions_allowed.await_args.args[-1] == (
+        Permission.VIEW_CHANNEL | Permission.MANAGE_TRACKER_TASKS
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assign_self", [True, False])
+async def test_assignment_only_task_update_does_not_require_task_edit(
+    monkeypatch: pytest.MonkeyPatch,
+    assign_self: bool,
+) -> None:
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    actor = user()
+    creator = user(user_id=9)
+    target = actor if assign_self else user(user_id=10)
+    board = TrackerBoard(
+        channel_id=50,
+        channel_domain="home.example",
+        guild_id=10,
+        guild_domain="home.example",
+        key_prefix="RAID",
+        next_task_number=2,
+        created_at=now,
+        updated_at=now,
+    )
+    task = TrackerTask(
+        id=52,
+        origin_domain="home.example",
+        channel_id=50,
+        channel_domain="home.example",
+        guild_id=10,
+        guild_domain="home.example",
+        lane_id=51,
+        lane_domain="home.example",
+        number=1,
+        title="Unassigned task",
+        priority="none",
+        position=0,
+        creator_id=creator.id,
+        creator_domain=creator.origin_domain,
+        created_at=now,
+        updated_at=now,
+    )
+    context = TrackerContext(
+        access=cast(
+            Any,
+            SimpleNamespace(
+                guild=SimpleNamespace(id=10, origin_domain="home.example"),
+                channel=SimpleNamespace(id=50, origin_domain="home.example"),
+            ),
+        ),
+        board=board,
+        permissions=int(Permission.VIEW_CHANNEL | Permission.ASSIGN_TRACKER_TASKS),
+    )
+    session = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    edit = AsyncMock()
+    require = AsyncMock(return_value=int(Permission.VIEW_CHANNEL | Permission.ASSIGN_TRACKER_TASKS))
+    interactions_allowed = AsyncMock()
+    monkeypatch.setattr(
+        tracker_service,
+        "proxy_remote_tracker_mutation",
+        AsyncMock(return_value=(False, {})),
+    )
+    monkeypatch.setattr(tracker_service, "tracker_context", AsyncMock(return_value=context))
+    monkeypatch.setattr(tracker_service, "task_by_ref", AsyncMock(return_value=task))
+    monkeypatch.setattr(tracker_service, "member_user", AsyncMock(return_value=target))
+    monkeypatch.setattr(tracker_service, "require_task_edit", edit)
+    monkeypatch.setattr(tracker_service, "require_permissions", require)
+    monkeypatch.setattr(
+        "app.automod.service.require_member_interactions_allowed",
+        interactions_allowed,
+    )
+    monkeypatch.setattr(
+        tracker_service,
+        "task_users",
+        AsyncMock(return_value={(creator.id, creator.origin_domain): creator}),
+    )
+    monkeypatch.setattr(tracker_service, "queue_context_federation", AsyncMock())
+    monkeypatch.setattr(tracker_service, "queue_context_dispatch", Mock())
+    monkeypatch.setattr(tracker_service, "wake_context_outboxes", AsyncMock())
+
+    rendered = await tracker_service.update_task(
+        cast(Any, session),
+        cast(Any, SimpleNamespace()),
+        settings(),
+        auth(actor),
+        EntityRef("50"),
+        EntityRef("52"),
+        TrackerTaskUpdate(assignee_id=EntityRef(str(target.id))),
+        now.isoformat(),
+    )
+
+    edit.assert_not_awaited()
+    assert rendered["assignee"]["id"] == str(target.id)
+    if assign_self:
+        require.assert_not_awaited()
+        assert interactions_allowed.await_args.args[-1] == Permission.EDIT_OWN_TRACKER_TASKS
+    else:
+        interactions_allowed.assert_not_awaited()
+        assert require.await_args.args[4] == (
+            Permission.VIEW_CHANNEL | Permission.ASSIGN_TRACKER_TASKS
+        )
 
 
 @pytest.mark.asyncio
@@ -951,7 +1174,12 @@ async def test_assignment_permission_allows_self_service_but_guards_other_member
         permissions=0,
     )
     require = AsyncMock(return_value=int(Permission.ASSIGN_TRACKER_TASKS))
+    interactions_allowed = AsyncMock()
     monkeypatch.setattr(tracker_service, "require_permissions", require)
+    monkeypatch.setattr(
+        "app.automod.service.require_member_interactions_allowed",
+        interactions_allowed,
+    )
     actor_ref = (actor.id, actor.origin_domain)
 
     await tracker_service.require_assignment_permission(
@@ -971,6 +1199,20 @@ async def test_assignment_permission_allows_self_service_but_guards_other_member
         new=(None, None),
     )
     require.assert_not_awaited()
+    assert [call.args[-1] for call in interactions_allowed.await_args_list] == [
+        Permission.EDIT_OWN_TRACKER_TASKS,
+        Permission.EDIT_OWN_TRACKER_TASKS,
+    ]
+
+    await tracker_service.require_assignment_permission(
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        context,
+        actor,
+        old=actor_ref,
+        new=actor_ref,
+    )
+    assert len(interactions_allowed.await_args_list) == 2
 
     await tracker_service.require_assignment_permission(
         cast(Any, SimpleNamespace()),
@@ -982,6 +1224,45 @@ async def test_assignment_permission_allows_self_service_but_guards_other_member
     )
     require.assert_awaited_once()
     assert require.await_args.args[4] == (Permission.VIEW_CHANNEL | Permission.ASSIGN_TRACKER_TASKS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"code": "MEMBER_TIMEOUT"},
+        {"code": "AUTO_MOD_MEMBER_INTERACTION_BLOCKED"},
+    ],
+)
+async def test_self_assignment_respects_member_interaction_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    detail: dict[str, str],
+) -> None:
+    actor = user()
+    context = TrackerContext(
+        access=cast(
+            Any,
+            SimpleNamespace(guild=SimpleNamespace(), channel=SimpleNamespace()),
+        ),
+        board=cast(Any, SimpleNamespace()),
+        permissions=int(Permission.VIEW_CHANNEL),
+    )
+    monkeypatch.setattr(
+        "app.automod.service.require_member_interactions_allowed",
+        AsyncMock(side_effect=HTTPException(status_code=403, detail=detail)),
+    )
+
+    with pytest.raises(HTTPException) as blocked:
+        await tracker_service.require_assignment_permission(
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            context,
+            actor,
+            old=(None, None),
+            new=(actor.id, actor.origin_domain),
+        )
+
+    assert blocked.value.detail == detail
 
 
 @pytest.mark.asyncio

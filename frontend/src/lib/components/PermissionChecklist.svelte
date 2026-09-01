@@ -24,6 +24,13 @@
       (item.resourceScopes as readonly string[]).includes('guild') ||
       (item.resourceScopes as readonly string[]).includes('channel')
   );
+  const permissionLabels = new Map<string, string>(
+    PERMISSION_METADATA.map((item) => [item.permission, item.label])
+  );
+
+  function dependencyLabels(dependencies: readonly string[]): string {
+    return dependencies.map((name) => permissionLabels.get(name) ?? name).join(', ');
+  }
   const visible = $derived.by(() => {
     const query = search.trim().toLocaleLowerCase();
     return query
@@ -76,6 +83,9 @@
             <span>
               <strong>{item.label}</strong>
               <small>{item.description}</small>
+              {#if item.dependencies.length}
+                <small>Also requires: {dependencyLabels(item.dependencies)}</small>
+              {/if}
             </span>
           </label>
         {/each}

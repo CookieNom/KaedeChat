@@ -5,9 +5,12 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/app/message_store.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/rich_content.dart';
 import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -15,6 +18,184 @@ import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:web_socket_channel/io.dart';
 
 void main() {
+  group('guild access revocation', () {
+    test('canonical delete payload purges every retained guild projection', () {
+      final guildRef = EntityRef.parse('10@guild.example');
+      final channelRef = EntityRef.parse('11@guild.example');
+      final threadRef = EntityRef.parse('12@guild.example');
+      final otherGuildRef = EntityRef.parse('20@guild.example');
+      final otherChannelRef = EntityRef.parse('21@guild.example');
+      final user = KaedeUser(
+        ref: EntityRef.parse('30@guild.example'),
+        username: 'member',
+        handle: '@member@guild.example',
+      );
+      final channel = KaedeChannel(
+        ref: channelRef,
+        guildRef: guildRef,
+        type: ChannelType.text,
+        position: 0,
+        permissions: BigInt.zero,
+      );
+      final thread = KaedeChannel(
+        ref: threadRef,
+        guildRef: guildRef,
+        parentRef: channelRef,
+        type: ChannelType.publicThread,
+        position: 1,
+        permissions: BigInt.zero,
+      );
+      final otherChannel = KaedeChannel(
+        ref: otherChannelRef,
+        guildRef: otherGuildRef,
+        type: ChannelType.text,
+        position: 0,
+        permissions: BigInt.zero,
+      );
+      KaedeMessage message(EntityRef ref) => KaedeMessage(
+            ref: EntityRef(Snowflake('40'), ref.domain),
+            channelRef: ref,
+            authorRef: user.ref,
+            createdAt: DateTime.utc(2026),
+          );
+      final response = MobileInteractionResponse(
+        interactionRef: EntityRef.parse('50@guild.example'),
+        responseRef: EntityRef.parse('51@guild.example'),
+        invokerRef: user.ref,
+        channelRef: channelRef,
+        applicationRef: EntityRef.parse('52@guild.example'),
+        responseGrantId: 'grant',
+        revision: BigInt.one,
+        operation: 'CREATE',
+        expiresAt: DateTime.utc(2027),
+        callbackType: 4,
+      );
+      final state = MobileState(
+        phase: SessionPhase.ready,
+        guilds: <KaedeGuild>[
+          KaedeGuild(
+            ref: guildRef,
+            name: 'Removed',
+            ownerRef: user.ref,
+            permissions: BigInt.zero,
+            unavailable: false,
+            channels: <KaedeChannel>[channel],
+          ),
+          KaedeGuild(
+            ref: otherGuildRef,
+            name: 'Kept',
+            ownerRef: user.ref,
+            permissions: BigInt.zero,
+            unavailable: false,
+            channels: <KaedeChannel>[otherChannel],
+          ),
+        ],
+        guildNavigation: GuildNavigation(items: <GuildNavigationItem>[
+          GuildNavigationGuildItem(guildRef),
+          GuildNavigationGuildItem(otherGuildRef),
+        ]),
+        threads: <KaedeChannel>[thread],
+        selectedGuild: guildRef,
+        selectedChannel: threadRef,
+        messageStore: <EntityRef, List<KaedeMessage>>{
+          channelRef: <KaedeMessage>[message(channelRef)],
+          threadRef: <KaedeMessage>[message(threadRef)],
+          otherChannelRef: <KaedeMessage>[message(otherChannelRef)],
+        },
+        drafts: <EntityRef, String>{channelRef: 'secret'},
+        loadingChannels: <EntityRef>{threadRef},
+        channelsWithOlderMessages: <EntityRef>{channelRef},
+        outbox: <OutboxItem>[
+          OutboxItem(
+            nonce: 'removed',
+            channelRef: channelRef.wire,
+            payload: const <String, Object?>{},
+            attempts: 0,
+            state: 'pending',
+            createdAt: DateTime.utc(2026),
+          ),
+        ],
+        guildNotificationLevels: <String, String>{guildRef.wire: 'all'},
+        unreadCounts: <EntityRef, int>{channelRef: 1},
+        mentionCounts: <EntityRef, int>{threadRef: 1},
+        typingByChannel: <EntityRef, List<TypingParticipant>>{
+          channelRef: <TypingParticipant>[
+            TypingParticipant(
+              user: user.ref,
+              name: user.name,
+              expiresAt: DateTime.utc(2027),
+            ),
+          ],
+        },
+        guildMembers: <EntityRef, List<GuildMember>>{
+          guildRef: <GuildMember>[
+            GuildMember(user: user, roleIds: const <String>[]),
+          ],
+        },
+        selfModerationByGuild: <EntityRef, GuildSelfModerationStatus>{
+          guildRef: GuildSelfModerationStatus(
+            guildRef: guildRef,
+            timedOut: true,
+            timeoutIndefinite: true,
+          ),
+        },
+        interactionResponses: <String, MobileInteractionResponse>{
+          'response': response,
+        },
+        interactionRequests: <String, MobileInteractionRequest>{
+          'request': (
+            channel: channelRef,
+            application: response.applicationRef,
+            integrationType: null,
+            interactionContext: null,
+            encryptionChannel: null,
+          ),
+        },
+        messageJump: MessageJumpRequest(
+          channel: threadRef,
+          message: EntityRef.parse('60@guild.example'),
+          generation: 1,
+        ),
+        incomingCall: IncomingCall(
+          call: EntityRef.parse('70@guild.example'),
+          channel: channelRef,
+          caller: user.ref,
+          callerName: user.name,
+        ),
+      );
+
+      expect(
+        guildDeleteRef(const <String, Object?>{
+          'id': '10',
+          'origin_domain': 'guild.example',
+        }),
+        guildRef,
+      );
+      final purged = purgeDeletedGuildProjection(state, guildRef);
+      expect(
+          purged.guilds.map((guild) => guild.ref), <EntityRef>[otherGuildRef]);
+      expect(purged.guildNavigation.items, hasLength(1));
+      expect(purged.threads, isEmpty);
+      expect(purged.messageStore.keys, <EntityRef>[otherChannelRef]);
+      expect(purged.drafts, isEmpty);
+      expect(purged.loadingChannels, isEmpty);
+      expect(purged.channelsWithOlderMessages, isEmpty);
+      expect(purged.outbox, isEmpty);
+      expect(purged.guildNotificationLevels, isEmpty);
+      expect(purged.unreadCounts, isEmpty);
+      expect(purged.mentionCounts, isEmpty);
+      expect(purged.typingByChannel, isEmpty);
+      expect(purged.guildMembers, isEmpty);
+      expect(purged.selfModerationByGuild, isEmpty);
+      expect(purged.interactionResponses, isEmpty);
+      expect(purged.interactionRequests, isEmpty);
+      expect(purged.selectedGuild, isNull);
+      expect(purged.selectedChannel, isNull);
+      expect(purged.messageJump, isNull);
+      expect(purged.incomingCall, isNull);
+    });
+  });
+
   group('private self moderation status', () {
     test('parses composite guild identity and expires finite timeouts', () {
       final status = GuildSelfModerationStatus.fromJson(<String, Object?>{

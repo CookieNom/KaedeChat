@@ -19,6 +19,7 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.guilds import local_guild
+from app.automod.service import require_member_interactions_allowed
 from app.chat.audit import add_audit_entry
 from app.chat.events import guild_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
@@ -445,18 +446,21 @@ async def _require_event_management(
                 "The voice channel for this scheduled event is unavailable.",
             )
     permissions = await get_permissions(session, redis, guild, actor, channel=channel)
-    management_permissions = (
-        Permission.CREATE_EVENTS | Permission.MANAGE_EVENTS
-        if own_event
-        else Permission.MANAGE_EVENTS
-    )
-    allowed = bool(permissions & management_permissions)
-    if not allowed:
+    can_manage = bool(permissions & Permission.MANAGE_EVENTS)
+    can_manage_own = own_event and bool(permissions & Permission.CREATE_EVENTS)
+    if not (can_manage or can_manage_own):
         raise _error(
             403,
             "MISSING_PERMISSIONS",
             "You need permission to manage this scheduled event.",
         ) from None
+    if can_manage_own and not can_manage:
+        await require_member_interactions_allowed(
+            session,
+            guild,
+            actor,
+            Permission.CREATE_EVENTS,
+        )
     if channel is not None and event.entity_type == STAGE_INSTANCE:
         await require_permissions(
             session,
@@ -1704,6 +1708,12 @@ async def subscribe_scheduled_event(
     )
     if created is None:
         return Response(status_code=204)
+    await require_member_interactions_allowed(
+        session,
+        guild,
+        auth.user,
+        Permission.ADD_REACTIONS,
+    )
     rendered: dict[str, object] = {
         "guild_scheduled_event_id": str(event.id),
         "guild_scheduled_event_domain": event.origin_domain,

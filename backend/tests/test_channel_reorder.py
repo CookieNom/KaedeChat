@@ -532,7 +532,8 @@ async def test_single_channel_parent_move_uses_the_same_acl_snapshot_fence(
         "guild_channel",
         AsyncMock(side_effect=[child, destination]),
     )
-    monkeypatch.setattr(management, "require_permissions", AsyncMock())
+    permission_check = AsyncMock()
+    monkeypatch.setattr(management, "require_permissions", permission_check)
 
     result = await management.update_channel(
         EntityRef("1@guild.example"),
@@ -556,6 +557,10 @@ async def test_single_channel_parent_move_uses_the_same_acl_snapshot_fence(
     policy_update = cast(AsyncMock, management.publish_e2ee_policy_updates)
     assert policy_update.await_args.args[3] == [child]
     cast(AsyncMock, management.publish_dispatch).assert_not_awaited()
+    assert [call.kwargs["channel"].id for call in permission_check.await_args_list] == [10, 21]
+    assert permission_check.await_args_list[1].args[4] == (
+        Permission.VIEW_CHANNEL | Permission.MANAGE_CHANNELS
+    )
 
 
 @pytest.mark.asyncio

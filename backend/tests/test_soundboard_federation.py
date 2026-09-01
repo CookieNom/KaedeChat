@@ -627,7 +627,7 @@ async def test_target_authority_fetches_remote_source_capability(
     )
     monkeypatch.setattr(
         soundboard_api,
-        "get_permissions",
+        "require_permissions",
         AsyncMock(return_value=permission_mask),
     )
     monkeypatch.setattr(
