@@ -361,20 +361,7 @@ export async function downloadAuthenticatedMedia(
   source: AuthenticatedMediaSource,
   filename: string
 ): Promise<void> {
-  if (!isNativeDesktop()) {
-    const anchor = document.createElement('a');
-    anchor.href = source.path;
-    anchor.download = filename;
-    anchor.click();
-    return;
-  }
-
-  const response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>('native_media_request', {
-    path: source.path
-  });
-  const objectUrl = URL.createObjectURL(
-    new Blob([asBlobPart(response)], { type: source.contentType })
-  );
+  const objectUrl = URL.createObjectURL(await authenticatedMediaBlob(source));
   try {
     const anchor = document.createElement('a');
     anchor.href = objectUrl;

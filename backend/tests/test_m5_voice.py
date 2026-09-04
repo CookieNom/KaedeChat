@@ -729,6 +729,63 @@ async def test_participant_left_without_connection_metadata_cannot_remove_new_le
     assert queued == []
 
 
+async def test_last_guild_participant_leaving_clears_the_room_start_time(
+    monkeypatch: Any,
+) -> None:
+    metadata = {
+        "generation": 4,
+        "connection_id": "c" * 43,
+        "client_kind": "mobile",
+        "user_id": "78",
+        "user_domain": "alpha.localhost",
+        "guild_id": "12",
+        "channel_id": "34",
+        "channel_domain": "alpha.localhost",
+        "e2ee": False,
+        "can_speak": True,
+        "can_stream": True,
+        "can_use_vad": True,
+        "server_mute": False,
+        "server_deaf": False,
+    }
+    clear_start_time = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "app.api.voice.receive_webhook",
+        lambda *_args: webhook_event("participant_left", metadata=json.dumps(metadata)),
+    )
+    monkeypatch.setattr(
+        "app.api.voice.remove_occupant_connection",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr("app.api.voice.room_occupants", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.api.voice.publish_voice_channel_start_time", clear_start_time)
+    monkeypatch.setattr("app.api.voice.release_voice_connection", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.api.voice.publish_ephemeral", AsyncMock())
+    monkeypatch.setattr("app.api.voice.enqueue_best_effort", AsyncMock(return_value=True))
+    session = AsyncMock()
+    redis = AsyncMock()
+    voice_settings = settings()
+
+    response = await livekit_webhook(
+        request=webhook_request(),
+        authorization="signed",
+        session=session,
+        redis=redis,
+        settings=voice_settings,
+    )
+
+    assert response.status_code == 204
+    clear_start_time.assert_awaited_once_with(
+        redis,
+        voice_settings,
+        session,
+        guild_id=12,
+        channel_id=34,
+        room="g.12.34",
+        started_at=None,
+    )
+
+
 async def test_voice_coordinator_publishes_scoped_local_snapshots(monkeypatch: Any) -> None:
     published: list[tuple[str, str, dict[str, object]]] = []
 

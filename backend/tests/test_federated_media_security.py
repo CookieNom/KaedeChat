@@ -232,6 +232,35 @@ async def test_known_remote_photodna_match_is_rejected_without_refetch() -> None
     assert session.commits == 0
 
 
+async def test_remote_media_not_yet_published_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(
+        404,
+        request=httpx.Request("GET", "https://beta.localhost/media"),
+    )
+    session = CacheSession(None)
+
+    @asynccontextmanager
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[httpx.Response]:
+        yield response
+
+    monkeypatch.setattr(media_api, "signed_stream_request", stream)
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.cache_remote_media(
+            cast(Any, session),
+            cast(Any, media_settings()),
+            origin_domain="beta.localhost",
+            attachment_id=7,
+            variant="thumbnail_512",
+        )
+
+    assert raised.value.status_code == 503
+    assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_BUSY"
+    assert raised.value.headers == {"Retry-After": "1"}
+
+
 async def test_photodna_match_retires_every_previously_clean_cached_variant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

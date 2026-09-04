@@ -3,6 +3,7 @@ import {
   attachmentMediaPath,
   copyAuthenticatedImage,
   dmHistoryAttachmentMediaPath,
+  downloadAuthenticatedMedia,
   privateInteractionAttachmentMediaPath,
   isSafeSameOriginMediaPath,
   mediaCapacityRetryDelay
@@ -25,6 +26,29 @@ describe('authenticated image clipboard', () => {
     try {
       await copyAuthenticatedImage({ path: '/media/image/original', contentType: 'image/png' });
       expect(write).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('authenticated media download', () => {
+  it('downloads through a blob URL so redirects cannot navigate the page', async () => {
+    const click = vi.fn();
+    const anchor = { href: '', download: '', click };
+    const createObjectURL = vi.fn().mockReturnValue('blob:download');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+    vi.stubGlobal('document', { createElement: vi.fn().mockReturnValue(anchor) });
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
+    vi.stubGlobal('window', { setTimeout: vi.fn() });
+    try {
+      await downloadAuthenticatedMedia(
+        { path: '/media/image/original', contentType: 'image/png' },
+        'image.png'
+      );
+      expect(anchor).toMatchObject({ href: 'blob:download', download: 'image.png' });
+      expect(createObjectURL).toHaveBeenCalledOnce();
+      expect(click).toHaveBeenCalledOnce();
     } finally {
       vi.unstubAllGlobals();
     }

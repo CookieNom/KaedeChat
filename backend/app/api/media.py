@@ -2188,7 +2188,16 @@ async def cache_remote_media(
                 guild_context=guild_context,
             ) as remote:
                 if remote.status_code == 404:
-                    raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+                    # A federated message can arrive before its origin finishes
+                    # scanning the newly finalized attachment.  The local replica
+                    # already proved that this live message references the media,
+                    # so let clients retry the short publication race instead of
+                    # presenting a permanent deletion error.
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"code": "REMOTE_MEDIA_BUSY", "retry_after_ms": 1_000},
+                        headers={"Retry-After": "1"},
+                    )
                 if remote.status_code != 200:
                     raise HTTPException(
                         status_code=503,

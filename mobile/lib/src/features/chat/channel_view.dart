@@ -620,8 +620,7 @@ bool canSubmitMessageReport(
     (!requiresAttachmentDisclosure ||
         (attachmentDisclosureAvailable && disclosureAcknowledged));
 
-typedef _ReportAttachment = Future<void> Function(
-  KaedeMessage message,
+typedef _OpenAttachmentActions = Future<void> Function(
   KaedeAttachment attachment,
   Map<String, Object?>? manifest,
   File? decryptedFile,
@@ -1401,13 +1400,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                               onMenu: detached
                                   ? null
                                   : () => _showMessageActions(message),
-                              onReportAttachment: detached ||
-                                      message.authorRef == state.user?.ref
+                              onAttachmentActions: detached
                                   ? null
-                                  : (reportedMessage, attachment, manifest,
-                                          decryptedFile) =>
-                                      _reportMessageDialog(
-                                        reportedMessage,
+                                  : (attachment, manifest, decryptedFile) =>
+                                      _showMessageActions(
+                                        message,
                                         attachment: attachment,
                                         attachmentManifest: manifest,
                                         decryptedAttachment: decryptedFile,
@@ -4106,8 +4103,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     }
   }
 
-  Future<void> _showMessageActions(KaedeMessage message) async {
+  Future<void> _showMessageActions(
+    KaedeMessage message, {
+    KaedeAttachment? attachment,
+    Map<String, Object?>? attachmentManifest,
+    File? decryptedAttachment,
+  }) async {
     if (message.deletedAt != null) return;
+    final displayedAttachment = attachment == null
+        ? null
+        : _manifestAttachment(attachment, attachmentManifest);
     final mobileState = ref.read(mobileControllerProvider);
     final me = mobileState.user?.ref;
     final channel = mobileState.activeChannel!;
@@ -4166,7 +4171,25 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _MessageActionsHeader(message: message),
+              _MessageActionsHeader(
+                message: message,
+                attachment: displayedAttachment,
+              ),
+              if (displayedAttachment != null) ...[
+                ListTile(
+                  leading: Icon(Icons.link_rounded),
+                  title: Text('Copy media link'),
+                  onTap: () => Navigator.pop(context, 'copy-media-link'),
+                ),
+                ListTile(
+                  leading: Icon(Icons.info_outline_rounded),
+                  title: Text(displayedAttachment.filename),
+                  subtitle: Text(
+                    '${displayedAttachment.contentType} · '
+                    '${formatAttachmentSize(displayedAttachment.size)}',
+                  ),
+                ),
+              ],
               if (canReact && recent.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
@@ -4321,6 +4344,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 ListTile(
                   leading: Icon(Icons.flag_outlined),
                   title: Text('Report message'),
+                  subtitle: displayedAttachment == null
+                      ? null
+                      : Text(
+                          'Include ${displayedAttachment.filename} as context',
+                        ),
                   onTap: () => Navigator.pop(context, 'report'),
                 ),
               if (mobileState.developerMode)
@@ -4386,6 +4414,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 SnackBar(content: Text('Message link copied.')),
               );
             }
+          }
+          break;
+        case 'copy-media-link':
+          final instance = controller.api.tokens?.instance.value;
+          if (instance != null && attachment != null) {
+            await Clipboard.setData(ClipboardData(
+              text: 'https://$instance${attachmentMediaPath(
+                attachment.ref,
+                historyMediaUrl: attachment.historyMediaUrl,
+              )}',
+            ));
           }
           break;
         case 'copy-id':
@@ -4575,7 +4614,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           await controller.removeMessage(message);
           break;
         case 'report':
-          await _reportMessageDialog(message);
+          await _reportMessageDialog(
+            message,
+            attachment: attachment,
+            attachmentManifest: attachmentManifest,
+            decryptedAttachment: decryptedAttachment,
+          );
           break;
       }
     } on Object catch (error) {
@@ -5026,20 +5070,22 @@ final class _DayDivider extends StatelessWidget {
 
 /// Compact reminder of which message an action sheet applies to.
 final class _MessageActionsHeader extends StatelessWidget {
-  const _MessageActionsHeader({required this.message});
+  const _MessageActionsHeader({required this.message, this.attachment});
 
   final KaedeMessage message;
+  final KaedeAttachment? attachment;
 
   @override
   Widget build(BuildContext context) {
     final author = message.author;
     final content = message.content?.trim();
-    final preview = content?.isNotEmpty == true
-        ? spoilerSafeReplyPreview(content!)
-        : message.attachments.isNotEmpty
-            ? '${message.attachments.length} attachment'
-                '${message.attachments.length == 1 ? '' : 's'}'
-            : 'Message';
+    final preview = attachment?.filename ??
+        (content?.isNotEmpty == true
+            ? spoilerSafeReplyPreview(content!)
+            : message.attachments.isNotEmpty
+                ? '${message.attachments.length} attachment'
+                    '${message.attachments.length == 1 ? '' : 's'}'
+                : 'Message');
     return Padding(
       padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
       child: Row(
@@ -6189,7 +6235,7 @@ final class _MessageTile extends StatelessWidget {
       this.onAddReaction,
       this.onAuthorTap,
       this.onOpenThread,
-      this.onReportAttachment,
+      this.onAttachmentActions,
       this.referenced,
       this.onJump});
   final KaedeMessage message;
@@ -6206,13 +6252,23 @@ final class _MessageTile extends StatelessWidget {
   final VoidCallback? onAddReaction;
   final VoidCallback? onAuthorTap;
   final VoidCallback? onOpenThread;
-  final _ReportAttachment? onReportAttachment;
+  final _OpenAttachmentActions? onAttachmentActions;
   final VoidCallback? onJump;
 
   void _openMenu() {
     if (onMenu == null) return;
     HapticFeedback.mediumImpact();
     onMenu!();
+  }
+
+  Future<void> _openAttachmentActions(
+    KaedeAttachment attachment,
+    Map<String, Object?>? manifest,
+    File? decryptedFile,
+  ) async {
+    if (onAttachmentActions == null) return;
+    await HapticFeedback.mediumImpact();
+    await onAttachmentActions!(attachment, manifest, decryptedFile);
   }
 
   @override
@@ -6536,15 +6592,9 @@ final class _MessageTile extends StatelessWidget {
                       ),
                       encryptedManifest:
                           _encryptedManifestFor(displayedMessage, attachment),
-                      onReport: onReportAttachment == null
+                      onActions: onAttachmentActions == null
                           ? null
-                          : (selected, manifest, decryptedFile) =>
-                              onReportAttachment!(
-                                displayedMessage,
-                                selected,
-                                manifest,
-                                decryptedFile,
-                              ),
+                          : _openAttachmentActions,
                     ),
                   if (!deleted)
                     if (message.thread case final thread?)
@@ -9526,7 +9576,7 @@ final class _AttachmentCard extends ConsumerStatefulWidget {
   const _AttachmentCard({
     required this.attachment,
     this.encryptedManifest,
-    this.onReport,
+    this.onActions,
     this.pollStatus = true,
     this.compact = false,
     this.compactFit = BoxFit.cover,
@@ -9536,11 +9586,7 @@ final class _AttachmentCard extends ConsumerStatefulWidget {
   final bool pollStatus;
   final bool compact;
   final BoxFit compactFit;
-  final Future<void> Function(
-    KaedeAttachment attachment,
-    Map<String, Object?>? manifest,
-    File? decryptedFile,
-  )? onReport;
+  final _OpenAttachmentActions? onActions;
 
   @override
   ConsumerState<_AttachmentCard> createState() => _AttachmentCardState();
@@ -10163,58 +10209,11 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
     setState(() => _future = _load());
   }
 
-  Future<void> _showMediaActions() async {
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.onReport != null)
-              ListTile(
-                leading: Icon(Icons.flag_outlined),
-                title: Text('Report message'),
-                subtitle: Text('Include this attachment as context'),
-                onTap: () => Navigator.pop(context, 'report'),
-              ),
-            ListTile(
-              leading: Icon(Icons.link_rounded),
-              title: Text('Copy media link'),
-              onTap: () => Navigator.pop(context, 'copy'),
-            ),
-            ListTile(
-              leading: Icon(Icons.info_outline_rounded),
-              title: Text(widget.attachment.filename),
-              subtitle: Text(
-                '${widget.attachment.contentType} · '
-                '${formatAttachmentSize(widget.attachment.size)}',
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (!mounted) return;
-    if (action == 'report') {
-      await widget.onReport?.call(
+  void _openActions() => unawaited(widget.onActions?.call(
         widget.attachment,
         widget.encryptedManifest,
         _file,
-      );
-      return;
-    }
-    if (action != 'copy') return;
-    final controller = ref.read(mobileControllerProvider.notifier);
-    final instance = controller.api.tokens?.instance.value;
-    if (instance == null) return;
-    await Clipboard.setData(ClipboardData(
-      text: 'https://$instance${attachmentMediaPath(
-        widget.attachment.ref,
-        historyMediaUrl: widget.attachment.historyMediaUrl,
-      )}',
-    ));
-  }
+      ));
 
   @override
   Widget build(BuildContext context) {
@@ -10393,7 +10392,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
                 button: true,
                 label: 'Open image ${attachment.filename}',
                 child: GestureDetector(
-                  onLongPress: _showMediaActions,
+                  onLongPress: widget.onActions == null ? null : _openActions,
                   onTap: () => showDialog<void>(
                     context: context,
                     builder: (dialogContext) => Dialog.fullscreen(
@@ -10441,13 +10440,13 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
         }
         if (attachment.contentType.startsWith('video/')) {
           return GestureDetector(
-            onLongPress: _showMediaActions,
+            onLongPress: widget.onActions == null ? null : _openActions,
             child: _FileVideo(file: file),
           );
         }
         if (attachment.contentType.startsWith('audio/')) {
           return GestureDetector(
-            onLongPress: _showMediaActions,
+            onLongPress: widget.onActions == null ? null : _openActions,
             child: _FileAudio(
               file: file,
               contentType: attachment.contentType,
@@ -10457,7 +10456,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
           );
         }
         return ListTile(
-          onLongPress: _showMediaActions,
+          onLongPress: widget.onActions == null ? null : _openActions,
           contentPadding: EdgeInsets.zero,
           leading: Icon(Icons.insert_drive_file_outlined),
           title: Text(attachment.filename),

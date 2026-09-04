@@ -1665,7 +1665,7 @@ async def livekit_webhook(
             generation = int(cast(int, metadata["generation"]))
         except ValueError:
             return await completed()
-        await remove_occupant_connection(
+        removed = await remove_occupant_connection(
             redis,
             settings.domain,
             room,
@@ -1673,6 +1673,16 @@ async def livekit_webhook(
             connection_id,
             generation=generation,
         )
+        if removed and kind == "g" and not await room_occupants(redis, settings.domain, room):
+            await publish_voice_channel_start_time(
+                redis,
+                settings,
+                session,
+                guild_id=scope_id,
+                channel_id=leaf_id,
+                room=room,
+                started_at=None,
+            )
         await release_voice_connection(
             redis,
             settings.domain,
