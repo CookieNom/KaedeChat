@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ApiError, userErrorMessage } from '$lib/api/client';
-  import { entityKey } from '$lib/chat/refs';
+  import { entityKey, entityRef } from '$lib/chat/refs';
   import type { Channel, GuildMemberSummary, UserSummary } from '$lib/chat/types';
   import { assetUrl } from '$lib/media/assets';
   import {
@@ -43,6 +43,7 @@
   import { onMount, tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import Icon from './Icon.svelte';
+  import GuildMemberPicker from './GuildMemberPicker.svelte';
   import TaskTrackerSettingsDialog from './TaskTrackerSettingsDialog.svelte';
   import TaskTrackerTaskDialog from './TaskTrackerTaskDialog.svelte';
 
@@ -653,14 +654,15 @@
         <option value="none">No priority</option>
       </select>
     </label>
-    <label>
+    <label class="assignee-filter">
       <span class="visually-hidden">Assignee</span>
-      <select bind:value={filters.assignee} aria-label="Filter by assignee">
-        <option value="">All assignees</option>
-        {#each uniqueAssignees as assignee (entityKey(assignee))}
-          <option value={entityKey(assignee)}>{userName(assignee)}</option>
-        {/each}
-      </select>
+      <GuildMemberPicker
+        fallbackUsers={uniqueAssignees}
+        value={filters.assignee ? [filters.assignee] : []}
+        optional
+        placeholder="All assignees"
+        onChange={(values) => (filters.assignee = values[0] ?? '')}
+      />
     </label>
     <label class="completed-filter">
       <input bind:checked={filters.hideCompleted} type="checkbox" />
@@ -912,6 +914,9 @@
       initialLane={taskDialogLane}
       {lanes}
       {members}
+      guildRef={channel.guild_id && channel.guild_domain
+        ? entityRef({ id: channel.guild_id, origin_domain: channel.guild_domain })
+        : null}
       {canAssign}
       {currentUser}
       canDelete={Boolean(editingTask && canEditTask(editingTask))}

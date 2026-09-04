@@ -21,6 +21,7 @@
     optional = false,
     placeholder = 'Choose a member',
     disabled = false,
+    filterUser = () => true,
     onChange
   }: {
     guildRef?: string | null;
@@ -32,7 +33,8 @@
     optional?: boolean;
     placeholder?: string | null;
     disabled?: boolean;
-    onChange: (values: string[]) => void;
+    filterUser?: (user: UserSummary) => boolean;
+    onChange: (values: string[], users: UserSummary[]) => void;
   } = $props();
 
   let active = $state(false);
@@ -47,6 +49,9 @@
   let loadedGuildRef = '';
   let requestGeneration = 0;
   let pageController: AbortController | null = null;
+  let picker = $state<HTMLDivElement | null>(null);
+  let highlighted = $state(0);
+  const memberResultsId = $props.id();
   const pageSize = 25;
 
   function userOption(user: UserSummary): StaticEntityOption {
@@ -58,11 +63,23 @@
   }
 
   const options = $derived.by(() => {
-    const users = guildRef ? results.map((member) => member.user) : fallbackUsers;
+    const needle = query.trim().toLowerCase();
+    const users = (guildRef ? results.map((member) => member.user) : fallbackUsers).filter(
+      (user) =>
+        filterUser(user) &&
+        (!needle ||
+          `${userDisplayName(user)} ${user.handle} ${user.origin_domain}`
+            .toLowerCase()
+            .includes(needle))
+    );
     const selected = new Set(value);
+    const selectedFallbackUsers = fallbackUsers.filter(
+      (user) => filterUser(user) && selected.has(entityRef(user))
+    );
     const selectedUsers = seen.filter((member) => selected.has(entityRef(member.user)));
     const candidates = [
       ...staticOptions,
+      ...selectedFallbackUsers.map(userOption),
       ...selectedUsers.map((item) => userOption(item.user)),
       ...users.map(userOption)
     ];
@@ -79,6 +96,8 @@
       (option, index) => candidates.findIndex((item) => item.value === option.value) === index
     );
   });
+  const availableOptions = $derived(options.filter((option) => !value.includes(option.value)));
+  const selectedOptions = $derived(options.filter((option) => value.includes(option.value)));
 
   async function loadPage(
     targetGuild: string,
@@ -172,43 +191,106 @@
     }
   }
 
-  function selectedValues(event: Event): string[] {
-    return [...(event.currentTarget as HTMLSelectElement).selectedOptions]
-      .map((option) => option.value)
-      .filter(Boolean);
+  function usersFor(values: string[]): UserSummary[] {
+    return [...fallbackUsers, ...seen.map((member) => member.user)].filter((user) =>
+      values.includes(entityRef(user))
+    );
+  }
+
+  function choose(option: StaticEntityOption) {
+    const next = multiple ? [...value, option.value].slice(0, maxValues) : [option.value];
+    onChange(next, usersFor(next));
+    query = '';
+    highlighted = 0;
+    if (!multiple) active = false;
+  }
+
+  function remove(option: StaticEntityOption) {
+    const next = value.filter((item) => item !== option.value);
+    onChange(next, usersFor(next));
+  }
+
+  function keydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      active = false;
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      active = true;
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      highlighted = Math.max(0, Math.min(availableOptions.length - 1, highlighted + direction));
+      return;
+    }
+    if (event.key === 'Enter' && active && availableOptions[highlighted]) {
+      event.preventDefault();
+      choose(availableOptions[highlighted]);
+    }
+  }
+
+  function focusout(event: FocusEvent) {
+    if (!picker?.contains(event.relatedTarget as Node | null)) active = false;
   }
 </script>
 
-<div class="guild-member-picker">
-  {#if guildRef}
-    <div class="member-search">
-      <input
-        bind:value={query}
-        {disabled}
-        aria-label="Search guild members"
-        placeholder="Search guild members"
-        aria-busy={loading}
-        onfocus={() => (active = true)}
-      />
+<div class="guild-member-picker" bind:this={picker} onfocusout={focusout}>
+  <div class="member-search">
+    <input
+      bind:value={query}
+      {disabled}
+      aria-label="Search people"
+      placeholder="Search by name or federated username"
+      aria-busy={loading}
+      role="combobox"
+      aria-expanded={active}
+      aria-controls={memberResultsId}
+      aria-autocomplete="list"
+      aria-activedescendant={active && availableOptions[highlighted]
+        ? `${memberResultsId}-${highlighted}`
+        : undefined}
+      onfocus={() => {
+        active = true;
+        highlighted = 0;
+      }}
+      onkeydown={keydown}
+      autocomplete="off"
+    />
+  </div>
+  {#if selectedOptions.length}
+    <div class="selected-options" aria-label="Selected people">
+      {#each selectedOptions as option (option.value)}
+        <span
+          >{option.label}<button type="button" {disabled} onclick={() => remove(option)}>×</button
+          ></span
+        >
+      {/each}
+    </div>
+  {:else if !active}
+    <small>{placeholder ?? 'Choose a member'}</small>
+  {/if}
+  {#if active}
+    <div id={memberResultsId} class="member-results" role="listbox" aria-multiselectable={multiple}>
+      {#if optional && !multiple && value.length}
+        <button type="button" role="option" aria-selected="false" onclick={() => onChange([], [])}
+          >{placeholder ?? 'Clear selection'}</button
+        >
+      {/if}
+      {#each availableOptions as option, index (option.value)}
+        <button
+          id={`${memberResultsId}-${index}`}
+          type="button"
+          role="option"
+          aria-selected="false"
+          class:highlighted={index === highlighted}
+          disabled={disabled || (multiple && value.length >= maxValues)}
+          onmouseenter={() => (highlighted = index)}
+          onclick={() => choose(option)}>{option.label}</button
+        >
+      {:else}
+        {#if !loading}<small>No matching people.</small>{/if}
+      {/each}
     </div>
   {/if}
-  <select
-    {multiple}
-    size={multiple ? Math.min(Math.max(options.length, 2), 5) : 1}
-    {disabled}
-    aria-label={placeholder ?? 'Choose a member'}
-    onfocus={() => (active = true)}
-    onchange={(event) => onChange(selectedValues(event))}
-  >
-    {#if !multiple}
-      <option value="" disabled={!optional} selected={value.length === 0}
-        >{placeholder ?? 'Choose a member'}</option
-      >
-    {/if}
-    {#each options as option (option.value)}
-      <option value={option.value} selected={value.includes(option.value)}>{option.label}</option>
-    {/each}
-  </select>
   {#if guildRef && !active}<small>Search to choose any member of this guild.</small>{/if}
   {#if loading}<small role="status">Searching members…</small>{/if}
   {#if hasMore}
@@ -225,8 +307,7 @@
     display: grid;
     gap: 4px;
   }
-  input,
-  select {
+  input {
     min-height: 36px;
     width: 100%;
     border: 1px solid var(--line);
@@ -241,6 +322,44 @@
   }
   small.error {
     color: var(--danger);
+  }
+  .selected-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .selected-options span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px 7px;
+    background: var(--surface-raised);
+  }
+  .selected-options button {
+    min-height: 0;
+    border: 0;
+    padding: 0;
+    background: transparent;
+  }
+  .member-results {
+    display: grid;
+    max-height: 240px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px;
+    background: var(--surface-raised);
+  }
+  .member-results button {
+    border: 0;
+    text-align: left;
+    background: transparent;
+  }
+  .member-results button:hover,
+  .member-results button.highlighted {
+    background: var(--surface-hover);
   }
   button {
     min-height: 30px;

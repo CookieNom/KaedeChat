@@ -20,6 +20,7 @@
   import { assetUrl } from '$lib/media/assets';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import Icon from './Icon.svelte';
+  import GuildMemberPicker from './GuildMemberPicker.svelte';
   import MessageRow from './MessageRow.svelte';
 
   let {
@@ -45,6 +46,7 @@
   let query = $state('');
   let authorRef = $state('');
   let mentionRef = $state('');
+  let selectedUsers = $state<UserSummary[]>([]);
   let has = $state<string[]>([]);
   let pinned = $state<'any' | 'yes' | 'no'>('any');
   let authorType = $state<'any' | MessageSearchAuthorType>('any');
@@ -108,6 +110,13 @@
     [...new Map(users.map((user) => [entityRef(user), user])).values()].sort((a, b) =>
       userDisplayName(a).localeCompare(userDisplayName(b))
     )
+  );
+  const memberPickerGuildRef = $derived(
+    scope === 'guild'
+      ? scopeRef
+      : channel?.guild_id && channel.guild_domain
+        ? entityRef({ id: channel.guild_id, origin_domain: channel.guild_domain })
+        : null
   );
   const authorUser = $derived(authorRef ? userForRef(authorRef) : null);
   const mentionedUser = $derived(mentionRef ? userForRef(mentionRef) : null);
@@ -281,7 +290,11 @@
   }
 
   function userForRef(reference: string) {
-    return uniqueUsers.find((user) => entityRef(user) === reference) ?? null;
+    return (
+      selectedUsers.find((user) => entityRef(user) === reference) ??
+      uniqueUsers.find((user) => entityRef(user) === reference) ??
+      null
+    );
   }
 
   function handleSearchKeydown(event: KeyboardEvent) {
@@ -576,23 +589,45 @@
                 }}
               >
                 <div class="filters">
-                  <label
+                  <label class="person-filter"
                     >From
-                    <select bind:value={authorRef}
-                      ><option value="">Anyone</option
-                      >{#each uniqueUsers as user (entityRef(user))}<option value={entityRef(user)}
-                          >{userDisplayName(user)} · @{userPublicHandle(user)}</option
-                        >{/each}</select
-                    >
+                    <GuildMemberPicker
+                      guildRef={memberPickerGuildRef}
+                      fallbackUsers={uniqueUsers}
+                      value={authorRef ? [authorRef] : []}
+                      optional
+                      placeholder="Anyone"
+                      onChange={(values, users) => {
+                        authorRef = values[0] ?? '';
+                        selectedUsers = [
+                          ...selectedUsers.filter(
+                            (user) =>
+                              !users.some((selected) => entityRef(selected) === entityRef(user))
+                          ),
+                          ...users
+                        ];
+                      }}
+                    />
                   </label>
-                  <label
+                  <label class="person-filter"
                     >Mentions
-                    <select bind:value={mentionRef}
-                      ><option value="">Anyone</option
-                      >{#each uniqueUsers as user (entityRef(user))}<option value={entityRef(user)}
-                          >{userDisplayName(user)} · @{userPublicHandle(user)}</option
-                        >{/each}</select
-                    >
+                    <GuildMemberPicker
+                      guildRef={memberPickerGuildRef}
+                      fallbackUsers={uniqueUsers}
+                      value={mentionRef ? [mentionRef] : []}
+                      optional
+                      placeholder="Anyone"
+                      onChange={(values, users) => {
+                        mentionRef = values[0] ?? '';
+                        selectedUsers = [
+                          ...selectedUsers.filter(
+                            (user) =>
+                              !users.some((selected) => entityRef(selected) === entityRef(user))
+                          ),
+                          ...users
+                        ];
+                      }}
+                    />
                   </label>
                   <label
                     >Sort<select bind:value={sort}

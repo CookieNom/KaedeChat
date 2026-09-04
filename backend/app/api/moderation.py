@@ -10,7 +10,7 @@ from typing import cast
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import ConfigDict, Field, ValidationError, model_validator
 from redis.asyncio import Redis
-from sqlalchemy import delete, or_, select, tuple_, update
+from sqlalchemy import and_, delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -124,6 +124,12 @@ from app.tracker.membership import clear_tracker_assignees, wake_tracker_members
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["moderation"])
 federation_router = APIRouter(tags=["audit log federation"])
+
+
+def _federated_username_parts(search: str) -> tuple[str, str] | None:
+    username, separator, domain = search.strip().lstrip("@").rpartition("@")
+    return (username, domain) if separator and username and domain else None
+
 
 AUDIT_LOG_FEDERATION_CAPABILITY = "guild-audit-log/1"
 AUDIT_LOG_FEDERATION_EVENT_TYPE = "guild.audit-log.page"
@@ -448,14 +454,24 @@ async def list_members(
     if query is not None:
         search = query.strip().lstrip("@").strip()
         if search:
-            conditions.append(
-                or_(
-                    User.username.icontains(search, autoescape=True),
-                    User.display_name.icontains(search, autoescape=True),
-                    User.origin_domain.icontains(search, autoescape=True),
-                    GuildMember.nickname.icontains(search, autoescape=True),
+            handle = _federated_username_parts(search)
+            if handle:
+                username, domain = handle
+                conditions.append(
+                    and_(
+                        User.username.icontains(username, autoescape=True),
+                        User.origin_domain.icontains(domain, autoescape=True),
+                    )
                 )
-            )
+            else:
+                conditions.append(
+                    or_(
+                        User.username.icontains(search, autoescape=True),
+                        User.display_name.icontains(search, autoescape=True),
+                        User.origin_domain.icontains(search, autoescape=True),
+                        GuildMember.nickname.icontains(search, autoescape=True),
+                    )
+                )
     rows = (
         await session.execute(
             select(GuildMember, User)

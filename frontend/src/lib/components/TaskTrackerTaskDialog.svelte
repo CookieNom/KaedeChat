@@ -12,12 +12,14 @@
   import { portal } from '$lib/ui/portal';
   import { onMount, untrack } from 'svelte';
   import Icon from './Icon.svelte';
+  import GuildMemberPicker from './GuildMemberPicker.svelte';
 
   let {
     task = null,
     initialLane,
     lanes,
     members,
+    guildRef = null,
     currentUser = null,
     canAssign = false,
     canDelete = false,
@@ -33,6 +35,7 @@
     initialLane: TrackerLane;
     lanes: TrackerLane[];
     members: GuildMemberSummary[];
+    guildRef?: string | null;
     currentUser?: UserSummary | null;
     canAssign?: boolean;
     canDelete?: boolean;
@@ -257,12 +260,15 @@
       </label>
       <label>
         <span>Assignee</span>
-        <select bind:value={assigneeKey} disabled={busy || readOnly || !canChangeAssignee}>
-          <option value="">Unassigned</option>
-          {#each assignableMembers as member (entityKey(member.user))}
-            <option value={entityKey(member.user)}>{memberName(member)}</option>
-          {/each}
-        </select>
+        <GuildMemberPicker
+          guildRef={canAssign ? guildRef : null}
+          fallbackUsers={assignableMembers.map((member) => member.user)}
+          value={assigneeKey ? [assigneeKey] : []}
+          optional
+          placeholder="Unassigned"
+          disabled={busy || readOnly || !canChangeAssignee}
+          onChange={(values) => (assigneeKey = values[0] ?? '')}
+        />
         {#if !readOnly && !canAssign}
           <small>
             {canChangeAssignee

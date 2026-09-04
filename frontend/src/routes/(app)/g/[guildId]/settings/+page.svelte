@@ -53,6 +53,7 @@
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import Icon from '$lib/components/Icon.svelte';
   import GuildAuditLog from '$lib/components/GuildAuditLog.svelte';
+  import GuildMemberPicker from '$lib/components/GuildMemberPicker.svelte';
   import GuildSafetyTools from '$lib/components/GuildSafetyTools.svelte';
   import AnnouncementFollowers from '$lib/components/AnnouncementFollowers.svelte';
   import ImageUploadField from '$lib/components/ImageUploadField.svelte';
@@ -188,7 +189,7 @@
       }
     | {
         kind: 'guild-transfer';
-        target: MemberSummary;
+        target: UserSummary;
         title: string;
         description: string;
         confirmLabel: string;
@@ -368,6 +369,7 @@
   let inviteUnique = $state(false);
   let inviteTargetType = $state<'' | 'stream'>('');
   let inviteTargetUser = $state('');
+  let ownershipTargetUser = $state<UserSummary | null>(null);
   let inviteScheduledEvent = $state('');
   let inviteRoleIds = $state<string[]>([]);
   let createdInvite = $state<InviteSummary | null>(null);
@@ -491,6 +493,7 @@
     rolePermissions = '0';
     createdInvite = null;
     inviteTargetUser = '';
+    ownershipTargetUser = null;
     inviteRoleIds = [];
     ownershipTarget = '';
     memberModerationDialog = null;
@@ -2901,14 +2904,14 @@
   }
 
   function requestOwnershipTransfer() {
-    const member = ownershipCandidates.find(
-      (candidate) => entityRef(candidate.user) === ownershipTarget
-    );
-    if (!guild || !isGuildOwner || !member) return;
-    const targetName = userDisplayName(member.user);
+    const user =
+      ownershipTargetUser ??
+      ownershipCandidates.find((candidate) => entityRef(candidate.user) === ownershipTarget)?.user;
+    if (!guild || !isGuildOwner || !user) return;
+    const targetName = userDisplayName(user);
     void openDestructiveConfirmation({
       kind: 'guild-transfer',
-      target: member,
+      target: user,
       title: `Transfer ownership to ${targetName}?`,
       description:
         'They will become the guild owner immediately. You will remain a member, but only the new owner can transfer or delete the guild.',
@@ -2935,18 +2938,19 @@
     });
   }
 
-  function transferConfirmedGuild(member: MemberSummary) {
+  function transferConfirmedGuild(user: UserSummary) {
     return run(async (targetGuild, generation) => {
       if (!guild?.version) throw new Error('Guild version is unavailable.');
       const updated = await api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}/owner`, {
         method: 'PUT',
         headers: { 'If-Match': guild.version },
-        body: JSON.stringify({ owner_id: entityRef(member.user) })
+        body: JSON.stringify({ owner_id: entityRef(user) })
       });
       if (generation !== loadGeneration) return;
       guild = { ...guild!, ...updated };
       ownershipTarget = '';
-      notice = `Ownership transferred to ${userDisplayName(member.user)}.`;
+      ownershipTargetUser = null;
+      notice = `Ownership transferred to ${userDisplayName(user)}.`;
     });
   }
 
@@ -6044,15 +6048,14 @@
                   {#if inviteTargetType === 'stream'}
                     <label class="form-field compact-field">
                       <span>Streaming member</span>
-                      <select bind:value={inviteTargetUser} required disabled={busy}>
-                        <option value="">Choose a member</option>
-                        {#each members as member (entityKey(member.user))}
-                          <option value={entityRef(member.user)}
-                            >{member.user.display_name ?? member.user.username} · {member.user
-                              .origin_domain}</option
-                          >
-                        {/each}
-                      </select>
+                      <GuildMemberPicker
+                        guildRef={entityRef(guild)}
+                        fallbackUsers={currentMembers.map((member) => member.user)}
+                        value={inviteTargetUser ? [inviteTargetUser] : []}
+                        placeholder="Choose a member"
+                        disabled={busy}
+                        onChange={(values) => (inviteTargetUser = values[0] ?? '')}
+                      />
                       <small>The member must currently be able to stream in the destination.</small>
                     </label>
                   {/if}
@@ -6192,16 +6195,21 @@
               <div class="inline-settings-form">
                 <label class="form-field">
                   <span>New owner</span>
-                  <select bind:value={ownershipTarget} disabled={busy}>
-                    <option value="">Choose a member</option>
-                    {#each ownershipCandidates as member (entityKey(member.user))}
-                      <option value={entityRef(member.user)}>
-                        {member.nickname ?? userDisplayName(member.user)} · {userPublicHandle(
-                          member.user
-                        ) ?? 'Profile unavailable'}
-                      </option>
-                    {/each}
-                  </select>
+                  <GuildMemberPicker
+                    guildRef={entityRef(guild)}
+                    fallbackUsers={ownershipCandidates.map((member) => member.user)}
+                    value={ownershipTarget ? [ownershipTarget] : []}
+                    placeholder="Choose a member"
+                    disabled={busy}
+                    filterUser={(user) =>
+                      user.account_type !== 'bot' &&
+                      user.bot !== true &&
+                      entityRef(user) !== currentUserRef}
+                    onChange={(values, users) => {
+                      ownershipTarget = values[0] ?? '';
+                      ownershipTargetUser = users[0] ?? null;
+                    }}
+                  />
                 </label>
                 <button
                   class="secondary-button"
