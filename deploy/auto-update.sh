@@ -218,7 +218,7 @@ run_update() {
   "${COMPOSE[@]}" run --rm --no-deps --build preflight || \
     die 'new application preflight failed; the running deployment was not stopped. Correct the preceding preflight error, then retry'
   log 'building application images before downtime'
-  "${COMPOSE[@]}" build --pull api gateway worker scheduler migrate storage-init frontend-build || \
+  "${COMPOSE[@]}" build --pull api gateway worker scheduler migrate storage-init frontend-build voice-preflight || \
     die 'application image build failed; the running deployment was not stopped. Correct the build error, then retry'
 
   if [[ -n $BACKUP_HOOK ]]; then
