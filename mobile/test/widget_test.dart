@@ -22,6 +22,7 @@ import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
+import 'package:kaede_mobile/src/platform/system_call_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:markdown/markdown.dart' as md;
@@ -2242,6 +2243,47 @@ void main() {
       expect(
         PushDestination.parse(destination.toUri().toString())?.message,
         destination.message,
+      );
+    });
+
+    test('call notification payload maps lock-screen actions', () {
+      final payload = PushCallPayload(
+        call: EntityRef.parse('88@home.example'),
+        channel: EntityRef.parse('42@home.example'),
+        callerName: 'Turtle',
+      );
+      final decoded = PushCallPayload.parse(payload.encode());
+
+      expect(decoded?.call, payload.call);
+      expect(decoded?.channel, payload.channel);
+      expect(decoded?.callerName, 'Turtle');
+      expect(decoded?.eventFor(null).action, SystemCallAction.incoming);
+      expect(
+        decoded?.eventFor('kaede_answer_call').action,
+        SystemCallAction.answer,
+      );
+      expect(
+        decoded?.eventFor('kaede_decline_call').action,
+        SystemCallAction.decline,
+      );
+    });
+
+    test('call payload accepts queued legacy refs and rejects partial data',
+        () {
+      expect(
+        PushCallPayload.parse(<String, String>{
+          'call_ref': 'call:88@home.example',
+          'channel_ref': '42@home.example',
+          'caller_name': 'Turtle',
+        })?.call.wire,
+        '88@home.example',
+      );
+      expect(
+        PushCallPayload.parse(<String, String>{
+          'call_ref': '88@home.example',
+          'channel_ref': '42@home.example',
+        }),
+        isNull,
       );
     });
 

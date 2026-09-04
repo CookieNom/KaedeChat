@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 
-enum SystemCallAction { answer, decline, ended }
+enum SystemCallAction { incoming, answer, decline, ended }
 
 final class SystemCallEvent {
   const SystemCallEvent(

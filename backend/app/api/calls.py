@@ -292,7 +292,7 @@ async def notify_call(
                         "call",
                         "Incoming Kaede call",
                         "Answer or decline the call.",
-                        f"call:{record['id']}@{record['authority_domain']}",
+                        f"{record['id']}@{record['authority_domain']}",
                         f"{record['channel_id']}@{record['channel_domain']}",
                     )
         except Exception:

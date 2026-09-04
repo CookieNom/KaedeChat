@@ -838,6 +838,7 @@ final class MobileController extends StateNotifier<MobileState> {
   StreamSubscription<GatewayHealth>? _gatewayHealthSubscription;
   StreamSubscription<String>? _pushTokenSubscription;
   StreamSubscription<PushDestination>? _pushDestinationSubscription;
+  StreamSubscription<SystemCallEvent>? _pushCallSubscription;
   StreamSubscription<String?>? _pushHealthSubscription;
   StreamSubscription<SystemCallEvent>? _systemCallSubscription;
   StreamSubscription<void>? _sessionExpiredSubscription;
@@ -1873,6 +1874,11 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushDestinationSubscription = push.destinations.listen(
       (destination) => unawaited(openPushDestination(destination)),
     );
+    await _pushCallSubscription?.cancel();
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    _pushCallSubscription = push.callEvents.listen(
+      (event) => unawaited(_onSystemCallAction(event)),
+    );
     await _pushHealthSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     _pushHealthSubscription = push.health.listen(_setPushRemoteDeliveryWarning);
@@ -1883,6 +1889,9 @@ final class MobileController extends StateNotifier<MobileState> {
     );
     if (push.consumeInitialDestination() case final destination?) {
       unawaited(openPushDestination(destination));
+    }
+    if (push.consumeInitialCallEvent() case final event?) {
+      unawaited(_onSystemCallAction(event));
     }
     unawaited(_activateNotifications());
     unawaited(_flushOutbox());
@@ -3653,6 +3662,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushTokenSubscription = null;
     await _pushDestinationSubscription?.cancel();
     _pushDestinationSubscription = null;
+    await _pushCallSubscription?.cancel();
+    _pushCallSubscription = null;
     await _pushHealthSubscription?.cancel();
     _pushHealthSubscription = null;
     await _sessionExpiredSubscription?.cancel();
@@ -5674,7 +5685,11 @@ final class MobileController extends StateNotifier<MobileState> {
       kind: NotificationKind.call,
       title: incoming.callerName,
       body: 'Incoming Kaede call',
-      payload: PushDestination(channel: incoming.channel).encode(),
+      payload: PushCallPayload(
+        call: incoming.call,
+        channel: incoming.channel,
+        callerName: incoming.callerName,
+      ).encode(),
     ));
   }
 
@@ -5718,6 +5733,7 @@ final class MobileController extends StateNotifier<MobileState> {
     final incoming = state.incomingCall;
     if (incoming == null || '${data['id']}' != incoming.call.id.value) return;
     state = state.copyWith(clearIncomingCall: true);
+    unawaited(push.dismissCall(incoming.call.wire));
     unawaited(active
         ? systemCalls.setActive(incoming.call.wire)
         : systemCalls.end(incoming.call.wire));
@@ -5726,6 +5742,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> answerIncomingCall() async {
     final incoming = state.incomingCall;
     if (incoming == null) return;
+    await push.dismissCall(incoming.call.wire);
     try {
       await repository.callAction(incoming.call, 'accept');
       state = state.copyWith(
@@ -5746,6 +5763,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> declineIncomingCall() async {
     final incoming = state.incomingCall;
     if (incoming == null) return;
+    await push.dismissCall(incoming.call.wire);
     state = state.copyWith(clearIncomingCall: true);
     await systemCalls.end(incoming.call.wire);
     try {
@@ -5758,6 +5776,30 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _onSystemCallAction(SystemCallEvent event) async {
+    await push.dismissCall(event.callId);
+    if (event.action == SystemCallAction.incoming) {
+      final channel = event.channelRef;
+      if (channel == null || api.tokens == null) return;
+      try {
+        final callRef = EntityRef.parse(event.callId);
+        state = state.copyWith(
+          incomingCall: IncomingCall(
+            call: callRef,
+            channel: EntityRef.parse(channel),
+            caller: callRef,
+            callerName: event.callerName ?? 'Kaede caller',
+          ),
+          clearError: true,
+        );
+        await systemCalls.showIncoming(
+          callId: event.callId,
+          callerName: event.callerName ?? 'Kaede caller',
+        );
+      } on Object {
+        return;
+      }
+      return;
+    }
     if (state.incomingCall?.call.wire != event.callId) {
       final channel = event.channelRef;
       if (channel == null || api.tokens == null) return;
@@ -5789,6 +5831,8 @@ final class MobileController extends StateNotifier<MobileState> {
       return;
     }
     switch (event.action) {
+      case SystemCallAction.incoming:
+        return;
       case SystemCallAction.answer:
         await answerIncomingCall();
         return;
@@ -6590,6 +6634,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _gatewaySubscription?.cancel();
     _pushTokenSubscription?.cancel();
     _pushDestinationSubscription?.cancel();
+    _pushCallSubscription?.cancel();
     _pushHealthSubscription?.cancel();
     _systemCallSubscription?.cancel();
     _sessionExpiredSubscription?.cancel();
@@ -6672,6 +6717,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushTokenSubscription = null;
     await _pushDestinationSubscription?.cancel();
     _pushDestinationSubscription = null;
+    await _pushCallSubscription?.cancel();
+    _pushCallSubscription = null;
     await _pushHealthSubscription?.cancel();
     _pushHealthSubscription = null;
     await _gatewaySubscription?.cancel();

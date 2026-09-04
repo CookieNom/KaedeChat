@@ -14,6 +14,7 @@ import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/platform/system_call_service.dart';
 import 'package:path_provider/path_provider.dart';
 
 enum NotificationKind {
@@ -292,6 +293,89 @@ final class PushDestination {
   }
 }
 
+const _answerCallAction = 'kaede_answer_call';
+const _declineCallAction = 'kaede_decline_call';
+
+final class PushCallPayload {
+  const PushCallPayload({
+    required this.call,
+    required this.channel,
+    required this.callerName,
+  });
+
+  final EntityRef call;
+  final EntityRef channel;
+  final String callerName;
+
+  String encode() => jsonEncode(<String, String>{
+        'call_ref': call.wire,
+        'channel_ref': channel.wire,
+        'caller_name': callerName,
+      });
+
+  SystemCallEvent eventFor(String? actionId) => SystemCallEvent(
+        call.wire,
+        switch (actionId) {
+          _answerCallAction => SystemCallAction.answer,
+          _declineCallAction => SystemCallAction.decline,
+          _ => SystemCallAction.incoming,
+        },
+        channelRef: channel.wire,
+        callerName: callerName,
+      );
+
+  static PushCallPayload? parse(Object? value) {
+    try {
+      final Object? decoded = switch (value) {
+        final String text when text.trim().startsWith('{') => jsonDecode(text),
+        _ => value,
+      };
+      if (decoded is! Map) return null;
+      var callRef = '${decoded['call_ref'] ?? ''}'.trim();
+      final channelRef = '${decoded['channel_ref'] ?? ''}'.trim();
+      final callerName = '${decoded['caller_name'] ?? ''}'.trim();
+      // Accept notifications queued by builds that used the old prefix.
+      if (callRef.startsWith('call:')) callRef = callRef.substring(5);
+      if (callRef.isEmpty || channelRef.isEmpty || callerName.isEmpty) {
+        return null;
+      }
+      return PushCallPayload(
+        call: EntityRef.parse(callRef),
+        channel: EntityRef.parse(channelRef),
+        callerName: callerName,
+      );
+    } on Object {
+      return null;
+    }
+  }
+}
+
+SystemCallEvent? systemCallEventForNotificationResponse(
+  NotificationResponse response,
+) =>
+    PushCallPayload.parse(response.payload)?.eventFor(response.actionId);
+
+@pragma('vm:entry-point')
+Future<void> notificationActionBackgroundHandler(
+  NotificationResponse response,
+) async {
+  final event = systemCallEventForNotificationResponse(response);
+  if (event?.action != SystemCallAction.decline) return;
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+  final api = KaedeApiClient(vault: const SessionVault());
+  if (await api.restore() == null) return;
+  try {
+    await api.sendJson(
+      'POST',
+      '/api/v1/calls/${event!.callId}',
+      data: const <String, Object?>{'action': 'decline'},
+    ).timeout(const Duration(seconds: 8));
+  } on Object {
+    // The call will expire naturally if the device is temporarily offline.
+  }
+}
+
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -368,6 +452,8 @@ Future<FlutterLocalNotificationsPlugin>
         notificationCategories: PushService._darwinCategories,
       ),
     ),
+    onDidReceiveBackgroundNotificationResponse:
+        notificationActionBackgroundHandler,
   );
   final android = local.resolvePlatformSpecificImplementation<
       AndroidFlutterLocalNotificationsPlugin>();
@@ -382,6 +468,7 @@ final class PushService {
     this._local,
     this._destinations,
     this._healthEvents,
+    this._callEvents,
   );
 
   /// Test-only constructor: builds the service around inert platform
@@ -391,7 +478,8 @@ final class PushService {
   PushService.test({bool firebaseReady = true})
       : _local = FlutterLocalNotificationsPlugin(),
         _destinations = StreamController<PushDestination>.broadcast(),
-        _healthEvents = StreamController<String?>.broadcast(sync: true) {
+        _healthEvents = StreamController<String?>.broadcast(sync: true),
+        _callEvents = StreamController<SystemCallEvent>.broadcast() {
     _firebaseReady = firebaseReady;
     _firebaseResolved = true;
   }
@@ -403,15 +491,18 @@ final class PushService {
   StreamController<String>? _tokenRefreshBridge;
   final StreamController<PushDestination> _destinations;
   final StreamController<String?> _healthEvents;
+  final StreamController<SystemCallEvent> _callEvents;
   final List<StreamSubscription<dynamic>> _subscriptions =
       <StreamSubscription<dynamic>>[];
   static const _nativePushState = MethodChannel('chat.kaede.mobile/push_state');
   PushDestination? _initialDestination;
+  SystemCallEvent? _initialCallEvent;
   var _appActive = true;
   EntityRef? _visibleChannel;
 
   Stream<PushDestination> get destinations => _destinations.stream;
   Stream<String?> get health => _healthEvents.stream;
+  Stream<SystemCallEvent> get callEvents => _callEvents.stream;
   bool get remotePushAvailable => _firebaseReady;
 
   Future<void> setNativeRelayState({
@@ -468,6 +559,12 @@ final class PushService {
     return destination;
   }
 
+  SystemCallEvent? consumeInitialCallEvent() {
+    final event = _initialCallEvent;
+    _initialCallEvent = null;
+    return event;
+  }
+
   void setAppVisibility({required bool active, EntityRef? visibleChannel}) {
     _appActive = active;
     _visibleChannel = active ? visibleChannel : null;
@@ -478,6 +575,14 @@ final class PushService {
       _destinations.add(destination);
     } else {
       _initialDestination = destination;
+    }
+  }
+
+  void _emitCallEvent(SystemCallEvent event) {
+    if (_callEvents.hasListener) {
+      _callEvents.add(event);
+    } else {
+      _initialCallEvent = event;
     }
   }
 
@@ -513,7 +618,13 @@ final class PushService {
     final local = FlutterLocalNotificationsPlugin();
     final destinations = StreamController<PushDestination>.broadcast();
     final healthEvents = StreamController<String?>.broadcast(sync: true);
-    late final PushService service;
+    final callEvents = StreamController<SystemCallEvent>.broadcast();
+    final service = PushService._(
+      local,
+      destinations,
+      healthEvents,
+      callEvents,
+    );
     await local.initialize(
       const InitializationSettings(
         android: AndroidInitializationSettings('@drawable/ic_stat_kaede'),
@@ -525,25 +636,35 @@ final class PushService {
         ),
       ),
       onDidReceiveNotificationResponse: (response) {
+        final callEvent = systemCallEventForNotificationResponse(response);
+        if (callEvent != null) {
+          service._emitCallEvent(callEvent);
+          return;
+        }
         final destination = PushDestination.parse(response.payload);
         if (destination != null) service._emitDestination(destination);
       },
+      onDidReceiveBackgroundNotificationResponse:
+          notificationActionBackgroundHandler,
     );
     final android = local.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
     for (final channel in _androidChannels) {
       await android?.createNotificationChannel(channel);
     }
-    service = PushService._(
-      local,
-      destinations,
-      healthEvents,
-    );
     // The cold-launch deep link must be resolved before the service is
     // returned so the session restore finds the tapped conversation.
     final launch = await local.getNotificationAppLaunchDetails();
-    service._initialDestination =
-        PushDestination.parse(launch?.notificationResponse?.payload);
+    final launchResponse = launch?.notificationResponse;
+    if (launchResponse != null) {
+      service._initialCallEvent =
+          systemCallEventForNotificationResponse(launchResponse);
+      if (service._initialCallEvent == null) {
+        service._initialDestination = PushDestination.parse(
+          launchResponse.payload,
+        );
+      }
+    }
     // Firebase setup is optional (self-hosters may ship without
     // credentials) and is slower than the launch-critical path above, so it
     // runs in the background. Token callers await its outcome via
@@ -629,11 +750,10 @@ final class PushService {
     await _ensureFirebaseResolved();
     var localAllowed = true;
     if (Platform.isAndroid) {
-      localAllowed = await _local
-              .resolvePlatformSpecificImplementation<
-                  AndroidFlutterLocalNotificationsPlugin>()
-              ?.requestNotificationsPermission() ??
-          true;
+      final android = _local.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      localAllowed = await android?.requestNotificationsPermission() ?? true;
+      if (localAllowed) await android?.requestFullScreenIntentPermission();
     } else {
       localAllowed = await _local
               .resolvePlatformSpecificImplementation<
@@ -748,6 +868,9 @@ final class PushService {
     );
   }
 
+  Future<void> dismissCall(String callId) =>
+      _local.cancel(stableNotificationId(callId));
+
   Future<void> dispose() async {
     for (final subscription in _subscriptions) {
       await subscription.cancel();
@@ -755,6 +878,7 @@ final class PushService {
     await _tokenRefreshBridge?.close();
     await _destinations.close();
     await _healthEvents.close();
+    await _callEvents.close();
   }
 }
 
@@ -768,7 +892,16 @@ Future<void> _displayRedeemedNotification(
         notification.destination?.channel.wire ??
         '${notification.kind}:${notification.title}:${notification.sentAt}',
   );
-  final payload = notification.destination?.encode();
+  final callPayload = notification.kind == NotificationKind.call &&
+          notification.eventRef != null &&
+          notification.destination != null
+      ? PushCallPayload.parse(<String, String>{
+          'call_ref': notification.eventRef!,
+          'channel_ref': notification.destination!.channel.wire,
+          'caller_name': notification.title,
+        })
+      : null;
+  final payload = callPayload?.encode() ?? notification.destination?.encode();
   await _showLocalNotification(
     local,
     id: id,
@@ -928,6 +1061,8 @@ Future<void> _showLocalNotification(
   String? senderAvatarPath,
   DateTime? sentAt,
 }) async {
+  final callPayload =
+      kind == NotificationKind.call ? PushCallPayload.parse(payload) : null;
   final channel = switch (kind) {
     NotificationKind.directMessage => PushService._androidChannels[0],
     NotificationKind.mention => PushService._androidChannels[1],
@@ -980,7 +1115,35 @@ Future<void> _showLocalNotification(
             : FilePathAndroidBitmap(senderAvatarPath),
         styleInformation: style,
         visibility: NotificationVisibility.private,
-        category: sender == null ? null : AndroidNotificationCategory.message,
+        category: callPayload != null
+            ? AndroidNotificationCategory.call
+            : sender == null
+                ? null
+                : AndroidNotificationCategory.message,
+        priority: callPayload == null ? Priority.defaultPriority : Priority.max,
+        fullScreenIntent: callPayload != null,
+        autoCancel: callPayload == null,
+        ongoing: callPayload != null,
+        timeoutAfter: callPayload == null ? null : 60000,
+        audioAttributesUsage: callPayload == null
+            ? AudioAttributesUsage.notification
+            : AudioAttributesUsage.voiceCommunicationSignalling,
+        actions: callPayload == null
+            ? null
+            : const <AndroidNotificationAction>[
+                AndroidNotificationAction(
+                  _declineCallAction,
+                  'Decline',
+                  cancelNotification: true,
+                ),
+                AndroidNotificationAction(
+                  _answerCallAction,
+                  'Answer',
+                  showsUserInterface: true,
+                  cancelNotification: true,
+                  semanticAction: SemanticAction.call,
+                ),
+              ],
         onlyAlertOnce: true,
       ),
       iOS: DarwinNotificationDetails(
