@@ -552,6 +552,10 @@ services:
       REMBG_HOME: /models/rembg
       # Only the relay sender worker receives the official provider credential.
       KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64: ${KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64:-}
+      KAEDE_PUSH_RELAY_APNS_KEY_B64: ${KAEDE_PUSH_RELAY_APNS_KEY_B64:-}
+      KAEDE_PUSH_RELAY_APNS_KEY_ID: ${KAEDE_PUSH_RELAY_APNS_KEY_ID:-}
+      KAEDE_PUSH_RELAY_APNS_TEAM_ID: ${KAEDE_PUSH_RELAY_APNS_TEAM_ID:-}
+      KAEDE_PUSH_RELAY_APNS_TOPIC: ${KAEDE_PUSH_RELAY_APNS_TOPIC:-chat.kaede.mobile.voip}
     volumes:
       - rembg-models:/models/rembg
       - type: bind

@@ -194,9 +194,11 @@ Provider tokens go from the official app straight to the relay. Your home
 keeps only opaque subscriptions and wake secrets.
 
 Only the relay operator sets `KAEDE_PUSH_RELAY_SERVICE_ENABLED=true` and
-`KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64`. The service-account credential
-must reach relay workers only. Never let it reach API processes, browsers,
-mobile apps, logs, or ordinary federated homes. Direct FCM is still
+`KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64`. For iOS calling, it also sets the
+`KAEDE_PUSH_RELAY_APNS_KEY_B64`, `KAEDE_PUSH_RELAY_APNS_KEY_ID`,
+`KAEDE_PUSH_RELAY_APNS_TEAM_ID`, and `KAEDE_PUSH_RELAY_APNS_TOPIC` variables.
+The provider credentials must reach relay workers only. Never let them reach
+API processes, browsers, mobile apps, logs, or ordinary federated homes. Direct FCM is still
 available with `KAEDE_PUSH_ENABLED` for a separately signed custom app
 distribution; it does not notify the official app.
 

@@ -372,6 +372,10 @@ class Settings(BaseSettings):
     push_relay_app_id: str = "chat.kaede.mobile"
     push_relay_service_enabled: bool = False
     push_relay_fcm_service_account_b64: SecretStr | None = None
+    push_relay_apns_key_b64: SecretStr | None = None
+    push_relay_apns_key_id: str | None = None
+    push_relay_apns_team_id: str | None = None
+    push_relay_apns_topic: str = "chat.kaede.mobile.voip"
     push_enabled: bool = False
     push_fcm_service_account_b64: SecretStr | None = None
     mobile_android_package: str = "chat.kaede.mobile"
@@ -403,6 +407,7 @@ class Settings(BaseSettings):
         "turnstile_site_key",
         "turnstile_secret",
         "push_relay_fcm_service_account_b64",
+        "push_relay_apns_key_b64",
         "push_fcm_service_account_b64",
         "search_master_key",
         mode="before",
@@ -524,6 +529,19 @@ class Settings(BaseSettings):
             raise ValueError("Firebase service account is missing required fields")
         if document["token_uri"] != FCM_AUTH_ENDPOINT:
             raise ValueError("Firebase token_uri must be Google's OAuth token endpoint")
+        return value
+
+    @field_validator("push_relay_apns_key_b64")
+    @classmethod
+    def validate_apns_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        try:
+            decoded = base64.b64decode(value.get_secret_value().strip(), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("must be a base64-encoded APNs signing key") from exc
+        if len(decoded) > 16 * 1024 or b"BEGIN PRIVATE KEY" not in decoded:
+            raise ValueError("must contain an APNs PKCS#8 private key")
         return value
 
     @field_validator("database_url")
@@ -1075,6 +1093,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "push_relay_fcm_service_account_b64 is required when the push relay "
                 "service is enabled"
+            )
+        apns_values = (
+            self.push_relay_apns_key_b64,
+            self.push_relay_apns_key_id,
+            self.push_relay_apns_team_id,
+        )
+        if any(value is not None for value in apns_values) and not all(
+            value is not None for value in apns_values
+        ):
+            raise ValueError(
+                "push_relay_apns_key_b64, push_relay_apns_key_id, and "
+                "push_relay_apns_team_id must be configured together"
             )
         if self.push_relay_service_enabled and self.push_relay_origin != self.domain:
             raise ValueError(

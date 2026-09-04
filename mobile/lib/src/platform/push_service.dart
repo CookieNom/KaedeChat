@@ -6,6 +6,7 @@ import 'dart:ui';
 import 'package:cryptography/cryptography.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
@@ -404,6 +405,7 @@ final class PushService {
   final StreamController<String?> _healthEvents;
   final List<StreamSubscription<dynamic>> _subscriptions =
       <StreamSubscription<dynamic>>[];
+  static const _nativePushState = MethodChannel('chat.kaede.mobile/push_state');
   PushDestination? _initialDestination;
   var _appActive = true;
   EntityRef? _visibleChannel;
@@ -411,6 +413,45 @@ final class PushService {
   Stream<PushDestination> get destinations => _destinations.stream;
   Stream<String?> get health => _healthEvents.stream;
   bool get remotePushAvailable => _firebaseReady;
+
+  Future<void> setNativeRelayState({
+    required RelayPushState state,
+    required String installationId,
+  }) async {
+    try {
+      await _nativePushState
+          .invokeMethod<void>('setRelayState', <String, String>{
+        'home': state.home.value,
+        'installationId': installationId,
+        'routeId': state.routeId,
+        'wakeSecret': state.wakeSecret,
+        if (state.voipRouteId != null) 'voipRouteId': state.voipRouteId!,
+        if (state.voipWakeSecret != null)
+          'voipWakeSecret': state.voipWakeSecret!,
+      });
+    } on MissingPluginException {
+      // Only iOS extensions consume this native copy.
+    }
+  }
+
+  Future<void> clearNativeRelayState() async {
+    try {
+      await _nativePushState.invokeMethod<void>('clearRelayState');
+    } on MissingPluginException {
+      // Only iOS extensions consume this native copy.
+    }
+  }
+
+  Future<String?> voipToken() async {
+    if (!Platform.isIOS) return null;
+    try {
+      return await _nativePushState
+          .invokeMethod<String>('voipToken')
+          .timeout(const Duration(seconds: 8));
+    } on Object {
+      return null;
+    }
+  }
 
   /// Completes once the optional Firebase setup (see [create]) has finished,
   /// whatever its outcome. Push-token callers await this so a session that
@@ -539,6 +580,13 @@ final class PushService {
         'Background notification delivery was interrupted. Open Kaede to refresh messages while it reconnects.',
       ),
     ));
+    _subscriptions.add(FirebaseMessaging.onMessageOpenedApp.listen((message) {
+      final destination = PushDestination.parse(message.data);
+      if (destination != null) _emitDestination(destination);
+    }));
+    final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
+    final initialDestination = PushDestination.parse(initialMessage?.data);
+    if (initialDestination != null) _emitDestination(initialDestination);
   }
 
   Future<void> _showRemoteMessage(RemoteMessage message) async {

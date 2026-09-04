@@ -377,6 +377,9 @@ class PushDevice(Base, LocalUserMixin, TimestampMixin):
     relay_subscription_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     relay_route_id: Mapped[str | None] = mapped_column(String(64))
     relay_wake_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    relay_voip_subscription_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    relay_voip_route_id: Mapped[str | None] = mapped_column(String(64))
+    relay_voip_wake_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     device_name: Mapped[str | None] = mapped_column(String(100))
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=true()
@@ -394,10 +397,17 @@ class PushDevice(Base, LocalUserMixin, TimestampMixin):
         CheckConstraint(
             "(transport = 'direct_fcm' AND token_hash IS NOT NULL AND token_encrypted IS NOT NULL "
             "AND relay_origin IS NULL AND relay_subscription_id IS NULL "
-            "AND relay_route_id IS NULL AND relay_wake_secret_encrypted IS NULL) OR "
+            "AND relay_route_id IS NULL AND relay_wake_secret_encrypted IS NULL "
+            "AND relay_voip_subscription_id IS NULL AND relay_voip_route_id IS NULL "
+            "AND relay_voip_wake_secret_encrypted IS NULL) OR "
             "(transport = 'relay' AND token_hash IS NULL AND token_encrypted IS NULL "
             "AND relay_origin IS NOT NULL AND relay_subscription_id IS NOT NULL "
-            "AND relay_route_id IS NOT NULL AND relay_wake_secret_encrypted IS NOT NULL)",
+            "AND relay_route_id IS NOT NULL AND relay_wake_secret_encrypted IS NOT NULL "
+            "AND ((relay_voip_subscription_id IS NULL AND relay_voip_route_id IS NULL "
+            "AND relay_voip_wake_secret_encrypted IS NULL) OR "
+            "(platform = 'ios' AND relay_voip_subscription_id IS NOT NULL "
+            "AND relay_voip_route_id IS NOT NULL "
+            "AND relay_voip_wake_secret_encrypted IS NOT NULL)))",
             name="transport_fields",
         ),
         Index("ix_push_devices_user", "user_id", "user_domain"),
@@ -449,6 +459,7 @@ class PushRelaySubscription(Base):
     home_origin: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
     app_id: Mapped[str] = mapped_column(String(160), nullable=False)
     platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False, server_default="fcm")
     route_id: Mapped[str] = mapped_column(String(43), nullable=False)
     provider_token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     provider_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -465,6 +476,8 @@ class PushRelaySubscription(Base):
     )
     __table_args__ = (
         CheckConstraint("platform IN ('android','ios')", name="platform_value"),
+        CheckConstraint("provider IN ('fcm','apns_voip')", name="provider_value"),
+        CheckConstraint("provider = 'fcm' OR platform = 'ios'", name="provider_platform"),
         CheckConstraint("octet_length(provider_token_hash) = 32", name="token_hash_length"),
         CheckConstraint(
             "octet_length(management_secret_hash) = 32", name="management_secret_hash_length"

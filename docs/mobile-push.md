@@ -30,13 +30,14 @@ application ID at build time. A home cannot redirect its provider token.
 1. The user chooses background notifications before the operating-system
    permission prompt.
 2. The app creates a random route ID, wake-authentication secret, and relay
-   management secret in Android Keystore or iOS Keychain.
+   management secret in Android Keystore or iOS protected app-group storage.
+   iOS creates a second, independently scoped route for VoIP calls.
 3. The authenticated app asks its home for a five-minute enrollment grant. The
    home signs the relay audience, app ID, platform, and route ID. The grant
    includes no Kaede user or room identifier.
-4. The app sends that grant and its FCM/APNs-via-FCM token directly to the
-   pinned relay. The relay verifies the home's federation key and stores the
-   provider token encrypted.
+4. The app sends that grant and its FCM token directly to the pinned relay.
+   iOS repeats enrollment with its PushKit token for calls. The relay verifies
+   the home's federation key and stores each provider token encrypted.
 5. The relay returns an opaque subscription and a signed receipt. The app gives
    only that receipt, subscription, route ID, and wake secret to its home.
 6. The home verifies the relay receipt and stores the subscription and wake
@@ -77,11 +78,15 @@ The relay forwards a version 2 data payload containing only:
 ```
 
 The relay never receives the wake secret, so it cannot invent a wake the app
-will accept. The app verifies the route, expiry, and constant-time HMAC before
-contacting the home or showing a fallback. It then redeems the single-use event
-token over its authenticated home session. Before returning display details,
-the home rechecks device ownership, current room access, blocks, read state,
-DND, guild settings, message deletion, and self-authorship.
+will accept. The app or signed notification extension verifies the route,
+expiry, and constant-time HMAC before contacting the home. The wake proof can
+redeem only its single-use, ten-minute event token; the login session is not
+shared with extensions. Before returning display details, the home rechecks
+device ownership, current room access, blocks, read state, DND, guild settings,
+message deletion, and self-authorship. On iOS, ordinary APNs alerts carry a
+private generic fallback which the Notification Service Extension replaces
+with these details. VoIP wakes are accepted only for urgent call deliveries
+and are reported to CallKit immediately.
 
 An already-used, expired, suppressed, malformed, or unauthenticated wake is
 silent. A generic local fallback appears only for an authentic wake whose home
@@ -137,9 +142,15 @@ The official relay operator additionally sets:
 ```dotenv
 KAEDE_PUSH_RELAY_SERVICE_ENABLED=true
 KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64=<base64 service-account JSON>
+KAEDE_PUSH_RELAY_APNS_KEY_B64=<base64 APNs .p8 contents>
+KAEDE_PUSH_RELAY_APNS_KEY_ID=<Apple key ID>
+KAEDE_PUSH_RELAY_APNS_TEAM_ID=<Apple team ID>
+KAEDE_PUSH_RELAY_APNS_TOPIC=chat.kaede.mobile.voip
 ```
 
-Only relay workers receive that credential. Don't set it on an ordinary home.
+Only relay workers receive those credentials. FCM delivers ordinary Android
+and iOS notifications. APNs VoIP wakes launch PushKit and CallKit for incoming
+iOS calls. Don't set either provider credential on an ordinary home.
 A custom build can instead use `KAEDE_PUSH_ENABLED=true` with
 `KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64`, but that legacy/direct transport is not
 compatible with the official store app.
@@ -150,7 +161,8 @@ compatible with the official store app.
    devices and keep working during the client transition.
 2. Enable the relay variables on each home and restart the API, worker,
    scheduler, and preflight services.
-3. Configure the Firebase credential only on the relay operator.
+3. Configure Firebase and, when supporting iOS calls, APNs credentials only on
+   the relay operator.
 4. Ship an official app containing its matching Firebase client file and relay
    pin. When users next enable or refresh notifications, the app registers with
    the relay and replaces its direct device row.

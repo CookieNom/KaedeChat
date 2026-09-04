@@ -5,10 +5,17 @@ import 'package:flutter/services.dart';
 enum SystemCallAction { answer, decline, ended }
 
 final class SystemCallEvent {
-  const SystemCallEvent(this.callId, this.action);
+  const SystemCallEvent(
+    this.callId,
+    this.action, {
+    this.channelRef,
+    this.callerName,
+  });
 
   final String callId;
   final SystemCallAction action;
+  final String? channelRef;
+  final String? callerName;
 }
 
 /// Small, platform-neutral bridge to Android Telecom and iOS CallKit.
@@ -74,7 +81,12 @@ final class SystemCallService {
       _ => null,
     };
     if (action != null && !_events.isClosed) {
-      _events.add(SystemCallEvent(callId, action));
+      _events.add(SystemCallEvent(
+        callId,
+        action,
+        channelRef: arguments['channelRef'] as String?,
+        callerName: arguments['callerName'] as String?,
+      ));
     }
   }
 

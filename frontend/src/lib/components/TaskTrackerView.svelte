@@ -43,7 +43,6 @@
   import { onMount, tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import Icon from './Icon.svelte';
-  import GuildMemberPicker from './GuildMemberPicker.svelte';
   import TaskTrackerSettingsDialog from './TaskTrackerSettingsDialog.svelte';
   import TaskTrackerTaskDialog from './TaskTrackerTaskDialog.svelte';
 
@@ -656,13 +655,12 @@
     </label>
     <label class="assignee-filter">
       <span class="visually-hidden">Assignee</span>
-      <GuildMemberPicker
-        fallbackUsers={uniqueAssignees}
-        value={filters.assignee ? [filters.assignee] : []}
-        optional
-        placeholder="All assignees"
-        onChange={(values) => (filters.assignee = values[0] ?? '')}
-      />
+      <select bind:value={filters.assignee} aria-label="Filter by assignee">
+        <option value="">All assignees</option>
+        {#each uniqueAssignees as assignee (entityKey(assignee))}
+          <option value={entityRef(assignee)}>{userName(assignee)}</option>
+        {/each}
+      </select>
     </label>
     <label class="completed-filter">
       <input bind:checked={filters.hideCompleted} type="checkbox" />
@@ -1131,6 +1129,10 @@
 
   .tracker-search input {
     width: 100%;
+  }
+
+  .assignee-filter select {
+    width: 210px;
   }
 
   .completed-filter {

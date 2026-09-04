@@ -5758,7 +5758,36 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _onSystemCallAction(SystemCallEvent event) async {
-    if (state.incomingCall?.call.wire != event.callId) return;
+    if (state.incomingCall?.call.wire != event.callId) {
+      final channel = event.channelRef;
+      if (channel == null || api.tokens == null) return;
+      try {
+        final callRef = EntityRef.parse(event.callId);
+        final channelRef = EntityRef.parse(channel);
+        if (event.action == SystemCallAction.answer) {
+          await repository.callAction(callRef, 'accept');
+          state = state.copyWith(
+            pendingCallJoin: IncomingCall(
+              call: callRef,
+              channel: channelRef,
+              caller: callRef,
+              callerName: event.callerName ?? 'Kaede caller',
+            ),
+            clearError: true,
+          );
+          await systemCalls.setActive(event.callId);
+        } else {
+          await repository.callAction(callRef, 'decline');
+          await systemCalls.end(event.callId);
+        }
+      } on Object catch (error) {
+        await systemCalls.end(event.callId);
+        state = state.copyWith(
+          error: userFacingError(error, summary: 'Could not update the call.'),
+        );
+      }
+      return;
+    }
     switch (event.action) {
       case SystemCallAction.answer:
         await answerIncomingCall();
@@ -5951,6 +5980,7 @@ final class MobileController extends StateNotifier<MobileState> {
           ? Platform.operatingSystemVersion
           : Platform.operatingSystemVersion.substring(0, 100);
       late final Map<String, Object?> response;
+      var voipReady = !Platform.isIOS;
       if (_pushTransport == 'direct_fcm') {
         response = await repository.registerPushDevice(
           installationId: installationId,
@@ -6003,7 +6033,7 @@ final class MobileController extends StateNotifier<MobileState> {
         );
         final home = api.tokens?.instance;
         if (home == null) return false;
-        await api.saveRelayPushState(RelayPushState(
+        var relayState = RelayPushState(
           home: home,
           relayUrl: relayUrl,
           relayOrigin: Domain(relayOrigin),
@@ -6011,12 +6041,84 @@ final class MobileController extends StateNotifier<MobileState> {
           routeId: routeId,
           wakeSecret: wakeSecret,
           managementSecret: managementSecret,
-        ));
+        );
+        if (Platform.isIOS) {
+          final voipToken = await push.voipToken();
+          if (voipToken != null && voipToken.isNotEmpty) {
+            final voipRouteId = _randomPushToken();
+            final voipWakeSecret = _randomPushToken();
+            final voipManagementSecret = _randomPushToken();
+            final voipEnrollment = await repository.beginRelayPushEnrollment(
+              installationId: installationId,
+              platform: platform,
+              routeId: voipRouteId,
+              appId: _pushApplicationId,
+              provider: 'apns_voip',
+            );
+            final voipRelayUrl =
+                Uri.parse('${voipEnrollment['relay_url'] ?? ''}');
+            if (voipRelayUrl != relayUrl ||
+                '${voipEnrollment['relay_origin'] ?? ''}' != relayOrigin) {
+              throw const KaedeException(
+                code: 'PUSH_RELAY_INVALID',
+                message: 'Your home offered an untrusted call relay.',
+                status: 502,
+              );
+            }
+            final voipSubscription =
+                await repository.createRelayPushSubscription(
+              relayUrl: relayUrl,
+              grant: Map<String, Object?>.from(
+                voipEnrollment['grant']! as Map,
+              ),
+              providerToken: voipToken,
+              managementSecret: voipManagementSecret,
+              provider: 'apns_voip',
+            );
+            await repository.completeRelayPushEnrollment(
+              installationId: installationId,
+              platform: platform,
+              routeId: voipRouteId,
+              wakeSecret: voipWakeSecret,
+              receipt: Map<String, Object?>.from(
+                voipSubscription['receipt']! as Map,
+              ),
+              deviceName: deviceName,
+              provider: 'apns_voip',
+            );
+            relayState = RelayPushState(
+              home: home,
+              relayUrl: relayUrl,
+              relayOrigin: Domain(relayOrigin),
+              subscriptionId: relayState.subscriptionId,
+              routeId: relayState.routeId,
+              wakeSecret: relayState.wakeSecret,
+              managementSecret: relayState.managementSecret,
+              voipSubscriptionId: '${voipSubscription['subscription_id']}',
+              voipRouteId: voipRouteId,
+              voipWakeSecret: voipWakeSecret,
+              voipManagementSecret: voipManagementSecret,
+            );
+            voipReady = true;
+          }
+        }
+        await api.saveRelayPushState(relayState);
+        await push.setNativeRelayState(
+          state: relayState,
+          installationId: installationId,
+        );
         if (previousRelayState != null &&
             previousRelayState.subscriptionId !=
                 '${subscription['subscription_id']}') {
           try {
             await repository.revokeRelayPushSubscription(previousRelayState);
+            if (previousRelayState.voipSubscriptionId case final id?) {
+              await repository.revokeRelayPushSubscriptionById(
+                previousRelayState,
+                id,
+                previousRelayState.voipManagementSecret!,
+              );
+            }
           } on Object {
             // The home binding now points at the new route. The old relay
             // subscription expires even if this best-effort cleanup is lost.
@@ -6025,7 +6127,9 @@ final class MobileController extends StateNotifier<MobileState> {
       }
       if (_sessionIsCurrent(accountKey, generation)) {
         _pushDeviceId = '${response['id']}';
-        _setPushRegistrationWarning(null);
+        _setPushRegistrationWarning(voipReady
+            ? null
+            : 'Message notifications are ready, but this iPhone did not provide a call token. Restart Kaede to retry incoming-call setup.');
         return true;
       }
     } on KaedeException catch (error) {
@@ -6195,7 +6299,6 @@ final class MobileController extends StateNotifier<MobileState> {
       );
       if (registered) {
         await api.savePushOptIn(true);
-        _setPushRegistrationWarning(null);
       }
       return registered;
     } on Object catch (error) {
@@ -6228,6 +6331,7 @@ final class MobileController extends StateNotifier<MobileState> {
       }
     }
     await api.clearRelayPushState();
+    await push.clearNativeRelayState();
     _setPushRegistrationWarning(null);
   }
 

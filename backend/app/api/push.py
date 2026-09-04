@@ -17,7 +17,13 @@ from sqlalchemy import delete, exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
+from app.api.dependencies import (
+    AuthenticatedUser,
+    federated_authenticated_user,
+    get_redis,
+    get_session,
+    require_user,
+)
 from app.auth.security import encrypt_secret
 from app.chat.payloads import public_user_display_name
 from app.chat.permissions import get_permissions
@@ -55,6 +61,7 @@ from app.push.presentation import (
 from app.push.relay import (
     RELAY_GRANT_TTL_SECONDS,
     RELAY_SUBSCRIPTION_DAYS,
+    decrypt_wake_secret,
     encrypt_provider_token,
     encrypt_wake_secret,
     opaque_token,
@@ -63,12 +70,14 @@ from app.push.relay import (
     subscription_id,
     utc_from_epoch,
     verify_push_document,
+    wake_mac,
 )
 from app.push.schemas import (
     PushDeviceCreate,
     PushDeviceResponse,
     PushNotificationRedeem,
     PushNotificationResponse,
+    PushNotificationWakeRedeem,
     PushRelayEnrollmentComplete,
     PushRelayEnrollmentCreate,
     PushRelaySubscriptionCreate,
@@ -106,6 +115,9 @@ def rotated_token_fields(
         "relay_subscription_id": None,
         "relay_route_id": None,
         "relay_wake_secret_encrypted": None,
+        "relay_voip_subscription_id": None,
+        "relay_voip_route_id": None,
+        "relay_voip_wake_secret_encrypted": None,
         "device_name": body.device_name,
         "enabled": True,
         "last_seen_at": now,
@@ -313,6 +325,7 @@ async def begin_relay_enrollment(
             "installation_id": str(body.installation_id),
             "platform": body.platform,
             "app_id": body.app_id,
+            "provider": body.provider,
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -334,6 +347,7 @@ async def begin_relay_enrollment(
             "audience": settings.push_relay_origin,
             "app_id": body.app_id,
             "platform": body.platform,
+            "provider": body.provider,
             "route_id": body.route_id,
             "issued_at": now,
             "expires_at": now + RELAY_GRANT_TTL_SECONDS,
@@ -372,6 +386,7 @@ async def complete_relay_enrollment(
             or receipt.get("route_id") != body.route_id
             or receipt.get("app_id") != settings.push_relay_app_id
             or receipt.get("platform") != body.platform
+            or receipt.get("provider", "fcm") != body.provider
         ):
             raise ValueError("push subscription receipt is not bound to this enrollment")
     except (KeyError, TypeError, ValueError):
@@ -389,6 +404,7 @@ async def complete_relay_enrollment(
         "installation_id": str(body.installation_id),
         "platform": body.platform,
         "app_id": settings.push_relay_app_id,
+        "provider": body.provider,
     }
     try:
         pending = json.loads(encoded_pending) if encoded_pending is not None else None
@@ -403,13 +419,34 @@ async def complete_relay_enrollment(
     await session.scalar(
         select(func.pg_advisory_xact_lock(func.hashtextextended(f"installation:{device_id}", 0)))
     )
+    subscription_column = (
+        PushDevice.relay_voip_subscription_id
+        if body.provider == "apns_voip"
+        else PushDevice.relay_subscription_id
+    )
     await session.execute(
-        delete(PushDevice).where(
-            PushDevice.relay_subscription_id == subscription,
-            PushDevice.id != device_id,
-        )
+        delete(PushDevice).where(subscription_column == subscription, PushDevice.id != device_id)
     )
     now = datetime.now(UTC)
+    if body.provider == "apns_voip":
+        device = await session.get(PushDevice, device_id)
+        if (
+            device is None
+            or device.user_id != auth.user.id
+            or device.user_domain != auth.user.origin_domain
+            or device.platform != "ios"
+            or device.transport != "relay"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "PUSH_RELAY_PRIMARY_REQUIRED"},
+            )
+        device.relay_voip_subscription_id = subscription
+        device.relay_voip_route_id = body.route_id
+        device.relay_voip_wake_secret_encrypted = encrypt_wake_secret(body.wake_secret, settings)
+        device.last_seen_at = now
+        await session.commit()
+        return payload(device)
     statement = pg_insert(PushDevice).values(
         id=device_id,
         user_id=auth.user.id,
@@ -423,6 +460,9 @@ async def complete_relay_enrollment(
         relay_subscription_id=subscription,
         relay_route_id=body.route_id,
         relay_wake_secret_encrypted=encrypt_wake_secret(body.wake_secret, settings),
+        relay_voip_subscription_id=None,
+        relay_voip_route_id=None,
+        relay_voip_wake_secret_encrypted=None,
         device_name=body.device_name,
         enabled=True,
         last_seen_at=now,
@@ -442,6 +482,9 @@ async def complete_relay_enrollment(
                 "relay_subscription_id": subscription,
                 "relay_route_id": body.route_id,
                 "relay_wake_secret_encrypted": encrypt_wake_secret(body.wake_secret, settings),
+                "relay_voip_subscription_id": None,
+                "relay_voip_route_id": None,
+                "relay_voip_wake_secret_encrypted": None,
                 "device_name": body.device_name,
                 "enabled": True,
                 "last_seen_at": now,
@@ -473,6 +516,8 @@ async def create_relay_subscription(
 ) -> dict[str, object]:
     if not settings.push_relay_service_enabled:
         raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    if body.provider == "apns_voip" and settings.push_relay_apns_key_b64 is None:
+        raise HTTPException(status_code=503, detail={"code": "PUSH_RELAY_VOIP_UNAVAILABLE"})
     require_relay_transport_host(request, settings)
     await _relay_registration_rate_limit(redis, request, settings)
     grant = dict(body.grant)
@@ -491,11 +536,14 @@ async def create_relay_subscription(
         grant_id = str(grant["grant_id"])
         app_id = str(grant["app_id"])
         platform = str(grant["platform"])
+        provider = str(grant.get("provider", "fcm"))
         route_id = str(grant["route_id"])
         if (
             re.fullmatch(r"^[A-Za-z0-9_-]{43}$", grant_id) is None
             or re.fullmatch(r"^[A-Za-z0-9_-]{43}$", route_id) is None
             or platform not in {"android", "ios"}
+            or provider != body.provider
+            or (provider == "apns_voip" and platform != "ios")
             or grant.get("audience") != settings.domain
             or app_id != settings.push_relay_app_id
         ):
@@ -530,6 +578,7 @@ async def create_relay_subscription(
             home_origin=home_origin,
             app_id=app_id,
             platform=platform,
+            provider=provider,
             route_id=route_id,
             provider_token_hash=token_hash,
             provider_token_encrypted=encrypt_provider_token(body.provider_token, settings),
@@ -548,6 +597,7 @@ async def create_relay_subscription(
             "home_origin": home_origin,
             "app_id": app_id,
             "platform": platform,
+            "provider": provider,
             "route_id": route_id,
             "issued_at": now,
             "expires_at": now + RELAY_GRANT_TTL_SECONDS,
@@ -616,6 +666,8 @@ async def accept_relay_wake(
         or subscription.route_id != body.route_id
     ):
         raise HTTPException(status_code=410, detail={"code": "PUSH_RELAY_SUBSCRIPTION_GONE"})
+    if subscription.provider == "apns_voip" and body.priority != "urgent":
+        raise HTTPException(status_code=400, detail={"code": "PUSH_RELAY_PRIORITY_INVALID"})
     subscription.last_seen_at = datetime.now(UTC)
     inserted = await session.scalar(
         pg_insert(PushRelayDelivery)
@@ -877,6 +929,70 @@ async def redeem_push_notification(
     )
 
 
+@router.post(
+    "/notifications/redeem-wake",
+    response_model=PushNotificationResponse,
+    responses={status.HTTP_204_NO_CONTENT: {"description": "Notification suppressed"}},
+)
+async def redeem_push_notification_with_wake(
+    body: PushNotificationWakeRedeem,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> PushNotificationResponse | Response:
+    """Redeem one event using its device-bound, short-lived wake proof."""
+
+    source = federation_client_ip(request, settings)
+    await _push_relay_rate_limit(redis, f"wake-redemption:{source}", limit=600)
+    now = int(time.time())
+    if body.expires_at < now or body.expires_at > now + 600:
+        raise _push_event_not_found()
+    loaded = await load_push_sync(redis, body.event_token)
+    if loaded is None:
+        raise _push_event_not_found()
+    _, event = loaded
+    device = await session.scalar(
+        select(PushDevice).where(
+            PushDevice.id == str(body.installation_id),
+            PushDevice.id == event.device_id,
+            PushDevice.transport == "relay",
+            PushDevice.enabled.is_(True),
+        )
+    )
+    if device is None:
+        raise _push_event_not_found()
+    if body.route_id == device.relay_route_id:
+        encrypted_wake_secret = device.relay_wake_secret_encrypted
+    elif body.route_id == device.relay_voip_route_id:
+        encrypted_wake_secret = device.relay_voip_wake_secret_encrypted
+    else:
+        raise _push_event_not_found()
+    if encrypted_wake_secret is None:
+        raise _push_event_not_found()
+    expected_mac = wake_mac(
+        decrypt_wake_secret(encrypted_wake_secret, settings),
+        route_id=body.route_id,
+        event_token=body.event_token,
+        delivery_id=body.delivery_id,
+        expires_at=body.expires_at,
+    )
+    if not secrets.compare_digest(expected_mac, body.wake_mac):
+        raise _push_event_not_found()
+    user = await session.get(User, (event.user_id, event.user_domain))
+    if user is None:
+        raise _push_event_not_found()
+    return await redeem_push_notification(
+        PushNotificationRedeem(
+            installation_id=body.installation_id,
+            event_token=body.event_token,
+        ),
+        federated_authenticated_user(user),
+        session,
+        redis,
+    )
+
+
 @router.delete("/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def unregister_push_device(
     device_id: UUID,
@@ -898,9 +1014,14 @@ async def unregister_push_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "PUSH_DEVICE_NOT_FOUND", "message": "Push device not found"},
         )
-    relay_subscription = device.relay_subscription_id if device.transport == "relay" else None
+    relay_subscriptions = (
+        [device.relay_subscription_id, device.relay_voip_subscription_id]
+        if device.transport == "relay"
+        else []
+    )
     await session.delete(device)
     await session.commit()
-    if relay_subscription is not None:
-        with suppress(FederationNetworkError):
-            await revoke_remote_relay_subscription(session, settings, relay_subscription)
+    for relay_subscription in relay_subscriptions:
+        if relay_subscription is not None:
+            with suppress(FederationNetworkError):
+                await revoke_remote_relay_subscription(session, settings, relay_subscription)

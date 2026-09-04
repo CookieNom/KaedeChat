@@ -38,6 +38,7 @@ class PushRelayEnrollmentCreate(UnambiguousInputModel):
     platform: Literal["android", "ios"]
     route_id: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
     app_id: str = Field(min_length=3, max_length=160, pattern=r"^[A-Za-z][A-Za-z0-9_.-]+$")
+    provider: Literal["fcm", "apns_voip"] = "fcm"
 
 
 class PushRelayEnrollmentComplete(UnambiguousInputModel):
@@ -47,12 +48,14 @@ class PushRelayEnrollmentComplete(UnambiguousInputModel):
     wake_secret: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
     receipt: dict[str, object]
     device_name: str | None = Field(default=None, max_length=100)
+    provider: Literal["fcm", "apns_voip"] = "fcm"
 
 
 class PushRelaySubscriptionCreate(UnambiguousInputModel):
     grant: dict[str, object]
     provider_token: str = Field(min_length=20, max_length=4096)
     management_secret: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
+    provider: Literal["fcm", "apns_voip"] = "fcm"
 
     @field_validator("provider_token")
     @classmethod
@@ -77,6 +80,14 @@ class PushRelayWakeCreate(UnambiguousInputModel):
 class PushNotificationRedeem(UnambiguousInputModel):
     installation_id: UUID
     event_token: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class PushNotificationWakeRedeem(PushNotificationRedeem):
+    version: Literal[2]
+    route_id: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
+    delivery_id: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
+    expires_at: int = Field(gt=0)
+    wake_mac: str = Field(min_length=43, max_length=43, pattern=OPAQUE_TOKEN_PATTERN)
 
 
 class PushNotificationResponse(BaseModel):

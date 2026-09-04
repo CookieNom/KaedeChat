@@ -26,10 +26,11 @@ from app.push.schemas import (
     PushDeviceCreate,
     PushNotificationRedeem,
     PushNotificationResponse,
+    PushNotificationWakeRedeem,
     PushRelaySubscriptionCreate,
     PushRelayWakeCreate,
 )
-from app.push.service import fcm_relay_payload, fcm_sync_payload
+from app.push.service import apns_voip_payload, fcm_relay_payload, fcm_sync_payload
 from app.push.sync import (
     PushSyncEvent,
     claim_push_sync,
@@ -235,6 +236,54 @@ def test_relay_payload_is_content_free_and_mac_bound() -> None:
     rendered = str(payload)
     for private_value in ("user_id", "message_ref", "channel_ref", "sender", "content"):
         assert private_value not in rendered
+
+
+def test_relay_payload_uses_ios_service_extension_fallback() -> None:
+    payload = fcm_relay_payload(
+        "provider-token",
+        route_id="r" * 43,
+        event_token="e" * 43,
+        delivery_id="d" * 43,
+        expires_at=2_000_000_000,
+        wake_mac="m" * 43,
+        platform="ios",
+    )
+    message = payload["message"]
+    assert message["apns"]["headers"] == {
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+    }
+    assert message["apns"]["payload"]["aps"]["mutable-content"] == 1
+    assert "user_id" not in str(payload)
+
+
+def test_apns_voip_payload_is_content_free_and_wake_schema_is_strict() -> None:
+    fields = {
+        "route_id": "r" * 43,
+        "event_token": "e" * 43,
+        "delivery_id": "d" * 43,
+        "expires_at": 2_000_000_000,
+        "wake_mac": "m" * 43,
+    }
+    payload = apns_voip_payload(**fields)
+    assert payload == {
+        "sync_version": "2",
+        **fields,
+        "expires_at": "2000000000",
+        "aps": {"content-available": 1},
+    }
+    assert "call" not in str(payload)
+    PushNotificationWakeRedeem(
+        installation_id=uuid4(),
+        version=2,
+        **fields,
+    )
+    with pytest.raises(ValidationError):
+        PushNotificationWakeRedeem(
+            installation_id=uuid4(),
+            version=2,
+            **{**fields, "wake_mac": "short"},
+        )
 
 
 def test_relay_wake_schema_and_idempotency_identifiers_are_strict() -> None:

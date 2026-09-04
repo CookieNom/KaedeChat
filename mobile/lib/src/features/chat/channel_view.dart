@@ -4171,25 +4171,6 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _MessageActionsHeader(
-                message: message,
-                attachment: displayedAttachment,
-              ),
-              if (displayedAttachment != null) ...[
-                ListTile(
-                  leading: Icon(Icons.link_rounded),
-                  title: Text('Copy media link'),
-                  onTap: () => Navigator.pop(context, 'copy-media-link'),
-                ),
-                ListTile(
-                  leading: Icon(Icons.info_outline_rounded),
-                  title: Text(displayedAttachment.filename),
-                  subtitle: Text(
-                    '${displayedAttachment.contentType} · '
-                    '${formatAttachmentSize(displayedAttachment.size)}',
-                  ),
-                ),
-              ],
               if (canReact && recent.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
@@ -4238,6 +4219,25 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     ],
                   ),
                 ),
+              _MessageActionsHeader(
+                message: message,
+                attachment: displayedAttachment,
+              ),
+              if (displayedAttachment != null) ...[
+                ListTile(
+                  leading: Icon(Icons.link_rounded),
+                  title: Text('Copy media link'),
+                  onTap: () => Navigator.pop(context, 'copy-media-link'),
+                ),
+                ListTile(
+                  leading: Icon(Icons.info_outline_rounded),
+                  title: Text(displayedAttachment.filename),
+                  subtitle: Text(
+                    '${displayedAttachment.contentType} · '
+                    '${formatAttachmentSize(displayedAttachment.size)}',
+                  ),
+                ),
+              ],
               if (!channelFollowNotice)
                 ListTile(
                     leading: Icon(Icons.reply_rounded),

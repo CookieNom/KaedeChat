@@ -190,7 +190,12 @@ from app.push.relay import (
     stable_wake_identifier,
     wake_mac,
 )
-from app.push.service import decrypt_device_token, fcm_client, relay_fcm_client
+from app.push.service import (
+    decrypt_device_token,
+    fcm_client,
+    relay_apns_client,
+    relay_fcm_client,
+)
 from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync
 from app.scheduled_events.service import advance_scheduled_event_lifecycle
 from app.search.meili import (
@@ -1076,11 +1081,21 @@ async def push_relay_outbox_sweep() -> int:
                         await discard_push_sync(redis, row.event_token)
                     await session.delete(row)
                     continue
+                use_voip = row.kind == "call" and device.relay_voip_subscription_id is not None
+                subscription_id = (
+                    device.relay_voip_subscription_id if use_voip else device.relay_subscription_id
+                )
+                route_id = device.relay_voip_route_id if use_voip else device.relay_route_id
+                encrypted_wake_secret = (
+                    device.relay_voip_wake_secret_encrypted
+                    if use_voip
+                    else device.relay_wake_secret_encrypted
+                )
                 if (
                     device.transport != "relay"
-                    or device.relay_subscription_id is None
-                    or device.relay_route_id is None
-                    or device.relay_wake_secret_encrypted is None
+                    or subscription_id is None
+                    or route_id is None
+                    or encrypted_wake_secret is None
                     or device.relay_origin != settings.push_relay_origin
                     or row.event_token is None
                 ):
@@ -1092,18 +1107,19 @@ async def push_relay_outbox_sweep() -> int:
                 claimed.append(
                     {
                         "row": row,
+                        "voip": use_voip,
                         "payload": {
                             "version": 2,
                             "request_id": row.request_id,
-                            "subscription_id": device.relay_subscription_id,
-                            "route_id": device.relay_route_id,
+                            "subscription_id": subscription_id,
+                            "route_id": route_id,
                             "event_token": row.event_token,
                             "delivery_id": row.delivery_id,
                             "expires_at": expires,
                             "priority": "urgent" if row.kind == "call" else "normal",
                             "wake_mac": wake_mac(
-                                decrypt_wake_secret(device.relay_wake_secret_encrypted, settings),
-                                route_id=device.relay_route_id,
+                                decrypt_wake_secret(encrypted_wake_secret, settings),
+                                route_id=route_id,
                                 event_token=row.event_token,
                                 delivery_id=row.delivery_id,
                                 expires_at=expires,
@@ -1136,7 +1152,12 @@ async def push_relay_outbox_sweep() -> int:
                 elif response.status_code == 410:
                     device = await session.get(PushDevice, current.device_id)
                     if device is not None:
-                        device.enabled = False
+                        if item["voip"]:
+                            device.relay_voip_subscription_id = None
+                            device.relay_voip_route_id = None
+                            device.relay_voip_wake_secret_encrypted = None
+                        else:
+                            device.enabled = False
                     if current.event_token is not None:
                         await discard_push_sync(redis, current.event_token)
                     await session.delete(current)
@@ -1199,7 +1220,6 @@ async def push_relay_provider_sweep() -> int:
                 row.next_attempt_at = now + timedelta(seconds=60)
                 claimed.append((row.home_origin, row.request_id))
             await session.commit()
-            client = relay_fcm_client(settings)
             for identity in claimed:
                 delivery = await session.get(PushRelayDelivery, identity)
                 if delivery is None or delivery.state != "pending":
@@ -1214,16 +1234,28 @@ async def push_relay_provider_sweep() -> int:
                     await session.commit()
                     continue
                 try:
-                    result = await client.send_relay(
-                        decrypt_provider_token(subscription.provider_token_encrypted, settings),
-                        route_id=delivery.route_id,
-                        event_token=delivery.event_token,
-                        delivery_id=delivery.delivery_id,
-                        expires_at=int(delivery.expires_at.timestamp()),
-                        wake_mac=delivery.wake_mac,
-                        platform=subscription.platform,
+                    provider_token = decrypt_provider_token(
+                        subscription.provider_token_encrypted, settings
                     )
-                except httpx.HTTPError as exc:
+                    fields = {
+                        "route_id": delivery.route_id,
+                        "event_token": delivery.event_token,
+                        "delivery_id": delivery.delivery_id,
+                        "expires_at": int(delivery.expires_at.timestamp()),
+                        "wake_mac": delivery.wake_mac,
+                    }
+                    if subscription.provider == "apns_voip":
+                        result = await relay_apns_client(settings).send_voip(
+                            provider_token, **fields
+                        )
+                    else:
+                        result = await relay_fcm_client(settings).send_relay(
+                            provider_token,
+                            **fields,
+                            platform=subscription.platform,
+                            priority=delivery.priority,
+                        )
+                except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                     delivery.last_error = str(exc)[:200]
                     delivery.next_attempt_at = datetime.now(UTC) + timedelta(
                         seconds=min(120, 2 ** min(delivery.attempts, 6))

@@ -2867,6 +2867,7 @@ final class KaedeRepository {
     required String platform,
     required String routeId,
     required String appId,
+    String provider = 'fcm',
   }) =>
       api.sendJson(
         'POST',
@@ -2876,6 +2877,7 @@ final class KaedeRepository {
           'platform': platform,
           'route_id': routeId,
           'app_id': appId,
+          'provider': provider,
         },
       );
 
@@ -2884,6 +2886,7 @@ final class KaedeRepository {
     required Map<String, Object?> grant,
     required String providerToken,
     required String managementSecret,
+    String provider = 'fcm',
   }) =>
       api.postPublicJson(
         relayUrl.resolve('/push/v1/subscriptions'),
@@ -2892,17 +2895,29 @@ final class KaedeRepository {
           'grant': grant,
           'provider_token': providerToken,
           'management_secret': managementSecret,
+          'provider': provider,
         },
       );
 
   Future<void> revokeRelayPushSubscription(RelayPushState state) =>
+      revokeRelayPushSubscriptionById(
+        state,
+        state.subscriptionId,
+        state.managementSecret,
+      );
+
+  Future<void> revokeRelayPushSubscriptionById(
+    RelayPushState state,
+    String subscriptionId,
+    String managementSecret,
+  ) =>
       api.deletePublic(
         state.relayUrl.resolve(
-          '/push/v1/subscriptions/${Uri.encodeComponent(state.subscriptionId)}',
+          '/push/v1/subscriptions/${Uri.encodeComponent(subscriptionId)}',
         ),
         expectedOrigin: state.relayUrl.host,
         headers: <String, String>{
-          'X-Kaede-Push-Management': state.managementSecret,
+          'X-Kaede-Push-Management': managementSecret,
         },
       );
 
@@ -2913,6 +2928,7 @@ final class KaedeRepository {
     required String wakeSecret,
     required Map<String, Object?> receipt,
     String? deviceName,
+    String provider = 'fcm',
   }) =>
       api.sendJson(
         'POST',
@@ -2924,6 +2940,7 @@ final class KaedeRepository {
           'wake_secret': wakeSecret,
           'receipt': receipt,
           if (deviceName != null) 'device_name': deviceName,
+          'provider': provider,
         },
       );
 

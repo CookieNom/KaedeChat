@@ -54,6 +54,10 @@ final class RelayPushState {
     required this.routeId,
     required this.wakeSecret,
     required this.managementSecret,
+    this.voipSubscriptionId,
+    this.voipRouteId,
+    this.voipWakeSecret,
+    this.voipManagementSecret,
   });
 
   factory RelayPushState.fromJson(Map<String, Object?> json) => RelayPushState(
@@ -64,6 +68,10 @@ final class RelayPushState {
         routeId: json['route_id']! as String,
         wakeSecret: json['wake_secret']! as String,
         managementSecret: json['management_secret']! as String,
+        voipSubscriptionId: json['voip_subscription_id'] as String?,
+        voipRouteId: json['voip_route_id'] as String?,
+        voipWakeSecret: json['voip_wake_secret'] as String?,
+        voipManagementSecret: json['voip_management_secret'] as String?,
       );
 
   final Domain home;
@@ -73,6 +81,10 @@ final class RelayPushState {
   final String routeId;
   final String wakeSecret;
   final String managementSecret;
+  final String? voipSubscriptionId;
+  final String? voipRouteId;
+  final String? voipWakeSecret;
+  final String? voipManagementSecret;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'home': home.value,
@@ -82,6 +94,12 @@ final class RelayPushState {
         'route_id': routeId,
         'wake_secret': wakeSecret,
         'management_secret': managementSecret,
+        if (voipSubscriptionId != null)
+          'voip_subscription_id': voipSubscriptionId,
+        if (voipRouteId != null) 'voip_route_id': voipRouteId,
+        if (voipWakeSecret != null) 'voip_wake_secret': voipWakeSecret,
+        if (voipManagementSecret != null)
+          'voip_management_secret': voipManagementSecret,
       };
 }
 
