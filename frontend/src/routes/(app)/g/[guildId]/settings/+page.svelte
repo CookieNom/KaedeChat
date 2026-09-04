@@ -17,7 +17,7 @@
     guildInviteManagementPath,
     guildInviteUrl
   } from '$lib/chat/invites';
-  import { hasAllPermissions } from '$lib/chat/permissions';
+  import { hasAllPermissions, reconcileChannelPermissionProjection } from '$lib/chat/permissions';
   import { guildMemberOutranks, guildRoleOutranks } from '$lib/chat/moderation';
   import { entityKey, entityRef } from '$lib/chat/refs';
   import {
@@ -525,15 +525,7 @@
     const roles = projection.roles ?? current.roles;
     const projectionChannels = projection.channels;
     const channels = projectionChannels
-      ? (() => {
-          const currentChannels = new Map(
-            (current.channels ?? []).map((item) => [entityKey(item), item])
-          );
-          return projectionChannels.map((item) => ({
-            ...(currentChannels.get(entityKey(item)) ?? item),
-            permissions: item.permissions
-          }));
-        })()
+      ? reconcileChannelPermissionProjection(current.channels, projectionChannels)
       : (current.channels ?? []);
     const changed =
       current.permissions !== projection.permissions ||

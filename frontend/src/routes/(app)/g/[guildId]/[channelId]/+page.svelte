@@ -92,7 +92,11 @@
     type ReactionDispatchName
   } from '$lib/chat/reaction-state';
   import { guildMemberOutranks, guildModerationActions } from '$lib/chat/moderation';
-  import { canReadChannelHistory, hasAllPermissions } from '$lib/chat/permissions';
+  import {
+    canReadChannelHistory,
+    hasAllPermissions,
+    reconcileChannelPermissionProjection
+  } from '$lib/chat/permissions';
   import { currentTtsPreferences, speakTtsMessage, ttsCommand } from '$lib/chat/tts';
   import { canCreateScheduledEventInChannel } from '$lib/voice/stage-permissions';
   import { voiceStartTimeFromDispatch } from '$lib/voice/elapsed';
@@ -541,21 +545,7 @@
     if (revokedGuildAccessRef === currentRef) revokedGuildAccessRef = '';
     const projectionChannels = projection.channels;
     const channels = projectionChannels
-      ? (() => {
-          const currentChannels = new Map(
-            (current.channels ?? []).map((item) => [entityKey(item), item])
-          );
-          const projectedChannelKeys = new Set(projectionChannels.map(entityKey));
-          return [
-            ...projectionChannels.map((item) => ({
-              ...(currentChannels.get(entityKey(item)) ?? item),
-              permissions: item.permissions
-            })),
-            ...(current.channels ?? []).filter(
-              (item) => isThreadChannel(item) && !projectedChannelKeys.has(entityKey(item))
-            )
-          ];
-        })()
+      ? reconcileChannelPermissionProjection(current.channels, projectionChannels, isThreadChannel)
       : (current.channels ?? []);
     const changed =
       current.permissions !== projection.permissions ||
