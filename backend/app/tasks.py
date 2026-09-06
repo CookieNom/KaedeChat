@@ -1237,21 +1237,23 @@ async def push_relay_provider_sweep() -> int:
                     provider_token = decrypt_provider_token(
                         subscription.provider_token_encrypted, settings
                     )
-                    fields = {
-                        "route_id": delivery.route_id,
-                        "event_token": delivery.event_token,
-                        "delivery_id": delivery.delivery_id,
-                        "expires_at": int(delivery.expires_at.timestamp()),
-                        "wake_mac": delivery.wake_mac,
-                    }
                     if subscription.provider == "apns_voip":
                         result = await relay_apns_client(settings).send_voip(
-                            provider_token, **fields
+                            provider_token,
+                            route_id=delivery.route_id,
+                            event_token=delivery.event_token,
+                            delivery_id=delivery.delivery_id,
+                            expires_at=int(delivery.expires_at.timestamp()),
+                            wake_mac=delivery.wake_mac,
                         )
                     else:
                         result = await relay_fcm_client(settings).send_relay(
                             provider_token,
-                            **fields,
+                            route_id=delivery.route_id,
+                            event_token=delivery.event_token,
+                            delivery_id=delivery.delivery_id,
+                            expires_at=int(delivery.expires_at.timestamp()),
+                            wake_mac=delivery.wake_mac,
                             platform=subscription.platform,
                             priority=delivery.priority,
                         )

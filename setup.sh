@@ -980,7 +980,7 @@ fi
 
 section 'Interaction services' \
   'KLIPY adds a GIF picker. Turnstile protects authentication. The public relay is the recommended closed-app notification path.'
-if confirm 'Enable the KLIPY GIF picker?' "$([[ $(old KAEDE_KLIPY_ENABLED false) == true ]] && printf true || printf false)"; then
+if confirm 'Enable the KLIPY GIF picker?(An API key will be required.)' "$([[ $(old KAEDE_KLIPY_ENABLED false) == true ]] && printf true || printf false)"; then
   KLIPY_ENABLED=true
   if [[ -n ${OLD[KAEDE_KLIPY_API_KEY]-} ]] && confirm 'Reuse existing KLIPY API key?' true; then
     KLIPY_API_KEY=${OLD[KAEDE_KLIPY_API_KEY]}

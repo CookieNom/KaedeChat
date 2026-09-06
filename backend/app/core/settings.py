@@ -408,6 +408,8 @@ class Settings(BaseSettings):
         "turnstile_secret",
         "push_relay_fcm_service_account_b64",
         "push_relay_apns_key_b64",
+        "push_relay_apns_key_id",
+        "push_relay_apns_team_id",
         "push_fcm_service_account_b64",
         "search_master_key",
         mode="before",

@@ -243,6 +243,9 @@ def test_blank_optional_secrets_are_treated_as_unset() -> None:
         turnstile_site_key="",
         turnstile_secret="",
         push_fcm_service_account_b64="",
+        push_relay_apns_key_b64="",
+        push_relay_apns_key_id="",
+        push_relay_apns_team_id=" ",
     )
     assert configured.proxy_secret is None
     assert configured.admin_token is None
@@ -252,6 +255,9 @@ def test_blank_optional_secrets_are_treated_as_unset() -> None:
     assert configured.klipy_api_key is None
     assert configured.turnstile_secret is None
     assert configured.push_fcm_service_account_b64 is None
+    assert configured.push_relay_apns_key_b64 is None
+    assert configured.push_relay_apns_key_id is None
+    assert configured.push_relay_apns_team_id is None
 
 
 def test_optional_interaction_services_require_credentials_and_hide_them() -> None:
