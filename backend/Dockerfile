@@ -33,6 +33,7 @@ COPY app app
 COPY alembic.ini ./
 COPY migrations migrations
 COPY scripts scripts
+RUN chmod -R a=rX app migrations scripts && chmod a=r alembic.ini
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin kaede
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER kaede

@@ -200,7 +200,7 @@ run_update() {
     git -C "$ROOT" merge-base --is-ancestor "$current" "$target" || \
       die "remote history is not a fast-forward; automatic update refused a force-push, downgrade, or local divergence. Compare HEAD with '$REMOTE/$BRANCH' and resolve it manually"
     log "fast-forwarding source from $current to $target"
-    git -C "$ROOT" merge --ff-only "$target" || \
+    (umask 022; git -C "$ROOT" merge --ff-only "$target") || \
       die "Git could not fast-forward to $target; inspect 'git -C $ROOT status' and resolve the checkout manually"
   elif [[ $deployed == "$target" ]]; then
     log "already running recorded commit $target"
