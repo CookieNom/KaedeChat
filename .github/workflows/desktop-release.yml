@@ -590,6 +590,7 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
+          ./tool/build_e2ee_native.sh --ios
           flutter build ipa --release --export-options-plist=ios/ExportOptions.plist \
             --dart-define=KAEDE_PUSH_TRANSPORT=relay \
             --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
