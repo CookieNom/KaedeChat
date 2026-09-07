@@ -28,13 +28,12 @@ final class SocketConnection: NSObject, StreamDelegate {
     }
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
-    let sunPathCapacity = MemoryLayout.size(ofValue: address.sun_path)
-    let copied = filePath.withCString { path in
-      withUnsafeMutablePointer(to: &address.sun_path.0) { destination in
-        strlcpy(destination, path, sunPathCapacity)
+    let pathBytes = filePath.utf8CString
+    withUnsafeMutableBytes(of: &address.sun_path) { destination in
+      pathBytes.withUnsafeBytes { source in
+        destination.copyBytes(from: source)
       }
     }
-    guard copied < sunPathCapacity else { return false }
     let connected = withUnsafePointer(to: &address) { pointer in
       pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
         Darwin.connect(socketHandle, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
