@@ -20,6 +20,7 @@ env:
   RUST_VERSION: "1.92.0"
   TAURI_CLI_VERSION: "2.11.4"
   FLUTTER_VERSION: "3.41.4"
+  COCOAPODS_VERSION: "1.16.2"
 
 jobs:
   desktop-linux:
@@ -539,6 +540,14 @@ jobs:
         run: |
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Install pinned CocoaPods
+        run: |
+          gem_home="$RUNNER_TEMP/cocoapods-gems"
+          GEM_HOME="$gem_home" GEM_PATH="$gem_home" gem install cocoapods --version "$COCOAPODS_VERSION" --no-document
+          echo "GEM_HOME=$gem_home" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$gem_home" >> "$GITHUB_ENV"
+          echo "$gem_home/bin" >> "$GITHUB_PATH"
+          GEM_HOME="$gem_home" GEM_PATH="$gem_home" "$gem_home/bin/pod" --version
       - name: Install pinned Rust toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal
       - name: Cache Dart and Cargo downloads
