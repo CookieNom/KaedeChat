@@ -550,6 +550,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/registry/index
             ~/.cargo/git/db
+            ~/.cocoapods/repos
+            ~/Library/Caches/CocoaPods
           key: ios-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock', 'desktop/Cargo.lock') }}
       - name: Install iOS signing material
         env:
