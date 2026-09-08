@@ -181,7 +181,7 @@ DEPENDENCIES:
   - webview_flutter_wkwebview (from `.symlinks/plugins/webview_flutter_wkwebview/darwin`)
 
 SPEC REPOS:
-  trunk:
+  https://github.com/CocoaPods/Specs.git:
     - DKImagePickerController
     - DKPhotoGallery
     - Firebase
