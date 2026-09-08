@@ -580,6 +580,7 @@ jobs:
           printf '%s' "$IOS_DISTRIBUTION_CERTIFICATE_BASE64" | base64 -D > "$certificate"
           security create-keychain -p "$keychain_password" "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
           security import "$certificate" -P "$IOS_DISTRIBUTION_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
           security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain" login.keychain-db
@@ -604,7 +605,7 @@ jobs:
           ./tool/build_e2ee_native.sh --ios
           flutter precache --ios
           pod install --deployment --project-directory=ios
-          flutter build ipa --verbose --release --export-options-plist=ios/ExportOptions.plist \
+          flutter build ipa --release --export-options-plist=ios/ExportOptions.plist \
             --dart-define=KAEDE_PUSH_TRANSPORT=relay \
             --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
             --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
