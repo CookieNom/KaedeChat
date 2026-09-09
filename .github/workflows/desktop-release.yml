@@ -413,7 +413,7 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   android:
-    name: Android APK
+    name: Android APK and Google Play open testing
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
@@ -493,17 +493,33 @@ jobs:
             > android/app/google-services.json
           python3 -c 'import json; d=json.load(open("android/app/google-services.json")); clients=d.get("client", []); assert any(c.get("client_info", {}).get("android_client_info", {}).get("package_name") == "chat.kaede.mobile" for c in clients), "Firebase config is not for chat.kaede.mobile"'
           chmod 600 android/app/google-services.json
+      - name: Set Android release version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#desktop-v}"
+          version="${version#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # Reserve two digits for retries; never reuse a Play version code.
+          (( GITHUB_RUN_ATTEMPT > 0 && GITHUB_RUN_ATTEMPT < 100 ))
+          version_code=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+          (( version_code > 0 && version_code <= 2100000000 ))
+          echo "ANDROID_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "ANDROID_RELEASE_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
       - name: Validate and build signed Android releases
         run: |
           flutter pub get
           flutter analyze
           flutter test
           flutter build apk --release \
+            --build-name="$ANDROID_RELEASE_VERSION" \
+            --build-number="$ANDROID_RELEASE_VERSION_CODE" \
             --dart-define=KAEDE_PUSH_TRANSPORT=relay \
             --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
             --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
             --dart-define=KAEDE_PUSH_APP_ID=chat.kaede.mobile
           flutter build appbundle --release \
+            --build-name="$ANDROID_RELEASE_VERSION" \
+            --build-number="$ANDROID_RELEASE_VERSION_CODE" \
             --dart-define=KAEDE_PUSH_TRANSPORT=relay \
             --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
             --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
@@ -525,6 +541,16 @@ jobs:
           path: mobile/release-assets/*
           if-no-files-found: error
           retention-days: 7
+      - name: Upload Android release to Google Play open testing
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: chat.kaede.mobile
+          releaseFiles: mobile/build/app/outputs/bundle/release/app-release.aab
+          releaseName: ${{ github.ref_name }}
+          tracks: beta
+          status: completed
+          changesNotSentForReview: false
       - name: Enforce mobile cache size budgets
         if: always()
         working-directory: ${{ github.workspace }}

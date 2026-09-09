@@ -81,6 +81,35 @@ The workflow creates the GitHub Release only after every signed build succeeds.
 Rerunning the workflow for the same tag replaces that tag's assets rather than
 creating a second release.
 
+### Google Play open testing
+
+Every release tag also uploads the signed AAB for `chat.kaede.mobile` to Google
+Play's open testing track (`beta`). The release uses `completed` status and is
+submitted for review automatically, rather than saved as a draft. Google's
+review and managed publishing settings still determine when testers receive
+it. Production is not updated.
+
+Set the repository Actions secret `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` to the
+entire service-account JSON (not base64). Enable the Google Play Android
+Developer API in its Cloud project, then invite the service-account email in
+Play Console's Users and permissions. For Kaede, grant **View app information
+(read-only)** and **Release apps to testing tracks**. The app must already
+exist in Play Console with an initial manual upload, and open testing must be
+available and configured, including its countries and required app declarations.
+
+Android version names come from the numeric release tag. Version codes use
+`GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT`, allowing attempts 1–99. Both
+the APK and AAB use the same version. Before the first automated upload, check
+that this code exceeds any previously uploaded version code. Release tags in
+order; rerunning an older release after a newer one can fail because its code
+is lower. Rerun the Android job to rebuild with a fresh code after an upload
+failure; do not reupload an already accepted AAB.
+
+The signed files are retained as Actions artifacts before Play upload. An
+upload failure fails the Android job and blocks GitHub Release publication.
+Include this workflow change in a new tag; rerunning an old tag uses its old
+workflow. Service-account credentials must never be committed or bundled.
+
 Generate the updater key once, keep the private key and password outside the
 repository, and put the public key in `tauri.conf.json`:
 
