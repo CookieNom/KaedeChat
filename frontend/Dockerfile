@@ -8,6 +8,7 @@ WORKDIR /workspace
 RUN chown node:node /workspace
 USER node
 COPY --chown=node:node package.json pnpm-lock.yaml ./
+COPY --chown=node:node patches/ ./patches/
 RUN pnpm install --frozen-lockfile
 
 FROM dependencies AS development
