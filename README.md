@@ -60,7 +60,6 @@ files before starting anything:
 
 ```sh
 make setup
-chmod 600 .env
 make env-check
 make generated-compose-check
 ```
@@ -75,12 +74,9 @@ S3, keep the buckets private and follow the
 
 ### 3. Start and check the services
 
-Render the production configuration, then build and start it:
+After the setup checks pass, build and start the services:
 
 ```sh
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml config --quiet
-
 KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
   -f deploy/compose.yml -f deploy/compose.generated.yml \
   up -d --build --wait --wait-timeout 180
@@ -147,53 +143,51 @@ it in your guild, enroll its Python worker, publish `/ping`, and run it.
 
 ## Updates and backups
 
-Use both Compose files for every production command. Back up PostgreSQL,
-object storage, secrets, and configuration together before an upgrade.
-Follow the [upgrade and rollback steps](docs/operator.md#manual-upgrade-and-rollback)
-so old writers cannot run during a migration. To stop services while retaining
-their data:
+After the initial deployment, update Kaede from the repository directory:
+
+```sh
+make auto-update-run
+```
+
+This checks the configured Git branch, builds the update, runs your backup hook
+if configured, stops application writers, applies migrations, and restarts the
+services with health checks. It works even when scheduled updates are disabled.
+The updater needs Python 3 and `flock` (from util-linux) on the host, and a
+checkout without modified tracked files.
+
+Back up PostgreSQL, object storage, secrets, and configuration together before
+updating. Configure a backup hook and optional scheduled updates with
+`make setup`. To see the updater configuration and timer status:
+
+```sh
+make auto-update-status
+```
+
+See the [operator guide](docs/operator.md#optional-automatic-updates) for
+scheduling, backup hooks, and recovery if an update fails.
+
+To stop services while retaining their data:
 
 ```sh
 KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
   -f deploy/compose.yml -f deploy/compose.generated.yml down
 ```
 
-Adding `-v` deletes named-volume data. Use it only when you intend to erase
-that deployment and have a verified backup.
-
-Automatic updates are optional and disabled by default. Configure them in
-`make setup`; [the operator guide](docs/operator.md#optional-automatic-updates)
-covers backup hooks, scheduling, logs, and recovery.
+Use both Compose files for production commands. Adding `-v` deletes named-volume
+data; leave it out when stopping or updating your instance.
 
 ## Development
 
-The backend uses FastAPI, PostgreSQL, and Dragonfly; the web client uses
-SvelteKit. Common checks run through the root Makefile:
+Run the standard code checks with:
 
 ```sh
-make compose-check
 make check
-make test
-make audit
-make migration-check
 ```
 
-`make dev` starts the two-instance development environment. Acceptance checks
-use disposable Compose projects without public application ports:
-
-```sh
-make identity-check
-make chat-check
-make federation-check
-make federation-tls-check
-make media-check
-make voice-check
-make release-check
-```
-
-Run `make lock` after changing dependency declarations. Native client build
-requirements and checks are in the [desktop](desktop/README.md) and
-[mobile](mobile/README.md) READMEs.
+`make dev` starts the two-instance development environment. The
+[operator guide](docs/operator.md#acceptance-checks) lists the focused acceptance
+checks. Native client build requirements are in the
+[desktop](desktop/README.md) and [mobile](mobile/README.md) READMEs.
 
 For Docker inside unprivileged LXC, the supplied Compose files avoid unlimited
 `memlock`, and lockfile tooling runs as the invoking UID/GID.
