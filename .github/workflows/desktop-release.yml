@@ -530,11 +530,30 @@ jobs:
     if: vars.IOS_RELEASE_ENABLED == 'true'
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     defaults:
       run:
         working-directory: mobile
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Verify iOS release toolchain and version
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iOS SDK: $sdk_version"
+          if (( ${sdk_version%%.*} < 26 )); then
+            echo "App Store Connect requires the iOS 26 SDK or later" >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#desktop-v}"
+          version="${version#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "iOS release tags must contain a numeric major.minor.patch version" >&2
+            exit 1
+          fi
+          echo "IOS_BUILD_NAME=$version" >> "$GITHUB_ENV"
       - name: Install pinned Flutter SDK
         working-directory: ${{ runner.temp }}
         run: |
@@ -606,6 +625,8 @@ jobs:
           flutter precache --ios
           pod install --deployment --project-directory=ios
           flutter build ipa --release --export-options-plist=ios/ExportOptions.plist \
+            --build-name="$IOS_BUILD_NAME" \
+            --build-number="${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" \
             --dart-define=KAEDE_PUSH_TRANSPORT=relay \
             --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
             --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
@@ -619,6 +640,13 @@ jobs:
           destination="release-assets/Kaede-Chat-${GITHUB_REF_NAME}-ios.ipa"
           cp "$ipa" "$destination"
           (cd release-assets && shasum -a 256 "$(basename "$destination")" > "$(basename "$destination").sha256")
+      - name: Upload iOS release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaede-chat-ios
+          path: mobile/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload iOS release to TestFlight
         if: vars.IOS_TESTFLIGHT_UPLOAD_ENABLED == 'true'
         env:
@@ -639,13 +667,6 @@ jobs:
           xcrun altool --upload-app --type ios --file "$ipa" \
             --apiKey "$APP_STORE_CONNECT_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
-      - name: Upload iOS release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: kaede-chat-ios
-          path: mobile/release-assets/*
-          if-no-files-found: error
-          retention-days: 7
 
   publish:
     name: Publish GitHub Release

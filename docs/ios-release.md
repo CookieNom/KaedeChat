@@ -39,6 +39,20 @@ Add the Actions variable `IOS_RELEASE_ENABLED` with value `true`. Tagged GitHub
 releases will then build a signed IPA using the official `push.kaede.chat`
 relay and attach it to the release.
 
+The iOS job explicitly selects Xcode 26.3 on `macos-15` and checks for an
+iOS 26 or newer SDK before building. App Store Connect has required this SDK
+since April 28, 2026; the runner's default Xcode 16.4 is too old.
+The app and extension versions come from the numeric release tag (for example,
+`v0.1.38` becomes `0.1.38`), with `GITHUB_RUN_NUMBER.GITHUB_RUN_ATTEMPT` as the
+build number so retries produce a new build number. The IPA and checksum are
+retained as Actions artifacts before TestFlight upload, even if Apple rejects
+the upload. A failed upload still blocks GitHub Release publication.
+
+Workflow fixes must be committed and included in a new release tag. Rerunning
+an old tag uses its original workflow and source. Include the matching
+`desktop/rust-toolchain.toml` pin: native mobile builds select that toolchain,
+which must match the release workflow's `RUST_VERSION` and installed targets.
+
 ## 3. Enable optional TestFlight upload
 
 In App Store Connect, create an API key allowed to upload builds. Add:

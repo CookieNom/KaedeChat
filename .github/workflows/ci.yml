@@ -11,7 +11,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: "0"
   FLUTTER_VERSION: "3.41.4"
-  RUST_VERSION: "1.92.0"
+  RUST_VERSION: "1.97.1"
 
 jobs:
   backend:
@@ -189,10 +189,10 @@ jobs:
           key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
           enableCrossOsArchive: true
       - name: Check native desktop stack
-        run: cargo +1.92.0 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+        run: cargo +1.97.1 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
       - name: Test native audio and capture boundaries
         if: runner.os == 'Linux'
-        run: cargo +1.92.0 test --locked --manifest-path desktop/Cargo.toml -p kaede-audio -p kaede-capture
+        run: cargo +1.97.1 test --locked --manifest-path desktop/Cargo.toml -p kaede-audio -p kaede-capture
       - name: Enforce Cargo cache size budget
         if: always()
         shell: bash
