@@ -94,6 +94,8 @@ def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
                         for text in (
                             b"Write this configuration?",
                             b"Continue without email-based account recovery?",
+                            # This test writes config only; it never binds these ports.
+                            b"Continue with this port anyway?",
                         )
                     )
                     os.write(master, b"y\n" if affirmative else b"\n")

@@ -208,8 +208,7 @@ federation-tls-check:
 	$(FEDERATION_TLS_COMPOSE) --profile validation run --rm --no-deps --build federation-check
 
 compose-check:
-	docker run --rm -v "$(CURDIR):/workspace:ro" -w /workspace/deploy \
-		python:3.12.13-slim python -m unittest discover -s tests -p 'test_validate_*.py'
+	python3 -m unittest discover -s deploy/tests -p 'test_validate_*.py'
 	@docker compose --env-file .env.example -f deploy/compose.yml config --format json | \
 		docker run --rm -i -v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
 		python:3.12.13-slim python /validate_compose.py

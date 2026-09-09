@@ -64,17 +64,15 @@ const message = {
 } as unknown as Message;
 const previews = () => calls.api.mock.calls.filter(([path]) => path === '/link-previews');
 beforeEach(() => {
-  calls.api
-    .mockReset()
-    .mockImplementation(async (path, options) =>
-      path === '/link-previews'
-        ? {
-            url: JSON.parse(options.body).url,
-            media_url: JSON.parse(options.body).url,
-            media_type: 'image'
-          }
-        : { source_channel_ref: '2@chat.example', source_message_ref: '3@chat.example' }
-    );
+  calls.api.mockReset().mockImplementation(async (path, options) =>
+    path === '/link-previews'
+      ? {
+          url: JSON.parse(options.body).url,
+          media_url: JSON.parse(options.body).url,
+          media_type: 'image'
+        }
+      : { source_channel_ref: '2@chat.example', source_message_ref: '3@chat.example' }
+  );
   calls.media.mockClear();
   calls.decrypt.mockClear();
 });

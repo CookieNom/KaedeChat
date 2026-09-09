@@ -46,7 +46,9 @@ The app and extension versions come from the numeric release tag (for example,
 `v0.1.38` becomes `0.1.38`), with `GITHUB_RUN_NUMBER.GITHUB_RUN_ATTEMPT` as the
 build number so retries produce a new build number. The IPA and checksum are
 retained as Actions artifacts before TestFlight upload, even if Apple rejects
-the upload. A failed upload still blocks GitHub Release publication.
+the upload. TestFlight delivery is a separate job: a failed upload is visible
+and retryable with **Re-run failed jobs**, but does not block GitHub Release
+publication. The retry downloads the existing signed IPA instead of rebuilding it.
 
 Workflow fixes must be committed and included in a new release tag. Rerunning
 an old tag uses its original workflow and source. Include the matching

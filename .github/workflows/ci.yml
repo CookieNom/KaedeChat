@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -15,7 +16,20 @@ env:
   RUST_VERSION: "1.97.1"
 
 jobs:
+  release-inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.12.13" }
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+      - run: python3 .github/scripts/check-release-inputs.py
+      - name: Validate workflow syntax
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color -shellcheck= -pyflakes=
+
   backend:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults: { run: { working-directory: backend } }
@@ -57,6 +71,7 @@ jobs:
         run: uv run python -m scripts.generate_protocol && git diff --exit-code -- ../frontend/src/lib/generated ../desktop/crates/kaede-protocol/src/generated.rs ../mobile/lib/src/protocol/generated.dart ../deploy/validate_deploy_env.py ../setup.sh
 
   mobile:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults: { run: { working-directory: mobile } }
@@ -103,7 +118,7 @@ jobs:
             ~/.gradle/caches/modules-2/metadata-*
             ~/.gradle/wrapper/dists
           key: gradle-download-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock', 'mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - run: dart format --output=none --set-exit-if-changed lib test
       - run: flutter analyze
       - run: flutter test
@@ -116,7 +131,54 @@ jobs:
         shell: bash
         run: bash .github/scripts/enforce-cache-budgets.sh mobile
 
+  mobile-ios:
+    needs: release-inputs
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      COCOAPODS_VERSION: "1.16.2"
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Verify release iOS SDK
+        run: |
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          (( ${sdk_version%%.*} >= 26 ))
+      - name: Install pinned Flutter SDK
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
+          echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Install pinned CocoaPods
+        run: |
+          gem_home="$RUNNER_TEMP/cocoapods-gems"
+          GEM_HOME="$gem_home" GEM_PATH="$gem_home" gem install cocoapods --version "$COCOAPODS_VERSION" --no-document
+          echo "GEM_HOME=$gem_home" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$gem_home" >> "$GITHUB_ENV"
+          echo "$gem_home/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Build unsigned iOS release
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter precache --ios
+          ./tool/build_e2ee_native.sh --ios
+          pod install --deployment --project-directory=ios
+          # The Xcode project bundles this file. CI needs a resource, not Firebase credentials.
+          python3 - <<'PYTHON'
+          import plistlib
+          from pathlib import Path
+          Path("ios/Runner/GoogleService-Info.plist").write_bytes(plistlib.dumps({"BUNDLE_ID": "chat.kaede.mobile"}))
+          PYTHON
+          flutter build ios --release --no-codesign
+          git diff --exit-code -- pubspec.lock ios/Podfile.lock
+
   frontend:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -141,6 +203,7 @@ jobs:
       - run: pnpm audit --audit-level=moderate
 
   desktop-portable:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     # A dependency-lock change causes a cold build of the full native stack.
     # Keep this above the release Linux build's cold-cache duration.
@@ -182,6 +245,7 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh cargo
 
   desktop-native:
+    needs: release-inputs
     strategy:
       fail-fast: false
       matrix:
@@ -228,6 +292,7 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh cargo
 
   migrations:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -297,14 +362,18 @@ jobs:
       - run: uv run alembic check
 
   compose:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.12.13" }
       - run: make compose-check
       - run: make auto-update-check
 
   identity:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -312,6 +381,7 @@ jobs:
       - run: make identity-check
 
   chat:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -319,6 +389,7 @@ jobs:
       - run: make chat-check
 
   media:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -326,6 +397,7 @@ jobs:
       - run: make media-check
 
   voice:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -333,6 +405,7 @@ jobs:
       - run: make voice-check
 
   release:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -340,6 +413,7 @@ jobs:
       - run: make release-check
 
   federation:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -347,6 +421,7 @@ jobs:
       - run: make federation-check
 
   federation-tls:
+    needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:

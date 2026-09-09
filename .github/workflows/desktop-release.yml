@@ -24,32 +24,26 @@ env:
   COCOAPODS_VERSION: "1.16.2"
 
 jobs:
+  preflight:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: python3 .github/scripts/check-release-inputs.py --tag "$GITHUB_REF_NAME"
+
+  ci:
+    name: Release CI
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+
   desktop-linux:
+    needs: ci
     name: Linux desktop
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Validate desktop release version
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#desktop-v}"
-          version="${version#v}"
-          python3 - "$version" <<'PY'
-          import json
-          import pathlib
-          import re
-          import sys
-
-          expected = sys.argv[1]
-          config = json.loads(pathlib.Path("desktop/tauri/src-tauri/tauri.conf.json").read_text())
-          cargo = pathlib.Path("desktop/tauri/src-tauri/Cargo.toml").read_text()
-          match = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE)
-          if config["version"] != expected or match is None or match.group(1) != expected:
-              raise SystemExit(
-                  f"tag version {expected} must match tauri.conf.json and kaede-tauri Cargo.toml"
-              )
-          PY
       - name: Install Linux desktop dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
@@ -115,7 +109,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           cargo +"$RUST_VERSION" tauri build \
             --config src-tauri/tauri.conf.json \
-            --bundles appimage,deb
+            --bundles appimage,deb -- --locked
       - name: Collect Linux release files
         shell: bash
         run: |
@@ -150,6 +144,7 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   desktop-windows:
+    needs: ci
     name: Windows desktop
     runs-on: windows-2025
     timeout-minutes: 90
@@ -250,7 +245,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           cargo +"$RUST_VERSION" tauri build \
             --config src-tauri/tauri.conf.json \
-            --bundles nsis
+            --bundles nsis -- --locked
       - name: Collect Windows release files
         shell: pwsh
         run: |
@@ -280,6 +275,7 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   desktop-macos:
+    needs: ci
     name: macOS desktop (${{ matrix.arch }})
     if: vars.APPLE_RELEASE_ENABLED == 'true'
     strategy:
@@ -376,7 +372,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           cargo +"$RUST_VERSION" tauri build \
             --config src-tauri/tauri.conf.json \
-            --bundles app,dmg
+            --bundles app,dmg -- --locked
       - name: Collect macOS release files
         run: |
           set -euo pipefail
@@ -413,7 +409,8 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   android:
-    name: Android APK and Google Play open testing
+    needs: ci
+    name: Android APK and AAB
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
@@ -507,7 +504,7 @@ jobs:
           echo "ANDROID_RELEASE_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
       - name: Validate and build signed Android releases
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter analyze
           flutter test
           flutter build apk --release \
@@ -541,16 +538,6 @@ jobs:
           path: mobile/release-assets/*
           if-no-files-found: error
           retention-days: 7
-      - name: Upload Android release to Google Play open testing
-        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
-        with:
-          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: chat.kaede.mobile
-          releaseFiles: mobile/build/app/outputs/bundle/release/app-release.aab
-          releaseName: ${{ github.ref_name }}
-          tracks: beta
-          status: completed
-          changesNotSentForReview: false
       - name: Enforce mobile cache size budgets
         if: always()
         working-directory: ${{ github.workspace }}
@@ -558,6 +545,7 @@ jobs:
         run: bash .github/scripts/enforce-cache-budgets.sh mobile
 
   ios:
+    needs: ci
     name: iOS IPA
     if: vars.IOS_RELEASE_ENABLED == 'true'
     runs-on: macos-15
@@ -650,7 +638,7 @@ jobs:
           chmod 600 ios/Runner/GoogleService-Info.plist
       - name: Validate and build signed iOS release
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter analyze
           flutter test
           ./tool/build_e2ee_native.sh --ios
@@ -679,8 +667,44 @@ jobs:
           path: mobile/release-assets/*
           if-no-files-found: error
           retention-days: 7
+
+  google-play:
+    name: Upload Google Play open testing
+    needs: android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download signed Android release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kaede-chat-android
+          path: release-assets
+      - name: Upload Android release to Google Play open testing
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: chat.kaede.mobile
+          releaseFiles: release-assets/*-android-play.aab
+          releaseName: ${{ github.ref_name }}
+          tracks: beta
+          status: completed
+          changesNotSentForReview: false
+
+  testflight:
+    name: Upload TestFlight
+    needs: ios
+    if: vars.IOS_TESTFLIGHT_UPLOAD_ENABLED == 'true'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - name: Download signed iOS release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kaede-chat-ios
+          path: release-assets
       - name: Upload iOS release to TestFlight
-        if: vars.IOS_TESTFLIGHT_UPLOAD_ENABLED == 'true'
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -756,8 +780,8 @@ jobs:
                   "url": f"https://github.com/{repository}/releases/download/{tag}/{name}",
                   "signature": signature.read_text(encoding="utf-8").strip(),
               }
-          if not platforms:
-              raise SystemExit("no signed desktop updater artifacts were produced")
+          if not {"windows-x86_64", "linux-x86_64"} <= platforms.keys():
+              raise SystemExit("signed Windows and Linux updater artifacts are required")
           manifest = {
               "version": version,
               "notes": f"Kaede Chat {version}",
@@ -773,15 +797,15 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$(find release-assets -type f -print -quit)"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" \
-              --title "Kaede Chat $GITHUB_REF_NAME" \
-              --draft=false
-          else
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
               --verify-tag \
               --generate-notes \
+              --draft \
               --title "Kaede Chat $GITHUB_REF_NAME"
           fi
           find release-assets -type f -print0 | \
             xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber
+          gh release edit "$GITHUB_REF_NAME" \
+            --title "Kaede Chat $GITHUB_REF_NAME" \
+            --draft=false

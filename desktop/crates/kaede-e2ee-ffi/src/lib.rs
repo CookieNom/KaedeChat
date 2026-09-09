@@ -370,6 +370,13 @@ mod tests {
 
     #[test]
     fn private_dispatcher_reports_advanced_native_epoch_as_decimal() -> Result<(), String> {
+        struct CloseHandle(u64);
+        impl Drop for CloseHandle {
+            fn drop(&mut self) {
+                kaede_e2ee_close(self.0);
+            }
+        }
+
         let generated = invoke(
             "generate",
             0,
@@ -380,12 +387,6 @@ mod tests {
             .ok_or_else(|| "native handle is not a string".to_owned())?
             .parse::<u64>()
             .map_err(|error| error.to_string())?;
-        struct CloseHandle(u64);
-        impl Drop for CloseHandle {
-            fn drop(&mut self) {
-                kaede_e2ee_close(self.0);
-            }
-        }
         let _close = CloseHandle(handle);
         let group_id = b"voice-media-group";
         invoke(

@@ -8,15 +8,23 @@ checksums are published to one GitHub Release. A branch push, pull request, or
 manual workflow dispatch cannot publish a release.
 
 The desktop version in `desktop/tauri/src-tauri/tauri.conf.json` and
-`desktop/tauri/src-tauri/Cargo.toml` must match the numeric part of the tag.
+`desktop/tauri/src-tauri/Cargo.toml` and the `kaede-tauri` entry in
+`desktop/Cargo.lock` must match the numeric part of the tag.
 Each desktop build also produces a Tauri updater payload and signature: an
-AppImage on Linux, an `app.tar.gz` archive on macOS, and an `nsis.zip` archive
+AppImage on Linux, an `app.tar.gz` archive on macOS, and the NSIS setup executable
 on Windows. The publish job assembles those into `latest.json` at the root of
 the GitHub Release, which is the only update endpoint embedded in the app.
 
-Before tagging, run:
+Every tag first passes the release metadata check and the same reusable CI
+workflow used by main and pull requests. Signed builds start only after CI
+succeeds. CI also checks the Podfile checksum and pinned Rust toolchain, lints
+workflow syntax, and compiles an unsigned iOS release using the release Xcode
+SDK. Dependency installation keeps the committed Cargo, Dart, and Pod locks.
+
+Before tagging, push the version bump to main and wait for its CI to pass. Run:
 
 ```sh
+python3 .github/scripts/check-release-inputs.py --tag vMAJOR.MINOR.PATCH
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend lint
 pnpm --dir frontend check
@@ -78,8 +86,14 @@ git push origin v0.1.10
 The workflow publishes both a signed sideload APK and a Play-ready AAB. Both
 are built in official-relay mode and contain no Firebase service-account key.
 The workflow creates the GitHub Release only after every signed build succeeds.
+New GitHub Releases remain drafts until all assets have uploaded. Google Play
+and TestFlight uploads run as separate jobs after their signed build; a store
+rejection fails that delivery job without blocking the downloadable GitHub
+Release. Use **Re-run failed jobs** to retry delivery from the existing signed
+artifacts (retained for seven days), without recompiling successful clients.
 Rerunning the workflow for the same tag replaces that tag's assets rather than
-creating a second release.
+creating a second release. Source or workflow fixes require a new tag: rerunning
+an old tag still uses its original commit.
 
 ### Google Play open testing
 
