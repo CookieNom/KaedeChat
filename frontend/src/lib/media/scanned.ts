@@ -1,3 +1,5 @@
+import { cancelableDelay } from '$lib/ui/delay';
+
 type ScannedResponse = Record<string, unknown>;
 
 export interface ScannedMediaOptions {
@@ -18,21 +20,6 @@ function scanStatus(value: unknown): string {
       ? ((attachment as ScannedResponse).scan_status as string)
       : 'pending'
     : 'pending';
-}
-
-function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new DOMException('Request cancelled', 'AbortError'));
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timeout);
-        reject(new DOMException('Request cancelled', 'AbortError'));
-      },
-      { once: true }
-    );
-  });
 }
 
 /**
@@ -60,7 +47,8 @@ export async function completeScannedMediaResource<R, T extends R>(
           'The selected media did not pass media safety processing. Choose another file.'
       );
     }
-    if (attempt + 1 < maxAttempts) await delay(delayMs, options.signal);
+    if (attempt + 1 < maxAttempts)
+      await cancelableDelay(delayMs, options.signal, 'Request cancelled');
   }
   throw new Error(
     options.timeoutMessage ?? 'Media processing is taking longer than expected. Try again shortly.'

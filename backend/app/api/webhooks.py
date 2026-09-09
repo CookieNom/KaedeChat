@@ -119,6 +119,7 @@ from app.media.service import (
     attachment_payload,
     bind_asset,
     create_upload_ticket,
+    defer_attachment_processing,
     discard_attachment,
     finalize_attachment,
     is_federated_human_authority_upload,
@@ -138,24 +139,6 @@ local attempts = redis.call('INCR', KEYS[1])
 if attempts == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
 return attempts
 """
-
-
-async def _proxy_webhook_guild_operation(
-    session: AsyncSession,
-    settings: Settings,
-    guild_ref: EntityRef,
-    auth: AuthenticatedUser,
-    operation: GuildManagementOperation,
-    payload: dict[str, Any],
-) -> GuildManagementResult | None:
-    return await proxy_remote_guild_management(
-        session,
-        settings,
-        guild_ref,
-        auth.user,
-        operation,
-        payload,
-    )
 
 
 async def _webhook_management_target(
@@ -181,11 +164,11 @@ async def _webhook_management_target(
     _, guild_domain = guild_ref.resolve(settings.domain)
     if guild_domain != authority:
         raise HTTPException(status_code=400, detail={"code": "WEBHOOK_GUILD_REF_INVALID"})
-    result = await _proxy_webhook_guild_operation(
+    result = await proxy_remote_guild_management(
         session,
         settings,
         guild_ref,
-        auth,
+        auth.user,
         operation,
         {"resource_id": webhook_id, **payload},
     )
@@ -1382,10 +1365,7 @@ async def apply_webhook_avatar(
     )
     if attachment.asset_binding != webhook_avatar_staging_binding(webhook, attachment.id):
         raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return (
             {"status": "processing", "attachment": attachment_payload(attachment)},
             None,
@@ -1432,10 +1412,7 @@ async def apply_follower_avatar(
         attachment.id,
     ):
         raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return (
             {"status": "processing", "attachment": attachment_payload(attachment)},
             None,
@@ -1478,11 +1455,11 @@ async def create_webhook(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason", max_length=512),
 ) -> dict[str, object]:
-    proxied = await _proxy_webhook_guild_operation(
+    proxied = await proxy_remote_guild_management(
         session,
         settings,
         guild_id,
-        auth,
+        auth.user,
         "webhook.create",
         {
             "channel_ref": str(channel_id),
@@ -1656,11 +1633,11 @@ async def list_webhooks(
     settings: Settings = Depends(get_settings),
     recover_tokens: bool = True,
 ) -> list[dict[str, object]]:
-    proxied = await _proxy_webhook_guild_operation(
+    proxied = await proxy_remote_guild_management(
         session,
         settings,
         guild_id,
-        auth,
+        auth.user,
         "webhook.list",
         {},
     )
@@ -1740,11 +1717,11 @@ async def list_channel_webhooks(
     settings: Settings = Depends(get_settings),
     recover_tokens: bool = True,
 ) -> list[dict[str, object]]:
-    proxied = await _proxy_webhook_guild_operation(
+    proxied = await proxy_remote_guild_management(
         session,
         settings,
         guild_id,
-        auth,
+        auth.user,
         "webhook.list_channel",
         {"channel_ref": str(channel_id)},
     )

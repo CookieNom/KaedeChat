@@ -28,6 +28,7 @@ import 'package:kaede_mobile/src/features/guild/scheduled_events_tab.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
@@ -7150,32 +7151,12 @@ Future<void> _textAction(
   String hint,
   Future<void> Function(String value) action,
 ) async {
-  final controller = TextEditingController();
-  final value = await showDialog<String>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: Text(title),
-      content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: InputDecoration(hintText: hint)),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(context), child: Text('Cancel')),
-        FilledButton(
-            onPressed: () {
-              final value = controller.text.trim();
-              if (value.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Enter $hint.')),
-                );
-                return;
-              }
-              Navigator.pop(context, value);
-            },
-            child: Text('Continue')),
-      ],
-    ),
+  final value = await showSettingsTextDialog(
+    context,
+    title: title,
+    label: hint,
+    actionLabel: 'Continue',
+    useHint: true,
   );
   if (value?.isNotEmpty == true) {
     try {

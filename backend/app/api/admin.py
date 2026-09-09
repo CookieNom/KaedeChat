@@ -270,6 +270,56 @@ async def reconcile_policy_change(
     return released_destinations | fully_unblocked, replica_syncs
 
 
+async def set_instance_block(
+    session: AsyncSession,
+    settings: Settings,
+    domain: str,
+    *,
+    level: str,
+    include_subdomains: bool,
+    reason: str | None,
+) -> tuple[set[str], set[tuple[str, int]]]:
+    """Mutate block policy under its locks; the caller owns audit and commit."""
+    await lock_block_policy(session)
+    block = await session.scalar(
+        select(InstanceBlock).where(InstanceBlock.domain == domain).with_for_update()
+    )
+    rules = [(domain, include_subdomains)]
+    if block is not None:
+        rules.append((block.domain, block.include_subdomains))
+    destinations = await affected_peer_domains(session, rules)
+    await lock_destination_policy(session, destinations)
+    previously_blocked = await effective_blocked_destinations(session, destinations)
+    if block is None:
+        block = InstanceBlock(domain=domain, level=level)
+        session.add(block)
+    block.level = level
+    block.include_subdomains = include_subdomains
+    block.reason = reason
+    await session.flush()
+    return await reconcile_policy_change(session, settings, destinations, previously_blocked)
+
+
+async def remove_instance_block(
+    session: AsyncSession,
+    settings: Settings,
+    domain: str,
+) -> tuple[set[str], set[tuple[str, int]]] | None:
+    """Remove existing policy without committing or waking uncommitted work."""
+    await lock_block_policy(session)
+    block = await session.scalar(
+        select(InstanceBlock).where(InstanceBlock.domain == domain).with_for_update()
+    )
+    if block is None:
+        return None
+    destinations = await affected_peer_domains(session, ((block.domain, block.include_subdomains),))
+    await lock_destination_policy(session, destinations)
+    previously_blocked = await effective_blocked_destinations(session, destinations)
+    await session.delete(block)
+    await session.flush()
+    return await reconcile_policy_change(session, settings, destinations, previously_blocked)
+
+
 async def wake_policy_reconciliation(
     destinations: set[str], replica_syncs: set[tuple[str, int]]
 ) -> None:
@@ -398,25 +448,13 @@ async def put_block(
     domain = safe_admin_domain(payload.domain)
     if domain == settings.domain:
         raise HTTPException(status_code=400, detail={"code": "CANNOT_BLOCK_SELF"})
-    await lock_block_policy(session)
-    block = await session.scalar(
-        select(InstanceBlock).where(InstanceBlock.domain == domain).with_for_update()
-    )
-    rules = [(domain, payload.include_subdomains)]
-    if block is not None:
-        rules.append((block.domain, block.include_subdomains))
-    destinations = await affected_peer_domains(session, rules)
-    await lock_destination_policy(session, destinations)
-    previously_blocked = await effective_blocked_destinations(session, destinations)
-    if block is None:
-        block = InstanceBlock(domain=domain, level=payload.level)
-        session.add(block)
-    block.level = payload.level
-    block.include_subdomains = payload.include_subdomains
-    block.reason = payload.reason
-    await session.flush()
-    wake_destinations, replica_syncs = await reconcile_policy_change(
-        session, settings, destinations, previously_blocked
+    wake_destinations, replica_syncs = await set_instance_block(
+        session,
+        settings,
+        domain,
+        level=payload.level,
+        include_subdomains=payload.include_subdomains,
+        reason=payload.reason,
     )
     await session.commit()
     await wake_policy_reconciliation(wake_destinations, replica_syncs)
@@ -432,23 +470,10 @@ async def delete_block(
 ) -> Response:
     admin_authorized(request, settings)
     normalized = safe_admin_domain(domain)
-    await lock_block_policy(session)
-    block = await session.scalar(
-        select(InstanceBlock).where(InstanceBlock.domain == normalized).with_for_update()
-    )
-    if block is not None:
-        destinations = await affected_peer_domains(
-            session, ((block.domain, block.include_subdomains),)
-        )
-        await lock_destination_policy(session, destinations)
-        previously_blocked = await effective_blocked_destinations(session, destinations)
-        await session.delete(block)
-        await session.flush()
-        wake_destinations, replica_syncs = await reconcile_policy_change(
-            session, settings, destinations, previously_blocked
-        )
+    result = await remove_instance_block(session, settings, normalized)
+    if result is not None:
         await session.commit()
-        await wake_policy_reconciliation(wake_destinations, replica_syncs)
+        await wake_policy_reconciliation(*result)
     return Response(status_code=204)
 
 

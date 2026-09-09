@@ -2599,16 +2599,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     ));
   }
 
-  Future<void> _sendSticker(
+  Future<void> _sendQuickMessage(
     KaedeChannel channel,
-    ComposerSticker sticker,
+    Future<void> Function() send,
+    String errorSummary,
   ) async {
-    final active = ref.read(mobileControllerProvider).activeChannel;
-    if (_sending ||
-        active?.ref != channel.ref ||
-        _composerChannel != channel.ref) {
-      return;
-    }
     final remaining = _slowModeRemaining(channel);
     if (remaining > Duration.zero) {
       final seconds = (remaining.inMilliseconds / 1000).ceil();
@@ -2619,6 +2614,46 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     }
     setState(() => _sending = true);
     try {
+      await send();
+      if (channel.slowModeSeconds > 0) {
+        _startSlowMode(channel, Duration(seconds: channel.slowModeSeconds));
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (_composerChannel == channel.ref && _scroll.hasClients) {
+        await _scroll.animateTo(
+          _scroll.position.minScrollExtent,
+          duration: Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    } on Object catch (error) {
+      if (error is KaedeException && error.retryAfter != null) {
+        _startSlowMode(channel, error.retryAfter!);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: errorSummary,
+          )),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _sendSticker(
+    KaedeChannel channel,
+    ComposerSticker sticker,
+  ) async {
+    final active = ref.read(mobileControllerProvider).activeChannel;
+    if (_sending ||
+        active?.ref != channel.ref ||
+        _composerChannel != channel.ref) {
+      return;
+    }
+    await _sendQuickMessage(channel, () async {
       await ref.read(mobileControllerProvider.notifier).send(
         channel.ref,
         '',
@@ -2632,32 +2667,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           ),
         ],
       );
-      if (channel.slowModeSeconds > 0) {
-        _startSlowMode(channel, Duration(seconds: channel.slowModeSeconds));
-      }
-      await WidgetsBinding.instance.endOfFrame;
-      if (_composerChannel == channel.ref && _scroll.hasClients) {
-        await _scroll.animateTo(
-          _scroll.position.minScrollExtent,
-          duration: Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
-      }
-    } on Object catch (error) {
-      if (error is KaedeException && error.retryAfter != null) {
-        _startSlowMode(channel, error.retryAfter!);
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(userFacingError(
-            error,
-            summary: 'Could not send that sticker',
-          )),
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
+    }, 'Could not send that sticker');
   }
 
   Future<void> _sendGif(KaedeChannel channel, ComposerGif gif) async {
@@ -2671,45 +2681,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       _showGifUnavailable();
       return;
     }
-    final remaining = _slowModeRemaining(channel);
-    if (remaining > Duration.zero) {
-      final seconds = (remaining.inMilliseconds / 1000).ceil();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Slow mode is active. Try again in $seconds seconds.'),
-      ));
-      return;
-    }
-    setState(() => _sending = true);
-    try {
+    await _sendQuickMessage(channel, () async {
       await ref
           .read(mobileControllerProvider.notifier)
           .send(channel.ref, gif.url.toString());
-      if (channel.slowModeSeconds > 0) {
-        _startSlowMode(channel, Duration(seconds: channel.slowModeSeconds));
-      }
-      await WidgetsBinding.instance.endOfFrame;
-      if (_composerChannel == channel.ref && _scroll.hasClients) {
-        await _scroll.animateTo(
-          _scroll.position.minScrollExtent,
-          duration: Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
-      }
-    } on Object catch (error) {
-      if (error is KaedeException && error.retryAfter != null) {
-        _startSlowMode(channel, error.retryAfter!);
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(userFacingError(
-            error,
-            summary: 'Could not send that GIF',
-          )),
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
+    }, 'Could not send that GIF');
   }
 
   Future<void> _pickFiles() async {

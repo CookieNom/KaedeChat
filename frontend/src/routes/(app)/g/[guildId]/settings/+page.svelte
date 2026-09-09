@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { trapDialogFocus } from '$lib/ui/focus';
+  import { cancelableDelay } from '$lib/ui/delay';
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -960,25 +962,6 @@
       channels: updated.channels ?? current.channels,
       roles: updated.roles ?? current.roles
     };
-  }
-
-  function cancelableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
-    return new Promise((resolveDelay, rejectDelay) => {
-      if (signal.aborted) {
-        rejectDelay(new DOMException('Operation cancelled', 'AbortError'));
-        return;
-      }
-      const timeout = window.setTimeout(finish, milliseconds);
-      function finish() {
-        signal.removeEventListener('abort', cancel);
-        resolveDelay();
-      }
-      function cancel() {
-        window.clearTimeout(timeout);
-        rejectDelay(new DOMException('Operation cancelled', 'AbortError'));
-      }
-      signal.addEventListener('abort', cancel, { once: true });
-    });
   }
 
   function selectChannel(channel: Channel, force = false) {
@@ -3104,27 +3087,11 @@
       return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = Array.from(
-      memberModerationElement.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
+    trapDialogFocus(
+      event,
+      memberModerationElement,
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
     );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1) ?? first;
-    if (!memberModerationElement.contains(document.activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   }
 
   function clampMemberPage() {

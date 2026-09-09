@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path as FilePath
-from typing import Any, cast
+from typing import cast
 
 import anyio
 from anyio import CapacityLimiter, WouldBlock
@@ -25,6 +25,9 @@ from app.api.dependencies import (
     get_session,
     get_snowflake,
     require_user,
+)
+from app.api.dependencies import (
+    proxy_authenticated_guild_management as _proxy_guild_management,
 )
 from app.api.guilds import local_guild
 from app.chat.audit import add_audit_entry, normalize_audit_reason
@@ -79,11 +82,6 @@ from app.db.models import (
 )
 from app.federation.client import signed_request, signed_stream_request
 from app.federation.dm_history import history_media_capability_status, history_media_path
-from app.federation.guild_management import (
-    GuildManagementOperation,
-    GuildManagementResult,
-    proxy_remote_guild_management,
-)
 from app.federation.network import (
     FederationNetworkError,
     normalize_domain,
@@ -117,6 +115,7 @@ from app.media.service import (
     attachment_variant_is_animated,
     bind_asset,
     create_upload_ticket,
+    defer_attachment_processing,
     finalize_attachment,
     media_redirect_response,
     require_image_type,
@@ -125,7 +124,7 @@ from app.media.service import (
     ticket_payload,
 )
 from app.media.storage import S3Storage, StorageError
-from app.tasks import federation_deliver, media_cache_gc, media_local_purge, media_process
+from app.tasks import federation_deliver, media_cache_gc, media_local_purge
 
 router = APIRouter(tags=["media"])
 REMOTE_MEDIA_UPLOAD_RESERVATION_SECONDS = 5 * 60
@@ -146,20 +145,6 @@ def _federated_authority_auth(auth: object, settings: Settings) -> bool:
         and auth.user.origin_domain != settings.domain
         and not auth.user.is_local
     )
-
-
-async def _proxy_guild_management(
-    session: AsyncSession,
-    settings: Settings,
-    guild_ref: EntityRef,
-    auth: AuthenticatedUser,
-    operation: GuildManagementOperation,
-    payload: dict[str, Any],
-) -> tuple[bool, GuildManagementResult | None]:
-    result = await proxy_remote_guild_management(
-        session, settings, guild_ref, auth.user, operation, payload
-    )
-    return result is not None, result
 
 
 REMOTE_MEDIA_RESERVATION_TTL_MS = 300_000
@@ -537,10 +522,7 @@ async def commit_user_asset(
     attachment = await finalize_attachment(
         session, settings, user, int(payload.attachment_id), required_purpose=kind
     )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return attachment_payload(attachment)
     if attachment.content_sha256 is None:
         raise RuntimeError("clean media is missing its content digest")
@@ -694,10 +676,7 @@ async def commit_guild_asset(
         required_purpose=purpose,
         federated_guild_upload=_federated_authority_auth(auth, settings),
     )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return attachment_payload(attachment)
     if attachment.content_sha256 is None:
         raise RuntimeError("clean media is missing its content digest")
@@ -893,10 +872,7 @@ async def commit_role_icon(
         required_purpose="role_icon",
         federated_guild_upload=_federated_authority_auth(auth, settings),
     )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return attachment_payload(attachment)
     if attachment.content_sha256 is None:
         raise RuntimeError("clean media is missing its content digest")
@@ -1086,10 +1062,7 @@ async def create_emoji(
         required_purpose="emoji",
         federated_guild_upload=_federated_authority_auth(auth, settings),
     )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return attachment_payload(attachment)
     require_image_type(attachment.detected_content_type)
     # The bounded query avoids a table-wide count on a hostile repeated request.
@@ -1414,10 +1387,7 @@ async def create_sticker(
         required_purpose="sticker",
         federated_guild_upload=_federated_authority_auth(auth, settings),
     )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return attachment_payload(attachment)
     require_sticker_asset(attachment)
     existing = list(

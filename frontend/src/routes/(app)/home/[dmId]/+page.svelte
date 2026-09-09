@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createUploadQueue } from '$lib/media/upload-queue';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -86,12 +87,7 @@
   } from '$lib/chat/outbox';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
   import { buildTimeline } from '$lib/chat/timeline';
-  import {
-    activeTypingParticipants,
-    typingLabel,
-    upsertTypingParticipant,
-    type TypingParticipant
-  } from '$lib/chat/typing';
+  import { createTypingState } from '$lib/chat/typing';
   import type {
     Attachment,
     Channel,
@@ -197,7 +193,9 @@
   let busy = $state(false);
   let channelReady = $state(false);
   let typing = $state('');
-  let typingParticipants = $state<TypingParticipant[]>([]);
+  const typingState = createTypingState((label) => {
+    typing = label;
+  });
   let replyingMessage = $state<Message | null>(null);
   let pinnedMessages = $state<Message[]>([]);
   let pinsOpen = $state(false);
@@ -211,7 +209,6 @@
   let lastTypingAt = 0;
   let loadGeneration = 0;
   let snapshotGeneration = 0;
-  let typingTimer: number | null = null;
   let gateway: GatewayClient | null = null;
   let dispatchBuffer: Dispatch[] | null = null;
   let uploads = $state<PendingUpload[]>([]);
@@ -249,7 +246,12 @@
   let commandNotice = $state('');
   let pollDialogOpen = $state(false);
   let forwardingMessage = $state<Message | null>(null);
-  const uploadControllers = new SvelteMap<string, AbortController>();
+  const uploadQueue = createUploadQueue(
+    () => uploads,
+    (next) => {
+      uploads = next;
+    }
+  );
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const deliveryRecoveries = new SvelteSet<string>();
   const readAcknowledgements = new ReadAcknowledgementQueue<Message>({
@@ -393,20 +395,7 @@
   }
 
   function resetTyping() {
-    typingParticipants = [];
-    typing = '';
-    if (typingTimer) window.clearTimeout(typingTimer);
-    typingTimer = null;
-  }
-
-  function refreshTyping() {
-    typingParticipants = activeTypingParticipants(typingParticipants);
-    typing = typingLabel(typingParticipants);
-    if (typingTimer) window.clearTimeout(typingTimer);
-    typingTimer = null;
-    if (!typingParticipants.length) return;
-    const nextExpiry = Math.min(...typingParticipants.map((item) => item.expiresAt));
-    typingTimer = window.setTimeout(refreshTyping, Math.max(50, nextExpiry - Date.now() + 5));
+    typingState.reset();
   }
 
   function registerTyping(userId: string, userDomain?: string) {
@@ -416,11 +405,10 @@
       entities.users.values.find(
         (candidate) => candidate.id === userId && candidate.origin_domain === domain
       ) ?? recipient;
-    typingParticipants = upsertTypingParticipant(typingParticipants, {
+    typingState.register({
       ref: `${userId}@${domain}`,
       name: user ? userDisplayName(user) : 'Someone'
     });
-    refreshTyping();
   }
   const completionQuery = $derived(completionAt(content, composerCursor));
   const completionOptions = $derived(
@@ -1703,71 +1691,27 @@
         error = `“${file.name}” is not an accepted file type for this command option.`;
         continue;
       }
-      const key = crypto.randomUUID();
-      const controller = new AbortController();
-      uploadControllers.set(key, controller);
-      uploads = [...uploads, { key, file, progress: 0, status: 'uploading' }];
       const upload =
         channel.encryption_mode === 'e2ee' ? uploadEncryptedChannelFile : uploadChannelFile;
-      void upload(
-        target,
+      uploadQueue.add(
         file,
-        (progress) => {
-          if (controller.signal.aborted || generation !== loadGeneration || routeRef !== dmId)
-            return;
-          uploads = uploads.map((item) => (item.key === key ? { ...item, progress } : item));
-        },
-        controller.signal
-      )
-        .then((ticket) => {
-          uploadControllers.delete(key);
-          if (generation !== loadGeneration || routeRef !== dmId) return;
-          const attachmentId = 'ticket' in ticket ? ticket.ticket.id : ticket.id;
-          uploads = uploads.map((item) =>
-            item.key === key
-              ? {
-                  ...item,
-                  progress: 100,
-                  status: 'ready',
-                  attachmentId,
-                  encryptedManifest: 'manifest' in ticket ? ticket.manifest : undefined
-                }
-              : item
-          );
+        (progress, signal) => upload(target, file, progress, signal),
+        () => generation === loadGeneration && routeRef === dmId,
+        (attachmentId) => {
           if (commandTarget && selectedApplicationCommand === commandTarget.command) {
-            commandOptionValues = {
-              ...commandOptionValues,
-              [commandTarget.path]: attachmentId
-            };
+            commandOptionValues = { ...commandOptionValues, [commandTarget.path]: attachmentId };
           }
-        })
-        .catch((caught: unknown) => {
-          uploadControllers.delete(key);
-          if (controller.signal.aborted || generation !== loadGeneration || routeRef !== dmId)
-            return;
-          uploads = uploads.map((item) =>
-            item.key === key
-              ? {
-                  ...item,
-                  status: 'failed',
-                  error: userErrorMessage(caught, 'Upload failed. Remove the file and try again.')
-                }
-              : item
-          );
-        });
+        }
+      );
     }
   }
 
   function removeUpload(key: string) {
-    uploadControllers.get(key)?.abort();
-    uploadControllers.delete(key);
-    uploads = uploads.filter((item) => item.key !== key);
+    uploadQueue.remove(key);
   }
 
   function resetUploads() {
-    for (const controller of uploadControllers.values()) controller.abort();
-    uploadControllers.clear();
-    uploads = [];
+    uploadQueue.reset();
   }
 
   async function startCall() {

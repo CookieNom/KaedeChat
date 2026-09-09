@@ -21,11 +21,8 @@ from app.admin.report_enforcement import (
     remove_remote_user_from_local_guilds,
 )
 from app.api.admin import (
-    affected_peer_domains,
-    effective_blocked_destinations,
-    lock_block_policy,
-    lock_destination_policy,
-    reconcile_policy_change,
+    remove_instance_block,
+    set_instance_block,
     wake_policy_reconciliation,
 )
 from app.api.channels import require_channel_permissions
@@ -2054,25 +2051,13 @@ async def administration_put_block(
     domain = normalize_domain(payload.domain)
     if domain == settings.domain:
         raise HTTPException(status_code=400, detail={"code": "CANNOT_BLOCK_SELF"})
-    await lock_block_policy(session)
-    block = await session.scalar(
-        select(InstanceBlock).where(InstanceBlock.domain == domain).with_for_update()
-    )
-    rules = [(domain, payload.include_subdomains)]
-    if block is not None:
-        rules.append((block.domain, block.include_subdomains))
-    destinations = await affected_peer_domains(session, rules)
-    await lock_destination_policy(session, destinations)
-    previously_blocked = await effective_blocked_destinations(session, destinations)
-    if block is None:
-        block = InstanceBlock(domain=domain, level=payload.level)
-        session.add(block)
-    block.level = payload.level
-    block.include_subdomains = payload.include_subdomains
-    block.reason = payload.reason
-    await session.flush()
-    wakes, replica_syncs = await reconcile_policy_change(
-        session, settings, destinations, previously_blocked
+    wakes, replica_syncs = await set_instance_block(
+        session,
+        settings,
+        domain,
+        level=payload.level,
+        include_subdomains=payload.include_subdomains,
+        reason=payload.reason,
     )
     await audit(
         session,
@@ -2098,20 +2083,10 @@ async def administration_delete_block(
 ) -> Response:
     principal.require("instances.manage")
     normalized = normalize_domain(domain)
-    await lock_block_policy(session)
-    block = await session.scalar(
-        select(InstanceBlock).where(InstanceBlock.domain == normalized).with_for_update()
-    )
-    if block is None:
+    result = await remove_instance_block(session, settings, normalized)
+    if result is None:
         return Response(status_code=204)
-    destinations = await affected_peer_domains(session, ((block.domain, block.include_subdomains),))
-    await lock_destination_policy(session, destinations)
-    previously_blocked = await effective_blocked_destinations(session, destinations)
-    await session.delete(block)
-    await session.flush()
-    wakes, replica_syncs = await reconcile_policy_change(
-        session, settings, destinations, previously_blocked
-    )
+    wakes, replica_syncs = result
     await audit(
         session,
         snowflake,

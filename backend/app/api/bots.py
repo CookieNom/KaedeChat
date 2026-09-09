@@ -1203,15 +1203,12 @@ async def render_bot_message_response(
     ) | bot_runtime_grant_payload(installation)
 
 
-async def installation_for_guild(
+async def _guild_installation(
     session: AsyncSession,
     settings: Settings,
     principal: BotPrincipal,
     guild_ref: EntityRef,
-    scope: str,
 ) -> tuple[Guild, BotInstallation]:
-    require_standard_installation_token(principal)
-    principal.require_scope(scope)
     guild_id, guild_domain = guild_ref.resolve(settings.domain)
     guild = await session.get(Guild, (guild_id, guild_domain))
     if guild is None or guild.unavailable:
@@ -1234,6 +1231,19 @@ async def installation_for_guild(
     )
     if installation is None:
         raise HTTPException(status_code=403, detail={"code": "BOT_NOT_INSTALLED"})
+    return guild, installation
+
+
+async def installation_for_guild(
+    session: AsyncSession,
+    settings: Settings,
+    principal: BotPrincipal,
+    guild_ref: EntityRef,
+    scope: str,
+) -> tuple[Guild, BotInstallation]:
+    require_standard_installation_token(principal)
+    principal.require_scope(scope)
+    guild, installation = await _guild_installation(session, settings, principal, guild_ref)
     if scope not in installation.granted_scopes:
         raise HTTPException(
             status_code=403,
@@ -1263,28 +1273,7 @@ async def installation_for_guild_any_scope(
             status_code=403,
             detail={"code": "BOT_SCOPE_REQUIRED", "scope": scope},
         )
-    guild_id, guild_domain = guild_ref.resolve(settings.domain)
-    guild = await session.get(Guild, (guild_id, guild_domain))
-    if guild is None or guild.unavailable:
-        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
-    require_bot_resource_authority(
-        settings,
-        resource_domain=guild.origin_domain,
-        resource_ref=EntityRef(f"{guild.id}@{guild.origin_domain}"),
-    )
-    installation = await session.scalar(
-        select(BotInstallation).where(
-            BotInstallation.application_id == principal.application.id,
-            BotInstallation.application_domain == principal.application.origin_domain,
-            BotInstallation.guild_id == guild.id,
-            BotInstallation.guild_domain == guild.origin_domain,
-            BotInstallation.bot_user_id == principal.user.id,
-            BotInstallation.bot_user_domain == principal.user.origin_domain,
-            usable_guild_installation(),
-        )
-    )
-    if installation is None:
-        raise HTTPException(status_code=403, detail={"code": "BOT_NOT_INSTALLED"})
+    guild, installation = await _guild_installation(session, settings, principal, guild_ref)
     if not any(item in installation.granted_scopes for item in accepted):
         raise HTTPException(
             status_code=403,
@@ -5480,6 +5469,12 @@ async def bot_clear_reaction_group(
     "/channels/{channel_ref}/messages/{message_ref}/polls/answers/{answer_id}/@me",
     status_code=204,
 )
+@router.delete(
+    "/channels/{channel_ref}/messages/{message_ref}/polls/answers/{answer_id}/@me",
+    status_code=204,
+    name="bot_remove_poll_vote",
+    summary="Bot Remove Poll Vote",
+)
 async def bot_add_poll_vote(
     channel_ref: EntityRef,
     message_ref: EntityRef,
@@ -5502,30 +5497,7 @@ async def bot_add_poll_vote(
     )
 
 
-@router.delete(
-    "/channels/{channel_ref}/messages/{message_ref}/polls/answers/{answer_id}/@me",
-    status_code=204,
-)
-async def bot_remove_poll_vote(
-    channel_ref: EntityRef,
-    message_ref: EntityRef,
-    answer_id: int,
-    principal: Annotated[BotPrincipal, Depends(require_bot)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    redis: Annotated[Redis, Depends(get_redis)],
-    settings: Annotated[Settings, Depends(get_settings)],
-    installation_id: int | None = Header(default=None, alias="X-Kaede-Bot-Installation"),
-) -> Response:
-    await installation_for_channel(
-        session, settings, principal, channel_ref, "polls.write", installation_id
-    )
-    raise HTTPException(
-        status_code=403,
-        detail={
-            "code": "BOT_POLL_VOTE_UNSUPPORTED",
-            "message": "Applications cannot vote in polls.",
-        },
-    )
+bot_remove_poll_vote = bot_add_poll_vote
 
 
 @router.get(

@@ -88,7 +88,7 @@ from app.chat.e2ee import (
     account_vault_lease_key,
 )
 from app.core.base64url import decode_base64url, encode_base64url
-from app.core.proxy import resolve_client_ip
+from app.core.proxy import connection_client_ip
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
@@ -238,16 +238,7 @@ async def lock_current_session(session: AsyncSession, auth: AuthenticatedUser, u
 
 
 def client_ip(request: Request, settings: Settings) -> str:
-    supplied_secret = request.headers.get("X-Kaede-Proxy-Secret")
-    configured_secret = (
-        settings.proxy_secret.get_secret_value() if settings.proxy_secret is not None else None
-    )
-    return resolve_client_ip(
-        supplied_secret=supplied_secret,
-        configured_secret=configured_secret,
-        forwarded_for=request.headers.get("X-Forwarded-For"),
-        direct_host=request.client.host if request.client is not None else None,
-    )
+    return connection_client_ip(request, settings)
 
 
 async def wake_email_outbox() -> None:

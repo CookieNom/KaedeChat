@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import Depends, HTTPException, Request, status
 from redis.asyncio import Redis
@@ -14,8 +14,12 @@ from app.auth.account_status import account_is_banned, account_is_temporarily_su
 from app.auth.tokens import AccessGrant, AccessTokenStore
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
+from app.core.types import EntityRef
 from app.db.models import Session as AuthSession
 from app.db.models import User
+
+if TYPE_CHECKING:
+    from app.federation.guild_management import GuildManagementOperation, GuildManagementResult
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -159,3 +163,20 @@ async def optional_user(
     # Invalid explicit credentials remain an authentication error. Treating
     # them as anonymous could leak whether a targeted invite exists.
     return await require_user(request, session, redis, settings)
+
+
+async def proxy_authenticated_guild_management(
+    session: AsyncSession,
+    settings: Settings,
+    guild_ref: EntityRef,
+    auth: AuthenticatedUser,
+    operation: GuildManagementOperation,
+    payload: dict[str, Any],
+) -> tuple[bool, GuildManagementResult | None]:
+    """Adapt a human request to the shared guild authority transport."""
+    from app.federation.guild_management import proxy_remote_guild_management
+
+    result = await proxy_remote_guild_management(
+        session, settings, guild_ref, auth.user, operation, payload
+    )
+    return result is not None, result

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { createUploadQueue } from '$lib/media/upload-queue';
+  import { trapDialogFocus } from '$lib/ui/focus';
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -158,12 +160,7 @@
   } from '$lib/chat/reconcile';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
   import { buildTimeline } from '$lib/chat/timeline';
-  import {
-    activeTypingParticipants,
-    typingLabel,
-    upsertTypingParticipant,
-    type TypingParticipant
-  } from '$lib/chat/typing';
+  import { createTypingState } from '$lib/chat/typing';
   import type {
     Attachment,
     Channel,
@@ -385,7 +382,9 @@
   let threadDirectoryArchivedCursor = $state('');
   let threadDirectoryBusy = $state(false);
   let typing = $state('');
-  let typingParticipants = $state<TypingParticipant[]>([]);
+  const typingState = createTypingState((label) => {
+    typing = label;
+  });
   let replyingMessage = $state<Message | null>(null);
   let replyNotify = $state(true);
   let pinnedMessages = $state<Message[]>([]);
@@ -399,7 +398,6 @@
   let lastTypingAt = 0;
   let loadGeneration = 0;
   let snapshotGeneration = 0;
-  let typingTimer: number | null = null;
   let gateway: GatewayClient | null = null;
   let subscribedGuildRef = '';
   let lastMemberRefreshAt = 0;
@@ -505,8 +503,18 @@
   let voiceModerationBusy = $state(false);
   let voiceChannelKey = '';
   let voiceStartedAt = $state<number | null>(null);
-  const uploadControllers = new SvelteMap<string, AbortController>();
-  const forumUploadControllers = new SvelteMap<string, AbortController>();
+  const uploadQueue = createUploadQueue(
+    () => uploads,
+    (next) => {
+      uploads = next;
+    }
+  );
+  const forumUploadQueue = createUploadQueue(
+    () => forumUploads,
+    (next) => {
+      forumUploads = next;
+    }
+  );
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const collapsedCategories = new SvelteSet<string>();
   const readAcknowledgements = new ReadAcknowledgementQueue<Message>({
@@ -1015,20 +1023,7 @@
   }
 
   function resetTyping() {
-    typingParticipants = [];
-    typing = '';
-    if (typingTimer) window.clearTimeout(typingTimer);
-    typingTimer = null;
-  }
-
-  function refreshTyping() {
-    typingParticipants = activeTypingParticipants(typingParticipants);
-    typing = typingLabel(typingParticipants);
-    if (typingTimer) window.clearTimeout(typingTimer);
-    typingTimer = null;
-    if (!typingParticipants.length) return;
-    const nextExpiry = Math.min(...typingParticipants.map((item) => item.expiresAt));
-    typingTimer = window.setTimeout(refreshTyping, Math.max(50, nextExpiry - Date.now() + 5));
+    typingState.reset();
   }
 
   function registerTyping(userId: string, userDomain?: string) {
@@ -1040,11 +1035,10 @@
       entities.users.values.find(
         (candidate) => candidate.id === userId && candidate.origin_domain === domain
       );
-    typingParticipants = upsertTypingParticipant(typingParticipants, {
+    typingState.register({
       ref: `${userId}@${domain}`,
       name: userDisplayName(user)
     });
-    refreshTyping();
   }
   const completionQuery = $derived(completionAt(content, composerCursor));
   const completionOptions = $derived.by((): Completion[] => {
@@ -1453,27 +1447,11 @@
       return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = Array.from(
-      channelDialogElement.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
+    trapDialogFocus(
+      event,
+      channelDialogElement,
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
     );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1) ?? first;
-    if (!channelDialogElement.contains(document.activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   }
 
   async function openQuickInvite(invoker: HTMLElement) {
@@ -1550,27 +1528,11 @@
       return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = Array.from(
-      inviteDialogElement.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
+    trapDialogFocus(
+      event,
+      inviteDialogElement,
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
     );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1) ?? first;
-    if (!inviteDialogElement.contains(document.activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   }
 
   function requestChannelDeletion(target: Channel) {
@@ -1602,27 +1564,11 @@
       return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = Array.from(
-      channelDeleteDialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
+    trapDialogFocus(
+      event,
+      channelDeleteDialog,
+      'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
     );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1) ?? first;
-    if (!channelDeleteDialog.contains(document.activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   }
 
   async function saveChannelDialog() {
@@ -5397,66 +5343,18 @@
         error = `“${file.name}” is not an accepted file type for this command option.`;
         continue;
       }
-      const key = crypto.randomUUID();
-      const controller = new AbortController();
-      uploadControllers.set(key, controller);
-      uploads = [...uploads, { key, file, progress: 0, status: 'uploading' }];
       const upload =
         channel.encryption_mode === 'e2ee' ? uploadEncryptedChannelFile : uploadChannelFile;
-      void upload(
-        target,
+      uploadQueue.add(
         file,
-        (progress) => {
-          if (
-            controller.signal.aborted ||
-            generation !== loadGeneration ||
-            routeChannel !== channelId
-          )
-            return;
-          uploads = uploads.map((item) => (item.key === key ? { ...item, progress } : item));
-        },
-        controller.signal
-      )
-        .then((ticket) => {
-          uploadControllers.delete(key);
-          if (generation !== loadGeneration || routeChannel !== channelId) return;
-          const attachmentId = 'ticket' in ticket ? ticket.ticket.id : ticket.id;
-          uploads = uploads.map((item) =>
-            item.key === key
-              ? {
-                  ...item,
-                  progress: 100,
-                  status: 'ready',
-                  attachmentId,
-                  encryptedManifest: 'manifest' in ticket ? ticket.manifest : undefined
-                }
-              : item
-          );
+        (progress, signal) => upload(target, file, progress, signal),
+        () => generation === loadGeneration && routeChannel === channelId,
+        (attachmentId) => {
           if (commandTarget && selectedApplicationCommand === commandTarget.command) {
-            commandOptionValues = {
-              ...commandOptionValues,
-              [commandTarget.path]: attachmentId
-            };
+            commandOptionValues = { ...commandOptionValues, [commandTarget.path]: attachmentId };
           }
-        })
-        .catch((caught: unknown) => {
-          uploadControllers.delete(key);
-          if (
-            controller.signal.aborted ||
-            generation !== loadGeneration ||
-            routeChannel !== channelId
-          )
-            return;
-          uploads = uploads.map((item) =>
-            item.key === key
-              ? {
-                  ...item,
-                  status: 'failed',
-                  error: userErrorMessage(caught, 'Upload failed. Remove the file and try again.')
-                }
-              : item
-          );
-        });
+        }
+      );
     }
   }
 
@@ -5495,75 +5393,19 @@
     const generation = loadGeneration;
     const routeChannel = channelId;
     for (const file of Array.from(files).slice(0, 10 - forumUploads.length)) {
-      const key = crypto.randomUUID();
-      const controller = new AbortController();
-      forumUploadControllers.set(key, controller);
-      forumUploads = [...forumUploads, { key, file, progress: 0, status: 'uploading' }];
-      void uploadChannelFile(
-        target,
+      forumUploadQueue.add(
         file,
-        (progress) => {
-          if (
-            controller.signal.aborted ||
-            generation !== loadGeneration ||
-            routeChannel !== channelId ||
-            !forumUploadTarget ||
-            entityKey(forumUploadTarget) !== forumKey
-          )
-            return;
-          forumUploads = forumUploads.map((item) =>
-            item.key === key ? { ...item, progress } : item
-          );
-        },
-        controller.signal
-      )
-        .then((ticket) => {
-          forumUploadControllers.delete(key);
-          if (
-            generation !== loadGeneration ||
-            routeChannel !== channelId ||
-            !forumUploadTarget ||
-            entityKey(forumUploadTarget) !== forumKey
-          )
-            return;
-          forumUploads = forumUploads.map((item) =>
-            item.key === key
-              ? {
-                  ...item,
-                  progress: 100,
-                  status: 'ready',
-                  attachmentId: ticket.id
-                }
-              : item
-          );
-        })
-        .catch((caught: unknown) => {
-          forumUploadControllers.delete(key);
-          if (
-            controller.signal.aborted ||
-            generation !== loadGeneration ||
-            routeChannel !== channelId ||
-            !forumUploadTarget ||
-            entityKey(forumUploadTarget) !== forumKey
-          )
-            return;
-          forumUploads = forumUploads.map((item) =>
-            item.key === key
-              ? {
-                  ...item,
-                  status: 'failed',
-                  error: userErrorMessage(caught, 'Upload failed. Remove the file and try again.')
-                }
-              : item
-          );
-        });
+        (progress, signal) => uploadChannelFile(target, file, progress, signal),
+        () =>
+          generation === loadGeneration &&
+          routeChannel === channelId &&
+          Boolean(forumUploadTarget && entityKey(forumUploadTarget) === forumKey)
+      );
     }
   }
 
   function removeUpload(key: string) {
-    uploadControllers.get(key)?.abort();
-    uploadControllers.delete(key);
-    uploads = uploads.filter((item) => item.key !== key);
+    uploadQueue.remove(key);
   }
 
   function removeForumUpload(key: string) {
@@ -5571,21 +5413,15 @@
       forumError = 'Finish retrying the pending encrypted post before changing its files.';
       return;
     }
-    forumUploadControllers.get(key)?.abort();
-    forumUploadControllers.delete(key);
-    forumUploads = forumUploads.filter((item) => item.key !== key);
+    forumUploadQueue.remove(key);
   }
 
   function resetUploads() {
-    for (const controller of uploadControllers.values()) controller.abort();
-    uploadControllers.clear();
-    uploads = [];
+    uploadQueue.reset();
   }
 
   function resetForumUploads() {
-    for (const controller of forumUploadControllers.values()) controller.abort();
-    forumUploadControllers.clear();
-    forumUploads = [];
+    forumUploadQueue.reset();
   }
 
   function composerPaste(event: ClipboardEvent) {

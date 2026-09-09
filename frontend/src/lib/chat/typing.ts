@@ -31,3 +31,31 @@ export function typingLabel(participants: readonly TypingParticipant[]): string 
   if (names.length === 3) return `${names[0]}, ${names[1]}, and ${names[2]} are typing…`;
   return `${names[0]}, ${names[1]}, and ${names.length - 2} more are typing…`;
 }
+
+/** Own one conversation's expiry timer; reset also disposes it on navigation. */
+export function createTypingState(onLabel: (label: string) => void) {
+  let participants: TypingParticipant[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  function reset() {
+    participants = [];
+    onLabel('');
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  }
+  function refresh() {
+    participants = activeTypingParticipants(participants);
+    onLabel(typingLabel(participants));
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (!participants.length) return;
+    const nextExpiry = Math.min(...participants.map((item) => item.expiresAt));
+    timer = setTimeout(refresh, Math.max(50, nextExpiry - Date.now() + 5));
+  }
+  return {
+    reset,
+    register(participant: Omit<TypingParticipant, 'expiresAt'>) {
+      participants = upsertTypingParticipant(participants, participant);
+      refresh();
+    }
+  };
+}

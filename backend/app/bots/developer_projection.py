@@ -11,11 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bots.application_contract import (
     DEVELOPER_TEAM_APPLICATION_LIMIT,
-    canonical_application_manifest_projection,
     validate_application_https_url,
     validate_application_icon_hash,
     validate_application_install_contract,
     validate_known_permission_mask,
+)
+from app.bots.application_contract import (
+    manifest_application_projection as _application_manifest_projection,
 )
 from app.bots.directory_contract import (
     DirectoryDescriptionLocalizations,
@@ -553,26 +555,6 @@ _DEVELOPER_APPLICATION_FIELDS = (
     "directory_description_localizations",
     "custody_mode",
 )
-
-
-def _application_manifest_projection(
-    application: BotApplication | DeveloperApplicationProjection,
-) -> tuple[object, ...]:
-    return canonical_application_manifest_projection(
-        name=application.name,
-        description=application.description,
-        icon_hash=application.icon_hash,
-        support_url=application.support_url,
-        privacy_url=application.privacy_url,
-        target_policy=application.target_policy,
-        default_scopes=application.default_scopes,
-        default_intents=application.default_intents,
-        default_permissions=int(application.default_permissions),
-        supported_install_types=application.supported_install_types,
-        user_install_scopes=application.user_install_scopes,
-        user_install_contexts=application.user_install_contexts,
-        e2ee_modes=application.e2ee_modes,
-    )
 
 
 def _apply_application_projection(

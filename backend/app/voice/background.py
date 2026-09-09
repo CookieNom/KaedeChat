@@ -33,6 +33,7 @@ from app.voice.state import (
     current_generation,
     federation_occupant_state,
     get_call,
+    occupant_from_metadata,
     public_occupant_state,
     release_voice_connection,
     remove_occupant,
@@ -410,11 +411,11 @@ async def _reconcile_room(
             continue
         seen.add(identity)
         resolved_channel_id = leaf_id if kind == "g" else scope_id
-        self_deaf = bool(metadata.get("self_deaf", False))
         await set_occupant(
             redis,
             settings.domain,
-            Occupant(
+            occupant_from_metadata(
+                metadata,
                 identity=identity,
                 user_id=str(user_id),
                 user_domain=user_domain,
@@ -423,24 +424,6 @@ async def _reconcile_room(
                 channel_id=str(resolved_channel_id),
                 joined_at=int(getattr(participant, "joined_at", 0)) or int(time.time()),
                 connection_id=connection_id,
-                client_kind=str(metadata["client_kind"]),
-                self_mute=bool(metadata.get("self_mute", False)) or self_deaf,
-                self_deaf=self_deaf,
-                server_mute=bool(metadata["server_mute"]),
-                server_deaf=bool(metadata["server_deaf"]),
-                suppressed=bool(metadata.get("suppressed", False)),
-                request_to_speak_timestamp=(
-                    str(metadata["request_to_speak_timestamp"])
-                    if metadata.get("request_to_speak_timestamp") is not None
-                    else None
-                ),
-                can_speak=bool(metadata["can_speak"]),
-                can_stream=bool(metadata["can_stream"]),
-                can_priority_speak=bool(metadata.get("can_priority_speak", False)),
-                allow_listen=bool(metadata.get("allow_listen", True)),
-                allow_speak=bool(metadata.get("allow_speak", True)),
-                allow_stream=bool(metadata.get("allow_stream", True)),
-                participant_metadata=dict(metadata),
             ),
         )
         if user_domain != settings.domain and isinstance(move_session_id, str):

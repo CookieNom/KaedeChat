@@ -517,6 +517,50 @@ class Occupant:
     participant_metadata: dict[str, object] = field(default_factory=dict)
 
 
+def occupant_from_metadata(
+    metadata: Mapping[str, object],
+    *,
+    identity: str,
+    user_id: str,
+    user_domain: str,
+    room: str,
+    guild_id: str | None,
+    channel_id: str,
+    joined_at: int,
+    connection_id: str,
+) -> Occupant:
+    """Project already-authorized LiveKit metadata without changing admission policy."""
+    self_deaf = bool(metadata.get("self_deaf", False))
+    return Occupant(
+        identity=identity,
+        user_id=user_id,
+        user_domain=user_domain,
+        room=room,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        joined_at=joined_at,
+        connection_id=connection_id,
+        client_kind=str(metadata["client_kind"]),
+        self_mute=bool(metadata.get("self_mute", False)) or self_deaf,
+        self_deaf=self_deaf,
+        server_mute=bool(metadata["server_mute"]),
+        server_deaf=bool(metadata["server_deaf"]),
+        suppressed=bool(metadata.get("suppressed", False)),
+        request_to_speak_timestamp=(
+            str(metadata["request_to_speak_timestamp"])
+            if metadata.get("request_to_speak_timestamp") is not None
+            else None
+        ),
+        can_speak=bool(metadata["can_speak"]),
+        can_stream=bool(metadata["can_stream"]),
+        can_priority_speak=bool(metadata.get("can_priority_speak", False)),
+        allow_listen=bool(metadata.get("allow_listen", True)),
+        allow_speak=bool(metadata.get("allow_speak", True)),
+        allow_stream=bool(metadata.get("allow_stream", True)),
+        participant_metadata=dict(metadata),
+    )
+
+
 def public_occupant_state(occupant: Occupant) -> dict[str, object]:
     """Return the Discord-like voice state safe to expose outside the authority.
 

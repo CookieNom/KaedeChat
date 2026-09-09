@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { cancelableDelay } from '$lib/ui/delay';
   import { resolve } from '$app/paths';
   import { api, expireBrowserSession, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
@@ -141,25 +142,6 @@
       if (routeController === controller) routeController = null;
     };
   });
-
-  function cancelableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
-    return new Promise((resolveDelay, rejectDelay) => {
-      if (signal.aborted) {
-        rejectDelay(new DOMException('Operation cancelled', 'AbortError'));
-        return;
-      }
-      const timeout = window.setTimeout(finish, milliseconds);
-      function finish() {
-        signal.removeEventListener('abort', cancel);
-        resolveDelay();
-      }
-      function cancel() {
-        window.clearTimeout(timeout);
-        rejectDelay(new DOMException('Operation cancelled', 'AbortError'));
-      }
-      signal.addEventListener('abort', cancel, { once: true });
-    });
-  }
 
   function beginAction() {
     error = '';

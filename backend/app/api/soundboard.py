@@ -84,8 +84,6 @@ from app.federation.actor_intents import (
 )
 from app.federation.client import signed_request
 from app.federation.guild_management import (
-    GuildManagementOperation,
-    GuildManagementResult,
     proxy_remote_guild_management,
 )
 from app.federation.network import FederationNetworkError, decode_federation_response_json
@@ -104,6 +102,7 @@ from app.media.service import (
     attachment_payload,
     bind_asset,
     create_upload_ticket,
+    defer_attachment_processing,
     finalize_attachment,
     is_federated_human_authority_upload,
     ticket_payload,
@@ -114,7 +113,7 @@ from app.media.storage import (
     media_url_origin,
     validate_media_url_origin,
 )
-from app.tasks import media_local_purge, media_process
+from app.tasks import media_local_purge
 from app.voice.rooms import guild_room_name, participant_identity
 from app.voice.schemas import (
     SoundboardPlayRequest,
@@ -144,24 +143,6 @@ SOUNDBOARD_ACTOR_INTENT_ACTION = "soundboard.play"
 SOUNDBOARD_FEDERATION_DEADLINE_SECONDS = 10
 SOUNDBOARD_FEDERATION_MAX_RESPONSE_BYTES = 128 * 1024
 SOUNDBOARD_EFFECT_TTL_SECONDS = 120
-
-
-async def _proxy_human_management(
-    session: AsyncSession,
-    settings: Settings,
-    guild_ref: EntityRef,
-    auth: AuthenticatedUser,
-    operation: GuildManagementOperation,
-    payload: dict[str, Any],
-) -> GuildManagementResult | None:
-    return await proxy_remote_guild_management(
-        session,
-        settings,
-        guild_ref,
-        auth.user,
-        operation,
-        payload,
-    )
 
 
 class StrictSoundboardModel(UnambiguousInputModel):
@@ -1344,11 +1325,11 @@ async def create_human_soundboard_ticket(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
     _validate_soundboard_upload(payload)
-    remote = await _proxy_human_management(
+    remote = await proxy_remote_guild_management(
         session,
         settings,
         guild_ref,
-        auth,
+        auth.user,
         "soundboard.ticket",
         {"data": payload.model_dump(mode="json")},
     )
@@ -2008,10 +1989,7 @@ async def _commit_soundboard_sound(
                 "max_bytes": SOUNDBOARD_MAX_BYTES,
             },
         )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return attachment_payload(attachment)
     content_type = _require_sound_content_type(attachment.detected_content_type)
     if not attachment.content_sha256 or not attachment.object_key:
@@ -2133,11 +2111,11 @@ async def create_human_soundboard_sound(
     settings: Annotated[Settings, Depends(get_settings)],
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> dict[str, object]:
-    remote = await _proxy_human_management(
+    remote = await proxy_remote_guild_management(
         session,
         settings,
         guild_ref,
-        auth,
+        auth.user,
         "soundboard.create",
         {
             "data": payload.model_dump(mode="json"),
@@ -2327,11 +2305,11 @@ async def update_human_soundboard_sound(
     settings: Annotated[Settings, Depends(get_settings)],
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> dict[str, object]:
-    remote = await _proxy_human_management(
+    remote = await proxy_remote_guild_management(
         session,
         settings,
         guild_ref,
-        auth,
+        auth.user,
         "soundboard.update",
         {
             "resource_ref": str(sound_ref),
@@ -2465,11 +2443,11 @@ async def delete_human_soundboard_sound(
     settings: Annotated[Settings, Depends(get_settings)],
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
-    remote = await _proxy_human_management(
+    remote = await proxy_remote_guild_management(
         session,
         settings,
         guild_ref,
-        auth,
+        auth.user,
         "soundboard.delete",
         {"resource_ref": str(sound_ref), "reason": reason},
     )

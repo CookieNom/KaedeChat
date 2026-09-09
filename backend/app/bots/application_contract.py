@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from app.bots.install_config import (
@@ -12,6 +13,11 @@ from app.bots.install_config import (
 from app.core.bot_intents import SUPPORTED_BOT_INTENTS
 from app.core.permissions import ALL_PERMISSIONS
 from app.federation.network import FederationNetworkError, normalize_domain
+
+if TYPE_CHECKING:
+    from app.api.bot_federation import ManifestApplication
+    from app.bots.developer_projection import DeveloperApplicationProjection
+    from app.db.bot_models import BotApplication
 
 DEVELOPER_TEAM_APPLICATION_LIMIT = 75
 
@@ -79,6 +85,28 @@ SUPPORTED_APPLICATION_SCOPES = frozenset(
         "dm.send",
     }
 )
+
+
+def manifest_application_projection(
+    application: BotApplication | ManifestApplication | DeveloperApplicationProjection,
+) -> tuple[object, ...]:
+    """Return the canonical application fields governed by manifest_generation."""
+
+    return canonical_application_manifest_projection(
+        name=application.name,
+        description=application.description,
+        icon_hash=application.icon_hash,
+        support_url=application.support_url,
+        privacy_url=application.privacy_url,
+        target_policy=application.target_policy,
+        default_scopes=application.default_scopes,
+        default_intents=application.default_intents,
+        default_permissions=int(application.default_permissions),
+        supported_install_types=application.supported_install_types,
+        user_install_scopes=application.user_install_scopes,
+        user_install_contexts=application.user_install_contexts,
+        e2ee_modes=application.e2ee_modes,
+    )
 
 
 def canonical_application_manifest_projection(

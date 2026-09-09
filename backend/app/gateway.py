@@ -56,7 +56,7 @@ from app.core.close_codes import GatewayCloseCode
 from app.core.gateway_ops import PROTOCOL_VERSION, GatewayOp
 from app.core.logging import configure_logging
 from app.core.permissions import Permission
-from app.core.proxy import resolve_client_ip
+from app.core.proxy import connection_client_ip
 from app.core.settings import get_settings
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference, validate_entity_reference
@@ -1131,16 +1131,7 @@ async def identify_admitted(redis: Redis, client: str) -> bool:
 
 
 def gateway_client_ip(websocket: WebSocket) -> str:
-    supplied_secret = websocket.headers.get("X-Kaede-Proxy-Secret")
-    configured_secret = (
-        settings.proxy_secret.get_secret_value() if settings.proxy_secret is not None else None
-    )
-    return resolve_client_ip(
-        supplied_secret=supplied_secret,
-        configured_secret=configured_secret,
-        forwarded_for=websocket.headers.get("X-Forwarded-For"),
-        direct_host=websocket.client.host if websocket.client is not None else None,
-    )
+    return connection_client_ip(websocket, settings)
 
 
 def cookie_origin_allowed(websocket: WebSocket) -> bool:

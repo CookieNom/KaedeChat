@@ -258,7 +258,7 @@ from app.federation.expression_authorization import (
     validate_attested_expression_target,
     validate_expression_authorization_map,
 )
-from app.federation.forwarding import validated_forward_source_proof
+from app.federation.forwarding import resolve_announcement_crosspost, validated_forward_source_proof
 from app.federation.guild_media_deletions import queue_guild_media_delete_request
 from app.federation.guilds import (
     GuildSequenceGap,
@@ -4273,49 +4273,9 @@ async def resolve_forwarded_message(
         )
         if follow is None:
             raise HTTPException(status_code=404, detail={"code": "FORWARDED_MESSAGE_NOT_FOUND"})
-        try:
-            upstream = await signed_request(
-                session,
-                settings,
-                "POST",
-                follow.source_authority_domain,
-                (f"/_kaede/v1/channels/{follow.source_channel_id}/announcement-crossposts/resolve"),
-                payload={
-                    "follow_id": str(follow.id),
-                    "generation": str(follow.generation),
-                    "source_message_ref": (
-                        f"{federated_crosspost.source_message_id}@"
-                        f"{federated_crosspost.source_message_domain}"
-                    ),
-                },
-                request_timeout=10,
-                max_response_bytes=512 * 1024,
-            )
-        except FederationNetworkError:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "FEDERATED_FORWARD_UNAVAILABLE"},
-            ) from None
-        if upstream.status_code == 404:
-            raise HTTPException(status_code=404, detail={"code": "FORWARDED_MESSAGE_NOT_FOUND"})
-        if upstream.status_code != 200:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "FEDERATED_FORWARD_UNAVAILABLE"},
-            )
-        remote = decode_federation_response_json(upstream)
-        if (
-            not isinstance(remote, dict)
-            or remote.get("id") != str(federated_crosspost.source_message_id)
-            or remote.get("origin_domain") != federated_crosspost.source_message_domain
-            or remote.get("source_channel_ref")
-            != f"{follow.source_channel_id}@{follow.source_channel_domain}"
-        ):
-            raise HTTPException(
-                status_code=502,
-                detail={"code": "FEDERATED_FORWARD_RESPONSE_INVALID"},
-            )
-        return {str(key): value for key, value in remote.items()}
+        return await resolve_announcement_crosspost(
+            session, settings, follow, federated_crosspost, generation=follow.generation
+        )
     source = await session.get(
         Message,
         (destination.forwarded_message_id, destination.forwarded_message_domain),

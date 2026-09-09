@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -801,3 +802,20 @@ async def delete_attachment_row(session: AsyncSession, attachment: Attachment) -
             Attachment.origin_domain == attachment.origin_domain,
         )
     )
+
+
+async def defer_attachment_processing(
+    session: AsyncSession,
+    attachment: Attachment,
+    response: Response,
+    enqueue: Callable[..., Awaitable[bool]],
+) -> bool:
+    """Persist staged media before waking processing and returning an HTTP 202."""
+    if attachment.scan_status == "clean":
+        return False
+    from app.tasks import media_process
+
+    await session.commit()
+    await enqueue(media_process, attachment.id, attachment.origin_domain)
+    response.status_code = status.HTTP_202_ACCEPTED
+    return True

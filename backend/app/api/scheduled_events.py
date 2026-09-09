@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, select, tuple_
@@ -17,6 +17,9 @@ from app.api.dependencies import (
     get_session,
     get_snowflake,
     require_user,
+)
+from app.api.dependencies import (
+    proxy_authenticated_guild_management as _proxy_human,
 )
 from app.api.guilds import local_guild
 from app.automod.service import require_member_interactions_allowed
@@ -46,16 +49,12 @@ from app.db.models import (
     MemberRole,
     User,
 )
-from app.federation.guild_management import (
-    GuildManagementOperation,
-    GuildManagementResult,
-    proxy_remote_guild_management,
-)
 from app.media.schemas import AssetCommitRequest, UploadTicketRequest
 from app.media.service import (
     attachment_payload,
     bind_asset,
     create_upload_ticket,
+    defer_attachment_processing,
     finalize_attachment,
     is_federated_human_authority_upload,
     require_image_type,
@@ -91,7 +90,7 @@ from app.scheduled_events.service import (
 from app.scheduled_events.service import (
     viewer_subscribed as _viewer_subscribed,
 )
-from app.tasks import media_local_purge, media_process
+from app.tasks import media_local_purge
 from app.voice.permissions import (
     STAGE_INSTANCE_MODERATOR_PERMISSIONS,
     STAGE_INSTANCE_VIEW_PERMISSIONS,
@@ -118,20 +117,6 @@ CHANNEL_EVENT_VIEW_PERMISSION = STAGE_INSTANCE_VIEW_PERMISSIONS
 CHANNEL_EVENT_CREATE_PERMISSIONS = Permission.CREATE_EVENTS | VOICE_CHANNEL_ACCESS_PERMISSIONS
 MAX_ACTIVE_SCHEDULED_EVENTS = 100
 SCHEDULED_EVENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
-
-
-async def _proxy_human(
-    session: AsyncSession,
-    settings: Settings,
-    guild_ref: EntityRef,
-    auth: AuthenticatedUser,
-    operation: GuildManagementOperation,
-    payload: dict[str, Any],
-) -> tuple[bool, GuildManagementResult | None]:
-    result = await proxy_remote_guild_management(
-        session, settings, guild_ref, auth.user, operation, payload
-    )
-    return result is not None, result
 
 
 def _event_image_staging_binding(event: GuildScheduledEvent, attachment_id: int) -> str:
@@ -786,10 +771,7 @@ async def commit_scheduled_event_image(
     )
     if attachment.asset_binding != _event_image_staging_binding(event, attachment.id):
         raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return {"status": "processing", "attachment": attachment_payload(attachment)}
     if attachment.content_sha256 is None:
         raise RuntimeError("clean scheduled event image is missing its digest")

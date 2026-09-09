@@ -40,7 +40,7 @@ from app.core.federation import (
 )
 from app.core.json_limits import strict_json_loads
 from app.core.permissions import PERMISSION_SCHEMA_CAPABILITY
-from app.core.proxy import resolve_client_ip
+from app.core.proxy import connection_client_ip
 from app.core.settings import Settings, get_settings
 from app.db.models import Instance, InstanceBlock, PeerKey
 from app.federation.network import (
@@ -446,29 +446,11 @@ async def enforce_federation_source_rate_limit(redis: Redis, source_ip: str) -> 
 
 
 def federation_client_ip(request: Request, settings: Settings) -> str:
-    supplied_secret = request.headers.get("X-Kaede-Proxy-Secret")
-    configured_secret = (
-        settings.proxy_secret.get_secret_value() if settings.proxy_secret is not None else None
-    )
-    return resolve_client_ip(
-        supplied_secret=supplied_secret,
-        configured_secret=configured_secret,
-        forwarded_for=request.headers.get("X-Forwarded-For"),
-        direct_host=request.client.host if request.client is not None else None,
-    )
+    return connection_client_ip(request, settings)
 
 
 def federation_websocket_client_ip(websocket: WebSocket, settings: Settings) -> str:
-    supplied_secret = websocket.headers.get("X-Kaede-Proxy-Secret")
-    configured_secret = (
-        settings.proxy_secret.get_secret_value() if settings.proxy_secret is not None else None
-    )
-    return resolve_client_ip(
-        supplied_secret=supplied_secret,
-        configured_secret=configured_secret,
-        forwarded_for=websocket.headers.get("X-Forwarded-For"),
-        direct_host=websocket.client.host if websocket.client is not None else None,
-    )
+    return connection_client_ip(websocket, settings)
 
 
 async def admit_unknown_key_refresh(redis: Redis, source_ip: str, origin: str) -> bool:

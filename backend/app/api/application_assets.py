@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,12 +42,13 @@ from app.media.service import (
     attachment_variant_is_animated,
     bind_asset,
     create_upload_ticket,
+    defer_attachment_processing,
     finalize_attachment,
     is_federated_human_authority_upload,
     require_image_type,
     ticket_payload,
 )
-from app.tasks import media_local_purge, media_process
+from app.tasks import media_local_purge
 
 router = APIRouter(prefix="/api/v1", tags=["application assets"])
 APPLICATION_ASSET_LIMIT = 300
@@ -415,10 +416,7 @@ async def _commit_asset(
         federated_application_upload=_federated_application_upload(access, settings),
     )
     _require_upload_binding(attachment, access.application, "application_asset")
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return {
             "status": "processing",
             "application_ref": (f"{access.application.id}@{access.application.origin_domain}"),
@@ -639,10 +637,7 @@ async def _commit_emoji(
                 "max_bytes": APPLICATION_EMOJI_MAX_BYTES,
             },
         )
-    if attachment.scan_status != "clean":
-        await session.commit()
-        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
-        response.status_code = status.HTTP_202_ACCEPTED
+    if await defer_attachment_processing(session, attachment, response, enqueue_best_effort):
         return {
             "status": "processing",
             "application_ref": (f"{access.application.id}@{access.application.origin_domain}"),

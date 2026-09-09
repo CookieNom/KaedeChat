@@ -6760,6 +6760,41 @@ class Client:
             headers=_audit_headers(reason),
         )
 
+    async def _complete_scanned_media(
+        self,
+        commit: Callable[[], Awaitable[Any]],
+        *,
+        origin: str,
+        scan_attempts: int,
+        label: str,
+        error_prefix: str,
+    ) -> dict[str, Any]:
+        for attempt in range(scan_attempts):
+            raw = await commit()
+            if isinstance(raw, dict) and raw.get("guild_id") is not None:
+                return raw
+            processing = raw.get("attachment") if isinstance(raw, dict) else None
+            if not isinstance(processing, dict):
+                raise ApiError(
+                    502,
+                    f"{error_prefix}_RESPONSE_INVALID",
+                    f"{label} processing returned an invalid response",
+                )
+            attachment = Attachment.from_payload(self, origin, processing)
+            if attachment.scan_status in {"infected", "rejected", "failed"}:
+                raise ApiError(
+                    422,
+                    f"{error_prefix}_REJECTED",
+                    f"The {label.lower()} did not pass media safety processing",
+                )
+            if attempt + 1 < scan_attempts:
+                await asyncio.sleep(1)
+        raise ApiError(
+            504,
+            f"{error_prefix}_PROCESSING_TIMEOUT",
+            f"{label} processing is taking longer than expected",
+        )
+
     async def upload_scheduled_event_image(
         self,
         guild: EntityRef,
@@ -6797,42 +6832,25 @@ class Client:
             guild, ticket.ref, label="scheduled event attachment"
         )
         await self._put_upload_ticket(ticket, data, content_type=content_type)
-        for attempt in range(scan_attempts):
-            raw = await self.request(
+        raw = await self._complete_scanned_media(
+            lambda: self.request(
                 "PUT",
                 f"/api/v1/bots/guilds/{guild}/scheduled-events/{event}/image",
                 target=origin,
                 json={"attachment_id": str(ticket.ref.id)},
                 headers=_audit_headers(reason),
-            )
-            if isinstance(raw, dict) and raw.get("guild_id") is not None:
-                return _scheduled_event_response(
-                    self,
-                    origin,
-                    guild,
-                    raw,
-                    expected_ref=event,
-                )
-            processing = raw.get("attachment") if isinstance(raw, dict) else None
-            if not isinstance(processing, dict):
-                raise ApiError(
-                    502,
-                    "SCHEDULED_EVENT_IMAGE_RESPONSE_INVALID",
-                    "Scheduled event cover processing returned an invalid response",
-                )
-            attachment = Attachment.from_payload(self, origin, processing)
-            if attachment.scan_status in {"infected", "rejected", "failed"}:
-                raise ApiError(
-                    422,
-                    "SCHEDULED_EVENT_IMAGE_REJECTED",
-                    "The scheduled event cover did not pass media safety processing",
-                )
-            if attempt + 1 < scan_attempts:
-                await asyncio.sleep(1)
-        raise ApiError(
-            504,
-            "SCHEDULED_EVENT_IMAGE_PROCESSING_TIMEOUT",
-            "Scheduled event cover processing is taking longer than expected",
+            ),
+            origin=origin,
+            scan_attempts=scan_attempts,
+            label="Scheduled event cover",
+            error_prefix="SCHEDULED_EVENT_IMAGE",
+        )
+        return _scheduled_event_response(
+            self,
+            origin,
+            guild,
+            raw,
+            expected_ref=event,
         )
 
     async def delete_scheduled_event_image(
@@ -7268,43 +7286,26 @@ class Client:
         ticket = Attachment.from_payload(self, origin, raw_ticket)
         self._require_same_authority(guild, ticket.ref, label="webhook attachment")
         await self._put_upload_ticket(ticket, data, content_type=content_type)
-        for attempt in range(scan_attempts):
-            raw = await self.request(
+        raw = await self._complete_scanned_media(
+            lambda: self.request(
                 "PUT",
                 f"/api/v1/bots/guilds/{guild}/webhooks/{webhook_id}/avatar",
                 target=origin,
                 json={"attachment_id": str(ticket.ref.id)},
                 headers={"X-Audit-Log-Reason": reason} if reason else None,
-            )
-            if isinstance(raw, dict) and raw.get("guild_id") is not None:
-                return _webhook_response(
-                    self,
-                    origin,
-                    guild,
-                    raw,
-                    expected_ref=EntityRef(webhook_id, guild.domain),
-                    expected_guild=guild,
-                )
-            processing = raw.get("attachment") if isinstance(raw, dict) else None
-            if not isinstance(processing, dict):
-                raise ApiError(
-                    502,
-                    "WEBHOOK_AVATAR_RESPONSE_INVALID",
-                    "Webhook avatar processing returned an invalid response",
-                )
-            attachment = Attachment.from_payload(self, origin, processing)
-            if attachment.scan_status in {"infected", "rejected", "failed"}:
-                raise ApiError(
-                    422,
-                    "WEBHOOK_AVATAR_REJECTED",
-                    "The webhook avatar did not pass media safety processing",
-                )
-            if attempt + 1 < scan_attempts:
-                await asyncio.sleep(1)
-        raise ApiError(
-            504,
-            "WEBHOOK_AVATAR_PROCESSING_TIMEOUT",
-            "Webhook avatar processing is taking longer than expected",
+            ),
+            origin=origin,
+            scan_attempts=scan_attempts,
+            label="Webhook avatar",
+            error_prefix="WEBHOOK_AVATAR",
+        )
+        return _webhook_response(
+            self,
+            origin,
+            guild,
+            raw,
+            expected_ref=EntityRef(webhook_id, guild.domain),
+            expected_guild=guild,
         )
 
     async def delete_webhook_avatar(
@@ -7488,44 +7489,27 @@ class Client:
             label="webhook attachment",
         )
         await self._put_upload_ticket(ticket, data, content_type=content_type)
-        for attempt in range(scan_attempts):
-            raw = await self.request(
+        raw = await self._complete_scanned_media(
+            lambda: self.request(
                 "PUT",
                 f"/api/v1/webhooks/{resolved_id}/{token}/avatar",
                 target=origin,
                 json={"attachment_id": str(ticket.ref.id)},
-            )
-            if isinstance(raw, dict) and raw.get("guild_id") is not None:
-                webhook = _webhook_response(
-                    self,
-                    origin,
-                    webhook_ref,
-                    raw,
-                    expected_ref=webhook_ref,
-                )
-                webhook.token = token
-                return webhook
-            processing = raw.get("attachment") if isinstance(raw, dict) else None
-            if not isinstance(processing, dict):
-                raise ApiError(
-                    502,
-                    "WEBHOOK_AVATAR_RESPONSE_INVALID",
-                    "Webhook avatar processing returned an invalid response",
-                )
-            attachment = Attachment.from_payload(self, origin, processing)
-            if attachment.scan_status in {"infected", "rejected", "failed"}:
-                raise ApiError(
-                    422,
-                    "WEBHOOK_AVATAR_REJECTED",
-                    "The webhook avatar did not pass media safety processing",
-                )
-            if attempt + 1 < scan_attempts:
-                await asyncio.sleep(1)
-        raise ApiError(
-            504,
-            "WEBHOOK_AVATAR_PROCESSING_TIMEOUT",
-            "Webhook avatar processing is taking longer than expected",
+            ),
+            origin=origin,
+            scan_attempts=scan_attempts,
+            label="Webhook avatar",
+            error_prefix="WEBHOOK_AVATAR",
         )
+        webhook = _webhook_response(
+            self,
+            origin,
+            webhook_ref,
+            raw,
+            expected_ref=webhook_ref,
+        )
+        webhook.token = token
+        return webhook
 
     async def delete_webhook_avatar_with_token(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.forwarding import (
@@ -11,6 +12,9 @@ from app.chat.forwarding import (
 )
 from app.core.settings import Settings
 from app.core.types import EntityRef
+from app.db.models import FederatedChannelFollow, FederatedMessageCrosspost
+from app.federation.client import signed_request
+from app.federation.network import FederationNetworkError, decode_federation_response_json
 from app.federation.security import validated_event_envelope
 
 
@@ -70,3 +74,57 @@ async def validated_forward_source_proof(
     ):
         raise ValueError("forward source proof use binding is invalid")
     return content
+
+
+async def resolve_announcement_crosspost(
+    session: AsyncSession,
+    settings: Settings,
+    follow: FederatedChannelFollow,
+    federated_crosspost: FederatedMessageCrosspost,
+    *,
+    generation: int,
+) -> dict[str, object]:
+    """Resolve the exact source projection after the caller authorizes the destination."""
+    try:
+        upstream = await signed_request(
+            session,
+            settings,
+            "POST",
+            follow.source_authority_domain,
+            (f"/_kaede/v1/channels/{follow.source_channel_id}/announcement-crossposts/resolve"),
+            payload={
+                "follow_id": str(follow.id),
+                "generation": str(generation),
+                "source_message_ref": (
+                    f"{federated_crosspost.source_message_id}@"
+                    f"{federated_crosspost.source_message_domain}"
+                ),
+            },
+            request_timeout=10,
+            max_response_bytes=512 * 1024,
+        )
+    except FederationNetworkError:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "FEDERATED_FORWARD_UNAVAILABLE"},
+        ) from None
+    if upstream.status_code == 404:
+        raise HTTPException(status_code=404, detail={"code": "FORWARDED_MESSAGE_NOT_FOUND"})
+    if upstream.status_code != 200:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "FEDERATED_FORWARD_UNAVAILABLE"},
+        )
+    remote = decode_federation_response_json(upstream)
+    if (
+        not isinstance(remote, dict)
+        or remote.get("id") != str(federated_crosspost.source_message_id)
+        or remote.get("origin_domain") != federated_crosspost.source_message_domain
+        or remote.get("source_channel_ref")
+        != f"{follow.source_channel_id}@{follow.source_channel_domain}"
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "FEDERATED_FORWARD_RESPONSE_INVALID"},
+        )
+    return {str(key): value for key, value in remote.items()}

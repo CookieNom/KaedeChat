@@ -123,6 +123,8 @@ Future<String?> showSettingsTextDialog(
   required String title,
   required String label,
   String initialValue = '',
+  String actionLabel = 'Save',
+  bool useHint = false,
   int? maxLength,
 }) async {
   final input = TextEditingController(text: initialValue);
@@ -135,7 +137,10 @@ Future<String?> showSettingsTextDialog(
           controller: input,
           autofocus: true,
           maxLength: maxLength,
-          decoration: InputDecoration(labelText: label),
+          decoration: InputDecoration(
+            labelText: useHint ? null : label,
+            hintText: useHint ? label : null,
+          ),
         ),
         actions: [
           TextButton(
@@ -148,7 +153,7 @@ Future<String?> showSettingsTextDialog(
               onPressed: value.text.trim().isEmpty
                   ? null
                   : () => Navigator.pop(dialogContext, value.text.trim()),
-              child: const Text('Save'),
+              child: Text(actionLabel),
             ),
           ),
         ],

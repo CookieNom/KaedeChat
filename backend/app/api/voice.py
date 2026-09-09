@@ -102,6 +102,7 @@ from app.voice.state import (
     get_federated_voice_session,
     occupancy_snapshot,
     occupant_from_federation_state,
+    occupant_from_metadata,
     occupant_in_room,
     public_occupant_state,
     release_voice_connection,
@@ -1588,8 +1589,8 @@ async def livekit_webhook(
             ):
                 return await revoke_current_join(connection_id, str(metadata["client_kind"]))
         resolved_channel_id = leaf_id if kind == "g" else scope_id
-        self_deaf = bool(metadata.get("self_deaf", False))
-        occupant = Occupant(
+        occupant = occupant_from_metadata(
+            metadata,
             identity=identity,
             user_id=str(user_id),
             user_domain=user_domain,
@@ -1598,24 +1599,6 @@ async def livekit_webhook(
             channel_id=str(resolved_channel_id),
             joined_at=int(time.time()),
             connection_id=connection_id,
-            client_kind=str(metadata["client_kind"]),
-            self_mute=bool(metadata.get("self_mute", False)) or self_deaf,
-            self_deaf=self_deaf,
-            server_mute=bool(metadata["server_mute"]),
-            server_deaf=bool(metadata["server_deaf"]),
-            suppressed=bool(metadata.get("suppressed", False)),
-            request_to_speak_timestamp=(
-                str(metadata["request_to_speak_timestamp"])
-                if metadata.get("request_to_speak_timestamp") is not None
-                else None
-            ),
-            can_speak=bool(metadata["can_speak"]),
-            can_stream=bool(metadata["can_stream"]),
-            can_priority_speak=bool(metadata.get("can_priority_speak", False)),
-            allow_listen=bool(metadata.get("allow_listen", True)),
-            allow_speak=bool(metadata.get("allow_speak", True)),
-            allow_stream=bool(metadata.get("allow_stream", True)),
-            participant_metadata=dict(metadata),
         )
         admitted = await admit_occupant(
             redis,

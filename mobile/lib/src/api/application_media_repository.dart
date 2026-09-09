@@ -48,15 +48,14 @@ extension ApplicationMediaRepository on KaedeRepository {
     );
   }
 
-  Future<ApplicationAsset> uploadApplicationAsset({
+  Future<String> _uploadApplicationImage({
     required EntityRef application,
-    required ApplicationAssetDraft draft,
+    required String collection,
     required String filename,
     required String contentType,
     required File file,
+    required String? Function() validateDraft,
     void Function(int sent, int total)? onProgress,
-    Duration pollInterval = const Duration(seconds: 1),
-    int maxPollAttempts = 45,
   }) async {
     final size = await file.length();
     final normalizedContentType = imageUploadContentType(
@@ -69,12 +68,12 @@ extension ApplicationMediaRepository on KaedeRepository {
       size: size,
     );
     if (validation != null) throw UserInputException(validation);
-    if (draft.validationMessage case final message?) {
+    if (validateDraft() case final message?) {
       throw UserInputException(message);
     }
     final ticket = await createApplicationMediaTicket(
       application: application,
-      collection: 'assets',
+      collection: collection,
       filename: filename,
       contentType: normalizedContentType!,
       size: size,
@@ -94,11 +93,33 @@ extension ApplicationMediaRepository on KaedeRepository {
       contentType: normalizedContentType,
       onProgress: onProgress,
     );
+    return '$attachmentId';
+  }
+
+  Future<ApplicationAsset> uploadApplicationAsset({
+    required EntityRef application,
+    required ApplicationAssetDraft draft,
+    required String filename,
+    required String contentType,
+    required File file,
+    void Function(int sent, int total)? onProgress,
+    Duration pollInterval = const Duration(seconds: 1),
+    int maxPollAttempts = 45,
+  }) async {
+    final attachmentId = await _uploadApplicationImage(
+      application: application,
+      collection: 'assets',
+      filename: filename,
+      contentType: contentType,
+      file: file,
+      validateDraft: () => draft.validationMessage,
+      onProgress: onProgress,
+    );
     return completeScannedMediaResource(
       commit: () => api.sendJson(
         'POST',
         '/api/v1/applications/${application.wire}/assets',
-        data: draft.createPayload('$attachmentId'),
+        data: draft.createPayload(attachmentId),
       ),
       isComplete: (json) => json['application_ref'] != null,
       parse: ApplicationAsset.fromJson,
@@ -117,47 +138,20 @@ extension ApplicationMediaRepository on KaedeRepository {
     Duration pollInterval = const Duration(seconds: 1),
     int maxPollAttempts = 45,
   }) async {
-    final size = await file.length();
-    final normalizedContentType = imageUploadContentType(
-      filename,
-      reportedType: contentType,
-    );
-    final validation = applicationImageValidation(
-      filename: filename,
-      contentType: normalizedContentType,
-      size: size,
-    );
-    if (validation != null) throw UserInputException(validation);
-    if (draft.validationMessage case final message?) {
-      throw UserInputException(message);
-    }
-    final ticket = await createApplicationMediaTicket(
+    final attachmentId = await _uploadApplicationImage(
       application: application,
       collection: 'emojis',
       filename: filename,
-      contentType: normalizedContentType!,
-      size: size,
-    );
-    final uploadUrl = ticket['upload_url'];
-    final attachmentId = ticket['id'];
-    if (uploadUrl is! String || attachmentId == null) {
-      throw const KaedeException(
-        code: 'INVALID_UPLOAD_TICKET',
-        message: 'The server returned an invalid image upload authorization.',
-        status: 502,
-      );
-    }
-    await api.putPresignedFile(
-      uploadUrl,
-      file,
-      contentType: normalizedContentType,
+      contentType: contentType,
+      file: file,
+      validateDraft: () => draft.validationMessage,
       onProgress: onProgress,
     );
     return completeScannedMediaResource(
       commit: () => api.sendJson(
         'POST',
         '/api/v1/applications/${application.wire}/emojis',
-        data: draft.createPayload('$attachmentId'),
+        data: draft.createPayload(attachmentId),
       ),
       isComplete: (json) => json['application_ref'] != null,
       parse: ApplicationEmoji.fromJson,
