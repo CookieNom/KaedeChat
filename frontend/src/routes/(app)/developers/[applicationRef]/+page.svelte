@@ -1860,6 +1860,7 @@
   }
   label {
     display: grid;
+    align-content: start;
     gap: 0.4rem;
     margin: 0.7rem 0;
     font-size: 0.8rem;
@@ -1867,7 +1868,8 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
     gap: 1rem;
   }
   input,
@@ -1881,6 +1883,15 @@
     color: var(--text);
     background: var(--input-bg, var(--bg));
     font: inherit;
+  }
+  input:not([type='checkbox']):not([type='radio']),
+  select {
+    min-height: 2.75rem;
+  }
+  label > small {
+    color: var(--text-muted);
+    font-weight: 400;
+    line-height: 1.5;
   }
   .chips {
     display: flex;

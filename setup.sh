@@ -604,6 +604,12 @@ if [[ -n ${OLD[KAEDE_DOMAIN]-} && ${OLD[KAEDE_DOMAIN]%.} != "$DOMAIN" && ${OLD[K
   die "KAEDE_DOMAIN is already '${OLD[KAEDE_DOMAIN]%.}' and cannot be changed to '$DOMAIN' safely by setup; rerun with the established domain or follow a documented migration procedure"
 fi
 
+while true; do
+  PROJECT_NAME=$(prompt_text 'Docker Compose project name (optional; blank uses kaede; use the existing name for an installed instance)' "$(old COMPOSE_PROJECT_NAME '')")
+  [[ -z $PROJECT_NAME || $PROJECT_NAME =~ ^[a-z0-9][a-z0-9_-]*$ ]] && break
+  warn 'Use lowercase letters, digits, underscores, or hyphens, starting with a letter or digit.'
+done
+
 FEDERATION_DEFAULT=$(old KAEDE_FEDERATION_MODE open)
 [[ $FEDERATION_DEFAULT == open || $FEDERATION_DEFAULT == allowlist ]] || FEDERATION_DEFAULT=open
 FEDERATION=$(choose 'Federation admission mode' "$FEDERATION_DEFAULT" open allowlist)
@@ -1303,6 +1309,7 @@ emit() {
   emit SETUP_STORAGE_PROVIDER "$STORAGE"
   emit SETUP_EMAIL_PROVIDER "$EMAIL"
   emit SETUP_HOST_NGINX "$HOST_NGINX"
+  [[ -z $PROJECT_NAME ]] || emit COMPOSE_PROJECT_NAME "$PROJECT_NAME"
   emit AUTO_UPDATE_ENABLED "$AUTO_UPDATE"
   emit AUTO_UPDATE_REMOTE "$AUTO_UPDATE_REMOTE"
   emit AUTO_UPDATE_BRANCH "$AUTO_UPDATE_BRANCH"

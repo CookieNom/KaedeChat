@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import ImageUploadField from './ImageUploadField.svelte';
+  import Icon from './Icon.svelte';
 
   import { api, userErrorMessage } from '$lib/api/client';
   import type {
@@ -448,7 +449,13 @@
           {#if image.hash}<img
               src={assetUrl(image.hash, 'thumbnail_512', mediaDomain)}
               alt={image.label}
-            />{:else}<span>No {image.label.toLowerCase()} yet</span>{/if}
+            />{:else}<span
+              class="profile-placeholder"
+              aria-label={`No ${image.label.toLowerCase()} yet`}
+            >
+              <Icon name={image.kind === 'icon' ? 'user' : 'image'} size={36} />
+              {#if image.kind === 'cover'}<span>No banner yet</span>{/if}
+            </span>{/if}
         </div>
         <p>{image.hint}</p>
         <ImageUploadField
@@ -456,18 +463,20 @@
           disabled={Boolean(busy)}
           onSelect={(file, input) => void uploadProfile(image.kind, file, input)}
         />
-        {#if currentAsset}<button
-            class="remove-image"
-            disabled={Boolean(busy)}
-            onclick={() => deleteAsset(currentAsset)}>Remove {image.label.toLowerCase()}</button
-          >{/if}
+        <div class="profile-actions">
+          {#if currentAsset}<button
+              class="remove-image"
+              disabled={Boolean(busy)}
+              onclick={() => deleteAsset(currentAsset)}>Remove {image.label.toLowerCase()}</button
+            >{/if}
+        </div>
       </div>
     {/each}
   </div>
   <p class="state" role="status">
     {busy === 'asset-create'
       ? `Uploading image… ${uploadProgress}%`
-      : 'Images save immediately after upload. PNG, JPEG, GIF, and WebP are supported.'}
+      : 'Images save automatically after upload.'}
   </p>
   <details class="asset-library">
     <summary>More assets and custom emoji</summary>
@@ -596,15 +605,33 @@
 <style>
   .profile-images {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-    gap: 1.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+    gap: 0.85rem 1.25rem;
+    margin-top: 1.25rem;
+  }
+  .profile-image {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 5;
+    min-width: 0;
+    padding: 1rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+  .profile-image h3,
+  .profile-image p {
+    margin: 0;
+  }
+  .profile-image h3 {
+    font-size: 0.95rem;
+    line-height: 1.4;
   }
   .profile-preview {
-    height: 140px;
+    height: 160px;
     display: grid;
     place-items: center;
     overflow: hidden;
-    border-radius: 12px;
+    border-radius: 8px;
     background: var(--bg);
     border: 1px solid var(--line);
     color: var(--text-muted);
@@ -614,19 +641,37 @@
     height: 100%;
     object-fit: cover;
   }
-  .profile-preview.avatar {
-    width: 140px;
+  .profile-preview.avatar img,
+  .avatar .profile-placeholder {
+    width: 112px;
+    height: 112px;
     border-radius: 50%;
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .profile-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    text-align: center;
   }
   .profile-image p {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
+    line-height: 1.5;
     color: var(--text-muted);
   }
+  .profile-actions:empty {
+    display: none;
+  }
   button.remove-image {
-    margin-top: 0.65rem;
     color: var(--text-muted);
     background: transparent;
     border: 1px solid var(--line);
+    font-size: 0.8rem;
+    font-weight: 500;
   }
   .asset-library {
     margin-top: 1.25rem;

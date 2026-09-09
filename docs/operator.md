@@ -537,6 +537,14 @@ selected in production.
 
 ### Optional automatic updates
 
+`make setup` optionally saves a Docker Compose project name in `.env` as
+`COMPOSE_PROJECT_NAME` and preserves it on subsequent runs. Leave it blank
+for the default `kaede`. For multiple installations on one Docker host, give
+each checkout a distinct name. For an existing installation, use the exact
+name originally passed to `docker compose -p`; changing it selects different
+containers and volumes. You can also add this setting directly to `.env`.
+Both manual updates and the automatic updater read it without additional flags.
+
 The supplied automatic updater runs on the host because this deployment
 builds the Kaede web and backend images from the local source tree. It's
 disabled by default. Enable it in `make setup`, or manage it later:
