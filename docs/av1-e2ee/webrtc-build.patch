@@ -1,0 +1,377 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index 54bfc31..4ebde0d 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -24,6 +24,7 @@ on:
+       - '.dockerignore'
+     branches-ignore:
+       - daily
++      - "kaede/**"
+     tags:
+       - '*'
+ 
+diff --git a/.github/workflows/kaede-av1.yml b/.github/workflows/kaede-av1.yml
+new file mode 100644
+index 0000000..4db3f4b
+--- /dev/null
++++ b/.github/workflows/kaede-av1.yml
+@@ -0,0 +1,42 @@
++name: Kaede AV1 encrypted media
++on:
++  push:
++    branches: [kaede/av1-e2ee]
++  workflow_dispatch:
++permissions:
++  contents: read
++jobs:
++  native:
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - platform: android
++            runner: ubuntu-24.04
++          - platform: apple
++            runner: macos-15
++    runs-on: ${{ matrix.runner }}
++    timeout-minutes: 180
++    steps:
++      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
++      - name: Linux build dependencies
++        if: runner.os == 'Linux'
++        run: |
++          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
++          sudo apt-get update
++          sudo apt-get install -y ninja-build pkg-config python3-setuptools rsync unzip xz-utils libglib2.0-dev
++      - name: Build Android AAR
++        if: runner.os == 'Linux'
++        working-directory: build
++        run: |
++          python3 run.py build android --commit a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd
++          python3 run.py package android
++      - name: Build Apple XCFramework
++        if: runner.os == 'macOS'
++        working-directory: build
++        run: ./build.apple.sh a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd release
++      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: kaede-av1-${{ matrix.platform }}
++          path: build/_package/${{ matrix.platform }}/
++          if-no-files-found: error
+diff --git a/build/VERSION b/build/VERSION
+index 56a0424..ff13c39 100644
+--- a/build/VERSION
++++ b/build/VERSION
+@@ -1,4 +1,4 @@
+-WEBRTC_BUILD_VERSION=150.7871.01
+-WEBRTC_VERSION=150.7871.01
+-WEBRTC_READABLE_VERSION=M150.7871@{#1}
+-WEBRTC_COMMIT=73cb8180f7258ee292878d6edd05177f41883962
++WEBRTC_BUILD_VERSION=137.7151.04.1
++WEBRTC_VERSION=137.7151.04
++WEBRTC_READABLE_VERSION=M137-Kaede-AV1-E2EE
++WEBRTC_COMMIT=a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd
+diff --git a/build/patches/kaede_av1_e2ee.patch b/build/patches/kaede_av1_e2ee.patch
+new file mode 100644
+index 0000000..94ed8b8
+--- /dev/null
++++ b/build/patches/kaede_av1_e2ee.patch
+@@ -0,0 +1,223 @@
++--- a/api/crypto/frame_crypto_transformer.cc
+++++ b/api/crypto/frame_crypto_transformer.cc
++@@ -1,3 +1,4 @@
+++#include "api/crypto/av1_frame.h"
++ /*
++  * Copyright 2022 LiveKit
++  *
++@@ -490,7 +491,13 @@
++   }
++ 
++   auto key_set = key_handler->GetKeySet(key_index_);
++-  uint8_t unencrypted_bytes = get_unencrypted_bytes(frame.get(), type_);
+++  const bool av1 = type_ == MediaType::kVideoFrame &&
+++      static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1;
+++  kaede_av1::Layout av1_layout;
+++  if (av1 && (algorithm_ != Algorithm::kAesGcm || !kaede_av1::Parse(std::span<const uint8_t>(data_in.data(), data_in.size()), false, key_index_, av1_layout))) return;
+++  size_t unencrypted_bytes = av1 ? 0 : get_unencrypted_bytes(frame.get(), type_);
+++  if (unencrypted_bytes > data_in.size()) return;
+++
++ 
++   rtc::Buffer frame_header(unencrypted_bytes);
++   for (size_t i = 0; i < unencrypted_bytes; i++) {
++@@ -507,6 +514,10 @@
++     payload[i - unencrypted_bytes] = data_in[i];
++   }
++ 
+++  if (av1) {
+++    frame_header.SetData(av1_layout.aad.data(), av1_layout.aad.size());
+++    payload.SetData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
+++  }
++   std::vector<uint8_t> buffer;
++   if (AesEncryptDecrypt(EncryptOrDecrypt::kEncrypt, algorithm_,
++                         key_set->encryption_key, iv, frame_header, payload,
++@@ -528,13 +539,17 @@
++     } else if (FrameIsH265(frame.get(), type_)) {
++       H265::WriteRbsp(data_without_header.data(), data_without_header.size(),
++                       &data_out);
++-    } else {
+++    } else if (!av1) {
++       data_out.AppendData(data_without_header);
++       RTC_CHECK_EQ(data_out.size(), frame_header.size() +
++                                         encrypted_payload.size() + iv.size() +
++                                         frame_trailer.size());
++     }
++ 
+++    if (av1) {
+++      if (!kaede_av1::Seal(av1_layout, buffer, std::span<const uint8_t>(iv.data(), iv.size()))) return;
+++      data_out.SetData(av1_layout.frame.data(), av1_layout.frame.size());
+++    }
++     frame->SetData(data_out);
++ 
++     if (last_enc_error_ != FrameCryptionState::kOk) {
++@@ -590,7 +605,7 @@
++   }
++ 
++   auto uncrypted_magic_bytes = key_provider_->options().uncrypted_magic_bytes;
++-  if (uncrypted_magic_bytes.size() > 0 &&
+++  if (!(type_ == MediaType::kVideoFrame && static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1) && uncrypted_magic_bytes.size() > 0 &&
++       data_in.size() >= uncrypted_magic_bytes.size()) {
++     auto tmp = data_in.subview(data_in.size() - (uncrypted_magic_bytes.size()),
++                                uncrypted_magic_bytes.size());
++@@ -614,7 +629,23 @@
++     }
++   }
++ 
++-  uint8_t unencrypted_bytes = get_unencrypted_bytes(frame.get(), type_);
+++  const bool av1 = type_ == MediaType::kVideoFrame &&
+++      static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1;
+++  kaede_av1::Layout av1_layout;
+++  rtc::Buffer av1_wire;
+++  if (av1) {
+++    if (algorithm_ != Algorithm::kAesGcm || !kaede_av1::Parse(std::span<const uint8_t>(data_in.data(), data_in.size()), true, 0, av1_layout)) return;
+++    av1_wire.AppendData(av1_layout.aad.data(), av1_layout.aad.size());
+++    av1_wire.AppendData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
+++    av1_wire.AppendData(av1_layout.tag.data(), av1_layout.tag.size());
+++    av1_wire.AppendData(av1_layout.iv.data(), av1_layout.iv.size());
+++    const uint8_t trailer[] = {12, av1_layout.key_index};
+++    av1_wire.AppendData(trailer, 2);
+++    data_in = rtc::ArrayView<const uint8_t>(av1_wire.data(), av1_wire.size());
+++  }
+++  size_t unencrypted_bytes = av1 ? av1_layout.aad.size() : get_unencrypted_bytes(frame.get(), type_);
+++  if (unencrypted_bytes > data_in.size() || data_in.size() - unencrypted_bytes < 30) return;
+++
++ 
++   rtc::Buffer frame_header(unencrypted_bytes);
++   for (size_t i = 0; i < unencrypted_bytes; i++) {
++@@ -684,6 +715,7 @@
++         H265::ParseRbsp(encrypted_buffer.data(), encrypted_buffer.size()));
++   }
++ 
+++  if (encrypted_buffer.size() < size_t(ivLength) + 2 + 16) return;
++   rtc::Buffer encrypted_payload(encrypted_buffer.size() - ivLength - 2);
++   for (size_t i = 0; i < encrypted_payload.size(); i++) {
++     encrypted_payload[i] = encrypted_buffer[i];
++@@ -762,6 +794,10 @@
++   rtc::Buffer data_out;
++   data_out.AppendData(frame_header);
++   data_out.AppendData(payload);
+++  if (av1) {
+++    if (!av1_layout.Scatter(buffer)) return;
+++    data_out.SetData(av1_layout.frame.data(), av1_layout.frame.size());
+++  }
++   frame->SetData(data_out);
++ 
++   if (last_dec_error_ != FrameCryptionState::kOk) {
++--- /dev/null
+++++ b/api/crypto/av1_frame.h
++@@ -0,0 +1,115 @@
+++// Copyright 2026 Kaede Chat contributors. SPDX-License-Identifier: Apache-2.0
+++// AV1 E2EE v1: canonical OBUs, authenticated clear structure, one final crypto OBU.
+++#ifndef KAEDE_AV1_FRAME_H
+++#define KAEDE_AV1_FRAME_H
+++#include <algorithm>
+++#include <array>
+++#include <cstdint>
+++#include <span>
+++#include <vector>
+++
+++namespace kaede_av1 {
+++constexpr std::array<uint8_t, 8> kMarker = {4, 255, 255, 'K', 'A', 'E', '1', 1};
+++constexpr size_t kMetadataSize = kMarker.size() + 12 + 16 + 1;
+++constexpr size_t kMaxFrameSize = 16 * 1024 * 1024;
+++struct Range { size_t offset; size_t length; };
+++struct Layout {
+++  std::vector<uint8_t> frame, aad, protected_bytes, iv, tag;
+++  std::vector<Range> ranges;
+++  uint8_t key_index = 0;
+++  bool Scatter(std::span<const uint8_t> bytes) {
+++    if (bytes.size() != protected_bytes.size()) return false;
+++    size_t offset = 0;
+++    for (const auto& r : ranges) {
+++      std::copy_n(bytes.begin() + offset, r.length, frame.begin() + r.offset);
+++      offset += r.length;
+++    }
+++    return true;
+++  }
+++};
+++inline void Leb(std::vector<uint8_t>& out, size_t value) {
+++  do {
+++    uint8_t byte = value & 127;
+++    value >>= 7;
+++    out.push_back(byte | (value ? 128 : 0));
+++  } while (value);
+++}
+++// Normalize size fields before authentication: RTP strips/recreates these fields.
+++inline bool Parse(std::span<const uint8_t> input, bool decrypt, uint8_t key, Layout& out) {
+++  if (input.empty() || input.size() > kMaxFrameSize) return false;
+++  out = Layout{};
+++  out.key_index = key;
+++  size_t offset = 0, count = 0;
+++  bool metadata = false;
+++  std::vector<uint8_t> clear;
+++  while (offset < input.size()) {
+++    if (++count > 4096) return false;
+++    uint8_t header = input[offset++];
+++    if (header & 0x81) return false; // forbidden and reserved bits
+++    const int type = (header >> 3) & 15;
+++    if (type == 0 || (type >= 9 && type <= 14)) return false;
+++    std::vector<uint8_t> prefix{static_cast<uint8_t>(header | 2)};
+++    if (header & 4) {
+++      if (offset == input.size() || (input[offset] & 7)) return false;
+++      prefix.push_back(input[offset++]);
+++    }
+++    size_t size = input.size() - offset;
+++    if (header & 2) {
+++      size = 0;
+++      bool terminated = false;
+++      for (unsigned i = 0; i < 8; ++i) {
+++        if (offset == input.size()) return false;
+++        uint8_t byte = input[offset++];
+++        // Frames are bounded; reject values exceeding that bound before shifting.
+++        if (i >= 4 && (byte & 127)) return false;
+++        if (i < 4) size |= size_t(byte & 127) << (7 * i);
+++        if (!(byte & 128)) { terminated = true; break; }
+++      }
+++      if (!terminated || size > input.size() - offset) return false;
+++    }
+++    auto payload = input.subspan(offset, size);
+++    offset += size;
+++    if (type == 2 || type == 8 || type == 15) {
+++      if (decrypt) return false;
+++      continue; // WebRTC never transports these OBU types.
+++    }
+++    if (decrypt && type == 5 && payload.size() >= kMarker.size() &&
+++        std::equal(kMarker.begin(), kMarker.end(), payload.begin())) {
+++      if (header != 0x2a || size != kMetadataSize || offset != input.size()) return false;
+++      out.iv.assign(payload.begin() + 8, payload.begin() + 20);
+++      out.tag.assign(payload.begin() + 20, payload.begin() + 36);
+++      out.key_index = payload[36];
+++      metadata = true;
+++      break;
+++    }
+++    if (type == 5 && payload.size() >= kMarker.size() &&
+++        std::equal(kMarker.begin(), kMarker.end(), payload.begin())) return false;
+++    Leb(prefix, size);
+++    // Keep sequence configuration and frame-type bits available to RTP/SFU parsing.
+++    size_t clear_size = type == 1 ? size : ((type == 3 || type == 6) ? std::min(size, size_t{1}) : 0);
+++    clear.insert(clear.end(), prefix.begin(), prefix.end());
+++    clear.insert(clear.end(), payload.begin(), payload.begin() + clear_size);
+++    out.frame.insert(out.frame.end(), prefix.begin(), prefix.end());
+++    out.frame.insert(out.frame.end(), payload.begin(), payload.end());
+++    const size_t protected_size = size - clear_size;
+++    out.ranges.push_back({out.frame.size() - protected_size, protected_size});
+++    out.protected_bytes.insert(out.protected_bytes.end(), payload.begin() + clear_size, payload.end());
+++  }
+++  if (out.frame.empty() || (decrypt && !metadata)) return false;
+++  out.aad.assign(kMarker.begin(), kMarker.end());
+++  out.aad.push_back(out.key_index);
+++  out.aad.insert(out.aad.end(), clear.begin(), clear.end());
+++  return true;
+++}
+++inline bool Seal(Layout& layout, std::span<const uint8_t> cipher, std::span<const uint8_t> iv) {
+++  if (cipher.size() < 16 || iv.size() != 12 || !layout.Scatter(cipher.first(cipher.size() - 16))) return false;
+++  layout.frame.push_back(0x2a);
+++  Leb(layout.frame, kMetadataSize);
+++  layout.frame.insert(layout.frame.end(), kMarker.begin(), kMarker.end());
+++  layout.frame.insert(layout.frame.end(), iv.begin(), iv.end());
+++  layout.frame.insert(layout.frame.end(), cipher.end() - 16, cipher.end());
+++  layout.frame.push_back(layout.key_index);
+++  return true;
+++}
+++} // namespace kaede_av1
+++#endif
+diff --git a/build/run.py b/build/run.py
+index b95533a..79ee112 100644
+--- a/build/run.py
++++ b/build/run.py
+@@ -204,7 +204,7 @@ def get_depot_tools(source_dir, fetch=False):
+     dir = os.path.join(source_dir, 'depot_tools')
+     if os.path.exists(dir):
+         if fetch:
+-            cmd(['git', 'fetch'])
++            cmd(['git', 'fetch', '--depth=1', 'origin', version] if version != 'HEAD' else ['git', 'fetch'])
+             cmd(['git', 'checkout', '-f', 'origin/HEAD'])
+     else:
+         cmd(['git', 'clone', 'https://chromium.googlesource.com/chromium/tools/depot_tools.git', dir])
+@@ -218,7 +218,7 @@ PATCH_INFO = {
+ }
+ 
+ PATCHES = {
+-    'apple': [],
++    'apple': ['kaede_av1_e2ee.patch'],
+     'apple_prefixed': [
+         'apple_prefix.patch',
+     ],
+@@ -246,11 +246,7 @@ PATCHES = {
+         'add_license_dav1d.patch',
+         'fix_mocks.patch',
+     ],
+-    'android': [
+-        'add_license_dav1d.patch',
+-        'android_webrtc_version.patch',
+-        'fix_mocks.patch',
+-    ],
++    'android': ['kaede_av1_e2ee.patch'],
+     'android_prefixed': [
+         'add_license_dav1d.patch',
+         'android_webrtc_version.patch',
+@@ -332,7 +328,7 @@ def get_webrtc(source_dir, patch_dir, version, target,
+         with cd(webrtc_source_dir):
+             cmd(['gclient'])
+             shutil.copyfile(os.path.join(BASE_DIR, '.gclient'), '.gclient')
+-            cmd(['git', 'clone', 'https://github.com/webrtc-sdk/webrtc.git', 'src'])
++            cmd(['git', 'clone', '--filter=blob:none', '--no-checkout', '--depth=1', 'https://github.com/webrtc-sdk/webrtc.git', 'src'])
+             if target in ['android', 'android_prefixed', 'android_prefixed_stripped']:
+                 with open('.gclient', 'a') as f:
+                     f.write("target_os = [ 'android' ]\n")
+@@ -344,7 +340,7 @@ def get_webrtc(source_dir, patch_dir, version, target,
+     src_dir = os.path.join(webrtc_source_dir, 'src')
+     if fetch:
+         with cd(src_dir):
+-            cmd(['git', 'fetch'])
++            cmd(['git', 'fetch', '--depth=1', 'origin', version] if version != 'HEAD' else ['git', 'fetch'])
+             if version == 'HEAD':
+                 # Update origin/HEAD (default branch may have changed)
+                 cmd(['git', 'remote', 'set-head', 'origin', '-a'])
+diff --git a/docs/kaede-av1-e2ee.md b/docs/kaede-av1-e2ee.md
+new file mode 100644
+index 0000000..63a7aea
+--- /dev/null
++++ b/docs/kaede-av1-e2ee.md
+@@ -0,0 +1,16 @@
++# Kaede AV1 E2EE build
++
++This branch applies the same authenticated AV1 framing used by Kaede's patched
++Rust and browser SDKs to the m137 native dependency used by Flutter WebRTC 1.2.1.
++The source revision is pinned in VERSION and the workflow. Builds produce an
++Android AAR and an Apple XCFramework as CI artifacts; they do not publish releases.
++
++The crypto patch preserves canonical AV1 OBU headers, sequence configuration and
++frame-type bits, authenticates those clear bytes with AES-GCM, and puts the IV,
++tag and key index into a final, versioned metadata OBU. Malformed lengths and
++missing tags are rejected before indexing. AV1 framing is a Kaede extension,
++not compatible with unpatched LiveKit AV1 encryption. Other codecs are unchanged.
++
++Use both artifacts together with the matching browser/Rust SDK patches. Do not
++activate encrypted AV1 in Flutter against the old hosted native binaries.
++Physical-device testing remains required after building and integrating them.

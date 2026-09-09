@@ -22,6 +22,7 @@ import {
   webAudioPublishOptions,
   webCameraDefaults,
   webScreenShareOptions,
+  webVideoCodecOptions,
   type MediaQualityPreferences
 } from './quality';
 
@@ -413,7 +414,8 @@ export class VoiceSession extends EventTarget {
       videoCaptureDefaults: camera.capture,
       publishDefaults: {
         ...webAudioPublishOptions(this.#mediaQuality, policy.bitrate),
-        ...camera.publish
+        ...camera.publish,
+        ...webVideoCodecOptions(Boolean(e2ee))
       },
       ...(e2ee ? { e2ee } : {})
     });

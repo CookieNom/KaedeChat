@@ -8,6 +8,27 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('video codecs prefer AV1 and H264 while preserving encrypted VP8', () {
+    const quality = MobileMediaQuality();
+    final av1 = quality.videoPublishOptionsForCameraMode(1,
+        supportedCodecs: ['video/AV1', 'video/H264']);
+    expect(av1.videoCodec, 'av1');
+    expect(av1.backupVideoCodec.codec, 'h264');
+    expect(av1.backupVideoCodec.enabled, isTrue);
+    final limited = quality
+        .videoPublishOptionsForCameraMode(1, supportedCodecs: ['video/AV1']);
+    expect(limited.backupVideoCodec.codec, 'vp8');
+    final h264 = quality
+        .videoPublishOptionsForCameraMode(1, supportedCodecs: ['video/H264']);
+    expect(h264.videoCodec, 'h264');
+    expect(h264.backupVideoCodec.enabled, isFalse);
+    final encrypted = quality.videoPublishOptionsForCameraMode(1,
+        encrypted: true, supportedCodecs: ['video/AV1', 'video/H264']);
+    expect(encrypted.videoCodec, 'vp8');
+    expect(encrypted.backupVideoCodec.enabled, isFalse);
+    expect(quality.videoPublishOptions.videoCodec, 'vp8');
+  });
+
   test('screen profiles bind capture and publish limits', () {
     const quality = MobileMediaQuality(
       screen: ScreenShareQuality.sharp,

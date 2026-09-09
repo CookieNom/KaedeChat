@@ -109,3 +109,26 @@ the only media authority, so calls become unavailable rather than moving to a
 different authority during an outage. Rate limits, admission controls,
 observability, and operational procedures are documented in
 [m6-hardening-release.md](m6-hardening-release.md).
+
+
+### Video codec defaults
+
+Unencrypted camera and screen-share publications prefer AV1 when the local
+WebRTC sender supports it. H.264 is the preferred compatibility codec, with VP8
+used when H.264 is unavailable. H.264 is a hardware-friendly default, not a
+promise that it outperforms VP8 on every device. Browser AV1 selection also
+respects LiveKit's browser support checks.
+
+Desktop pins the backup-publishing fork of LiveKit Rust 0.8.4 at
+`dfe997b7782ba1d6e0bcc7e19ed37e80e2c370cb`. It publishes a second codec on demand
+under the same track SID and enables dynacast to pause unused encodings. Web and
+Flutter use their existing SDK fallback policy, which may switch the primary
+publication to the compatibility codec. This is capability-based fallback;
+CPU load, thermal throttling and slow AV1 software decoding do not trigger an
+application-level codec switch yet.
+
+Encrypted calls keep VP8 with no backup publishing. The fork rejects encrypted
+backup publishing, and its upstream AV1 encryption path failed validation.
+Encryption is never disabled to enable AV1. Physical-device interoperability
+and hardware performance still need validation on Windows, macOS, Android and
+iOS before assuming that AV1 game sharing will perform well everywhere.

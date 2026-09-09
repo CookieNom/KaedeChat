@@ -14,14 +14,14 @@ the normal Make targets or release workflow.
 
 ## Development
 
-Install Node 22, pnpm 10.34, Rust 1.92, the Tauri CLI, and the native libraries
+Install Node 22, pnpm 10.34, Rust 1.97.1, the Tauri CLI, and the native libraries
 listed in [platform support](docs/platform-support.md). Then:
 
 ```sh
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend build
 make desktop-check desktop-test
-cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+cargo +1.97.1 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 ```
 
 For live frontend development, run `make desktop-dev`. Compile a release

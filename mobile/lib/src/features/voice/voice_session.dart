@@ -648,9 +648,15 @@ final class VoiceSession extends ChangeNotifier {
           ].join('\u0000'),
         );
         try {
-          final provider = await BaseKeyProvider.create(
+          final keyOptions = rtc.KeyProviderOptions(
             sharedKey: true,
-            ratchetSalt: 'kaede-livekit-v1',
+            ratchetSalt: Uint8List.fromList(utf8.encode('kaede-livekit-v1')),
+            ratchetWindowSize: 16,
+            keyDerivationAlgorithm: rtc.KeyDerivationAlgorithm.kHKDF,
+          );
+          final provider = BaseKeyProvider(
+            await rtc.frameCryptorFactory.createDefaultKeyProvider(keyOptions),
+            keyOptions,
           );
           await provider.setRawKey(mediaKey);
           e2eeOptions = E2EEOptions(keyProvider: provider);
@@ -660,6 +666,18 @@ final class VoiceSession extends ChangeNotifier {
       }
       if (generation != _generation) return;
 
+      // Query the actual WebRTC build, not the device's file playback support.
+      Iterable<String> videoCodecs = const [];
+      if (!encryptedGrant) {
+        try {
+          final capabilities = await rtc.getRtpSenderCapabilities('video');
+          videoCodecs =
+              capabilities.codecs?.map((codec) => codec.mimeType) ?? const [];
+        } catch (_) {
+          // Older WebRTC builds may not expose capabilities; keep VP8 usable.
+        }
+      }
+      if (generation != _generation) return;
       final room = candidate = Room(
         roomOptions: RoomOptions(
           e2eeOptions: e2eeOptions,
@@ -671,8 +689,12 @@ final class VoiceSession extends ChangeNotifier {
               cameraCaptureOptionsForMode(mediaPolicy.videoQualityMode),
           defaultAudioPublishOptions:
               _mediaQuality.audioPublishOptionsForChannel(mediaPolicy.bitrate),
-          defaultVideoPublishOptions: _mediaQuality
-              .videoPublishOptionsForCameraMode(mediaPolicy.videoQualityMode),
+          defaultVideoPublishOptions:
+              _mediaQuality.videoPublishOptionsForCameraMode(
+            mediaPolicy.videoQualityMode,
+            encrypted: encryptedGrant,
+            supportedCodecs: videoCodecs,
+          ),
           defaultAudioCaptureOptions: const AudioCaptureOptions(
             echoCancellation: true,
             noiseSuppression: true,

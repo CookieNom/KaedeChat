@@ -12,7 +12,8 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:livekit-crypto": "vitest run --config livekit-crypto.vitest.config.mjs"
   },
   "pnpm": {
     "overrides": {
@@ -22,13 +23,16 @@
       "js-yaml@<4.3.1": "4.3.1",
       "nanoid@<3.3.18": "3.3.18",
       "postcss": "8.5.23"
+    },
+    "patchedDependencies": {
+      "livekit-client@2.20.1": "patches/livekit-client@2.20.1.patch"
     }
   },
   "dependencies": {
     "dompurify": "3.4.13",
     "emojibase-data": "17.0.0",
-    "marked": "18.0.6",
-    "livekit-client": "^2.20.1"
+    "livekit-client": "^2.20.1",
+    "marked": "18.0.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.19.0",

@@ -320,14 +320,14 @@ short-lived in-app window rather than an external browser.
 The old Slint client is archived under `desktop/legacy-slint/` and isn't part
 of current builds or releases.
 
-Install Rust 1.92 and the platform dependencies listed in
+Install Rust 1.97.1 and the platform dependencies listed in
 [desktop/README.md](desktop/README.md), then run:
 
 ```sh
 make desktop-check
 make desktop-test
 make desktop-build
-cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+cargo +1.97.1 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 ```
 
 Native permissions, packaging, signing, and known operating-system constraints

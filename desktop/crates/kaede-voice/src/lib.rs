@@ -26,9 +26,9 @@ use livekit::{
     E2eeOptions,
     e2ee::{
         EncryptionType,
-        key_provider::{KeyProvider, KeyProviderOptions},
+        key_provider::{KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions},
     },
-    options::{AudioEncoding, TrackPublishOptions, VideoEncoding},
+    options::{AudioEncoding, BackupVideoCodec, TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         DataPacket, DataPacketKind, DisconnectReason, LocalAudioTrack, LocalTrack, LocalVideoTrack,
         Participant, RemoteTrack, Room, RoomEvent, RoomOptions, TrackSource,
@@ -600,7 +600,11 @@ fn media_room_options(
         return Err(VoiceError::EncryptionPolicyMismatch);
     }
     match (grant.e2ee, media_key) {
-        (false, None) => Ok(RoomOptions::default()),
+        (false, None) => {
+            let mut options = RoomOptions::default();
+            options.dynacast = true;
+            Ok(options)
+        }
         (false, Some(mut key)) => {
             key.fill(0);
             Err(VoiceError::EncryptionPolicyMismatch)
@@ -629,6 +633,7 @@ fn media_room_options(
             let provider = KeyProvider::with_shared_key(
                 KeyProviderOptions {
                     ratchet_salt: b"kaede-livekit-v1".to_vec(),
+                    key_derivation_algorithm: KeyDerivationAlgorithm::HKDF,
                     ..KeyProviderOptions::default()
                 },
                 key,
@@ -1268,6 +1273,42 @@ struct PublishedVideo {
     capture_thread: Option<thread::JoinHandle<()>>,
 }
 
+// Keep encrypted publishing on VP8 until all clients ship matching AV1 cryptors.
+fn video_publish_options(encrypted: bool, encoding: VideoEncoding) -> TrackPublishOptions {
+    let mut options = TrackPublishOptions {
+        video_encoding: Some(encoding.clone()),
+        ..Default::default()
+    };
+    if encrypted {
+        return options;
+    }
+    let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
+        .pc_factory()
+        .get_rtp_sender_capabilities(livekit::webrtc::MediaType::Video);
+    let supports = |mime: &str| {
+        capabilities
+            .codecs
+            .iter()
+            .any(|c| c.mime_type.eq_ignore_ascii_case(mime))
+    };
+    let fallback = if supports("video/h264") {
+        VideoCodec::H264
+    } else {
+        VideoCodec::VP8
+    };
+    options.video_codec = fallback;
+    if supports("video/av1") {
+        options.video_codec = VideoCodec::AV1;
+        options.scalability_mode = Some("L3T3_KEY".into());
+        options.backup_codec = Some(BackupVideoCodec {
+            codec: fallback,
+            encoding: Some(encoding),
+            ..Default::default()
+        });
+    }
+    options
+}
+
 async fn publish_screen_share(
     room: &Room,
     source_id: Option<&str>,
@@ -1332,11 +1373,13 @@ async fn publish_screen_share(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: settings.max_bitrate,
-                    max_framerate: f64::from(settings.frame_rate),
-                }),
-                ..TrackPublishOptions::default()
+                ..video_publish_options(
+                    room.e2ee_manager().encryption_type() != EncryptionType::None,
+                    VideoEncoding {
+                        max_bitrate: settings.max_bitrate,
+                        max_framerate: f64::from(settings.frame_rate),
+                    },
+                )
             },
         )
         .await
@@ -1572,11 +1615,13 @@ async fn publish_camera(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Camera,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: settings.max_bitrate,
-                    max_framerate: f64::from(settings.frame_rate),
-                }),
-                ..TrackPublishOptions::default()
+                ..video_publish_options(
+                    room.e2ee_manager().encryption_type() != EncryptionType::None,
+                    VideoEncoding {
+                        max_bitrate: settings.max_bitrate,
+                        max_framerate: f64::from(settings.frame_rate),
+                    },
+                )
             },
         )
         .await
@@ -1973,13 +2018,34 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::is_wayland_environment;
     use super::{
-        DataPacketKind, DisconnectReason, ExpectedVoicePolicy, VoiceError, VoiceGrant,
-        bounded_dimensions, camera_settings, decode_priority_speaker_signal, disconnect_message,
-        effective_microphone_bitrate, local_priority_speaker_allowed,
-        local_priority_speaker_metadata_allowed, local_priority_speaker_metadata_transition,
-        local_voice_grant_rotation, media_room_options, participant_can_priority_speak,
-        priority_speaker_transition,
+        DataPacketKind, DisconnectReason, ExpectedVoicePolicy, VideoCodec, VideoEncoding,
+        VoiceError, VoiceGrant, bounded_dimensions, camera_settings,
+        decode_priority_speaker_signal, disconnect_message, effective_microphone_bitrate,
+        local_priority_speaker_allowed, local_priority_speaker_metadata_allowed,
+        local_priority_speaker_metadata_transition, local_voice_grant_rotation, media_room_options,
+        participant_can_priority_speak, priority_speaker_transition, video_publish_options,
     };
+
+    #[test]
+    fn video_codec_defaults_preserve_encryption_and_offer_backup() {
+        let encoding = VideoEncoding {
+            max_bitrate: 2_500_000,
+            max_framerate: 30.0,
+        };
+        let encrypted = video_publish_options(true, encoding.clone());
+        assert_eq!(encrypted.video_codec, VideoCodec::VP8);
+        assert!(encrypted.backup_codec.is_none());
+        let plain = video_publish_options(false, encoding);
+        assert_eq!(plain.video_codec, VideoCodec::AV1);
+        let Some(backup) = plain.backup_codec else {
+            panic!("missing compatibility codec")
+        };
+        assert_eq!(backup.codec, VideoCodec::H264);
+        assert_eq!(
+            backup.encoding.map(|value| value.max_bitrate),
+            Some(2_500_000)
+        );
+    }
 
     fn grant(e2ee: bool) -> VoiceGrant {
         VoiceGrant {

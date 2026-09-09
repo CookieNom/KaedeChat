@@ -33,6 +33,7 @@ import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/application_launcher.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/chat/invite_card.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/chat/voice_message_recorder.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
@@ -6571,6 +6572,12 @@ final class _MessageTile extends StatelessWidget {
                       allowExternalMedia: !encrypted,
                       onInvoke: onComponent,
                     ),
+                  if (!deleted && !displayedMessage.contentUnavailable)
+                    for (final reference in messageInviteReferences(
+                      displayedMessage.content,
+                      encrypted: encrypted,
+                    ))
+                      InviteCard(key: ValueKey(reference), reference: reference),
                   if (!deleted &&
                       displayedMessage.e2ee == null &&
                       mediaPreview == null &&

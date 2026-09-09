@@ -1,5 +1,6 @@
 import {
   VideoPresets,
+  supportsAV1,
   type ScreenShareCaptureOptions,
   type TrackPublishOptions,
   type VideoCaptureOptions
@@ -227,5 +228,19 @@ export function webCameraDefaults(videoQualityMode: 1 | 2): {
       videoEncoding: preset.encoding,
       simulcast: true
     }
+  };
+}
+
+/** Prefer AV1 with a broadly supported backup; preserve the encrypted VP8 path. */
+export function webVideoCodecOptions(encrypted: boolean): TrackPublishOptions {
+  if (encrypted) return { videoCodec: 'vp8', backupCodec: false };
+  const codecs = globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? [];
+  const fallback = codecs.some((codec) => codec.mimeType.toLowerCase() === 'video/h264')
+    ? 'h264'
+    : 'vp8';
+  const av1 = typeof RTCRtpSender !== 'undefined' && supportsAV1();
+  return {
+    videoCodec: av1 ? 'av1' : fallback,
+    backupCodec: av1 ? { codec: fallback } : false
   };
 }

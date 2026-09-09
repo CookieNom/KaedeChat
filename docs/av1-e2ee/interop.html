@@ -1,0 +1,30 @@
+<!doctype html><html><body><script type="module">
+import {Room, RoomEvent, ExternalE2EEKeyProvider, LocalVideoTrack, Track} from '/sdk.mjs';
+window.start = async (url, token, role, backup = false) => {
+  const keys = new ExternalE2EEKeyProvider({ratchetWindowSize:16});
+  await keys.setKey(new Uint8Array(32).fill(7).buffer);
+  const room = window.room = new Room({dynacast:true, e2ee:{keyProvider:keys, worker:new Worker('/worker.mjs',{type:'module'})}, publishDefaults:{videoCodec:'av1',backupCodec:backup ? {codec:backup} : false,backupCodecPolicy:1,scalabilityMode:'L3T3_KEY'}});
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind !== 'video') return;
+    const video = track.attach(); video.muted=true; video.autoplay=true;document.body.append(video);
+    const timer = setInterval(async () => {
+      const report = await track.getRTCStatsReport();
+      for (const stat of report?.values() ?? []) {
+        if (stat.type === 'inbound-rtp' && stat.framesDecoded > 0) {
+          window.decoded = {frames:stat.framesDecoded,codec:report.get(stat.codecId)?.mimeType};clearInterval(timer);
+        }
+      }
+    },100);
+  });
+  await room.connect(url,token);
+  await room.setE2EEEnabled(true);
+  if (role === 'publisher') {
+    const canvas = document.createElement('canvas');canvas.width=640;canvas.height=360;document.body.append(canvas);
+    const ctx=canvas.getContext('2d');let t=0;
+    setInterval(()=>{ctx.fillStyle=`hsl(${t++%360},80%,50%)`;ctx.fillRect(0,0,640,360);ctx.fillStyle='black';ctx.fillRect(t%600,100,40,100)},100);
+    const media=canvas.captureStream(10).getVideoTracks()[0];
+    await room.localParticipant.publishTrack(new LocalVideoTrack(media),{source:Track.Source.ScreenShare,videoCodec:'av1',backupCodec:backup ? {codec:backup} : false,backupCodecPolicy:1,scalabilityMode:'L3T3_KEY'});
+  }
+  return true;
+};
+</script></body></html>

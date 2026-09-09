@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_MEDIA_QUALITY,
@@ -7,7 +7,8 @@ import {
   screenShareProfile,
   webAudioPublishOptions,
   webCameraDefaults,
-  webScreenShareOptions
+  webScreenShareOptions,
+  webVideoCodecOptions
 } from './quality';
 
 class MemoryStorage {
@@ -130,5 +131,30 @@ describe('media quality preferences', () => {
     expect(webScreenShareOptions(DEFAULT_MEDIA_QUALITY, 'monitor').capture.video).toEqual({
       displaySurface: 'monitor'
     });
+  });
+});
+
+describe('video codec defaults', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('prefers AV1 with H264 backup, falls back on limited senders, and preserves E2EE', () => {
+    const getCapabilities = vi.fn(() => ({
+      codecs: [{ mimeType: 'video/AV1' }, { mimeType: 'video/H264' }]
+    }));
+    vi.stubGlobal('RTCRtpSender', { getCapabilities });
+    expect(webVideoCodecOptions(false)).toEqual({
+      videoCodec: 'av1',
+      backupCodec: { codec: 'h264' }
+    });
+    expect(webVideoCodecOptions(true)).toEqual({ videoCodec: 'vp8', backupCodec: false });
+    getCapabilities.mockReturnValue({ codecs: [{ mimeType: 'video/AV1' }] });
+    expect(webVideoCodecOptions(false)).toEqual({
+      videoCodec: 'av1',
+      backupCodec: { codec: 'vp8' }
+    });
+    getCapabilities.mockReturnValue({ codecs: [{ mimeType: 'video/H264' }] });
+    expect(webVideoCodecOptions(false)).toEqual({ videoCodec: 'h264', backupCodec: false });
+    vi.stubGlobal('RTCRtpSender', undefined);
+    expect(webVideoCodecOptions(false)).toEqual({ videoCodec: 'vp8', backupCodec: false });
   });
 });
