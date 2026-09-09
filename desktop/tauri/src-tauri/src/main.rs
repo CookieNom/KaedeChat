@@ -3735,8 +3735,9 @@ mod tests {
                 headers,
                 ..request.clone()
             };
-            let error =
-                native_forward_headers(&rejected).expect_err("unsafe headers must fail closed");
+            let Err(error) = native_forward_headers(&rejected) else {
+                panic!("unsafe headers must fail closed");
+            };
             assert_eq!(error.code, "INVALID_NATIVE_HEADER");
         }
     }

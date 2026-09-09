@@ -107,7 +107,7 @@ desktop-check:
 	cargo +$(DESKTOP_RUST_VERSION) check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 
 desktop-lint:
-	cargo +$(DESKTOP_RUST_VERSION) clippy --locked --manifest-path desktop/Cargo.toml \
+	cargo +$(DESKTOP_RUST_VERSION) clippy --locked --keep-going --manifest-path desktop/Cargo.toml \
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
 		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-gateway \
 		-p kaede-capture -p kaede-audio -p kaede-voice -p kaede-turnstile \
