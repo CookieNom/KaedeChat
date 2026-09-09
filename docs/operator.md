@@ -1,8 +1,12 @@
 # Operator guide
 
-This guide covers the supplied deployment and release controls. Reviewing your
-infrastructure, threat model, capacity, restoration process, and key-rotation
-policy is still your job.
+Use this guide to configure, monitor, back up, and upgrade a Kaede instance.
+For a new deployment, start with the [README setup steps](../README.md#setup).
+The [wizard reference](deployment-wizard.md) explains each generated file.
+
+[Configuration](#secrets-and-initial-configuration) · [Storage](#object-storage) ·
+[Backups](#backup-and-restore-boundary) · [Upgrades](#upgrade-and-rollback) ·
+[Federation](#federation-allowlists-and-blocklists) · [Monitoring](#observability-boundary)
 
 ## Hosts, certificates, and ports
 
@@ -27,8 +31,7 @@ certificate name must match `KAEDE_DOMAIN`.
 
 The defaults are control TCP 7880, RTC TCP 7881, RTC UDP 7882, TURN/TLS TCP
 5349, and TURN UDP 13478. Every host-networked LiveKit process on the same
-host needs its own five-port set. The setup wizard can find and reserve an
-available set automatically, or take one you pick by hand. Automatic
+host needs its own five-port set. The setup wizard can find an available set or accept one you pick by hand. Automatic
 selection avoids conflicts with listeners present while setup runs. It can't
 stop another process from claiming a selected port before Compose starts.
 
@@ -114,6 +117,8 @@ operator automatically deletes stored or federated data. Do not claim a
 settings workflow or deletion outcome unless the deployment actually adds and
 verifies one.
 
+## Manual environment configuration
+
 Before starting any service, validate both the file itself and the effective
 application environment:
 
@@ -168,6 +173,8 @@ reviewed application workflow. Preserve the distinct
 `KAEDE_GATEWAY_SECRET_KEY` as well; it satisfies strict process
 configuration without handing the instance master key to the gateway.
 
+## Optional services
+
 Optional interaction services are disabled by default. Set
 `KAEDE_KLIPY_ENABLED=true` with a private `KAEDE_KLIPY_API_KEY` to expose the
 GIF picker. Set `KAEDE_TURNSTILE_ENABLED=true`, `KAEDE_TURNSTILE_SITE_KEY`,
@@ -179,7 +186,7 @@ responses.
 Guild stickers use the ordinary scanned media pipeline. Configure the per-guild
 and per-file bounds with `KAEDE_MEDIA_STICKER_LIMIT` and
 `KAEDE_MEDIA_MAX_STICKER_BYTES`. Cropping is always available and preserves GIF
-animation. Background removal is deliberately opt-in because rembg loads an
+animation. Background removal is opt-in because rembg loads an
 ONNX model and materially increases worker memory: set `REMBG_HOME`, preseed that model cache
 for every media worker, size worker memory for the selected model, then set
 `KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED=true`. Keep it disabled when the
@@ -223,6 +230,8 @@ settings reject new proposals; they never downgrade an active encrypted room.
 Turning the flag off later hides new activation. Rekey, recovery,
 selective-disclosure reports, and active encrypted rooms keep working.
 
+## Reverse-proxy credentials
+
 Set the same `KAEDE_EDGE_SECRET` in `.env` and in the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
 internal edge receives only the domain and these two edge credentials.
@@ -255,8 +264,10 @@ For AWS S3, Backblaze B2, or another compatible service, start from
   to all three configured buckets. Set `KAEDE_MEDIA_S3_SESSION_TOKEN` only
   for temporary credentials.
 
-External providers must permit browser `PUT` requests from the exact
-`https://<KAEDE_DOMAIN>` origin with the `Content-Type` request header. Don't
+Configure browser `GET` and `HEAD` for the exact Kaede HTTPS origin. The
+attachment bucket must allow `PUT` from any HTTPS origin so remote members can
+upload report evidence directly to the moderation authority. Permit the
+`Content-Type` header; the presigned URL provides upload authorization. Don't
 make any bucket public: all reads and writes use short-lived SigV4 URLs. The
 application rejects redirects and production HTTP endpoints. Backblaze calls
 its service B2. It needs an S3-compatible application key, endpoint, and
@@ -273,17 +284,11 @@ retention and privacy requirements. Backblaze B2 buckets are versioned by
 default, so the lifecycle step is required there for bounded physical
 retention.
 
-Use the external-storage override for every Compose command:
-
-```sh
-cp .env.s3.example .env
-chmod 600 .env
-docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.s3.yml config --quiet
-docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.s3.yml up -d --build \
-  --wait --wait-timeout 180
-```
+For a new deployment, choose external S3 in `make setup` and use the generated
+Compose file for every command, as shown in [server setup](../README.md#setup).
+For a manually maintained deployment, `deploy/compose.s3.yml` is the external
+storage override; use it together with `deploy/compose.yml`. Fill in all
+credentials and validate `.env` before starting services.
 
 The override removes Garage from the rendered service set. `storage-init`
 verifies all three pre-created buckets before API and worker startup, and it
@@ -375,10 +380,12 @@ the SDK on a local filesystem (or one with working POSIX `flock` semantics).
 PhotoDNA can't inspect an E2EE attachment: the server receives only
 ciphertext and has no room key. That's why the E2EE activation warning states
 that server-side file and malware scanning stops. A recipient can still
-submit a client-decrypted report, but Kaede never silently uploads E2EE
+submit a client-decrypted report, but Kaede never uploads E2EE
 plaintext to PhotoDNA.
 
-Kaede excludes plaintext images below `160x160` pixels locally. MatchHash
+Kaede rejects images with either dimension below 50 pixels. Smaller eligible
+images are proportionally upscaled to the provider’s 160-pixel floor only
+inside the isolated hash adapter; published bytes remain unchanged. MatchHash
 receives a fixed-size Edge Hash rather than the source file, so there is no
 source-byte-size bypass. The supplied SDK's preferred `PreHashV2` sample posts
 only the fixed-size hash; the provider's 4 MB source-image rule belongs to the
@@ -392,37 +399,14 @@ limits, and normal image processing still apply.
 
 ## Validate and start
 
-The checks below may pull or build images but publish no project ports.
-`make check`, `make test`, and each acceptance target use distinct disposable
-Compose project names and clean up their own volumes.
+For a wizard-generated deployment, follow the [README startup sequence](../README.md#setup)
+and the exact command in `deploy/generated/README.txt`. Always include
+`deploy/compose.yml` and `deploy/compose.generated.yml`, with `.env` selected
+by both `--env-file` and `KAEDE_OPERATOR_ENV_FILE`.
 
-```sh
-make lock                 # only after dependency declarations change
-make env-check            # validate the production .env before any startup
-make compose-check
-make check
-make test
-make audit
-make migration-check
-make identity-check
-make chat-check
-make federation-check
-make federation-tls-check
-make media-check
-make voice-check
-make release-check
-```
-
-Passing these checks doesn't replace a deployment-specific security,
-capacity, backup, and recovery review. To start the production topology:
-
-```sh
-docker compose --env-file .env -f deploy/compose.yml config --quiet
-docker compose --env-file .env -f deploy/compose.yml up -d --build \
-  --wait --wait-timeout 180
-docker compose --env-file .env -f deploy/compose.yml ps
-curl --fail http://127.0.0.1:18082/health/ready
-```
+Run `make env-check` and `make generated-compose-check` before startup. The
+[acceptance checks](#acceptance-checks) validate code against disposable
+services; they are separate from the health checks of your running deployment.
 
 The one-shot preflight runs before data services. Then `migrate` applies
 every pending Alembic revision in dependency order through `head` and
@@ -1058,7 +1042,7 @@ rejected at that ceiling. The bundled alerts warn at 80% inbox utilization,
 on any inbox rejection, when remote-media eviction can't make room, and when
 a remote guild stays quota-paused.
 
-Loki deliberately has no privileged host log collector. If you need
+Loki has no privileged host log collector. If you need
 centralized logs, connect a separately reviewed collector.
 
 ## Explicit v1 operational boundaries
@@ -1081,3 +1065,24 @@ approved images and run an image/SBOM vulnerability scanner. LiveKit health
 and RTC/TURN reachability are separate from API database/Dragonfly readiness.
 Monitor its HTTP and media-plane ports externally whenever the voice profile
 is enabled.
+
+## Acceptance checks
+
+Run checks from the repository root. These targets create disposable Compose
+projects and remove their containers, networks, and volumes on exit; they do
+not publish application ports or validate an existing production deployment.
+
+| Target | Coverage |
+| --- | --- |
+| `make identity-check` | Registration, email outbox, cookies/bearers, CSRF, MFA, session rotation, recovery |
+| `make chat-check` | Messages and DMs, Gateway replay, roles, moderation, invites, reactions, pins, unread state |
+| `make federation-check` | Discovery, signed delivery, remote joins/writes, replication, recovery, and revocation |
+| `make federation-tls-check` | Federation TLS and transport validation |
+| `make media-check` | Real Garage uploads, scan gating, derivatives, webhooks, and deletion |
+| `make voice-check` | LiveKit grants, occupancy, call transitions, replay, and orphan-room cleanup |
+| `make release-check` | Readiness warmup, rate limits, shared-stream fanout, and federation storage amplification |
+| `make migration-check` | Migration up/down/up, guarded downgrades, database invariants, and schema drift |
+
+`make check` covers backend and frontend lint, types, unit tests, and the web
+build. `make audit` checks locked dependencies. Live-device media quality and
+platform signing still need the checks in the client release guides.

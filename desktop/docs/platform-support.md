@@ -43,4 +43,4 @@ All platforms require an operating-system microphone permission the first time
 the user explicitly joins or tests voice. This is an OS privacy prompt, not a
 browser device chooser. Devices can disappear or change IDs. When that happens,
 Kaede rescans and falls back to the system default with a visible status
-instead of silently opening an unrelated device.
+instead of opening an unrelated device.

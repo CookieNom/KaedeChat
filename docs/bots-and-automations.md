@@ -1,12 +1,17 @@
 # Bots and automations
 
-Kaede applications provide bot accounts, commands, interactive components, and
-event-driven automation. They work in local and federated guilds alike. If
-you've written Discord bots, the API should feel familiar, but authority always
-stays with the instance that owns each guild or conversation.
+This is the bot API reference: authentication, installations, scopes, REST
+routes, Gateway events, and encryption. For a runnable first bot, start with
+the [quickstart](bot-api-quickstart.md); for feature examples, use the
+[SDK recipes](bot-sdk-recipes.md).
 
 The management interfaces for application owners and instance operators are
 covered in [Instance Administration and Developer Portal](administration-and-developer-portals.md).
+
+[Authentication](#direct-target-authentication) · [Installation](#installation) ·
+[Scopes](#authorization-controls) · [REST](#rest-api) ·
+[Interactions](#commands-and-interactions) · [Gateway](#bot-gateway) ·
+[E2EE](#end-to-end-encrypted-conversations)
 
 ## Platform model
 
@@ -20,8 +25,7 @@ password, human session, recovery codes, or personal settings.
 
 An **application home** is the instance in the application's immutable composite
 ID, such as `123@apps.example`. It manages the application and publishes its
-signed manifest and key history. It is an identity control plane, not a proxy
-for bot traffic.
+signed manifest and key history. Runtime bot traffic goes directly to the resource owner.
 
 A **target instance** owns the resource the bot is using. A bot installed in a
 guild on `chat.example` connects directly to `chat.example` for that guild's API
@@ -57,11 +61,11 @@ published it. It does not prove that a bot is installed or permitted to act.
 
 ## Automation types
 
-| Type                    | Reads ambient events             | Typical use                                        |
-| ----------------------- | -------------------------------- | -------------------------------------------------- |
-| Channel webhook         | No                               | Build output, alerts, and simple posting           |
-| Interaction application | No by default                    | Slash commands and E2EE-safe interaction workflows |
-| Event bot               | Only approved intents and fields | Moderation, logging, and stateful integrations     |
+| Type | Reads ambient events | Typical use |
+| --- | --- | --- |
+| Channel webhook | No | Build output, alerts, and simple posting |
+| Interaction application | No by default | Slash commands and E2EE-safe interaction workflows |
+| Event bot | Only approved intents and fields | Moderation, logging, and stateful integrations |
 
 Existing `kwh_` channel webhook secrets remain write-only. They cannot be
 upgraded to bot credentials. User-account automation and silent user
@@ -298,13 +302,13 @@ Plaintext bot invite links may render as Kaede-native embeds:
 
 ```text
 +----------------------------------------------------------+
-| APP AUTHORIZATION                                        |
-| [icon] Poll Garden                       Verified         |
-|        123@apps.example                                  |
-|                                                          |
-| Polls, reminders, and scheduled announcements.           |
-| Requests: Commands, Send messages, Attach files          |
-|                            [Details] [Add to guild]       |
+| APP AUTHORIZATION |
+| [icon] Poll Garden                       Verified |
+| 123@apps.example |
+|  |
+| Polls, reminders, and scheduled announcements. |
+| Requests: Commands, Send messages, Attach files |
+| [Details] [Add to guild] |
 +----------------------------------------------------------+
 ```
 
@@ -524,27 +528,27 @@ principal.
 
 These routes use an authenticated human or team member session:
 
-| Method             | Path                                                  | Purpose                                                    |
-| ------------------ | ----------------------------------------------------- | ---------------------------------------------------------- |
-| `POST`             | `/api/v1/applications`                                | Create an application and bot user                         |
-| `GET`              | `/api/v1/applications`                                | List owned or team-managed applications                    |
-| `GET/PATCH`        | `/api/v1/applications/{app}`                          | Read or update application configuration                   |
-| `GET`              | `/api/v1/applications/{app}/directory-preview`        | Read the team-only product preview and readiness checklist |
-| `GET/POST`         | `/api/v1/applications/{app}/credentials`              | Create a named control credential                          |
-| `DELETE`           | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential                                        |
-| `GET`              | `/api/v1/applications/{app}/instance-rules`           | List exact-domain target rules                             |
-| `PUT/DELETE`       | `/api/v1/applications/{app}/instance-rules/{domain}`  | Set or remove an exact-domain rule                         |
-| `GET/POST`         | `/api/v1/applications/{app}/install-templates`        | List or create invite templates                            |
-| `GET`              | `/api/v1/applications/{app}/installations`            | List installations and health                              |
-| `GET/POST`         | `/api/v1/applications/{app}/assets`                   | List or commit application assets                          |
-| `POST`             | `/api/v1/applications/{app}/assets/tickets`           | Reserve an application asset upload                        |
-| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/assets/{asset}`           | Read, update, or remove an asset                           |
-| `GET/POST`         | `/api/v1/applications/{app}/emojis`                   | List or commit application emoji                           |
-| `POST`             | `/api/v1/applications/{app}/emojis/tickets`           | Reserve an application emoji upload                        |
-| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/emojis/{emoji}`           | Read, update, or remove app emoji                          |
-| `GET`              | `/api/v1/application-directory`                       | Search reviewed local or remote apps                       |
-| `GET`              | `/api/v1/application-directory/bot-profiles/{bot}`    | Resolve a bot profile's Add App action                     |
-| `GET`              | `/api/v1/application-directory/{app}`                 | Read a reviewed app product page                           |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/applications` | Create an application and bot user |
+| `GET` | `/api/v1/applications` | List owned or team-managed applications |
+| `GET/PATCH` | `/api/v1/applications/{app}` | Read or update application configuration |
+| `GET` | `/api/v1/applications/{app}/directory-preview` | Read the team-only product preview and readiness checklist |
+| `GET/POST` | `/api/v1/applications/{app}/credentials` | Create a named control credential |
+| `DELETE` | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential |
+| `GET` | `/api/v1/applications/{app}/instance-rules` | List exact-domain target rules |
+| `PUT/DELETE` | `/api/v1/applications/{app}/instance-rules/{domain}` | Set or remove an exact-domain rule |
+| `GET/POST` | `/api/v1/applications/{app}/install-templates` | List or create invite templates |
+| `GET` | `/api/v1/applications/{app}/installations` | List installations and health |
+| `GET/POST` | `/api/v1/applications/{app}/assets` | List or commit application assets |
+| `POST` | `/api/v1/applications/{app}/assets/tickets` | Reserve an application asset upload |
+| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/assets/{asset}` | Read, update, or remove an asset |
+| `GET/POST` | `/api/v1/applications/{app}/emojis` | List or commit application emoji |
+| `POST` | `/api/v1/applications/{app}/emojis/tickets` | Reserve an application emoji upload |
+| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/emojis/{emoji}` | Read, update, or remove app emoji |
+| `GET` | `/api/v1/application-directory` | Search reviewed local or remote apps |
+| `GET` | `/api/v1/application-directory/bot-profiles/{bot}` | Resolve a bot profile's Add App action |
+| `GET` | `/api/v1/application-directory/{app}` | Read a reviewed app product page |
 
 Qualified team and application references route these operations to their
 authority, so a federated team member uses the same management surface from
@@ -556,24 +560,24 @@ label, safe prefix/suffix, timestamps, expiry, last use, and revocation state.
 
 ### Installation management
 
-| Method   | Path                                                      | Purpose                        |
-| -------- | --------------------------------------------------------- | ------------------------------ |
-| `GET`    | `/api/v1/bot-invites/{app}/{template}`                    | Resolve the signed invite card |
-| `POST`   | `/api/v1/guilds/{guild}/integrations/bots`                | Confirm and commit an install  |
-| `GET`    | `/api/v1/guilds/{guild}/integrations/bots`                | List installations             |
-| `DELETE` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Revoke immediately             |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/bot-invites/{app}/{template}` | Resolve the signed invite card |
+| `POST` | `/api/v1/guilds/{guild}/integrations/bots` | Confirm and commit an install |
+| `GET` | `/api/v1/guilds/{guild}/integrations/bots` | List installations |
+| `DELETE` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Revoke immediately |
 
 Installation responses contain no worker or bot secret.
 
 ### Worker authentication
 
-| Method   | Path                                              | Purpose                                        |
-| -------- | ------------------------------------------------- | ---------------------------------------------- |
-| `POST`   | `/api/v1/bot-control/applications/{app}/workers`  | Register a delegated worker public key         |
-| `PUT`    | `/api/v1/bot-control/applications/{app}/commands` | Publish commands from deployment tooling       |
-| `DELETE` | `/api/v1/applications/{app}/workers/{worker}`     | Revoke a worker and its sessions               |
-| `POST`   | `/api/v1/bots/token`                              | Issue a DPoP-bound target token                |
-| `GET`    | `/api/v1/bots/@me`                                | Read worker, installation, and target ceilings |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/bot-control/applications/{app}/workers` | Register a delegated worker public key |
+| `PUT` | `/api/v1/bot-control/applications/{app}/commands` | Publish commands from deployment tooling |
+| `DELETE` | `/api/v1/applications/{app}/workers/{worker}` | Revoke a worker and its sessions |
+| `POST` | `/api/v1/bots/token` | Issue a DPoP-bound target token |
+| `GET` | `/api/v1/bots/@me` | Read worker, installation, and target ceilings |
 
 ### Resource operations
 
@@ -668,7 +672,7 @@ timestamp bounds, all documented `has` values (including sound, sticker, poll,
 and snapshot), embed type/provider, link hostname, attachment filename/
 extension, NSFW inclusion, relevance/timestamp sorting, and opaque pagination.
 Unknown, conflicting, malformed, or unsupported filter values fail closed
-instead of being silently ignored. The current Meilisearch backend supports its
+instead of being ignored. The current Meilisearch backend supports its
 native phrase slop of `2`; another explicit slop is rejected rather than
 pretending to apply it.
 
@@ -680,22 +684,22 @@ exposes it.
 
 The principal runtime routes are:
 
-| Capability         | Routes                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Guild management   | `PATCH /api/v1/bots/guilds/{guild}`                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Channel management | `POST/PATCH /api/v1/bots/guilds/{guild}/channels`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/channels/{channel}`                                                                                                                                                                                                                                                                                                                                             |
-| Forums and threads | create/list below `/api/v1/bots/channels/{parent}/threads`; existing-message create below `.../messages/{message}/threads`; lifecycle and membership below `/api/v1/bots/channels/{thread}`                                                                                                                                                                                                                                                                  |
-| Role management    | `POST/PATCH /api/v1/bots/guilds/{guild}/roles`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/roles/{role}`; member-role `PUT/DELETE` routes                                                                                                                                                                                                                                                                                                                     |
-| Attachments        | `POST /api/v1/bots/channels/{channel}/attachments`; `GET /api/v1/bots/attachments/{attachment}` and `/{variant}`                                                                                                                                                                                                                                                                                                                                             |
-| Invites            | create/guild-list/revoke with expiry, use limits, temporary membership, verified live-stream targets, event association, role grants, and target-user management below `/api/v1/bots/guilds/{guild}/invites`; create and delete accept `X-Audit-Log-Reason`, while `DELETE` returns the deleted typed Invite with HTTP 200, including across federation; channel managers list one exact channel at `/api/v1/bots/guilds/{guild}/channels/{channel}/invites` |
-| Webhooks           | create/list/update/rotate/delete below `/api/v1/bots/guilds/{guild}`; token execution and message fetch/edit/delete on the webhook API                                                                                                                                                                                                                                                                                                                       |
-| Expressions        | guild emoji/sticker list/get/upload/edit/delete and role/availability restrictions; application asset and emoji CRUD below `/api/v1/bots/applications/@me`                                                                                                                                                                                                                                                                                                   |
-| Rich messages      | embeds, components/views, poll create/read/end, forwarding, reactions, announcement follows, and crosspost operations below `/api/v1/bots/channels/{channel}`                                                                                                                                                                                                                                                                                                |
-| AutoMod/moderation | AutoMod rule CRUD; prune estimate/execute; bulk bans with per-member failures; ordinary member/ban operations                                                                                                                                                                                                                                                                                                                                                |
-| Soundboard         | guild sound list/upload/edit/delete and voice-channel play operations                                                                                                                                                                                                                                                                                                                                                                                        |
-| Audit log          | cursor-paged and filtered `GET /api/v1/bots/guilds/{guild}/audit-logs`                                                                                                                                                                                                                                                                                                                                                                                       |
-| Voice moderation   | `PATCH/DELETE .../members/{user}/voice`; `POST .../voice/move`                                                                                                                                                                                                                                                                                                                                                                                               |
-| Direct messages    | `POST /api/v1/bots/dms` at A; capability-bound message, reaction, poll-read/end, pin, typing, call, voice, and attachment routes directly at C under `/api/v1/bots/channels/{channel}`                                                                                                                                                                                                                                                                       |
+| Capability | Routes |
+| --- | --- |
+| Guild management | `PATCH /api/v1/bots/guilds/{guild}` |
+| Channel management | `POST/PATCH /api/v1/bots/guilds/{guild}/channels`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/channels/{channel}` |
+| Forums and threads | create/list below `/api/v1/bots/channels/{parent}/threads`; existing-message create below `.../messages/{message}/threads`; lifecycle and membership below `/api/v1/bots/channels/{thread}` |
+| Role management | `POST/PATCH /api/v1/bots/guilds/{guild}/roles`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/roles/{role}`; member-role `PUT/DELETE` routes |
+| Attachments | `POST /api/v1/bots/channels/{channel}/attachments`; `GET /api/v1/bots/attachments/{attachment}` and `/{variant}` |
+| Invites | create/guild-list/revoke with expiry, use limits, temporary membership, verified live-stream targets, event association, role grants, and target-user management below `/api/v1/bots/guilds/{guild}/invites`; create and delete accept `X-Audit-Log-Reason`, while `DELETE` returns the deleted typed Invite with HTTP 200, including across federation; channel managers list one exact channel at `/api/v1/bots/guilds/{guild}/channels/{channel}/invites` |
+| Webhooks | create/list/update/rotate/delete below `/api/v1/bots/guilds/{guild}`; token execution and message fetch/edit/delete on the webhook API |
+| Expressions | guild emoji/sticker list/get/upload/edit/delete and role/availability restrictions; application asset and emoji CRUD below `/api/v1/bots/applications/@me` |
+| Rich messages | embeds, components/views, poll create/read/end, forwarding, reactions, announcement follows, and crosspost operations below `/api/v1/bots/channels/{channel}` |
+| AutoMod/moderation | AutoMod rule CRUD; prune estimate/execute; bulk bans with per-member failures; ordinary member/ban operations |
+| Soundboard | guild sound list/upload/edit/delete and voice-channel play operations |
+| Audit log | cursor-paged and filtered `GET /api/v1/bots/guilds/{guild}/audit-logs` |
+| Voice moderation | `PATCH/DELETE .../members/{user}/voice`; `POST .../voice/move` |
+| Direct messages | `POST /api/v1/bots/dms` at A; capability-bound message, reaction, poll-read/end, pin, typing, call, voice, and attachment routes directly at C under `/api/v1/bots/channels/{channel}` |
 
 DM capability restart and renewal use
 `GET /api/v1/bots/dm-capabilities?limit={n}&after={opaque_kbdg_cursor}` and
@@ -711,7 +715,7 @@ call.
 
 Like Discord, Kaede applications may create a poll, read its voters, receive
 vote events, and end a poll they authored, but they cannot cast or remove a
-vote. Bot vote routes deliberately return `BOT_POLL_VOTE_UNSUPPORTED`; the
+vote. Bot vote routes return `BOT_POLL_VOTE_UNSUPPORTED`; the
 `polls.write` scope is not permission to impersonate a human voter.
 
 Mutable guild, channel, and role payloads carry a `version`. Update requests
@@ -785,14 +789,14 @@ counts, nesting, and total bytes are bounded and validated by the authority.
 
 ### Command and response routes
 
-| Method             | Path                                                                                      | Purpose                                          |
-| ------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `GET/PUT`          | `/api/v1/applications/{app}/commands`                                                     | Read or atomically replace global commands       |
-| `POST`             | `/api/v1/bots/interactions/{interaction}/callback`                                        | Send the one initial callback                    |
-| `GET/PATCH/DELETE` | `/api/v1/bots/interactions/{interaction}/responses/@original`                             | Read or mutate the original response             |
-| `POST`             | `/api/v1/bots/interactions/{interaction}/followups`                                       | Create a follow-up                               |
-| `GET/PATCH/DELETE` | `/api/v1/bots/interactions/{interaction}/followups/{response_id}`                         | Read or mutate one follow-up by durable ID       |
-| `POST`             | `/api/v1/bots/interactions/{interaction}/responses/{@original\|response_id}/polls/expire` | End the exact public or private interaction poll |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET/PUT` | `/api/v1/applications/{app}/commands` | Read or atomically replace global commands |
+| `POST` | `/api/v1/bots/interactions/{interaction}/callback` | Send the one initial callback |
+| `GET/PATCH/DELETE` | `/api/v1/bots/interactions/{interaction}/responses/@original` | Read or mutate the original response |
+| `POST` | `/api/v1/bots/interactions/{interaction}/followups` | Create a follow-up |
+| `GET/PATCH/DELETE` | `/api/v1/bots/interactions/{interaction}/followups/{response_id}` | Read or mutate one follow-up by durable ID |
+| `POST` | `/api/v1/bots/interactions/{interaction}/responses/{@original\|response_id}/polls/expire` | End the exact public or private interaction poll |
 
 ### Delivery
 
@@ -872,7 +876,7 @@ Direct-message and call events name their exact capability lineage and are
 delivered from conversation authority C, not relayed through application home
 A or installation authority B. The server retains a bounded topic backlog. A
 cursor older than that backlog receives an explicit `GAP` event instead of
-silently missing data.
+missing data.
 
 There is no session-ID or opcode-6 Resume flow. After any disconnect, the SDK
 waits with exponential one-to-thirty-second backoff plus jitter, obtains or
@@ -989,14 +993,14 @@ source-read proof.
 Device administration is worker-authenticated and always routed to application
 home A:
 
-| Method   | Path                                                                | Purpose                                      |
-| -------- | ------------------------------------------------------------------- | -------------------------------------------- |
-| `POST`   | `/api/v1/bots/e2ee/devices/challenge`                               | Create a five-minute registration challenge  |
-| `POST`   | `/api/v1/bots/e2ee/devices`                                         | Prove and register this worker's MLS device  |
-| `GET`    | `/api/v1/bots/e2ee/devices`                                         | List active devices and KeyPackage inventory |
-| `POST`   | `/api/v1/bots/e2ee/devices/{kbe_id}/key-packages`                   | Upload identity-signed MLS KeyPackages       |
-| `DELETE` | `/api/v1/bots/e2ee/devices/{kbe_id}`                                | Revoke this worker's device immediately      |
-| `GET`    | `/api/v1/bots/channels/{channel}/e2ee/participation` at authority C | Read the exact runtime participation status  |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/bots/e2ee/devices/challenge` | Create a five-minute registration challenge |
+| `POST` | `/api/v1/bots/e2ee/devices` | Prove and register this worker's MLS device |
+| `GET` | `/api/v1/bots/e2ee/devices` | List active devices and KeyPackage inventory |
+| `POST` | `/api/v1/bots/e2ee/devices/{kbe_id}/key-packages` | Upload identity-signed MLS KeyPackages |
+| `DELETE` | `/api/v1/bots/e2ee/devices/{kbe_id}` | Revoke this worker's device immediately |
+| `GET` | `/api/v1/bots/channels/{channel}/e2ee/participation` at authority C | Read the exact runtime participation status |
 
 Registration binds the application, worker authority ID, device identity key,
 MLS credential digest, one-use challenge, and device signature. KeyPackage
@@ -1032,7 +1036,7 @@ receives its private state or plaintext. Revoking either the room grant or the
 device stops new delivery, evicts that device's active encrypted-media session,
 and moves the room through a rekey before content resumes.
 
-Once a bot is deliberately made a cryptographic participant, its operator is a
+Once a bot is made a cryptographic participant, its operator is a
 recipient and can retain anything it decrypts. Removing access can stop future
 delivery, but it cannot erase data already copied by that operator. Pre-install
 history remains excluded by default.
@@ -1045,7 +1049,7 @@ complete, short-lived media context: encryption policy generation, MLS epoch,
 `livekit-e2ee-v1`, `AES-256-GCM`, a group-bound media-session digest, and the
 matching media epoch. The SDK recomputes that digest from the local 32-byte
 group ID, so the bearer grant does not need to disclose the group ID and cannot
-silently substitute a different group.
+substitute a different group.
 
 `VoiceE2EEContext` requires the real MLS provider, device ID, composite channel
 reference, group ID, and epoch. It checks the provider epoch before and after
@@ -1092,68 +1096,10 @@ the server.
 
 ## Python SDK
 
-The first-party `kaede-bot` package is asynchronous and keeps a familiar
-decorator-based interface. See
-[Python bot API quickstart](bot-api-quickstart.md) for the complete enrollment
-and startup flow.
-
-One-time enrollment uses a control credential and stores the generated worker
-private key in an owner-only directory. Normal startup loads that state:
-
-```python
-import asyncio
-
-import kaede_bot as kaede
-
-bot = kaede.Client(
-    worker_state=kaede.WorkerState.load("/run/secrets/kaede-worker"),
-    intents=kaede.Intents.default(),
-)
-
-
-@bot.command(name="ping", description="Check whether the bot is awake")
-async def ping(interaction: kaede.Interaction) -> None:
-    await interaction.respond("Pong!")
-
-
-asyncio.run(bot.start("https://chat.example", "https://community.example"))
-```
-
-The package provides:
-
-- `WorkerState.enroll`, safe local key persistence, and control-token command
-  synchronization
-- direct multi-target token exchange and DPoP signing
-- heartbeat, post-handler cursor persistence, fresh-Identify replay, bounded
-  reconnect, and `Retry-After` handling
-- `Client.event` and `Client.command` decorators
-- typed resources and events: guilds, channels, members, roles, messages, and
-  attachments; forums, threads, polls, scheduled events, invites, webhooks,
-  expressions, application media, soundboard, and task trackers; interactions,
-  AutoMod, moderation, presence, audit records, and voice
-- arbitrary embeds, Discord-style Views, buttons, selects, checkboxes, modals,
-  autocomplete, immediate/deferred/update callbacks, follow-ups, private
-  responses, and authoritative timeout edits
-- scoped CRUD and hierarchy-aware moderation helpers, safe presigned
-  uploads/downloads, message history, complete reaction management,
-  live-reference forwarding, announcements, polls, voice messages, and user
-  lookup
-- voice join/listen plus decoded camera and screen-share callbacks, soundboard,
-  programmable PCM or local-file playback, and pause/resume/stop controls
-- `content_unavailable`, encrypted payload, and composite-reference handling
-
-A snowflake is never converted into a username. `fetch_user(EntityRef)`
-resolves the authoritative profile. `User.handle` returns normal
-`username@instance` formatting, while `User.mention` retains the full
-composite reference.
-
-Task tracker channels have a separate scope and event boundary. `tasks.read`
-allows board fetches and is required alongside the `guild_tasks` intent for
-tracker Gateway events. `tasks.write` admits task CRUD, while `tasks.manage`
-admits lane and board-setting operations. The bot's current tracker permission
-bits and channel overwrites are checked again for every request. See the
-[task tracker channel contract](task-tracker.md#bots-and-applications) for the
-routes, typed SDK resources, concurrency rules, and dispatches.
+Use the [bot quickstart](bot-api-quickstart.md) for enrollment, command
+publishing, and a runnable `/ping` bot. The [SDK recipes](bot-sdk-recipes.md)
+cover feature examples and required grants, including federation and media.
+The SDK handles target token exchange, request signing, and Gateway recovery.
 
 ## User-facing behavior
 
@@ -1195,5 +1141,4 @@ the composite snowflake reference.
 - Bot loops are limited through provenance, hop limits, mention rules, duplicate
   suppression, intent defaults, and channel write limits.
 
-Implementation order, migrations, and release checks are maintained in
-[Instance Administration and Developer Portal](administration-and-developer-portals.md).
+Portal workflows are in [Administration and Developer Portal](administration-and-developer-portals.md).

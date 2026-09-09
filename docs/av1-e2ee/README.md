@@ -1,10 +1,10 @@
 # Encrypted AV1 validation
 
-Rust fix: [cd55b5af](https://github.com/CookieNom/rust-sdks/commit/cd55b5af),
-branch `kaede/encrypted-av1-investigation`. Desktop pins this revision.
-Browser fix: `frontend/patches/livekit-client@2.20.1.patch`, installed by pnpm.
-Mobile native fix/build workflow: `webrtc-build.patch`, also prepared in
-`/tmp/kaede-webrtc-build` on `kaede/av1-e2ee`. Local mobile build commit: `a82acd9`. Its push and remote builds await approval.
+These are development validation notes for the experimental AV1 encryption
+format. Production encrypted video still uses VP8. Current Rust dependency
+pins are in [desktop/Cargo.toml](../../desktop/Cargo.toml); the browser patch is
+[the LiveKit patch](../../frontend/patches/livekit-client@2.20.1.patch), and the
+mobile build changes are in [webrtc-build.patch](webrtc-build.patch).
 
 The original failures came from encrypting AV1 OBU structure needed by RTP,
 browser cryptors rejecting AV1, and missing cryptors on backup senders. Desktop
@@ -20,7 +20,7 @@ An upstream client advertising AV1 does not imply support for this encryption
 format. Encrypted publishing therefore remains VP8 until matching mobile binaries
 are integrated and compatibility with older clients is addressed.
 
-## Results
+## Recorded investigation results
 
 | Check | Result |
 | --- | --- |
@@ -42,8 +42,8 @@ are integrated and compatibility with older clients is addressed.
 | Flutter analyzer on changed voice files | Passed |
 | Android/iOS/macOS device calls and rebuilt mobile binaries | Pending |
 
-These are functional tests, not game-screen performance or hardware acceleration
-benchmarks. No LiveKit server changes or encryption bypass were used.
+These are historical functional-test results, not a fresh run against the
+current checkout or hardware-performance measurements. No LiveKit server changes or encryption bypass were used.
 
 ## Reproduce
 
@@ -82,7 +82,7 @@ interop tests. The rebuild script uses the existing Vite/esbuild dependency.
 
 ## Remaining integration
 
-Build the prepared mobile WebRTC patch on Android and Apple CI after approval,
+Build the mobile WebRTC patch on Android and Apple CI,
 then pin those artifacts in Flutter's native plugin and test actual devices.
 Validate Windows/macOS Rust builds, and H264 publishing in a browser with an H264
 encoder. Only then change the encrypted default, with a way to handle old clients

@@ -1,0 +1,66 @@
+name: Python SDK
+
+on:
+  pull_request:
+    paths: ['sdk/python/**', '.github/workflows/sdk-publish.yml']
+  push:
+    branches: [main]
+    paths: ['sdk/python/**', '.github/workflows/sdk-publish.yml']
+    tags: ['sdk-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with: { version: '0.11.8', enable-cache: true }
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "sdk-v$(uv version --project sdk/python --short)"
+      - run: uv sync --project sdk/python --locked --python 3.11
+      - run: uv build --project sdk/python --no-sources
+      - run: uv run --project sdk/python --no-sync twine check --strict sdk/python/dist/*
+      - name: Test installed wheel and source distribution
+        run: |
+          for artifact in sdk/python/dist/*.whl sdk/python/dist/*.tar.gz; do
+            uv pip install --python sdk/python/.venv/bin/python --reinstall "$artifact"
+            uv run --project sdk/python --no-sync python -I -c 'import kaede_bot; from importlib.resources import files; assert files("kaede_bot").joinpath("py.typed").is_file()'
+            uv run --project sdk/python --no-sync pytest -q sdk/python/tests
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-sdk-distributions
+          path: sdk/python/dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/sdk-v') && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/kaede-bot/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-sdk-distributions
+          path: dist
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with: { version: '0.11.8', enable-cache: false }
+      - run: uv publish --trusted-publishing always dist/*

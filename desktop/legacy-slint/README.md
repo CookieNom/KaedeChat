@@ -1,25 +1,15 @@
-# Kaede Desktop
+# Archived Slint desktop client
 
-Kaede Desktop is the native Slint client for Kaede Chat. It connects only to a
-user's home instance; federation, history replication, remote media, and voice
-authorization remain server responsibilities.
+This directory preserves the previous Slint client. It is excluded from the
+current desktop workspace, Make targets, and release workflow. For current
+builds, platform support, and signing instructions, use the
+[Tauri desktop README](../README.md).
 
-The workspace targets Windows 10/11, macOS 14 or newer, and current Linux
-desktops using Wayland or X11. The application UI is native Slint. A restricted
-system web view is used only when an instance requires a Cloudflare Turnstile
-challenge; it is not used to render the application.
+The archived client used Slint for its UI, Tokio for network/background work,
+SQLite for cached state, and CPAL/LiveKit for media. It connected through the
+user's home instance and stored credentials in the OS vault. Its old parity
+inventory is in [parity.toml](../parity.toml); it describes the archived client,
+not current backend support.
 
-Development status and the web-to-desktop coverage contract are tracked in
-[`parity.toml`](parity.toml). Architecture and platform constraints are in
-[`docs/architecture.md`](docs/architecture.md).
-
-```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo run -p kaede-desktop
-```
-
-Platform packaging, signing, and notarization require the credentials described
-in [`docs/releasing.md`](docs/releasing.md).
-
+Historical design and packaging notes remain in Git history. They should not
+be used to configure a current Kaede release.

@@ -7,12 +7,12 @@ setting.
 
 ## Presets
 
-| Preset     |                                                 Capture ceiling | Frame rate | Video bitrate ceiling | Encoder priority  |
-| ---------- | --------------------------------------------------------------: | ---------: | --------------------: | ----------------- |
-| Data saver |                                                        1280×720 |     15 FPS |              1.2 Mbps | Detail            |
-| Smooth     |                                                        1280×720 |     30 FPS |              2.5 Mbps | Motion/frame rate |
-| Sharp      |                                                       1920×1080 |     30 FPS |              4.5 Mbps | Detail/resolution |
-| Source     | Source resolution (8K defensive browser bound; 4K native bound) |     30 FPS |                8 Mbps | Detail/resolution |
+| Preset | Capture ceiling | Frame rate | Video bitrate ceiling | Encoder priority |
+| --- | ---: | ---: | ---: | --- |
+| Data saver | 1280×720 | 15 FPS | 1.2 Mbps | Detail |
+| Smooth | 1280×720 | 30 FPS | 2.5 Mbps | Motion/frame rate |
+| Sharp | 1920×1080 | 30 FPS | 4.5 Mbps | Detail/resolution |
+| Source | Source resolution (8K defensive browser bound; 4K native bound) | 30 FPS | 8 Mbps | Detail/resolution |
 
 The ceilings are targets, not reservations. WebRTC can send less during static
 content or congestion, and may reduce resolution or frame rate according to the
@@ -45,7 +45,7 @@ bounded, one-frame thumbnails for at most 24 listed sources with three capture
 workers; full-resolution frames are not retained or persisted. The selected
 source ID is checked against a fresh trusted enumeration before it is stored.
 
-Native desktop system-audio loopback is deliberately disabled in the chooser
+Native desktop system-audio loopback is disabled in the chooser
 until the Windows WASAPI, macOS ScreenCaptureKit audio, and Linux PipeWire
 paths have a tested common mixer contract. This does not affect microphone
 bitrate selection.
@@ -62,7 +62,7 @@ by the target macOS release.
 ### Wayland desktop
 
 When `WAYLAND_DISPLAY` is set or `XDG_SESSION_TYPE=wayland`, Kaede uses the
-generic PipeWire/XDG Desktop Portal capturer. It intentionally returns no
+generic PipeWire/XDG Desktop Portal capturer. It returns no
 XWayland source list, previews, or cached IDs, leaving disclosure and consent
 to the compositor's portal. X11 sessions continue to use explicit source
 enumeration.
@@ -73,7 +73,7 @@ Kaede requests the user-owned MediaProjection grant before capture, then
 promotes its existing voice foreground service with the `mediaProjection`
 type before LiveKit consumes the grant. The manifest includes Android's
 foreground-service media-projection permission and the persistent notification
-states that the screen is being shared. Audio is not silently included in the
+states that the screen is being shared. Audio is not included in the
 screen capture. Android may revoke the grant when the user stops sharing from
 system UI; the user can start a new share to obtain a fresh token.
 
@@ -102,3 +102,46 @@ testing must confirm MediaProjection foreground-service ordering. iOS testing
 must use a signed physical device because the app-group extension path cannot
 be validated by Flutter's Linux CI or treated as proven by project-file
 presence alone.
+
+## Voice and call routing
+
+Guild voice runs on the guild's home instance. Human two-person DM calls use
+the caller's instance as call authority; bot calls use their DM capability's
+conversation authority. A remote client obtains a grant through the relevant
+API and connects to the returned LiveKit server. Existing media can continue
+through a federation outage, but new joins require the authority. There is no
+automatic SFU failover to another instance.
+
+Grants name one room and participant. `CONNECT`, `SPEAK`, and `STREAM` control
+joining, microphone publication, and camera/screen publication separately.
+LiveKit webhooks and periodic reconciliation remove stale or unauthorized
+participants; persisted moderator mute/deafen state applies on every join.
+Occupancy is temporary state, and stale remote snapshots display as unknown.
+
+A two-person call begins ringing and needs the other participant's acceptance
+before media tokens are issued. End/decline retries are idempotent. Terminal
+state commits independently of best-effort LiveKit room removal; a scheduled
+sweep cleans up orphaned rooms.
+
+Enable LiveKit in the deployment wizard and open the RTC/TURN ports in the
+[operator guide](operator.md#hosts-certificates-and-ports). Configured
+`KAEDE_VOICE_REGIONS` values form the selectable region catalog; `rtc_region:
+null` leaves selection automatic. `make voice-check` exercises disposable
+LiveKit and Dragonfly services; it does not replace physical-device checks.
+
+For bot playback, receiving, video publication, and calls, use the
+[SDK recipes](bot-sdk-recipes.md#play-audio-in-a-voice-channel).
+Encrypted media requires the room's current MLS state; see [E2EE](e2ee.md).
+
+## Codec defaults
+
+Plaintext camera and screen sharing prefer AV1 when supported, with H.264 as
+the compatibility choice and VP8 where H.264 is unavailable. Desktop can
+publish a backup codec on demand; web and Flutter follow their SDK fallback
+behavior. CPU load and thermal throttling do not trigger an application-level
+codec switch.
+
+Encrypted calls keep VP8. AV1 decoding support alone does not establish
+compatibility with Kaede's experimental encrypted AV1 format. Keep encryption
+enabled and use the supported codec; [the AV1 notes](av1-e2ee/README.md)
+record the separate interoperability investigation.

@@ -16,16 +16,17 @@ Administration screens under User Settings.
 Administrative access belongs to an ordinary local user account. The host grants
 the first owner role from the CLI:
 
-```sh
-docker compose exec api kaede admin-grant alice --role owner
-```
-
-Additional examples:
+Run this from the repository root after registering the local account:
 
 ```sh
-docker compose exec api kaede admin-grant bob --role trust_safety
-docker compose exec api kaede admin-revoke bob --role trust_safety
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml \
+  exec -T api kaede admin-grant alice --role owner
 ```
+
+Use the same Compose prefix for `kaede admin-grant bob --role trust_safety`
+or `kaede admin-revoke bob --role trust_safety`. Both files are needed for a
+wizard-generated production deployment.
 
 Accepted roles are `owner`, `administrator`, `trust_safety`, `bot_reviewer`,
 `operations`, and `auditor`. The command accepts a local `username` or
@@ -42,14 +43,14 @@ expired or revoked grants, remote users, and bot users are rejected.
 
 ### Roles
 
-| Role           | Access                                                |
-| -------------- | ----------------------------------------------------- |
-| Owner          | Every administration capability; CLI controlled       |
-| Administrator  | Operators, users, instances, bots, reports, and audit |
-| Trust & Safety | Reports, local-user state, and instance policy        |
-| Bot reviewer   | Bot applications and the audit log                    |
-| Operations     | Instance policy and the audit log                     |
-| Auditor        | Read-only reports and audit log                       |
+| Role | Access |
+| --- | --- |
+| Owner | Every administration capability; CLI controlled |
+| Administrator | Operators, users, instances, bots, reports, and audit |
+| Trust & Safety | Reports, local-user state, and instance policy |
+| Bot reviewer | Bot applications and the audit log |
+| Operations | Instance policy and the audit log |
+| Auditor | Read-only reports and audit log |
 
 `GET /api/v1/administration/@me` returns the caller's roles and effective
 capabilities. The panel hides mutation controls the caller cannot use, but the
@@ -152,22 +153,22 @@ no action, mark duplicates, and reopen cases. Report creation is rate limited to
 
 ### Administration API
 
-| Method      | Path                                               | Purpose                          |
-| ----------- | -------------------------------------------------- | -------------------------------- |
-| `GET`       | `/api/v1/administration/@me`                       | Current roles and capabilities   |
-| `GET`       | `/api/v1/administration/overview`                  | Instance counts                  |
-| `GET/POST`  | `/api/v1/administration/operators`                 | List or grant non-owner roles    |
-| `DELETE`    | `/api/v1/administration/operators/{grant}`         | Revoke a non-owner role          |
-| `GET`       | `/api/v1/administration/users`                     | Search local accounts            |
-| `PATCH`     | `/api/v1/administration/users/{user}`              | Disable or enable an account     |
-| `GET`       | `/api/v1/administration/applications`              | List bot applications            |
-| `PATCH`     | `/api/v1/administration/applications/{app}`        | Activate or suspend an app       |
-| `GET/PATCH` | `/api/v1/administration/reports[/{report}]`        | Review and update reports        |
-| `GET/PUT`   | `/api/v1/administration/instances/blocks`          | List or create instance rules    |
-| `DELETE`    | `/api/v1/administration/instances/blocks/{domain}` | Remove an instance rule          |
-| `GET`       | `/api/v1/administration/audit`                     | Read recent audit events         |
-| `POST`      | `/api/v1/reports`                                  | Submit a plaintext report        |
-| `GET`       | `/api/v1/reports/@me`                              | Read the reporter-safe case view |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/administration/@me` | Current roles and capabilities |
+| `GET` | `/api/v1/administration/overview` | Instance counts |
+| `GET/POST` | `/api/v1/administration/operators` | List or grant non-owner roles |
+| `DELETE` | `/api/v1/administration/operators/{grant}` | Revoke a non-owner role |
+| `GET` | `/api/v1/administration/users` | Search local accounts |
+| `PATCH` | `/api/v1/administration/users/{user}` | Disable or enable an account |
+| `GET` | `/api/v1/administration/applications` | List bot applications |
+| `PATCH` | `/api/v1/administration/applications/{app}` | Activate or suspend an app |
+| `GET/PATCH` | `/api/v1/administration/reports[/{report}]` | Review and update reports |
+| `GET/PUT` | `/api/v1/administration/instances/blocks` | List or create instance rules |
+| `DELETE` | `/api/v1/administration/instances/blocks/{domain}` | Remove an instance rule |
+| `GET` | `/api/v1/administration/audit` | Read recent audit events |
+| `POST` | `/api/v1/reports` | Submit a plaintext report |
+| `GET` | `/api/v1/reports/@me` | Read the reporter-safe case view |
 
 ## Developer Portal
 
@@ -180,14 +181,14 @@ those shared workspaces.
 
 Developer-team roles are separate from instance-administrator roles:
 
-| Role          | Developer access                                |
-| ------------- | ----------------------------------------------- |
-| Owner         | Full team and application control               |
+| Role | Developer access |
+| --- | --- |
+| Owner | Full team and application control |
 | Administrator | Application configuration and member management |
-| Developer     | Workers and command definitions                 |
-| Security      | Credentials, workers, and federation rules      |
-| Analyst       | Read-only application and installation data     |
-| Support       | Read-only support and installation data         |
+| Developer | Workers and command definitions |
+| Security | Credentials, workers, and federation rules |
+| Analyst | Read-only application and installation data |
+| Support | Read-only support and installation data |
 
 The last owner cannot be demoted or removed. Personal teams remain single-user;
 shared teams accept federated human members and can own at most 75 active
@@ -352,49 +353,39 @@ a recipient and may retain anything the bot decrypts.
 
 ### Developer API
 
-| Method             | Path                                                  | Purpose                             |
-| ------------------ | ----------------------------------------------------- | ----------------------------------- |
-| `GET/POST`         | `/api/v1/developer-teams`                             | List or create teams                |
-| `GET/POST`         | `/api/v1/developer-teams/{team}/members`              | List or add members                 |
-| `PATCH/DELETE`     | `/api/v1/developer-teams/{team}/members/{user}`       | Change or remove a member           |
-| `GET/POST`         | `/api/v1/applications`                                | List or create applications         |
-| `GET/PATCH`        | `/api/v1/applications/{app}`                          | Read or change an application       |
-| `GET`              | `/api/v1/applications/{app}/directory-preview`        | Read the private product preview and readiness status |
-| `GET/POST`         | `/api/v1/applications/{app}/credentials`              | List or create control credentials  |
-| `DELETE`           | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential                 |
-| `GET/POST`         | `/api/v1/applications/{app}/workers`                  | List or enroll workers              |
-| `DELETE`           | `/api/v1/applications/{app}/workers/{worker}`         | Revoke a worker                     |
-| `GET/PUT`          | `/api/v1/applications/{app}/commands`                 | Read or replace commands            |
-| `GET/POST`         | `/api/v1/applications/{app}/install-templates`        | Manage invite links                 |
-| `GET`              | `/api/v1/applications/{app}/installations`            | List installations                  |
-| `GET`              | `/api/v1/applications/{app}/instance-rules`           | List exact-domain policy rules      |
-| `PUT/DELETE`       | `/api/v1/applications/{app}/instance-rules/{domain}`  | Set or remove an exact-domain rule  |
-| `GET/POST`         | `/api/v1/applications/{app}/assets`                   | List or commit application assets   |
-| `POST`             | `/api/v1/applications/{app}/assets/tickets`           | Reserve an application asset upload |
-| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/assets/{asset}`           | Read, update, or remove an asset    |
-| `GET/POST`         | `/api/v1/applications/{app}/emojis`                   | List or commit application emoji    |
-| `POST`             | `/api/v1/applications/{app}/emojis/tickets`           | Reserve an application emoji upload |
-| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/emojis/{emoji}`           | Read, update, or remove app emoji   |
-| `GET`              | `/api/v1/application-directory`                       | Search a local or selected remote catalog |
-| `GET`              | `/api/v1/application-directory/bot-profiles/{bot}`    | Resolve a bot profile's authority-owned Add App action |
-| `GET`              | `/api/v1/application-directory/{app}`                 | Read a reviewed application product page |
-| `POST`             | `/api/v1/bot-control/applications/{app}/workers`      | Enroll using a control token        |
-| `PUT`              | `/api/v1/bot-control/applications/{app}/commands`     | Sync commands using a control token |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET/POST` | `/api/v1/developer-teams` | List or create teams |
+| `GET/POST` | `/api/v1/developer-teams/{team}/members` | List or add members |
+| `PATCH/DELETE` | `/api/v1/developer-teams/{team}/members/{user}` | Change or remove a member |
+| `GET/POST` | `/api/v1/applications` | List or create applications |
+| `GET/PATCH` | `/api/v1/applications/{app}` | Read or change an application |
+| `GET` | `/api/v1/applications/{app}/directory-preview` | Read the private product preview and readiness status |
+| `GET/POST` | `/api/v1/applications/{app}/credentials` | List or create control credentials |
+| `DELETE` | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential |
+| `GET/POST` | `/api/v1/applications/{app}/workers` | List or enroll workers |
+| `DELETE` | `/api/v1/applications/{app}/workers/{worker}` | Revoke a worker |
+| `GET/PUT` | `/api/v1/applications/{app}/commands` | Read or replace commands |
+| `GET/POST` | `/api/v1/applications/{app}/install-templates` | Manage invite links |
+| `GET` | `/api/v1/applications/{app}/installations` | List installations |
+| `GET` | `/api/v1/applications/{app}/instance-rules` | List exact-domain policy rules |
+| `PUT/DELETE` | `/api/v1/applications/{app}/instance-rules/{domain}` | Set or remove an exact-domain rule |
+| `GET/POST` | `/api/v1/applications/{app}/assets` | List or commit application assets |
+| `POST` | `/api/v1/applications/{app}/assets/tickets` | Reserve an application asset upload |
+| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/assets/{asset}` | Read, update, or remove an asset |
+| `GET/POST` | `/api/v1/applications/{app}/emojis` | List or commit application emoji |
+| `POST` | `/api/v1/applications/{app}/emojis/tickets` | Reserve an application emoji upload |
+| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/emojis/{emoji}` | Read, update, or remove app emoji |
+| `GET` | `/api/v1/application-directory` | Search a local or selected remote catalog |
+| `GET` | `/api/v1/application-directory/bot-profiles/{bot}` | Resolve a bot profile's authority-owned Add App action |
+| `GET` | `/api/v1/application-directory/{app}` | Read a reviewed application product page |
+| `POST` | `/api/v1/bot-control/applications/{app}/workers` | Enroll using a control token |
+| `PUT` | `/api/v1/bot-control/applications/{app}/commands` | Sync commands using a control token |
 
 See [Bot API quickstart](bot-api-quickstart.md) for the Python SDK and
 [Bot and automation API](bots-and-automations.md) for runtime routes, Gateway
 events, rate limits, federation, and E2EE behavior.
 
-## Storage and migrations
-
-The schema is introduced by migrations `94397280832f` and `b84e2f6a19d7`.
-They add administrator grants/audit, developer teams, applications, credentials,
-workers, policies, templates, commands, installations, tokens, interactions,
-and reports. Bot users reuse the existing user/member/message payloads with an
-explicit bot discriminator, so badges work in rosters and beside message authors
-without a separate identity system.
-
-Secrets are never stored in plaintext. Control and target tokens are hash-only,
-and worker private keys stay outside Kaede. Installation, token, interaction,
-report, and federation paths have explicit count, byte, time, replay, and rate
-bounds.
+Control and target tokens are stored as hashes; worker private keys stay with
+the worker. Database migrations run through the deployment's `migrate` service.
+See the [operator guide](operator.md) for upgrades and backups.

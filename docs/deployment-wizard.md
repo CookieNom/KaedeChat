@@ -14,45 +14,29 @@ install packages or proxy files, request certificates, change the firewall, or
 reload nginx/Caddy. The user timer is the only host service it touches, and
 only after you explicitly opt into automatic updates.
 
-The wizard asks about:
+## Choices
 
-- the production domain, federation admission, and optional admin token;
-- the loopback port for Kaede's internal Caddy edge;
-- an optional host nginx configuration for hosts where nginx owns 80/443,
-  referencing TLS certificate and private-key paths you supply;
-- bundled Garage, AWS S3, Backblaze B2, Cloudflare R2, or generic S3 storage;
-- Mailtrap API, Mailtrap SMTP, AWS SES SMTP, generic SMTP, or no email;
-- optional KLIPY GIF search and Cloudflare Turnstile registration/adaptive
-  sign-in protection;
-- optional typo-tolerant message search backed by a private, bundled
-  Meilisearch service (enabled by default for new deployments);
-- optional LiveKit voice/video and observability services;
-- optional source-based automatic updates, including Git remote, branch,
-  interval, and an executable pre-update backup hook; and
-- worker counts, upload limits, non-conflicting host ports, and optional
-  federation/storage quota tuning.
+| Setting | What to prepare |
+| --- | --- |
+| Domain and proxy | Instance domain, DNS, TLS certificate/key paths, loopback edge port, and optional host nginx configuration |
+| Storage | Bundled Garage, or credentials and three private buckets at an S3-compatible provider |
+| Email | SMTP or Mailtrap credentials, or no-email registration |
+| Optional features | LiveKit voice/video, private message search, GIF search, Turnstile, mobile push, and monitoring |
+| Updates | Optional source-update schedule and executable backup hook |
+| Capacity | Worker counts, upload limits, host ports, and optional federation/cache quotas |
 
-Federation and remote-cache sizing is optional. **Keep recommended defaults**
-on a new deployment, or **Keep existing limits** on a rerun, asks no individual
-quota questions and preserves custom values already in `.env`. **Customize
-common storage limits** exposes the operationally useful high-water marks:
-retained federation-event bytes per origin and instance, the rolling DM cache,
-remote-guild replica bytes per guild and origin, one retained-history import,
-and downloaded remote media. **Advanced** additionally exposes event counts,
-identity/relationship abuse caps, DM hard ceilings, replica row counts,
-concurrent media transfer, and history grant/page ceilings.
+For a new deployment, **Keep recommended defaults** skips individual quota
+questions. On a rerun, **Keep existing limits** preserves custom values.
+**Customize common storage limits** covers the main cache/history byte budgets;
+**Advanced** exposes event counts, identity/relationship caps, row counts,
+concurrency, and grant/page limits. Full sizing guidance is in the
+[operator guide](operator.md#federation-storage-budgets).
 
-Count fields accept plain integers or `K`, `M`, and `B` suffixes (for example
-`250K` and `2.5M`). Byte fields accept decimal `KB`, `MB`, `GB`, and `TB`, or
-binary `K`, `M`, `G`, `T`, `KiB`, `MiB`, `GiB`, and `TiB`. Setup shows the
-parsed count or byte value after each answer and prints a core quota summary
-before writing anything. Paired prompts constrain their next answer, so a
-per-scope or cache value cannot exceed its aggregate or hard ceiling. If you
-raise the attachment limit above remote-transfer capacity, setup raises the
-in-flight limits enough to receive one maximum attachment. Raising limits does
-not reserve disk — keep headroom for PostgreSQL index/WAL/vacuum/backup and
-object-store lifecycle. Stay on the default path unless monitoring shows
-sustained capacity pressure.
+Counts accept `K`, `M`, and `B` (`250K`, `2.5M`). Bytes accept decimal
+`KB`/`MB`/`GB`/`TB` or binary `K`/`M`/`G`/`T` and `KiB`/`MiB`/`GiB`/`TiB`.
+Setup shows the parsed values before writing and checks that related limits
+fit together. Higher limits do not reserve disk space; leave room for database
+indexes, WAL, maintenance, and backups.
 
 If you already have [`gum`](https://github.com/charmbracelet/gum) installed,
 the script uses it for the interface and hidden credential prompts. Otherwise

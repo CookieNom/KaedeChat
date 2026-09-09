@@ -1,9 +1,7 @@
 # Kaede mobile
 
-Kaede's Android and iOS clients share one Flutter presentation and domain layer. Native platform integrations remain for credentials, biometrics, notifications, media capture, and LiveKit voice/video. The layouts are mobile-first rather than scaled versions of the desktop shell.
-
-The implementation-level web/desktop comparison, known gaps, and release-device
-checklist live in [`docs/mobile-parity.md`](../docs/mobile-parity.md).
+Kaede's Android and iOS apps use Flutter, with native integrations for secure
+credentials, biometrics, notifications, capture, and LiveKit calls.
 
 The client connects only to the account's home instance. That instance brokers federation, remote media authorization, presence, history import, direct messages, and voice grants. A mobile client must never call peer federation endpoints directly.
 
@@ -59,7 +57,7 @@ Tag-triggered GitHub Releases build a signed APK and Play AAB together with the
 desktop clients. Configure the four Android signing secrets and the official
 Firebase client-configuration secret listed in
 [`desktop/docs/releasing.md`](../desktop/docs/releasing.md) before pushing a
-release tag. The workflow deliberately fails instead of publishing an unsigned
+release tag. The workflow fails instead of publishing an unsigned
 artifact, omitting push support, or generating a throwaway key that would break
 application updates.
 
@@ -120,3 +118,40 @@ device can decrypt locally. Full protocol and privacy details are in
 ## Generated protocol
 
 `lib/src/protocol/generated.dart` is generated from the authoritative Python registries by `backend/scripts/generate_protocol.py`. CI regenerates it and rejects drift alongside the TypeScript and Rust protocol modules.
+
+## Cross-client release checks
+
+Use the same account in mobile and web to compare results. Check the minimum
+supported OS, a current physical Android phone, a signed physical iPhone,
+a 320–390 logical-pixel screen with large text, and a tablet/foldable in both
+orientations. Native media and background behavior need hardware tests.
+
+- Create/edit/reorder channels and roles; both clients should update without
+  reopening the screen. Test owner, moderator, ordinary, and remote members.
+- Test task/lane changes and stale-version recovery from a second client.
+- Send replies, Markdown, concealed spoilers, mentions, emoji, stickers,
+  attachments, reactions, and pins in both directions. Check moderation controls
+  with and without permission, and confirm reaction counts reconcile.
+- Follow and publish announcements to local and remote guilds, then remove
+  follows. Search DMs, guilds, and channels with filters and pagination while
+  the software keyboard is open; results must jump to the selected message.
+- Test offline history, send retry/discard, reconnect, and access-revocation
+  cleanup. Equal numeric IDs from different domains must remain distinct.
+- Complete registration, verification, recovery, MFA, email change, session
+  revocation, E2EE backup/restore, and app-lock timeout.
+- Test push opt-in/out, DND, disabled previews, cold launch, expired sessions,
+  revoked access, and generic E2EE notifications. See [iOS release setup](../docs/ios-release.md).
+- Keep a voice call active for at least ten minutes while locked/backgrounded.
+  Test Wi-Fi/cellular transitions, Bluetooth changes, interruptions, and camera.
+  Confirm remote participants and the resumed UI agree about room membership.
+- Test screen-share denial, cancellation, rotation, source closure, system stop,
+  and reconnect. Android needs MediaProjection foreground-service ordering;
+  iOS needs signed ReplayKit/App Group validation. See
+  [media quality](../docs/screen-sharing-quality.md#release-validation).
+
+Mobile uses sheets and OS controls in place of desktop hover menus, tray,
+autostart, and updater settings. Developer Portal and Instance Administration
+have native screens; owner grants remain CLI-only. Interface text is currently
+English, while locale settings affect dates and localized command labels.
+Record actual device results with each release; automated tests alone do not
+establish that background calls, capture, or push work on hardware.

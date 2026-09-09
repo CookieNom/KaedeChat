@@ -187,7 +187,7 @@ No chat data migration or federation outage is required.
 Monitor home outbox age, relay queue age, provider status, invalid-token rates,
 signature/replay rejection, `429` responses, and key/certificate expiry.
 Closed-app delivery failures should be visible in mobile settings, but must not
-become persistent warnings when a user intentionally disabled push.
+become persistent warnings when a user disabled push.
 
 ## User controls
 

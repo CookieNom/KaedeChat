@@ -15,6 +15,7 @@
     syncDirectoryMediaWithAssets,
     type ApplicationAsset
   } from '$lib/chat/application-directory-editor';
+  import { applicationSettingsMatch } from '$lib/chat/application-settings';
   import { permissionMask } from '$lib/chat/permission-selection';
   import { BOT_INTENT_NAMES } from '$lib/generated/ops';
   import { resolve } from '$app/paths';
@@ -204,6 +205,16 @@
   let commandsText = $state('[]');
   let error = $state('');
   let notice = $state('');
+  let directoryTags = $state('');
+  let savedSettings = $state('');
+  let saveState = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  let saveError = $state('');
+  let accessSearch = $state('');
+  const visibleScopes = $derived(
+    scopes.filter((scope) => scope.includes(accessSearch.trim().toLowerCase()))
+  );
+  const settingsDraft = $derived(JSON.stringify({ application, directoryTags }));
+  const hasUnsavedChanges = $derived(!!application && settingsDraft !== savedSettings);
   let busy = $state(false);
   let credentialLabel = $state('Deployment');
   let credentialToken = $state('');
@@ -215,7 +226,6 @@
   let templateDescription = $state('');
   let ruleDomain = $state('');
   let ruleEffect = $state<'allow' | 'deny'>('deny');
-  let directoryTags = $state('');
   let loadedRef = $state('');
   let loadController = new AbortController();
   let previewController = new AbortController();
@@ -307,8 +317,12 @@
       ) {
         throw new Error('The application response returned a different identity.');
       }
-      application = app;
-      directoryTags = app.directory_tags.join(', ');
+      // Inventory actions must not replace the settings the user is editing.
+      if (!application) {
+        application = app;
+        directoryTags = app.directory_tags.join(', ');
+        savedSettings = JSON.stringify({ application: app, directoryTags });
+      }
       commandsText = JSON.stringify(commandList, null, 2);
       credentials = credentialList;
       workers = workerList;
@@ -442,7 +456,11 @@
     const applicationRef = ref;
     const currentApplication = application;
     const generation = ++mutationGeneration;
+    const submittedApplication = $state.snapshot(currentApplication);
+    const submittedTags = directoryTags;
     busy = true;
+    saveState = 'saving';
+    saveError = '';
     error = '';
     notice = '';
     try {
@@ -452,46 +470,80 @@
         supportedLocales: currentApplication.directory_supported_locales,
         descriptionLocalizations: currentApplication.directory_description_localizations
       });
+      const submittedSettings = {
+        name: currentApplication.name,
+        description: currentApplication.description,
+        support_url: currentApplication.support_url || null,
+        privacy_url: currentApplication.privacy_url || null,
+        terms_url: currentApplication.terms_url || null,
+        directory_enabled: currentApplication.directory_enabled,
+        directory_summary: currentApplication.directory_summary || null,
+        directory_category: currentApplication.directory_category,
+        directory_tags: directoryTags
+          .split(',')
+          .map((tag) => tag.trim().toLowerCase())
+          .filter(Boolean),
+        ...directoryPayload,
+        target_policy: currentApplication.target_policy,
+        default_scopes: currentApplication.default_scopes,
+        default_intents: currentApplication.default_intents,
+        // Permission masks extend beyond JavaScript's safe-integer range.
+        // Keep the exact decimal representation on the wire.
+        default_permissions: permissionBits(currentApplication.default_permissions),
+        supported_install_types: currentApplication.supported_install_types,
+        user_install_scopes: currentApplication.user_install_scopes,
+        user_install_contexts: currentApplication.user_install_contexts,
+        e2ee_modes: currentApplication.e2ee_modes
+      };
+      // PATCH only edited fields so an older form cannot reset unrelated settings.
+      const previousApplication: Application = JSON.parse(savedSettings).application;
+      const changedSettings = Object.fromEntries(
+        Object.entries(submittedSettings).filter(
+          ([key, value]) => !applicationSettingsMatch(previousApplication, { [key]: value })
+        )
+      );
       const updatedApplication = await api<Application>(
         `/applications/${encodeURIComponent(applicationRef)}`,
         {
           method: 'PATCH',
-          body: JSON.stringify({
-            name: currentApplication.name,
-            description: currentApplication.description,
-            support_url: currentApplication.support_url || null,
-            privacy_url: currentApplication.privacy_url || null,
-            terms_url: currentApplication.terms_url || null,
-            directory_enabled: currentApplication.directory_enabled,
-            directory_summary: currentApplication.directory_summary || null,
-            directory_category: currentApplication.directory_category,
-            directory_tags: directoryTags
-              .split(',')
-              .map((tag) => tag.trim().toLowerCase())
-              .filter(Boolean),
-            ...directoryPayload,
-            target_policy: currentApplication.target_policy,
-            default_scopes: currentApplication.default_scopes,
-            default_intents: currentApplication.default_intents,
-            // Permission masks extend beyond JavaScript's safe-integer range.
-            // Keep the exact decimal representation on the wire.
-            default_permissions: permissionBits(currentApplication.default_permissions),
-            supported_install_types: currentApplication.supported_install_types,
-            user_install_scopes: currentApplication.user_install_scopes,
-            user_install_contexts: currentApplication.user_install_contexts,
-            e2ee_modes: currentApplication.e2ee_modes
-          })
+          body: JSON.stringify(changedSettings)
         }
       );
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
-        application = updatedApplication;
-        directoryTags = updatedApplication.directory_tags.join(', ');
-        notice = 'Application settings saved.';
+        if (
+          updatedApplication.ref !== applicationRef ||
+          !applicationSettingsMatch(updatedApplication, changedSettings)
+        ) {
+          saveState = 'error';
+          saveError =
+            'The server did not confirm all of your changes. Your edits are still here; retry saving.';
+          return;
+        }
+        const savedTags = updatedApplication.directory_tags.join(', ');
+        savedSettings = JSON.stringify({
+          application: updatedApplication,
+          directoryTags: savedTags
+        });
+        // Apply server normalization without losing edits made during the request.
+        const newerEdits = Object.fromEntries(
+          (Object.keys(submittedApplication) as (keyof Application)[])
+            .filter(
+              (key) =>
+                JSON.stringify(currentApplication[key]) !==
+                JSON.stringify(submittedApplication[key])
+            )
+            .map((key) => [key, currentApplication[key]])
+        );
+        application = { ...updatedApplication, ...newerEdits };
+        if (directoryTags === submittedTags) directoryTags = savedTags;
+        saveState = 'saved';
+
         void loadDirectoryPreview(applicationRef);
       }
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
-        error = userErrorMessage(caught, 'Could not save the application.');
+        saveState = 'error';
+        saveError = userErrorMessage(caught, 'Could not save the application.');
       }
     } finally {
       if (mutationIsCurrent(applicationRef, generation)) busy = false;
@@ -693,6 +745,10 @@
     if (applicationRef === loadedRef) return;
     loadedRef = applicationRef;
     application = null;
+    savedSettings = '';
+    saveState = 'idle';
+    saveError = '';
+    accessSearch = '';
     credentials = [];
     workers = [];
     templates = [];
@@ -734,9 +790,6 @@
       <h1>{loadedRef === ref ? (application?.name ?? 'Loading…') : 'Loading…'}</h1>
       <p>{loadedRef === ref ? (application?.bot_user.handle ?? ref) : ref}</p>
     </div>
-    <button onclick={saveApplication} disabled={busy || !application || loadedRef !== ref}
-      >Save changes</button
-    >
   </header>
   {#if error}<div class="notice error" role="alert">{error}</div>{/if}{#if notice}<div
       class="notice success"
@@ -744,8 +797,33 @@
       {notice}<button aria-label="Dismiss" onclick={() => (notice = '')}>×</button>
     </div>{/if}
   {#if application && loadedRef === ref}
+    <aside class="save-card" aria-label="Save application settings">
+      <div class="save-status" role="status" aria-live="polite">
+        <strong
+          >{saveState === 'saving'
+            ? 'Saving settings…'
+            : saveState === 'error'
+              ? 'Settings not saved'
+              : hasUnsavedChanges
+                ? 'Unsaved changes'
+                : saveState === 'saved'
+                  ? 'Application settings saved.'
+                  : 'All changes saved'}</strong
+        >
+        <small
+          >{saveState === 'error'
+            ? saveError
+            : hasUnsavedChanges
+              ? 'Save your general, discovery, and access settings.'
+              : 'Your app settings are up to date.'}</small
+        >
+      </div>
+      <button onclick={saveApplication} disabled={busy || !hasUnsavedChanges}>
+        {saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Retry save' : 'Save changes'}
+      </button>
+    </aside>
     <div class="layout">
-      <nav>
+      <nav aria-label="Application sections">
         <a href="#general">General</a><a href="#discovery-settings">Discovery settings</a><a
           href="#discovery-status">Discovery status</a
         ><a href="#discovery-preview">Product preview</a><a href="#access">Access</a><a
@@ -941,9 +1019,19 @@
             Scopes control what the bot can request. Intents control which live events are
             delivered. A guild may approve less.
           </p>
-          <h3>Scopes</h3>
-          <div class="chips">
-            {#each scopes as scope (scope)}<label
+          <div class="section-title-row access-heading">
+            <h3>Scopes</h3>
+            <span>{application.default_scopes.length} selected</span>
+          </div>
+          <label class="scope-search"
+            >Search scopes<input
+              type="search"
+              bind:value={accessSearch}
+              placeholder="Filter by name, e.g. messages"
+            /></label
+          >
+          <div class="chips scope-grid">
+            {#each visibleScopes as scope (scope)}<label
                 class:active={application.default_scopes.includes(scope)}
                 ><input
                   type="checkbox"
@@ -954,7 +1042,11 @@
                 />{scope}</label
               >{/each}
           </div>
-          <h3>Gateway intents</h3>
+          {#if visibleScopes.length === 0}<p>No scopes match your search.</p>{/if}
+          <div class="section-title-row access-heading">
+            <h3>Gateway intents</h3>
+            <span>{application.default_intents.length} selected</span>
+          </div>
           <div class="chips">
             {#each intents as intent (intent)}<label
                 class:active={application.default_intents.includes(intent)}
@@ -1212,13 +1304,13 @@
   }
   .page {
     min-height: 100dvh;
-    padding: 1.5rem clamp(1rem, 4vw, 4rem) 5rem;
+    padding: 1.5rem clamp(1rem, 4vw, 4rem) 11rem;
     background: var(--bg);
     color: var(--text);
   }
   .top {
     display: grid;
-    grid-template-columns: 180px 1fr auto;
+    grid-template-columns: 180px 1fr;
     gap: 1rem;
     align-items: center;
     max-width: 1280px;
@@ -1237,7 +1329,7 @@
     font-weight: 800;
     text-transform: uppercase;
   }
-  .top button,
+  .save-card button,
   section > button,
   .inline button,
   .rows button {
@@ -1249,6 +1341,57 @@
     font: inherit;
     font-weight: 800;
     cursor: pointer;
+  }
+  .save-card {
+    position: fixed;
+    z-index: 30;
+    right: 1.5rem;
+    bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    max-width: min(560px, calc(100vw - 3rem));
+    box-sizing: border-box;
+    padding: 1rem;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: 0 8px 32px #0003;
+  }
+  .save-status {
+    display: grid;
+    gap: 0.3rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .save-status small,
+  .access-heading span {
+    color: var(--text-muted);
+  }
+  .save-card button {
+    flex-shrink: 0;
+  }
+  button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .access-heading {
+    align-items: baseline;
+    margin-top: 1.3rem;
+  }
+  .access-heading h3 {
+    margin: 0 0 0.6rem;
+  }
+  .scope-search {
+    margin-top: 0;
+  }
+  .chips.scope-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  }
+  .chips label:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .secret {
     display: grid;
@@ -1345,8 +1488,8 @@
     display: block;
     margin: 0;
     border: 1px solid var(--line);
-    border-radius: 999px;
-    padding: 0.35rem 0.65rem;
+    border-radius: 8px;
+    padding: 0.55rem 0.7rem;
     color: var(--text-muted);
     cursor: pointer;
   }
@@ -1356,9 +1499,9 @@
     background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
   .chips input {
-    position: absolute;
-    opacity: 0;
-    width: 1px;
+    width: auto;
+    margin: 0 0.45rem 0 0;
+    accent-color: var(--accent);
   }
   .warning {
     border-left: 3px solid var(--warning, #d79b36);
@@ -1540,6 +1683,16 @@
     font-size: 1.2rem;
   }
   @media (max-width: 760px) {
+    .save-card {
+      left: 1rem;
+      right: 1rem;
+      bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+      max-width: none;
+      gap: 0.75rem;
+    }
+    .save-status {
+      flex: 1;
+    }
     .top {
       grid-template-columns: 1fr auto;
     }
@@ -1565,7 +1718,7 @@
       flex-wrap: wrap;
     }
     .page {
-      padding: 1rem 1rem 4rem;
+      padding: 1rem 1rem 13rem;
     }
   }
 </style>

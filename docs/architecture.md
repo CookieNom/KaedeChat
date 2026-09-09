@@ -1,6 +1,8 @@
 # Kaede Chat architecture
 
-Status: normative for `v1` · Updated: 2026-07-20
+This guide explains data ownership and the server/client design. For wire
+formats, use the [federation contract](kaede-fed-v1.md) and
+[bot API reference](bots-and-automations.md).
 
 ## Product boundary
 
@@ -220,7 +222,7 @@ privileges after local removal or blocking.
 
 Task tracker boards, lanes, tasks, and creation nonces are normalized local
 guild-authority data. They cascade with their type-17 channel and are not
-silently accepted by a replica; remote mutations fail closed until a tracker
+accepted by a replica; remote mutations fail closed until a tracker
 snapshot/event capability is added to Kaede Fed. The local API and storage
 contract is documented in [Task tracker channels](task-tracker.md).
 
@@ -246,7 +248,7 @@ instance, and only when that instance advertises `message-search/1`. The
 authority applies its own permissions and returns a minimal bounded result
 projection. The user home validates and re-authorizes each result against local
 channel state before showing it. Unavailable authorities are reported explicitly
-rather than silently replaced with cached partial history.
+rather than replaced with cached partial history.
 
 A channel-scoped DM search contacts that conversation's deterministic
 authority. Account-wide DM search snapshots the user's active conversation
@@ -259,7 +261,7 @@ active authorities and fails explicitly if that safety bound is exceeded.
 Channels marked `e2ee` are excluded at indexing, query, SQL hydration, and
 federation boundaries. The UI explains why search is disabled. A later E2EE
 extension may define a separate opt-in client-side or privacy-preserving search
-design, but server plaintext indexing is not silently re-enabled for encrypted
+design, but server plaintext indexing is not re-enabled for encrypted
 rooms.
 
 ## Optional end-to-end encryption
@@ -323,8 +325,86 @@ The production scope covers identity and authentication, single-instance chat,
 federation, media and webhooks, voice/video/screen sharing, Android and iOS
 clients, task tracker channels, message search, group DMs, and the associated
 operational controls.
-Threads and compressed gateway encoding are not currently implemented. MLS 1.0
+Public, private, and announcement threads and forum posts share the channel
+and message APIs. Compressed gateway encoding is not currently implemented. MLS 1.0
 messaging, encrypted attachments, recovery, and LiveKit frame encryption ship
 behind the operator activation gate documented in `docs/e2ee.md`.
 The mobile clients use the same home-instance API and gateway boundary as the
 web and desktop clients; they never call peer federation endpoints directly.
+
+## Identity and sessions
+
+Handles are immutable `username@home-domain` identifiers. Email and password
+credentials stay on the home instance. Email-enabled deployments provide
+verification and password recovery; email-disabled deployments use username
+and password and cannot send recovery links. Passwords use Argon2id with
+64 MiB memory, three iterations, and one lane; hashing runs off the async loop
+with one admitted operation per API process.
+
+Browser sessions use HttpOnly `kc_access` and `kc_refresh` cookies. Cookie-based
+writes require `X-Kaede-Client: web`. Native clients receive body tokens and
+send `Authorization: Bearer`; an explicit bearer takes precedence over cookies.
+Refresh tokens rotate, and reuse revokes that session's access tokens. MFA uses
+TOTP and single-use recovery codes. MFA changes require reauthentication and
+revoke other sessions. Email messages use an encrypted transactional outbox;
+the console email backend is development-only.
+
+## Chat and permissions
+
+Guild creation also creates the owner membership, `@everyone`, and `general`.
+Permission checks apply ownership, roles, administrator access, everyone/role/
+member channel overrides, implicit channel restrictions, and timeouts in order.
+Role and moderation actions enforce hierarchy and protect the owner. Guild
+ownership can transfer only to a member homed on the guild's instance.
+
+Messages use client nonces to reconcile retries, cursor-paged history,
+soft deletion, reactions, and pins. Pins are newest-first, at most 250 per
+channel, with pages of 50. Message writes queue batched unread and mention
+projections instead of updating every recipient synchronously. Permission
+cache keys use guild generation and member version; message creation does not
+invalidate them.
+
+Human Gateway sessions resume from shared per-topic streams. Each connection
+has a bounded queue; overflow invalidates the session instead of silently
+losing events. Presence, typing, and voice occupancy are ephemeral. The bot
+Gateway has a different reconnect contract: a fresh Identify with saved topic
+cursors, described in [the bot reference](bots-and-automations.md#bot-gateway).
+
+Forums contain child threads with starter messages, tags, sorting, pagination,
+and archive/lock controls. Encrypted child threads have independent MLS groups;
+a parent's encryption does not admit a device to its children. See
+[E2EE](e2ee.md), [group DMs](group-direct-messages.md), and
+[task boards](task-tracker.md) for their separate access and storage rules.
+
+## Media storage and processing
+
+Three private S3 buckets hold attachments, derivatives, and remote cache.
+Garage initializes them for bundled deployments; external storage needs the
+bucket and CORS configuration in the [setup guide](deployment-wizard.md).
+Clients receive scoped presigned URLs, never object-store credentials.
+
+Uploads reserve quota and bind size, content type, owner, and expiry. Message
+creation checks the object length and consumes a single-use ticket. Workers
+inspect file signatures, scan plaintext through ClamAV, and create image/video
+derivatives. Only the exact scanned bytes are promoted to a clean,
+content-addressed key. A still-valid upload URL can overwrite its staging key,
+but cannot replace the clean object. Staging cleanup waits more than 16 minutes
+past PUT expiry; third-party upload clients must cap request duration at
+15 minutes too.
+
+Optional PhotoDNA checks plaintext images before promotion. A match produces a
+metadata-only report and quarantines the upload. Decoder or local policy
+rejections remove that upload without permanently blocking its digest;
+cross-upload digest revocation is reserved for affirmative malware or PhotoDNA
+matches. E2EE attachments contain only ciphertext and bypass content scanning;
+clients must make that tradeoff clear before encryption is activated.
+
+Media reads recheck channel access. Remote fetches use signed fixed federation
+paths, validate and scan bytes locally, and obey cache and concurrency limits.
+An origin-signed deletion removes its cached variants. Message deletion queues
+original/derivative cleanup and quota release; storage failure must remain
+retryable. The [operator guide](operator.md) covers limits and storage repair.
+
+Webhook messages retain their webhook attribution. Tokens are shown only at
+creation or rotation, stored as digests, and invalidated by rotation/revocation.
+See [bot recipes](bot-sdk-recipes.md) for sending and managing them.

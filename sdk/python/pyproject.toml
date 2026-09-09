@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,6 +8,10 @@ version = "1.0.0"
 description = "Official asynchronous Python SDK for the Kaede bot API"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "KaedeChat contributors" }]
+keywords = ["kaedechat", "bot", "sdk", "asyncio", "federation"]
 dependencies = [
   "cryptography>=43,<46",
   "httpx>=0.27,<1",
@@ -17,7 +21,6 @@ dependencies = [
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Framework :: AsyncIO",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -28,4 +31,22 @@ classifiers = [
 voice = ["livekit>=1.1.16,<2"]
 
 [tool.hatch.build.targets.wheel]
+# Metadata 2.4 supports SPDX licenses and remains compatible with Twine 6.
+core-metadata-version = "2.4"
 packages = ["kaede_bot"]
+
+[project.urls]
+Homepage = "https://github.com/CookieNom/KaedeChat"
+Documentation = "https://github.com/CookieNom/KaedeChat/blob/main/docs/bot-api-quickstart.md"
+Repository = "https://github.com/CookieNom/KaedeChat"
+Issues = "https://github.com/CookieNom/KaedeChat/issues"
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "pytest-asyncio>=1,<2", "twine>=6,<7"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
+include = ["/kaede_bot", "/README.md", "/LICENSE", "/pyproject.toml"]

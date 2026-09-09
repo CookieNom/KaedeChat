@@ -52,3 +52,7 @@ core window operations and the explicit command handler. Turnstile starts a
 separate short-lived helper process/window with an unpredictable request ID and
 strict origin validation. Logs and UI errors must not contain tokens, presigned
 URLs, password material, or raw media buffers.
+
+New web features usually need no desktop view changes. Add a native adapter
+when a feature needs credentials, OS integration, device access, capture,
+notifications, or network access outside the bundled UI's permissions.

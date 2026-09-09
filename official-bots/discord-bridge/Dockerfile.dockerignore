@@ -1,0 +1,8 @@
+**
+!official-bots/
+!official-bots/discord-bridge/
+!official-bots/discord-bridge/requirements.txt
+!official-bots/discord-bridge/bridge.py
+**/__pycache__/
+**/*.pyc
+!official-bots/discord-bridge/pairing.py

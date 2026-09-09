@@ -3,6 +3,10 @@
 This document is the security contract for Kaede E2EE. A UI lock or an opaque
 `Message.e2ee` object is not, by itself, evidence that this contract is active.
 
+[Identity](#account-identity-and-device-access) · [Room policy](#room-policy) ·
+[Messages](#message-envelope) · [Files](#files-and-previews) ·
+[Calls](#voice-and-video) · [Release checks](#release-gate)
+
 ## Scope and threat model
 
 MLS 1.0 (RFC 9420) is the room key agreement protocol, with
@@ -295,7 +299,7 @@ context, after explicit confirmation. The server stores:
 
 Moderators must treat the evidence as user-supplied; non-repudiation must not
 be claimed. Reporting other encrypted messages requires a separate explicit
-selection, and surrounding history is never silently included.
+selection, and surrounding history is never included.
 
 ## Files and previews
 
@@ -415,7 +419,7 @@ Before media E2EE is released, the remaining external gate must run web,
 desktop, Android, and iOS participants against a real SFU while exercising
 microphone, camera, screen video, and screen audio under loss, duplication,
 reordering, reconnect, and epoch rotation. It must confirm that stale or
-replayed frames fail closed and that no client silently downgrades to
+replayed frames fail closed and that no client downgrades to
 plaintext.
 
 The deployment kill switch prevents only new proposals. Rekey, recovery,

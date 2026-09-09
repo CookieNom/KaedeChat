@@ -122,13 +122,14 @@ Android version names come from the numeric release tag. Version codes use
 the APK and AAB use the same version. Before the first automated upload, check
 that this code exceeds any previously uploaded version code. Release tags in
 order; rerunning an older release after a newer one can fail because its code
-is lower. Rerun the Android job to rebuild with a fresh code after an upload
-failure; do not reupload an already accepted AAB.
+is lower. If a new binary or version code is required, use a new release tag. For a
+transient delivery failure, retry the store job without rebuilding; do not
+reupload an already accepted AAB.
 
-The signed files are retained as Actions artifacts before Play upload. An
-upload failure fails the Android job and blocks GitHub Release publication.
-Include this workflow change in a new tag; rerunning an old tag uses its old
-workflow. Service-account credentials must never be committed or bundled.
+The signed files are retained before Play upload. A Play failure fails the
+separate `google-play` job; GitHub Release publication still depends on the
+signed builds, not store delivery. Retry the delivery job using its existing
+artifacts. Service-account credentials must never be committed or bundled.
 
 Generate the updater key once, keep the private key and password outside the
 repository, and put the public key in `tauri.conf.json`:

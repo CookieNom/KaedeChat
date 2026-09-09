@@ -50,6 +50,9 @@ audio controls. Membership is rechecked when call actions and voice tokens are
 authorized. A removed member cannot mint another token, and ending the call
 closes it for the group.
 
+Applications cannot start or join group-DM calls. Commands-only user installs
+may expose commands in the private channel without gaining call access.
+
 ## API summary
 
 The authenticated client API uses composite channel and user references:

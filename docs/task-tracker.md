@@ -6,7 +6,7 @@ description, priority, due date, creator, and optional assignee. The same
 resource model is used by the responsive web client, desktop shell, Flutter
 client, human REST API, and bot API.
 
-Tracker channels are deliberately separate from message channels. Opening one
+Tracker channels are separate from message channels. Opening one
 does not fetch message history, typing state, pins, or a composer. Its board is
 loaded from the tracker API and updated from tracker Gateway events.
 
@@ -186,7 +186,7 @@ instead of returning a mixed or stale board.
 
 Deleting the channel cascades its board, lanes, tasks, and task nonce metadata. The
 schema downgrade refuses to proceed while tracker channels exist, preventing a
-rollback from silently discarding task data.
+rollback from discarding task data.
 
 ## PostgreSQL storage verification
 
