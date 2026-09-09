@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import ImageUploadField from './ImageUploadField.svelte';
 
   import { api, userErrorMessage } from '$lib/api/client';
   import type {
@@ -27,9 +28,13 @@
 
   let {
     applicationRef,
+    iconHash = $bindable(null),
+    bannerHash = $bindable(null),
     onAssetsChange = () => undefined
   }: {
     applicationRef: string;
+    iconHash?: string | null;
+    bannerHash?: string | null;
     onAssetsChange?: (assets: ApplicationAsset[]) => void;
   } = $props();
 
@@ -44,6 +49,7 @@
   ];
 
   let assets = $state<ApplicationAsset[]>([]);
+  let savedKinds = new Map<string, ApplicationAssetKind>();
   let emojis = $state<ApplicationEmoji[]>([]);
   let loading = $state(true);
   let busy = $state('');
@@ -78,6 +84,7 @@
 
   function replaceAssets(nextAssets: ApplicationAsset[]): void {
     assets = nextAssets;
+    savedKinds = new Map(nextAssets.map((asset) => [asset.id, asset.kind]));
     onAssetsChange(nextAssets.map((asset) => ({ ...asset })));
   }
 
@@ -134,14 +141,47 @@
     if (!file.size) throw new Error('The selected image is empty.');
   }
 
-  async function createAsset(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    if (!assetFile || !assetName.trim() || busy) return;
-    const file = assetFile;
+  function updateProfile(asset: ApplicationAsset, removed = false): void {
+    const previousKind = savedKinds.get(asset.id) ?? asset.kind;
+    if (
+      previousKind === 'icon' &&
+      iconHash === asset.media_hash &&
+      (removed || asset.kind !== 'icon')
+    )
+      iconHash = null;
+    if (
+      previousKind === 'cover' &&
+      bannerHash === asset.media_hash &&
+      (removed || asset.kind !== 'cover')
+    )
+      bannerHash = null;
+    if (!removed && asset.kind === 'icon') iconHash = asset.media_hash;
+    if (!removed && asset.kind === 'cover') bannerHash = asset.media_hash;
+  }
+
+  async function uploadProfile(kind: 'icon' | 'cover', file: File | null, input: HTMLInputElement) {
+    if (!file || busy) return;
+    // Preserve older artwork because other parts of the app may still reference it.
+    const label = kind === 'icon' ? 'Profile picture' : 'Profile banner';
+    let name = label;
+    for (
+      let suffix = 2;
+      assets.some((asset) => asset.kind === kind && asset.name === name);
+      suffix++
+    )
+      name = `${label} ${suffix}`;
+    await createAsset(file, kind, name);
+    input.value = '';
+  }
+
+  async function createAsset(
+    file: File | null,
+    targetKind = assetKind,
+    targetName = assetName.trim()
+  ): Promise<void> {
+    if (!file || !targetName || busy) return;
     const applicationRef = loadedRef;
     const targetRef = encodeURIComponent(applicationRef);
-    const targetName = assetName.trim();
-    const targetKind = assetKind;
     const signal = controller.signal;
     busy = 'asset-create';
     error = '';
@@ -178,10 +218,11 @@
         });
       const created = await completeScannedMediaResource(
         commit,
-        (value): value is ApplicationAsset => 'application_ref' in value,
+        (value): value is ApplicationAsset => 'media_hash' in value,
         { signal }
       );
       if (!operationIsCurrent(applicationRef, signal)) return;
+      updateProfile(created);
       replaceAssets(
         [...assets.filter((item) => item.id !== created.id), created].sort((a, b) =>
           `${a.kind}:${a.name}`.localeCompare(`${b.kind}:${b.name}`)
@@ -190,7 +231,7 @@
       assetName = '';
       assetFile = null;
       if (assetInput) assetInput.value = '';
-      notice = `${created.name} is ready.`;
+      notice = `${created.name} saved. No need to save app settings again.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
         error = userErrorMessage(caught, 'Could not create the application asset.');
@@ -245,7 +286,7 @@
         });
       const created = await completeScannedMediaResource(
         commit,
-        (value): value is ApplicationEmoji => 'application_ref' in value,
+        (value): value is ApplicationEmoji => 'media_hash' in value,
         { signal }
       );
       if (!operationIsCurrent(applicationRef, signal)) return;
@@ -285,6 +326,7 @@
         body: JSON.stringify({ name, kind })
       });
       if (!operationIsCurrent(applicationRef, signal)) return;
+      updateProfile(updated);
       replaceAssets(assets.map((item) => (item.id === updated.id ? updated : item)));
       notice = `${updated.name} was updated.`;
     } catch (caught) {
@@ -309,6 +351,7 @@
     try {
       await api(`/applications/${targetRef}/assets/${asset.id}`, { method: 'DELETE', signal });
       if (!operationIsCurrent(applicationRef, signal)) return;
+      updateProfile(asset, true);
       replaceAssets(assets.filter((item) => item.id !== asset.id));
       notice = `${asset.name} was deleted.`;
     } catch (caught) {
@@ -394,116 +437,206 @@
 {#if loading}
   <p class="state">Loading application media…</p>
 {:else}
-  <div class="media-grid">
-    <div>
-      <h3>Application assets</h3>
-      <p>Manage icons, covers, store art, achievements, and activity artwork.</p>
-      <form class="create" onsubmit={createAsset}>
-        <label
-          >Asset name<input bind:value={assetName} minlength="1" maxlength="100" required /></label
-        >
-        <label
-          >Kind<select bind:value={assetKind}>
-            {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
-          </select></label
-        >
-        <label
-          >Image<input
-            bind:this={assetInput}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            required
-            onchange={(event) => selectedFile(event, 'asset')}
-          /></label
-        >
-        <button disabled={Boolean(busy) || !assetFile || !assetName.trim()}>
-          {busy === 'asset-create' ? `Uploading ${uploadProgress}%` : 'Add asset'}
-        </button>
-      </form>
-      <div class="items">
-        {#each assets as asset (asset.id)}
-          <article>
-            <img src={assetUrl(asset.media_hash, 'thumbnail_512', mediaDomain)} alt="" />
-            <div class="fields">
-              <label>Name<input bind:value={asset.name} maxlength="100" /></label>
-              <label
-                >Kind<select bind:value={asset.kind}>
-                  {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
-                </select></label
-              >
-              <small>v{asset.version}{asset.width ? ` · ${asset.width}×${asset.height}` : ''}</small
-              >
-            </div>
-            <div class="actions">
-              <button
-                disabled={Boolean(busy) || !asset.name.trim()}
-                onclick={() => saveAsset(asset)}>Save</button
-              >
-              <button class="danger" disabled={Boolean(busy)} onclick={() => deleteAsset(asset)}
-                >Delete</button
-              >
-            </div>
-          </article>
-        {/each}
-        {#if !assets.length}<p class="state">No application assets yet.</p>{/if}
+  <div class="profile-images">
+    {#each [{ kind: 'icon' as const, label: 'Profile picture', hash: iconHash, hint: 'A square image works best. This also becomes your app icon.' }, { kind: 'cover' as const, label: 'Profile banner', hash: bannerHash, hint: 'A wide image works best. This also becomes your directory cover.' }] as image (image.kind)}
+      {@const currentAsset = assets.find(
+        (asset) => asset.kind === image.kind && asset.media_hash === image.hash
+      )}
+      <div class="profile-image" role="group" aria-label={image.label}>
+        <h3>{image.label}</h3>
+        <div class="profile-preview" class:avatar={image.kind === 'icon'}>
+          {#if image.hash}<img
+              src={assetUrl(image.hash, 'thumbnail_512', mediaDomain)}
+              alt={image.label}
+            />{:else}<span>No {image.label.toLowerCase()} yet</span>{/if}
+        </div>
+        <p>{image.hint}</p>
+        <ImageUploadField
+          id={`application-${image.kind}`}
+          disabled={Boolean(busy)}
+          onSelect={(file, input) => void uploadProfile(image.kind, file, input)}
+        />
+        {#if currentAsset}<button
+            class="remove-image"
+            disabled={Boolean(busy)}
+            onclick={() => deleteAsset(currentAsset)}>Remove {image.label.toLowerCase()}</button
+          >{/if}
       </div>
-    </div>
-
-    <div>
-      <h3>Application emoji</h3>
-      <p>Application emoji are portable and do not consume a guild’s emoji slots.</p>
-      <form class="create" onsubmit={createEmoji}>
-        <label
-          >Emoji name<input
-            bind:value={emojiName}
-            minlength="2"
-            maxlength="32"
-            pattern="[A-Za-z0-9_]+"
-            required
-          /></label
-        >
-        <label
-          >Image<input
-            bind:this={emojiInput}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            required
-            onchange={(event) => selectedFile(event, 'emoji')}
-          /></label
-        >
-        <button disabled={Boolean(busy) || !emojiFile || !emojiName.trim()}>
-          {busy === 'emoji-create' ? `Uploading ${uploadProgress}%` : 'Add emoji'}
-        </button>
-      </form>
-      <div class="items">
-        {#each emojis as emoji (emoji.id)}
-          <article>
-            <img src={assetUrl(emoji.media_hash, 'thumbnail_128', mediaDomain)} alt="" />
-            <div class="fields">
-              <label>Name<input bind:value={emoji.name} minlength="2" maxlength="32" /></label>
-              <small
-                >{emoji.animated ? 'Animated' : 'Static'} ·
-                {emoji.available ? 'Available' : 'Unavailable'} · v{emoji.version}</small
-              >
-            </div>
-            <div class="actions">
-              <button
-                disabled={Boolean(busy) || !emoji.name.trim()}
-                onclick={() => saveEmoji(emoji)}>Save</button
-              >
-              <button class="danger" disabled={Boolean(busy)} onclick={() => deleteEmoji(emoji)}
-                >Delete</button
-              >
-            </div>
-          </article>
-        {/each}
-        {#if !emojis.length}<p class="state">No application emoji yet.</p>{/if}
-      </div>
-    </div>
+    {/each}
   </div>
+  <p class="state" role="status">
+    {busy === 'asset-create'
+      ? `Uploading image… ${uploadProgress}%`
+      : 'Images save immediately after upload. PNG, JPEG, GIF, and WebP are supported.'}
+  </p>
+  <details class="asset-library">
+    <summary>More assets and custom emoji</summary>
+    <div class="media-grid">
+      <div>
+        <h3>Application assets</h3>
+        <p>Manage icons, covers, store art, achievements, and activity artwork.</p>
+        <form
+          class="create"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void createAsset(assetFile);
+          }}
+        >
+          <label
+            >Asset name<input
+              bind:value={assetName}
+              minlength="1"
+              maxlength="100"
+              required
+            /></label
+          >
+          <label
+            >Kind<select bind:value={assetKind}>
+              {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
+            </select></label
+          >
+          <label
+            >Image<input
+              bind:this={assetInput}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              required
+              onchange={(event) => selectedFile(event, 'asset')}
+            /></label
+          >
+          <button disabled={Boolean(busy) || !assetFile || !assetName.trim()}>
+            {busy === 'asset-create' ? `Uploading ${uploadProgress}%` : 'Add asset'}
+          </button>
+        </form>
+        <div class="items">
+          {#each assets as asset (asset.id)}
+            <article>
+              <img src={assetUrl(asset.media_hash, 'thumbnail_512', mediaDomain)} alt="" />
+              <div class="fields">
+                <label>Name<input bind:value={asset.name} maxlength="100" /></label>
+                <label
+                  >Kind<select bind:value={asset.kind}>
+                    {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
+                  </select></label
+                >
+                <small
+                  >v{asset.version}{asset.width ? ` · ${asset.width}×${asset.height}` : ''}</small
+                >
+              </div>
+              <div class="actions">
+                <button
+                  disabled={Boolean(busy) || !asset.name.trim()}
+                  onclick={() => saveAsset(asset)}>Save</button
+                >
+                <button class="danger" disabled={Boolean(busy)} onclick={() => deleteAsset(asset)}
+                  >Delete</button
+                >
+              </div>
+            </article>
+          {/each}
+          {#if !assets.length}<p class="state">No application assets yet.</p>{/if}
+        </div>
+      </div>
+
+      <div>
+        <h3>Application emoji</h3>
+        <p>Application emoji are portable and do not consume a guild’s emoji slots.</p>
+        <form class="create" onsubmit={createEmoji}>
+          <label
+            >Emoji name<input
+              bind:value={emojiName}
+              minlength="2"
+              maxlength="32"
+              pattern="[A-Za-z0-9_]+"
+              required
+            /></label
+          >
+          <label
+            >Image<input
+              bind:this={emojiInput}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              required
+              onchange={(event) => selectedFile(event, 'emoji')}
+            /></label
+          >
+          <button disabled={Boolean(busy) || !emojiFile || !emojiName.trim()}>
+            {busy === 'emoji-create' ? `Uploading ${uploadProgress}%` : 'Add emoji'}
+          </button>
+        </form>
+        <div class="items">
+          {#each emojis as emoji (emoji.id)}
+            <article>
+              <img src={assetUrl(emoji.media_hash, 'thumbnail_128', mediaDomain)} alt="" />
+              <div class="fields">
+                <label>Name<input bind:value={emoji.name} minlength="2" maxlength="32" /></label>
+                <small
+                  >{emoji.animated ? 'Animated' : 'Static'} ·
+                  {emoji.available ? 'Available' : 'Unavailable'} · v{emoji.version}</small
+                >
+              </div>
+              <div class="actions">
+                <button
+                  disabled={Boolean(busy) || !emoji.name.trim()}
+                  onclick={() => saveEmoji(emoji)}>Save</button
+                >
+                <button class="danger" disabled={Boolean(busy)} onclick={() => deleteEmoji(emoji)}
+                  >Delete</button
+                >
+              </div>
+            </article>
+          {/each}
+          {#if !emojis.length}<p class="state">No application emoji yet.</p>{/if}
+        </div>
+      </div>
+    </div>
+  </details>
 {/if}
 
 <style>
+  .profile-images {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+    gap: 1.5rem;
+  }
+  .profile-preview {
+    height: 140px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    border-radius: 12px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--text-muted);
+  }
+  .profile-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .profile-preview.avatar {
+    width: 140px;
+    border-radius: 50%;
+  }
+  .profile-image p {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  button.remove-image {
+    margin-top: 0.65rem;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--line);
+  }
+  .asset-library {
+    margin-top: 1.25rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+  }
+  summary {
+    cursor: pointer;
+    font-weight: 700;
+  }
   .media-notice {
     margin: 0.75rem 0;
     border-radius: 8px;

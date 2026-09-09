@@ -25,7 +25,7 @@ from app.bots.directory_contract import (
 from app.core.model_validation import UnambiguousInputModel
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
-from app.core.task_wake import enqueue_best_effort
+from app.core.task_wake import enqueue_best_effort, wake_federation_destinations
 from app.core.types import EntityRef, WireSnowflake
 from app.db.bot_models import ApplicationAsset, ApplicationEmoji, BotApplication
 from app.db.materialization import materialize_updated_at
@@ -36,6 +36,7 @@ from app.federation.application_management import (
     proxy_remote_application_management,
     require_application_management_empty,
 )
+from app.federation.relationships import queue_profile_updates
 from app.media.payloads import attachment_payload
 from app.media.schemas import UploadTicketRequest
 from app.media.service import (
@@ -117,6 +118,35 @@ class ApplicationEmojiPatch(UnambiguousInputModel):
 class AppAccess:
     application: BotApplication
     actor: User
+
+
+async def _commit_asset_mutation(
+    session: AsyncSession,
+    settings: Settings,
+    application: BotApplication,
+    *,
+    profile_changed: bool,
+) -> None:
+    destinations: set[str] = set()
+    if profile_changed:
+        bot = await session.scalar(
+            select(User)
+            .where(
+                User.id == application.bot_user_id,
+                User.origin_domain == application.bot_user_domain,
+            )
+            .with_for_update()
+        )
+        if bot is None:
+            raise RuntimeError("application bot profile is missing")
+        if (bot.avatar_hash, bot.banner_hash) != (application.icon_hash, application.banner_hash):
+            bot.avatar_hash = application.icon_hash
+            bot.banner_hash = application.banner_hash
+            bot.profile_version += 1
+            destinations = await queue_profile_updates(session, settings, bot)
+    # Include the updated bot profile in both developer and runtime snapshots.
+    await commit_developer_application_mutation(session, settings, application)
+    await wake_federation_destinations(destinations)
 
 
 def _asset_binding(application: BotApplication, asset_id: int) -> str:
@@ -456,7 +486,9 @@ async def _commit_asset(
     if directory_asset_change_requires_reapproval(None, payload.kind):
         access.application.directory_approved = False
     access.application.manifest_generation += 1
-    await commit_developer_application_mutation(session, settings, access.application)
+    await _commit_asset_mutation(
+        session, settings, access.application, profile_changed=payload.kind in {"icon", "cover"}
+    )
     if previous is not None:
         await enqueue_best_effort(media_local_purge, previous.id, previous.origin_domain)
     return asset_payload(asset)
@@ -490,7 +522,9 @@ async def _delete_asset(
         attachment.asset_binding = None
     access.application.manifest_generation += 1
     await session.delete(asset)
-    await commit_developer_application_mutation(session, settings, access.application)
+    await _commit_asset_mutation(
+        session, settings, access.application, profile_changed=asset.kind in {"icon", "cover"}
+    )
     if attachment is not None:
         await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
 
@@ -571,12 +605,15 @@ async def _patch_asset(
         changed=next_kind != asset.kind or next_name != asset.name,
     ):
         access.application.directory_approved = False
+    profile_changed = bool({asset.kind, next_kind} & {"icon", "cover"})
     asset.kind = next_kind
     asset.name = next_name
     asset.version += 1
     access.application.manifest_generation += 1
     await materialize_updated_at(session, asset)
-    await commit_developer_application_mutation(session, settings, access.application)
+    await _commit_asset_mutation(
+        session, settings, access.application, profile_changed=profile_changed
+    )
     return asset_payload(asset)
 
 

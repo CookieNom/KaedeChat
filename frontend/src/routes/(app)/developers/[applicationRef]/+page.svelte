@@ -1,5 +1,8 @@
 <script lang="ts">
   import { api, userErrorMessage } from '$lib/api/client';
+  import { assetUrl } from '$lib/media/assets';
+  import ApplicationCommandEditor from '$lib/components/ApplicationCommandEditor.svelte';
+  import { commandDraftError, readCommandDraft } from '$lib/chat/command-editor';
   import ApplicationDirectorySettings from '$lib/components/ApplicationDirectorySettings.svelte';
   import ApplicationMediaManager from '$lib/components/ApplicationMediaManager.svelte';
   import PermissionChecklist from '$lib/components/PermissionChecklist.svelte';
@@ -27,6 +30,8 @@
     origin_domain: string;
     ref: string;
     name: string;
+    icon_hash: string | null;
+    banner_hash: string | null;
     description: string | null;
     support_url: string | null;
     privacy_url: string | null;
@@ -203,6 +208,75 @@
   let installations = $state<Installation[]>([]);
   let rules = $state<Rule[]>([]);
   let commandsText = $state('[]');
+  let savedCommandsText = $state('[]');
+  let commandsLoaded = $state(false);
+  let commandError = $state('');
+  let commandNotice = $state('');
+  let publishingCommands = $state(false);
+  const commandsDirty = $derived(commandsText !== savedCommandsText);
+  const panels = [
+    {
+      id: 'general',
+      title: 'Overview',
+      subtitle: 'Identity and setup',
+      symbol: '◈',
+      heading: 'Your app, at a glance',
+      description: 'Give your app an identity, then choose what you want to set up next.'
+    },
+    {
+      id: 'directory',
+      title: 'Directory listing',
+      subtitle: 'Profile, media & discovery',
+      symbol: '▦',
+      heading: 'Make a great first impression',
+      description: 'Help people understand your app before they install it.'
+    },
+    {
+      id: 'access',
+      title: 'Permissions & installs',
+      subtitle: 'Access and availability',
+      symbol: '◇',
+      heading: 'Choose what your app can access',
+      description: 'Request only the permissions and events your app needs.'
+    },
+    {
+      id: 'commands',
+      title: 'Commands',
+      subtitle: 'Slash commands & actions',
+      symbol: '/',
+      heading: 'Give people a way to interact',
+      description: 'Create the commands people will see in chat and in the Apps menu.'
+    },
+    {
+      id: 'deployment',
+      title: 'Credentials & workers',
+      subtitle: 'Connect your bot code',
+      symbol: '⌘',
+      heading: 'Connect your running bot',
+      description: 'Create a deployment credential, then enroll the workers that run your app.'
+    },
+    {
+      id: 'distribution',
+      title: 'Invite links & servers',
+      subtitle: 'Share and manage installs',
+      symbol: '↗',
+      heading: 'Bring your app to a community',
+      description: 'Create an install link and see which servers have installed your app.'
+    }
+  ] as const;
+  let activePanel = $state<(typeof panels)[number]['id']>('general');
+  const currentPanel = $derived(panels.find((panel) => panel.id === activePanel)!);
+
+  function selectPanel(panel: (typeof panels)[number]['id']) {
+    activePanel = panel;
+    window.scrollTo(0, 0);
+  }
+
+  function updateCommands(value: string) {
+    commandsText = value;
+    commandError = '';
+    commandNotice = '';
+  }
   let error = $state('');
   let notice = $state('');
   let directoryTags = $state('');
@@ -213,7 +287,13 @@
   const visibleScopes = $derived(
     scopes.filter((scope) => scope.includes(accessSearch.trim().toLowerCase()))
   );
-  const settingsDraft = $derived(JSON.stringify({ application, directoryTags }));
+  function settingsSnapshot(app: Application | null, tags: string): string {
+    return JSON.stringify({
+      application: app ? { ...app, icon_hash: undefined, banner_hash: undefined } : app,
+      directoryTags: tags
+    });
+  }
+  const settingsDraft = $derived(settingsSnapshot(application, directoryTags));
   const hasUnsavedChanges = $derived(!!application && settingsDraft !== savedSettings);
   let busy = $state(false);
   let credentialLabel = $state('Deployment');
@@ -321,9 +401,13 @@
       if (!application) {
         application = app;
         directoryTags = app.directory_tags.join(', ');
-        savedSettings = JSON.stringify({ application: app, directoryTags });
+        savedSettings = settingsSnapshot(app, directoryTags);
       }
-      commandsText = JSON.stringify(commandList, null, 2);
+      if (!commandsLoaded) {
+        commandsText = JSON.stringify(commandList, null, 2);
+        savedCommandsText = commandsText;
+        commandsLoaded = true;
+      }
       credentials = credentialList;
       workers = workerList;
       templates = templateList;
@@ -520,10 +604,7 @@
           return;
         }
         const savedTags = updatedApplication.directory_tags.join(', ');
-        savedSettings = JSON.stringify({
-          application: updatedApplication,
-          directoryTags: savedTags
-        });
+        savedSettings = settingsSnapshot(updatedApplication, savedTags);
         // Apply server normalization without losing edits made during the request.
         const newerEdits = Object.fromEntries(
           (Object.keys(submittedApplication) as (keyof Application)[])
@@ -550,33 +631,37 @@
     }
   }
   async function saveCommands() {
-    if (busy || !routeOwnsApplication(ref, application)) return;
+    if (busy || !commandsDirty || !routeOwnsApplication(ref, application)) return;
+    commandError = commandDraftError(commandsText);
+    if (commandError) return;
     const applicationRef = ref;
     const currentApplication = application;
     const commandDraft = commandsText;
     const generation = ++mutationGeneration;
     busy = true;
-    error = '';
+    publishingCommands = true;
+    commandNotice = '';
     try {
-      const parsed = JSON.parse(commandDraft);
-      if (!Array.isArray(parsed)) throw new Error('Commands must be a JSON array.');
       await api(`/applications/${encodeURIComponent(applicationRef)}/commands`, {
         method: 'PUT',
-        body: JSON.stringify({ commands: parsed })
+        body: JSON.stringify({ commands: readCommandDraft(commandDraft) })
       });
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;
-      notice = 'Commands published.';
-      await load(applicationRef);
+      savedCommandsText = commandDraft;
+      commandNotice = 'Commands published.';
+      void loadDirectoryPreview(applicationRef);
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
-        error =
-          caught instanceof SyntaxError ||
-          (caught instanceof Error && caught.message.startsWith('Commands'))
-            ? caught.message
-            : userErrorMessage(caught, 'Could not publish commands.');
+        commandError = userErrorMessage(
+          caught,
+          'Could not publish commands. Your draft is still here.'
+        );
       }
     } finally {
-      if (mutationIsCurrent(applicationRef, generation)) busy = false;
+      if (mutationIsCurrent(applicationRef, generation)) {
+        busy = false;
+        publishingCommands = false;
+      }
     }
   }
   async function createCredential() {
@@ -759,6 +844,12 @@
     previewError = '';
     previewLoading = true;
     commandsText = '[]';
+    savedCommandsText = '[]';
+    commandsLoaded = false;
+    commandError = '';
+    commandNotice = '';
+    publishingCommands = false;
+    activePanel = 'general';
     directoryTags = '';
     credentialToken = '';
     notice = '';
@@ -784,11 +875,21 @@
 >
 <main class="page">
   <header class="top">
-    <a href={resolve('/developers')}>← Applications</a>
-    <div>
-      <small>Developer Portal</small>
-      <h1>{loadedRef === ref ? (application?.name ?? 'Loading…') : 'Loading…'}</h1>
-      <p>{loadedRef === ref ? (application?.bot_user.handle ?? ref) : ref}</p>
+    <a class="back-link" href={resolve('/developers')}>← All applications</a>
+    <div class="app-heading">
+      <div class="app-monogram" aria-hidden="true">
+        {#if application?.icon_hash}<img
+            src={assetUrl(application.icon_hash, 'thumbnail_128', application.origin_domain)}
+            alt=""
+          />{:else}{application?.name.slice(0, 1).toUpperCase() || 'K'}{/if}
+      </div>
+      <div>
+        <small>Developer Portal</small>
+        <h1>{loadedRef === ref ? (application?.name ?? 'Loading…') : 'Loading…'}</h1>
+        <p>{loadedRef === ref ? (application?.bot_user.handle ?? ref) : ref}</p>
+      </div>
+      {#if application}<span class="app-status">{application.status.replaceAll('_', ' ')}</span
+        >{/if}
     </div>
   </header>
   {#if error}<div class="notice error" role="alert">{error}</div>{/if}{#if notice}<div
@@ -797,502 +898,603 @@
       {notice}<button aria-label="Dismiss" onclick={() => (notice = '')}>×</button>
     </div>{/if}
   {#if application && loadedRef === ref}
-    <aside class="save-card" aria-label="Save application settings">
-      <div class="save-status" role="status" aria-live="polite">
-        <strong
-          >{saveState === 'saving'
-            ? 'Saving settings…'
-            : saveState === 'error'
-              ? 'Settings not saved'
+    {#if activePanel === 'commands'}
+      <aside class="save-card command-save-card" aria-label="Publish application commands">
+        <div class="save-status" role="status" aria-live="polite">
+          <strong
+            >{publishingCommands
+              ? 'Publishing commands…'
+              : commandError
+                ? 'Commands not published'
+                : commandsDirty
+                  ? 'Unpublished command changes'
+                  : commandNotice || 'Commands up to date'}</strong
+          >
+          <small
+            >{commandError ||
+              (commandsDirty
+                ? 'Publish to update the commands people can use.'
+                : 'Commands and app settings are saved separately.')}</small
+          >
+          <small
+            >{saveState === 'error'
+              ? saveError
+              : saveState === 'saving'
+                ? 'Saving app settings…'
+                : hasUnsavedChanges
+                  ? 'App settings also have unsaved changes.'
+                  : 'App settings are saved.'}</small
+          >
+        </div>
+        <div class="save-actions">
+          <button class="secondary" onclick={saveApplication} disabled={busy || !hasUnsavedChanges}
+            >Save app settings</button
+          >
+          <button onclick={saveCommands} disabled={busy || !commandsDirty}
+            >{publishingCommands ? 'Publishing…' : 'Publish commands'}</button
+          >
+        </div>
+      </aside>
+    {:else}
+      <aside class="save-card" aria-label="Save application settings">
+        <div class="save-status" role="status" aria-live="polite">
+          <strong
+            >{saveState === 'saving'
+              ? 'Saving settings…'
+              : saveState === 'error'
+                ? 'Settings not saved'
+                : hasUnsavedChanges
+                  ? 'Unsaved changes'
+                  : saveState === 'saved'
+                    ? 'Application settings saved.'
+                    : 'App settings saved'}</strong
+          >
+          <small
+            >{saveState === 'error'
+              ? saveError
               : hasUnsavedChanges
-                ? 'Unsaved changes'
-                : saveState === 'saved'
-                  ? 'Application settings saved.'
-                  : 'All changes saved'}</strong
-        >
-        <small
-          >{saveState === 'error'
-            ? saveError
-            : hasUnsavedChanges
-              ? 'Save your general, discovery, and access settings.'
-              : 'Your app settings are up to date.'}</small
-        >
-      </div>
-      <button onclick={saveApplication} disabled={busy || !hasUnsavedChanges}>
-        {saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Retry save' : 'Save changes'}
-      </button>
-    </aside>
+                ? 'Save your general, discovery, and access settings.'
+                : commandsDirty
+                  ? 'You also have unpublished changes in Commands.'
+                  : 'Your app settings are up to date.'}</small
+          >
+        </div>
+        <button onclick={saveApplication} disabled={busy || !hasUnsavedChanges}>
+          {saveState === 'saving'
+            ? 'Saving…'
+            : saveState === 'error'
+              ? 'Retry save'
+              : 'Save changes'}
+        </button>
+      </aside>
+    {/if}
     <div class="layout">
       <nav aria-label="Application sections">
-        <a href="#general">General</a><a href="#discovery-settings">Discovery settings</a><a
-          href="#discovery-status">Discovery status</a
-        ><a href="#discovery-preview">Product preview</a><a href="#access">Access</a><a
-          href="#credentials">Credentials</a
-        ><a href="#commands">Commands</a><a href="#workers">Workers</a><a href="#media"
-          >Assets & emoji</a
-        ><a href="#invites">Invite links</a><a href="#federation">Federation</a><a
-          href="#installations">Installations</a
-        >
+        <span class="nav-label">Configure your app</span>
+        {#each panels as panel, index (panel.id)}
+          {#if index === 3}<span class="nav-label nav-divider">Build & manage</span>{/if}
+          <button
+            class:active={activePanel === panel.id}
+            aria-current={activePanel === panel.id ? 'page' : undefined}
+            aria-controls={`${panel.id}-panel`}
+            onclick={() => selectPanel(panel.id)}
+          >
+            <span class="nav-symbol" aria-hidden="true">{panel.symbol}</span><span
+              ><strong>{panel.title}</strong><small>{panel.subtitle}</small
+              >{#if panel.id === 'commands' && commandsDirty}<small class="draft-marker"
+                  >Unpublished changes</small
+                >{/if}</span
+            >
+          </button>
+        {/each}
+        <p class="nav-tip">Settings save together. Commands have their own publish step.</p>
       </nav>
       <div class="sections">
-        <section id="general">
-          <h2>General information</h2>
-          <div class="grid">
-            <label>Name<input bind:value={application.name} maxlength="100" /></label><label
-              >Status<input value={application.status} disabled /></label
-            >
-          </div>
-          <label
-            >Description<textarea bind:value={application.description} rows="3" maxlength="1000"
-            ></textarea></label
-          >
-        </section>
-        <section id="discovery-settings">
-          <h2>Discovery settings</h2>
-          <p>Describe how your app appears in the desktop and browser App Directory.</p>
-          <div class="grid">
-            <label
-              >Category<select bind:value={application.directory_category}
-                ><option value={null}>Choose a category</option><option value="entertainment"
-                  >Entertainment</option
-                ><option value="games">Games</option><option value="moderation">Moderation</option
-                ><option value="productivity">Productivity</option><option value="social"
-                  >Social</option
-                ><option value="utilities">Utilities</option></select
-              ></label
-            ><label
-              >Tags<input
-                bind:value={directoryTags}
-                placeholder="moderation, utility, community"
-              /><small>1–5 unique lowercase tags, separated by commas.</small></label
-            >
-          </div>
-          <label
-            >Directory summary<textarea
-              bind:value={application.directory_summary}
-              rows="2"
-              maxlength="200"
-              placeholder="A short explanation of what your app helps people do."
-            ></textarea></label
-          >
-          <div class="grid">
-            <label
-              >Support URL<input
-                type="url"
-                bind:value={application.support_url}
-                placeholder="https://support.example"
-              /></label
-            ><label
-              >Privacy policy URL<input
-                type="url"
-                bind:value={application.privacy_url}
-                placeholder="https://example/privacy"
-              /></label
-            >
-          </div>
-          <label
-            >Terms of service URL<input
-              type="url"
-              bind:value={application.terms_url}
-              placeholder="https://example/terms"
-            /></label
-          >
-          <ApplicationDirectorySettings
-            originDomain={application.origin_domain}
-            media={application.directory_media}
-            externalLinks={application.directory_external_links}
-            supportedLocales={application.directory_supported_locales}
-            descriptionLocalizations={application.directory_description_localizations}
-            assets={directoryAssets}
-            disabled={busy}
-            onMediaChange={updateDirectoryMedia}
-            onExternalLinksChange={updateDirectoryExternalLinks}
-            onSupportedLocalesChange={updateDirectorySupportedLocales}
-            onDescriptionLocalizationsChange={updateDirectoryDescriptionLocalizations}
-          />
-        </section>
-        <section id="discovery-status">
-          <div class="section-title-row">
-            <div>
-              <h2>Discovery status</h2>
-              <p>Review the saved publication checklist before submitting your listing.</p>
+        <div class="panel-heading">
+          <span class="panel-eyebrow">{currentPanel.title}</span>
+          <h2>{currentPanel.heading}</h2>
+          <p>{currentPanel.description}</p>
+        </div>
+        <div id="general-panel" class="panel-sections" hidden={activePanel !== 'general'}>
+          <section id="general">
+            <h2>General information</h2>
+            <div class="grid">
+              <label>Name<input bind:value={application.name} maxlength="100" /></label><label
+                >Status<input value={application.status} disabled /></label
+              >
             </div>
-            <button
-              class="secondary"
-              onclick={() => void loadDirectoryPreview(ref)}
-              disabled={previewLoading}>{previewLoading ? 'Refreshing…' : 'Refresh'}</button
+            <label
+              >Description<textarea bind:value={application.description} rows="3" maxlength="1000"
+              ></textarea></label
+            >
+          </section>
+          <section id="media">
+            <h2>Bot profile</h2>
+            <p>
+              Give your bot a profile picture and banner. These images also represent your app in
+              the directory.
+            </p>
+            <ApplicationMediaManager
+              applicationRef={ref}
+              bind:iconHash={application.icon_hash}
+              bind:bannerHash={application.banner_hash}
+              onAssetsChange={handleAssetsChange}
+            />
+          </section>
+          <div class="setup-heading">
+            <h2>Keep building</h2>
+            <p>Pick the next step for your app. Your drafts stay here when you switch sections.</p>
+          </div>
+          <div class="setup-cards">
+            <button onclick={() => selectPanel('directory')}
+              ><span>01 · Present your app</span><strong
+                >Create a directory listing <span aria-hidden="true">↗</span></strong
+              ><small>Add a summary, screenshots, and support links.</small></button
+            >
+            <button onclick={() => selectPanel('commands')}
+              ><span>02 · Add interactions</span><strong
+                >Build your first command <span aria-hidden="true">↗</span></strong
+              ><small>Create slash commands and actions with a guided editor.</small></button
+            >
+            <button onclick={() => selectPanel('deployment')}
+              ><span>03 · Connect your code</span><strong
+                >Set up your bot <span aria-hidden="true">↗</span></strong
+              ><small>Manage credentials and the workers that respond to people.</small></button
             >
           </div>
-          <label
-            >Directory status<input
-              value={application.directory_approved
-                ? 'Approved'
-                : application.directory_enabled
-                  ? 'Submitted for review'
-                  : 'Not listed'}
-              disabled
-            /></label
-          >
-          <label class="toggle"
-            ><input type="checkbox" bind:checked={application.directory_enabled} /><span
-              ><strong>List in the App Directory</strong><small
-                >Your home instance reviews the listing before it becomes searchable. Account
-                installation requires an active global command that explicitly supports user
-                installation.</small
-              ></span
-            ></label
-          >
-          {#if previewError}<p class="warning" role="alert">{previewError}</p>{/if}
-          {#if directoryPreview}
-            <div class="readiness-summary">
-              <strong
-                >{directoryPreview.readiness.status === 'approved'
+        </div>
+        <div id="directory-panel" class="panel-sections" hidden={activePanel !== 'directory'}>
+          <section id="discovery-settings">
+            <h2>Discovery settings</h2>
+            <p>Describe how your app appears in the desktop and browser App Directory.</p>
+            <div class="grid">
+              <label
+                >Category<select bind:value={application.directory_category}
+                  ><option value={null}>Choose a category</option><option value="entertainment"
+                    >Entertainment</option
+                  ><option value="games">Games</option><option value="moderation">Moderation</option
+                  ><option value="productivity">Productivity</option><option value="social"
+                    >Social</option
+                  ><option value="utilities">Utilities</option></select
+                ></label
+              ><label
+                >Tags<input
+                  bind:value={directoryTags}
+                  placeholder="moderation, utility, community"
+                /><small>1–5 unique lowercase tags, separated by commas.</small></label
+              >
+            </div>
+            <label
+              >Directory summary<textarea
+                bind:value={application.directory_summary}
+                rows="2"
+                maxlength="200"
+                placeholder="A short explanation of what your app helps people do."
+              ></textarea></label
+            >
+            <div class="grid">
+              <label
+                >Support URL<input
+                  type="url"
+                  bind:value={application.support_url}
+                  placeholder="https://support.example"
+                /></label
+              ><label
+                >Privacy policy URL<input
+                  type="url"
+                  bind:value={application.privacy_url}
+                  placeholder="https://example/privacy"
+                /></label
+              >
+            </div>
+            <label
+              >Terms of service URL<input
+                type="url"
+                bind:value={application.terms_url}
+                placeholder="https://example/terms"
+              /></label
+            >
+            <ApplicationDirectorySettings
+              originDomain={application.origin_domain}
+              media={application.directory_media}
+              externalLinks={application.directory_external_links}
+              supportedLocales={application.directory_supported_locales}
+              descriptionLocalizations={application.directory_description_localizations}
+              assets={directoryAssets}
+              disabled={busy}
+              onMediaChange={updateDirectoryMedia}
+              onExternalLinksChange={updateDirectoryExternalLinks}
+              onSupportedLocalesChange={updateDirectorySupportedLocales}
+              onDescriptionLocalizationsChange={updateDirectoryDescriptionLocalizations}
+            />
+          </section>
+          <section id="discovery-status">
+            <div class="section-title-row">
+              <div>
+                <h2>Discovery status</h2>
+                <p>Review the saved publication checklist before submitting your listing.</p>
+              </div>
+              <button
+                class="secondary"
+                onclick={() => void loadDirectoryPreview(ref)}
+                disabled={previewLoading}>{previewLoading ? 'Refreshing…' : 'Refresh'}</button
+              >
+            </div>
+            <label
+              >Directory status<input
+                value={application.directory_approved
                   ? 'Approved'
-                  : directoryPreview.readiness.status === 'ready_for_review'
-                    ? 'Ready for review'
-                    : 'Incomplete'}</strong
-              >
-              <small>This checklist reflects your last saved settings.</small>
-            </div>
-            <ul class="checklist">
-              {#each directoryPreview.readiness.items as item (item.key)}
-                <li class:ready={item.ready}>
-                  <span aria-hidden="true">{item.ready ? '✓' : '○'}</span>
-                  {readinessLabels[item.key]}
-                </li>
-              {/each}
-            </ul>
-          {:else if previewLoading}<p>Loading readiness…</p>{/if}
-          {#if application.directory_enabled && !application.directory_approved}
-            <p>Your saved listing will await approval from your home instance once it is ready.</p>
-          {/if}
-        </section>
-        <section id="discovery-preview">
-          <div class="section-title-row">
-            <div>
-              <h2>Product page preview</h2>
-              <p>Preview the saved listing that reviewers and members will see.</p>
-            </div>
-          </div>
-          {#if directoryPreview?.application}
-            {@const product = directoryPreview.application}
-            <article class="product-preview">
-              <div class="preview-identity">
-                <span class="preview-icon">{product.name.slice(0, 1).toUpperCase()}</span>
-                <div>
-                  <small>{product.category ?? 'Category not set'}</small>
-                  <h3>{product.name}{product.verified ? ' ✓' : ''}</h3>
-                  <p>{product.summary ?? 'Add a summary to complete this preview.'}</p>
-                </div>
-              </div>
-              <p class="preview-description">
-                {product.description ?? 'Add a description to complete this preview.'}
-              </p>
-              {#if product.media.length}
-                <div
-                  class="preview-media"
-                  aria-label={`${product.media.length} product media items`}
-                >
-                  {#each product.media as item (`${item.type}:${item.type === 'image' ? item.asset_id : item.video_id}`)}
-                    <span>{item.type === 'image' ? item.name : `YouTube · ${item.video_id}`}</span>
-                  {/each}
-                </div>
-              {/if}
-              <div class="preview-meta">
-                <span>{product.tags.join(' · ')}</span>
-                <span>{product.install_template?.name ?? 'Install path not configured'}</span>
-                {#if product.supported_locales.length}<span
-                    >{product.supported_locales.length} supported language{product.supported_locales
-                      .length === 1
-                      ? ''
-                      : 's'}</span
-                  >{/if}
-              </div>
-            </article>
-          {:else if previewLoading}
-            <p>Loading product preview…</p>
-          {:else if !previewError}<p>Product preview unavailable.</p>{/if}
-        </section>
-        <section id="access">
-          <h2>API access</h2>
-          <p>
-            Scopes control what the bot can request. Intents control which live events are
-            delivered. A guild may approve less.
-          </p>
-          <div class="section-title-row access-heading">
-            <h3>Scopes</h3>
-            <span>{application.default_scopes.length} selected</span>
-          </div>
-          <label class="scope-search"
-            >Search scopes<input
-              type="search"
-              bind:value={accessSearch}
-              placeholder="Filter by name, e.g. messages"
-            /></label
-          >
-          <div class="chips scope-grid">
-            {#each visibleScopes as scope (scope)}<label
-                class:active={application.default_scopes.includes(scope)}
-                ><input
-                  type="checkbox"
-                  checked={application.default_scopes.includes(scope)}
-                  onchange={() =>
-                    application &&
-                    (application.default_scopes = toggle(application.default_scopes, scope))}
-                />{scope}</label
-              >{/each}
-          </div>
-          {#if visibleScopes.length === 0}<p>No scopes match your search.</p>{/if}
-          <div class="section-title-row access-heading">
-            <h3>Gateway intents</h3>
-            <span>{application.default_intents.length} selected</span>
-          </div>
-          <div class="chips">
-            {#each intents as intent (intent)}<label
-                class:active={application.default_intents.includes(intent)}
-                ><input
-                  type="checkbox"
-                  checked={application.default_intents.includes(intent)}
-                  onchange={() =>
-                    application &&
-                    (application.default_intents = toggle(application.default_intents, intent))}
-                />{intent}</label
-              >{/each}
-          </div>
-          <PermissionChecklist
-            value={application.default_permissions}
-            onChange={(value) => application && (application.default_permissions = value)}
-          />
-          <div class="grid">
-            <label
-              >Target policy<select bind:value={application.target_policy}
-                ><option value="open">Open federation</option><option value="allowlist"
-                  >Allowlist only</option
-                ><option value="blocklist">Open except blocked instances</option><option
-                  value="local_only">Local instance only</option
-                ></select
+                  : application.directory_enabled
+                    ? 'Submitted for review'
+                    : 'Not listed'}
+                disabled
+              /></label
+            >
+            <label class="toggle"
+              ><input type="checkbox" bind:checked={application.directory_enabled} /><span
+                ><strong>List in the App Directory</strong><small
+                  >Your home instance reviews the listing before it becomes searchable. Account
+                  installation requires an active global command that explicitly supports user
+                  installation.</small
+                ></span
               ></label
             >
-          </div>
-          <h3>Installation contexts</h3>
-          <p>
-            Choose where Discord-style Add App authorization is offered. User installs authorize
-            only interactions the account explicitly starts.
-          </p>
-          <div class="chips">
-            {#each installTypes as installType (installType[0])}
-              <label class:active={application.supported_install_types.includes(installType[0])}
-                ><input
-                  type="checkbox"
-                  checked={application.supported_install_types.includes(installType[0])}
-                  disabled={application.supported_install_types.length === 1 &&
-                    application.supported_install_types.includes(installType[0])}
-                  onchange={() => toggleInstallType(installType[0])}
-                />{installType[1]}</label
-              >
-            {/each}
-          </div>
-          {#if application.supported_install_types.includes('user_install')}
-            <h3>User-install scopes</h3>
-            <div class="chips">
-              {#each userInstallScopes as scope (scope)}<label
-                  class:active={application.user_install_scopes.includes(scope)}
+            {#if previewError}<p class="warning" role="alert">{previewError}</p>{/if}
+            {#if directoryPreview}
+              <div class="readiness-summary">
+                <strong
+                  >{directoryPreview.readiness.status === 'approved'
+                    ? 'Approved'
+                    : directoryPreview.readiness.status === 'ready_for_review'
+                      ? 'Ready for review'
+                      : 'Incomplete'}</strong
+                >
+                <small>This checklist reflects your last saved settings.</small>
+              </div>
+              <ul class="checklist">
+                {#each directoryPreview.readiness.items as item (item.key)}
+                  <li class:ready={item.ready}>
+                    <span aria-hidden="true">{item.ready ? '✓' : '○'}</span>
+                    {readinessLabels[item.key]}
+                  </li>
+                {/each}
+              </ul>
+            {:else if previewLoading}<p>Loading readiness…</p>{/if}
+            {#if application.directory_enabled && !application.directory_approved}
+              <p>
+                Your saved listing will await approval from your home instance once it is ready.
+              </p>
+            {/if}
+          </section>
+          <section id="discovery-preview">
+            <div class="section-title-row">
+              <div>
+                <h2>Product page preview</h2>
+                <p>Preview the saved listing that reviewers and members will see.</p>
+              </div>
+            </div>
+            {#if directoryPreview?.application}
+              {@const product = directoryPreview.application}
+              <article class="product-preview">
+                <div class="preview-identity">
+                  <span class="preview-icon">{product.name.slice(0, 1).toUpperCase()}</span>
+                  <div>
+                    <small>{product.category ?? 'Category not set'}</small>
+                    <h3>{product.name}{product.verified ? ' ✓' : ''}</h3>
+                    <p>{product.summary ?? 'Add a summary to complete this preview.'}</p>
+                  </div>
+                </div>
+                <p class="preview-description">
+                  {product.description ?? 'Add a description to complete this preview.'}
+                </p>
+                {#if product.media.length}
+                  <div
+                    class="preview-media"
+                    aria-label={`${product.media.length} product media items`}
+                  >
+                    {#each product.media as item (`${item.type}:${item.type === 'image' ? item.asset_id : item.video_id}`)}
+                      <span>{item.type === 'image' ? item.name : `YouTube · ${item.video_id}`}</span
+                      >
+                    {/each}
+                  </div>
+                {/if}
+                <div class="preview-meta">
+                  <span>{product.tags.join(' · ')}</span>
+                  <span>{product.install_template?.name ?? 'Install path not configured'}</span>
+                  {#if product.supported_locales.length}<span
+                      >{product.supported_locales.length} supported language{product
+                        .supported_locales.length === 1
+                        ? ''
+                        : 's'}</span
+                    >{/if}
+                </div>
+              </article>
+            {:else if previewLoading}
+              <p>Loading product preview…</p>
+            {:else if !previewError}<p>Product preview unavailable.</p>{/if}
+          </section>
+        </div>
+        <div id="access-panel" class="panel-sections" hidden={activePanel !== 'access'}>
+          <section id="access">
+            <h2>API access</h2>
+            <p>
+              Scopes control what the bot can request. Intents control which live events are
+              delivered. A guild may approve less.
+            </p>
+            <div class="section-title-row access-heading">
+              <h3>Scopes</h3>
+              <span>{application.default_scopes.length} selected</span>
+            </div>
+            <label class="scope-search"
+              >Search scopes<input
+                type="search"
+                bind:value={accessSearch}
+                placeholder="Filter by name, e.g. messages"
+              /></label
+            >
+            <div class="chips scope-grid">
+              {#each visibleScopes as scope (scope)}<label
+                  class:active={application.default_scopes.includes(scope)}
                   ><input
                     type="checkbox"
-                    checked={application.user_install_scopes.includes(scope)}
-                    disabled={requiredUserInstallScopes.has(scope)}
+                    checked={application.default_scopes.includes(scope)}
                     onchange={() =>
                       application &&
-                      (application.user_install_scopes = toggle(
-                        application.user_install_scopes,
-                        scope
-                      ))}
+                      (application.default_scopes = toggle(application.default_scopes, scope))}
                   />{scope}</label
                 >{/each}
             </div>
-            <h3>User-install command contexts</h3>
+            {#if visibleScopes.length === 0}<p>No scopes match your search.</p>{/if}
+            <div class="section-title-row access-heading">
+              <h3>Gateway intents</h3>
+              <span>{application.default_intents.length} selected</span>
+            </div>
             <div class="chips">
-              {#each userInstallContexts as context (context[0])}<label
-                  class:active={application.user_install_contexts.includes(context[0])}
+              {#each intents as intent (intent)}<label
+                  class:active={application.default_intents.includes(intent)}
                   ><input
                     type="checkbox"
-                    checked={application.user_install_contexts.includes(context[0])}
-                    disabled={application.user_install_contexts.length === 1 &&
-                      application.user_install_contexts.includes(context[0])}
+                    checked={application.default_intents.includes(intent)}
                     onchange={() =>
                       application &&
-                      (application.user_install_contexts = toggle(
-                        application.user_install_contexts,
-                        context[0]
-                      ) as Array<'guild' | 'bot_dm' | 'private_channel'>)}
-                  />{context[1]}</label
+                      (application.default_intents = toggle(application.default_intents, intent))}
+                  />{intent}</label
                 >{/each}
             </div>
-          {/if}
-          <p class="warning">
-            Message content and history remain unavailable in E2EE channels unless the bot is
-            installed and explicitly admitted per channel as a visible cryptographic participant.
-            Admission grants only future encrypted content and rotates the room keys.
-          </p>
-        </section>
-        <section id="credentials">
-          <h2>Control credentials</h2>
-          <p>
-            Deployment tools use these scoped secrets only to enroll workers and publish command
-            definitions. They cannot connect as the bot or sign in as a user.
-          </p>
-          <div class="inline">
-            <input bind:value={credentialLabel} maxlength="100" placeholder="Deployment" /><button
-              onclick={createCredential}
-              disabled={busy || !credentialLabel.trim()}>Create credential</button
-            >
-          </div>
-          {#if credentialToken}
-            <div class="secret" role="status">
-              <strong>Copy this token now</strong><code>{credentialToken}</code><button
-                onclick={() => copy(credentialToken, 'Credential')}>Copy</button
+            <PermissionChecklist
+              value={application.default_permissions}
+              onChange={(value) => application && (application.default_permissions = value)}
+            />
+            <div class="grid">
+              <label
+                >Target policy<select bind:value={application.target_policy}
+                  ><option value="open">Open federation</option><option value="allowlist"
+                    >Allowlist only</option
+                  ><option value="blocklist">Open except blocked instances</option><option
+                    value="local_only">Local instance only</option
+                  ></select
+                ></label
               >
             </div>
-          {/if}
-          <div class="rows">
-            {#each credentials as credential (credential.id)}<article>
-                <div>
-                  <strong>{credential.label}</strong><small
-                    >{credential.token_hint} · {credential.scopes.join(', ')}</small
-                  >
-                </div>
-                <span class:revoked={credential.revoked_at}
-                  >{credential.revoked_at ? 'Revoked' : 'Active'}</span
-                >{#if !credential.revoked_at}<button
-                    class="danger"
-                    onclick={() => revokeCredential(credential.id)}>Revoke</button
-                  >{/if}
-              </article>{/each}
-          </div>
-        </section>
-        <section id="commands">
-          <h2>Slash and context commands</h2>
-          <p>
-            Publish up to 100 chat-input commands, 15 user commands, and 15 message commands.
-            Slash-command names use Discord's lowercase Unicode naming rules; context-command names
-            may use spaces and title case.
-          </p>
-          <textarea class="code" bind:value={commandsText} rows="14" spellcheck="false"
-          ></textarea><button onclick={saveCommands} disabled={busy}>Publish commands</button>
-        </section>
-        <section id="workers">
-          <h2>Worker keys</h2>
-          <p>
-            A worker signs short-lived token assertions and connects directly to every target
-            instance. Private keys never leave the worker.
-          </p>
-          <div class="grid">
-            <label>Worker name<input bind:value={workerName} /></label><label
-              >Ed25519 public key (base64url)<input
-                bind:value={workerKey}
-                placeholder="43-character public key"
-              /></label
-            >
-          </div>
-          <label
-            >Target domains (comma separated, empty means any approved target)<input
-              bind:value={workerTargets}
-              placeholder="chat.example, community.example"
-            /></label
-          ><button onclick={createWorker} disabled={busy || workerKey.length < 43}
-            >Enroll worker</button
-          >
-          <div class="rows">
-            {#each workers as worker (worker.id)}<article>
-                <div>
-                  <strong>{worker.name}</strong><small
-                    >#{worker.id} · {worker.target_domains.join(', ') ||
-                      'all approved targets'}</small
-                  >
-                </div>
-                <span class:revoked={worker.revoked_at}
-                  >{worker.revoked_at ? 'Revoked' : 'Active'}</span
-                >{#if !worker.revoked_at}<button
-                    class="danger"
-                    onclick={() => revokeWorker(worker.id)}>Revoke</button
-                  >{/if}
-              </article>{/each}
-          </div>
-        </section>
-        <section id="media">
-          <h2>Application assets and emoji</h2>
-          <p>
-            These assets belong to the application, are versioned with its federated manifest, and
-            can also be managed through the bot REST API and Python SDK.
-          </p>
-          <ApplicationMediaManager applicationRef={ref} onAssetsChange={handleAssetsChange} />
-        </section>
-        <section id="invites">
-          <h2>Bot invite links</h2>
-          <p>
-            Invite pages show the app origin, requested permissions, data access, and E2EE behavior
-            before an administrator approves.
-          </p>
-          <div class="grid">
-            <label>Slug<input bind:value={templateSlug} /></label><label
-              >Invite name<input bind:value={templateName} /></label
-            >
-          </div>
-          <label>Description<input bind:value={templateDescription} /></label><button
-            onclick={createTemplate}
-            disabled={busy}>Create invite link</button
-          >
-          <div class="rows">
-            {#each templates as template (template.id)}<article>
-                <div>
-                  <strong>{template.name}</strong><small
-                    >{template.e2ee_mode} · {template.active ? 'active' : 'disabled'}</small
-                  >
-                </div>
-                <code>{template.invite_url}</code><button onclick={() => copy(template.invite_url)}
-                  >Copy</button
+            <h3>Installation contexts</h3>
+            <p>
+              Choose where Discord-style Add App authorization is offered. User installs authorize
+              only interactions the account explicitly starts.
+            </p>
+            <div class="chips">
+              {#each installTypes as installType (installType[0])}
+                <label class:active={application.supported_install_types.includes(installType[0])}
+                  ><input
+                    type="checkbox"
+                    checked={application.supported_install_types.includes(installType[0])}
+                    disabled={application.supported_install_types.length === 1 &&
+                      application.supported_install_types.includes(installType[0])}
+                    onchange={() => toggleInstallType(installType[0])}
+                  />{installType[1]}</label
                 >
-              </article>{/each}
-          </div>
-        </section>
-        <section id="federation">
-          <h2>Federated instance policy</h2>
-          <p>
-            Rules match exact verified instance domains. Deny always wins. Wildcards are not
-            supported.
-          </p>
-          <div class="inline">
-            <input bind:value={ruleDomain} placeholder="instance.example" /><select
-              bind:value={ruleEffect}
-              ><option value="deny">Deny</option><option value="allow">Allow</option></select
-            ><button onclick={addRule}>Add rule</button>
-          </div>
-          <div class="rows">
-            {#each rules as rule (rule.target_domain)}<article>
-                <code>{rule.target_domain}</code><span class:revoked={rule.effect === 'deny'}
-                  >{rule.effect}</span
-                ><button onclick={() => deleteRule(rule.target_domain)}>Remove</button>
-              </article>{/each}
-          </div>
-        </section>
-        <section id="installations">
-          <h2>Installations</h2>
-          <div class="rows">
-            {#each installations as installation (installation.id)}<article>
-                <div>
-                  <strong>{installation.guild_ref}</strong><small
-                    >{installation.e2ee_mode} · revision {installation.grant_revision} ·
-                    {installation.channel_restrictions.length
-                      ? `${installation.channel_restrictions.length} channel restrictions`
-                      : 'all role-permitted channels'}</small
+              {/each}
+            </div>
+            {#if application.supported_install_types.includes('user_install')}
+              <h3>User-install scopes</h3>
+              <div class="chips">
+                {#each userInstallScopes as scope (scope)}<label
+                    class:active={application.user_install_scopes.includes(scope)}
+                    ><input
+                      type="checkbox"
+                      checked={application.user_install_scopes.includes(scope)}
+                      disabled={requiredUserInstallScopes.has(scope)}
+                      onchange={() =>
+                        application &&
+                        (application.user_install_scopes = toggle(
+                          application.user_install_scopes,
+                          scope
+                        ))}
+                    />{scope}</label
+                  >{/each}
+              </div>
+              <h3>User-install command contexts</h3>
+              <div class="chips">
+                {#each userInstallContexts as context (context[0])}<label
+                    class:active={application.user_install_contexts.includes(context[0])}
+                    ><input
+                      type="checkbox"
+                      checked={application.user_install_contexts.includes(context[0])}
+                      disabled={application.user_install_contexts.length === 1 &&
+                        application.user_install_contexts.includes(context[0])}
+                      onchange={() =>
+                        application &&
+                        (application.user_install_contexts = toggle(
+                          application.user_install_contexts,
+                          context[0]
+                        ) as Array<'guild' | 'bot_dm' | 'private_channel'>)}
+                    />{context[1]}</label
+                  >{/each}
+              </div>
+            {/if}
+            <p class="warning">
+              Message content and history remain unavailable in E2EE channels unless the bot is
+              installed and explicitly admitted per channel as a visible cryptographic participant.
+              Admission grants only future encrypted content and rotates the room keys.
+            </p>
+          </section>
+          <section id="federation">
+            <h2>Federated instance policy</h2>
+            <p>
+              Rules match exact verified instance domains. Deny always wins. Wildcards are not
+              supported.
+            </p>
+            <div class="inline">
+              <input bind:value={ruleDomain} placeholder="instance.example" /><select
+                bind:value={ruleEffect}
+                ><option value="deny">Deny</option><option value="allow">Allow</option></select
+              ><button onclick={addRule}>Add rule</button>
+            </div>
+            <div class="rows">
+              {#each rules as rule (rule.target_domain)}<article>
+                  <code>{rule.target_domain}</code><span class:revoked={rule.effect === 'deny'}
+                    >{rule.effect}</span
+                  ><button onclick={() => deleteRule(rule.target_domain)}>Remove</button>
+                </article>{/each}
+            </div>
+          </section>
+        </div>
+        <div id="commands-panel" class="panel-sections" hidden={activePanel !== 'commands'}>
+          <section id="commands">
+            <ApplicationCommandEditor
+              value={commandsText}
+              onChange={updateCommands}
+              disabled={busy}
+              installTypes={JSON.parse(savedSettings).application.supported_install_types}
+            />
+            {#if commandError}<p class="command-error" role="alert">{commandError}</p>{/if}
+            {#if commandNotice}<p class="command-success" role="status">{commandNotice}</p>{/if}
+          </section>
+        </div>
+        <div id="deployment-panel" class="panel-sections" hidden={activePanel !== 'deployment'}>
+          <section id="credentials">
+            <h2>Control credentials</h2>
+            <p>
+              Deployment tools use these scoped secrets only to enroll workers and publish command
+              definitions. They cannot connect as the bot or sign in as a user.
+            </p>
+            <div class="inline">
+              <input bind:value={credentialLabel} maxlength="100" placeholder="Deployment" /><button
+                onclick={createCredential}
+                disabled={busy || !credentialLabel.trim()}>Create credential</button
+              >
+            </div>
+            {#if credentialToken}
+              <div class="secret" role="status">
+                <strong>Copy this token now</strong><code>{credentialToken}</code><button
+                  onclick={() => copy(credentialToken, 'Credential')}>Copy</button
+                >
+              </div>
+            {/if}
+            <div class="rows">
+              {#each credentials as credential (credential.id)}<article>
+                  <div>
+                    <strong>{credential.label}</strong><small
+                      >{credential.token_hint} · {credential.scopes.join(', ')}</small
+                    >
+                  </div>
+                  <span class:revoked={credential.revoked_at}
+                    >{credential.revoked_at ? 'Revoked' : 'Active'}</span
+                  >{#if !credential.revoked_at}<button
+                      class="danger"
+                      onclick={() => revokeCredential(credential.id)}>Revoke</button
+                    >{/if}
+                </article>{/each}
+            </div>
+          </section>
+          <section id="workers">
+            <h2>Worker keys</h2>
+            <p>
+              A worker signs short-lived token assertions and connects directly to every target
+              instance. Private keys never leave the worker.
+            </p>
+            <div class="grid">
+              <label>Worker name<input bind:value={workerName} /></label><label
+                >Ed25519 public key (base64url)<input
+                  bind:value={workerKey}
+                  placeholder="43-character public key"
+                /></label
+              >
+            </div>
+            <label
+              >Target domains (comma separated, empty means any approved target)<input
+                bind:value={workerTargets}
+                placeholder="chat.example, community.example"
+              /></label
+            ><button onclick={createWorker} disabled={busy || workerKey.length < 43}
+              >Enroll worker</button
+            >
+            <div class="rows">
+              {#each workers as worker (worker.id)}<article>
+                  <div>
+                    <strong>{worker.name}</strong><small
+                      >#{worker.id} · {worker.target_domains.join(', ') ||
+                        'all approved targets'}</small
+                    >
+                  </div>
+                  <span class:revoked={worker.revoked_at}
+                    >{worker.revoked_at ? 'Revoked' : 'Active'}</span
+                  >{#if !worker.revoked_at}<button
+                      class="danger"
+                      onclick={() => revokeWorker(worker.id)}>Revoke</button
+                    >{/if}
+                </article>{/each}
+            </div>
+          </section>
+        </div>
+        <div id="distribution-panel" class="panel-sections" hidden={activePanel !== 'distribution'}>
+          <section id="invites">
+            <h2>Bot invite links</h2>
+            <p>
+              Invite pages show the app origin, requested permissions, data access, and E2EE
+              behavior before an administrator approves.
+            </p>
+            <div class="grid">
+              <label>Slug<input bind:value={templateSlug} /></label><label
+                >Invite name<input bind:value={templateName} /></label
+              >
+            </div>
+            <label>Description<input bind:value={templateDescription} /></label><button
+              onclick={createTemplate}
+              disabled={busy}>Create invite link</button
+            >
+            <div class="rows">
+              {#each templates as template (template.id)}<article>
+                  <div>
+                    <strong>{template.name}</strong><small
+                      >{template.e2ee_mode} · {template.active ? 'active' : 'disabled'}</small
+                    >
+                  </div>
+                  <code>{template.invite_url}</code><button
+                    onclick={() => copy(template.invite_url)}>Copy</button
                   >
-                </div>
-                <span class:revoked={installation.status !== 'active'}>{installation.status}</span>
-              </article>{/each}{#if installations.length === 0}<p>
-                No guilds have installed this application.
-              </p>{/if}
-          </div>
-        </section>
+                </article>{/each}
+            </div>
+          </section>
+          <section id="installations">
+            <h2>Installations</h2>
+            <div class="rows">
+              {#each installations as installation (installation.id)}<article>
+                  <div>
+                    <strong>{installation.guild_ref}</strong><small
+                      >{installation.e2ee_mode} · revision {installation.grant_revision} ·
+                      {installation.channel_restrictions.length
+                        ? `${installation.channel_restrictions.length} channel restrictions`
+                        : 'all role-permitted channels'}</small
+                    >
+                  </div>
+                  <span class:revoked={installation.status !== 'active'}>{installation.status}</span
+                  >
+                </article>{/each}{#if installations.length === 0}<p>
+                  No guilds have installed this application.
+                </p>{/if}
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   {/if}
@@ -1310,7 +1512,7 @@
   }
   .top {
     display: grid;
-    grid-template-columns: 180px 1fr;
+    grid-template-columns: 230px minmax(0, 1fr);
     gap: 1rem;
     align-items: center;
     max-width: 1280px;
@@ -1357,6 +1559,25 @@
     border-radius: 14px;
     background: var(--surface);
     box-shadow: 0 8px 32px #0003;
+  }
+  .command-save-card {
+    flex-wrap: wrap;
+    max-width: min(620px, calc(100vw - 3rem));
+  }
+  .command-save-card .save-status {
+    flex: 1 1 100%;
+  }
+  .save-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin-left: auto;
+    flex-wrap: wrap;
+  }
+  .save-actions .secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--line);
+    font-weight: 600;
   }
   .save-status {
     display: grid;
@@ -1408,7 +1629,7 @@
   }
   .layout {
     display: grid;
-    grid-template-columns: 180px minmax(0, 900px);
+    grid-template-columns: 230px minmax(0, 1fr);
     gap: 2rem;
     max-width: 1280px;
     margin: 2rem auto;
@@ -1421,25 +1642,209 @@
     gap: 0.2rem;
     height: max-content;
   }
-  .layout > nav a {
+  .layout > nav button {
     border-radius: 7px;
     padding: 0.55rem 0.7rem;
     color: var(--text-muted);
     text-decoration: none;
   }
-  .layout > nav a:hover {
+  .layout > nav button:hover {
     color: var(--text);
     background: var(--surface-hover);
   }
   .sections {
+    min-width: 0;
+  }
+  .panel-sections {
     display: grid;
+    gap: 1.25rem;
+  }
+  .panel-sections[hidden] {
+    display: none;
+  }
+  .panel-heading {
+    margin: 0.2rem 0 1.5rem;
+  }
+  .panel-eyebrow {
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 750;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .panel-heading h2 {
+    margin: 0.5rem 0;
+    font-size: clamp(1.4rem, 2.5vw, 1.9rem);
+    letter-spacing: -0.03em;
+  }
+  .panel-heading p {
+    margin: 0;
+    color: var(--text-muted);
+    line-height: 1.6;
+    font-size: 0.9rem;
+  }
+  .app-heading {
+    display: flex;
+    align-items: center;
     gap: 1rem;
+    min-width: 0;
+  }
+  .app-heading > div:not(.app-monogram) {
+    min-width: 0;
+  }
+  .app-heading h1 {
+    font-size: clamp(1.4rem, 2.5vw, 2rem);
+    letter-spacing: -0.03em;
+    overflow-wrap: anywhere;
+  }
+  .app-heading p {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+  .app-monogram {
+    display: grid;
+    place-items: center;
+    flex: 0 0 56px;
+    height: 56px;
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+    color: var(--accent);
+    font-size: 1.5rem;
+    font-weight: 800;
+  }
+  .app-monogram img {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: inherit;
+  }
+  .app-status {
+    align-self: start;
+    margin-left: auto;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.35rem 0.65rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    background: var(--surface);
+    text-transform: capitalize;
+    white-space: nowrap;
+  }
+  .nav-label {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 750;
+  }
+  .nav-divider {
+    margin-top: 1rem;
+  }
+  .layout > nav button {
+    display: flex;
+    align-items: start;
+    gap: 0.75rem;
+    border: 1px solid transparent;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    padding: 0.8rem;
+  }
+  .layout > nav button.active {
+    border-color: color-mix(in srgb, var(--accent) 25%, var(--line));
+    background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+    color: var(--text);
+  }
+  .nav-symbol {
+    flex: 0 0 22px;
+    font-size: 1.1rem;
+    color: var(--accent);
+    text-align: center;
+  }
+  .layout > nav strong {
+    font-size: 0.8rem;
+    font-weight: 650;
+  }
+  .layout > nav small {
+    display: block;
+    margin-top: 0.25rem;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+  }
+  .layout > nav .draft-marker {
+    color: var(--accent);
+  }
+  .nav-tip {
+    border-top: 1px solid var(--line);
+    margin: 1rem 0.75rem 0;
+    padding-top: 1rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.6;
+  }
+  .setup-heading h2 {
+    margin: 0.5rem 0;
+    font-size: 1rem;
+  }
+  .setup-heading p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .setup-cards {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.8rem;
+  }
+  .setup-cards button {
+    display: grid;
+    align-content: start;
+    gap: 0.8rem;
+    padding: 1.15rem;
+    text-align: left;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  .setup-cards button:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  }
+  .setup-cards button > span {
+    font-size: 0.65rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+  }
+  .setup-cards strong {
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  .setup-cards small {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .command-error {
+    color: var(--danger);
+  }
+  .command-success {
+    color: var(--success);
   }
   section {
     scroll-margin-top: 1rem;
     border: 1px solid var(--line);
     border-radius: 14px;
-    padding: 1.3rem;
+    padding: clamp(1rem, 2.5vw, 1.75rem);
     background: var(--surface);
   }
   section h2 {
@@ -1450,6 +1855,8 @@
   }
   section p {
     color: var(--text-muted);
+    font-size: 0.88rem;
+    line-height: 1.65;
   }
   label {
     display: grid;
@@ -1474,10 +1881,6 @@
     color: var(--text);
     background: var(--input-bg, var(--bg));
     font: inherit;
-  }
-  .code {
-    font-family: ui-monospace, monospace;
-    font-size: 0.82rem;
   }
   .chips {
     display: flex;
@@ -1693,6 +2096,20 @@
     .save-status {
       flex: 1;
     }
+    .command-save-card {
+      max-width: none;
+    }
+    .command-save-card .save-status {
+      flex: 1 1 100%;
+    }
+    .save-actions {
+      width: 100%;
+    }
+    .save-actions button {
+      flex: 1;
+      font-size: 0.8rem;
+      padding: 0.7rem;
+    }
     .top {
       grid-template-columns: 1fr auto;
     }
@@ -1706,7 +2123,34 @@
       position: static;
       display: flex;
       overflow-x: auto;
-      margin-bottom: 1rem;
+      margin: 0 -1rem 1.5rem;
+      padding: 0 1rem 0.5rem;
+      gap: 0.5rem;
+    }
+    .layout > nav button {
+      flex-shrink: 0;
+      padding: 0.65rem 0.8rem;
+      align-items: center;
+    }
+    .layout > nav button small,
+    .nav-label,
+    .nav-tip {
+      display: none;
+    }
+    .app-status {
+      display: none;
+    }
+    .setup-cards {
+      grid-template-columns: 1fr;
+    }
+    .top {
+      gap: 1rem;
+    }
+    .top .app-heading {
+      grid-column: 1/-1;
+    }
+    .panel-heading {
+      margin-top: 0;
     }
     .grid,
     .inline,
