@@ -46,7 +46,6 @@ mobile/android/app/*.jks
 mobile/android/app/*.keystore
 mobile/android/app/google-services.json
 # Local Google Play publishing credentials.
-/kaede-chat-48de2-*.json
 mobile/ios/Runner/GoogleService-Info.plist
 .flutter-shim/
 # Generated mobile MLS binaries. Release builds regenerate these from the

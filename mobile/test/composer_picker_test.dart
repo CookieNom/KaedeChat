@@ -537,7 +537,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(tester.takeException(), isNull);
-    expect(calls, <(String?, int)>[(null, 1)]);
+    expect(calls, <(String?, int)>[(null, 1), (null, 2)]);
     expect(
       find.byWidgetPredicate(
         (widget) =>
@@ -547,7 +547,7 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.tap(find.byKey(const ValueKey('composer-gif-load-more')));
+    expect(find.text('Load more'), findsNothing);
     await tester.pump();
     expect(calls.last, (null, 2));
     for (final title in ['Celebration', 'Happy dance']) {
@@ -570,7 +570,7 @@ void main() {
     expect(calls.last, (null, 2));
     await tester.pump(const Duration(milliseconds: 200));
     await tester.pump();
-    expect(calls.last, ('cats playing', 1));
+    expect(calls, contains(('cats playing', 1)));
     expect(tester.takeException(), isNull);
   });
 

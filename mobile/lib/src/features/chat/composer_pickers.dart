@@ -1446,6 +1446,7 @@ final class ComposerGifPicker extends StatefulWidget {
 
 final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   final _search = TextEditingController();
+  final _scroll = ScrollController();
   final _items = <ComposerGif>[];
   List<ComposerGif> _favorites = const [];
   Timer? _debounce;
@@ -1459,8 +1460,16 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_loadNearEnd);
     unawaited(_loadFavorites());
     unawaited(_load(page: 1, append: false));
+  }
+
+  void _loadNearEnd() {
+    if (!mounted || !_scroll.hasClients || _error != null) return;
+    if (_scroll.position.extentAfter <= 200 && _nextPage != null) {
+      unawaited(_load(page: _nextPage!, append: true));
+    }
   }
 
   Future<void> _loadFavorites() async {
@@ -1545,11 +1554,13 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   void dispose() {
     _debounce?.cancel();
     _search.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadNearEnd());
     final content = Padding(
       padding: EdgeInsets.fromLTRB(12, 0, 12, 8),
       child: _KeyboardResponsivePickerBody(
@@ -1617,6 +1628,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
             final columns = constraints.maxWidth >= 520 ? 3 : 2;
             return GridView.builder(
               key: ValueKey('composer-gif-grid'),
+              controller: _scroll,
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: columns,
@@ -1703,12 +1715,13 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
               child: CircularProgressIndicator(strokeWidth: 2),
             ),
           )
-        else if (_nextPage case final page?)
+        else if (_error != null)
           TextButton.icon(
             key: ValueKey('composer-gif-load-more'),
-            onPressed: () => _load(page: page, append: true),
+            onPressed: () =>
+                _load(page: _nextPage ?? 1, append: _nextPage != null),
             icon: Icon(Icons.expand_more_rounded),
-            label: Text(_error == null ? 'Load more' : 'Retry load more'),
+            label: Text('Try again'),
           ),
       ],
     );

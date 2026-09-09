@@ -13,6 +13,7 @@
   let error = $state('');
   let request: AbortController | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
+  let results: HTMLDivElement;
   let searchInput = $state<HTMLInputElement | null>(null);
   const displayedItems = $derived(
     view === 'browse'
@@ -36,16 +37,19 @@
   }
 
   async function load(page = 1, append = false) {
+    if (append && (loading || debounce || view !== 'browse')) return;
     request?.abort();
     const controller = new AbortController();
     request = controller;
     loading = true;
+    if (!append) nextPage = null;
     error = '';
     const parameter = query.trim() ? `&query=${encodeURIComponent(query.trim())}` : '';
     try {
       const result = await api<GifPage>(`/gifs?page=${page}&limit=24${parameter}`, {
         signal: controller.signal
       });
+      if (controller.signal.aborted) return;
       items = append ? [...items, ...result.items] : result.items;
       nextPage = result.next_page;
     } catch (caught) {
@@ -59,7 +63,13 @@
 
   function search() {
     if (debounce) clearTimeout(debounce);
-    if (view === 'browse') debounce = setTimeout(() => void load(), 300);
+    request?.abort();
+    nextPage = null;
+    if (view === 'browse')
+      debounce = setTimeout(() => {
+        debounce = null;
+        void load();
+      }, 300);
   }
 
   function show(next: 'browse' | 'favorites') {
@@ -67,8 +77,19 @@
     debounce = null;
     view = next;
     query = '';
-    if (next === 'browse' && !items.length) void load();
+    if (next === 'browse') void load();
     void Promise.resolve().then(() => searchInput?.focus());
+  }
+
+  function observeEnd(node: HTMLElement) {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && nextPage && !error) void load(nextPage, true);
+      },
+      { root: results, rootMargin: '0px 0px 200px 0px' }
+    );
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
   }
 
   function windowKeydown(event: KeyboardEvent) {
@@ -115,7 +136,7 @@
     <span class="visually-hidden">Search KLIPY</span>
     <input bind:this={searchInput} bind:value={query} oninput={search} placeholder="Search KLIPY" />
   </label>
-  <div class="gif-results" aria-live="polite">
+  <div class="gif-results" bind:this={results} aria-live="polite">
     {#each displayedItems as gif (`${gif.id}:${gif.preview_url}`)}
       <div class="gif-result">
         <button
@@ -145,11 +166,15 @@
         >
       </div>
     {/each}
-    {#if view === 'browse' && loading && !items.length}<p class="gif-state">Loading GIFs…</p>{/if}
+    {#if view === 'browse' && loading}<p class="gif-state">Loading GIFs…</p>{/if}
     {#if view === 'browse' && error}
       <div class="gif-state" role="alert">
         <p class="form-error">{error}</p>
-        <button type="button" disabled={loading} onclick={() => void load()}>Try again</button>
+        <button
+          type="button"
+          disabled={loading}
+          onclick={() => void load(nextPage ?? 1, nextPage !== null)}>Try again</button
+        >
       </div>
     {/if}
     {#if view === 'browse' && !loading && !error && !items.length}<p class="gif-state">
@@ -162,13 +187,11 @@
           : 'Favorite GIFs with the star to find them here.'}
       </p>
     {/if}
+    {#if view === 'browse' && nextPage && !loading && !error}
+      <div class="gif-state" style="height: 1px; width: 100%" use:observeEnd></div>
+    {/if}
   </div>
   <footer>
     <span>Powered by <strong>KLIPY</strong></span>
-    {#if view === 'browse' && nextPage}
-      <button type="button" disabled={loading} onclick={() => void load(nextPage ?? 1, true)}>
-        {loading ? 'Loading…' : 'Load more'}
-      </button>
-    {/if}
   </footer>
 </div>
