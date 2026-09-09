@@ -2027,7 +2027,8 @@ mod tests {
     };
 
     #[test]
-    fn video_codec_defaults_preserve_encryption_and_offer_backup() {
+    fn video_codec_defaults_preserve_encryption_and_offer_backup()
+    -> Result<(), Box<dyn std::error::Error>> {
         let encoding = VideoEncoding {
             max_bitrate: 2_500_000,
             max_framerate: 30.0,
@@ -2052,7 +2053,7 @@ mod tests {
         };
         if supports("video/av1") {
             assert_eq!(plain.video_codec, VideoCodec::AV1);
-            let backup = plain.backup_codec.expect("available compatibility backup");
+            let backup = plain.backup_codec.ok_or("missing compatibility backup")?;
             assert_eq!(backup.codec, fallback);
             assert_eq!(
                 backup.encoding.map(|value| value.max_bitrate),
@@ -2062,6 +2063,7 @@ mod tests {
             assert_eq!(plain.video_codec, fallback);
             assert!(plain.backup_codec.is_none());
         }
+        Ok(())
     }
 
     fn grant(e2ee: bool) -> VoiceGrant {
@@ -2131,13 +2133,12 @@ mod tests {
     }
 
     #[test]
-    fn native_voice_policy_is_bidirectional_before_media_setup() {
-        let plain =
-            media_room_options(&grant(false), &expected(false), None).expect("plaintext options");
+    fn native_voice_policy_is_bidirectional_before_media_setup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let plain = media_room_options(&grant(false), &expected(false), None)?;
         assert!(plain.encryption.is_none());
-        let encrypted = media_room_options(&grant(true), &expected(true), Some(vec![7; 32]))
-            .expect("encrypted options");
-        let encryption = encrypted.encryption.expect("encryption configured");
+        let encrypted = media_room_options(&grant(true), &expected(true), Some(vec![7; 32]))?;
+        let encryption = encrypted.encryption.ok_or("encryption not configured")?;
         assert_eq!(encryption.encryption_type, super::EncryptionType::Gcm);
         assert_eq!(encryption.key_provider.get_shared_key(0), Some(vec![7; 32]));
         assert!(matches!(
@@ -2212,6 +2213,7 @@ mod tests {
             media_room_options(&invalid_grant, &invalid_expected, None),
             Err(VoiceError::EncryptionPolicyMismatch)
         ));
+        Ok(())
     }
 
     #[test]
