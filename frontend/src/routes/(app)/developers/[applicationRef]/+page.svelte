@@ -55,7 +55,7 @@
     user_install_scopes: string[];
     user_install_contexts: Array<'guild' | 'bot_dm' | 'private_channel'>;
     e2ee_modes: string[];
-    bot_user: { handle: string };
+    bot_user: { id: string; origin_domain: string; handle: string };
   }
   interface Credential {
     id: string;
@@ -1008,6 +1008,45 @@
               ></textarea></label
             >
           </section>
+          <section aria-labelledby="bot-reference-heading">
+            <h2 id="bot-reference-heading">Bot identity</h2>
+            <p>
+              The snowflake is your bot’s numeric ID. Combine it with its home domain to form the
+              full bot reference used by APIs and tools that ask for <code>bot_ref</code>.
+            </p>
+            <div class="grid">
+              <div>
+                <label for="bot-snowflake">Bot ID (snowflake)</label>
+                <div class="identity-value">
+                  <input id="bot-snowflake" value={application.bot_user.id} readonly />
+                  <button class="secondary" onclick={() => copy(application!.bot_user.id, 'Bot ID')}
+                    >Copy ID</button
+                  >
+                </div>
+              </div>
+              <div>
+                <label for="bot-reference">Bot reference</label>
+                <div class="identity-value">
+                  <input
+                    id="bot-reference"
+                    value={`${application.bot_user.id}@${application.bot_user.origin_domain}`}
+                    readonly
+                  />
+                  <button
+                    class="secondary"
+                    onclick={() =>
+                      copy(
+                        `${application!.bot_user.id}@${application!.bot_user.origin_domain}`,
+                        'Bot reference'
+                      )}>Copy ref</button
+                  >
+                </div>
+              </div>
+            </div>
+            <p class="identity-help">
+              For tools asking for <code>application_ref</code>, use <code>{application.ref}</code> instead.
+            </p>
+          </section>
           <section id="media">
             <h2>Bot profile</h2>
             <p>
@@ -1892,6 +1931,27 @@
     color: var(--text-muted);
     font-weight: 400;
     line-height: 1.5;
+  }
+  .identity-value {
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .identity-value input {
+    min-width: 0;
+    font-family: var(--font-mono, monospace);
+  }
+  .identity-value button {
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    background: var(--surface-hover);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .identity-help code {
+    overflow-wrap: anywhere;
   }
   .chips {
     display: flex;

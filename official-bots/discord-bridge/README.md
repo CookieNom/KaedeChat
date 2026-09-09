@@ -60,10 +60,17 @@ for the server installation flow.
 1. In KaedeChat, open **User settings → Developer Portal**, then **Create
    application**. Give it a name such as **Discord Bridge**.
 2. On its **Access** page, select these **Scopes** (things the bot may do):
-   `guilds.read`, `channels.read`, `messages.read`, `messages.content`,
+   `guilds.read`, `channels.read`, `messages.metadata`, `messages.content`,
    `messages.send`, `applications.commands`, `interactions.respond`.
 3. Select these **Gateway intents** (updates the bot should receive):
    `guilds`, `guild_messages`, `message_content`, `interactions`.
+
+   Use these exact names in the **KaedeChat** Developer Portal. The message
+   scope is `messages.metadata` (message events) plus `messages.content` (their
+   text). Message history is a separate scope and is not needed for this bridge.
+   In Discord's portal, only enable **Message Content Intent** as described in
+   step 1; Kaede's `interactions` intent is not a Discord setting.
+
 4. In the permission checklist, allow viewing channels and sending messages.
    Under **Installation contexts**, enable the server/guild installation option.
    A user/account installation cannot read ordinary channel messages.

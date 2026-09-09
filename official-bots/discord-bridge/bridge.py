@@ -15,7 +15,7 @@ from sqlalchemy.dialects.sqlite import insert
 from pairing import Pairing
 
 log = logging.getLogger("bridge")
-SCOPES = ["guilds.read", "channels.read", "messages.read", "messages.content", "messages.send",
+SCOPES = ["guilds.read", "channels.read", "messages.metadata", "messages.content", "messages.send",
           "applications.commands", "interactions.respond"]
 INTENTS = kaede.Intents(message_content=True, direct_messages=False,
                        direct_message_reactions=False, message_reactions=False,

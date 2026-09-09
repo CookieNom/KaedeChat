@@ -8,6 +8,25 @@ import bridge
 
 
 class BridgeTest(unittest.TestCase):
+    def test_enrollment_matches_server_contract(self):
+        import ast
+        import runpy
+
+        root = Path(__file__).resolve().parents[3]
+        contract = root / 'backend/app/bots/application_contract.py'
+        if not contract.exists():
+            self.skipTest('Server contract check requires the repository checkout')
+        tree = ast.parse(contract.read_text())
+        assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'SUPPORTED_APPLICATION_SCOPES'
+                                  for target in node.targets))
+        scopes = ast.literal_eval(assignment.value.args[0])
+        intents = runpy.run_path(str(root / 'backend/app/core/bot_intents.py'))['SUPPORTED_BOT_INTENTS']
+        self.assertLessEqual(set(bridge.SCOPES), scopes)
+        self.assertLessEqual(set(bridge.INTENTS.names()), intents)
+        self.assertIn('messages.metadata', bridge.SCOPES)
+
+
     def test_queue_routes_and_loop_guards(self):
         with TemporaryDirectory() as directory:
             route = {'discord_channel_id': '123', 'kaede_channel_ref': '456@chat.example'}

@@ -87,7 +87,11 @@ beforeEach(async () => {
     user_install_scopes: ['applications.commands', 'interactions.respond'],
     user_install_contexts: ['guild'],
     e2ee_modes: ['participant'],
-    bot_user: { handle: 'test@apps.example' }
+    bot_user: {
+      id: '91287871893315585',
+      origin_domain: 'bots.example',
+      handle: 'test@bots.example'
+    }
   };
   network.api.mockReset().mockImplementation(async (path: string, options: RequestInit = {}) => {
     if (path === root) {
@@ -377,4 +381,14 @@ it('saves profile artwork immediately without marking app settings as unsaved', 
   input('Name', 'Unsaved bot name');
   expect(button('Save changes').disabled).toBe(false);
   expect(document.querySelector('.avatar img')?.getAttribute('src')).toContain('a'.repeat(64));
+});
+
+it('shows the exact bot snowflake and authority-qualified reference separately from the application ref', () => {
+  expect((document.querySelector('#bot-snowflake') as HTMLInputElement).value).toBe(
+    '91287871893315585'
+  );
+  expect((document.querySelector('#bot-reference') as HTMLInputElement).value).toBe(
+    '91287871893315585@bots.example'
+  );
+  expect(document.querySelector('.identity-help')?.textContent).toContain(ref);
 });
