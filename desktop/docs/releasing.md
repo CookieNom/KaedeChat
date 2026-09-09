@@ -111,6 +111,12 @@ Play Console's Users and permissions. For Kaede, grant **View app information
 exist in Play Console with an initial manual upload, and open testing must be
 available and configured, including its countries and required app declarations.
 
+Complete the full-screen intent declaration in Play Console's App content page
+before submitting. Kaede requests `USE_FULL_SCREEN_INTENT` for incoming call
+notifications; Google rejects the release commit while this declaration is
+missing, even when the AAB upload succeeds. This is a Console setting, so a
+source rebuild cannot resolve it.
+
 Android version names come from the numeric release tag. Version codes use
 `GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT`, allowing attempts 1–99. Both
 the APK and AAB use the same version. Before the first automated upload, check

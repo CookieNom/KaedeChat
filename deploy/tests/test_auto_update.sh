@@ -31,8 +31,9 @@ git -C "$TEST_ROOT/repo" commit -qm baseline
 git -C "$TEST_ROOT/repo" remote add origin https://example.invalid/kaede.git
 
 TEST_ENV=(
-  env
+  env -u AUTO_UPDATE_SYSTEMD_DIR
   "HOME=$TEST_ROOT/home"
+  "XDG_CONFIG_HOME=$TEST_ROOT/home/.config"
   "PATH=$TEST_ROOT/bin:$PATH"
 )
 
