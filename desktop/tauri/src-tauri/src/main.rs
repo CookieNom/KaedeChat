@@ -3963,7 +3963,7 @@ mod tests {
             &configured_authority,
             &configured_origin,
         );
-        let target = valid.expect("valid media capability");
+        let target = valid.map_err(|error| error.message)?;
         assert_eq!(
             target.url.as_str(),
             "https://media.guild.example/sounds/one?signature=opaque"

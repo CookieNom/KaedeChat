@@ -632,12 +632,13 @@ mod tests {
             Some("KAED_FED_HISTORY_CAPACITY")
         );
         assert_eq!(guild.history_sync_resource.as_deref(), Some("messages"));
-        let legacy: User = serde_json::from_value(serde_json::json!({
+        let Ok(legacy): Result<User, _> = serde_json::from_value(serde_json::json!({
             "id":"9", "origin_domain":"remote.example", "username":"maple",
             "display_name":null, "avatar_hash":null, "banner_hash":null,
             "bio":null, "custom_status":null
-        }))
-        .expect("legacy user payload");
+        })) else {
+            panic!("legacy user payload should deserialize");
+        };
         assert!(legacy.profile_resolved);
         assert_eq!(legacy.label(), "maple");
     }

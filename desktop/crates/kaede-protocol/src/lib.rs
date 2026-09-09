@@ -368,11 +368,12 @@ mod tests {
             serde_json::from_str::<EntityRef>(r#"{"id":42,"origin_domain":"chat.example"}"#)
                 .is_err()
         );
-        let envelope: GatewayEnvelope = serde_json::from_value(serde_json::json!({
+        let Ok(envelope): Result<GatewayEnvelope, _> = serde_json::from_value(serde_json::json!({
             "op": 0, "t": "CHANNEL_ACCESS_REVOKED", "s": 18,
             "d": {"channel_id": "76426998884343809", "channel_domain": "remote.example"}
-        }))
-        .expect("large decimal envelope");
+        })) else {
+            panic!("large decimal envelope should deserialize");
+        };
         assert_eq!(envelope.d["channel_id"], "76426998884343809");
         assert_eq!(envelope.d["channel_domain"], "remote.example");
         assert_eq!(envelope.t.as_deref(), Some("CHANNEL_ACCESS_REVOKED"));
