@@ -23,7 +23,7 @@ use url::Url;
 use wry::{WebViewBuilder, http::Request};
 
 pub const HELPER_FLAG: &str = "--kaede-native-challenge";
-const HELPER_TIMEOUT: time::Duration = time::Duration::from_secs(180);
+const HELPER_TIMEOUT: time::Duration = time::Duration::from_mins(3);
 const MAX_HELPER_OUTPUT: usize = 4096;
 
 #[derive(Clone, Default)]

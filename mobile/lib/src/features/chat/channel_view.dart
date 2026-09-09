@@ -6577,7 +6577,8 @@ final class _MessageTile extends StatelessWidget {
                       displayedMessage.content,
                       encrypted: encrypted,
                     ))
-                      InviteCard(key: ValueKey(reference), reference: reference),
+                      InviteCard(
+                          key: ValueKey(reference), reference: reference),
                   if (!deleted &&
                       displayedMessage.e2ee == null &&
                       mediaPreview == null &&

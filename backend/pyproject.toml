@@ -44,7 +44,7 @@ kaede = "app.cli:main"
 
 [dependency-groups]
 dev = [
-  "httpx2>=2.7,<3",
+  "httpx2>=2.12,<3",
   "mypy>=1.14,<2",
   "pip-audit>=2.9,<3",
   "pytest>=9.0.3,<10",

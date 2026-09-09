@@ -21,7 +21,7 @@ use thiserror::Error;
 use url::{Url, form_urlencoded};
 
 /// Maximum age of a public asset before its origin must be checked again.
-pub const PUBLIC_ASSET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+pub const PUBLIC_ASSET_CACHE_TTL: Duration = Duration::from_mins(5);
 
 #[derive(Clone, Debug, Serialize)]
 struct TicketRequest<'a> {

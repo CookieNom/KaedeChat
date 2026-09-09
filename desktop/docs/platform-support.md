@@ -23,8 +23,11 @@ Developer ID, hardened runtime, notarization, and stapling.
 Linux supports PipeWire/PulseAudio/ALSA as exposed through CPAL and the desktop
 session, plus Secret Service credentials, notifications, tray integration, and
 portal-compatible screen capture. Building requires WebKitGTK 4.1, GTK 3,
-Ayatana AppIndicator, ALSA, udev, D-Bus, OpenSSL, and the ordinary C/C++ build
-toolchain. Global push to talk can be unavailable on Wayland compositors that
+Ayatana AppIndicator, ALSA, udev, D-Bus, OpenSSL, and Clang 21 or newer for
+libwebrtc's bundled libc++. On Debian/Ubuntu, run `sudo sh desktop/install-clang.sh`
+from the repository root, then build with `CC=clang-21 CXX=clang++-21`.
+The tooling image and Linux CI jobs configure this automatically.
+Global push to talk can be unavailable on Wayland compositors that
 don't grant a global-shortcut portal. Voice activity remains available in that
 case, and the UI reports the limitation.
 

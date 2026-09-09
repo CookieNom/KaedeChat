@@ -194,7 +194,7 @@ impl ApiClient {
         let upload_http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_mins(5))
             .user_agent(concat!("KaedeDesktop/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
@@ -463,7 +463,7 @@ impl ApiClient {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_mins(5))
             .user_agent(concat!("KaedeDesktop/", env!("CARGO_PKG_VERSION")))
             .no_proxy()
             .resolve_to_addrs(host, &addresses)

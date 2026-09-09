@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   NODE_VERSION: "22.23.1"
   PNPM_VERSION: "10.34.0"
   RUST_VERSION: "1.97.1"
@@ -52,9 +53,14 @@ jobs:
       - name: Install Linux desktop dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
-          clang cmake file libasound2-dev libayatana-appindicator3-dev
+          cmake file libasound2-dev libayatana-appindicator3-dev
           libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev
           libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
+      - name: Install Clang 21 for libwebrtc
+        run: |
+          sudo sh desktop/install-clang.sh
+          echo "CC=clang-21" >> "$GITHUB_ENV"
+          echo "CXX=clang++-21" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: ${{ env.PNPM_VERSION }}

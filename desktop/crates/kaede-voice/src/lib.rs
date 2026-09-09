@@ -1347,7 +1347,7 @@ async fn publish_screen_share(
             }
         })
         .map_err(VoiceError::CaptureThread)?;
-    match time::timeout(Duration::from_secs(120), ready_rx).await {
+    match time::timeout(Duration::from_mins(2), ready_rx).await {
         Ok(Ok(Ok(()))) => {}
         Ok(Ok(Err(error))) => {
             stop.store(true, Ordering::Release);
@@ -1467,7 +1467,7 @@ pub fn screen_sources() -> Vec<ScreenSource> {
             });
         }
     }
-    result.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+    result.sort_by_key(|device| device.label.to_lowercase());
     result
 }
 
@@ -1566,7 +1566,7 @@ pub fn camera_devices() -> Result<Vec<CameraDevice>, VoiceError> {
             label: camera.human_name(),
         })
         .collect::<Vec<_>>();
-    cameras.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+    cameras.sort_by_key(|device| device.label.to_lowercase());
     Ok(cameras)
 }
 

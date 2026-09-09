@@ -1,3 +1,4 @@
+DESKTOP_RUST_VERSION := $(shell sed -n 's/^channel = "\(.*\)"/\1/p' desktop/rust-toolchain.toml)
 ENV_FILE ?= .env
 OPERATOR_ENV_FILE := $(abspath $(ENV_FILE))
 GENERATED_COMPOSE := $(if $(wildcard deploy/compose.generated.yml),-f deploy/compose.generated.yml,)
@@ -101,12 +102,12 @@ audit:
 	$(AUDIT_COMPOSE) run --rm --no-deps --build frontend-check pnpm audit --audit-level=moderate
 
 desktop-check:
-	cargo +1.92.0 fmt --all --manifest-path desktop/Cargo.toml -- --check
+	cargo +$(DESKTOP_RUST_VERSION) fmt --all --manifest-path desktop/Cargo.toml -- --check
 	test -f frontend/build/index.html || { echo 'frontend/build is missing; run pnpm --dir frontend build' >&2; exit 2; }
-	cargo +1.92.0 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+	cargo +$(DESKTOP_RUST_VERSION) check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 
 desktop-lint:
-	cargo +1.92.0 clippy --locked --manifest-path desktop/Cargo.toml \
+	cargo +$(DESKTOP_RUST_VERSION) clippy --locked --manifest-path desktop/Cargo.toml \
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
 		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-gateway \
 		-p kaede-capture -p kaede-audio -p kaede-voice -p kaede-turnstile \
@@ -114,7 +115,7 @@ desktop-lint:
 		-p kaede-tauri --all-targets -- -D warnings
 
 desktop-test:
-	cargo +1.92.0 test --locked --manifest-path desktop/Cargo.toml \
+	cargo +$(DESKTOP_RUST_VERSION) test --locked --manifest-path desktop/Cargo.toml \
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
 		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-app \
 		-p kaede-gateway -p kaede-capture -p kaede-audio -p kaede-voice \
@@ -123,12 +124,12 @@ desktop-test:
 desktop-build:
 	pnpm --dir frontend install --frozen-lockfile
 	pnpm --dir frontend build
-	cd desktop/tauri && cargo +1.92.0 tauri build --config src-tauri/tauri.conf.json
+	cd desktop/tauri && cargo +$(DESKTOP_RUST_VERSION) tauri build --config src-tauri/tauri.conf.json
 
 desktop-dev:
 	pnpm --dir frontend dev --host 127.0.0.1 & \
 	frontend_pid=$$!; trap 'kill $$frontend_pid 2>/dev/null || true' EXIT INT TERM; \
-	cd desktop/tauri && cargo +1.92.0 tauri dev --config src-tauri/tauri.dev.conf.json
+	cd desktop/tauri && cargo +$(DESKTOP_RUST_VERSION) tauri dev --config src-tauri/tauri.dev.conf.json
 
 env-check:
 	@test -f "$(ENV_FILE)" || { echo 'ENV_FILE does not exist: $(ENV_FILE). Run make setup or pass ENV_FILE=/path/to/operator.env' >&2; exit 2; }
@@ -169,7 +170,8 @@ chat-check:
 media-check:
 	@set -eu; \
 	trap '$(MEDIA_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	$(MEDIA_COMPOSE) --profile validation up -d --wait --build postgres dragonfly garage storage-init clamav; \
+	$(MEDIA_COMPOSE) --profile validation up -d --wait --build postgres dragonfly garage clamav; \
+	$(MEDIA_COMPOSE) run --rm --no-deps --build storage-init; \
 	$(MEDIA_COMPOSE) run --rm --no-deps --build media-check
 
 voice-check:
