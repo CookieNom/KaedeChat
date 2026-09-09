@@ -1561,7 +1561,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
             controller: _search,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: 'Search GIFs',
+              hintText: 'Search KLIPY',
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),

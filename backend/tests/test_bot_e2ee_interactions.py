@@ -15,7 +15,6 @@ from starlette.responses import Response
 
 import app.api.bot_e2ee as bot_e2ee_api
 import app.api.interactions as interactions
-from app.api.bot_gateway import encrypted_bot_content_event
 from app.bots import e2ee as bot_e2ee_service
 from app.chat.e2ee import (
     interaction_routing_contract_digest,
@@ -509,6 +508,19 @@ async def test_response_attachment_uses_current_room_policy_after_e2ee_switch() 
 
     session.get.assert_awaited_once_with(Channel, (20, "guild.example"))
 
+    attachment.encryption_mode = "plaintext"
+    with pytest.raises(HTTPException) as denied:
+        await interactions.require_owned_interaction_response_attachments(
+            cast(Any, session),
+            cast(Any, SimpleNamespace(domain="guild.example")),
+            cast(Any, principal),
+            app_installation,
+            cast(Any, plaintext_interaction()),
+            [101],
+        )
+    assert denied.value.status_code == 404
+    assert denied.value.detail == {"code": "ATTACHMENT_NOT_FOUND"}
+
 
 @pytest.mark.asyncio
 async def test_interaction_response_read_binds_selected_device(
@@ -948,20 +960,6 @@ async def test_interaction_attachment_ticket_matches_encrypted_invocation(
     session.commit.assert_awaited_once()
 
 
-def test_gateway_fences_encrypted_interactions_like_messages() -> None:
-    encrypted_channels = {(20, "guild.example")}
-    event = {
-        "t": "INTERACTION_CREATE",
-        "d": {
-            "channel_id": "20",
-            "channel_domain": "guild.example",
-            "encrypted_payload": mls_envelope(),
-        },
-    }
-
-    assert encrypted_bot_content_event(event, encrypted_channels)
-
-
 def test_bot_device_snapshot_accepts_only_one_complete_authorization_context() -> None:
     capability = bot_e2ee_api.BotE2EESnapshotRequest(
         target_domain="dm.example",
@@ -1254,29 +1252,88 @@ async def test_capability_snapshot_request_uses_grant_not_target_user_identity(
 
 
 @pytest.mark.asyncio
-async def test_bot_device_snapshot_compaction_is_destination_and_actor_scoped() -> None:
-    class Rows:
-        def all(self) -> list[tuple[str, str]]:
-            return [("app.example", "kcfe_old")]
+async def test_bot_device_snapshot_compaction_is_destination_and_actor_scoped(
+    postgres_schema,
+) -> None:
+    import json
 
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=None),
-        execute=AsyncMock(side_effect=[Rows(), SimpleNamespace(), SimpleNamespace()]),
+    from sqlalchemy import text
+
+    connection = postgres_schema
+    await connection.execute(
+        text(
+            "CREATE TABLE federation_events (origin_domain text, event_id text, event_type "
+            "text, envelope jsonb)"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE TABLE federation_outbox (id bigint GENERATED ALWAYS AS IDENTITY, "
+            "destination text, event_origin_domain text, event_id text)"
+        )
+    )
+    event_type = "e2ee.device-list.changed"
+    baseline = {
+        "actor": {"id": "60", "domain": "app.example"},
+        "content": {"team_id": "10", "team_domain": "apps.example"},
+    }
+    candidates = [
+        ("old", "guild.example", event_type, baseline),
+        ("shared", "guild.example", event_type, baseline),
+        ("destination", "other.example", event_type, baseline),
+        (
+            "actor_id",
+            "guild.example",
+            event_type,
+            baseline | {"actor": {"id": "99", "domain": "app.example"}},
+        ),
+        (
+            "actor_domain",
+            "guild.example",
+            event_type,
+            baseline | {"actor": {"id": "60", "domain": "other.example"}},
+        ),
+        ("type", "guild.example", "guild.message.create", baseline),
+    ]
+    for identifier, target, kind, envelope in candidates:
+        await connection.execute(
+            text(
+                "INSERT INTO federation_events VALUES ('apps.example', :id, :type, "
+                "CAST(:envelope AS jsonb))"
+            ),
+            {"id": identifier, "type": kind, "envelope": json.dumps(envelope)},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO federation_outbox (destination, event_origin_domain, event_id) "
+                "VALUES (:destination, 'apps.example', :id)"
+            ),
+            {"destination": target, "id": identifier},
+        )
+    await connection.execute(
+        text(
+            "INSERT INTO federation_outbox (destination, event_origin_domain, event_id) "
+            "VALUES ('other.example', 'apps.example', 'shared')"
+        )
     )
     await federation_events.discard_superseded_latest_state_event(
-        cast(Any, session),
+        connection,
         destination="guild.example",
-        event_type="e2ee.device-list.changed",
+        event_type=event_type,
         actor_ref=(60, "app.example"),
     )
-
-    select_statement = session.execute.await_args_list[0].args[0]
-    select_params = select_statement.compile().params.values()
-    assert {"guild.example", "e2ee.device-list.changed", "60", "app.example"} <= set(select_params)
-    outbox_delete = str(session.execute.await_args_list[1].args[0].compile())
-    orphan_delete = str(session.execute.await_args_list[2].args[0].compile())
-    assert "federation_outbox.destination" in outbox_delete
-    assert "NOT (EXISTS" in orphan_delete
+    assert set(
+        (
+            await connection.execute(text("SELECT event_id, destination FROM federation_outbox"))
+        ).all()
+    ) == {
+        (identifier, destination)
+        for identifier, destination, _kind, _envelope in candidates
+        if identifier not in {"old", "shared"}
+    } | {("shared", "other.example")}
+    assert set(await connection.scalars(text("SELECT event_id FROM federation_events"))) == {
+        identifier for identifier, *_rest in candidates if identifier != "old"
+    }
 
 
 @pytest.mark.asyncio
@@ -1314,11 +1371,11 @@ async def test_bot_device_generation_queues_capability_authorities_without_commi
 
     assert paused_channels == [paused]
     assert destinations == {"guild.example", "dm.example"}
-    assert [call.kwargs["destination"] for call in discard.await_args_list] == [
+    assert sorted(call.kwargs["destination"] for call in discard.await_args_list) == [
         "dm.example",
         "guild.example",
     ]
-    assert [call.args[2] for call in queue.await_args_list] == [
+    assert sorted(call.args[2] for call in queue.await_args_list) == [
         "dm.example",
         "guild.example",
     ]

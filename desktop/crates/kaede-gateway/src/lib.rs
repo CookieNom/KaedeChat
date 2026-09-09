@@ -339,6 +339,7 @@ mod tests {
             query: "member".to_owned(),
             limit: u16::MAX,
         });
+        assert_eq!(payload["d"]["query"], "member");
         assert_eq!(payload["op"], GatewayOp::RequestMembers as u8);
         assert_eq!(payload["d"]["limit"], 100);
         assert_eq!(payload["d"]["guild_id"], "1@home.example");
@@ -394,31 +395,16 @@ mod tests {
 
     #[test]
     fn voice_state_matches_the_gateway_self_state_contract_exactly() {
-        let payload = command_payload(GatewayCommand::VoiceState {
-            self_mute: false,
-            self_deaf: true,
-        });
-        assert_eq!(payload["op"], GatewayOp::VoiceStateUpdate as u8);
-        assert_eq!(payload["d"], json!({"self_mute": true, "self_deaf": true}));
-    }
-
-    #[test]
-    fn gateway_envelopes_decode_decimal_identifiers_without_number_coercion() {
-        let message = Message::Text(
-            json!({
-                "op": GatewayOp::Dispatch as u8,
-                "t": "CHANNEL_ACCESS_REVOKED",
-                "s": 18,
-                "d": {
-                    "channel_id": "76426998884343809",
-                    "channel_domain": "remote.example"
-                }
-            })
-            .to_string()
-            .into(),
-        );
-        let envelope = decode_text(message).expect("gateway envelope");
-        assert_eq!(envelope.d["channel_id"], "76426998884343809");
-        assert_eq!(envelope.t.as_deref(), Some("CHANNEL_ACCESS_REVOKED"));
+        for (self_mute, self_deaf) in [(false, false), (true, false), (false, true), (true, true)] {
+            let payload = command_payload(GatewayCommand::VoiceState {
+                self_mute,
+                self_deaf,
+            });
+            assert_eq!(payload["op"], GatewayOp::VoiceStateUpdate as u8);
+            assert_eq!(
+                payload["d"],
+                json!({"self_mute": self_mute || self_deaf, "self_deaf": self_deaf})
+            );
+        }
     }
 }

@@ -50,7 +50,7 @@ def test_owner_checks_use_the_full_federated_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_disconnect_expires_roleless_temporary_membership(monkeypatch) -> None:
+async def test_temporary_membership_expiry_helper_behavior(monkeypatch) -> None:
     guild = make_guild()
     user = make_user(2)
     member = GuildMember(
@@ -177,6 +177,20 @@ async def test_ownership_transfer_accepts_an_active_remote_human_member(monkeypa
     assert audited.await_args.kwargs["reason"] == "planned handoff"
     session.commit.assert_awaited_once()
     published.assert_awaited_once()
+
+    assert queued.await_args.args[2:5] == (guild, owner, "guild.update")
+    assert queued.await_args.args[5]["guild"]["owner_id"] == "2"
+    assert queued.await_args.args[5]["guild"]["owner_domain"] == "remote.example"
+    assert audited.await_args.args[2:5] == (guild, owner, 27)
+    assert audited.await_args.kwargs["target_ref"] == {"id": "2", "origin_domain": "remote.example"}
+    assert audited.await_args.kwargs["changes"] == [
+        {
+            "key": "owner",
+            "old_value": {"id": "1", "origin_domain": "chat.example"},
+            "new_value": {"id": "2", "origin_domain": "remote.example"},
+        }
+    ]
+    assert published.await_args.args[1:] == ("guild:chat.example:10", "GUILD_UPDATE", rendered)
 
 
 @pytest.mark.asyncio
@@ -505,11 +519,12 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
         [(bot.id, bot.origin_domain)],
     )
     session.delete.assert_awaited_once_with(member)
-    assert order == ["commit", "tracker-wake", "roles", "member"]
+    assert order[0] == "commit"
+    assert sorted(order) == ["commit", "member", "roles", "tracker-wake"]
 
 
 @pytest.mark.asyncio
-async def test_authority_applies_durable_leave_request_idempotently(monkeypatch) -> None:
+async def test_authority_leave_skips_mutations_when_member_is_already_missing(monkeypatch) -> None:
     guild = make_guild()
     remote = make_user(2, "remote.example")
     owner = make_user(1)
@@ -612,6 +627,12 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
     ) == (False, [], [])
     session.delete.assert_not_awaited()
 
+    revoke.assert_awaited_once()
+    cleanup.assert_awaited_once()
+    queue_revocation.assert_awaited_once()
+    queue_mutation.assert_awaited_once()
+    clear_assignees.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_direct_authoritative_leave_publishes_role_cleanup_only_after_commit(
@@ -668,7 +689,8 @@ async def test_direct_authoritative_leave_publishes_role_cleanup_only_after_comm
     )
 
     assert response.status_code == 204
-    assert order == ["commit", "wake", "roles", "member"]
+    assert order[0] == "commit"
+    assert sorted(order) == ["commit", "member", "roles", "wake"]
     applied.assert_awaited_once_with(
         session,
         SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]

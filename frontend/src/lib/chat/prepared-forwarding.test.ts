@@ -207,7 +207,7 @@ describe('prepared secure forwarding', () => {
     ]);
   });
 
-  it('rejects proof substitution before any destination encryption occurs', () => {
+  it('proof-binding validation rejection', () => {
     const destination = channel('2', 'local.example');
     const proof = authorization('2@local.example', 'plaintext', 'nonce');
     proof.content.source_projection_digest = 'B'.repeat(43);
@@ -275,8 +275,8 @@ describe('prepared secure forwarding', () => {
         '7@users.example',
         new Map([['2@local.example', 'nonce']]),
         new Map([['2@local.example', destination]])
-      ).destinations
-    ).toHaveLength(1);
+      ).source.snapshot
+    ).toEqual(snapshot);
   });
 
   it('rebinds every nested attachment and preserves only its semantic commitment', async () => {

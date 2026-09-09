@@ -137,7 +137,7 @@ class ProjectionSession:
         )
 
 
-def test_new_gateway_projections_are_ordered_but_snapshot_neutral() -> None:
+def test_snapshot_neutral_event_registration() -> None:
     expected = {
         "guild.scheduled_event.create",
         "guild.scheduled_event.update",
@@ -271,7 +271,9 @@ async def test_gateway_projection_validation_rejects_cross_guild_and_oversized_s
             {
                 "guild_id": "10",
                 "guild_domain": DOMAIN,
-                "soundboard_sounds": [sound_payload() for _ in range(49)],
+                "soundboard_sounds": [
+                    {**sound_payload(), "id": str(50 + index)} for index in range(49)
+                ],
             },
         )
 

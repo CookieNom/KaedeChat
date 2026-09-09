@@ -53,26 +53,24 @@ void main() {
         isTrue,
       );
     });
-
     test('uses exact BigInt checks for every high-bit tracker grant', () {
-      final mask = TrackerPermission.createTasks |
-          TrackerPermission.editOwnTasks |
-          TrackerPermission.manageTasks |
-          TrackerPermission.assignTasks |
-          TrackerPermission.manageTracker;
-      final board = TrackerBoard.fromJson(<String, Object?>{
-        ..._boardJson(),
-        'permissions': mask.toString(),
-      });
-
-      expect(board.allows(TrackerPermission.createTasks), isTrue);
-      expect(board.allows(TrackerPermission.editOwnTasks), isTrue);
-      expect(board.allows(TrackerPermission.manageTasks), isTrue);
-      expect(board.allows(TrackerPermission.assignTasks), isTrue);
-      expect(board.allows(TrackerPermission.manageTracker), isTrue);
-      expect(mask > BigInt.from(0x1FFFFFFFFFFFFF), isTrue);
+      final permissions = [
+        TrackerPermission.createTasks,
+        TrackerPermission.editOwnTasks,
+        TrackerPermission.manageTasks,
+        TrackerPermission.assignTasks,
+        TrackerPermission.manageTracker
+      ];
+      for (final granted in [BigInt.zero, ...permissions]) {
+        final board = TrackerBoard.fromJson(<String, Object?>{
+          ..._boardJson(),
+          'permissions': granted.toString(),
+        });
+        for (final requested in permissions) {
+          expect(board.allows(requested), granted == requested);
+        }
+      }
     });
-
     test('own-task editing includes creator and assignee but not a stranger',
         () {
       final board = TrackerBoard.fromJson(<String, Object?>{
@@ -83,6 +81,14 @@ void main() {
       final completed = board.tasks.last;
 
       expect(trackerTaskCanEdit(board, active, active.creator.ref), isTrue);
+      expect(
+          trackerTaskCanEdit(board, active,
+              EntityRef(active.creator.ref.id, Domain('other.example'))),
+          isFalse);
+      expect(
+          trackerTaskCanEdit(board, completed,
+              EntityRef(completed.assignee!.ref.id, Domain('other.example'))),
+          isFalse);
       expect(
         trackerTaskCanEdit(board, completed, completed.assignee?.ref),
         isTrue,
@@ -143,7 +149,7 @@ void main() {
       );
     });
 
-    test('retains the caller nonce across safe create retries', () async {
+    test('preserving a caller nonce across two explicit creates', () async {
       final adapter = _RecordingJsonAdapter(jsonEncode(_taskJson(
         id: '90',
         laneId: '10',
@@ -273,8 +279,7 @@ void main() {
     expect(draft.json, containsPair('rate_limit_per_user', 0));
   });
 
-  testWidgets('channel editor exposes tracker creation and validates its key',
-      (tester) async {
+  testWidgets('valid tracker prefix acceptance', (tester) async {
     GuildChannelDraft? result;
     await tester.pumpWidget(MaterialApp(
       theme: kaedeTheme(),
@@ -436,8 +441,7 @@ void main() {
     expect(trackerRefreshMustDiscardBoard(StateError('offline')), isFalse);
   });
 
-  testWidgets('touch task editor returns a stable idempotency key',
-      (tester) async {
+  testWidgets('generated idempotency-key shape', (tester) async {
     TrackerTaskDraft? result;
     final lane = TrackerLane.fromJson(_laneJson(
       id: '10',

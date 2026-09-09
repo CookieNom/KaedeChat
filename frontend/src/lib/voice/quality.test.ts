@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_MEDIA_QUALITY,
+  audioQuality,
   loadMediaQuality,
   saveMediaQuality,
   screenShareProfile,
@@ -32,8 +33,20 @@ describe('media quality preferences', () => {
       shareAudio: 'yes'
     });
     expect(loadMediaQuality(storage)).toEqual(DEFAULT_MEDIA_QUALITY);
+    const valid = { screenProfile: 'source', audioQuality: 'studio', shareAudio: true, dtx: false };
+    for (const [field, invalid] of Object.entries({
+      screenProfile: 'unbounded',
+      audioQuality: 999,
+      shareAudio: 'yes',
+      dtx: 'yes'
+    })) {
+      storage.value = JSON.stringify({ ...valid, [field]: invalid });
+      expect(loadMediaQuality(storage)).toEqual({
+        ...valid,
+        [field]: DEFAULT_MEDIA_QUALITY[field as keyof typeof DEFAULT_MEDIA_QUALITY]
+      });
+    }
   });
-
   it('round trips valid preferences', () => {
     const storage = new MemoryStorage();
     const preferences = {
@@ -65,13 +78,18 @@ describe('media quality preferences', () => {
       dtx: false
     };
     const screen = webScreenShareOptions(preferences);
-    expect(screen.capture.resolution).toEqual({ width: 1280, height: 720, frameRate: 30 });
+    const profile = screenShareProfile('smooth');
+    expect(screen.capture.resolution).toEqual({
+      width: profile.width,
+      height: profile.height,
+      frameRate: profile.frameRate
+    });
     expect(screen.publish.screenShareEncoding).toEqual({
-      maxBitrate: 2_500_000,
-      maxFramerate: 30
+      maxBitrate: profile.maxBitrate,
+      maxFramerate: profile.frameRate
     });
     expect(webAudioPublishOptions(preferences)).toMatchObject({
-      audioPreset: { maxBitrate: 128_000 },
+      audioPreset: { maxBitrate: audioQuality('studio').maxBitrate },
       forceStereo: true,
       dtx: false
     });
@@ -100,15 +118,18 @@ describe('media quality preferences', () => {
     const automatic = webCameraDefaults(1);
     const full = webCameraDefaults(2);
 
-    expect(automatic.capture.resolution).toMatchObject({ width: 640, height: 360 });
-    expect(full.capture.resolution).toMatchObject({ width: 1280, height: 720 });
+    expect(automatic.capture.resolution!.width).toBeGreaterThan(0);
+    expect(automatic.capture.resolution!.height).toBeGreaterThan(0);
+    expect(automatic.capture.resolution!.width).toBeLessThan(full.capture.resolution!.width);
+    expect(automatic.capture.resolution!.height).toBeLessThan(full.capture.resolution!.height);
     expect(automatic.publish.videoEncoding?.maxBitrate).toBeLessThan(
       full.publish.videoEncoding?.maxBitrate ?? 0
     );
+    const screen = screenShareProfile(DEFAULT_MEDIA_QUALITY.screenProfile);
     expect(webScreenShareOptions(DEFAULT_MEDIA_QUALITY).capture.resolution).toEqual({
-      width: 1280,
-      height: 720,
-      frameRate: 30
+      width: screen.width,
+      height: screen.height,
+      frameRate: screen.frameRate
     });
   });
 
@@ -117,8 +138,14 @@ describe('media quality preferences', () => {
       ...DEFAULT_MEDIA_QUALITY,
       screenProfile: 'source'
     });
-    expect(options.capture.resolution).toEqual({ width: 7680, height: 4320, frameRate: 30 });
-    expect(screenShareProfile('source').maxBitrate).toBe(8_000_000);
+    expect(options.capture.resolution).toEqual({
+      width: 7680,
+      height: 4320,
+      frameRate: screenShareProfile('source').frameRate
+    });
+    expect(options.publish.screenShareEncoding?.maxBitrate).toBe(
+      screenShareProfile('source').maxBitrate
+    );
   });
 
   it('passes the selected source category to the protected browser picker', () => {

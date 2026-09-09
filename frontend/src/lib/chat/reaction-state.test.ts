@@ -44,7 +44,7 @@ function message(): Message {
 }
 
 describe('reaction gateway updates', () => {
-  it('tracks counts and the current user reaction without replacing the message', () => {
+  it('preserving message content while updating reaction state', () => {
     const updated = applyReactionUpdate(
       message(),
       {
@@ -154,7 +154,7 @@ describe('reaction gateway updates', () => {
         channel_id: '20',
         channel_domain: 'remote.example',
         reaction: '❤️',
-        emoji: { id: null, name: '❤', animated: false }
+        emoji: { id: null, name: '🔥', animated: false }
       })
     ).toBe('❤');
     expect(

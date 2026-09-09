@@ -569,6 +569,14 @@ async def test_bot_gateway_requested_resources_recheck_runtime_grants(
     assert heartbeat == 123.0
     assert socket.send_json.await_args.args[0]["t"] == event_name
 
+    socket.send_json.reset_mock()
+    runtime.topic_grants[f"guild:{local_domain}:42"] = (frozenset(), frozenset(), 9)
+    assert (
+        await bot_gateway.handle_gateway_client_frame(runtime, {"op": op, "d": request_data}, 123.0)
+        == 123.0
+    )
+    socket.send_json.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_bot_gateway_channel_info_proxies_remote_authority(
@@ -674,32 +682,6 @@ def direct_grant(
     )
 
 
-def test_intent_registry_is_total_additive_and_preserves_published_aliases() -> None:
-    assert len(BOT_INTENT_NAMES) == len(set(BOT_INTENT_NAMES))
-    assert frozenset(BOT_INTENT_NAMES) == SUPPORTED_INTENTS
-    assert set(DISCORD_BOT_INTENTS).isdisjoint(KAEDE_BOT_INTENTS)
-    assert BOT_INTENT_ALIASES == {
-        "voice_states": "guild_voice_states",
-        "message_reactions": "guild_message_reactions",
-        "guild_typing": "guild_message_typing",
-    }
-    assert set(BOT_INTENT_ALIASES).isdisjoint(DISCORD_BOT_INTENTS)
-
-
-def test_remaining_message_and_voice_events_are_published_protocol_names() -> None:
-    assert {
-        "APPLICATION_COMMAND_PERMISSIONS_UPDATE",
-        "CHANNEL_INFO",
-        "CHANNEL_PINS_UPDATE",
-        "MESSAGE_DELETE_BULK",
-        "MESSAGE_REACTION_REMOVE_ALL",
-        "MESSAGE_REACTION_REMOVE_EMOJI",
-        "VOICE_CHANNEL_EFFECT_SEND",
-        "VOICE_CHANNEL_START_TIME_UPDATE",
-        "VOICE_CHANNEL_STATUS_UPDATE",
-    } <= set(EVENT_NAMES)
-
-
 def test_discord_canonical_intents_and_kaede_aliases_authorize_same_guild_events() -> None:
     assert event_intent("MESSAGE_REACTION_REMOVE_ALL") == "guild_message_reactions"
     assert event_intents("MESSAGE_REACTION_REMOVE_ALL") == frozenset(
@@ -711,6 +693,78 @@ def test_discord_canonical_intents_and_kaede_aliases_authorize_same_guild_events
     assert event_intents("VOICE_STATE_UPDATE") == frozenset({"guild_voice_states", "voice_states"})
     assert event_intent("GUILD_SOUNDBOARD_SOUND_CREATE") == "guild_expressions"
     assert event_scope("MESSAGE_DELETE_BULK") == "messages.metadata"
+
+    for event, direct, intent, scope in [
+        ("MESSAGE_REACTION_ADD", False, "guild_message_reactions", "reactions.read"),
+        ("MESSAGE_REACTION_ADD", True, "direct_message_reactions", None),
+        ("MESSAGE_POLL_VOTE_ADD", False, "guild_message_polls", None),
+        ("MESSAGE_CREATE", False, "guild_messages", "messages.metadata"),
+        ("ATTACHMENT_UPDATE", False, "guild_messages", "attachments.read"),
+        ("INTERACTION_CREATE", False, "interactions", None),
+        ("TYPING_START", False, "guild_message_typing", None),
+        ("TYPING_START", True, "direct_message_typing", None),
+        ("CHANNEL_CREATE", True, "direct_messages", None),
+        ("CHANNEL_CREATE", False, "guilds", None),
+        ("VOICE_STATE_UPDATE", True, "direct_messages", None),
+        ("VOICE_STATE_UPDATE", False, "guild_voice_states", "voice.states.read"),
+        ("DM_OPEN_REJECTED", True, "direct_messages", None),
+        ("GUILD_BAN_ADD", False, "guild_moderation", "moderation.bans"),
+        ("GUILD_AUDIT_LOG_ENTRY_CREATE", False, "guild_moderation", "audit_logs.read"),
+        ("GUILD_EMOJI_UPDATE", False, "guild_expressions", None),
+        ("INTEGRATION_CREATE", False, "guild_integrations", None),
+        ("WEBHOOKS_UPDATE", False, "guild_webhooks", "webhooks.read"),
+        ("INVITE_CREATE", False, "guild_invites", None),
+        ("GUILD_SCHEDULED_EVENT_CREATE", False, "guild_scheduled_events", None),
+        ("GUILD_SOUNDBOARD_SOUND_CREATE", False, "guild_expressions", None),
+        ("AUTO_MODERATION_RULE_CREATE", False, "auto_moderation_configuration", None),
+        (
+            "AUTO_MODERATION_ACTION_EXECUTION",
+            False,
+            "auto_moderation_execution",
+            "automod.executions.read",
+        ),
+        ("FUTURE_SECRET_EVENT", False, "", ""),
+        ("PRESENCE_UPDATE", False, None, "members.read"),
+        ("VOICE_CHANNEL_MOVE", False, None, "voice.connect"),
+        ("VOICE_TOKEN", False, None, "voice.connect"),
+        ("VOICE_CHANNEL_EFFECT_SEND", False, None, "soundboard.read"),
+        ("DM_OPEN_REJECTED", False, None, "dm.send"),
+        ("GUILD_ROLE_UPDATE", False, None, "roles.read"),
+        ("CHANNEL_UPDATE", False, None, "channels.read"),
+        ("GUILD_MEMBERS_PRUNED", False, None, "moderation.prune"),
+        ("GUILD_EMOJIS_UPDATE", False, None, "expressions.read"),
+        ("INTEGRATION_UPDATE", False, None, "integrations.read"),
+        ("INVITE_DELETE", False, None, "invites.read"),
+        ("GUILD_SCHEDULED_EVENT_UPDATE", False, None, "events.read"),
+        ("GUILD_SOUNDBOARD_SOUNDS_UPDATE", False, None, "soundboard.read"),
+        ("AUTO_MODERATION_RULE_DELETE", False, None, "automod.rules.read"),
+    ]:
+        if intent is not None:
+            assert event_intent(event, direct=direct) == intent, (event, direct)
+        if scope is not None:
+            assert event_scope(event) == scope, event
+
+    assert len(BOT_INTENT_NAMES) == len(set(BOT_INTENT_NAMES))
+    assert frozenset(BOT_INTENT_NAMES) == SUPPORTED_INTENTS
+    assert set(DISCORD_BOT_INTENTS).isdisjoint(KAEDE_BOT_INTENTS)
+    assert BOT_INTENT_ALIASES == {
+        "voice_states": "guild_voice_states",
+        "message_reactions": "guild_message_reactions",
+        "guild_typing": "guild_message_typing",
+    }
+    assert set(BOT_INTENT_ALIASES).isdisjoint(DISCORD_BOT_INTENTS)
+
+    assert {
+        "APPLICATION_COMMAND_PERMISSIONS_UPDATE",
+        "CHANNEL_INFO",
+        "CHANNEL_PINS_UPDATE",
+        "MESSAGE_DELETE_BULK",
+        "MESSAGE_REACTION_REMOVE_ALL",
+        "MESSAGE_REACTION_REMOVE_EMOJI",
+        "VOICE_CHANNEL_EFFECT_SEND",
+        "VOICE_CHANNEL_START_TIME_UPDATE",
+        "VOICE_CHANNEL_STATUS_UPDATE",
+    } <= set(EVENT_NAMES)
 
 
 def test_user_topics_use_independent_direct_message_intents() -> None:

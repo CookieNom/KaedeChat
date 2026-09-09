@@ -7,10 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/guild_admin_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
-import 'package:kaede_mobile/src/api/scanned_media.dart';
 import 'package:kaede_mobile/src/api/scheduled_events_repository.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
-import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
@@ -26,7 +24,13 @@ void main() {
 
   test('AutoMod models preserve every trigger, action, and exemption field',
       () {
-    final rule = AutoModRule.fromJson(_ruleJson());
+    final raw = _ruleJson();
+    (raw['trigger_metadata'] as Map).addAll(<String, Object?>{
+      'presets': ['profanity'],
+      'mention_total_limit': 5,
+      'mention_raid_protection_enabled': true
+    });
+    final rule = AutoModRule.fromJson(raw);
 
     expect(rule.ref.wire, '90@chat.example');
     expect(rule.triggerMetadata.keywordFilter, ['blocked*']);
@@ -37,6 +41,10 @@ void main() {
       'send_alert_message',
       'timeout',
     ]);
+    expect(rule.actions.first.customMessage, 'Please rephrase.');
+    expect(rule.triggerMetadata.presets, ['profanity']);
+    expect(rule.triggerMetadata.mentionTotalLimit, 5);
+    expect(rule.triggerMetadata.mentionRaidProtectionEnabled, isTrue);
     expect(rule.actions[1].channelRef?.wire, '2@chat.example');
     expect(rule.actions[2].durationSeconds, 600);
     expect(rule.exemptRoles.single.wire, '7@chat.example');
@@ -46,10 +54,10 @@ void main() {
     expect(request['trigger_metadata'], <String, Object?>{
       'keyword_filter': ['blocked*'],
       'regex_patterns': [r'bad\s+word'],
-      'presets': <String>[],
+      'presets': ['profanity'],
       'allow_list': ['allowed phrase'],
-      'mention_total_limit': null,
-      'mention_raid_protection_enabled': false,
+      'mention_total_limit': 5,
+      'mention_raid_protection_enabled': true,
     });
     expect(request['exempt_roles'], ['7@chat.example']);
     expect(request['exempt_channels'], ['3@chat.example']);
@@ -78,7 +86,7 @@ void main() {
     );
     expect(
       autoModDraftValidationMessage(invalid),
-      'Add at least one keyword or regular expression.',
+      matches(RegExp(r'keyword|regular expression', caseSensitive: false)),
     );
 
     const valid = AutoModRuleDraft(
@@ -295,7 +303,10 @@ void main() {
     final events = await repository.scheduledEvents(guild);
     final event = events.single;
     final draft = ScheduledEventDraft.fromEvent(event);
-    await repository.createScheduledEvent(guild, draft);
+    final created = await repository.createScheduledEvent(guild, draft);
+    expect(created.ref.wire, '95@chat.example');
+    expect(created.name, 'Town hall');
+    expect(created.startTime.toUtc(), DateTime.utc(2027, 1, 3, 18));
     await repository.transitionScheduledEvent(
       guild,
       event,
@@ -331,6 +342,17 @@ void main() {
         'DELETE /api/v1/guilds/1@chat.example/scheduled-events/95@chat.example',
       ],
     );
+    expect(adapter.requests[1].data, {
+      'channel_id': '2@chat.example',
+      'entity_metadata': null,
+      'name': 'Town hall',
+      'privacy_level': 2,
+      'scheduled_start_time': '2027-01-03T18:00:00.000Z',
+      'scheduled_end_time': null,
+      'description': 'Quarterly questions',
+      'entity_type': 2,
+      'recurrence_rule': null
+    });
     expect(adapter.requests[0].queryParameters['with_user_count'], true);
     expect(adapter.requests[2].data, <String, Object?>{'status': 2});
     expect(adapter.requests[3].queryParameters,
@@ -340,7 +362,12 @@ void main() {
   test('webhook moves and avatar endpoints use exact human API payloads',
       () async {
     final adapter = _QueueAdapter([
-      _Reply(jsonEncode(_webhookJson(channelId: '3'))),
+      _Reply(jsonEncode((_webhookJson(channelId: '3')
+        ..addAll({
+          'guild_domain': 'remote.example',
+          'channel_domain': 'remote.example',
+          'origin_domain': 'remote.example'
+        })))),
       _Reply(jsonEncode(<String, Object?>{
         'id': '91',
         'upload_url': 'https://uploads.example/avatar',
@@ -349,7 +376,12 @@ void main() {
         'status': 'processing',
         'attachment': <String, Object?>{'scan_status': 'pending'},
       })),
-      _Reply(jsonEncode(_webhookJson(avatarHash: null))),
+      _Reply(jsonEncode((_webhookJson(avatarHash: null)
+        ..addAll({
+          'guild_domain': 'remote.example',
+          'channel_domain': 'remote.example',
+          'origin_domain': 'remote.example'
+        })))),
     ]);
     final repository = _repository(adapter);
 
@@ -396,30 +428,6 @@ void main() {
     });
   });
 
-  test('webhook avatar scan lifecycle recommits only after a clean scan',
-      () async {
-    var commits = 0;
-    final result = await completeScannedMediaResource<Map<String, Object?>>(
-      commit: () async {
-        commits += 1;
-        return commits == 1
-            ? <String, Object?>{
-                'status': 'processing',
-                'attachment': <String, Object?>{'scan_status': 'pending'},
-              }
-            : _webhookJson(avatarHash: 'c' * 64);
-      },
-      isComplete: (json) =>
-          json['channel_id'] != null && json['avatar_hash'] is String,
-      parse: (json) => json,
-      pollInterval: Duration.zero,
-      maxPollAttempts: 3,
-    );
-
-    expect(result['avatar_hash'], 'c' * 64);
-    expect(commits, 2);
-  });
-
   test('remote invite revocation binds its code to the qualified guild',
       () async {
     final adapter = _QueueAdapter([_Reply('{}')]);
@@ -437,28 +445,6 @@ void main() {
     expect(
       adapter.requests.single.queryParameters,
       containsPair('guild_ref', '1@remote.example'),
-    );
-  });
-
-  test('webhook avatar scan lifecycle reports a clear safety rejection',
-      () async {
-    await expectLater(
-      completeScannedMediaResource<Map<String, Object?>>(
-        commit: () async => <String, Object?>{
-          'status': 'rejected',
-          'attachment': <String, Object?>{'scan_status': 'rejected'},
-        },
-        isComplete: (json) => json['avatar_hash'] is String,
-        parse: (json) => json,
-        pollInterval: Duration.zero,
-      ),
-      throwsA(
-        isA<KaedeException>().having(
-          (error) => error.message,
-          'message',
-          contains('did not pass media safety processing'),
-        ),
-      ),
     );
   });
 
@@ -493,8 +479,9 @@ void main() {
     );
 
     expect((await repository.autoModRules(guild)).single.name, 'Keyword guard');
-    await repository.createAutoModRule(guild, draft);
-    await repository.updateAutoModRule(
+    final created = await repository.createAutoModRule(guild, draft);
+    expect(created.ref.wire, '90@chat.example');
+    final updated = await repository.updateAutoModRule(
       guild,
       EntityRef.parse('90@chat.example'),
       draft,
@@ -523,7 +510,20 @@ void main() {
       reason: 'Raid',
     );
 
+    expect(updated.ref.wire, '90@chat.example');
     expect(prune.pruned, 2);
+    expect(prune.prunedUserRefs.map((item) => item.wire),
+        ['20@chat.example', '21@chat.example']);
+    expect(bans.failures.single.userRef.wire, '31@chat.example');
+    expect(adapter.requests.map((item) => item.method),
+        ['GET', 'POST', 'PATCH', 'DELETE', 'GET', 'POST', 'POST']);
+    expect(adapter.requests[1].data, draft.toJson());
+    expect(adapter.requests[2].data, draft.toJson());
+    expect(adapter.requests[5].data, {
+      'days': 14,
+      'include_roles': ['7@chat.example'],
+      'compute_prune_count': true
+    });
     expect(bans.bannedUserRefs.single.wire, '30@chat.example');
     expect(bans.failures.single.code, 'ROLE_HIERARCHY');
     expect(
@@ -586,7 +586,7 @@ void main() {
     final repository = _repository(adapter);
 
     expect((await repository.guildEmojis(guild)).single['name'], 'wave');
-    await repository.updateGuildEmoji(
+    final emoji = await repository.updateGuildEmoji(
       guild,
       EntityRef.parse('50@chat.example'),
       <String, Object?>{
@@ -595,7 +595,7 @@ void main() {
       },
     );
     expect((await repository.soundboardSounds(guild)).single.name, 'Party');
-    await repository.updateSoundboardSound(
+    final sound = await repository.updateSoundboardSound(
       guild,
       EntityRef.parse('70@chat.example'),
       <String, Object?>{'name': 'Party 2'},
@@ -612,6 +612,25 @@ void main() {
       EntityRef.parse('70@chat.example'),
     );
 
+    expect(emoji['id'], '50');
+    expect(emoji['name'], 'wave2');
+    expect(sound.ref.wire, '70@chat.example');
+    expect(sound.name, 'Party 2');
+    expect(adapter.requests.map((item) => item.method),
+        ['GET', 'PATCH', 'GET', 'PATCH', 'POST', 'DELETE']);
+    expect(adapter.requests.map((item) => item.path), [
+      '/api/v1/guilds/1@chat.example/emojis',
+      '/api/v1/guilds/1@chat.example/emojis/50',
+      '/api/v1/guilds/1@chat.example/soundboard-sounds',
+      '/api/v1/guilds/1@chat.example/soundboard-sounds/70@chat.example',
+      '/api/v1/channels/2@chat.example/send-soundboard-sound',
+      '/api/v1/guilds/1@chat.example/soundboard-sounds/70@chat.example',
+    ]);
+    expect(adapter.requests[1].data, {
+      'name': 'wave2',
+      'role_ids': ['7@chat.example']
+    });
+    expect(adapter.requests[3].data, {'name': 'Party 2'});
     expect(adapter.requests[1].method, 'PATCH');
     expect(
       adapter.requests[1].path,

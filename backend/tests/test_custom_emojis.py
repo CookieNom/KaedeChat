@@ -144,7 +144,13 @@ async def test_bot_can_use_its_application_emoji_without_guild_entitlement() -> 
     )
 
     class Session:
-        async def scalar(self, _query: object) -> object:
+        async def scalar(self, query: Any) -> object:
+            assert query.compile().params == {
+                "id_1": 123,
+                "application_domain_1": "apps.example",
+                "bot_user_id_1": 20,
+                "bot_user_domain_1": "apps.example",
+            }
             return application_emoji
 
         async def get(self, _model: object, _identity: object) -> object:
@@ -229,9 +235,11 @@ async def test_federated_rich_emoji_attestation_is_limited_to_actor_home() -> No
     assert raised.value.detail == {"code": "CUSTOM_EMOJI_NOT_FOUND"}
 
 
+@pytest.mark.parametrize("roles", [None, []])
 @pytest.mark.asyncio
 async def test_removing_emoji_role_restrictions_records_the_change(
     monkeypatch: pytest.MonkeyPatch,
+    roles: list[str] | None,
 ) -> None:
     emoji = SimpleNamespace(
         id=123,
@@ -310,7 +318,7 @@ async def test_removing_emoji_role_restrictions_records_the_change(
         cast(Any, guild),
         cast(Any, actor),
         emoji.id,
-        EmojiUpdate(role_ids=[]),
+        EmojiUpdate(role_ids=roles),
         reason=None,
     )
 
@@ -348,84 +356,3 @@ def test_expression_updates_reject_null_non_nullable_fields() -> None:
         StickerUpdate.model_validate({"name": None})
     with pytest.raises(ValueError, match="sticker tags cannot be null"):
         StickerUpdate.model_validate({"tags": None})
-
-
-@pytest.mark.asyncio
-async def test_null_emoji_roles_clear_restrictions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    emoji = SimpleNamespace(
-        id=123,
-        origin_domain="chat.example",
-        guild_id=10,
-        guild_domain="chat.example",
-        name="party",
-        animated=False,
-        available=True,
-        media_hash="a" * 64,
-        creator_id=20,
-        creator_domain="chat.example",
-        updated_at=None,
-    )
-    guild = SimpleNamespace(id=10, origin_domain="chat.example")
-    actor = SimpleNamespace(id=20, origin_domain="chat.example")
-    role_reads = iter([["30@chat.example"], []])
-    validations: list[list[str]] = []
-
-    class Session:
-        async def execute(self, _query: object) -> None:
-            return None
-
-        async def flush(self) -> None:
-            return None
-
-        async def refresh(
-            self,
-            value: object,
-            *,
-            attribute_names: tuple[str, ...],
-        ) -> None:
-            assert value is emoji
-            assert attribute_names == ("updated_at",)
-            emoji.updated_at = datetime.now(UTC)
-
-        async def commit(self) -> None:
-            return None
-
-    async def get_emoji(*_args: object, **_kwargs: object) -> object:
-        return emoji
-
-    async def emoji_roles(*_args: object, **_kwargs: object) -> list[str]:
-        return next(role_reads)
-
-    async def validate_roles(
-        _session: object,
-        _settings: object,
-        _guild: object,
-        refs: list[object],
-    ) -> list[object]:
-        validations.append([str(item) for item in refs])
-        return []
-
-    async def no_op(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(expressions, "_get_emoji", get_emoji)
-    monkeypatch.setattr(expressions, "_emoji_roles", emoji_roles)
-    monkeypatch.setattr(expressions, "_validate_roles", validate_roles)
-    monkeypatch.setattr(expressions, "add_audit_entry", no_op)
-    monkeypatch.setattr(expressions, "queue_guild_mutation", no_op)
-    monkeypatch.setattr(expressions, "wake_queued_guild_federation", no_op)
-
-    await expressions._patch_emoji(
-        cast(Any, Session()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="chat.example")),
-        cast(Any, guild),
-        cast(Any, actor),
-        emoji.id,
-        EmojiUpdate.model_validate({"role_ids": None}),
-        reason=None,
-    )
-
-    assert validations == [[]]

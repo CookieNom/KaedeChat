@@ -60,6 +60,7 @@ packages = ["app"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["postgres: requires a disposable migrated PostgreSQL database"]
 
 [tool.ruff]
 line-length = 100

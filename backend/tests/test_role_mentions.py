@@ -71,15 +71,16 @@ async def test_role_mention_resolves_federated_recipients() -> None:
         0,
     )
 
-    assert recipients == [(1, DOMAIN), (2, "remote.example")]
-    assert merge_mention_recipients([(1, DOMAIN)], recipients) == [
-        (1, DOMAIN),
-        (2, "remote.example"),
-    ]
+    expected = {(1, DOMAIN), (2, "remote.example")}
+    assert len(recipients) == len(expected)
+    assert set(recipients) == expected
+    merged = merge_mention_recipients([(1, DOMAIN)], recipients)
+    assert len(merged) == len(expected)
+    assert set(merged) == expected
 
 
 async def test_unmentionable_role_notifies_only_with_mention_everyone() -> None:
-    session = FakeSession([role(20, mentionable=False)], [])
+    session = FakeSession([role(20, mentionable=False)], [(2, "remote.example")])
 
     assert (
         await role_mention_recipients(
@@ -91,15 +92,12 @@ async def test_unmentionable_role_notifies_only_with_mention_everyone() -> None:
         == []
     )
 
-    assert (
-        await role_mention_recipients(
-            session,  # type: ignore[arg-type]
-            guild(),
-            f"hello <@&20@{DOMAIN}>",
-            int(Permission.MENTION_EVERYONE),
-        )
-        == []
-    )
+    assert await role_mention_recipients(
+        session,  # type: ignore[arg-type]
+        guild(),
+        f"hello <@&20@{DOMAIN}>",
+        int(Permission.MENTION_EVERYONE),
+    ) == [(2, "remote.example")]
 
 
 async def test_role_mentions_cannot_reference_another_guild_domain() -> None:

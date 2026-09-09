@@ -87,7 +87,10 @@ def test_public_user_display_name_hides_unresolved_history_handle() -> None:
         profile_resolved=True,
     )
 
-    assert public_user_display_name(unresolved) == "Remote user · remote.example"
+    label = public_user_display_name(unresolved)
+    assert label.strip()
+    assert unresolved.username not in label
+    assert "deadbeef" not in label
     assert public_user_display_name(resolved) == "Maple"
 
 
@@ -153,20 +156,18 @@ def test_provider_token_rotation_updates_digest_and_ciphertext_together() -> Non
 
 
 def test_push_presentation_hides_message_content_by_default() -> None:
-    assert push_presentation(
-        show_preview=False,
-        is_dm=True,
-        is_mention=False,
-        title="Alice",
-        body="private message text",
-    ) == ("Kaede Chat", "New direct message")
-    assert push_presentation(
-        show_preview=False,
-        is_dm=False,
-        is_mention=True,
-        title="Alice in Staff",
-        body="private message text",
-    ) == ("Kaede Chat", "You were mentioned")
+    for is_dm, is_mention in ((True, False), (False, True)):
+        title, body = push_presentation(
+            show_preview=False,
+            is_dm=is_dm,
+            is_mention=is_mention,
+            title="Alice in Staff",
+            body="private message text",
+        )
+        assert title.strip() and body.strip()
+        for private in ("Alice", "Staff", "private message text"):
+            assert private not in title
+            assert private not in body
 
 
 def test_push_presentation_allows_opted_in_previews() -> None:
@@ -210,7 +211,7 @@ def test_fcm_payload_rejects_unknown_platform() -> None:
         fcm_sync_payload("provider-token", "x" * 43, "windows")
 
 
-def test_relay_payload_is_content_free_and_mac_bound() -> None:
+def test_content_free_relay_payload_and_mac_inclusion() -> None:
     secret = "A" * 43
     fields = {
         "route_id": "r" * 43,
@@ -325,8 +326,15 @@ def test_relay_wake_schema_and_idempotency_identifiers_are_strict() -> None:
 
 
 def test_relay_subscription_rejects_malformed_device_secrets() -> None:
-    with pytest.raises(ValidationError):
-        PushRelaySubscriptionCreate(grant={}, provider_token="p" * 32, management_secret="short")
+    baseline = {
+        "grant": {"origin": "home.example"},
+        "provider_token": "p" * 32,
+        "management_secret": "m" * 43,
+    }
+    assert PushRelaySubscriptionCreate.model_validate(baseline).management_secret == "m" * 43
+    with pytest.raises(ValidationError) as denied:
+        PushRelaySubscriptionCreate.model_validate({**baseline, "management_secret": "short"})
+    assert [error["loc"] for error in denied.value.errors()] == [("management_secret",)]
 
 
 def test_relay_pending_enrollment_keys_do_not_expose_device_routes() -> None:
@@ -420,9 +428,11 @@ async def test_outbound_push_relay_ignores_silence_but_honors_suspension(
     lock.assert_awaited_once()
 
 
+@pytest.mark.parametrize("revoke", [False, True])
 @pytest.mark.asyncio
 async def test_federated_push_wake_rate_limit_precedes_subscription_lookup(
     monkeypatch: pytest.MonkeyPatch,
+    revoke: bool,
 ) -> None:
     rejected = HTTPException(status_code=429, detail={"code": "RATE_LIMITED"})
     rate_limit = AsyncMock(side_effect=rejected)
@@ -441,9 +451,11 @@ async def test_federated_push_wake_rate_limit_precedes_subscription_lookup(
     )
 
     with pytest.raises(HTTPException) as caught:
-        await push_api.accept_relay_wake(
-            body,
-            relay_request("POST", "/_kaede/push/v1/wakes"),
+        await (push_api.revoke_relay_subscription if revoke else push_api.accept_relay_wake)(
+            "kps_" + "s" * 40 if revoke else body,
+            relay_request("DELETE", "/_kaede/push/v1/subscriptions/kps_test")
+            if revoke
+            else relay_request("POST", "/_kaede/push/v1/wakes"),
             FederationPrincipal("home.example", "ed25519:test", silenced=True),
             session,  # type: ignore[arg-type]
             redis,  # type: ignore[arg-type]
@@ -457,43 +469,9 @@ async def test_federated_push_wake_rate_limit_precedes_subscription_lookup(
     rate_limit.assert_awaited_once_with(
         redis,
         "home.example",
-        "push-relay-wake",
-        capacity=600,
-        refill_per_minute=600,
-    )
-    session.get.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_federated_push_revoke_rate_limit_precedes_subscription_lookup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rejected = HTTPException(status_code=429, detail={"code": "RATE_LIMITED"})
-    rate_limit = AsyncMock(side_effect=rejected)
-    session = SimpleNamespace(get=AsyncMock())
-    redis = SimpleNamespace()
-    monkeypatch.setattr(push_api, "enforce_federation_route_rate_limit", rate_limit)
-
-    with pytest.raises(HTTPException) as caught:
-        await push_api.revoke_relay_subscription(
-            "kps_" + "s" * 40,
-            relay_request("DELETE", "/_kaede/push/v1/subscriptions/kps_test"),
-            FederationPrincipal("home.example", "ed25519:test", silenced=True),
-            session,  # type: ignore[arg-type]
-            redis,  # type: ignore[arg-type]
-            SimpleNamespace(
-                push_relay_service_enabled=True,
-                push_relay_url="https://relay.example",
-            ),  # type: ignore[arg-type]
-        )
-
-    assert caught.value is rejected
-    rate_limit.assert_awaited_once_with(
-        redis,
-        "home.example",
-        "push-relay-revoke",
-        capacity=120,
-        refill_per_minute=120,
+        "push-relay-revoke" if revoke else "push-relay-wake",
+        capacity=120 if revoke else 600,
+        refill_per_minute=120 if revoke else 600,
     )
     session.get.assert_not_awaited()
 

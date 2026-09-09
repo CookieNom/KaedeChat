@@ -14,5 +14,6 @@ describe('message links', () => {
     expect(
       previewableLink('https://apps.example/application-directory/123@apps.example')
     ).toBeNull();
+    expect(previewableLink('https://example.com/article')).toBe('https://example.com/article');
   });
 });

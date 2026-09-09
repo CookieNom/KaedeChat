@@ -32,43 +32,55 @@ function stateWith(cache: Record<string, CachedPlaintextMessage>): DeviceState {
 
 describe('portable E2EE message cache', () => {
   it('keeps the newest bound entries within both count and UTF-8 byte budgets', () => {
-    const entries: Array<[string, CachedPlaintextMessage]> = [];
-    for (let index = 0; index < MAX_MESSAGE_CACHE_ENTRIES + 100; index += 1) {
-      entries.push([
-        base64url(utf8(`ciphertext-${index}`)),
-        {
-          plaintext: `${index}:${'x'.repeat(5_000)}`,
-          authorRef: '1@example.test',
-          messageRef: `${index}@example.test`
-        }
-      ]);
-    }
-
-    const compacted = compactDeviceState(stateWith(Object.fromEntries(entries)));
-    const cache = compacted.messageCache ?? {};
-    expect(Object.keys(cache).length).toBeLessThanOrEqual(MAX_MESSAGE_CACHE_ENTRIES);
-    expect(new TextEncoder().encode(JSON.stringify(cache)).length).toBeLessThanOrEqual(
+    const entries = Array.from(
+      { length: MAX_MESSAGE_CACHE_ENTRIES + 1 },
+      (_, index) =>
+        [
+          base64url(utf8(`ciphertext-${index}`)),
+          {
+            plaintext: 'small',
+            authorRef: '1@example.test',
+            messageRef: `${index + 1}@example.test`
+          }
+        ] as const
+    );
+    const countCache = compactDeviceState(stateWith(Object.fromEntries(entries))).messageCache!;
+    expect(Object.keys(countCache)).toEqual(entries.slice(1).map(([key]) => key));
+    expect(new TextEncoder().encode(JSON.stringify(countCache)).length).toBeLessThan(
       MAX_MESSAGE_CACHE_BYTES
     );
-    expect(cache[entries.at(-1)![0]]?.messageRef).toBe(
-      `${MAX_MESSAGE_CACHE_ENTRIES + 99}@example.test`
+    const large = entries
+      .slice(-2)
+      .map(
+        ([key, value]) =>
+          [
+            key,
+            { ...value, plaintext: '界'.repeat(Math.floor(MAX_MESSAGE_CACHE_BYTES / 6)) }
+          ] as const
+      );
+    const input = Object.fromEntries(large);
+    expect(JSON.stringify(input).length).toBeLessThan(MAX_MESSAGE_CACHE_BYTES);
+    expect(new TextEncoder().encode(JSON.stringify(input)).length).toBeGreaterThan(
+      MAX_MESSAGE_CACHE_BYTES
     );
-    expect(cache[entries[0][0]]).toBeUndefined();
+    const byteCache = compactDeviceState(stateWith(input)).messageCache!;
+    expect(Object.keys(byteCache)).toEqual([large[1][0]]);
+    expect(byteCache[large[1][0]]).toEqual(large[1][1]);
+    expect(new TextEncoder().encode(JSON.stringify(byteCache)).length).toBeLessThanOrEqual(
+      MAX_MESSAGE_CACHE_BYTES
+    );
   });
-
   it('rejects unbound or malformed cache values', () => {
     const ciphertext = base64url(utf8('ciphertext'));
-    expect(() =>
-      compactDeviceState(
-        stateWith({
-          [ciphertext]: {
-            plaintext: '{}',
-            authorRef: 'not-an-account',
-            messageRef: null
-          }
-        })
-      )
-    ).toThrow(/message cache/u);
+    const valid = { plaintext: '{}', authorRef: '1@example.test', messageRef: '2@example.test' };
+    expect(compactDeviceState(stateWith({ [ciphertext]: valid })).messageCache).toEqual({
+      [ciphertext]: valid
+    });
+    for (const mutation of [{ authorRef: 'not-an-account' }, { messageRef: 'not-a-message' }]) {
+      expect(() =>
+        compactDeviceState(stateWith({ [ciphertext]: { ...valid, ...mutation } }))
+      ).toThrow(/message cache/u);
+    }
   });
 });
 

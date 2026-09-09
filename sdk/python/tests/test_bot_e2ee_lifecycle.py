@@ -20,7 +20,6 @@ from kaede_bot.e2ee import (
     E2EEProtocolError,
     InteractionE2EEContext,
     bot_device_protocol_id,
-    bot_key_package_upload_input,
     bot_mls_credential,
 )
 from kaede_bot.refs import EntityRef
@@ -233,11 +232,7 @@ async def test_device_registration_proves_provider_identity() -> None:
     device = await bot.register_e2ee_device(provider)
 
     assert isinstance(provider, E2EEProvider)
-    assert device.protocol_id == bot_device_protocol_id(
-        bot.worker_state.application_ref,
-        2,
-        provider.identity_key,
-    )
+    assert device.protocol_id == "kbe_Oq8zrASndOOGyEqcywv6X-EO40HTGXamHKeksBmSJQ0"
     assert provider.signed == [signing_input]
     challenge_request, register_request = bot.request.await_args_list
     assert challenge_request.args == (
@@ -246,18 +241,17 @@ async def test_device_registration_proves_provider_identity() -> None:
     )
     assert challenge_request.kwargs["json"] == {
         "identity_key": b64(provider.identity_key),
-        "credential_digest": b64(
-            hashlib.sha256(
-                bot_mls_credential(
-                    bot.worker_state.application_ref,
-                    2,
-                    provider.identity_key,
-                )
-            ).digest()
-        ),
+        "credential_digest": "RcmZIAanV0FfzNf-sRd3EsnoucOOGRcwkI1JjLwFOZw",
     }
     assert register_request.args == ("POST", "/api/v1/bots/e2ee/devices")
     assert register_request.kwargs["json"]["signature"] == b64(b"s" * 64)
+    assert register_request.kwargs["json"] == {
+        "challenge_id": "kbec_" + "c" * 32,
+        "identity_key": "aWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWk",
+        "credential": "eyJhY2NvdW50IjoiYm90OjFAYXBwcy5leGFtcGxlOndvcmtlcjoyIiwiYXBwbGljYXRpb25fcmVmIjoiMUBhcHBzLmV4YW1wbGUiLCJjcmVkZW50aWFsX3R5cGUiOiJrYWVkZS1ib3QtZGV2aWNlLXYyIiwiZGV2aWNlX2lkIjoia2JlX09xOHpyQVNuZE9PR3lFcWN5d3Y2WC1FTzQwSFRHWGFtSEtla3NCbVNKUTAiLCJ3b3JrZXJfaWQiOiIyIn0",
+        "capabilities": ["e2ee-media/1", "e2ee-mls/1"],
+        "signature": b64(b"s" * 64),
+    }
 
 
 @pytest.mark.asyncio
@@ -286,15 +280,17 @@ async def test_key_package_replenishment_signs_the_exact_generation() -> None:
     assert device.available_key_packages == 5
     assert provider.package_number == 4
     packages = [f"package-{number}".encode() for number in range(1, 5)]
-    assert provider.signed == [
-        bot_key_package_upload_input(
-            protocol_id=device.protocol_id,
-            generation=device.generation,
-            cipher_suite=MLS_SUITE,
-            expires_at=expiry,
-            package_hashes=(hashlib.sha256(item).digest() for item in packages),
-        )
-    ]
+    expected = b"\n".join(
+        [
+            b"kaede-bot-e2ee-key-packages-v1",
+            b"kbe_Oq8zrASndOOGyEqcywv6X-EO40HTGXamHKeksBmSJQ0",
+            b"3",
+            b"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+            expiry.isoformat().encode(),
+            b"CbmEpUWoRxqhtW-aHWLXj8hMU5TgBFBJC60AbtDAQD0,_WHoOlTH_obe85JGztnYPRf_SFZoNEaRP5xO_Pj9X60,liPGdb4cJZaBHtUp0GXveoaX4_DHIxFJiEdil_Nycd4,mr6ExZdy3WR5wwxQ0uu0OoWE2oEI3ZgQb33M1mtEick",
+        ]
+    )
+    assert provider.signed == [expected]
     upload = bot.request.await_args_list[1]
     assert upload.args == (
         "POST",
@@ -342,6 +338,10 @@ async def test_revoke_and_participation_use_exact_runtime_grant() -> None:
     participation = bot.request.await_args_list[1]
     assert participation.kwargs["headers"] == {"X-Kaede-Bot-Installation": "77"}
     assert participation.kwargs["target"] == "https://chat.example"
+    assert bot.request.await_args_list[0].args == (
+        "DELETE",
+        "/api/v1/bots/e2ee/devices/" + "kbe_" + "d" * 43,
+    )
 
 
 def test_bound_worker_assertion_is_signed_for_one_grant_revision_and_audience() -> None:
@@ -361,9 +361,10 @@ def test_bound_worker_assertion_is_signed_for_one_grant_revision_and_audience() 
         dm_capability=context,
     )
 
+    assert assertion["audience"] == "https://chat.example/api/v1/bots/token"
     signed = (
         f"kaede-worker-assertion-v2\n1@apps.example\n2\n"
-        f"{assertion['audience']}\n{assertion['issued_at']}\n"
+        f"https://chat.example/api/v1/bots/token\n{assertion['issued_at']}\n"
         f"{assertion['expires_at']}\n{assertion['nonce']}\n"
         f"{context.grant_id}\n{context.revision}"
     ).encode()
@@ -412,7 +413,9 @@ async def test_restart_bootstrap_refreshes_opaque_grant_without_a_handle() -> No
         "POST",
         "/api/v1/bots/dm-capabilities/kbdg_ggggggggggggggggggggggggggggggggggggggggggg/refresh",
     )
-    assert "handle" not in refresh.kwargs
+    assert (
+        "handle" not in client_module.json.dumps(refresh.kwargs.get("json", {})).lower()
+    )
 
 
 def test_control_page_requires_strict_authority_order() -> None:
@@ -467,7 +470,8 @@ async def test_offline_control_sync_applies_welcome_then_commit_and_checkpoints(
         )
     )
     monkeypatch.setattr(bot, "_fetch_e2ee_control_log", fetch)
-    save = Mock()
+    saved = []
+    save = Mock(side_effect=lambda value: saved.append(dict(value)))
     monkeypatch.setattr(WorkerState, "save_e2ee_control_checkpoints", save)
 
     cursor = await bot._sync_e2ee_control_log(  # noqa: SLF001
@@ -482,6 +486,13 @@ async def test_offline_control_sync_applies_welcome_then_commit_and_checkpoints(
     assert save.call_count == 2
     checkpoint = next(iter(bot._e2ee_control_checkpoints.values()))  # noqa: SLF001
     assert checkpoint[0] == "2@chat.example"
+    key = "https://chat.example|" + device_id + "|5@chat.example"
+    expected = [
+        {key: ("1@chat.example", hashlib.sha256(b"[(b'group', 1)]").hexdigest())},
+        {key: ("2@chat.example", hashlib.sha256(b"[(b'group', 2)]").hexdigest())},
+    ]
+    assert saved == expected
+    assert bot._e2ee_control_checkpoints == expected[-1]
 
 
 @pytest.mark.asyncio

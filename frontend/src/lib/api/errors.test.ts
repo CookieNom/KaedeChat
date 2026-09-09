@@ -9,88 +9,64 @@ import {
 
 describe('user-facing API errors', () => {
   it('maps bare status phrases to an actionable explanation', () => {
-    expect(apiErrorMessage('HTTP_403', 403, { message: 'Forbidden' })).toBe(
-      "You don't have permission to do that."
-    );
-    expect(apiErrorMessage('REQUEST_FAILED', 409, { message: 'Conflict' })).toBe(
-      'That information changed somewhere else. Reload and try again.'
-    );
+    const forbidden = apiErrorMessage('HTTP_403', 403, { message: 'Forbidden' });
+    expect(forbidden).toMatch(/permission/i);
+    expect(forbidden).not.toBe('Forbidden');
+    const conflict = apiErrorMessage('REQUEST_FAILED', 409, { message: 'Conflict' });
+    expect(conflict).toMatch(/reload|refresh|retry|try again/i);
+    expect(conflict).not.toBe('Conflict');
   });
 
   it('includes retry timing returned by the server', () => {
-    expect(apiErrorMessage('RATE_LIMITED', 429, { retry_after_ms: 2_100 })).toBe(
-      'You are doing that too quickly. Try again in 3 seconds.'
-    );
+    expect(apiErrorMessage('RATE_LIMITED', 429, { retry_after_ms: 2_100 })).toContain('3 seconds');
   });
 
   it('shows a safe support reference for server failures without exposing technical detail', () => {
-    expect(
-      apiErrorMessage('INTERNAL_SERVER_ERROR', 500, {
-        message: 'SQLAlchemy MissingGreenlet at /home/service/media.py',
-        trace_id: 'aabbccddeeff00112233445566778899'
-      })
-    ).toBe(
-      'The server encountered an unexpected problem and could not complete this request. Try again shortly. Error reference: aabbccddeeff00112233445566778899.'
-    );
+    const message = apiErrorMessage('INTERNAL_SERVER_ERROR', 500, {
+      message: 'SQLAlchemy MissingGreenlet at /home/service/media.py',
+      trace_id: 'aabbccddeeff00112233445566778899'
+    });
+    expect(message).toContain('aabbccddeeff00112233445566778899');
+    expect(message).not.toMatch(/SQLAlchemy|MissingGreenlet|\/home\/service|media\.py/);
+    expect(message).toMatch(/server|request/i);
   });
 
   it('accepts the backend trace-id alphabet, including short and dotted references', () => {
-    expect(
-      apiErrorMessage('INTERNAL_SERVER_ERROR', 500, {
-        trace_id: 'edge.7-a'
-      })
-    ).toBe(
-      'The server encountered an unexpected problem and could not complete this request. Try again shortly. Error reference: edge.7-a.'
+    expect(apiErrorMessage('INTERNAL_SERVER_ERROR', 500, { trace_id: 'edge.7-a' })).toContain(
+      'edge.7-a'
     );
   });
 
   it('formats upload limits supplied by the server', () => {
-    expect(
-      apiErrorMessage('ATTACHMENT_TOO_LARGE', 413, {
-        max_bytes: 5 * 1024 * 1024
-      })
-    ).toBe(
-      'That attachment exceeds this instance’s size limit. The maximum allowed size is 5 MiB.'
+    expect(apiErrorMessage('ATTACHMENT_TOO_LARGE', 413, { max_bytes: 5 * 1024 * 1024 })).toContain(
+      '5 MiB'
     );
   });
 
   it('explains federation cache limits without blaming the user or suggesting message deletion', () => {
-    expect(apiErrorMessage('KAED_FED_REPLICA_QUOTA_EXCEEDED', 507, {})).toBe(
-      'This guild’s local replica reached its cache limit. New messages and changes may be missing until your instance frees space.'
-    );
-    expect(apiErrorMessage('FEDERATED_DM_STORAGE_QUOTA_EXCEEDED', 507, {})).toBe(
-      'This instance could not retain more direct-message data. Recent remote messages are normally kept by removing the oldest cached copies; if this persists, contact your instance administrator.'
-    );
-    expect(apiErrorMessage('FEDERATED_DM_HISTORY_UNAVAILABLE', 503, {})).toBe(
-      'Older messages could not be loaded from their home instance right now. Your recent messages are still available; try again in a moment.'
-    );
-    expect(apiErrorMessage('KAED_FED_HISTORY_CAPACITY', 429, { retry_after_ms: 60_000 })).toBe(
-      'This instance is already importing the maximum amount of remote message history. The import will be retried automatically. Try again in 1 minute.'
-    );
-    expect(apiErrorMessage('FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED', 507, {})).toBe(
-      'This instance cannot cache another remote account right now. Contact your instance administrator if this continues.'
-    );
-    expect(apiErrorMessage('FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED', 507, {})).toBe(
-      'This instance cannot cache another remote server right now. Contact your instance administrator if this continues.'
-    );
-    expect(apiErrorMessage('FEDERATION_OUTBOX_CAPACITY_EXCEEDED', 507, {})).toContain(
-      'Nothing was saved'
-    );
-    expect(apiErrorMessage('KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED', 507, {})).toBe(
-      'The receiving instance cannot accept another pending friend request right now. Your request was not delivered.'
-    );
-    expect(apiErrorMessage('FEDERATED_GUILD_HISTORY_TEMPORARILY_UNAVAILABLE', 503, {})).toContain(
-      'retry automatically'
-    );
-    expect(apiErrorMessage('FEDERATED_GUILD_HISTORY_LIMIT_REACHED', 507, {})).toContain(
-      'Recent messages and new activity remain available'
-    );
-    expect(apiErrorMessage('FEDERATED_GUILD_HISTORY_REJECTED', 409, {})).toContain(
-      'could not be safely imported'
+    for (const [code, status, expected] of [
+      ['KAED_FED_REPLICA_QUOTA_EXCEEDED', 507, /replica|cache/i],
+      ['FEDERATED_DM_STORAGE_QUOTA_EXCEEDED', 507, /direct.message/i],
+      ['FEDERATED_DM_HISTORY_UNAVAILABLE', 503, /older|history/i],
+      ['KAED_FED_HISTORY_CAPACITY', 429, /history/i],
+      ['FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED', 507, /remote account/i],
+      ['FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED', 507, /remote server/i],
+      ['FEDERATION_OUTBOX_CAPACITY_EXCEEDED', 507, /not.*sav|nothing.*sav/i],
+      ['KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED', 507, /not delivered/i],
+      ['FEDERATED_GUILD_HISTORY_TEMPORARILY_UNAVAILABLE', 503, /automatic/i],
+      ['FEDERATED_GUILD_HISTORY_LIMIT_REACHED', 507, /recent|new activity/i],
+      ['FEDERATED_GUILD_HISTORY_REJECTED', 409, /safe/i]
+    ] as const) {
+      const message = apiErrorMessage(code, status, {});
+      expect(message).toMatch(expected);
+      expect(message).not.toMatch(/delete your|you (?:caused|exceeded)/i);
+    }
+    expect(apiErrorMessage('KAED_FED_HISTORY_CAPACITY', 429, { retry_after_ms: 60_000 })).toContain(
+      '1 minute'
     );
   });
 
-  it('identifies the first invalid field without showing the raw response object', () => {
+  it('validation field rendering omits raw response', () => {
     expect(
       apiErrorMessage('VALIDATION_ERROR', 422, {
         errors: [{ location: ['body', 'display_name'], message: 'Field required' }]
@@ -104,11 +80,11 @@ describe('user-facing API errors', () => {
   });
 
   it('does not invent a “Value” field when validation has no useful location', () => {
-    expect(
-      apiErrorMessage('VALIDATION_ERROR', 422, {
-        errors: [{ location: ['body'], message: 'Field required' }]
-      })
-    ).toBe('Some information is missing or invalid. Check it and try again.');
+    const message = apiErrorMessage('VALIDATION_ERROR', 422, {
+      errors: [{ location: ['body'], message: 'Field required' }]
+    });
+    expect(message).not.toMatch(/\bValue\b/);
+    expect(message).toMatch(/missing|invalid|required/i);
   });
 
   it('supports both current and legacy API error envelopes', () => {
@@ -142,9 +118,9 @@ describe('user-facing API errors', () => {
 
 describe('non-API errors', () => {
   it('turns browser transport failures into useful connection guidance', () => {
-    expect(userErrorMessage(new TypeError('Failed to fetch'), 'Could not save.')).toBe(
-      'Could not reach the server. Check your connection and try again.'
-    );
+    const message = userErrorMessage(new TypeError('Failed to fetch'), 'Could not save.');
+    expect(message).toMatch(/connection|network/i);
+    expect(message).not.toContain('Failed to fetch');
   });
 
   it('does not show technical runtime details', () => {

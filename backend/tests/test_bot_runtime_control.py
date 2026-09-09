@@ -55,6 +55,27 @@ from app.db.models import User
 from app.federation.schemas import EventEnvelope
 
 
+@pytest.fixture
+async def runtime_session(postgres_schema):
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    for table in (
+        "bot_applications",
+        "bot_application_targets",
+        "bot_installations",
+        "bot_user_installations",
+        "bot_workers",
+        "bot_tokens",
+        "bot_dm_capabilities",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        yield session
+
+
 def application_identity(*, local: bool) -> tuple[BotApplication, User]:
     bot = User(
         id=10,
@@ -424,23 +445,51 @@ async def test_capability_only_runtime_target_is_persisted_for_reactivation(
 
 
 @pytest.mark.asyncio
-async def test_active_dm_runtime_targets_include_install_and_conversation_authorities() -> None:
-    application, _ = application_identity(local=True)
-    session = SimpleNamespace(
-        scalars=AsyncMock(return_value=["install.example", "conversation.example", "apps.example"])
-    )
+async def test_active_dm_runtime_targets_include_install_and_conversation_authorities(
+    runtime_session,
+) -> None:
+    from app.db.bot_models import BotDMCapability
 
-    domains = await runtime_control.active_dm_runtime_target_domains(
-        cast(Any, session),
+    application, _ = application_identity(local=True)
+    now = datetime.now(UTC)
+    rows = []
+    for identifier, overrides in enumerate(
+        (
+            {},
+            {
+                "source_installation_domain": "apps.example",
+                "authority_domain": "conversation.example",
+            },
+            {"status": "revoked"},
+            {"revoked_at": now},
+            {"expires_at": now - timedelta(seconds=1)},
+            {"application_id": 21},
+            {"application_domain": "other.example"},
+        ),
+        1,
+    ):
+        values = dict(
+            id=identifier,
+            application_id=20,
+            application_domain="apps.example",
+            source_installation_domain="install.example"
+            if identifier < 3
+            else f"excluded{identifier}.example",
+            authority_domain="conversation.example"
+            if identifier < 3
+            else f"excluded{identifier}.example",
+            status="active",
+            revoked_at=None,
+            expires_at=now + timedelta(hours=1),
+        )
+        rows.append(BotDMCapability(**(values | overrides)))
+    runtime_session.add_all(rows)
+    await runtime_session.flush()
+    assert await runtime_control.active_dm_runtime_target_domains(
+        runtime_session,
         cast(Any, SimpleNamespace(domain="apps.example")),
         application,
-    )
-
-    assert domains == {"install.example", "conversation.example"}
-    query = str(session.scalars.await_args.args[0])
-    assert "bot_dm_capabilities.source_installation_domain" in query
-    assert "bot_dm_capabilities.authority_domain" in query
-    assert "UNION" in query
+    ) == {"install.example", "conversation.example"}
 
 
 @pytest.mark.asyncio
@@ -580,6 +629,7 @@ async def test_target_deny_then_allow_retains_terminal_access_revocation(
 @pytest.mark.asyncio
 async def test_application_reactivation_restores_only_suspended_installations(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_session,
 ) -> None:
     application, _ = application_identity(local=True)
     installation = BotInstallation(
@@ -614,14 +664,19 @@ async def test_application_reactivation_restores_only_suspended_installations(
         grant_revision=2,
         status="active",
     )
-    session = SimpleNamespace(
-        scalars=AsyncMock(
-            side_effect=[
-                [installation],
-                [installation],
-            ]
-        )
+    session = runtime_session
+    session.add_all([installation, user_installation])
+    await session.flush()
+    attributes = {
+        column.name: getattr(installation, column.name)
+        for column in BotInstallation.__table__.columns
+    }
+    revoked = BotInstallation(
+        **(attributes | {"id": 62, "status": "revoked", "revoked_at": datetime.now(UTC)})
     )
+    foreign = BotInstallation(**(attributes | {"id": 63, "application_domain": "other.example"}))
+    session.add_all([revoked, foreign])
+    await session.flush()
     dispatch = Mock()
     monkeypatch.setattr(bot_installations, "queue_installation_gateway_events", dispatch)
 
@@ -646,30 +701,25 @@ async def test_application_reactivation_restores_only_suspended_installations(
     assert (user_installation.status, user_installation.grant_revision) == ("active", 2)
     assert dispatch.call_args_list[0].args[2] == "UPDATE"
     assert dispatch.call_args_list[1].args[2] == "UPDATE"
-    guild_query = str(session.scalars.await_args_list[1].args[0])
-    assert "bot_installations.status" in guild_query
-    assert "bot_installations.revoked_at IS NULL" in guild_query
-    assert all(
-        "bot_user_installations" not in str(call.args[0])
-        for call in session.scalars.await_args_list
-    )
-
-    session.scalars.reset_mock()
+    await session.flush()
+    await session.refresh(user_installation)
+    assert (user_installation.status, user_installation.grant_revision) == ("active", 2)
     assert (
         await transition_application_installations(
-            cast(Any, session),
-            application,
-            previous_status="active",
-            next_status="active",
+            session, application, previous_status="active", next_status="active"
         )
         == []
     )
-    session.scalars.assert_not_awaited()
+    await session.refresh(revoked)
+    await session.refresh(foreign)
+    assert (revoked.status, revoked.grant_revision) == ("revoked", 4)
+    assert (foreign.status, foreign.grant_revision) == ("active", 4)
 
 
 @pytest.mark.asyncio
 async def test_admin_suspend_reactivate_converges_installations_and_capability_targets(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_session,
 ) -> None:
     application, _ = application_identity(local=True)
     installation = BotInstallation(
@@ -713,15 +763,9 @@ async def test_admin_suspend_reactivate_converges_installations_and_capability_t
         password_hash="hash",
     )
     principal = AdminPrincipal(admin, frozenset({"owner"}), frozenset({"*"}))
-    session = SimpleNamespace(
-        get=AsyncMock(return_value=application),
-        scalars=AsyncMock(
-            side_effect=[
-                [installation],
-                [installation],
-            ]
-        ),
-    )
+    session = runtime_session
+    session.add_all([application, installation, user_installation])
+    await session.flush()
     runtime_targets = AsyncMock(return_value={"cap-only.example"})
     revoke_e2ee = AsyncMock(return_value=[])
     target_snapshots = AsyncMock(return_value=set())
@@ -777,6 +821,10 @@ async def test_admin_suspend_reactivate_converges_installations_and_capability_t
     assert user_installation.grant_revision == 1
     assert commit.await_args.kwargs["runtime_target_domains"] == set()
     assert target_snapshots.await_count == 2
+
+    await session.flush()
+    await session.refresh(user_installation)
+    assert (user_installation.status, user_installation.grant_revision) == ("active", 1)
 
 
 @pytest.mark.asyncio
@@ -834,7 +882,9 @@ def test_administration_application_projection_marks_only_home_authority_managea
 
 
 @pytest.mark.asyncio
-async def test_runtime_snapshot_revokes_tokens_without_permanently_revoking_target_denial() -> None:
+async def test_runtime_snapshot_revokes_tokens_without_permanently_revoking_target_denial(
+    runtime_session,
+) -> None:
     application, actor = application_identity(local=False)
     target = BotApplicationTarget(
         application_id=20,
@@ -866,12 +916,32 @@ async def test_runtime_snapshot_revokes_tokens_without_permanently_revoking_targ
         public_key=b"d" * 32,
         generation=2,
     )
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[application, target]),
-        scalars=AsyncMock(side_effect=[[revoked_worker, denied_worker], [], []]),
-        execute=AsyncMock(),
-    )
+    session = runtime_session
+    session.add_all([application, target, revoked_worker, denied_worker])
+    await session.flush()
 
+    from app.db.bot_models import BotToken
+
+    earlier = datetime.now(UTC) - timedelta(days=1)
+    tokens = [
+        BotToken(
+            id=identifier,
+            application_id=app_id,
+            application_domain=domain,
+            worker_id=worker_id,
+            revoked_at=earlier if identifier == 6 else None,
+        )
+        for identifier, app_id, domain, worker_id in (
+            (1, 20, "apps.example", 140),
+            (2, 20, "apps.example", 141),
+            (3, 21, "apps.example", 140),
+            (4, 20, "other.example", 140),
+            (5, 20, "apps.example", 999),
+            (6, 20, "apps.example", 140),
+        )
+    ]
+    session.add_all(tokens)
+    await session.flush()
     changed = await apply_application_runtime_snapshot(
         cast(Any, session),
         cast(Any, SimpleNamespace(domain="guilds.example")),
@@ -888,14 +958,17 @@ async def test_runtime_snapshot_revokes_tokens_without_permanently_revoking_targ
     assert target.runtime_status == "active"
     assert target.runtime_target_allowed is True
     assert target.runtime_fingerprint is not None
-    token_update = str(session.execute.await_args.args[0].compile())
-    assert "bot_tokens.worker_id IN" in token_update
-    assert "bot_tokens.revoked_at IS NULL" in token_update
+    await session.flush()
+    for token in tokens:
+        await session.refresh(token)
+    assert {token.id for token in tokens if token.revoked_at is not None} == {1, 2, 6}
+    assert tokens[-1].revoked_at == earlier
 
 
 @pytest.mark.asyncio
 async def test_runtime_snapshot_preserves_remote_user_authority_while_fencing_guild_grants(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_session,
 ) -> None:
     application, actor = application_identity(local=False)
     target = BotApplicationTarget(
@@ -953,11 +1026,9 @@ async def test_runtime_snapshot_preserves_remote_user_authority_while_fencing_gu
         public_key=b"k" * 32,
         generation=3,
     )
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[application, target]),
-        scalars=AsyncMock(side_effect=[[worker], [guild_installation]]),
-        execute=AsyncMock(),
-    )
+    session = runtime_session
+    session.add_all([application, target, worker, guild_installation, user_installation])
+    await session.flush()
     target_snapshot = AsyncMock(return_value="apps.example")
     gateway_events = Mock()
     wake = Mock()
@@ -988,8 +1059,9 @@ async def test_runtime_snapshot_preserves_remote_user_authority_while_fencing_gu
         "active",
     )
 
-    session.scalar = AsyncMock(side_effect=[application, target])
-    session.scalars = AsyncMock(side_effect=[[worker], [guild_installation]])
+    await session.flush()
+    await session.refresh(user_installation)
+    assert user_installation.status == "active"
     assert await apply_application_runtime_snapshot(
         cast(Any, session),
         settings,
@@ -1012,6 +1084,10 @@ async def test_runtime_snapshot_preserves_remote_user_authority_while_fencing_gu
     assert target_snapshot.await_count == 2
     assert gateway_events.call_count == 2
     assert wake.call_count == 2
+
+    await session.flush()
+    await session.refresh(user_installation)
+    assert (user_installation.status, user_installation.grant_revision) == ("active", 1)
 
 
 @pytest.mark.asyncio

@@ -16,9 +16,30 @@ from app.chat.rich_content import PollCreate
 @pytest.mark.asyncio
 async def test_expiry_redacts_private_interactions_and_releases_attachments(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import BotInteraction, BotInteractionResponse
+    from app.db.models import Attachment
+
+    for table in (
+        "bot_interactions",
+        "bot_interaction_responses",
+        "attachments",
+        "federated_interaction_response_locators",
+        "federation_events",
+        "interaction_dispatch_outbox",
+        "interaction_create_dispatch_outbox",
+        "bot_interaction_polls",
+        "federated_interaction_admission_grants",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
     now = datetime.now(UTC)
-    interaction = SimpleNamespace(
+    interaction = BotInteraction(
         id=10,
         user_id=10,
         user_domain="chat.example",
@@ -29,7 +50,7 @@ async def test_expiry_redacts_private_interactions_and_releases_attachments(
         encrypted_payload=None,
         expires_at=now - timedelta(seconds=1),
     )
-    response = SimpleNamespace(
+    response = BotInteractionResponse(
         id=20,
         interaction_id=10,
         sequence=0,
@@ -37,75 +58,77 @@ async def test_expiry_redacts_private_interactions_and_releases_attachments(
         payload={"content": "private", "attachments": [{"id": "31"}]},
         deleted_at=None,
     )
-    invocation_attachment = SimpleNamespace(id=30, origin_domain="chat.example")
-    response_attachment = SimpleNamespace(id=31, origin_domain="chat.example")
-    session = SimpleNamespace(
-        scalars=AsyncMock(
-            side_effect=[
-                [interaction],
-                [response],
-                [30, 31],
-                [invocation_attachment, response_attachment],
-            ]
-        ),
-        execute=AsyncMock(
-            side_effect=[SimpleNamespace(all=lambda: []), None, None, None, None, None, None]
-        ),
-        commit=AsyncMock(),
+    invocation_attachment = Attachment(id=30, origin_domain="chat.example", interaction_id=10)
+    response_attachment = Attachment(
+        id=31, origin_domain="chat.example", interaction_response_id=20
     )
-    lock = AsyncMock()
-    discard = AsyncMock()
-    monkeypatch.setattr(tasks, "lock_media_tombstone_ref", lock)
-    monkeypatch.setattr(tasks, "discard_attachment", discard)
-    monkeypatch.setattr(
-        tasks,
-        "expire_federated_interaction_attachment_grants",
-        AsyncMock(return_value=[]),
-    )
-    monkeypatch.setattr(
-        tasks,
-        "queue_interaction_response_event",
-        AsyncMock(return_value=None),
-    )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        unrelated = Attachment(id=32, origin_domain="chat.example", interaction_id=11)
+        foreign = Attachment(id=30, origin_domain="foreign.example", interaction_id=10)
+        session.add_all(
+            [interaction, response, invocation_attachment, response_attachment, unrelated, foreign]
+        )
+        await session.flush()
+        lock = AsyncMock()
 
-    (
-        events,
-        attachments,
-        count,
-        relay_destinations,
-        expired_topics,
-    ) = await tasks.expire_bot_interactions_batch(
-        session,
-        SimpleNamespace(domain="chat.example"),
-        now=now,
-    )
+        async def discard_row(session, _settings, attachment):
+            await session.delete(attachment)
 
-    assert count == 1
-    assert relay_destinations == set()
-    assert expired_topics == {"user:chat.example:10"}
-    assert events == [(interaction, response)]
-    assert attachments == [invocation_attachment, response_attachment]
-    assert interaction.status == "expired"
-    assert interaction.token_hash is None
-    assert interaction.dispatch_fingerprint is None
-    assert interaction.payload == {}
-    assert response.deleted_at == now
-    assert response.payload == {}
-    assert [(call.args[1], call.args[2]) for call in lock.await_args_list] == [
-        (30, "chat.example"),
-        (31, "chat.example"),
-    ]
-    assert discard.await_count == 2
-    assert session.execute.await_count == 7
-    assert "federation_events" in str(session.execute.await_args_list[1].args[0])
-    assert "interaction_dispatch_outbox" in str(session.execute.await_args_list[2].args[0])
-    assert "interaction_create_dispatch_outbox" in str(session.execute.await_args_list[3].args[0])
-    assert "bot_interaction_polls" in str(session.execute.await_args_list[4].args[0])
-    session.commit.assert_awaited_once()
+        discard = AsyncMock(side_effect=discard_row)
+        monkeypatch.setattr(tasks, "lock_media_tombstone_ref", lock)
+        monkeypatch.setattr(tasks, "discard_attachment", discard)
+        monkeypatch.setattr(
+            tasks,
+            "expire_federated_interaction_attachment_grants",
+            AsyncMock(return_value=[]),
+        )
+        monkeypatch.setattr(
+            tasks,
+            "queue_interaction_response_event",
+            AsyncMock(return_value=None),
+        )
+
+        (
+            events,
+            attachments,
+            count,
+            relay_destinations,
+            expired_topics,
+        ) = await tasks.expire_bot_interactions_batch(
+            session,
+            SimpleNamespace(domain="chat.example"),
+            now=now,
+        )
+
+        assert count == 1
+        assert relay_destinations == set()
+        assert expired_topics == {"user:chat.example:10"}
+        assert events == [(interaction, response)]
+        assert attachments == [invocation_attachment, response_attachment]
+        assert interaction.status == "expired"
+        assert interaction.token_hash is None
+        assert interaction.dispatch_fingerprint is None
+        assert interaction.payload == {}
+        assert response.deleted_at == now
+        assert response.payload == {}
+        assert [(call.args[1], call.args[2]) for call in lock.await_args_list] == [
+            (30, "chat.example"),
+            (31, "chat.example"),
+        ]
+        assert [call.args[2] for call in discard.await_args_list] == [
+            invocation_attachment,
+            response_attachment,
+        ]
+        assert set(
+            (await session.execute(select(Attachment.id, Attachment.origin_domain))).all()
+        ) == {
+            (32, "chat.example"),
+            (30, "foreign.example"),
+        }
 
 
 @pytest.mark.asyncio
-async def test_private_e2ee_response_attachment_is_readable_locally_and_by_federation() -> None:
+async def test_local_attachment_lookup_construction() -> None:
     user = SimpleNamespace(id=10, origin_domain="home.example")
     interaction = SimpleNamespace(id=30)
     stored = SimpleNamespace(id=40)
@@ -251,104 +274,98 @@ async def test_private_dispatch_is_live_only_and_retained_for_sql_replay(
 
 
 @pytest.mark.asyncio
-async def test_private_gateway_replay_selects_latest_exact_sql_revision() -> None:
+async def test_private_gateway_replay_selects_latest_exact_sql_revision(postgres_schema) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import BotInteraction, BotInteractionResponse, InteractionDispatchOutbox
+
+    for table in ("bot_interactions", "bot_interaction_responses", "interaction_dispatch_outbox"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
     now = datetime.now(UTC)
     interaction, response, current, stale = private_dispatch_objects(now)
-    session = SimpleNamespace(
-        # The row-number query returns one latest row per response identity.
-        scalars=AsyncMock(return_value=[current]),
-        get=AsyncMock(side_effect=[interaction, response]),
-    )
-
-    events = await interaction_events.interaction_response_replay_events(
-        session,
-        user_id=30,
-        user_domain="home.example",
-        now=now,
-    )
-
-    assert len(events) == 1
-    assert events[0]["t"] == "INTERACTION_RESPONSE_UPDATE"
-    assert events[0]["ephemeral"] is True
-    assert events[0]["d"]["revision"] == "2"
-
-
-@pytest.mark.asyncio
-async def test_private_gateway_replay_rank_does_not_starve_later_response() -> None:
-    now = datetime.now(UTC)
-    first_interaction, first_response, current, stale = private_dispatch_objects(now)
-    # More than the former six-row heuristic for one response must not consume
-    # the replay budget before the next response identity is considered.
-    crowded = [
-        SimpleNamespace(
-            **(
-                vars(stale)
-                | {
-                    "id": 10 + revision,
-                    "revision": revision,
-                    "operation": "UPDATE",
-                }
+    async with AsyncSession(bind=postgres_schema) as session:
+        session.add(BotInteraction(**vars(interaction)))
+        session.add(BotInteractionResponse(**(vars(response) | {"revision": 8})))
+        for revision in range(1, 9):
+            session.add(
+                InteractionDispatchOutbox(
+                    **(
+                        vars(current)
+                        | {
+                            "id": revision,
+                            "revision": revision,
+                            "operation": "UPDATE" if revision > 1 else "CREATE",
+                        }
+                    )
+                )
+            )
+        session.add(BotInteraction(**(vars(interaction) | {"id": 11})))
+        session.add(
+            BotInteractionResponse(
+                **(
+                    vars(response)
+                    | {
+                        "id": 60,
+                        "interaction_id": 11,
+                        "revision": 1,
+                        "payload": {"content": "later"},
+                    }
+                )
             )
         )
-        for revision in range(1, 8)
-    ]
-    second_interaction = SimpleNamespace(
-        **(
-            vars(first_interaction)
-            | {
-                "id": 11,
-                "response_message_id": 60,
-            }
+        session.add(
+            InteractionDispatchOutbox(
+                **(
+                    vars(current)
+                    | {
+                        "id": 30,
+                        "interaction_id": 11,
+                        "response_id": 60,
+                        "revision": 1,
+                        "operation": "CREATE",
+                    }
+                )
+            )
         )
-    )
-    second_response = SimpleNamespace(
-        **(
-            vars(first_response)
-            | {
-                "id": 60,
-                "interaction_id": 11,
-                "revision": 1,
-                "payload": {"content": "later"},
-            }
+        for identifier, changed in enumerate(
+            [
+                {"user_id": 31},
+                {"user_domain": "foreign.example"},
+                {"expires_at": now - timedelta(seconds=1)},
+            ],
+            start=40,
+        ):
+            session.add(
+                InteractionDispatchOutbox(
+                    **(
+                        vars(current)
+                        | {
+                            "id": identifier,
+                            "revision": 99,
+                        }
+                        | changed
+                    )
+                )
+            )
+        await session.flush()
+        events = await interaction_events.interaction_response_replay_events(
+            session,
+            user_id=30,
+            user_domain="home.example",
+            now=now,
+            limit=2,
         )
-    )
-    later = SimpleNamespace(
-        **(
-            vars(current)
-            | {
-                "id": 30,
-                "interaction_id": 11,
-                "response_id": 60,
-                "revision": 1,
-                "operation": "CREATE",
-            }
-        )
-    )
-    session = SimpleNamespace(
-        scalars=AsyncMock(return_value=[current, later]),
-        get=AsyncMock(
-            side_effect=[
-                first_interaction,
-                first_response,
-                second_interaction,
-                second_response,
-            ]
-        ),
-    )
-
-    events = await interaction_events.interaction_response_replay_events(
-        session,
-        user_id=30,
-        user_domain="home.example",
-        now=now,
-        limit=2,
-    )
-
-    statement = str(session.scalars.await_args.args[0])
-    assert len(crowded) > 6
-    assert "row_number() OVER" in statement
-    assert "PARTITION BY interaction_dispatch_outbox.response_id" in statement
-    assert [event["d"]["response_id"] for event in events] == ["50", "60"]
+        assert [
+            (event["t"], event["d"]["revision"], event["d"]["response_id"]) for event in events
+        ] == [
+            ("INTERACTION_RESPONSE_UPDATE", "8", "50"),
+            ("INTERACTION_RESPONSE_CREATE", "1", "60"),
+        ]
+        assert all(event["ephemeral"] is True for event in events)
+        assert events[1]["d"]["data"]["content"] == "later"
 
 
 def poll_create() -> PollCreate:
@@ -784,6 +801,11 @@ async def test_followup_limit_applies_only_to_exclusive_user_authority(
         )
         session.scalar.assert_not_awaited()
 
+    session.scalar.return_value = 4
+    await interactions.require_user_install_followup_capacity(
+        session, interaction, SimpleNamespace()
+    )
+
 
 @pytest.mark.asyncio
 async def test_first_followup_after_message_defer_materializes_original(
@@ -876,6 +898,11 @@ async def test_acknowledgement_deletes_sealed_create_before_commit(
         AsyncMock(return_value=set()),
     )
 
+    trace = []
+    session.execute.side_effect = lambda statement: trace.append(
+        ("delete", statement.compile().params)
+    )
+    session.commit.side_effect = lambda: trace.append(("commit", None))
     stored = await interactions.persist_interaction_callback(context, state)
 
     assert stored.interaction_id == interaction.id
@@ -884,6 +911,8 @@ async def test_acknowledgement_deletes_sealed_create_before_commit(
     assert "DELETE FROM interaction_create_dispatch_outbox" in statement
     assert "interaction_create_dispatch_outbox.interaction_id" in statement
     session.commit.assert_awaited_once()
+
+    assert trace == [("delete", {"interaction_id_1": 10}), ("commit", None)]
 
 
 @pytest.mark.asyncio
@@ -1019,21 +1048,42 @@ async def test_poll_cannot_be_added_after_original_response_exists(
 
 
 @pytest.mark.asyncio
-async def test_private_poll_lookup_fails_closed_for_every_user_but_invoker() -> None:
-    session = SimpleNamespace(scalar=AsyncMock(return_value=None))
-    outsider = SimpleNamespace(id=99, origin_domain="chat.example")
+async def test_private_poll_lookup_fails_closed_for_every_user_but_invoker(postgres_schema) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    with pytest.raises(HTTPException) as denied:
-        await interactions.invoking_user_interaction_poll(
-            session,
-            10,
-            20,
-            outsider,
-            for_update=True,
+    from app.db.bot_models import BotInteraction, BotInteractionPoll, BotInteractionResponse
+
+    for table in ("bot_interactions", "bot_interaction_responses", "bot_interaction_polls"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
         )
-
-    assert denied.value.status_code == 404
-    assert denied.value.detail == {"code": "INTERACTION_POLL_NOT_FOUND"}
-    statement = str(session.scalar.await_args.args[0])
-    assert "bot_interactions.user_id" in statement
-    assert "bot_interactions.user_domain" in statement
+    now = datetime.now(UTC)
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        interaction = BotInteraction(
+            id=10, user_id=30, user_domain="chat.example", expires_at=now + timedelta(minutes=5)
+        )
+        response = BotInteractionResponse(id=20, interaction_id=10, ephemeral=True)
+        poll = BotInteractionPoll(
+            response_id=20, question={"text": "Choose"}, expires_at=now + timedelta(minutes=5)
+        )
+        session.add_all([interaction, response, poll])
+        await session.flush()
+        assert await interactions.invoking_user_interaction_poll(
+            session, 10, 20, SimpleNamespace(id=30, origin_domain="chat.example"), for_update=True
+        ) == (
+            interaction,
+            response,
+            poll,
+        )
+        for identifier, domain in [(99, "chat.example"), (30, "foreign.example")]:
+            with pytest.raises(HTTPException) as denied:
+                await interactions.invoking_user_interaction_poll(
+                    session,
+                    10,
+                    20,
+                    SimpleNamespace(id=identifier, origin_domain=domain),
+                    for_update=True,
+                )
+            assert denied.value.status_code == 404
+            assert denied.value.detail == {"code": "INTERACTION_POLL_NOT_FOUND"}

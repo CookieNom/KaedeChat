@@ -280,9 +280,11 @@ def test_explicit_generation_zero_is_not_a_legacy_media_tombstone() -> None:
         federation_events.media_delete_generation(envelope)
 
 
+@pytest.mark.parametrize("rotated", [False, True])
 @pytest.mark.asyncio
 async def test_legacy_media_tombstone_is_resigned_on_the_current_key(
     monkeypatch: pytest.MonkeyPatch,
+    rotated: bool,
 ) -> None:
     legacy_envelope = {
         "event_id": "kcfe_legacy",
@@ -295,6 +297,9 @@ async def test_legacy_media_tombstone_is_resigned_on_the_current_key(
         },
         "signatures": {LOCAL_DOMAIN: {"ed25519:current": "legacy-signature"}},
     }
+    if rotated:
+        legacy_envelope["content"]["generation"] = "1"
+        legacy_envelope["signatures"] = {LOCAL_DOMAIN: {"ed25519:old": "old-signature"}}
     event = SimpleNamespace(event_id="kcfe_legacy", envelope=legacy_envelope)
     instance = SimpleNamespace(
         domain=LOCAL_DOMAIN,
@@ -307,8 +312,8 @@ async def test_legacy_media_tombstone_is_resigned_on_the_current_key(
         signer_id=30,
         signer_domain=LOCAL_DOMAIN,
         event_id=event.event_id,
-        key_id="ed25519:current",
-        generation=0,
+        key_id="ed25519:old" if rotated else "ed25519:current",
+        generation=1 if rotated else 0,
         updated_at=None,
     )
     current_envelope = {
@@ -319,7 +324,7 @@ async def test_legacy_media_tombstone_is_resigned_on_the_current_key(
         "content": {
             "attachment_id": "40",
             "origin_domain": LOCAL_DOMAIN,
-            "generation": "1",
+            "generation": "2" if rotated else "1",
         },
         "signatures": {LOCAL_DOMAIN: {"ed25519:current": "current-signature"}},
     }
@@ -341,11 +346,8 @@ async def test_legacy_media_tombstone_is_resigned_on_the_current_key(
     monkeypatch.setattr(tombstones, "lock_media_tombstone_ref", AsyncMock())
     build = AsyncMock(return_value=current_envelope)
     monkeypatch.setattr(tombstones, "build_envelope", build)
-    monkeypatch.setattr(
-        tombstones,
-        "_retain_media_delete_event",
-        AsyncMock(return_value=SimpleNamespace(envelope=current_envelope)),
-    )
+    retain = AsyncMock(return_value=SimpleNamespace(envelope=current_envelope))
+    monkeypatch.setattr(tombstones, "_retain_media_delete_event", retain)
     queued = AsyncMock()
     monkeypatch.setattr(tombstones, "queue_event", queued)
     monkeypatch.setattr(tombstones, "record_media_tombstone_destinations", AsyncMock())
@@ -360,101 +362,14 @@ async def test_legacy_media_tombstone_is_resigned_on_the_current_key(
 
     assert destinations == {REMOTE_DOMAIN}
     build.assert_awaited_once()
+    retain.assert_awaited_once_with(session, current_envelope)
+    session.execute.assert_awaited_once()
     queued.assert_awaited_once_with(session, settings(), REMOTE_DOMAIN, current_envelope)
     assert (source.event_id, source.key_id, source.generation) == (
         "kcfe_current",
         "ed25519:current",
-        1,
+        2 if rotated else 1,
     )
-
-
-@pytest.mark.asyncio
-async def test_rotated_media_tombstone_envelope_is_not_reused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    old_envelope = {
-        "event_id": "kcfe_old",
-        "origin": LOCAL_DOMAIN,
-        "type": "media.delete",
-        "ts": 1,
-        "content": {
-            "attachment_id": "40",
-            "origin_domain": LOCAL_DOMAIN,
-            "generation": "1",
-        },
-        "signatures": {LOCAL_DOMAIN: {"ed25519:old": "signature"}},
-    }
-    event = SimpleNamespace(event_id="kcfe_old", envelope=old_envelope)
-    instance = SimpleNamespace(
-        domain=LOCAL_DOMAIN,
-        is_self=True,
-        current_key_id="ed25519:new",
-    )
-    source = SimpleNamespace(
-        attachment_id=40,
-        attachment_domain=LOCAL_DOMAIN,
-        signer_id=30,
-        signer_domain=LOCAL_DOMAIN,
-        event_id=event.event_id,
-        key_id="ed25519:old",
-        generation=1,
-        updated_at=None,
-    )
-    new_envelope = {
-        "event_id": "kcfe_new",
-        "origin": LOCAL_DOMAIN,
-        "type": "media.delete",
-        "ts": 2,
-        "content": {
-            "attachment_id": "40",
-            "origin_domain": LOCAL_DOMAIN,
-            "generation": "2",
-        },
-        "signatures": {LOCAL_DOMAIN: {"ed25519:new": "signature"}},
-    }
-
-    async def get_model(model: object, key: object, **_kwargs: object) -> object | None:
-        if model is Instance:
-            return instance
-        if model is FederationEvent and key == (LOCAL_DOMAIN, event.event_id):
-            return event
-        raise AssertionError("unexpected model lookup")
-
-    session = SimpleNamespace(
-        get=get_model,
-        scalar=AsyncMock(return_value=source),
-        scalars=AsyncMock(return_value=[REMOTE_DOMAIN]),
-        execute=AsyncMock(),
-        flush=AsyncMock(),
-    )
-    monkeypatch.setattr(tombstones, "lock_media_tombstone_ref", AsyncMock())
-    build = AsyncMock(return_value=new_envelope)
-    retain = AsyncMock(return_value=SimpleNamespace(envelope=new_envelope))
-    queued = AsyncMock()
-    record = AsyncMock()
-    monkeypatch.setattr(tombstones, "build_envelope", build)
-    monkeypatch.setattr(tombstones, "_retain_media_delete_event", retain)
-    monkeypatch.setattr(tombstones, "queue_event", queued)
-    monkeypatch.setattr(tombstones, "record_media_tombstone_destinations", record)
-
-    destinations = await tombstones.queue_media_delete_tombstone(
-        cast(Any, session),
-        settings(),
-        attachment_id=40,
-        attachment_domain=LOCAL_DOMAIN,
-        destinations=set(),
-    )
-
-    assert destinations == {REMOTE_DOMAIN}
-    build.assert_awaited_once()
-    retain.assert_awaited_once_with(session, new_envelope)
-    queued.assert_awaited_once_with(session, settings(), REMOTE_DOMAIN, new_envelope)
-    assert (source.event_id, source.key_id, source.generation) == (
-        "kcfe_new",
-        "ed25519:new",
-        2,
-    )
-    session.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -634,31 +549,46 @@ async def test_late_remote_metadata_disclosure_requeues_retained_origin_tombston
 async def test_disclosure_to_attachment_origin_never_replays_tombstone_to_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = SimpleNamespace(scalars=AsyncMock(return_value=[]))
-    record = AsyncMock(return_value=set())
-    queue_proof = AsyncMock(return_value=True)
-    monkeypatch.setattr(federation_events, "record_attachment_recipients", record)
-    monkeypatch.setattr(
-        tombstones,
-        "queue_retained_media_delete_proof",
-        queue_proof,
+    # Use the real recipient filter with the same eligible attachment in both requests.
+    rows = SimpleNamespace(tuples=lambda: [(40, REMOTE_DOMAIN)])
+    session = SimpleNamespace(
+        execute=AsyncMock(return_value=rows),
+        scalars=AsyncMock(
+            return_value=[SimpleNamespace(attachment_id=40, attachment_domain=REMOTE_DOMAIN)]
+        ),
     )
-
+    monkeypatch.setattr(tombstones, "lock_media_tombstone_ref", AsyncMock())
+    queue_proof = AsyncMock(return_value=True)
+    monkeypatch.setattr(tombstones, "queue_retained_media_delete_proof", queue_proof)
+    refs = {(40, REMOTE_DOMAIN)}
     recorded, wakes, terminal_refs = await federation_events.record_disclosed_attachment_recipients(
         cast(Any, session),
         settings(),
-        {(40, REMOTE_DOMAIN)},
+        refs,
+        "recipient.example",
+    )
+    assert (recorded, wakes, terminal_refs) == (refs, {"recipient.example"}, refs)
+    assert queue_proof.await_args.args[2:] == (40, REMOTE_DOMAIN, "recipient.example")
+    queue_proof.reset_mock()
+    session.execute.reset_mock()
+    session.scalars.reset_mock()
+    result = await federation_events.record_disclosed_attachment_recipients(
+        cast(Any, session),
+        settings(),
+        refs,
         REMOTE_DOMAIN,
     )
-
-    assert recorded == set()
-    assert wakes == set()
-    assert terminal_refs == set()
+    assert result == (set(), set(), set())
     queue_proof.assert_not_awaited()
+    session.execute.assert_not_awaited()
+    session.scalars.assert_not_awaited()
 
 
+@pytest.mark.parametrize("guild_channel", [False, True])
 @pytest.mark.asyncio
-async def test_former_dm_participant_remains_a_terminal_tombstone_destination() -> None:
+async def test_former_dm_participant_remains_a_terminal_tombstone_destination(
+    guild_channel: bool,
+) -> None:
     attachment = SimpleNamespace(id=40, origin_domain=LOCAL_DOMAIN)
     channel = SimpleNamespace(id=2, origin_domain=REMOTE_DOMAIN)
     session = SimpleNamespace(
@@ -670,27 +600,7 @@ async def test_former_dm_participant_remains_a_terminal_tombstone_destination() 
         settings(),
         cast(Any, attachment),
         cast(Any, channel),
-        None,
-    )
-
-    assert destinations == {"former.localhost"}
-
-
-@pytest.mark.asyncio
-async def test_former_guild_viewer_remains_a_terminal_tombstone_destination() -> None:
-    attachment = SimpleNamespace(id=40, origin_domain=LOCAL_DOMAIN)
-    channel = SimpleNamespace(id=2, origin_domain=REMOTE_DOMAIN)
-    guild = SimpleNamespace(id=1, origin_domain=REMOTE_DOMAIN)
-    session = SimpleNamespace(
-        scalars=AsyncMock(side_effect=[["former.localhost"], [], [], []]),
-    )
-
-    destinations = await tombstones.terminal_attachment_destinations(
-        cast(Any, session),
-        settings(),
-        cast(Any, attachment),
-        cast(Any, channel),
-        cast(Any, guild),
+        cast(Any, SimpleNamespace(id=1, origin_domain=REMOTE_DOMAIN)) if guild_channel else None,
     )
 
     assert destinations == {"former.localhost"}
@@ -1108,7 +1018,15 @@ async def test_guild_gap_sync_queues_late_bound_terminal_tombstone_before_wake(
     assert session.flushed
     assert session.refreshed == [guild, message]
     render_message.assert_awaited_once_with(session, message)
-    assert publish.await_count == 2
+    assert [call.args for call in publish.await_args_list] == [
+        (
+            redis,
+            f"guild:{REMOTE_DOMAIN}:1",
+            "GUILD_UPDATE",
+            {"version": guild.updated_at.isoformat()},
+        ),
+        (redis, f"guild:{REMOTE_DOMAIN}:1", "MESSAGE_CREATE", {"id": "20"}),
+    ]
     assert call(tasks.federation_deliver, "gamma.localhost") in wake.await_args_list
     redis.aclose.assert_awaited_once()
     engine.dispose.assert_awaited_once()
@@ -1190,7 +1108,7 @@ async def test_terminal_tombstone_repair_commits_before_delivery_wake(
 
 
 @pytest.mark.asyncio
-async def test_terminal_tombstone_repair_pages_all_rows_in_one_scheduled_run(
+async def test_terminal_tombstone_repair_drains_all_supplied_pages_in_one_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attachments = [
@@ -1248,12 +1166,14 @@ async def test_terminal_tombstone_repair_pages_all_rows_in_one_scheduled_run(
     result = await unwrap(tasks.media_terminal_tombstone_sweep.original_func)()
 
     assert result == 101
-    assert queue_tombstone.await_count == 101
+    assert [
+        (call.args[2].id, call.args[2].origin_domain) for call in queue_tombstone.await_args_list
+    ] == [(identifier, LOCAL_DOMAIN) for identifier in range(1, 102)]
     engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_remote_tombstone_purge_removes_every_cached_variant(
+async def test_remote_tombstone_purge_queues_every_cached_variant_for_storage_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cached = [
@@ -1291,6 +1211,15 @@ async def test_remote_tombstone_purge_removes_every_cached_variant(
 
     assert removed == 2
     assert session.execute.await_count == 2
-    assert session.delete.await_args_list == [call(cached[0]), call(cached[1])]
+    assert {id(call.args[0]) for call in session.delete.await_args_list} == {
+        id(item) for item in cached
+    }
+    assert {
+        tuple(sorted(call.args[0].compile().params.items()))
+        for call in session.execute.await_args_list
+    } == {
+        (("object_key", "remote/40/original"), ("size", 512)),
+        (("object_key", "remote/40/thumbnail_128"), ("size", 128)),
+    }
     session.commit.assert_awaited_once()
     drain.assert_awaited_once()

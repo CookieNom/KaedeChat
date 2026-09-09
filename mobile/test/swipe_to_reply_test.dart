@@ -10,7 +10,7 @@ void main() {
     late int replies;
 
     Future<void> pumpConversation(WidgetTester tester,
-        {bool enabled = true}) async {
+        {bool enabled = true, bool thirdPage = false}) async {
       pages = PageController(initialPage: 1);
       replies = 0;
       await tester.pumpWidget(MaterialApp(
@@ -32,6 +32,7 @@ void main() {
                   ),
               ],
             ),
+            if (thirdPage) const Center(child: Text('details page')),
           ],
         ),
       ));
@@ -63,40 +64,27 @@ void main() {
       expect(find.text('channel list'), findsNothing);
     });
 
-    testWidgets('a wobble at touch-down does not kill the reply drag',
-        (tester) async {
-      await pumpConversation(tester);
-      final gesture =
-          await tester.startGesture(tester.getCenter(find.text('message 3')));
-
-      // A finger settling on the glass often slides the wrong way first.
-      await gesture.moveBy(const Offset(8, 0));
-      for (var step = 0; step < 4; step++) {
-        await gesture.moveBy(const Offset(-25, 0));
-      }
-      await gesture.up();
-      await tester.pumpAndSettle();
-
-      expect(replies, 1);
-      expect(pages.page, 1);
-    });
-
-    testWidgets('a moderately diagonal swipe still replies', (tester) async {
-      await pumpConversation(tester);
-      final gesture =
-          await tester.startGesture(tester.getCenter(find.text('message 3')));
-
-      // Real thumbs travel in an arc; reply should not demand a nearly
-      // pixel-perfect horizontal line.
-      for (var step = 0; step < 4; step++) {
-        await gesture.moveBy(const Offset(-20, -24));
-      }
-      await gesture.up();
-      await tester.pumpAndSettle();
-
-      expect(replies, 1);
-      expect(pages.page, 1);
-    });
+    for (final scenario in <String, List<Offset>>{
+      'a wobble at touch-down does not kill the reply drag': [
+        const Offset(8, 0),
+        ...List.filled(4, const Offset(-25, 0)),
+      ],
+      'a moderately diagonal swipe still replies':
+          List.filled(4, const Offset(-20, -24)),
+    }.entries) {
+      testWidgets(scenario.key, (tester) async {
+        await pumpConversation(tester);
+        final gesture =
+            await tester.startGesture(tester.getCenter(find.text('message 3')));
+        for (final offset in scenario.value) {
+          await gesture.moveBy(offset);
+        }
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(replies, 1);
+        expect(pages.page, 1);
+      });
+    }
 
     testWidgets('crossing the trigger stays armed through a small rebound',
         (tester) async {
@@ -169,8 +157,7 @@ void main() {
       expect(pages.page, 1);
     });
 
-    testWidgets('a rightward drag anywhere returns to the channel list',
-        (tester) async {
+    testWidgets('rightward drag from the tested position', (tester) async {
       await pumpConversation(tester);
 
       await tester.fling(find.text('message 3'), const Offset(300, 0), 1000);
@@ -263,13 +250,16 @@ void main() {
 
     testWidgets('a disabled row leaves both directions to the page view',
         (tester) async {
-      await pumpConversation(tester, enabled: false);
+      await pumpConversation(tester, enabled: false, thirdPage: true);
 
       await tester.fling(find.text('message 3'), const Offset(-300, 0), 1000);
       await tester.pumpAndSettle();
 
       expect(replies, 0);
-      expect(pages.page, 1, reason: 'there is no third page to reach');
+      expect(pages.page, 2);
+      expect(find.text('details page'), findsOneWidget);
+      pages.jumpToPage(1);
+      await tester.pumpAndSettle();
 
       await tester.fling(find.text('message 3'), const Offset(300, 0), 1000);
       await tester.pumpAndSettle();

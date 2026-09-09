@@ -27,12 +27,15 @@ def role(role_id: int, position: int) -> Role:
     )
 
 
-def test_higher_position_outranks_lower_position() -> None:
-    assert role_rank(role(50, 2)) > role_rank(role(10, 1))
-
-
-def test_lower_snowflake_wins_equal_position() -> None:
-    assert role_rank(role(10, 2)) > role_rank(role(50, 2))
+@pytest.mark.parametrize(
+    "higher_id,higher_position,lower_id,lower_position",
+    [(50, 2, 10, 1), (10, 2, 50, 2)],
+    ids=["position", "snowflake-tiebreak"],
+)
+def test_higher_position_outranks_lower_position(
+    higher_id: int, higher_position: int, lower_id: int, lower_position: int
+) -> None:
+    assert role_rank(role(higher_id, higher_position)) > role_rank(role(lower_id, lower_position))
 
 
 def test_role_reorder_cannot_cross_actor_ceiling() -> None:

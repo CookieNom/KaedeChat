@@ -234,7 +234,7 @@ void main() {
       );
     });
 
-    test('decodes and renders Discord type-21 nested thread sources', () {
+    test('type-21 nested source projection', () {
       final wrapper = KaedeMessage.fromThreadStarterJson(
         _messageJson(
           '90',
@@ -310,8 +310,9 @@ void main() {
         <String>['90', '91'],
       );
       expect(
-        threadTimelineMessages(thread, <KaedeMessage>[starter, reply]).length,
-        2,
+        threadTimelineMessages(thread, <KaedeMessage>[starter, reply])
+            .map((message) => message.ref.wire),
+        ['90@chat.example', '91@chat.example'],
       );
     });
 
@@ -494,6 +495,20 @@ void main() {
     });
 
     test('mobile honors command, pin, slowmode, and reaction splits', () {
+      for (final bit in [
+        Permission.useApplicationCommands,
+        Permission.pinMessages,
+        Permission.bypassSlowmode,
+        Permission.addReactions
+      ]) {
+        final only = channel(ChannelType.text, bit);
+        expect(canUseApplicationCommands(only),
+            bit == Permission.useApplicationCommands);
+        expect(canPinMessages(only), bit == Permission.pinMessages);
+        expect(canBypassSlowmode(only), bit == Permission.bypassSlowmode);
+        expect(canAddMessageReaction(only, emojiExists: false),
+            bit == Permission.addReactions);
+      }
       final denied = channel(ChannelType.text, 0);
       final granted = channel(
         ChannelType.text,
@@ -741,7 +756,8 @@ void main() {
     test('forum feed revision changes only for the selected parent', () {
       final forum = EntityRef.parse('15@chat.example');
       final first = _post('1', createdAt: '2026-08-24T09:00:00Z');
-      final changed = first.copyWith(messageCount: 2, version: 'v2');
+      final changed = first.copyWith(messageCount: 2);
+      final newVersion = first.copyWith(version: 'v2');
       final editedStarter = first.copyWith(
         starterMessage: first.starterMessage?.copyWith(
           content: 'Edited preview',
@@ -761,6 +777,8 @@ void main() {
         forumThreadFeedRevision(<KaedeChannel>[first], forum),
         isNot(forumThreadFeedRevision(<KaedeChannel>[changed], forum)),
       );
+      expect(forumThreadFeedRevision(<KaedeChannel>[first], forum),
+          isNot(forumThreadFeedRevision(<KaedeChannel>[newVersion], forum)));
       expect(
         forumThreadFeedRevision(<KaedeChannel>[first], forum),
         isNot(
@@ -814,6 +832,17 @@ void main() {
         e2eeRequired: true,
       );
 
+      expect(draft.json['available_tags'], [
+        <String, Object?>{
+          'id': '7',
+          'name': 'Solved',
+          'moderated': true,
+        }
+      ]);
+      expect(draft.json['default_thread_rate_limit_per_user'], 10);
+      expect(draft.json['default_auto_archive_duration'], 4320);
+      expect(draft.json['default_sort_order'], 1);
+      expect(draft.json['default_forum_layout'], 2);
       expect(draft.json['type'], 15);
       expect(draft.json['flags'], 16);
       expect(draft.json['e2ee_required'], isTrue);
@@ -847,8 +876,6 @@ void main() {
       expect(parsed?.name, 'release notes');
       expect(parsed?.message, 'Ship it today');
       expect(parseNativeThreadCommand('/thread name:test'), isNull);
-      expect(
-          parseNativeThreadCommand('/thread message:test name:test'), isNull);
     });
 
     test('enforces Discord title and message limits', () {
@@ -868,8 +895,7 @@ void main() {
   });
 
   group('thread REST contract', () {
-    test('creates an inherited-E2EE child without a plaintext starter',
-        () async {
+    test('starterless child payload omission', () async {
       final adapter = _RecordingJsonAdapter(jsonEncode(_channelJson(
         id: '11',
         type: 11,
@@ -922,9 +948,14 @@ void main() {
       expect(reservationData.containsKey('message'), isFalse);
 
       final claimAdapter = _RecordingJsonAdapter(
-        jsonEncode(_messageJson('11', channelId: '11')),
+        jsonEncode(<String, Object?>{
+          ..._messageJson('11', channelId: '11'),
+          'content': null,
+          'e2ee': <String, Object?>{'ciphertext': 'opaque-starter'},
+        }),
       );
-      await _repository(claimAdapter).claimEncryptedForumStarter(
+      final claimed =
+          await _repository(claimAdapter).claimEncryptedForumStarter(
         thread: EntityRef.parse('11@chat.example'),
         clientNonce: 'forum-reservation-1',
         e2ee: <String, Object?>{'rich_payload_digest': 'digest'},
@@ -935,6 +966,11 @@ void main() {
         claimAdapter.request?.path,
         '/api/v1/channels/11@chat.example/starter',
       );
+      expect(claimed.ref.wire, '11@chat.example');
+      expect(claimed.channelRef.wire, '11@chat.example');
+      expect(claimed.content, isNull);
+      expect(claimed.e2ee, <String, Object?>{'ciphertext': 'opaque-starter'});
+      expect(claimAdapter.request?.method, 'POST');
       final claimData = claimAdapter.request!.data as Map<String, Object?>;
       expect(claimData['content'], isNull);
       expect(claimData['client_nonce'], 'forum-reservation-1');
@@ -1053,7 +1089,7 @@ void main() {
           <String, Object?>{'name': 'Source discussion'});
     });
 
-    test('round-trips thread notification preference when joining', () async {
+    test('join notification request serialization', () async {
       final adapter = _RecordingJsonAdapter('{}');
       final repository = _repository(adapter);
 

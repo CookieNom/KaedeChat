@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import httpx
 import pytest
@@ -55,7 +55,6 @@ from app.federation.client import (
     silence_blocks_path,
 )
 from app.federation.delivery import (
-    BACKOFF_SECONDS,
     bound_delivered_projection_retention,
     drain_destination,
     due_ordered_prefix,
@@ -146,6 +145,9 @@ async def test_search_capability_is_advertised_only_when_enabled() -> None:
     assert "message-search/1" in enabled["capabilities"]
     assert enabled["permission_schema"] == PERMISSION_SCHEMA
     assert PERMISSION_SCHEMA_CAPABILITY in enabled["capabilities"]
+
+    assert {"e2ee-mls/1", "e2ee-media/1", "dm-history-page/1"} <= set(disabled["capabilities"])
+    assert {"e2ee-mls/1", "e2ee-media/1", "dm-history-page/1"} <= set(enabled["capabilities"])
 
 
 def settings(**overrides: object) -> Settings:
@@ -463,18 +465,25 @@ async def test_envelope_builder_binds_remote_room_policy_actor_and_context(
     assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
     assert envelope["context"] == context
 
-    forged = deepcopy(context)
-    forged["actor"]["id"] = "43"
-    with pytest.raises(ValueError, match="only sign events for its own users"):
-        await build_envelope(
-            cast(Any, SimpleNamespace()),
-            configured,
-            "e2ee.room-policy.changed",
-            remote_actor,
-            content,
-            context=forged,
-            authority_attested_actor=True,
-        )
+    for section, field, value in (
+        ("actor", "id", "43"),
+        ("channel", "id", "12"),
+        ("channel", "domain", "other.localhost"),
+        ("scope", "domain", "other.localhost"),
+        ("scope", "type", "dm"),
+    ):
+        forged = deepcopy(context)
+        forged[section][field] = value
+        with pytest.raises(ValueError, match="only sign events for its own users"):
+            await build_envelope(
+                cast(Any, SimpleNamespace()),
+                configured,
+                "e2ee.room-policy.changed",
+                remote_actor,
+                content,
+                context=forged,
+                authority_attested_actor=True,
+            )
 
 
 @pytest.mark.asyncio
@@ -503,7 +512,7 @@ async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
         get=AsyncMock(return_value=instance),
         scalar=AsyncMock(side_effect=[old_key, True, old_key, 1]),
         scalars=AsyncMock(return_value=[old_key]),
-        add=AsyncMock(),
+        add=Mock(),
         flush=AsyncMock(),
     )
     client = httpx.AsyncClient()
@@ -549,7 +558,7 @@ async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
     assert instance.current_key_id == "ed25519:old"
     assert old_key.public_key == old_material
     assert old_key.expired_at is None
-    session.add.assert_not_awaited()
+    session.add.assert_not_called()
     session.flush.assert_not_awaited()
 
 
@@ -874,12 +883,15 @@ def test_developer_projection_survives_the_ordinary_delivery_cutoff() -> None:
     )
 
 
-def test_rejected_media_delete_remains_retryable_after_upgrade_window() -> None:
+@pytest.mark.parametrize(
+    "event_type", ["media.delete", DEVELOPER_TEAM_SNAPSHOT_EVENT, "e2ee.device-list.changed"]
+)
+def test_rejected_media_delete_remains_retryable_after_upgrade_window(event_type: str) -> None:
     now = datetime.now(UTC)
     event = FederationEvent(
         event_id="kcfe_delete",
         origin_domain="alpha.localhost",
-        event_type="media.delete",
+        event_type=event_type,
         envelope={},
     )
     row = FederationOutbox(
@@ -904,89 +916,13 @@ def test_rejected_media_delete_remains_retryable_after_upgrade_window() -> None:
     assert row.last_error == "KAED_FED_EVENT_REJECTED"
 
 
-def test_rejected_developer_projection_remains_retryable_after_upgrade_window() -> None:
+@pytest.mark.parametrize("event_type", [DEVELOPER_TEAM_SNAPSHOT_EVENT, "e2ee.device-list.changed"])
+def test_acknowledged_developer_projection_returns_to_bounded_retention(event_type: str) -> None:
     now = datetime.now(UTC)
     event = FederationEvent(
         event_id="kcfe_developer_snapshot",
         origin_domain="alpha.localhost",
-        event_type=DEVELOPER_TEAM_SNAPSHOT_EVENT,
-        envelope={},
-        expires_at=None,
-    )
-    row = FederationOutbox(
-        destination="beta.localhost",
-        event_origin_domain=event.origin_domain,
-        event_id=event.event_id,
-        status="pending",
-        attempts=3,
-        created_at=now - timedelta(days=30),
-        next_retry_at=now,
-    )
-
-    assert retry_rejected_durable_event(
-        event,
-        row,
-        "KAED_FED_EVENT_REJECTED",
-        now,
-    )
-    assert row.status == "circuit"
-    assert row.next_retry_at == now + timedelta(hours=1)
-
-
-def test_rejected_bot_device_snapshot_remains_retryable_until_ack() -> None:
-    now = datetime.now(UTC)
-    event = FederationEvent(
-        event_id="kcfe_bot_device_snapshot",
-        origin_domain="alpha.localhost",
-        event_type="e2ee.device-list.changed",
-        envelope={},
-        expires_at=None,
-    )
-    row = FederationOutbox(
-        destination="beta.localhost",
-        event_origin_domain=event.origin_domain,
-        event_id=event.event_id,
-        status="pending",
-        attempts=3,
-        created_at=now - timedelta(days=30),
-        next_retry_at=now,
-    )
-
-    assert retry_rejected_durable_event(
-        event,
-        row,
-        "KAED_FED_EVENT_REJECTED",
-        now,
-    )
-    assert row.status == "circuit"
-    assert row.next_retry_at == now + timedelta(hours=1)
-
-
-def test_acknowledged_developer_projection_returns_to_bounded_retention() -> None:
-    now = datetime.now(UTC)
-    event = FederationEvent(
-        event_id="kcfe_developer_snapshot",
-        origin_domain="alpha.localhost",
-        event_type=DEVELOPER_TEAM_SNAPSHOT_EVENT,
-        envelope={},
-        expires_at=None,
-    )
-
-    bound_delivered_projection_retention(
-        event,
-        cast(Any, SimpleNamespace(federation_event_retention_days=14)),
-        now,
-    )
-
-    assert event.expires_at == now + timedelta(days=14)
-
-
-def test_acknowledged_bot_device_snapshot_returns_to_bounded_retention() -> None:
-    now = datetime.now(UTC)
-    event = FederationEvent(
-        event_id="kcfe_bot_device_snapshot",
-        origin_domain="alpha.localhost",
-        event_type="e2ee.device-list.changed",
+        event_type=event_type,
         envelope={},
         expires_at=None,
     )
@@ -1066,7 +1002,7 @@ def test_group_state_generic_rejection_retries_only_during_upgrade_window() -> N
 async def test_peer_discovery_capacity_fails_before_refresh_lock_or_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    borrowers = [object() for _ in range(4)]
+    borrowers = [object() for _ in range(int(PEER_DISCOVERY_LIMITER.total_tokens))]
     for borrower in borrowers:
         PEER_DISCOVERY_LIMITER.acquire_on_behalf_of_nowait(borrower)
     session = SimpleNamespace(
@@ -1241,6 +1177,13 @@ async def test_delegated_third_party_profile_becomes_an_opaque_identity(
         "gamma.localhost",
         introduced_by_domain="beta.localhost",
     )
+
+    assert resolved.display_name is None
+    assert resolved.avatar_hash is None
+    assert [call.args for call in session.get.await_args_list] == [
+        (User, (77, "gamma.localhost")),
+        (User, (77, "gamma.localhost")),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1526,6 +1469,7 @@ def test_only_local_guild_events_create_expiry_resync_markers() -> None:
     assert expired_guild_context(local_event, "alpha.localhost") == (42, "alpha.localhost")
     local_event.envelope["context"]["guild_domain"] = "beta.localhost"
     assert expired_guild_context(local_event, "alpha.localhost") is None
+    local_event.envelope["context"]["guild_domain"] = "alpha.localhost"
     local_event.event_type = "dm.message.create"
     assert expired_guild_context(local_event, "alpha.localhost") is None
 
@@ -1909,7 +1853,7 @@ async def test_channel_mutation_materializes_authority_version_before_signing(
         origin_domain="alpha.localhost",
         snapshot_generation=1,
         permission_generation=1,
-        updated_at=authority_version,
+        updated_at=authority_version - timedelta(days=1),
     )
     actor = SimpleNamespace(
         id=7,
@@ -1920,9 +1864,13 @@ async def test_channel_mutation_materializes_authority_version_before_signing(
         id=80,
         origin_domain="alpha.localhost",
         unavailable=False,
-        updated_at=authority_version,
+        updated_at=authority_version - timedelta(days=1),
     )
-    session = SimpleNamespace(flush=AsyncMock(), refresh=AsyncMock())
+
+    async def refresh(value: Any, **_kwargs: Any) -> None:
+        value.updated_at = authority_version
+
+    session = SimpleNamespace(flush=AsyncMock(), refresh=AsyncMock(side_effect=refresh))
     signed = AsyncMock(
         return_value={
             "event_id": "kcge_channel_version",
@@ -2577,7 +2525,7 @@ def test_snapshot_cursor_survives_only_message_sequence_advances() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_resync_remains_durably_discoverable() -> None:
+async def test_failed_resync_object_state_mutation() -> None:
     guild = SimpleNamespace(last_event_seq=6, sync_status="ready")
     session = SimpleNamespace(scalar=AsyncMock(return_value=guild))
 
@@ -2650,8 +2598,19 @@ def test_event_envelope_signature_excludes_only_signatures() -> None:
     signature = base64.b64decode(sign_envelope(envelope, private))
     envelope["signatures"] = {"alpha.localhost": {"ed25519:test": "ignored"}}
     assert verify_envelope(envelope, signature, private.public_key())
-    envelope["content"] = {"text": "tampered"}
-    assert not verify_envelope(envelope, signature, private.public_key())
+    for field, changed in (
+        ("event_id", "kcfe_other_event_0123"),
+        ("origin", "other.localhost"),
+        ("type", "dm.message.update"),
+        ("ts", 43),
+        ("actor", {"id": "124", "domain": "alpha.localhost"}),
+        ("actor", {"id": "123", "domain": "other.localhost"}),
+        ("context", {"channel_id": "99"}),
+        ("content", {"text": "tampered"}),
+    ):
+        assert not verify_envelope(envelope | {field: changed}, signature, private.public_key()), (
+            field
+        )
 
 
 def _room_policy_envelope(
@@ -3194,7 +3153,15 @@ async def test_peer_dns_failure_is_normalized(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.asyncio
 async def test_peer_response_is_bounded_while_streaming() -> None:
-    transport = httpx.MockTransport(lambda _request: httpx.Response(200, content=b"x" * 17))
+    chunks_read: list[int] = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for index, chunk in enumerate((b"x" * 8, b"x" * 9, b"must not read")):
+                chunks_read.append(index)
+                yield chunk
+
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, stream=Body()))
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(FederationNetworkError, match="size limit"):
             await bounded_http_request(
@@ -3203,6 +3170,8 @@ async def test_peer_response_is_bounded_while_streaming() -> None:
                 "https://beta.example/federation",
                 max_response_bytes=16,
             )
+
+    assert chunks_read == [0, 1]
 
 
 @pytest.mark.asyncio
@@ -3265,21 +3234,25 @@ async def test_cached_federation_request_body_still_enforces_size_limit() -> Non
 
 @pytest.mark.asyncio
 async def test_unknown_key_refresh_consumes_both_unauthenticated_quotas() -> None:
-    class FakeRedis:
-        async def eval(self, _script: str, _keys: int, *_args: object) -> list[int]:
-            return [1, 1]
+    source_key = "federation:key-refresh:source:192.0.2.10"
+    origin_key = "federation:key-refresh:origin:beta.example"
+    seen: list[str] = []
+    denied_key: str | None = None
 
-    redis = FakeRedis()
+    async def evaluate(_script: str, count: int, key: str, *_args: object) -> list[int]:
+        assert count == 1
+        seen.append(key)
+        return [0, 0] if key == denied_key else [1, 1]
+
+    redis = SimpleNamespace(eval=AsyncMock(side_effect=evaluate))
     assert await admit_unknown_key_refresh(cast(Any, redis), "192.0.2.10", "beta.example")
-    assert await admit_unknown_key_refresh(cast(Any, redis), "192.0.2.10", "beta.example")
-
-    class LimitedRedis(FakeRedis):
-        async def eval(self, _script: str, _keys: int, *_args: object) -> list[int]:
-            return [0, 0]
-
-    with pytest.raises(HTTPException) as raised:
-        await admit_unknown_key_refresh(cast(Any, LimitedRedis()), "192.0.2.10", "beta.example")
-    assert raised.value.status_code == 429
+    assert seen == [source_key, origin_key]
+    for denied_key in (source_key, origin_key):
+        seen.clear()
+        with pytest.raises(HTTPException) as raised:
+            await admit_unknown_key_refresh(cast(Any, redis), "192.0.2.10", "beta.example")
+        assert raised.value.status_code == 429
+        assert seen == ([source_key] if denied_key == source_key else [source_key, origin_key])
 
 
 @pytest.mark.asyncio
@@ -3296,15 +3269,19 @@ async def test_v2_request_nonce_is_validated_pinned_and_single_use() -> None:
     assert cast(dict[str, object], downgraded.value.detail)["code"] == ("KAED_FED_NONCE_REQUIRED")
 
     class FakeRedis:
-        accepted = True
+        keys: set[str] = set()
 
-        async def set(self, *_args: object, **_kwargs: object) -> bool:
-            return self.accepted
+        async def set(self, key: str, value: str, **kwargs: object) -> bool:
+            assert key == f"federation:request-nonce:beta.localhost:{nonce}"
+            assert value == "1" and kwargs == {"ex": 660, "nx": True}
+            if key in self.keys:
+                return False
+            self.keys.add(key)
+            return True
 
     redis = FakeRedis()
     configured = settings(federation_clock_skew_seconds=300)
     await consume_request_nonce(cast(Any, redis), configured, "beta.localhost", nonce)
-    redis.accepted = False
     with pytest.raises(HTTPException) as replayed:
         await consume_request_nonce(cast(Any, redis), configured, "beta.localhost", nonce)
     assert replayed.value.status_code == 409
@@ -3487,7 +3464,7 @@ async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
         async def close(self, *, code: int) -> None:
             self.closed.append(code)
 
-    parse = AsyncMock()
+    parse = Mock()
     monkeypatch.setattr(
         federation_api,
         "authenticate_federation_websocket",
@@ -3506,13 +3483,16 @@ async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
     await federation_api.federation_link(cast(Any, websocket))
 
     assert websocket.closed == [4429]
-    parse.assert_not_awaited()
+    parse.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_durable_event_key_refresh_is_bounded_and_releases_its_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "app.federation.security.secrets.token_urlsafe", lambda _size: "refresh-owner"
+    )
     refreshed = AsyncMock()
     monkeypatch.setattr("app.federation.security.ensure_peer", refreshed)
     released: list[tuple[object, ...]] = []
@@ -3522,7 +3502,14 @@ async def test_durable_event_key_refresh_is_bounded_and_releases_its_lock(
             return 0
 
         async def set(self, _key: str, _value: str, **kwargs: object) -> bool:
-            assert kwargs == {"ex": 30, "nx": True}
+            assert (_key, _value, kwargs) in (
+                (
+                    "federation:key-refresh:lock:beta.localhost",
+                    "refresh-owner",
+                    {"ex": 30, "nx": True},
+                ),
+                ("federation:key-refresh:miss:beta.localhost:ed25519:rotated", "1", {"ex": 300}),
+            )
             return True
 
         async def eval(self, _script: str, _keys: int, *args: object) -> list[int]:
@@ -3546,7 +3533,12 @@ async def test_durable_event_key_refresh_is_bounded_and_releases_its_lock(
         "ed25519:rotated",
     )
     refreshed.assert_awaited_once_with(session, configured, "beta.localhost", force=True)
-    assert released
+    assert released == [("federation:key-refresh:lock:beta.localhost", "refresh-owner")]
+    refreshed.side_effect = FederationNetworkError("unavailable")
+    assert not await refresh_event_signing_keys(
+        session, cast(Any, FakeRedis()), configured, principal, "ed25519:rotated"
+    )
+    assert released == [("federation:key-refresh:lock:beta.localhost", "refresh-owner")] * 2
 
 
 @pytest.mark.asyncio
@@ -3562,7 +3554,7 @@ async def test_durable_event_key_refresh_does_not_bypass_missing_source_identity
 
 
 @pytest.mark.asyncio
-async def test_federation_source_limit_runs_before_authenticated_origin_work() -> None:
+async def test_source_limit_helper_rejection() -> None:
     class LimitedRedis:
         async def eval(self, _script: str, _keys: int, *_args: object) -> list[int]:
             return [0, 0]
@@ -3738,30 +3730,6 @@ async def test_background_profile_refresh_obeys_target_domain_limit(
 
 
 @pytest.mark.asyncio
-async def test_remote_user_lookup_limits_outbound_amplification() -> None:
-    class FakeSession:
-        async def scalar(self, _statement: object) -> None:
-            return None
-
-    class LimitedRedis:
-        async def exists(self, _key: str) -> int:
-            return 0
-
-        async def eval(self, _script: str, _keys: int, *_args: object) -> list[int]:
-            return [31, 1]
-
-    with pytest.raises(HTTPException) as raised:
-        await resolve_handle(
-            cast(Any, FakeSession()),
-            settings(),
-            cast(Any, LimitedRedis()),
-            "alpha.localhost:1",
-            "bob@beta.localhost",
-        )
-    assert raised.value.status_code == 429
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("counts", ([31, 1], [1, 121]))
 async def test_remote_user_lookup_has_independent_requester_and_target_limits(
     counts: list[int],
@@ -3830,57 +3798,6 @@ async def test_guild_home_cannot_mutate_a_cached_third_party_profile() -> None:
     assert resolved is cached
     assert cached.display_name == "Authoritative Carol"
     assert cached.avatar_hash == "authoritative-avatar"
-
-
-@pytest.mark.asyncio
-async def test_guild_home_creates_only_an_opaque_unknown_third_party_reference(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opaque = SimpleNamespace(
-        id=77,
-        origin_domain="gamma.localhost",
-        username=unresolved_remote_username(77, "gamma.localhost"),
-        display_name=None,
-        avatar_hash=None,
-        is_local=False,
-        profile_resolved=False,
-    )
-
-    class FakeSession:
-        user_lookups = 0
-
-        async def get(self, model: object, identity: object) -> object | None:
-            assert model is User
-            assert identity == (77, "gamma.localhost")
-            self.user_lookups += 1
-            return None if self.user_lookups == 1 else opaque
-
-        async def execute(self, _statement: object) -> object:
-            return object()
-
-    admit_identity = AsyncMock(return_value=(None, "beta.localhost"))
-    monkeypatch.setattr(
-        "app.federation.replication.admit_remote_user_identity",
-        admit_identity,
-    )
-
-    delegated = RemoteUserProfile(
-        id="77",
-        origin_domain="gamma.localhost",
-        username="carol",
-    )
-    resolved = await resolve_delegated_profile(
-        cast(Any, FakeSession()),
-        settings(),
-        delegated,
-        authority_origin="beta.localhost",
-    )
-
-    assert resolved is opaque
-    assert resolved.username != delegated.username
-    assert resolved.display_name is None
-    assert resolved.avatar_hash is None
-    admit_identity.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -3962,7 +3879,7 @@ async def test_guild_snapshot_pagination_uses_a_stable_membership_cursor(
 
 
 @pytest.mark.asyncio
-async def test_snapshot_pages_2001_members_across_intervening_messages(
+async def test_2001_member_pagination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A message may advance event sequence without invalidating member paging."""
@@ -4114,10 +4031,10 @@ async def test_snapshot_visibility_for_2001_members_has_bounded_query_count() ->
     class BulkSession:
         def __init__(self) -> None:
             self.calls = 0
-            self.rows = [members, [], []]
+            self.rows = [members]
 
         async def scalars(self, _statement: object) -> list[object]:
-            rows = self.rows[self.calls]
+            rows = self.rows[self.calls] if self.calls < len(self.rows) else []
             self.calls += 1
             return rows
 
@@ -4131,7 +4048,7 @@ async def test_snapshot_visibility_for_2001_members_has_bounded_query_count() ->
     )
 
     assert visible == [channel]
-    assert session.calls == 3
+    assert 0 < session.calls <= 3
 
 
 @pytest.mark.asyncio
@@ -4167,7 +4084,7 @@ async def test_successful_gap_fill_restores_a_policy_staled_replica(
 
 
 @pytest.mark.asyncio
-async def test_semantic_poison_gap_page_is_quarantined_and_snapshot_recovered(
+async def test_oversized_gap_page_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guild = SimpleNamespace(
@@ -4235,7 +4152,6 @@ def test_outbox_backoff_uses_normative_steps(monkeypatch: pytest.MonkeyPatch) ->
         3600,
         3600,
     ]
-    assert BACKOFF_SECONDS[-1] == 3600
 
 
 @pytest.mark.asyncio

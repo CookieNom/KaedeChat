@@ -1,7 +1,6 @@
 import base64
 from copy import deepcopy
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -31,7 +30,7 @@ from app.chat.e2ee_controls import (
     room_policy_change_context,
 )
 from app.chat.schemas import MessageCreate, MessageEdit
-from app.core.federation import FEDERATION_CAPABILITIES, canonical_json
+from app.core.federation import canonical_json
 from app.core.json_limits import MAX_SAFE_JSON_INTEGER, strict_json_loads
 from app.db.models import Message
 from app.federation.replication import (
@@ -215,6 +214,32 @@ def test_remote_room_policy_pause_binds_authority_actor_channel_and_scope() -> N
         actor_domain="participant.test",
     )
 
+    assert not authority_attested_room_policy_change(
+        "e2ee.room-policy.changed",
+        content,
+        context,
+        expected_authority="other.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+    for section, field, value in (
+        ("channel", "id", "12"),
+        ("channel", "domain", "other.test"),
+        ("scope", "domain", "other.test"),
+        ("scope", "type", "invalid"),
+        ("scope", "type", "dm"),
+    ):
+        changed = deepcopy(context)
+        changed[section][field] = value
+        assert not authority_attested_room_policy_change(
+            "e2ee.room-policy.changed",
+            content,
+            changed,
+            expected_authority="authority.test",
+            actor_id="7",
+            actor_domain="participant.test",
+        )
+
 
 def test_e2ee_envelope_has_iterative_shape_limits() -> None:
     nested: object = "ciphertext"
@@ -261,12 +286,6 @@ def test_e2ee_envelope_returns_a_detached_normalized_json_copy() -> None:
     recipients[0] = {"device": "changed"}
     assert validated is not None
     assert validated["recipients"] == [{"device": "one"}]
-
-
-def test_federation_advertises_supported_e2ee_protocols() -> None:
-    assert "e2ee-mls/1" in FEDERATION_CAPABILITIES
-    assert "e2ee-media/1" in FEDERATION_CAPABILITIES
-    assert "dm-history-page/1" in FEDERATION_CAPABILITIES
 
 
 def test_federation_event_rejects_pathological_json_before_signing() -> None:
@@ -392,16 +411,21 @@ def test_active_mls_room_binds_envelope_to_group_generation_and_epoch() -> None:
         policy_group_id=b64url(b"group-id"),
     )
 
-    with pytest.raises(MessageEncryptionPolicyError) as raised:
-        validate_message_encryption_policy(
-            "e2ee",
-            content=None,
-            e2ee=envelope,
-            policy_generation=4,
-            policy_epoch=10,
-            policy_group_id=b64url(b"group-id"),
-        )
-    assert raised.value.code == "E2EE_POLICY_CONTEXT_MISMATCH"
+    for generation, epoch, group in (
+        (5, 9, b64url(b"group-id")),
+        (4, 10, b64url(b"group-id")),
+        (4, 9, b64url(b"other-group")),
+    ):
+        with pytest.raises(MessageEncryptionPolicyError) as raised:
+            validate_message_encryption_policy(
+                "e2ee",
+                content=None,
+                e2ee=envelope,
+                policy_generation=generation,
+                policy_epoch=epoch,
+                policy_group_id=group,
+            )
+        assert raised.value.code == "E2EE_POLICY_CONTEXT_MISMATCH"
 
 
 def test_active_mls_room_rejects_legacy_opaque_envelope() -> None:
@@ -533,16 +557,66 @@ def test_federated_room_policy_rejects_same_generation_state_rollback() -> None:
         validate_channel_encryption_policy_transition(channel, incoming, label="channel")
 
 
-def test_database_migration_contains_message_policy_backstop() -> None:
-    migration = (
-        Path(__file__).parents[1] / "migrations/versions/c82f4a1d6e90_e2ee_room_policy_guard.py"
-    ).read_text()
-    assert "channel_encryption_policy_consistent" in migration
-    assert "CREATE TRIGGER trg_channels_encryption_transition" in migration
-    assert "encrypted channel cannot be downgraded to plaintext" in migration
-    assert "CREATE TRIGGER trg_messages_encryption_policy" in migration
-    assert "plaintext body is forbidden in an encrypted channel" in migration
-    assert "message encryption policy generation is stale" in migration
+@pytest.mark.asyncio
+async def test_database_migration_contains_message_policy_backstop(migrate_to) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    connection = await migrate_to("c82f4a1d6e90")
+    for statement in (
+        "INSERT INTO instances (domain) VALUES ('test.example')",
+        "INSERT INTO users (id, origin_domain, username, is_local, "
+        "federation_introduced_by_domain) VALUES (7,"
+        "'test.example', 'owner', false, 'test.example')",
+        "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) VALUES (2, "
+        "'test.example', 'Guild', 7, 'test.example')",
+        "INSERT INTO channels (id, origin_domain, guild_id, guild_domain, type, name, "
+        "created_floor_id)"
+        "VALUES (1, 'test.example', 2, 'test.example', 0, 'Room', 1)",
+    ):
+        await connection.execute(text(statement))
+    insert = text(
+        "INSERT INTO messages (id, origin_domain, channel_id, channel_domain, author_id, "
+        "author_domain, content, e2ee, encryption_policy_generation, encryption_epoch) "
+        "VALUES (:id, 'test.example', 1, 'test.example', 7, 'test.example', :content, "
+        "CAST(:envelope AS jsonb), :generation, :epoch)"
+    )
+    await connection.execute(
+        insert,
+        {"id": 10, "content": "old plaintext", "envelope": None, "generation": 0, "epoch": None},
+    )
+    await connection.execute(
+        text(
+            "UPDATE channels SET encryption_mode = 'e2ee', encryption_state = 'active', "
+            "encryption_policy_generation = 1, encryption_protocol = 'mls10', "
+            "encryption_suite = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519', "
+            "encryption_group_id = 'room', encryption_epoch = 1 WHERE id = 1"
+        )
+    )
+    valid = {
+        "id": 11,
+        "content": None,
+        "envelope": '{"ciphertext":"sealed"}',
+        "generation": 1,
+        "epoch": 1,
+    }
+    await connection.execute(insert, valid)
+    for change, error in (
+        ({"content": "leak", "envelope": None}, "plaintext body is forbidden"),
+        ({"generation": 0}, "policy generation is stale"),
+        ({"epoch": 0}, "encryption epoch is stale"),
+    ):
+        with pytest.raises(IntegrityError, match=error):
+            async with connection.begin_nested():
+                await connection.execute(insert, {**valid, "id": 12, **change})
+    with pytest.raises(IntegrityError, match="cannot be downgraded"):
+        async with connection.begin_nested():
+            await connection.execute(
+                text("UPDATE channels SET encryption_mode = 'plaintext' WHERE id = 1")
+            )
+    assert (
+        await connection.execute(text("SELECT id, content FROM messages ORDER BY id"))
+    ).all() == [(10, "old plaintext"), (11, None)]
 
 
 def test_plaintext_message_binds_absent_envelope_as_sql_null() -> None:

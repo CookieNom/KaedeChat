@@ -177,9 +177,31 @@ def test_team_snapshot_binds_authority_target_and_revocation_disclosure() -> Non
         DeveloperTeamSnapshot.model_validate(
             {**payload, "member_role": None, "applications": payload["applications"]}
         )
+    assert not authority_attested_developer_team_snapshot(
+        DEVELOPER_TEAM_SNAPSHOT_EVENT,
+        payload,
+        expected_authority="apps.example",
+        actor=("41", "users.example"),
+    )
     application = application_projection().model_dump(mode="json")
+    unique = [
+        {
+            **application,
+            "id": str(100 + index),
+            "bot_user": {**application["bot_user"], "id": str(200 + index)},
+        }
+        for index in range(76)
+    ]
+    assert (
+        len(
+            DeveloperTeamSnapshot.model_validate(
+                {**payload, "applications": unique[:75]}
+            ).applications
+        )
+        == 75
+    )
     with pytest.raises(ValidationError):
-        DeveloperTeamSnapshot.model_validate({**payload, "applications": [application] * 76})
+        DeveloperTeamSnapshot.model_validate({**payload, "applications": unique})
     repeated_bot = {**application, "id": "21"}
     with pytest.raises(ValidationError, match="repeats a bot identity"):
         DeveloperTeamSnapshot.model_validate(
@@ -231,19 +253,14 @@ def test_application_projection_rejects_malformed_authority_contract(
         DeveloperApplicationProjection.model_validate(payload)
 
 
-def test_application_projection_rejects_zero_bot_identity() -> None:
+@pytest.mark.parametrize("mutation", [{"account_type": "human"}, {"id": "0"}])
+def test_application_projection_requires_an_authoritative_bot_profile(
+    mutation: dict[str, str],
+) -> None:
     payload = application_projection().model_dump(mode="json")
-    payload["bot_user"] = {**payload["bot_user"], "id": "0"}
+    payload["bot_user"] = {**payload["bot_user"], **mutation}
 
     with pytest.raises(ValidationError):
-        DeveloperApplicationProjection.model_validate(payload)
-
-
-def test_application_projection_requires_an_authoritative_bot_profile() -> None:
-    payload = application_projection().model_dump(mode="json")
-    payload["bot_user"] = {**payload["bot_user"], "account_type": "human"}
-
-    with pytest.raises(ValidationError, match="authority is invalid"):
         DeveloperApplicationProjection.model_validate(payload)
 
 
@@ -444,44 +461,109 @@ def test_stale_developer_projection_preserves_manifest_and_generation_highwaters
 
 
 @pytest.mark.asyncio
-async def test_snapshot_coalescing_deletes_the_previous_member_projection() -> None:
-    previous = SimpleNamespace(all=lambda: [("apps.example", "kcfe_previous_snapshot")])
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=None),
-        execute=AsyncMock(side_effect=[previous, None, None]),
-    )
-    team = DeveloperTeam(
-        id=10,
-        origin_domain="apps.example",
-        name="Platform",
-        personal=False,
-        federation_revision=4,
-    )
-    member = human(40, "users.example", local=False)
+async def test_snapshot_coalescing_deletes_the_previous_member_projection(postgres_schema) -> None:
+    import json
 
+    from sqlalchemy import text
+
+    connection = postgres_schema
+    await connection.execute(
+        text(
+            "CREATE TABLE federation_events (origin_domain text, event_id text, event_type "
+            "text, envelope jsonb)"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE TABLE federation_outbox (id bigint GENERATED ALWAYS AS IDENTITY, "
+            "destination text, event_origin_domain text, event_id text)"
+        )
+    )
+    event_type = DEVELOPER_TEAM_SNAPSHOT_EVENT
+    baseline = {
+        "actor": {"id": "40", "domain": "users.example"},
+        "content": {"team_id": "10", "team_domain": "apps.example"},
+    }
+    candidates = [
+        ("old", "users.example", event_type, baseline),
+        ("shared", "users.example", event_type, baseline),
+        ("destination", "other.example", event_type, baseline),
+        (
+            "actor_id",
+            "users.example",
+            event_type,
+            baseline | {"actor": {"id": "99", "domain": "users.example"}},
+        ),
+        (
+            "actor_domain",
+            "users.example",
+            event_type,
+            baseline | {"actor": {"id": "40", "domain": "other.example"}},
+        ),
+        ("type", "users.example", "guild.message.create", baseline),
+    ]
+    candidates.extend(
+        [
+            (
+                "team_id",
+                "users.example",
+                event_type,
+                baseline | {"content": {"team_id": "11", "team_domain": "apps.example"}},
+            ),
+            (
+                "team_domain",
+                "users.example",
+                event_type,
+                baseline | {"content": {"team_id": "10", "team_domain": "other.example"}},
+            ),
+        ]
+    )
+    for identifier, target, kind, envelope in candidates:
+        await connection.execute(
+            text(
+                "INSERT INTO federation_events VALUES ('apps.example', :id, :type, "
+                "CAST(:envelope AS jsonb))"
+            ),
+            {"id": identifier, "type": kind, "envelope": json.dumps(envelope)},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO federation_outbox (destination, event_origin_domain, event_id) "
+                "VALUES (:destination, 'apps.example', :id)"
+            ),
+            {"destination": target, "id": identifier},
+        )
+    await connection.execute(
+        text(
+            "INSERT INTO federation_outbox (destination, event_origin_domain, event_id) "
+            "VALUES ('other.example', 'apps.example', 'shared')"
+        )
+    )
     await developer_projection.discard_superseded_latest_state_event(
-        session,
+        connection,
         destination="users.example",
-        event_type=DEVELOPER_TEAM_SNAPSHOT_EVENT,
-        actor_ref=(member.id, member.origin_domain),
-        team_ref=(team.id, team.origin_domain),
+        event_type=event_type,
+        actor_ref=(40, "users.example"),
+        team_ref=(10, "apps.example"),
     )
-
-    assert session.scalar.await_count == 1
-    assert session.execute.await_count == 3
-    lookup = str(session.execute.await_args_list[0].args[0])
-    outbox_deletion = str(session.execute.await_args_list[1].args[0])
-    event_deletion = str(session.execute.await_args_list[2].args[0])
-    assert "federation_outbox.destination" in lookup
-    assert "federation_events.event_type" in lookup
-    assert "federation_events.envelope" in lookup
-    assert "DELETE FROM federation_outbox" in outbox_deletion
-    assert "DELETE FROM federation_events" in event_deletion
+    assert set(
+        (
+            await connection.execute(text("SELECT event_id, destination FROM federation_outbox"))
+        ).all()
+    ) == {
+        (identifier, destination)
+        for identifier, destination, _kind, _envelope in candidates
+        if identifier not in {"old", "shared"}
+    } | {("shared", "other.example")}
+    assert set(await connection.scalars(text("SELECT event_id FROM federation_events"))) == {
+        identifier for identifier, *_rest in candidates if identifier != "old"
+    }
 
 
 @pytest.mark.asyncio
 async def test_authority_queues_one_monotonic_snapshot_per_remote_member(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
     team = DeveloperTeam(
         id=10,
@@ -537,49 +619,79 @@ async def test_authority_queues_one_monotonic_snapshot_per_remote_member(
         command_generation=1,
         revocation_generation=1,
     )
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=team),
-        execute=AsyncMock(
-            side_effect=[
-                SimpleNamespace(all=lambda: [(member, remote_user)]),
-                SimpleNamespace(all=lambda: [(app, bot())]),
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    for table in ("developer_teams", "developer_team_members", "bot_applications", "users"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    second = human(41, "second.example", local=False)
+    local = human(42, "apps.example", local=True)
+    members = [
+        DeveloperTeamMember(
+            team_id=10,
+            team_domain="apps.example",
+            user_id=user.id,
+            user_domain=user.origin_domain,
+            user_is_local=user.is_local,
+            role="developer",
+        )
+        for user in (second, local)
+    ]
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all([team, remote_user, member, second, local, *members, app, bot()])
+        await session.flush()
+        attributes = {
+            column.name: getattr(app, column.name) for column in BotApplication.__table__.columns
+        }
+        second_bot = bot()
+        second_bot.id, second_bot.username = 31, "secondbot"
+        session.add(second_bot)
+        session.add_all(
+            [
+                BotApplication(**(attributes | values))
+                for values in (
+                    {"id": 21, "status": "suspended", "bot_user_id": 31},
+                    {"id": 22, "status": "deleted"},
+                    {"id": 23, "team_id": 11},
+                    {"id": 24, "team_domain": "other.example"},
+                )
             ]
-        ),
-    )
-    build = AsyncMock(return_value={"event_id": "kcfe_team"})
-    queue = AsyncMock()
-    discard = AsyncMock()
-    monkeypatch.setattr(developer_projection, "build_envelope", build)
-    monkeypatch.setattr(developer_projection, "queue_event", queue)
-    monkeypatch.setattr(
-        developer_projection,
-        "discard_superseded_latest_state_event",
-        discard,
-    )
-
-    destinations = await queue_developer_team_snapshots(
-        session,
-        SimpleNamespace(domain="apps.example"),
-        team,
-    )
-
-    assert destinations == {"users.example"}
-    assert team.federation_revision == 4
-    content = build.await_args.args[4]
-    assert content["revision"] == "4"
-    assert content["member_id"] == "40"
-    assert content["applications"][0]["id"] == "20"
-    application_query = str(session.execute.await_args_list[1].args[0])
-    assert "bot_applications.status !=" in application_query
-    assert build.await_args.kwargs["authority_attested_actor"] is True
-    discard.assert_awaited_once_with(
-        session,
-        destination="users.example",
-        event_type=DEVELOPER_TEAM_SNAPSHOT_EVENT,
-        actor_ref=(remote_user.id, remote_user.origin_domain),
-        team_ref=(team.id, team.origin_domain),
-    )
-    queue.assert_awaited_once()
+        )
+        await session.flush()
+        build = AsyncMock(
+            side_effect=lambda *args, **kwargs: {
+                "event_id": "kcfe_" + args[4]["member_id"],
+                "content": args[4],
+            }
+        )
+        queue = AsyncMock()
+        discard = AsyncMock()
+        monkeypatch.setattr(developer_projection, "build_envelope", build)
+        monkeypatch.setattr(developer_projection, "queue_event", queue)
+        monkeypatch.setattr(developer_projection, "discard_superseded_latest_state_event", discard)
+        config = SimpleNamespace(domain="apps.example")
+        assert await queue_developer_team_snapshots(session, config, team) == {
+            "users.example",
+            "second.example",
+        }
+        assert team.federation_revision == 4
+        assert {call.args[4]["member_id"] for call in build.await_args_list} == {"40", "41"}
+        for call in build.await_args_list:
+            assert call.args[4]["revision"] == "4"
+            assert [app["id"] for app in call.args[4]["applications"]] == ["20", "21"]
+            assert call.kwargs["authority_attested_actor"] is True
+        assert {
+            (call.args[2], call.args[3]["content"]["member_id"]) for call in queue.await_args_list
+        } == {("users.example", "40"), ("second.example", "41")}
+        assert {
+            (call.kwargs["destination"], call.kwargs["actor_ref"], call.kwargs["team_ref"])
+            for call in discard.await_args_list
+        } == {
+            ("users.example", (40, "users.example"), (10, "apps.example")),
+            ("second.example", (41, "second.example"), (10, "apps.example")),
+        }
 
 
 @pytest.mark.asyncio

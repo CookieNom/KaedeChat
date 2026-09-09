@@ -263,14 +263,18 @@ def test_encrypt_private_interaction_response_binds_exact_lifecycle_identity() -
         "purpose": "kaede.interaction.response.v1",
     }
 
-    with pytest.raises(ValueError, match="identity"):
-        encrypt_interaction_response(
-            interaction,
-            context,
-            {},
-            callback_type=8,
-            response_id=0,
-        )
+    for callback_type, response_id, error, message in [
+        (4, 0, ValueError, "identity"),
+        (6, 101, E2EEProtocolError, "callback type"),
+    ]:
+        with pytest.raises(error, match=message):
+            encrypt_interaction_response(
+                interaction,
+                context,
+                {},
+                callback_type=callback_type,
+                response_id=response_id,
+            )
 
 
 def test_python_matches_shared_routing_contract_vectors() -> None:
@@ -604,7 +608,7 @@ def test_decrypt_interaction_authenticates_encrypted_file_manifest() -> None:
 async def test_client_decrypts_before_command_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    interaction, context, provider = prepared_interaction()
+    interaction, context, _provider = prepared_interaction()
     bot = interaction.client
     received: list[dict[str, Any] | None] = []
 
@@ -622,4 +626,10 @@ async def test_client_decrypts_before_command_dispatch(
     )
 
     assert received == [{"query": "safe"}]
-    assert provider.epoch == 7
+    malformed = interaction_payload(interaction_id=92)
+    malformed["encrypted_payload"]["ciphertext"] = "!invalid-base64!"
+    with pytest.raises(E2EEProtocolError):
+        await bot.dispatch(
+            "INTERACTION_CREATE", malformed, target="https://guild.example"
+        )
+    assert received == [{"query": "safe"}]

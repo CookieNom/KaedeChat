@@ -152,17 +152,6 @@ def test_closed_management_protocol_has_an_authority_dispatcher() -> None:
     )
     assert management_api._management_dispatcher("voice_message.capability") is None
     assert management_api._management_dispatcher("not-a-real-operation") is None
-    assert (
-        management_api._management_dispatcher("emoji.get")
-        is management_api._dispatch_expression_metadata
-    )
-    assert (
-        management_api._management_dispatcher("emoji.create")
-        is management_api._dispatch_expression_media
-    )
-    assert (
-        management_api._management_dispatcher("bot_e2ee.grant") is management_api._dispatch_bot_e2ee
-    )
 
 
 def test_management_response_contracts_cover_every_operation_once() -> None:
@@ -170,7 +159,6 @@ def test_management_response_contracts_cover_every_operation_once() -> None:
 
     assert set(guild_management_rpc._GUILD_MANAGEMENT_RESULT_CONTRACT) == operations
     assert set(guild_management_rpc._GUILD_MANAGEMENT_IDENTITY_CONTRACT) == operations
-    assert len(guild_management_rpc._GUILD_MANAGEMENT_IDENTITY_CONTRACT) == len(operations)
 
 
 def test_authority_result_centrally_echoes_request_lineage() -> None:
@@ -482,18 +470,23 @@ async def test_federated_stage_voice_read_dispatch_preserves_self_or_other_targe
     actor = SimpleNamespace(id=8, origin_domain="remote.example")
     request = management_request("stage_voice_state.get", {"user_ref": target_ref})
 
+    session, redis, snowflake = object(), object(), object()
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_stage_instances(
         request,
         actor,
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert result.body == rendered
     assert str(get_voice_state.await_args.args[5]) == qualified_target
     assert get_voice_state.await_args.args[4] is actor
+    get_voice_state.assert_awaited_once_with(
+        session, redis, settings, EntityRef("10"), actor, EntityRef(qualified_target)
+    )
 
 
 def channel_info_body() -> dict[str, object]:
@@ -771,13 +764,18 @@ async def test_channel_overwrite_authority_wraps_and_public_proxy_unwraps(
         "channel.overwrite.list",
         {"channel_ref": "20@home.example"},
     )
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_channel_core(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
     assert result.body == overwrite_body()
     guild_management_rpc.validate_guild_management_result(request, result)
@@ -797,6 +795,17 @@ async def test_channel_overwrite_authority_wraps_and_public_proxy_unwraps(
         cast(Any, SimpleNamespace(domain="client.example")),
     )
     assert unwrapped == public
+    list_service.assert_awaited_once()
+    args = list_service.await_args.args
+    assert args[2].user is actor
+    assert args[3:] == (
+        session,
+        redis,
+        settings,
+    )
+    assert str(args[0]) == "10"
+    assert str(args[1]) == "20@home.example"
+    assert list_service.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -832,10 +841,12 @@ async def test_channel_info_item_and_authority_dispatch_emit_full_lineage(
         "voice_channel_info.get",
         {"fields": ["status", "voice_start_time"]},
     )
+    actor = human_actor()
+    session = SimpleNamespace(get=AsyncMock(return_value=guild))
     result = await management_api._dispatch_voice_channel_info(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace(get=AsyncMock(return_value=guild))),
+        actor,
+        cast(Any, session),
         cast(Any, SimpleNamespace()),
         cast(Any, SimpleNamespace()),
         cast(Any, SimpleNamespace(domain="home.example")),
@@ -849,6 +860,10 @@ async def test_channel_info_item_and_authority_dispatch_emit_full_lineage(
     }
     guild_management_rpc.validate_guild_management_result(request, result)
     assert visible.await_args.args[-1] == ["status", "voice_start_time"]
+
+    assert visible.await_args.args[0] is session
+    assert visible.await_args.args[2:4] == (guild, actor)
+    session.get.assert_awaited_once_with(Guild, (10, "home.example"))
 
 
 @pytest.mark.asyncio
@@ -867,6 +882,8 @@ async def test_signed_management_response_enforces_operation_status_and_shape(
     status_code: object,
     body: object,
 ) -> None:
+    if status_code != 200:
+        body = federated_invite_payload()["guild"]
     current = management_request(operation, {})
     upstream = SimpleNamespace(
         status_code=200,
@@ -887,6 +904,17 @@ async def test_signed_management_response_enforces_operation_status_and_shape(
         AsyncMock(return_value=upstream),
     )
 
+    if status_code != 200:
+        invalid_content = upstream.content
+        baseline = json.loads(invalid_content)
+        baseline["status_code"] = 200
+        upstream.content = json.dumps(baseline).encode()
+        accepted = await request_guild_management(
+            cast(Any, SimpleNamespace()), cast(Any, SimpleNamespace()), current
+        )
+        assert accepted.body == body
+        upstream.content = invalid_content
+
     with pytest.raises(HTTPException) as invalid:
         await request_guild_management(
             cast(Any, SimpleNamespace()),
@@ -905,7 +933,7 @@ async def test_body_only_management_proxy_reuses_the_operation_contract(
     monkeypatch.setattr(
         guild_management_rpc,
         "proxy_remote_guild_management",
-        AsyncMock(return_value=management_result(200, {})),
+        AsyncMock(return_value=management_result(200, {}, operation="automod.list")),
     )
 
     with pytest.raises(HTTPException) as invalid:
@@ -954,13 +982,67 @@ async def test_body_only_management_proxy_reuses_the_operation_contract(
         (invites.revoke_invite, "session.scalar("),
     ],
 )
-def test_remote_proxy_admission_precedes_local_authority_checks(
+async def test_remote_proxy_admission_precedes_local_authority_checks(
     route: object,
     local_authority_call: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = inspect.getsource(route)
+    from typing import get_type_hints
 
-    assert source.index("proxy_remote_guild_management(") < source.index(local_authority_call)
+    module = inspect.getmodule(route)
+    assert module is not None
+    denied = HTTPException(status_code=409, detail={"code": "REMOTE_AUTHORITY_CONFLICT"})
+    proxy = AsyncMock(side_effect=denied)
+    monkeypatch.setattr(module, "proxy_remote_guild_management", proxy)
+    local = AsyncMock(side_effect=AssertionError("local authority lookup before remote admission"))
+    session = SimpleNamespace(scalar=local, get=local, execute=local, scalars=local)
+    if not local_authority_call.startswith("session."):
+        monkeypatch.setattr(module, local_authority_call.removesuffix("("), local)
+    if route is invites.create_invite:
+        monkeypatch.setattr(invites, "enforce_client_rate_limit", AsyncMock())
+    auth = SimpleNamespace(user=local_actor())
+    settings = SimpleNamespace(domain="local.example")
+    values = dict(
+        guild_id=EntityRef("10@home.example"),
+        guild_ref=EntityRef("10@home.example"),
+        channel_id=EntityRef("20@home.example"),
+        role_id=EntityRef("30@home.example"),
+        user_id=EntityRef("8@remote.example"),
+        target_id=EntityRef("30@home.example"),
+        target_type="role",
+        instance_domain="blocked.example",
+        code="Abcd1234@home.example",
+        auth=auth,
+        session=session,
+        settings=settings,
+        redis=SimpleNamespace(),
+        snowflake=SimpleNamespace(),
+        response=Response(),
+        reason=None,
+        header_reason=None,
+        if_match=None,
+        limit=50,
+        after=None,
+    )
+    parameters = inspect.signature(route).parameters
+    if "payload" in parameters:
+        payload_type = get_type_hints(route)["payload"]
+        values["payload"] = payload_type.model_construct(
+            name="Example",
+            owner_id=EntityRef("8@remote.example"),
+            target_id=EntityRef("30@home.example"),
+            target_type="role",
+            role_ids=[],
+            target_user_ids=[],
+            channels=[],
+            roles=[],
+        )
+    with pytest.raises(HTTPException) as result:
+        await route(**{name: values[name] for name in parameters})
+    assert result.value is denied
+    proxy.assert_awaited_once()
+    assert proxy.await_args.args[:4] == (session, settings, EntityRef("10@home.example"), auth.user)
+    local.assert_not_awaited()
 
 
 def test_signed_management_resource_ids_and_timing_reject_json_booleans() -> None:
@@ -1201,57 +1283,120 @@ async def test_remote_bot_management_revalidates_exact_active_installation(
     operation: str,
     granted_scopes: list[str],
     granted_permissions: Permission,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import BotApplication, BotApplicationTarget, BotInstallation
+    from app.db.models import GuildMember
+
+    for table in (
+        "guilds",
+        "users",
+        "guild_members",
+        "bot_applications",
+        "bot_application_targets",
+        "bot_installations",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
     guild = Guild(
         id=10,
         origin_domain="home.example",
         name="Guild",
         owner_id=7,
         owner_domain="home.example",
+        unavailable=False,
     )
     actor = User(
         id=8,
         origin_domain="remote.example",
-        username="status-bot",
+        username="statusbot",
         is_local=False,
         account_type="bot",
     )
-    member = SimpleNamespace()
-    installation = SimpleNamespace(
+    member = GuildMember(
+        guild_id=10, guild_domain="home.example", user_id=8, user_domain="remote.example"
+    )
+    app = BotApplication(
+        id=20,
+        origin_domain="remote.example",
+        bot_user_id=8,
+        bot_user_domain="remote.example",
+        status="active",
+        manifest_generation=1,
+        revocation_generation=1,
+    )
+    target = BotApplicationTarget(
+        application_id=20,
+        application_domain="remote.example",
+        target_domain="home.example",
+        runtime_manifest_generation=1,
+        runtime_revocation_generation=1,
+        runtime_status="active",
+        runtime_target_allowed=True,
+        runtime_fingerprint=b"a" * 32,
+    )
+    attributes = dict(
+        application_id=20,
+        application_domain="remote.example",
+        guild_id=10,
+        guild_domain="home.example",
+        bot_user_id=8,
+        bot_user_domain="remote.example",
+        status="active",
+        revoked_at=None,
         granted_scopes=granted_scopes,
         granted_permissions=int(granted_permissions),
     )
-    session = SimpleNamespace(
-        get=AsyncMock(side_effect=[guild, actor, member]),
-        scalars=AsyncMock(return_value=[installation]),
-    )
-    consumed = AsyncMock()
-    monkeypatch.setattr(guild_management_rpc, "consume_management_request_once", consumed)
+    installed = BotInstallation(id=1, **attributes)
+    from datetime import UTC, datetime
 
-    resolved_guild, resolved_actor = await authorize_guild_management_request(
-        cast(Any, session),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
-        FederationPrincipal(origin="remote.example", key_id="main"),
-        10,
-        management_request(operation, {"resource_id": 20, "data": {}}),
-    )
-
-    assert resolved_guild is guild
-    assert resolved_actor is actor
-    session.scalars.assert_awaited_once()
-    statement = session.scalars.await_args.args[0]
-    compiled = statement.compile()
-    sql = str(compiled)
-    assert "bot_installations.status" in sql
-    assert "bot_installations.revoked_at IS NULL" in sql
-    assert "bot_installations.bot_user_id" in sql
-    assert "bot_installations.bot_user_domain" in sql
-    assert "bot_applications.bot_user_id" in sql
-    assert "bot_application_targets.runtime_fingerprint IS NOT NULL" in sql
-    assert "bot_application_targets.runtime_target_allowed IS true" in sql
-    assert "active" in compiled.params.values()
-    assert 8 in compiled.params.values()
+    distractors = [
+        BotInstallation(id=identifier, **(attributes | overrides))
+        for identifier, overrides in enumerate(
+            (
+                {"status": "suspended"},
+                {"revoked_at": datetime.now(UTC)},
+                {"guild_id": 11},
+                {"guild_domain": "other.example"},
+                {"bot_user_id": 9},
+                {"bot_user_domain": "other.example"},
+                {"application_id": 21},
+                {"application_domain": "other.example"},
+            ),
+            2,
+        )
+    ]
+    monkeypatch.setattr(guild_management_rpc, "consume_management_request_once", AsyncMock())
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all([guild, actor, member, app, target, installed, *distractors])
+        await session.flush()
+        args = (
+            session,
+            SimpleNamespace(),
+            SimpleNamespace(domain="home.example"),
+            FederationPrincipal(origin="remote.example", key_id="main"),
+            10,
+            management_request(operation, {"resource_id": 20, "data": {}}),
+        )
+        assert await authorize_guild_management_request(*args) == (guild, actor)
+        for field, value in (
+            ("status", "suspended"),
+            ("runtime_target_allowed", False),
+            ("runtime_fingerprint", None),
+        ):
+            owner = installed if field == "status" else target
+            original = getattr(owner, field)
+            setattr(owner, field, value)
+            await session.flush()
+            with pytest.raises(HTTPException) as denied:
+                await authorize_guild_management_request(*args)
+            assert denied.value.detail == {"code": "BOT_INSTALLATION_NOT_FOUND"}
+            setattr(owner, field, original)
+            await session.flush()
 
 
 @pytest.mark.asyncio
@@ -1937,6 +2082,18 @@ async def test_scheduled_event_subscription_dispatch_uses_the_selected_authority
     assert str(subscribe.await_args.args[1]) == "42@home.example"
     assert subscribe.await_args.args[2].user is actor
 
+    request.operation = "scheduled_event.unsubscribe"
+    assert await management_api._dispatch_scheduled_event_subscription(
+        request,
+        actor,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace(domain="home.example")),
+    ) == (204, None)
+    assert tuple(str(arg) for arg in unsubscribe.await_args.args[:2]) == ("10", "42@home.example")
+    assert unsubscribe.await_args.args[2].user is actor
+    subscribe.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_guild_lifecycle_authority_dispatch_reuses_the_local_service(
@@ -1953,18 +2110,37 @@ async def test_guild_lifecycle_authority_dispatch_reuses_the_local_service(
         },
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_guild_core(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, {"id": "10", "name": "Renamed"})
     update.assert_awaited_once()
     assert update.await_args.args[-2:] == ("version", "federated rename")
+    update.assert_awaited_once()
+    args = update.await_args.args
+    assert args[2].user is actor
+    assert args[3:] == (
+        session,
+        redis,
+        snowflake,
+        settings,
+        "version",
+        "federated rename",
+    )
+    assert str(args[0]) == "10"
+    assert args[1].name == "Renamed"
+    assert update.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -1987,19 +2163,40 @@ async def test_channel_overwrite_authority_dispatch_reuses_the_local_service(
         },
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_channel_core(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, {"status": "updated"})
     put.assert_awaited_once()
     assert str(put.await_args.args[1]) == "20@home.example"
     assert str(put.await_args.args[2].target_id) == "8@remote.example"
+    put.assert_awaited_once()
+    args = put.await_args.args
+    assert args[3].user is actor
+    assert args[4:] == (
+        session,
+        redis,
+        snowflake,
+        settings,
+        "parity",
+    )
+    assert str(args[0]) == "10"
+    assert str(args[1]) == "20@home.example"
+    assert args[2].target_type == "member"
+    assert str(args[2].target_id) == "8@remote.example"
+    assert int(args[2].allow) == int(args[2].deny) == 0
+    assert put.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2055,17 +2252,35 @@ async def test_channel_delete_authority_dispatch_returns_deleted_channel(
         },
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_channel_core(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, deleted)
     assert delete.await_args.args[-1] == "federated cleanup"
+    delete.assert_awaited_once()
+    args = delete.await_args.args
+    assert args[2].user is actor
+    assert args[3:] == (
+        session,
+        redis,
+        snowflake,
+        settings,
+        "federated cleanup",
+    )
+    assert str(args[0]) == "10"
+    assert str(args[1]) == "20@home.example"
+    assert delete.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2079,13 +2294,18 @@ async def test_role_authority_dispatch_preserves_create_status(
         {"data": {"name": "Member", "permissions": "0"}},
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_roles(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (
@@ -2093,6 +2313,20 @@ async def test_role_authority_dispatch_preserves_create_status(
         {"id": "30", "name": "Member"},
     )
     create.assert_awaited_once()
+    create.assert_awaited_once()
+    args = create.await_args.args
+    assert args[2].user is actor
+    assert args[3:] == (
+        session,
+        redis,
+        snowflake,
+        settings,
+        None,
+    )
+    assert str(args[0]) == "10"
+    assert args[1].name == "Member"
+    assert int(args[1].permissions) == 0
+    assert create.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2106,19 +2340,36 @@ async def test_member_ban_authority_dispatch_preserves_private_collection(
         {"limit": 25, "after": "9@remote.example"},
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_members(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, [{"user": {"id": "9"}}])
     list_service.assert_awaited_once()
     assert list_service.await_args.args[1] == 25
     assert str(list_service.await_args.args[2]) == "9@remote.example"
+    list_service.assert_awaited_once()
+    args = list_service.await_args.args
+    assert args[3].user is actor
+    assert args[4:] == (
+        session,
+        redis,
+        settings,
+    )
+    assert str(args[0]) == "10"
+    assert args[1] == 25
+    assert str(args[2]) == "9@remote.example"
+    assert list_service.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2132,18 +2383,34 @@ async def test_instance_ban_authority_dispatch_preserves_private_collection(
         {"limit": 25, "after": "alpha.example"},
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_instance_bans(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, [{"domain": "blocked.example"}])
     list_service.assert_awaited_once()
     assert list_service.await_args.args[2] == "alpha.example"
+    list_service.assert_awaited_once()
+    args = list_service.await_args.args
+    assert args[3].user is actor
+    assert args[4:] == (
+        session,
+        redis,
+        settings,
+    )
+    assert str(args[0]) == "10"
+    assert args[1:3] == (25, "alpha.example")
+    assert list_service.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2158,13 +2425,18 @@ async def test_invite_revoke_authority_binds_the_requested_guild(
         {"code": "Abcd1234", "reason": "federated cleanup"},
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_invites(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, deleted)
@@ -2172,6 +2444,19 @@ async def test_invite_revoke_authority_binds_the_requested_guild(
     assert revoke.await_args.args[0] == "Abcd1234"
     assert str(revoke.await_args.args[1]) == "10"
     assert revoke.await_args.args[-1] == "federated cleanup"
+    revoke.assert_awaited_once()
+    args = revoke.await_args.args
+    assert args[2].user is actor
+    assert args[3:] == (
+        session,
+        redis,
+        snowflake,
+        settings,
+        "federated cleanup",
+    )
+    assert args[0] == "Abcd1234"
+    assert str(args[1]) == "10"
+    assert revoke.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2183,19 +2468,35 @@ async def test_invite_get_dispatches_at_the_bound_guild_authority(
     monkeypatch.setattr(invites, "get_managed_invite", get_invite)
     request = management_request("invite.get", {"code": "Abcd1234"})
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_invites(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, fetched)
     get_invite.assert_awaited_once()
     assert str(get_invite.await_args.args[0]) == "10"
     assert get_invite.await_args.args[1] == "Abcd1234"
+    get_invite.assert_awaited_once()
+    args = get_invite.await_args.args
+    assert args[2].user is actor
+    assert args[3:] == (
+        session,
+        redis,
+        settings,
+    )
+    assert str(args[0]) == "10"
+    assert args[1] == "Abcd1234"
+    assert get_invite.await_args.kwargs == {}
 
 
 def test_invite_get_management_result_binds_requested_code() -> None:
@@ -2290,7 +2591,7 @@ def test_scheduled_event_response_rejects_foreign_nested_resource_authority(
     assert invalid.value.status_code == 502
 
 
-def test_invite_revoke_management_result_requires_deleted_invite_body() -> None:
+def test_required_invite_response_body() -> None:
     deleted = federated_invite_payload()
     request = management_request("invite.revoke", {"code": "Abcd1234"})
 
@@ -2345,18 +2646,33 @@ async def test_channel_invite_list_dispatch_preserves_qualified_channel(
         {"channel_ref": "20@home.example"},
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_invites(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, [{"code": "Abcd1234"}])
     listed.assert_awaited_once()
     assert str(listed.await_args.args[0]) == "20@home.example"
+    listed.assert_awaited_once()
+    args = listed.await_args.args
+    assert args[1].user is actor
+    assert args[2:] == (
+        session,
+        redis,
+        settings,
+    )
+    assert str(args[0]) == "20@home.example"
+    assert listed.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -2382,13 +2698,18 @@ async def test_targeted_invite_update_dispatches_at_guild_authority(
         },
     )
 
+    actor = human_actor()
+    session = SimpleNamespace(label="session")
+    redis = SimpleNamespace(label="redis")
+    snowflake = SimpleNamespace(label="snowflake")
+    settings = SimpleNamespace(domain="home.example")
     result = await management_api._dispatch_invites(
         request,
-        human_actor(),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace()),
-        cast(Any, SimpleNamespace(domain="home.example")),
+        actor,
+        session,
+        redis,
+        snowflake,
+        settings,
     )
 
     assert (result.status_code, result.body) == (200, job)
@@ -2397,3 +2718,16 @@ async def test_targeted_invite_update_dispatches_at_guild_authority(
     assert update.await_args.args[1] == ["8@remote.example"]
     assert str(update.await_args.args[2]) == "10"
     assert update.await_args.args[-1] == "federated allowlist refresh"
+    update.assert_awaited_once()
+    args = update.await_args.args
+    assert args[3].user is actor
+    assert args[4:] == (
+        session,
+        redis,
+        snowflake,
+        settings,
+        "federated allowlist refresh",
+    )
+    assert args[0:2] == ("Abcd1234", ["8@remote.example"])
+    assert str(args[2]) == "10"
+    assert update.await_args.kwargs == {}

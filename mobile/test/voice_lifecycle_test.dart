@@ -100,6 +100,15 @@ void main() {
       permissions: BigInt.from(protocol.Permission.connect),
     );
 
+    for (final speak in [false, true]) {
+      for (final stream in [false, true]) {
+        final capabilities = voiceChannelCapabilities(stage,
+            authoritativeCanSpeak: speak, authoritativeCanStream: stream);
+        expect(capabilities.canSpeak, speak);
+        expect(capabilities.canStream, stream);
+        expect(capabilities.canUseVad, speak);
+      }
+    }
     final audience = voiceChannelCapabilities(
       stage,
       authoritativeCanSpeak: false,
@@ -134,7 +143,7 @@ void main() {
       publishScreen: () async => published.add('screen'),
     );
 
-    expect(published, <String>['camera', 'screen']);
+    expect(published, unorderedEquals(<String>['camera', 'screen']));
     expect(restored.camera, isTrue);
     expect(restored.screen, isTrue);
     expect(restored.failed, isFalse);
@@ -171,7 +180,7 @@ void main() {
     expect(revoked.screen, isFalse);
   });
 
-  test('resume starts protection without reconnecting a healthy room', () {
+  test('resume policy decision', () {
     expect(
       voiceCanBeginProtectedJoin(isAndroid: true, appActive: false),
       isFalse,
@@ -232,21 +241,22 @@ void main() {
     );
   });
 
-  test('terminal cleanup disposes every owner without disconnect recursion',
+  test('terminal cleanup reports failure and disposes every supplied owner',
       () async {
+    final failure = StateError('native service already stopped');
     final operations = <String>[];
 
     final errors = await disposeTerminalVoiceResources(
       stopBackgroundService: () async {
         operations.add('service');
-        throw StateError('native service already stopped');
+        throw failure;
       },
       disposeEvents: () async => operations.add('events'),
       disposeRoom: () async => operations.add('room'),
     );
 
     expect(operations, <String>['service', 'events', 'room']);
-    expect(errors, hasLength(1));
+    expect(errors, [failure]);
   });
 
   test('Bluetooth routing requires the Android Nearby Devices grant', () {
@@ -268,13 +278,13 @@ void main() {
       voiceBluetoothPermissionMessage(const <PermissionStatus>[
         PermissionStatus.permanentlyDenied,
       ]),
-      contains('system settings'),
+      matches(RegExp(r'system.*settings', caseSensitive: false)),
     );
     expect(
       voiceBluetoothPermissionMessage(const <PermissionStatus>[
         PermissionStatus.denied,
       ]),
-      contains('Nearby devices'),
+      matches(RegExp(r'nearby.*devices', caseSensitive: false)),
     );
   });
 

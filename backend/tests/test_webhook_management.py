@@ -37,7 +37,6 @@ from app.api.webhooks import (
     require_webhook_message_thread,
     store_webhook_token,
     token_digest,
-    validate_webhook_components_v2_body,
     validate_webhook_thread_target,
     webhook_bot_installation,
     webhook_execution_components,
@@ -121,7 +120,7 @@ async def test_bot_webhook_avatar_ticket_requires_attachment_write_scope(
 
 
 @pytest.mark.asyncio
-async def test_bot_webhook_avatar_commit_rechecks_attachment_ownership_and_scope(
+async def test_owned_attachment_guard_delegation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     installation = SimpleNamespace()
@@ -176,7 +175,7 @@ async def test_bot_webhook_avatar_commit_rechecks_attachment_ownership_and_scope
     commit_avatar.assert_not_awaited()
 
 
-def test_webhook_patch_cleans_name_and_requires_a_destination() -> None:
+def test_name_cleanup_and_null_field_validation() -> None:
     payload = WebhookPatch(name="  Release relay  ", channel_id="15@chat.example")
 
     assert payload.name == "Release relay"
@@ -346,22 +345,6 @@ def test_application_webhooks_always_honor_components() -> None:
     )
 
 
-def test_components_v2_webhook_execute_rejects_attachments() -> None:
-    with pytest.raises(HTTPException) as raised:
-        validate_webhook_components_v2_body(
-            flags=1 << 15,
-            content=None,
-            embeds=[],
-            components=[{"type": 10, "content": "Release ready"}],
-            attachment_ids=[41],
-            poll=None,
-            sticker_ids=[],
-        )
-
-    assert raised.value.status_code == 400
-    assert raised.value.detail == {"code": "COMPONENTS_V2_BODY_INVALID"}
-
-
 @pytest.mark.parametrize(
     ("channel_type", "has_thread_id", "thread_name", "applied_tags", "code"),
     [
@@ -392,24 +375,38 @@ def test_webhook_thread_fields_match_the_destination_contract(
 
 
 @pytest.mark.asyncio
-async def test_webhook_capacity_counts_incoming_and_both_follower_kinds() -> None:
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[10, 4, 20, 3, 30, 2]),
-    )
+async def test_webhook_capacity_counts_incoming_and_both_follower_kinds(postgres_schema) -> None:
+    from sqlalchemy import text
+
+    connection = postgres_schema
+    # Only columns read by the capacity queries are needed; this tests selection, not DDL.
+    for statement in (
+        "CREATE TABLE channels (id bigint, origin_domain text, guild_id bigint, guild_domain text)",
+        "CREATE TABLE webhooks (guild_id bigint, guild_domain text, channel_id bigint, "
+        "channel_domain text, revoked_at timestamptz)",
+        "CREATE TABLE channel_follows (target_channel_id bigint, target_channel_domain "
+        "text, active boolean)",
+        "CREATE TABLE federated_channel_follows (target_channel_id bigint, "
+        "target_channel_domain text, active boolean, local_role text)",
+        "INSERT INTO channels VALUES (13, 'chat.example', 11, 'chat.example'), (14, "
+        "'chat.example', 11, 'chat.example'), (15, 'chat.example', 12, 'chat.example'), "
+        "(13, 'other.example', 11, 'other.example')",
+        "INSERT INTO webhooks VALUES (11, 'chat.example', 13, 'chat.example', NULL), (11, "
+        "'chat.example', 14, 'chat.example', NULL), (11, 'chat.example', 13, "
+        "'chat.example', now()), (12, 'chat.example', 15, 'chat.example', NULL), (11, "
+        "'other.example', 13, 'other.example', NULL)",
+        "INSERT INTO channel_follows VALUES (13, 'chat.example', true), (13, "
+        "'chat.example', true), (14, 'chat.example', true), (13, 'chat.example', false), "
+        "(15, 'chat.example', true), (13, 'other.example', true)",
+        "INSERT INTO federated_channel_follows VALUES (13, 'chat.example', true, 'target'), "
+        "(14, 'chat.example', true, 'target'), (13, 'chat.example', true, 'source'), (13, "
+        "'chat.example', false, 'target'), (15, 'chat.example', true, 'target'), (13, "
+        "'other.example', true, 'target')",
+    ):
+        await connection.execute(text(statement))
     guild = SimpleNamespace(id=11, origin_domain="chat.example")
     channel = SimpleNamespace(id=13, origin_domain="chat.example")
-
-    counts = await webhook_capacity_counts(
-        session,  # type: ignore[arg-type]
-        guild,  # type: ignore[arg-type]
-        channel,  # type: ignore[arg-type]
-    )
-
-    assert counts == (60, 9)
-    statements = [str(call.args[0]) for call in session.scalar.await_args_list]
-    assert sum("webhooks" in statement for statement in statements) == 2
-    assert sum("channel_follows" in statement for statement in statements) == 4
-    assert any("local_role" in statement for statement in statements)
+    assert await webhook_capacity_counts(connection, guild, channel) == (7, 4)
 
 
 @pytest.mark.asyncio
@@ -679,7 +676,7 @@ async def test_bot_webhook_get_passes_the_authority_qualified_resource(
 
 
 @pytest.mark.asyncio
-async def test_bot_manage_create_receives_fresh_execution_credential(
+async def test_authority_credential_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created = {
@@ -956,6 +953,7 @@ async def test_follower_webhook_payload_is_type_two_and_hides_inaccessible_sourc
 @pytest.mark.asyncio
 async def test_clean_webhook_avatar_rebinds_and_updates_historical_defaults(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
     old_hash = "a" * 64
     new_hash = "b" * 64
@@ -969,7 +967,23 @@ async def test_clean_webhook_avatar_rebinds_and_updates_historical_defaults(
         detected_content_type="image/png",
     )
     previous = SimpleNamespace(id=40, origin_domain="chat.example")
-    session = SimpleNamespace(execute=AsyncMock())
+    from sqlalchemy import text
+
+    session = postgres_schema
+    await session.execute(
+        text(
+            "CREATE TABLE messages (id bigint, webhook_id bigint, webhook_domain text, "
+            "webhook_avatar_hash text, updated_at timestamptz)"
+        )
+    )
+    await session.execute(
+        text(
+            "INSERT INTO messages VALUES (1, 7, 'chat.example', :old, now()), (2, 7, "
+            "'chat.example', :new, now()), (3, 8, 'chat.example', :old, now()), (4, 7, "
+            "'other.example', :old, now()), (5, 7, 'chat.example', :custom, now())"
+        ),
+        {"old": old_hash, "new": new_hash, "custom": "c" * 64},
+    )
     bind = AsyncMock(return_value=previous)
     monkeypatch.setattr("app.api.webhooks.finalize_attachment", AsyncMock(return_value=attachment))
     monkeypatch.setattr("app.api.webhooks.bind_asset", bind)
@@ -995,13 +1009,13 @@ async def test_clean_webhook_avatar_rebinds_and_updates_historical_defaults(
     assert item.avatar_hash == new_hash
     assert attachment.asset_binding is None
     assert bind.await_args.args[2] == "webhook:chat.example:7:avatar"
-    statement = str(session.execute.await_args.args[0])
-    assert "messages.webhook_id" in statement
-    assert "messages.webhook_avatar_hash" in statement
+    assert (
+        await session.execute(text("SELECT id, webhook_avatar_hash FROM messages ORDER BY id"))
+    ).all() == [(1, new_hash), (2, new_hash), (3, old_hash), (4, old_hash), (5, "c" * 64)]
 
 
 @pytest.mark.asyncio
-async def test_pending_webhook_avatar_is_durable_and_queues_processing(
+async def test_pending_avatar_commit_and_processing_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = webhook()
@@ -1069,16 +1083,19 @@ async def test_channel_move_publishes_source_and_destination_updates(
     await publish_webhook_update(SimpleNamespace(), item, previous_channel_id=13)  # type: ignore[arg-type]
 
     assert publish.await_count == 2
-    assert publish.await_args_list[0].args[2:] == (
-        "WEBHOOKS_UPDATE",
-        {
-            "guild_id": "11",
-            "guild_domain": "chat.example",
-            "channel_id": "13",
-            "channel_domain": "chat.example",
-        },
-    )
-    assert publish.await_args_list[1].args[3]["channel_id"] == "15"
+    updates = {call.args[3]["channel_id"]: call.args[2:] for call in publish.await_args_list}
+    assert updates == {
+        channel_id: (
+            "WEBHOOKS_UPDATE",
+            {
+                "guild_id": "11",
+                "guild_domain": "chat.example",
+                "channel_id": channel_id,
+                "channel_domain": "chat.example",
+            },
+        )
+        for channel_id in ("13", "15")
+    }
 
 
 @pytest.mark.asyncio
@@ -1182,6 +1199,23 @@ async def test_shared_message_deletion_converges_thread_media_and_federation(
         "THREAD_UPDATE",
     ]
     assert enqueue.await_count == 2
+
+    from app.tasks import federation_deliver, media_local_purge
+
+    assert tombstones.await_args.args[3:] == (actor, [message])
+    assert [(call.args[0], call.args[1:]) for call in enqueue.await_args_list] == [
+        (media_local_purge, (41, "chat.example")),
+        (federation_deliver, ("remote.example",)),
+    ]
+    assert all(
+        call.args[2:4] == (guild, actor) and call.kwargs == {"channel": thread}
+        for call in queue_mutation.await_args_list
+    )
+    assert queue_mutation.await_args_list[0].args[5]["message"] == {
+        "id": "90",
+        "origin_domain": "chat.example",
+    }
+    assert queue_mutation.await_args_list[1].args[5] == {"channel": {"id": "13"}}
 
 
 @pytest.mark.asyncio

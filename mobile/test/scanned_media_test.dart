@@ -1,10 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/scanned_media.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 
 void main() {
-  test('scanned resource retries the authority-scoped commit operation',
-      () async {
+  test('retrying supplied resource commit', () async {
     var calls = 0;
     final result = await completeScannedMediaResource<String>(
       commit: () async {
@@ -29,7 +29,7 @@ void main() {
     expect(calls, 3);
   });
 
-  test('simple scanned media also retries only its qualified commit', () async {
+  test('simple scanned-media commit retry', () async {
     var calls = 0;
     final result = await commitScannedMedia(
       commit: () async {
@@ -47,5 +47,58 @@ void main() {
 
     expect(result['name'], 'ready');
     expect(calls, 3);
+  });
+  test('clean media commits once', () async {
+    var calls = 0;
+    final result = await commitScannedMedia(
+      commit: () async {
+        calls += 1;
+        return <String, Object?>{'scan_status': 'clean'};
+      },
+      pollInterval: Duration.zero,
+    );
+    expect(result['scan_status'], 'clean');
+    expect(calls, 1);
+  });
+
+  test('scan helpers reject unsafe media and bound pending retries', () async {
+    for (final resource in [false, true]) {
+      for (final status in ['rejected', 'infected', 'failed', 'pending']) {
+        var calls = 0;
+        Future<Map<String, Object?>> commit() async {
+          calls += 1;
+          return resource
+              ? <String, Object?>{
+                  'attachment': {'scan_status': status}
+                }
+              : <String, Object?>{'scan_status': status};
+        }
+
+        final operation = resource
+            ? completeScannedMediaResource<Map<String, Object?>>(
+                commit: commit,
+                isComplete: (json) => json['id'] != null,
+                parse: (json) => json,
+                pollInterval: Duration.zero,
+                maxPollAttempts: 2,
+              )
+            : commitScannedMedia(
+                commit: commit,
+                pollInterval: Duration.zero,
+                maxPollAttempts: 2,
+              );
+        await expectLater(
+          operation,
+          throwsA(isA<KaedeException>().having(
+            (error) => error.code,
+            'code',
+            status == 'pending'
+                ? 'MEDIA_PROCESSING_TIMEOUT'
+                : 'MEDIA_PROCESSING_REJECTED',
+          )),
+        );
+        expect(calls, status == 'pending' ? 2 : 1);
+      }
+    }
   });
 }

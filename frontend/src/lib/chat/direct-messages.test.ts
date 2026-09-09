@@ -55,7 +55,7 @@ function channel(overrides: Partial<Channel> = {}): Channel {
 }
 
 describe('direct-message presentation', () => {
-  it('uses the other participant for a direct-message title', () => {
+  it('single-recipient direct-message title', () => {
     expect(dmTitle(channel())).toBe('Turtle');
   });
 
@@ -69,7 +69,7 @@ describe('direct-message presentation', () => {
     });
     expect(isGroupDm(group)).toBe(true);
     expect(dmTitle(group)).toBe('Weekend plans');
-    expect(groupDmSubtitle(group)).toBe('3 members');
+    expect(groupDmSubtitle(group)).toMatch(/\b3\b/);
     expect(ownsGroupDm(group, self)).toBe(true);
   });
 

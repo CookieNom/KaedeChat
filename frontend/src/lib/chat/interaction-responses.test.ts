@@ -306,14 +306,24 @@ describe('interaction response state', () => {
   it('rejects malformed exact-wire projections before state or MLS processing', async () => {
     const decrypt = vi.fn(async () => ({ context: {} as never, data: { content: 'no' } }));
     registerEncrypted(decrypt as KaedeE2EEClient['decryptInteractionResponse']);
+    const encrypted = {
+      ephemeral: true,
+      data: { e2ee: { ciphertext: 'opaque' }, attachments: [] }
+    };
+    interactionResponses.apply('INTERACTION_RESPONSE_CREATE', responseEvent('CREATE', encrypted));
+    await settle();
+    expect(decrypt).toHaveBeenCalledOnce();
+    interactionResponses.reset();
+    registerEncrypted(decrypt as KaedeE2EEClient['decryptInteractionResponse']);
+    decrypt.mockClear();
     const malformed = [
-      responseEvent('CREATE', { unexpected: true }),
-      responseEvent('CREATE', { response_grant_id: 'not-a-grant' }),
-      responseEvent('CREATE', { callback_type: 8, autocomplete_generation: null }),
-      responseEvent('CREATE', { message_ref: '9@other.example' }),
-      responseEvent('CREATE', { sequence: Number.MAX_SAFE_INTEGER + 1 }),
-      responseEvent('UPDATE', { revision: '1' }),
-      responseEvent('CREATE', { data: [] })
+      responseEvent('CREATE', { ...encrypted, unexpected: true }),
+      responseEvent('CREATE', { ...encrypted, response_grant_id: 'not-a-grant' }),
+      responseEvent('CREATE', { ...encrypted, callback_type: 8, autocomplete_generation: null }),
+      responseEvent('CREATE', { ...encrypted, message_ref: '9@other.example' }),
+      responseEvent('CREATE', { ...encrypted, sequence: Number.MAX_SAFE_INTEGER + 1 }),
+      responseEvent('UPDATE', { ...encrypted, revision: '1' }),
+      responseEvent('CREATE', { ...encrypted, data: [] })
     ];
     for (const event of malformed) {
       interactionResponses.apply(
@@ -371,21 +381,27 @@ describe('interaction response state', () => {
     expect(JSON.stringify(interactionResponses.byResponse)).not.toContain('SECRET-CIPHERTEXT');
     expect(interactionResponses.response('10@c1.example')).toMatchObject({
       decryption_unavailable: true,
-      data: { content: 'This encrypted bot response is unavailable on this device.' }
+      data: { content: expect.stringMatching(/encrypted.*unavailable/i) }
     });
 
     interactionResponses.apply('INTERACTION_RESPONSE_CREATE', responseEvent('CREATE', encrypted));
     interactionResponses.apply(
       'INTERACTION_RESPONSE_UPDATE',
-      responseEvent('UPDATE', { ...encrypted, revision: '2' })
+      responseEvent('UPDATE', { ...encrypted, revision: '3' })
     );
     await settle();
     expect(decrypt).toHaveBeenCalledTimes(2);
     expect(interactionResponses.response('10@c1.example')?.data).toEqual({
       content: 'recovered'
     });
+    interactionResponses.apply(
+      'INTERACTION_RESPONSE_UPDATE',
+      responseEvent('UPDATE', { ...encrypted, revision: '2' })
+    );
+    await settle();
+    expect(decrypt).toHaveBeenCalledTimes(2);
+    expect(interactionResponses.response('10@c1.example')?.data).toEqual({ content: 'recovered' });
   });
-
   it('presents private controls only with matching server view lineage', async () => {
     interactionResponses.reset();
     const decrypt = vi.fn(async () => ({

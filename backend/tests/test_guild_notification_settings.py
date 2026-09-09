@@ -80,9 +80,10 @@ async def test_nonmember_cannot_read_guild_notification_settings() -> None:
 
 @pytest.mark.asyncio
 async def test_preference_write_locks_membership_before_insert() -> None:
-    scalar = AsyncMock(return_value=membership())
+    trace = []
+    scalar = AsyncMock(side_effect=lambda *_args: (trace.append("lock"), membership())[1])
     get = AsyncMock(return_value=None)
-    add = Mock()
+    add = Mock(side_effect=lambda *_args: trace.append("insert"))
     commit = AsyncMock()
     session = cast(
         AsyncSession,
@@ -104,3 +105,11 @@ async def test_preference_write_locks_membership_before_insert() -> None:
     assert inserted.level == "all"
     commit.assert_awaited_once()
     assert result["level"] == "all"
+
+    assert trace == ["lock", "insert"]
+    assert (inserted.user_id, inserted.user_domain, inserted.guild_id, inserted.guild_domain) == (
+        7,
+        DOMAIN,
+        10,
+        DOMAIN,
+    )

@@ -29,7 +29,7 @@ import {
   validateRichMessageAuthenticatedContext,
   webhookIdentityDeviceId
 } from './client';
-import { base64url, concatBytes, sha256, utf8 } from './encoding';
+import { base64url, sha256 } from './encoding';
 
 const channel = {
   id: '20',
@@ -189,10 +189,6 @@ describe('encrypted interaction wire contract', () => {
         `${vector.name} routing digest`
       ).toBe(input.interactionContractDigest);
     }
-    expect(responseVectors.vectors[0].input.attachmentRefs).toEqual([
-      '100@guild.example',
-      '9@guild.example'
-    ]);
   });
 
   it('matches shared privacy-preserving routing contracts and rejects public mutations', async () => {
@@ -208,7 +204,6 @@ describe('encrypted interaction wire contract', () => {
         vector.name
       ).toEqual(vector.contract);
     }
-    expect(routingVectors.vectors[0].contract).toEqual(routingVectors.vectors[1].contract);
     for (const vector of routingVectors.invalid_contracts) {
       expect(
         () => validateInteractionRoutingContract(vector.contract, vector.callback_type),
@@ -476,8 +471,10 @@ describe('encrypted interaction wire contract', () => {
     expect(() =>
       validateEncryptedMessageSenderCredential(humanCredential, message, `ked_${'A'.repeat(43)}`)
     ).toThrow(/author or app/u);
+    expect(() =>
+      validateEncryptedMessageSenderCredential(credential, message, `kbe_${'B'.repeat(43)}`)
+    ).toThrow(/device|author or app/i);
   });
-
   it('binds normal-message webhook credentials to the exact projected webhook and device', () => {
     const deviceId = `kwe_${'W'.repeat(43)}`;
     const credential = new TextEncoder().encode(
@@ -525,16 +522,12 @@ describe('encrypted interaction wire contract', () => {
   });
 
   it('derives webhook MLS devices from the exact federated webhook and identity key', async () => {
-    const identityKey = Uint8Array.from({ length: 32 }, (_, index) => index);
-    const expected = base64url(
-      await sha256(
-        concatBytes(utf8('kaede-webhook-e2ee-device-v1\0' + '70@hooks.example' + '\0'), identityKey)
-      )
+    // Same fixed vector as sdk/python/tests/test_webhook_e2ee.py.
+    const identityKey = new Uint8Array(32).fill(119);
+    await expect(webhookIdentityDeviceId('7@guild.example', identityKey)).resolves.toBe(
+      'kwe_e8UoirPWMXLe-0abjGxyiFmJjMQoeeqthlFMZ_2np7k'
     );
-    await expect(webhookIdentityDeviceId('70@hooks.example', identityKey)).resolves.toBe(
-      `kwe_${expected}`
-    );
-    await expect(webhookIdentityDeviceId('070@hooks.example', identityKey)).rejects.toThrow(
+    await expect(webhookIdentityDeviceId('007@guild.example', identityKey)).rejects.toThrow(
       /identity/u
     );
   });

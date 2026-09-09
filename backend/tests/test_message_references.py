@@ -84,14 +84,22 @@ def test_pin_projection_binds_message_channel_and_guild() -> None:
         )
         == reference
     )
-    with pytest.raises(ValueError, match="does not match"):
-        validate_message_reference_projection(
-            reference | {"guild_id": "3"},
-            message_type=6,
-            channel_ref=(5, "guild.example"),
-            guild_ref=(4, "guild.example"),
-            referenced_message_ref=(9, "guild.example"),
-        )
+    for mutation in (
+        {"guild_id": "3"},
+        {"guild_domain": "other.example"},
+        {"channel_id": "6"},
+        {"channel_domain": "other.example"},
+        {"message_id": "10"},
+        {"message_domain": "other.example"},
+    ):
+        with pytest.raises(ValueError, match="does not match"):
+            validate_message_reference_projection(
+                reference | mutation,
+                message_type=6,
+                channel_ref=(5, "guild.example"),
+                guild_ref=(4, "guild.example"),
+                referenced_message_ref=(9, "guild.example"),
+            )
 
 
 def test_follow_projection_retains_qualified_source_without_a_message_id() -> None:
@@ -218,8 +226,8 @@ def test_message_payload_prefers_the_persisted_reference() -> None:
         e2ee=None,
         message_type=6,
         flags=0,
-        referenced_message_id=9,
-        referenced_message_domain="guild.example",
+        referenced_message_id=99,
+        referenced_message_domain="fallback.example",
         message_reference=reference,
         mention_user_refs=[],
         mention_role_refs=[],

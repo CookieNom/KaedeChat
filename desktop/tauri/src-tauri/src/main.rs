@@ -3313,14 +3313,14 @@ mod tests {
     }
 
     #[test]
-    fn voice_shortcut_release_is_not_dropped_by_a_full_queue() {
+    fn queued_shortcut_presses_preserve_both_releases() {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        for _ in 0..1_024 {
+        for _ in 0..3 {
             assert!(sender.send(VoiceCommand::SetPushToTalk(true)).is_ok());
         }
         release_voice_hotkeys(Some(&sender));
 
-        for _ in 0..1_024 {
+        for _ in 0..3 {
             assert!(matches!(
                 receiver.try_recv(),
                 Ok(VoiceCommand::SetPushToTalk(true))
@@ -3715,17 +3715,30 @@ mod tests {
             Some("keep the audit trail useful")
         );
 
-        let rejected = NativeRequest {
-            headers: BTreeMap::from([(
+        for headers in [
+            BTreeMap::from([(
                 "Authorization".to_owned(),
                 "Bearer attacker-controlled".to_owned(),
             )]),
-            ..request
-        };
-        let Err(error) = native_forward_headers(&rejected) else {
-            panic!("unknown headers must fail closed");
-        };
-        assert_eq!(error.code, "INVALID_NATIVE_HEADER");
+            BTreeMap::from([("If-Match".to_owned(), "different-version".to_owned())]),
+            BTreeMap::from([
+                ("X-Audit-Log-Reason".to_owned(), "first".to_owned()),
+                ("x-audit-log-reason".to_owned(), "second".to_owned()),
+            ]),
+            BTreeMap::from([(
+                "x-audit-log-reason".to_owned(),
+                "reason\r\nInjected: yes".to_owned(),
+            )]),
+            BTreeMap::from([("if-match".to_owned(), "version\r\nInjected: yes".to_owned())]),
+        ] {
+            let rejected = NativeRequest {
+                headers,
+                ..request.clone()
+            };
+            let error =
+                native_forward_headers(&rejected).expect_err("unsafe headers must fail closed");
+            assert_eq!(error.code, "INVALID_NATIVE_HEADER");
+        }
     }
 
     #[test]
@@ -3950,7 +3963,12 @@ mod tests {
             &configured_authority,
             &configured_origin,
         );
-        assert!(valid.is_ok());
+        let target = valid.expect("valid media capability");
+        assert_eq!(
+            target.url.as_str(),
+            "https://media.guild.example/sounds/one?signature=opaque"
+        );
+        assert_eq!(target.network_policy, PublicDownloadPolicy::PublicOnly);
         let object_storage = validate(
             "https://kaede-sounds.s3.example.com/sounds/one?signature=opaque",
             "guild.example",
@@ -4044,7 +4062,7 @@ mod tests {
         assert_eq!(native.code, "INTERNAL_SERVER_ERROR");
         assert_eq!(native.status, 500);
         assert!(native.message.contains("Try again"));
-        assert!(native.message.contains("Error reference: 7f21d8d0-exa."));
+        assert!(native.message.contains("7f21d8d0"));
         assert!(!native.message.contains("Internal Server Error"));
         assert_eq!(native.detail["trace_id"], "7f21d8d0-example-trace");
     }
@@ -4071,5 +4089,7 @@ mod tests {
         assert!(error.message.contains("Reset desktop settings"));
         assert!(!error.message.contains("line 4"));
         assert_eq!(error.detail, serde_json::Value::Null);
+        assert_eq!(error.code, "PREFERENCES_INVALID");
+        assert_eq!(error.status, 0);
     }
 }

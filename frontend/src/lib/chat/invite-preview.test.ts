@@ -39,7 +39,10 @@ describe('invite destination', () => {
   it('opens the invited channel instead of the first channel', () => {
     const general = channel('10', 0);
     const invited = channel('11', 1);
-    expect(invitedChannel(guild([general, invited]), '11')).toBe(invited);
+    expect(invitedChannel(guild([general, invited]), '11')).toMatchObject({
+      id: invited.id,
+      origin_domain: invited.origin_domain
+    });
   });
 
   it('falls back safely when the invited channel is no longer visible', () => {
@@ -53,25 +56,23 @@ describe('invite destination', () => {
   });
 
   it('summarizes role, allowlist, stream, and event context without leaking identities', () => {
-    expect(
-      invitePreviewDetails({
-        code: 'Ab12Cd34',
-        guild: guild(),
-        channel_id: null,
-        expires_at: null,
-        uses: 2,
-        max_uses: 10,
-        role_ids: ['7@home.test'],
-        target_user_count: 1,
-        target_type: 'stream',
-        guild_scheduled_event: { name: 'Town hall' }
-      })
-    ).toEqual([
-      '8 uses remain',
-      'Grants 1 role',
-      'Limited invitation',
-      'Opens a Go Live stream',
-      'Event: Town hall'
-    ]);
+    const details = invitePreviewDetails({
+      code: 'Ab12Cd34',
+      guild: guild(),
+      channel_id: null,
+      expires_at: null,
+      uses: 2,
+      max_uses: 10,
+      role_ids: ['7@home.test'],
+      target_user_count: 1,
+      target_type: 'stream',
+      guild_scheduled_event: { name: 'Town hall' }
+    }).join(' ');
+    expect(details).toMatch(/8.*us/i);
+    expect(details).toMatch(/1.*role/i);
+    expect(details).toMatch(/limit/i);
+    expect(details).toMatch(/stream/i);
+    expect(details).toContain('Town hall');
+    expect(details).not.toContain('7@home.test');
   });
 });

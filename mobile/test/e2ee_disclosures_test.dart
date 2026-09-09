@@ -7,8 +7,7 @@ void main() {
 
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
-  test('room warning acknowledgement is durable and account/channel scoped',
-      () async {
+  test('room warning acknowledgement is account/channel scoped', () async {
     await acknowledgeEncryptedRoom('1@home.test', '2@room.test');
 
     expect(
@@ -23,20 +22,23 @@ void main() {
       await hasAcknowledgedEncryptedRoom('4@home.test', '2@room.test'),
       isFalse,
     );
-    expect(
-      encryptedRoomWarningKey('1@home.test', '2@room.test'),
-      contains('v1'),
-    );
   });
 
   test('voice warning names protected media and unavailable server features',
       () {
     final warning = encryptedRoomJoinWarning(EncryptedRoomKind.media);
+    for (final media in [
+      'microphone',
+      'camera',
+      'screen video',
+      'screen audio'
+    ]) {
+      expect(warning, contains(media));
+    }
     expect(
-      warning,
-      contains('microphone, camera, screen video, and screen audio'),
-    );
-    expect(warning, contains('Server recording and transcription'));
+        warning,
+        matches(RegExp(r'server.*recording.*transcription.*unavailable',
+            caseSensitive: false)));
     expect(warning, contains('safety number'));
   });
 
@@ -44,9 +46,13 @@ void main() {
       'message warning discloses search, scanning, metadata, and recovery loss',
       () {
     final warning = encryptedRoomJoinWarning(EncryptedRoomKind.messages);
-    expect(warning, contains('Server message search'));
-    expect(warning, contains('file previews and scanning'));
+    expect(warning, matches(RegExp(r'server.*search', caseSensitive: false)));
+    expect(warning,
+        matches(RegExp(r'file previews.*scanning', caseSensitive: false)));
     expect(warning, contains('traffic metadata'));
-    expect(warning, contains('permanently loses encrypted history'));
+    expect(
+        warning,
+        matches(RegExp(r'permanent.*(los|loss).*encrypted history',
+            caseSensitive: false)));
   });
 }

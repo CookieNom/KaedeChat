@@ -135,7 +135,7 @@ describe('application commands', () => {
     expect(commandCompletions(localized, 'mét', 'fr')[0]).toMatchObject({
       value: '/météo',
       label: '/météo',
-      detail: 'Météo actuelle · Poll Bot'
+      detail: expect.stringMatching(/Météo actuelle.*Poll Bot/)
     });
     expect(commandInvocation('/météo demain', localized, 'fr')).toEqual({
       command: localized[0],
@@ -202,7 +202,7 @@ describe('application commands', () => {
     ]);
   });
 
-  it('exposes the bounded string options needed by Discord-style command fields', () => {
+  it('exposed string option fields', () => {
     const thread = {
       ...commands[0],
       name: 'thread',
@@ -396,7 +396,7 @@ describe('application commands', () => {
     );
   });
 
-  it('retains bot-DM capability lineage in plaintext and encrypted requests', () => {
+  it('DM capability request identity construction', () => {
     const capability = parseApplicationCommands([
       {
         ...commands[0],

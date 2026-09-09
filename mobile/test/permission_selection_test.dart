@@ -24,8 +24,8 @@ void main() {
 
   test('permission masks project readable install metadata', () {
     expect(
-      selectedApplicationPermissions('3').map((item) => item.label),
-      ['Create invites', 'Kick members'],
+      selectedApplicationPermissions('3').map((item) => item.bit),
+      [1, 2],
     );
     expect(
       () => applicationPermissionMask('-1'),

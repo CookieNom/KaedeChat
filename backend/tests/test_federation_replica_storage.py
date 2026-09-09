@@ -55,7 +55,7 @@ def test_replica_ledger_tracks_history_import_control_rows() -> None:
     assert tracked["guild_history_import_channels"] == "channel"
 
 
-def test_replica_storage_reports_the_first_exceeded_scope() -> None:
+def test_guild_row_quota_rejection() -> None:
     configured = quota_settings()
     violation = replica_storage_quota_violation(
         configured,
@@ -154,7 +154,7 @@ async def test_replica_admission_rejects_the_atomic_batch_over_high_water() -> N
 
 
 @pytest.mark.asyncio
-async def test_replica_quota_pause_is_durable_and_operator_actionable() -> None:
+async def test_quota_pause_state_mutation() -> None:
     guild = remote_guild()
     session = cast(
         AsyncSession,
@@ -173,15 +173,6 @@ async def test_replica_quota_pause_is_durable_and_operator_actionable() -> None:
     assert guild.sync_error_code == REPLICA_QUOTA_ERROR_CODE
     assert "guild bytes high-water mark reached" in (guild.sync_error or "")
 
-
-@pytest.mark.asyncio
-async def test_identity_capacity_pause_keeps_only_a_safe_code_in_the_guild_payload() -> None:
-    guild = remote_guild()
-    session = cast(
-        AsyncSession,
-        SimpleNamespace(scalar=AsyncMock(return_value=guild)),
-    )
-
     assert await mark_replica_capacity_paused(
         session,
         cast(Any, SimpleNamespace(domain="local.example")),
@@ -196,25 +187,99 @@ async def test_identity_capacity_pause_keeps_only_a_safe_code_in_the_guild_paylo
 
 
 @pytest.mark.asyncio
-async def test_replica_reconciliation_repairs_parent_cascade_accounting() -> None:
-    session = cast(AsyncSession, SimpleNamespace(scalar=AsyncMock(return_value=None)))
+async def test_replica_reconciliation_repairs_parent_cascade_accounting(
+    postgres_schema, migrate_to
+) -> None:
+    from sqlalchemy import text
 
-    await reconcile_replica_storage(session, 42, "remote.example")
-
-    statements = [call.args[0] for call in session.scalar.await_args_list]  # type: ignore[attr-defined]
-    sql = [
-        str(
-            statement.compile(
-                dialect=postgresql.dialect(),
-                compile_kwargs={"literal_binds": True},
+    await migrate_to("head")
+    for statement in (
+        "INSERT INTO instances "
+        "(domain,is_self,current_key_id,encrypted_private_key,private_key_nonce) VALUES "
+        "('local.example',true,'main',decode(repeat('ab',32),'hex'),decode(repeat('cd',12),'h"
+        "ex')),('remote.example',false,NULL,NULL,NULL)",
+        "INSERT INTO users "
+        "(id,origin_domain,username,is_local,federation_introduced_by_domain) VALUES "
+        "(99,'remote.example','owner',false,'remote.example')",
+        "INSERT INTO guilds (id,origin_domain,name,owner_id,owner_domain) VALUES "
+        "(42,'remote.example','Remote',99,'remote.example')",
+        "INSERT INTO guild_members (guild_id,guild_domain,user_id,user_domain,joined_at) VALUES "
+        "(42,'remote.example',99,'remote.example',now())",
+        "INSERT INTO channels "
+        "(id,origin_domain,guild_id,guild_domain,type,name,created_floor_id) VALUES "
+        "(10,'remote.example',42,'remote.example',0,'removed',1),(11,'remote.example',42,'rem"
+        "ote.example',0,'retained',1)",
+        "INSERT INTO messages "
+        "(id,origin_domain,channel_id,channel_domain,author_id,author_domain,content) "
+        "VALUES "
+        "(100,'remote.example',10,'remote.example',99,'remote.example','removed'),(101,'remot"
+        "e.example',11,'remote.example',99,'remote.example','retained')",
+    ):
+        await postgres_schema.execute(text(statement))
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO reactions (message_id,message_domain,user_id,user_domain,emoji_key) "
+            "VALUES (100,'remote.example',99,'remote.example','🔥')"
+        )
+    )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        await reconcile_replica_storage(session, 42, "remote.example")
+        assert (
+            await session.scalar(
+                text("SELECT message_rows FROM federation_replica_usage WHERE guild_id=42")
+            )
+            == 2
+        )
+        await session.execute(
+            text("DELETE FROM messages WHERE id=100 AND origin_domain='remote.example'")
+        )
+        assert list(await session.scalars(text("SELECT id FROM messages"))) == [101]
+        # Model stale accounting left by a parent cascade or interrupted repair.
+        await session.execute(
+            text(
+                "UPDATE federation_replica_usage SET "
+                "message_rows=999,message_bytes=999999,reaction_rows=999,reaction_bytes=999999 "
+                "WHERE guild_id=42"
             )
         )
-        for statement in statements
-    ]
-    assert any("kaede_reconcile_replica_usage(42, 'remote.example')" in item for item in sql)
-    assert any(
-        "kaede_reconcile_tracker_replica_usage(42, 'remote.example')" in item for item in sql
-    )
+        await reconcile_replica_storage(session, 42, "remote.example")
+        counts = (
+            await session.execute(
+                text(
+                    "SELECT "
+                    "message_rows,reaction_rows,member_rows,attachment_rows,projection_rows "
+                    "FROM federation_replica_usage WHERE guild_id=42 AND "
+                    "guild_domain='remote.example'"
+                )
+            )
+        ).one()
+        assert counts == (1, 0, 1, 0, 0)
+        assert (
+            await session.scalar(
+                text("SELECT message_bytes FROM federation_replica_usage WHERE guild_id=42")
+            )
+            > 0
+        )
+        before = (
+            await session.execute(
+                text(
+                    "SELECT message_rows,message_bytes,reaction_rows,reaction_bytes,member_rows,"
+                    "member_bytes,total_rows,total_bytes FROM federation_replica_usage WHERE "
+                    "guild_id=42"
+                )
+            )
+        ).one()
+        await reconcile_replica_storage(session, 42, "remote.example")
+        after = (
+            await session.execute(
+                text(
+                    "SELECT message_rows,message_bytes,reaction_rows,reaction_bytes,member_rows,"
+                    "member_bytes,total_rows,total_bytes FROM federation_replica_usage WHERE "
+                    "guild_id=42"
+                )
+            )
+        ).one()
+        assert before == after
 
 
 def test_orphan_remote_identity_candidates_cover_the_fk_graph_and_lock_a_small_batch() -> None:
@@ -256,22 +321,51 @@ def test_orphan_remote_identity_candidates_reject_unsafe_bounds() -> None:
         )
 
 
-def test_orphan_remote_instance_gc_does_not_treat_cached_peer_keys_as_ownership() -> None:
-    statement = orphaned_remote_instance_candidates(
-        quota_settings(),
-        now=datetime(2026, 8, 12, tzinfo=UTC),
-        limit=17,
-    )
-    sql = str(
-        statement.compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
+async def test_orphan_remote_instance_gc_does_not_treat_cached_peer_keys_as_ownership(
+    postgres_schema, migrate_to
+) -> None:
+    from datetime import timedelta
 
-    assert "instances.is_self IS false" in sql
-    assert f"FROM {PeerKey.__tablename__}" not in sql
-    assert f"FROM {Instance.__tablename__}" in sql
+    from sqlalchemy import select
+
+    from app.federation.replica_storage import purge_orphaned_remote_instances
+
+    await migrate_to("head")
+    now = datetime.now(UTC)
+    old = now - timedelta(days=90)
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all(
+            [
+                Instance(domain=domain, updated_at=old)
+                for domain in ("keys.example", "owned.example", "empty.example")
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                PeerKey(domain="keys.example", key_id="main", public_key=b"k" * 32),
+                User(
+                    id=99,
+                    origin_domain="owned.example",
+                    username="owner",
+                    is_local=False,
+                    federation_introduced_by_domain="owned.example",
+                ),
+            ]
+        )
+        await session.flush()
+        candidates = list(
+            await session.scalars(
+                orphaned_remote_instance_candidates(quota_settings(), now=now, limit=10)
+            )
+        )
+        assert {row.domain for row in candidates} == {"keys.example", "empty.example"}
+        assert (
+            await purge_orphaned_remote_instances(session, quota_settings(), now=now, limit=10) == 2
+        )
+        await session.flush()
+        assert set(await session.scalars(select(Instance.domain))) == {"owned.example"}
+        assert list(await session.scalars(select(PeerKey.key_id))) == []
 
 
 @pytest.mark.asyncio

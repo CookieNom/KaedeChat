@@ -940,10 +940,39 @@ async def test_runtime_manifest_fetch_is_bound_to_c_and_exact_a_generations(
             manifest_generation=MANIFEST_GENERATION,
             revocation_generation=REVOCATION_GENERATION,
         )
+    envelope_validator.return_value = envelope
+    with pytest.raises(FederationNetworkError):
+        await fetch_runtime_bot_manifest(
+            session,
+            settings,
+            application_id=APP_ID,
+            application_domain=APP_DOMAIN,
+            bot_user_id=BOT_ID,
+            bot_user_domain=APP_DOMAIN,
+            manifest_generation=MANIFEST_GENERATION + 1,
+            revocation_generation=REVOCATION_GENERATION,
+        )
+    wrong_target = runtime_manifest(target_domain="other.example")
+    envelope_validator.return_value = SimpleNamespace(
+        type=BOT_RUNTIME_MANIFEST_EVENT,
+        actor=envelope.actor,
+        content=wrong_target.model_dump(mode="json"),
+    )
+    with pytest.raises(FederationNetworkError):
+        await fetch_runtime_bot_manifest(
+            session,
+            settings,
+            application_id=APP_ID,
+            application_domain=APP_DOMAIN,
+            bot_user_id=BOT_ID,
+            bot_user_domain=APP_DOMAIN,
+            manifest_generation=MANIFEST_GENERATION,
+            revocation_generation=REVOCATION_GENERATION,
+        )
 
 
 @pytest.mark.asyncio
-async def test_runtime_manifest_materialization_promotes_exact_pending_a_proof(
+async def test_pending_proof_promotion_orchestration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = runtime_manifest()

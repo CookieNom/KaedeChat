@@ -369,7 +369,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn group_epoch_is_a_decimal_string_from_the_native_state() -> Result<(), String> {
+    fn private_dispatcher_reports_advanced_native_epoch_as_decimal() -> Result<(), String> {
         let generated = invoke(
             "generate",
             0,
@@ -380,6 +380,13 @@ mod tests {
             .ok_or_else(|| "native handle is not a string".to_owned())?
             .parse::<u64>()
             .map_err(|error| error.to_string())?;
+        struct CloseHandle(u64);
+        impl Drop for CloseHandle {
+            fn drop(&mut self) {
+                kaede_e2ee_close(self.0);
+            }
+        }
+        let _close = CloseHandle(handle);
         let group_id = b"voice-media-group";
         invoke(
             "create_group",
@@ -387,20 +394,34 @@ mod tests {
             &json!({"group_id": encode(group_id)}),
         )?;
 
+        let peer = kaede_e2ee::MlsClient::generate(b"epoch-peer@example.test")
+            .map_err(|error| error.to_string())?;
+        let package = peer
+            .generate_key_package()
+            .map_err(|error| error.to_string())?;
+        invoke(
+            "add_members",
+            handle,
+            &json!({"group_id": encode(group_id), "key_packages": [encode(&package)]}),
+        )?;
+        invoke(
+            "merge_pending_commit",
+            handle,
+            &json!({"group_id": encode(group_id)}),
+        )?;
         assert_eq!(
             invoke(
                 "group_epoch",
                 handle,
                 &json!({"group_id": encode(group_id)}),
             )?,
-            json!({"epoch": "0"})
+            json!({"epoch": "1"})
         );
-        kaede_e2ee_close(handle);
         Ok(())
     }
 
     #[test]
-    fn nested_json_strings_are_zeroized_before_drop() {
+    fn clearing_nested_json_values() {
         let mut value = json!({
             "plaintext": "secret",
             "nested": ["credential", {"state": "private"}],

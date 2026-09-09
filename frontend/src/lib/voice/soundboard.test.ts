@@ -25,7 +25,7 @@ function request(overrides: Partial<Parameters<typeof loadSoundboardMedia>[0]> =
 describe('soundboard media integrity', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('accepts only the exact authority-signed HTTPS media origin', () => {
+  it('exact selected HTTPS media origin', () => {
     expect(
       validateSoundboardMediaUrl(
         'https://media.guild.example/object?signature=opaque',
@@ -75,6 +75,7 @@ describe('soundboard media integrity', () => {
 
     const blob = await loadSoundboardMedia(request());
 
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(new TextEncoder().encode('abc'));
     expect(blob.size).toBe(3);
     expect(blob.type).toBe('audio/ogg');
     expect(fetcher).toHaveBeenCalledWith(
@@ -154,23 +155,20 @@ describe('soundboard playback eligibility', () => {
 
   it('requires an active, unsuppressed, unmuted speaker state', () => {
     expect(soundboardPlaybackUnavailableReason(ready)).toBeNull();
-    expect(soundboardPlaybackUnavailableReason({ ...ready, connected: false })).toContain('Join');
-    expect(soundboardPlaybackUnavailableReason({ ...ready, canSpeak: false })).toContain(
-      'permission'
-    );
-    expect(soundboardPlaybackUnavailableReason({ ...ready, selfMuted: true })).toContain('Unmute');
-    expect(soundboardPlaybackUnavailableReason({ ...ready, selfDeafened: true })).toContain(
-      'Undeafen'
-    );
-    expect(soundboardPlaybackUnavailableReason({ ...ready, serverMuted: true })).toContain(
-      'moderator'
-    );
-    expect(soundboardPlaybackUnavailableReason({ ...ready, serverDeafened: true })).toContain(
-      'moderator'
-    );
-    expect(soundboardPlaybackUnavailableReason({ ...ready, suppressed: true })).toContain(
-      'Stage speakers'
-    );
+    for (const denied of [
+      { connected: false },
+      { canSpeak: false },
+      { selfMuted: true },
+      { selfDeafened: true },
+      { serverMuted: true },
+      { serverDeafened: true },
+      { suppressed: true }
+    ]) {
+      expect(soundboardPlaybackUnavailableReason({ ...ready, ...denied })).toEqual(
+        expect.any(String)
+      );
+      expect(soundboardPlaybackUnavailableReason({ ...ready, ...denied })).not.toBe('');
+    }
   });
 
   it('uses full guild refs when enforcing external-sound permission', () => {

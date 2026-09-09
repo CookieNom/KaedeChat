@@ -1,87 +1,128 @@
 from __future__ import annotations
 
 import importlib
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 migration = importlib.import_module(
     "migrations.versions.0a6d2f9c4b81_federated_follow_authority_identity"
 )
-OperationCall = tuple[str, tuple[Any, ...], dict[str, Any]]
 
 
-def recording_operations() -> tuple[SimpleNamespace, list[OperationCall]]:
-    calls: list[OperationCall] = []
+async def upgrade_follow_schema(connection, monkeypatch):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
 
-    def operation(name: str):
-        def record(*args: Any, **kwargs: Any) -> None:
-            calls.append((name, args, kwargs))
+    for sql in (
+        "CREATE TABLE federated_channel_follows (id bigint, "
+        "target_authority_domain text, local_role text, CONSTRAINT "
+        "pk_federated_channel_follows PRIMARY KEY(id,local_role))",
+        "CREATE TABLE federated_message_crossposts (source_message_id bigint, "
+        "source_message_domain text, follow_id bigint, local_role text, "
+        "CONSTRAINT pk_federated_message_crossposts PRIMARY "
+        "KEY(source_message_id,source_message_domain,follow_id,local_role))",
+        "INSERT INTO federated_channel_follows VALUES "
+        "(1,'a.example','source'),(1,'b.example','target')",
+        "INSERT INTO federated_message_crossposts VALUES "
+        "(2,'source.example',1,'source'),(2,'source.example',1,'target')",
+    ):
+        await connection.execute(text(sql))
 
-        return record
+    def upgrade(sync_connection):
+        operations = Operations(MigrationContext.configure(sync_connection))
+        operations.create_foreign_key(
+            operations.f(
+                "fk_federated_message_crossposts_follow_id_local_role_federated_channel_follows"
+            ),
+            "federated_message_crossposts",
+            "federated_channel_follows",
+            ["follow_id", "local_role"],
+            ["id", "local_role"],
+            ondelete="CASCADE",
+        )
+        monkeypatch.setattr(migration, "op", operations)
+        migration.upgrade()
 
-    return (
-        SimpleNamespace(
-            f=lambda name: name,
-            add_column=operation("add_column"),
-            execute=operation("execute"),
-            alter_column=operation("alter_column"),
-            drop_constraint=operation("drop_constraint"),
-            create_primary_key=operation("create_primary_key"),
-            create_foreign_key=operation("create_foreign_key"),
-            create_index=operation("create_index"),
-            drop_index=operation("drop_index"),
-            drop_column=operation("drop_column"),
-        ),
-        calls,
-    )
+    await connection.run_sync(upgrade)
 
 
-def test_upgrade_backfills_before_replacing_qualified_identity(
+async def test_upgrade_backfills_before_replacing_qualified_identity(
+    postgres_schema,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    operations, calls = recording_operations()
-    monkeypatch.setattr(migration, "op", operations)
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
 
-    migration.upgrade()
-
-    names = [name for name, _args, _kwargs in calls]
-    assert names[:4] == ["add_column", "execute", "execute", "alter_column"]
-    update_sql = str(calls[1][1][0])
-    guard_sql = str(calls[2][1][0])
-    assert "SET follow_authority_domain = follow.target_authority_domain" in update_sql
-    assert "follow_authority_domain IS NULL" in guard_sql
-    assert "ERRCODE = '23503'" in guard_sql
-
-    primary_keys = [call for call in calls if call[0] == "create_primary_key"]
-    assert primary_keys[0][1][2] == ["id", "target_authority_domain", "local_role"]
-    assert primary_keys[1][1][2] == [
-        "source_message_id",
-        "source_message_domain",
-        "follow_id",
-        "follow_authority_domain",
-        "local_role",
-    ]
-    foreign_key = next(call for call in calls if call[0] == "create_foreign_key")
-    assert foreign_key[1][3:] == (
-        ["follow_id", "follow_authority_domain", "local_role"],
-        ["id", "target_authority_domain", "local_role"],
+    await upgrade_follow_schema(postgres_schema, monkeypatch)
+    assert (
+        await postgres_schema.execute(
+            text(
+                "SELECT follow_id,follow_authority_domain,local_role FROM "
+                "federated_message_crossposts ORDER BY local_role"
+            )
+        )
+    ).all() == [(1, "a.example", "source"), (1, "b.example", "target")]
+    await postgres_schema.execute(
+        text("INSERT INTO federated_channel_follows VALUES (1,'b.example','source')")
     )
-    assert foreign_key[2] == {"ondelete": "CASCADE"}
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO federated_message_crossposts VALUES "
+            "(2,'source.example',1,'source','b.example')"
+        )
+    )
+    with pytest.raises(IntegrityError):
+        async with postgres_schema.begin_nested():
+            await postgres_schema.execute(
+                text(
+                    "INSERT INTO federated_message_crossposts VALUES "
+                    "(3,'source.example',1,'source','foreign.example')"
+                )
+            )
+    await postgres_schema.execute(
+        text("DELETE FROM federated_channel_follows WHERE target_authority_domain='a.example'")
+    )
+    assert (
+        await postgres_schema.execute(
+            text(
+                "SELECT follow_authority_domain,local_role FROM "
+                "federated_message_crossposts ORDER BY local_role"
+            )
+        )
+    ).all() == [("b.example", "source"), ("b.example", "target")]
 
 
-def test_downgrade_refuses_lossy_authority_collapse_first(
+async def test_downgrade_refuses_lossy_authority_collapse_first(
+    postgres_schema,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    operations, calls = recording_operations()
-    monkeypatch.setattr(migration, "op", operations)
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
 
-    migration.downgrade()
-
-    assert calls[0][0] == "execute"
-    guard_sql = str(calls[0][1][0])
-    assert "HAVING count(*) > 1" in guard_sql
-    assert "ERRCODE = '23505'" in guard_sql
-    assert "qualified follow identities exist" in guard_sql
-    assert [name for name, _args, _kwargs in calls][-1] == "drop_column"
+    await upgrade_follow_schema(postgres_schema, monkeypatch)
+    await postgres_schema.execute(
+        text("INSERT INTO federated_channel_follows VALUES (1,'b.example','source')")
+    )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO federated_message_crossposts VALUES "
+            "(2,'source.example',1,'source','b.example')"
+        )
+    )
+    with pytest.raises(IntegrityError) as caught:
+        async with postgres_schema.begin_nested():
+            await postgres_schema.run_sync(lambda _: migration.downgrade())
+    assert caught.value.orig.sqlstate == "23505"
+    assert (
+        await postgres_schema.execute(
+            text(
+                "SELECT follow_authority_domain,local_role FROM "
+                "federated_message_crossposts ORDER BY "
+                "local_role,follow_authority_domain"
+            )
+        )
+    ).all() == [("a.example", "source"), ("b.example", "source"), ("b.example", "target")]
+    assert (
+        await postgres_schema.execute(text("SELECT count(*) FROM federated_channel_follows"))
+    ).scalar_one() == 3

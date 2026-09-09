@@ -26,6 +26,13 @@ describe('authenticated image clipboard', () => {
     try {
       await copyAuthenticatedImage({ path: '/media/image/original', contentType: 'image/png' });
       expect(write).toHaveBeenCalledOnce();
+      const [items] = write.mock.calls[0] as [{ data: Record<string, Blob> }[]];
+      expect(items).toHaveLength(1);
+      expect(Object.keys(items[0].data)).toEqual(['image/png']);
+      expect(items[0].data['image/png'].type).toBe('image/png');
+      expect(new Uint8Array(await items[0].data['image/png'].arrayBuffer())).toEqual(
+        new Uint8Array([1, 2, 3])
+      );
     } finally {
       vi.unstubAllGlobals();
     }
@@ -33,7 +40,7 @@ describe('authenticated image clipboard', () => {
 });
 
 describe('authenticated media download', () => {
-  it('downloads through a blob URL so redirects cannot navigate the page', async () => {
+  it('blob-URL download behavior', async () => {
     const click = vi.fn();
     const anchor = { href: '', download: '', click };
     const createObjectURL = vi.fn().mockReturnValue('blob:download');
@@ -63,10 +70,15 @@ describe('authenticated media capacity retry', () => {
     expect(mediaCapacityRetryDelay(404, 'REMOTE_MEDIA_BUSY', '1', 0, '')).toBeNull();
   });
 
-  it('stops after two automatic retries so failures still reach the manual Retry state', () => {
-    expect(mediaCapacityRetryDelay(503, 'REMOTE_MEDIA_BUSY', null, 0, '')).toBe(1000);
-    expect(mediaCapacityRetryDelay(503, 'REMOTE_MEDIA_BUSY', null, 1, '')).toBe(2000);
-    expect(mediaCapacityRetryDelay(503, 'REMOTE_MEDIA_BUSY', null, 2, '')).toBeNull();
+  it('bounds automatic retries so failures still reach the manual Retry state', () => {
+    const delays = Array.from({ length: 10 }, (_, attempt) =>
+      mediaCapacityRetryDelay(503, 'REMOTE_MEDIA_BUSY', null, attempt, '')
+    );
+    const stopped = delays.indexOf(null);
+    expect(stopped).toBeGreaterThan(0);
+    expect(stopped).toBeLessThan(delays.length);
+    for (const delay of delays.slice(0, stopped)) expect(delay).toBeGreaterThan(0);
+    expect(delays.slice(stopped).every((delay) => delay === null)).toBe(true);
   });
 });
 
@@ -77,7 +89,7 @@ describe('federated history media paths', () => {
     expect(attachmentMediaPath('remote.example', '60', 'original', path)).toBe(path);
   });
 
-  it('retries an expired signed path through the authenticated renewal route', () => {
+  it('preserves an expired capability for downstream handling', () => {
     const expired =
       '/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=1&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO';
     expect(attachmentMediaPath('remote.example', '60', 'original', expired)).toBe(expired);

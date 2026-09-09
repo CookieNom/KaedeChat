@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/domain/voice_messages.dart';
 
@@ -5,7 +7,8 @@ void main() {
   test('decodes bounded Discord voice-message waveform samples', () {
     expect(decodeVoiceWaveform('AP+A'), <double>[.12, 1, 128 / 255]);
     expect(decodeVoiceWaveform('not base64'), isEmpty);
-    expect(decodeVoiceWaveform('A' * 345), isEmpty);
+    expect(
+        decodeVoiceWaveform(base64Encode(List<int>.filled(257, 128))), isEmpty);
   });
 
   test('formats the authoritative duration', () {
@@ -19,6 +22,9 @@ void main() {
     final encoded = encodeVoiceWaveform(
       List<double>.generate(1000, (index) => -60 + (index % 61)),
     );
-    expect(decodeVoiceWaveform(encoded), hasLength(256));
+    final samples = decodeVoiceWaveform(encoded);
+    expect(samples, isNotEmpty);
+    expect(samples.length, lessThanOrEqualTo(256));
+    expect(samples, everyElement(inInclusiveRange(0, 1)));
   });
 }

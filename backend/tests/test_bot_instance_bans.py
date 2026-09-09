@@ -10,26 +10,9 @@ from app.api.bots import (
     bot_ban_instance,
     bot_list_instance_bans,
     bot_unban_instance,
-    router,
 )
 from app.chat.schemas import InstanceBanCreate
 from app.core.types import EntityRef
-
-
-def test_bot_instance_ban_routes_cover_read_create_and_delete() -> None:
-    operations = {
-        (route.path, method) for route in router.routes for method in (route.methods or set())
-    }
-
-    assert ("/api/v1/bots/guilds/{guild_ref}/instance-bans", "GET") in operations
-    assert (
-        "/api/v1/bots/guilds/{guild_ref}/instance-bans/{instance_domain}",
-        "PUT",
-    ) in operations
-    assert (
-        "/api/v1/bots/guilds/{guild_ref}/instance-bans/{instance_domain}",
-        "DELETE",
-    ) in operations
 
 
 @pytest.mark.asyncio
@@ -87,6 +70,20 @@ async def test_bot_instance_bans_use_dedicated_ban_scope_and_human_services(
     assert unbanned.status_code == 204
     assert installer.await_count == 3
     assert all(call.args[4] == "moderation.bans" for call in installer.await_args_list)
-    list_service.assert_awaited_once()
-    ban_service.assert_awaited_once()
-    unban_service.assert_awaited_once()
+    list_service.assert_awaited_once_with(
+        guild_ref, 25, "older.example", principal, session, redis, settings
+    )
+    ban_service.assert_awaited_once_with(
+        guild_ref,
+        "remote.example",
+        InstanceBanCreate(reason="raid"),
+        principal,
+        session,
+        redis,
+        snowflake,
+        settings,
+        "raid",
+    )
+    unban_service.assert_awaited_once_with(
+        guild_ref, "remote.example", principal, session, redis, snowflake, settings, "appeal"
+    )

@@ -20,15 +20,13 @@ describe('operator legal build configuration', () => {
   });
 
   it('fails a custom build when any required legal value is missing', () => {
-    expect(() => resolveOperatorLegalConfig({}, 'custom')).toThrow(
-      /missing KAEDE_LEGAL_INSTANCE_NAME/
-    );
-    expect(() =>
-      resolveOperatorLegalConfig(
-        { ...completeEnvironment, KAEDE_LEGAL_JURISDICTION: ' ' },
-        'custom'
-      )
-    ).toThrow(/missing KAEDE_LEGAL_JURISDICTION/);
+    for (const key of Object.keys(completeEnvironment)) {
+      for (const missing of [undefined, ' ']) {
+        expect(() =>
+          resolveOperatorLegalConfig({ ...completeEnvironment, [key]: missing }, 'custom')
+        ).toThrow(`missing ${key}`);
+      }
+    }
   });
 
   it('rejects partial policy data even on the default landing', () => {

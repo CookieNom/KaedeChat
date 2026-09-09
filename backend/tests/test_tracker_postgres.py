@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, func, select
@@ -28,7 +29,9 @@ from app.db.models import (
     User,
 )
 
-DATABASE_URL = os.environ.get("KAEDE_TRACKER_TEST_DATABASE_URL")
+DATABASE_URL = os.environ.get("KAEDE_TRACKER_TEST_DATABASE_URL") or os.environ.get(
+    "TEST_DATABASE_URL"
+)
 pytestmark = pytest.mark.skipif(
     DATABASE_URL is None,
     reason="set KAEDE_TRACKER_TEST_DATABASE_URL to a disposable migrated PostgreSQL database",
@@ -40,7 +43,7 @@ async def test_tracker_postgresql_constraints_and_cascades() -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    domain = "tracker-storage-it.example"
+    domain = f"tracker-{uuid4().hex}.example"
     guild_id, channel_id = 8_810_001, 8_810_010
     creator_id, assignee_id = 8_810_002, 8_810_003
     lane_a_id, lane_b_id = 8_810_011, 8_810_012
@@ -208,7 +211,9 @@ async def test_tracker_postgresql_constraints_and_cascades() -> None:
                 item.id
                 for item in await session.scalars(
                     select(TrackerLane)
-                    .where(TrackerLane.channel_id == channel_id)
+                    .where(
+                        TrackerLane.channel_id == channel_id, TrackerLane.channel_domain == domain
+                    )
                     .order_by(TrackerLane.position)
                 )
             ] == [lane_b_id, lane_a_id]
@@ -216,7 +221,9 @@ async def test_tracker_postgresql_constraints_and_cascades() -> None:
                 item.id
                 for item in await session.scalars(
                     select(TrackerTask)
-                    .where(TrackerTask.channel_id == channel_id)
+                    .where(
+                        TrackerTask.channel_id == channel_id, TrackerTask.channel_domain == domain
+                    )
                     .order_by(TrackerTask.position)
                 )
             ] == [task_b_id, task_a_id]
@@ -243,7 +250,7 @@ async def test_tracker_postgresql_constraints_and_cascades() -> None:
             )
             savepoint = await session.begin_nested()
             session.add(duplicate)
-            with pytest.raises(IntegrityError):
+            with pytest.raises(IntegrityError, match="uq_tracker_tasks_creator_nonce"):
                 await session.flush()
             await savepoint.rollback()
 

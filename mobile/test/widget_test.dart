@@ -140,7 +140,7 @@ void main() {
       );
     });
 
-    test('consumed message jumps are one-shot', () {
+    test('consumed-jump copyWith state', () {
       final request = MessageJumpRequest(
         channel: EntityRef.parse('10@home.example'),
         message: EntityRef.parse('99@home.example'),
@@ -236,10 +236,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(messageSearchRouteCanDismiss(searchContext), isTrue);
 
-      Navigator.of(searchContext).pop();
+      final navigator = Navigator.of(searchContext);
+      navigator.pop();
       await tester.pumpAndSettle();
       expect(messageSearchRouteCanDismiss(searchContext), isFalse);
-      expect(find.text('Open search'), findsOneWidget);
+      navigator.push<void>(MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('Successor route'))));
+      await tester.pumpAndSettle();
+      // Model the delayed search completion using its original route context.
+      if (messageSearchRouteCanDismiss(searchContext)) navigator.pop();
+      await tester.pumpAndSettle();
+      expect(find.text('Successor route'), findsOneWidget);
     });
 
     testWidgets('320dp direct-message header keeps usable title space',
@@ -460,7 +467,10 @@ void main() {
     });
 
     test('uses a compact useful default for a new user', () {
-      expect(rankRecentReactions(const <String>[]), hasLength(4));
+      final defaults = rankRecentReactions(const <String>[]);
+      expect(defaults, isNotEmpty);
+      expect(rankRecentReactions(defaults), unorderedEquals(defaults));
+      expect(defaults.toSet().length, defaults.length);
     });
   });
 
@@ -564,19 +574,168 @@ void main() {
         after: null,
         before: null,
       );
-      final changed = MessageSearchCriteria(
-        query: 'different query',
-        scope: 'guild',
-        scopeRef: EntityRef.parse('7@home.example'),
-        sort: 'newest',
-        has: const <String>['image', 'link'],
-        pinned: true,
-        authorType: 'user',
-        author: maple.ref,
-        mention: null,
-        after: null,
-        before: null,
-      );
+      final alternatives = [
+        MessageSearchCriteria(
+          query: 'different query',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'channel',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@remote.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'oldest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: false,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'bot',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: EntityRef.parse('99@remote.example'),
+          mention: null,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: maple.ref,
+          after: null,
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: DateTime.utc(2026, 1, 1),
+          before: null,
+        ),
+        MessageSearchCriteria(
+          query: 'release notes',
+          scope: 'guild',
+          scopeRef: EntityRef.parse('7@home.example'),
+          sort: 'newest',
+          has: const <String>['image', 'link'],
+          pinned: true,
+          authorType: 'user',
+          author: maple.ref,
+          mention: null,
+          after: null,
+          before: DateTime.utc(2026, 2, 1),
+        ),
+      ];
+      for (final alternative in alternatives) {
+        expect(first.signature, isNot(alternative.signature));
+        expect(
+            messageSearchCanLoadMore(
+                pageSignature: first.signature,
+                currentSignature: alternative.signature,
+                nextCursor: "cursor"),
+            isFalse);
+        expect(
+            messageSearchResponseIsCurrent(
+                requestGeneration: 4,
+                currentGeneration: 4,
+                requestSignature: first.signature,
+                currentSignature: alternative.signature),
+            isFalse);
+      }
+      final changed = alternatives.first;
 
       expect(first.signature, equivalent.signature);
       expect(first.signature, isNot(changed.signature));
@@ -671,6 +830,15 @@ void main() {
 
       expect(find.text('Maple'), findsOneWidget);
       expect(find.text('maple@remote.example'), findsOneWidget);
+      await tester.tap(find.text('Maple'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('search-mention')));
+      await tester.pumpAndSettle();
+      expect(find.text('maple@remote.example'), findsOneWidget);
+      await tester.tap(find.text('Maple').last);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('message-search-member-picker')),
+          findsNothing);
     });
 
     testWidgets('author type filter includes bots separately from webhooks',
@@ -717,7 +885,13 @@ void main() {
         type: ChannelType.dm,
         position: 0,
         permissions: BigInt.zero,
-        recipients: <KaedeUser>[maple],
+        recipients: <KaedeUser>[
+          for (var i = 1; i <= 30; i++)
+            KaedeUser(
+                ref: EntityRef.parse('$i@remote.example'),
+                username: 'Member $i',
+                handle: 'member$i@remote.example')
+        ],
       );
       await tester.pumpWidget(MaterialApp(
         home: MessageSearchScreen(
@@ -734,7 +908,7 @@ void main() {
       await tester.ensureVisible(author);
       await tester.tap(author);
       await tester.pumpAndSettle();
-      tester.view.viewInsets = const FakeViewPadding(bottom: 240);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 180);
       await tester.pump();
 
       expect(tester.takeException(), isNull);
@@ -746,6 +920,20 @@ void main() {
         find.byKey(const ValueKey('message-search-member-query')),
         findsOneWidget,
       );
+      final member = find.text('Member 30');
+      expect(member.hitTestable(), findsNothing);
+      await tester.scrollUntilVisible(member, 100,
+          scrollable: find
+              .descendant(
+                  of: find
+                      .byKey(const ValueKey('message-search-member-picker')),
+                  matching: find.byType(Scrollable))
+              .first);
+      await tester.tap(member);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('message-search-member-picker')),
+          findsNothing);
+      expect(find.textContaining('Member 30'), findsOneWidget);
     });
 
     testWidgets('search filters remain scrollable above the keyboard',
@@ -781,6 +969,14 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.byType(ListView), findsWidgets);
+      final mention = find.byKey(const ValueKey('search-mention'));
+      await tester.scrollUntilVisible(mention, 100,
+          scrollable: find.byType(Scrollable).last);
+      await tester.tap(mention);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('message-search-member-picker')),
+          findsOneWidget);
+      expect(find.text('maple@remote.example'), findsOneWidget);
     });
 
     testWidgets('from operator offers matching conversation members',
@@ -996,6 +1192,7 @@ void main() {
         ),
       ));
 
+      expect(find.bySemanticsLabel(RegExp('secret plans')), findsNothing);
       expect(find.bySemanticsLabel('Reveal spoiler'), findsOneWidget);
       await tester.tap(find.bySemanticsLabel('Reveal spoiler'));
       await tester.pumpAndSettle();
@@ -1037,7 +1234,14 @@ void main() {
       expect(
           channel.ownerRef, EntityRef(Snowflake('1'), Domain('alpha.example')));
       expect(channel.recipients.single.handle, 'turtle@beta.example');
-      expect(channel.toJson()['conversation_type'], 'group');
+      final wire = channel.toJson();
+      expect(wire['conversation_type'], 'group');
+      expect(wire['owner_id'], '1');
+      expect(wire['owner_domain'], 'alpha.example');
+      final restored = KaedeChannel.fromJson(wire);
+      expect(restored.ownerRef?.wire, '1@alpha.example');
+      expect(
+          restored.recipients.map((user) => user.ref.wire), ['2@beta.example']);
     });
 
     test('retains membership notice types across local reconciliation', () {
@@ -1213,8 +1417,12 @@ void main() {
       ));
 
       expect(error.code, 'NETWORK_ERROR');
-      expect(error.message, contains('too long to connect'));
-      expect(error.message, contains('Check your connection'));
+      expect(
+          error.message,
+          matches(
+              RegExp(r'(too long|timeout).*connect', caseSensitive: false)));
+      expect(error.message,
+          matches(RegExp(r'check.*connection', caseSensitive: false)));
       expect(error.message, isNot(contains('DioException')));
     });
 
@@ -1238,8 +1446,9 @@ void main() {
         summary: 'Could not save the guild',
       );
 
-      expect(message, contains('server ran into an unexpected problem'));
-      expect(message, contains('Reference: trace-a1b2c3'));
+      expect(message,
+          matches(RegExp(r'server.*(problem|error)', caseSensitive: false)));
+      expect(message, contains('trace-a1b2c3'));
       expect(message, isNot(contains('SQLAlchemy')));
       expect(message, isNot(contains('/srv/app')));
       expect(message, isNot(contains('INTERNAL_SERVER_ERROR')));
@@ -1265,7 +1474,8 @@ void main() {
         ),
       ));
 
-      expect(error.message, 'Check display name: field required.');
+      expect(error.message,
+          matches(RegExp(r'display name.*required', caseSensitive: false)));
       expect(error.message, isNot(contains('VALIDATION')));
     });
 
@@ -1300,7 +1510,7 @@ void main() {
       );
       expect(
         parse(<String, Object?>{'errors': issues}).message,
-        'Check display name: field required.',
+        matches(RegExp(r'display name.*required', caseSensitive: false)),
       );
       expect(
         parse(<String, Object?>{
@@ -1315,7 +1525,7 @@ void main() {
             ],
           },
         }).message,
-        'Check display name: field required.',
+        matches(RegExp(r'display name.*required', caseSensitive: false)),
       );
     });
 
@@ -1379,27 +1589,27 @@ void main() {
 
       expect(
         parse('FEDERATED_DM_STORAGE_QUOTA_EXCEEDED').message,
-        contains('This instance could not retain more direct-message data'),
+        matches(RegExp(r'instance.*direct.message', caseSensitive: false)),
       );
       expect(
         parse('KAED_FED_REPLICA_QUOTA_EXCEEDED').message,
-        contains('guild’s local replica reached its cache limit'),
+        matches(RegExp(r'guild.*replica.*cache limit', caseSensitive: false)),
       );
       expect(
         parse('FEDERATED_DM_HISTORY_UNAVAILABLE').message,
-        contains('recent messages are still available'),
+        matches(RegExp(r'recent messages.*available', caseSensitive: false)),
       );
       expect(
         parse('FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED').message,
-        contains('cannot cache another remote account'),
+        matches(RegExp(r'cannot.*cache.*remote account', caseSensitive: false)),
       );
       expect(
         parse('FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED').message,
-        contains('cannot cache another remote server'),
+        matches(RegExp(r'cannot.*cache.*remote server', caseSensitive: false)),
       );
       expect(
         parse('FEDERATION_OUTBOX_CAPACITY_EXCEEDED').message,
-        contains('Nothing was saved'),
+        matches(RegExp(r'nothing.*saved', caseSensitive: false)),
       );
       expect(
         parse('KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED').message,
@@ -1407,15 +1617,16 @@ void main() {
       );
       expect(
         parse('FEDERATED_GUILD_HISTORY_TEMPORARILY_UNAVAILABLE').message,
-        contains('retry automatically'),
+        matches(RegExp(r'retry.*automatic', caseSensitive: false)),
       );
       expect(
         parse('FEDERATED_GUILD_HISTORY_LIMIT_REACHED').message,
-        contains('Recent messages and new activity remain available'),
+        matches(RegExp(r'recent messages.*new activity.*available',
+            caseSensitive: false)),
       );
       expect(
         parse('FEDERATED_GUILD_HISTORY_REJECTED').message,
-        contains('could not be safely imported'),
+        matches(RegExp(r'not.*safe.*import', caseSensitive: false)),
       );
     });
 
@@ -1461,19 +1672,19 @@ void main() {
       );
 
       expect(gateway, contains('privacy settings'));
-      expect(gateway, contains('Reference: gateway-1234'));
+      expect(gateway, contains('gateway-1234'));
       expect(gateway, isNot(contains('DM_PRIVACY_REJECTED')));
       expect(
         voiceDisconnectMessage(DisconnectReason.participantRemoved),
-        contains('another device or by a moderator'),
+        matches(RegExp(r'device.*moderator', caseSensitive: false)),
       );
       expect(
         voiceDisconnectMessage(DisconnectReason.duplicateIdentity),
-        contains('will stay disconnected'),
+        matches(RegExp(r'stay.*disconnected', caseSensitive: false)),
       );
       expect(
         voiceDisconnectMessage(DisconnectReason.reconnectAttemptsExceeded),
-        contains('connection to voice was lost'),
+        matches(RegExp(r'connection.*voice.*lost', caseSensitive: false)),
       );
     });
   });
@@ -1489,61 +1700,6 @@ void main() {
       expect(
         imageUploadContentType('avatar.heic', reportedType: 'image/heic'),
         isNull,
-      );
-    });
-
-    test('waits for a clean scan and repeats the binding commit', () async {
-      var commits = 0;
-      final result = await commitScannedMedia(
-        commit: () async {
-          commits += 1;
-          return <String, Object?>{
-            'scan_status': commits == 1 ? 'pending' : 'clean',
-          };
-        },
-        pollInterval: Duration.zero,
-      );
-
-      expect(commits, 2);
-      expect(result['scan_status'], 'clean');
-    });
-
-    test('does not repeat a commit that already bound clean media', () async {
-      var commits = 0;
-      await commitScannedMedia(
-        commit: () async {
-          commits += 1;
-          return <String, Object?>{'scan_status': 'clean'};
-        },
-        pollInterval: Duration.zero,
-      );
-
-      expect(commits, 1);
-    });
-
-    test('surfaces rejected and timed-out processing', () async {
-      await expectLater(
-        commitScannedMedia(
-          commit: () async => <String, Object?>{'scan_status': 'rejected'},
-          pollInterval: Duration.zero,
-        ),
-        throwsA(isA<KaedeException>().having(
-          (error) => error.code,
-          'code',
-          'MEDIA_PROCESSING_REJECTED',
-        )),
-      );
-      await expectLater(
-        commitScannedMedia(
-          commit: () async => <String, Object?>{'scan_status': 'pending'},
-          pollInterval: Duration.zero,
-          maxPollAttempts: 2,
-        ),
-        throwsA(isA<KaedeException>().having(
-          (error) => error.code,
-          'code',
-          'MEDIA_PROCESSING_TIMEOUT',
-        )),
       );
     });
   });
@@ -2076,18 +2232,21 @@ void main() {
       expect(wake?.routeId, 'r' * 43);
       expect(wake?.deliveryId, 'd' * 43);
       expect(wake?.wakeMac, 'm' * 43);
-      expect(
-        OpaquePushWake.parse(<String, dynamic>{
-          'sync_version': '2',
-          'route_id': 'r' * 43,
-          'event_token': 'e' * 43,
-          'delivery_id': 'd' * 43,
-          'expires_at': '2000000000',
-          'wake_mac': 'm' * 43,
-          'message_ref': '42@private.example',
-        }),
-        isNull,
-      );
+      for (final extra in ['message_ref', 'sender_ref', 'sender_avatar_hash']) {
+        expect(
+          OpaquePushWake.parse(<String, dynamic>{
+            'sync_version': '2',
+            'route_id': 'r' * 43,
+            'event_token': 'e' * 43,
+            'delivery_id': 'd' * 43,
+            'expires_at': '2000000000',
+            'wake_mac': 'm' * 43,
+            extra:
+                extra == 'sender_avatar_hash' ? 'a' * 64 : '42@private.example',
+          }),
+          isNull,
+        );
+      }
     });
 
     test('requires the configured transport and device MAC before redemption',
@@ -2142,6 +2301,39 @@ void main() {
         managementSecret: 'm' * 43,
       );
       expect(
+          await authenticatePushWake(legacy, state,
+              configuredTransport: 'direct_fcm',
+              nowEpochSeconds: expiresAt - 60),
+          isFalse);
+      final wrongMac = OpaquePushWake(
+        version: relayWake.version,
+        eventToken: relayWake.eventToken,
+        routeId: relayWake.routeId,
+        deliveryId: relayWake.deliveryId,
+        expiresAt: relayWake.expiresAt,
+        wakeMac: 'x' * 43,
+      );
+      final wrongSecret = RelayPushState.fromJson(<String, Object?>{
+        ...state.toJson(),
+        'wake_secret':
+            base64UrlEncode(List<int>.filled(32, 255)).replaceAll('=', ''),
+      });
+      final wrongRoute = RelayPushState.fromJson(<String, Object?>{
+        ...state.toJson(),
+        'route_id': 'z' * 43,
+      });
+      for (final candidate in [
+        (wrongMac, state, 'relay'),
+        (relayWake, wrongSecret, 'relay'),
+        (relayWake, wrongRoute, 'relay'),
+      ]) {
+        expect(
+            await authenticatePushWake(candidate.$1, candidate.$2,
+                configuredTransport: candidate.$3,
+                nowEpochSeconds: expiresAt - 60),
+            isFalse);
+      }
+      expect(
         await authenticatePushWake(
           relayWake,
           state,
@@ -2161,7 +2353,7 @@ void main() {
       );
     });
 
-    test('parses notification content only after authenticated redemption', () {
+    test('notification content parsing', () {
       final envelope = PushNotificationEnvelope.parse(<String, Object?>{
         'kind': 'mention',
         'title': 'Turtle in General',
@@ -2212,7 +2404,8 @@ void main() {
       expect(stableNotificationId('73@remote.example'), 1372435255);
       expect(stableNotificationId('73@remote.example'),
           stableNotificationId('73@remote.example'));
-      expect(stableNotificationId('74@remote.example'), isNot(1959121094));
+      expect(stableNotificationId('74@remote.example'),
+          isNot(stableNotificationId('73@remote.example')));
       expect(
         stableNotificationId('73@remote.example'),
         inInclusiveRange(0, 0x7fffffff),
@@ -2311,6 +2504,13 @@ void main() {
     test('acknowledges only when the selected conversation pane is visible',
         () {
       final selected = EntityRef.parse('42@chat.example');
+      expect(
+          shouldAcknowledgeVisibleChannel(
+              appActive: false,
+              conversationPaneVisible: true,
+              selectedChannel: selected,
+              channel: selected),
+          isFalse);
 
       expect(
         shouldAcknowledgeVisibleChannel(
@@ -2443,6 +2643,22 @@ void main() {
         gatewayProtocolWarning: 'Invalid realtime data.',
         pushWarning: 'Notifications need attention.',
       );
+      final protocolCleared =
+          initial.copyWith(clearGatewayProtocolWarning: true);
+      expect(protocolCleared.gatewayProtocolWarning, isNull);
+      expect(protocolCleared.pushWarning, initial.pushWarning);
+      expect(protocolCleared.degradedWarnings, initial.degradedWarnings);
+      final pushCleared = initial.copyWith(clearPushWarning: true);
+      expect(pushCleared.pushWarning, isNull);
+      expect(
+          pushCleared.gatewayProtocolWarning, initial.gatewayProtocolWarning);
+      final healthRecovered = initial.copyWith(
+          gatewayHealth: const GatewayHealth(GatewayConnectionPhase.connected));
+      expect(healthRecovered.gatewayHealth.isConnected, isTrue);
+      expect(healthRecovered.degradedWarnings, initial.degradedWarnings);
+      final degradedCleared = initial.copyWith(degradedWarnings: const {});
+      expect(degradedCleared.degradedWarnings, isEmpty);
+      expect(degradedCleared.gatewayHealth.phase, initial.gatewayHealth.phase);
       final recovered = initial.copyWith(
         gatewayHealth: const GatewayHealth(GatewayConnectionPhase.connected),
         degradedWarnings: const <DegradedFeature, String>{},

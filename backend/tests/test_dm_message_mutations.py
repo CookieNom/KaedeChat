@@ -235,7 +235,7 @@ def mutation_session(
         ),
     ],
 )
-async def test_remote_home_applies_reaction_and_pin_deltas_idempotently(
+async def test_no_dispatch_when_the_mutation_reports_no_changed_rows(
     event_type: str,
     content: dict[str, object],
     expected: dict[str, object],
@@ -352,6 +352,20 @@ async def test_remote_home_applies_message_tombstone_once() -> None:
     session.execute.assert_awaited_once()
     assert result.dispatches[0][0] == "MESSAGE_DELETE"
 
+    replay = await apply_dm_message_mutation(
+        cast(Any, session),
+        cast(Any, SimpleNamespace(domain="local.example")),
+        event_type="dm.message.delete",
+        content=common_content(deleted_at=deleted_at.isoformat()),
+        context=context(),
+        event_origin=AUTHORITY,
+        actor_ref=ACTOR_REF,
+        event_timestamp_ms=int((deleted_at + timedelta(milliseconds=1)).timestamp() * 1_000),
+    )
+    assert message.content is None and message.deleted_at == deleted_at
+    assert replay.dispatches == ()
+    session.execute.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_full_message_update_uses_strict_projection_before_dispatch(
@@ -372,9 +386,10 @@ async def test_full_message_update_uses_strict_projection_before_dispatch(
     strict_update = AsyncMock(return_value=None)
     monkeypatch.setattr(dm_mutations, "_apply_message_update", strict_update)
 
+    configured = SimpleNamespace(domain="local.example")
     result = await apply_dm_message_mutation(
         cast(Any, session),
-        cast(Any, SimpleNamespace(domain="local.example")),
+        cast(Any, configured),
         event_type="dm.message.update",
         content={"message": raw},
         context=context(),
@@ -383,6 +398,14 @@ async def test_full_message_update_uses_strict_projection_before_dispatch(
         event_timestamp_ms=int(edited_at.timestamp() * 1_000),
     )
 
-    strict_update.assert_awaited_once()
+    strict_update.assert_awaited_once_with(
+        session,
+        configured,
+        channel=channel,
+        message=message,
+        actor=actor,
+        raw=raw,
+        event_timestamp_ms=int(edited_at.timestamp() * 1000),
+    )
     assert result.dispatches == ()
     assert result.render_message_update is True

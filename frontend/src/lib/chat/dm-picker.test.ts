@@ -80,11 +80,12 @@ describe('friendsWithoutVisibleDm', () => {
 describe('filterDmFriends', () => {
   const friends = [
     user('1', 'alice', 'chat.example', 'Alice Example'),
-    user('2', 'turtle', 'remote.example', 'River Turtle')
+    user('2', 'turtle', 'remote.example', 'River Otter')
   ];
 
   it('matches display names, usernames, domains, and handles case-insensitively', () => {
     expect(filterDmFriends(friends, 'river')).toEqual([friends[1]]);
+    expect(filterDmFriends(friends, 'TURTLE')).toEqual([friends[1]]);
     expect(filterDmFriends(friends, '@TURTLE@REMOTE')).toEqual([friends[1]]);
     expect(filterDmFriends(friends, 'chat.example')).toEqual([friends[0]]);
   });

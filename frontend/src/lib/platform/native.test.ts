@@ -54,8 +54,9 @@ describe('native session startup', () => {
       'native_set_instance',
       'native_restore_session'
     ]);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'native_set_instance', { instance: 'kaede.chat' });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'native_restore_session', undefined);
   });
-
   it('shares one restore across concurrent startup requests', async () => {
     let releaseRestore: (() => void) | undefined;
     const restorePending = new Promise<void>((resolve) => {
@@ -93,7 +94,7 @@ describe('native session startup', () => {
     expect(invoke).toHaveBeenCalledTimes(2);
   });
 
-  it('retains only safe authenticated routes across a native process restart', async () => {
+  it('persisted safe route filtering', async () => {
     vi.stubGlobal('window', {
       __TAURI__: { core: { invoke: vi.fn() } }
     });

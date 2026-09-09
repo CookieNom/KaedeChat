@@ -117,9 +117,33 @@ def test_bare_invite_management_code_uses_explicit_guild_authority() -> None:
 def test_federated_invite_projection_rejects_substituted_resources(
     payload: object,
 ) -> None:
+    from copy import deepcopy
+
+    baseline = exact_federated_invite_payload()
+    if "scheduled_event_id" in payload:
+        baseline["scheduled_event_id"] = "30@guild.example"
+    if "guild_scheduled_event" in payload:
+        baseline["guild_scheduled_event"] = {
+            "id": "30",
+            "origin_domain": "guild.example",
+            "guild_id": "10",
+            "guild_domain": "guild.example",
+        }
+    assert (
+        invite_api.validated_federated_invite_payload(
+            baseline,
+            expected_guild=(10, "guild.example"),
+            expected_channel_id=20,
+            validate_channel=True,
+        )
+        == baseline
+    )
+    invalid = deepcopy(baseline)
+    invalid.update(payload)
+    invalid["guild"] = exact_federated_guild_payload() | payload["guild"]
     with pytest.raises(HTTPException) as raised:
         invite_api.validated_federated_invite_payload(
-            payload,
+            invalid,
             expected_guild=(10, "guild.example"),
             expected_channel_id=20,
             validate_channel=True,
@@ -283,7 +307,7 @@ async def test_live_invite_targets_reject_non_voice_destination() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invite_roles_are_idempotent_and_make_membership_permanent() -> None:
+async def test_granting_missing_roles_when_some_already_exist() -> None:
     role_one = SimpleNamespace(id=91, origin_domain="guild.example")
     role_two = SimpleNamespace(id=92, origin_domain="guild.example")
     invite = SimpleNamespace(role_ids=["91@guild.example", "92@guild.example"])
@@ -306,6 +330,15 @@ async def test_invite_roles_are_idempotent_and_make_membership_permanent() -> No
     assert newly_granted == [role_two]
     assert member.temporary is False
     session.execute.assert_awaited_once()
+    inserted = session.execute.await_args.args[0].compile().params
+    assert inserted == {
+        "guild_id_m0": 10,
+        "guild_domain_m0": "guild.example",
+        "user_id_m0": 30,
+        "user_domain_m0": "people.example",
+        "role_id_m0": 92,
+        "role_domain_m0": "guild.example",
+    }
 
 
 def test_public_invite_target_payload_does_not_expose_user_allowlist() -> None:
@@ -476,7 +509,11 @@ async def test_bot_invite_channel_access_checks_nested_scheduled_event_channel(
         ),
     }
     session = SimpleNamespace(get=AsyncMock(side_effect=lambda _model, ref: channels.get(ref)))
-    permission_check = AsyncMock(side_effect=[int(Permission.VIEW_CHANNEL), 0])
+    permission_check = AsyncMock(
+        side_effect=lambda *_args, channel: (
+            int(Permission.VIEW_CHANNEL) if channel is channels[(20, "guild.example")] else 0
+        )
+    )
     monkeypatch.setattr(
         invite_api,
         "active_scheduled_event_for_invite",
@@ -494,7 +531,9 @@ async def test_bot_invite_channel_access_checks_nested_scheduled_event_channel(
     )
 
     assert not allowed
-    assert permission_check.await_count == 2
+    assert [call.kwargs["channel"] for call in permission_check.await_args_list] == list(
+        channels.values()
+    )
 
 
 @pytest.mark.asyncio
@@ -831,7 +870,7 @@ async def test_bot_invite_listing_accepts_read_scope(
 
 
 @pytest.mark.asyncio
-async def test_inactive_federated_invite_recovery_binds_exact_viewer_identity(
+async def test_viewer_scoped_recovery_query_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     invite = SimpleNamespace(
@@ -943,7 +982,7 @@ def test_target_user_csv_ignores_duplicate_ids_like_discord() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inviter_or_audit_permission_can_read_but_not_update_target_users(
+async def test_audit_permission_read_without_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 8, 28, tzinfo=UTC)
@@ -1091,6 +1130,10 @@ async def test_target_user_update_records_the_authority_audit_reason(
     assert result["total_users"] == 1
     assert audit.await_args.kwargs["reason"] == "bulk allowlist refresh"
 
+    assert invite.target_user_ids == ["31@people.example"]
+    assert audit.await_args.args[2:5] == (guild, actor, 41)
+    assert audit.await_args.kwargs["target_ref"] == {"code": "abcdefgh"}
+
 
 @pytest.mark.asyncio
 async def test_bot_invite_management_binds_qualified_code_to_guild_authority(
@@ -1219,7 +1262,7 @@ async def test_bot_target_user_routes_reuse_authoritative_invite_services(
             "error_message": None,
         }
     )
-    status = AsyncMock(return_value=await update())
+    status = AsyncMock(return_value=update.return_value)
     monkeypatch.setattr(bots_api, "bot_invite_management_scope", scope)
     monkeypatch.setattr(bots_api, "local_get_invite_target_users", read)
     monkeypatch.setattr(bots_api, "local_update_invite_target_users", update)

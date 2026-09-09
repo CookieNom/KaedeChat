@@ -17,7 +17,7 @@ def remote_user() -> User:
 
 
 @pytest.mark.asyncio
-async def test_remote_suspension_blocks_guild_message_creation_but_not_join() -> None:
+async def test_suspension_helper_allowing_join_but_rejecting_message_creation() -> None:
     restriction = SimpleNamespace(
         restriction_type="suspended",
         expires_at=SimpleNamespace(isoformat=lambda: "2026-08-26T00:00:00+00:00"),
@@ -33,7 +33,7 @@ async def test_remote_suspension_blocks_guild_message_creation_but_not_join() ->
 
 
 @pytest.mark.asyncio
-async def test_remote_ban_blocks_message_creation_and_new_guild_membership() -> None:
+async def test_ban_helper_rejecting_creation_and_membership() -> None:
     restriction = SimpleNamespace(restriction_type="banned", expires_at=None)
     session = AsyncMock()
     session.scalar.return_value = restriction

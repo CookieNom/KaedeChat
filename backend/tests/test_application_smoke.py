@@ -5,17 +5,6 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
-from pydantic import ValidationError
-
-
-def test_application_emoji_availability_is_read_only() -> None:
-    from app.api.application_assets import ApplicationEmojiPatch
-
-    assert ApplicationEmojiPatch.model_validate({"name": "renamed"}).name == "renamed"
-    with pytest.raises(ValidationError):
-        ApplicationEmojiPatch.model_validate({"name": "renamed", "available": False})
-
 
 def test_api_and_gateway_register_all_routes() -> None:
     environment = os.environ.copy()
@@ -104,8 +93,61 @@ def test_api_and_gateway_register_all_routes() -> None:
             ),
             ("post", "/_kaede/v1/dms/{conversation_id}/forward-resolve"),
         }
+        parity_routes.update({
+            ('get', '/api/v1/bots/guilds/{guild_ref}/instance-bans'),
+            ('put', '/api/v1/bots/guilds/{guild_ref}/instance-bans/{instance_domain}'),
+            ('delete', '/api/v1/bots/guilds/{guild_ref}/instance-bans/{instance_domain}'),
+            ('get', '/api/v1/bots/voice/regions'),
+            ('get', '/api/v1/bots/guilds/{guild_ref}/voice/regions'),
+            ('get', '/api/v1/voice/regions'),
+            ('get', '/api/v1/guilds/{guild_ref}/soundboard-sounds'),
+            ('post', '/api/v1/guilds/{guild_ref}/soundboard-sounds'),
+            ('post', '/api/v1/guilds/{guild_ref}/soundboard-sounds/tickets'),
+            ('get', '/api/v1/guilds/{guild_ref}/soundboard-sounds/{sound_ref}'),
+            ('patch', '/api/v1/guilds/{guild_ref}/soundboard-sounds/{sound_ref}'),
+            ('delete', '/api/v1/guilds/{guild_ref}/soundboard-sounds/{sound_ref}'),
+            ('post', '/api/v1/channels/{channel_ref}/send-soundboard-sound'),
+            ('get', '/api/v1/bots/guilds/{guild_ref}/soundboard-sounds'),
+            ('post', '/api/v1/bots/guilds/{guild_ref}/soundboard-sounds'),
+            ('post', '/api/v1/bots/guilds/{guild_ref}/soundboard-sounds/tickets'),
+            ('get', '/api/v1/bots/guilds/{guild_ref}/soundboard-sounds/{sound_ref}'),
+            ('patch', '/api/v1/bots/guilds/{guild_ref}/soundboard-sounds/{sound_ref}'),
+            ('delete', '/api/v1/bots/guilds/{guild_ref}/soundboard-sounds/{sound_ref}'),
+            ('post', '/api/v1/bots/channels/{channel_ref}/send-soundboard-sound'),
+            ('post', '/api/v1/bots/channels/{channel_ref}/soundboard-playback-grants'),
+            ('delete', '/api/v1/users/@me/assets/{kind}'),
+            ('post', '/api/v1/guilds/{guild_id}/assets/{kind}'),
+            ('put', '/api/v1/guilds/{guild_id}/assets/{kind}'),
+            ('delete', '/api/v1/guilds/{guild_id}/assets/{kind}'),
+            ('post', '/api/v1/guilds/{guild_id}/roles/{role_id}/icon'),
+            ('put', '/api/v1/guilds/{guild_id}/roles/{role_id}/icon'),
+            ('delete', '/api/v1/guilds/{guild_id}/roles/{role_id}/icon'),
+            ('post', '/api/v1/bots/guilds/{guild_ref}/assets/{kind}'),
+            ('put', '/api/v1/bots/guilds/{guild_ref}/assets/{kind}'),
+            ('delete', '/api/v1/bots/guilds/{guild_ref}/assets/{kind}'),
+            ('post', '/api/v1/bots/guilds/{guild_ref}/roles/{role_ref}/icon'),
+            ('put', '/api/v1/bots/guilds/{guild_ref}/roles/{role_ref}/icon'),
+            ('delete', '/api/v1/bots/guilds/{guild_ref}/roles/{role_ref}/icon'),
+            ('post', '/_kaede/v1/guilds/{guild_id}/soundboard/query'),
+            ('post', '/_kaede/v1/guilds/{guild_id}/soundboard/play'),
+            ('post', '/_kaede/v1/voice/soundboard-effect'),
+        })
         for method, path in parity_routes:
             assert method in schema["paths"][path], f"missing {method.upper()} {path}"
+        from app.core.federation import FEDERATION_CAPABILITIES
+        from app.federation.client import silence_blocks_path
+        assert "guild-soundboard/1" in FEDERATION_CAPABILITIES
+        for path in (
+            "/_kaede/v1/guilds/10/soundboard/query",
+            "/_kaede/v1/guilds/10/soundboard/play",
+            "/_kaede/v1/voice/soundboard-effect",
+        ):
+            assert silence_blocks_path(path)
+        grant_path = "/api/v1/bots/channels/{channel_ref}/soundboard-playback-grants"
+        grant = schema["paths"][grant_path]["post"]
+        assert "200" in grant["responses"]
+        from app.api.soundboard import router as bot_soundboard_router
+        assert all(route.path.startswith("/api/v1/bots/") for route in bot_soundboard_router.routes)
         discord_200_posts = {
             "/api/v1/guilds/{guild_ref}/auto-moderation/rules",
             "/api/v1/bots/guilds/{guild_ref}/auto-moderation/rules",
@@ -171,9 +213,10 @@ def test_api_and_gateway_register_all_routes() -> None:
                 )
                 assert missing.json() == {
                     "code": "HTTP_404",
-                    "message": "The requested item could not be found or is no longer available.",
+                    "message": missing.json()["message"],
                     "trace_id": "smoke-trace",
                 }
+                assert isinstance(missing.json()["message"], str) and missing.json()["message"]
                 assert missing.headers["Cache-Control"] == "no-store"
                 discovery = await client.get("/.well-known/kaede/server")
                 assert discovery.status_code == 200

@@ -142,6 +142,21 @@ async def test_remote_forward_source_proof_marks_only_guild_sources(
     assert result == {"type": FORWARD_SOURCE_AUTHORIZATION_EVENT}
     assert signed.await_args.kwargs["guild_context"] is guild_context
 
+    assert signed.await_args.args[2:] == (
+        "POST",
+        "source.example",
+        "/_kaede/v1/channels/70/forward-authorize",
+    )
+    payload = signed.await_args.kwargs["payload"]
+    assert payload["actor"]["id"] == "7"
+    assert payload["actor"]["origin_domain"] == "destination.example"
+    assert {key: value for key, value in payload.items() if key != "actor"} == {
+        "source_message_ref": "700@source.example",
+        "destination_channel_ref": "80@destination.example",
+        "destination_encryption_mode": "plaintext",
+        "nonce": "human-forward-1",
+    }
+
 
 def test_forward_snapshot_binds_destination_plaintext_integrity() -> None:
     plaintext = b"hello world\n"
@@ -600,6 +615,8 @@ async def test_cross_authority_forward_proof_verifies_signature_and_exact_use() 
     (
         ("destination.example", "e2ee", "plaintext", "local"),
         ("source.example", "plaintext", "e2ee", "remote"),
+        ("destination.example", "plaintext", "e2ee", "local"),
+        ("source.example", "e2ee", "plaintext", "remote"),
     ),
 )
 async def test_human_forward_prepare_pins_authority_and_disclosure_contract(

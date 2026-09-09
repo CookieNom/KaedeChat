@@ -70,24 +70,46 @@ PAIR_KEY = dm_pair_key(
 )
 
 
-def test_usable_dm_capability_sql_uses_default_and_explicit_time_boundaries() -> None:
-    default_statement = select(BotDMCapability.id).where(usable_dm_capability())
-    default_compiled = default_statement.compile()
-    default_sql = str(default_compiled)
+async def test_usable_dm_capability_sql_uses_default_and_explicit_time_boundaries(
+    postgres_schema,
+) -> None:
+    from sqlalchemy import text
 
-    assert "bot_dm_capabilities.status =" in default_sql
-    assert "bot_dm_capabilities.revoked_at IS NULL" in default_sql
-    assert "bot_dm_capabilities.expires_at > now()" in default_sql
-    assert "active" in default_compiled.params.values()
-
-    boundary = datetime(2026, 8, 29, tzinfo=UTC)
-    explicit_statement = select(BotDMCapability.id).where(usable_dm_capability(at=boundary))
-    explicit_compiled = explicit_statement.compile()
-    explicit_sql = str(explicit_compiled)
-
-    assert "bot_dm_capabilities.expires_at >" in explicit_sql
-    assert "now()" not in explicit_sql
-    assert boundary in explicit_compiled.params.values()
+    connection = postgres_schema
+    await connection.execute(
+        text(
+            "CREATE TABLE bot_dm_capabilities (id bigint, status text, revoked_at "
+            "timestamptz, expires_at timestamptz)"
+        )
+    )
+    now = await connection.scalar(text("SELECT now()"))
+    await connection.execute(
+        text(
+            "INSERT INTO bot_dm_capabilities VALUES (1, 'active', NULL, now() + interval '1 "
+            "hour'), (2, 'active', NULL, now()), (3, 'active', NULL, now() - interval '1 "
+            "hour'), (4, 'revoked', NULL, now() + interval '1 hour'), (5, 'active', now(), "
+            "now() + interval '1 hour')"
+        )
+    )
+    assert list(
+        await connection.scalars(select(BotDMCapability.id).where(usable_dm_capability()))
+    ) == [1]
+    assert list(
+        await connection.scalars(select(BotDMCapability.id).where(usable_dm_capability(at=now)))
+    ) == [1]
+    assert (
+        list(
+            await connection.scalars(
+                select(BotDMCapability.id).where(usable_dm_capability(at=now + timedelta(hours=1)))
+            )
+        )
+        == []
+    )
+    assert set(
+        await connection.scalars(
+            select(BotDMCapability.id).where(usable_dm_capability(at=now - timedelta(hours=1)))
+        )
+    ) == {1, 2}
 
 
 def bot_user() -> User:
@@ -481,7 +503,7 @@ def test_live_dm_worker_requires_exact_capability_runtime_and_worker_target() ->
         application,
         worker,
         target,
-        target_domain=DM_DOMAIN,
+        target_domain=runtime_domain,
         dm_capability=row,
     )
 
@@ -684,38 +706,109 @@ async def test_active_apply_requires_runtime_admission_and_renews_a_stable_revis
 
 @pytest.mark.asyncio
 async def test_exact_capability_fence_revokes_tokens_and_e2ee_atomically(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, postgres_schema
 ) -> None:
-    row = capability_row()
-    expectation = bot_dm_capability_fence_expectation(row)
-    channel = SimpleNamespace(id=60, origin_domain=DM_DOMAIN)
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[None, row]),
-        execute=AsyncMock(),
-    )
-    revoke_e2ee = AsyncMock(return_value=[channel])
-    monkeypatch.setattr("app.bots.e2ee.revoke_bot_e2ee_access", revoke_e2ee)
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    fenced, channels = await fence_bot_dm_capability(
-        session,
-        SimpleNamespace(),
-        SimpleNamespace(domain=DM_DOMAIN),
-        expectation,
-    )
+    import app.bots.e2ee as bot_e2ee
 
-    assert fenced is True
-    assert channels == [channel]
-    assert row.status == "suspended"
-    assert row.revoked_at is not None
-    assert "pg_advisory_xact_lock" in str(session.scalar.await_args_list[0].args[0])
-    row_lock = session.scalar.await_args_list[1].args[0]
-    assert "FOR UPDATE" in str(row_lock)
-    assert row_lock.get_execution_options()["populate_existing"] is True
-    token_revoke = str(session.execute.await_args.args[0])
-    assert "UPDATE bot_tokens" in token_revoke
-    assert "bot_tokens.dm_capability_id" in token_revoke
-    revoke_e2ee.assert_awaited_once()
-    assert revoke_e2ee.await_args.kwargs["dm_capability_ids"] == (row.id,)
+    for table in (
+        "bot_dm_capabilities",
+        "bot_tokens",
+        "bot_dm_grants",
+        "bot_e2ee_participations",
+        "channels",
+        "dm_conversations",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    monkeypatch.setattr(bot_e2ee, "evict_bot_voice_runtime_sessions", AsyncMock())
+    monkeypatch.setattr(bot_e2ee, "evict_channel_media_sessions", AsyncMock())
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        row = capability_row()
+        session.add(row)
+        await session.flush()
+        expectation = bot_dm_capability_fence_expectation(row)
+        await session.execute(
+            text(
+                "INSERT INTO bot_tokens (id,dm_capability_id,revoked_at) VALUES "
+                "(1,90,NULL),(2,91,NULL),(3,90,:old)"
+            ),
+            dict(old=datetime.now(UTC) - timedelta(days=1)),
+        )
+        await session.execute(
+            text(
+                "INSERT INTO bot_dm_grants "
+                "(id,dm_capability_id,consent_state,consent_generation) VALUES "
+                "(1,90,'active',1),(2,91,'active',1)"
+            )
+        )
+        await session.execute(
+            text(
+                "INSERT INTO bot_e2ee_participations "
+                "(id,dm_grant_id,channel_id,channel_domain,status,consent_generation) "
+                "VALUES "
+                "(1,1,60,:domain,'active',1),(2,2,61,:domain,'active',1),(3,1,60,:domain,'revoked',4)"
+            ),
+            dict(domain=DM_DOMAIN),
+        )
+        await session.execute(
+            text(
+                "INSERT INTO channels (id,origin_domain,encryption_mode,encryption_state) "
+                "VALUES (60,:domain,'e2ee','active'),(61,:domain,'e2ee','active')"
+            ),
+            dict(domain=DM_DOMAIN),
+        )
+        await session.execute(
+            text(
+                "INSERT INTO dm_conversations (id,origin_domain,type) VALUES (60,:domain,'direct')"
+            ),
+            dict(domain=DM_DOMAIN),
+        )
+        savepoint = await session.begin_nested()
+        fenced, channels = await fence_bot_dm_capability(
+            session, SimpleNamespace(), SimpleNamespace(domain=DM_DOMAIN), expectation
+        )
+        assert fenced and [(channel.id, channel.origin_domain) for channel in channels] == [
+            (60, DM_DOMAIN)
+        ]
+        await session.flush()
+        assert set(
+            await session.scalars(text("SELECT id FROM bot_tokens WHERE revoked_at IS NOT NULL"))
+        ) == {1, 3}
+        assert (
+            await session.execute(
+                text("SELECT id,status,consent_generation FROM bot_e2ee_participations ORDER BY id")
+            )
+        ).all() == [(1, "revoked", 2), (2, "active", 1), (3, "revoked", 4)]
+        assert (
+            await session.execute(text("SELECT id,consent_state FROM bot_dm_grants ORDER BY id"))
+        ).all() == [(1, "revoked"), (2, "active")]
+        assert (
+            await session.execute(text("SELECT id,encryption_state FROM channels ORDER BY id"))
+        ).all() == [(60, "rekeying"), (61, "active")]
+        assert (
+            await session.scalar(text("SELECT status FROM bot_dm_capabilities WHERE id=90"))
+            == "suspended"
+        )
+        await savepoint.rollback()
+        assert set(
+            await session.scalars(text("SELECT id FROM bot_tokens WHERE revoked_at IS NOT NULL"))
+        ) == {3}
+        assert (
+            await session.scalar(text("SELECT status FROM bot_e2ee_participations WHERE id=1"))
+            == "active"
+        )
+        assert (
+            await session.scalar(text("SELECT status FROM bot_dm_capabilities WHERE id=90"))
+            == "active"
+        )
+        assert (
+            await session.scalar(text("SELECT encryption_state FROM channels WHERE id=60"))
+            == "active"
+        )
 
 
 @pytest.mark.asyncio
@@ -1017,7 +1110,7 @@ async def test_a_mirrors_only_c_explicit_exact_fence(
 
 
 @pytest.mark.asyncio
-async def test_suspended_projection_fence_is_idempotent() -> None:
+async def test_suppression_when_no_eligible_rows_are_returned() -> None:
     capability = payload()
     row = BotDMCapability(
         id=90,
@@ -1442,6 +1535,7 @@ async def test_install_revocation_queues_distinct_monotonic_tombstones(
         get=AsyncMock(return_value=bot_user()),
     )
     built: list[dict[str, object]] = []
+    contexts: list[tuple[object, ...]] = []
 
     async def build(
         _session: object,
@@ -1451,6 +1545,7 @@ async def test_install_revocation_queues_distinct_monotonic_tombstones(
         content: dict[str, object],
         **_kwargs: object,
     ) -> dict[str, object]:
+        contexts.append((_session, settings.domain, _event_type, _actor, _kwargs))
         value = envelope(BotDMCapabilityPayload.model_validate(content)).model_dump(mode="json")
         value["origin"] = settings.domain  # type: ignore[attr-defined]
         value["event_id"] = f"kcfe_projection_event_{len(built)}"
@@ -1480,7 +1575,19 @@ async def test_install_revocation_queues_distinct_monotonic_tombstones(
     row_sql = str(session.scalar.await_args_list[1].args[0])
     assert "pg_advisory_xact_lock" in lock_sql
     assert "FOR UPDATE" in row_sql
-    assert len({item["event_id"] for item in built}) == 3
+    assert len(contexts) == 3
+    assert all(context[0] is session for context in contexts)
+    assert all(
+        context[1:3] == (INSTALL_DOMAIN, "bot.dm.installation-capability") for context in contexts
+    )
+    assert all(
+        (context[3].id, context[3].origin_domain) == (10, APP_DOMAIN) for context in contexts
+    )
+    assert all(context[4] == {"authority_attested_actor": True} for context in contexts)
+    assert applied.await_args.args[2].event_id == built[0]["event_id"]
+    assert [(call.args[2], call.args[3]) for call in queued.await_args_list] == list(
+        zip(sorted({APP_DOMAIN, dm_authority}), built[1:], strict=True)
+    )
     assert all(item["content"]["status"] == "revoked" for item in built)  # type: ignore[index]
     assert all(item["content"]["revision"] == "2" for item in built)  # type: ignore[index]
     assert all(item["content"]["target_access_revocation_generation"] == "0" for item in built)  # type: ignore[index]
@@ -1493,11 +1600,6 @@ async def test_install_revocation_queues_distinct_monotonic_tombstones(
 
 
 def test_empty_worker_target_list_is_the_documented_approved_target_wildcard() -> None:
-    source = bot_dm_api.__file__
-    assert source is not None
-    # The runtime assertion itself is covered in target-discovery tests; this
-    # regression keeps every runtime surface aligned with the public
-    # empty-list-means-every-approved-target contract.
     from app.bots.runtime_control import _runtime_snapshot
 
     application = SimpleNamespace(

@@ -9,12 +9,11 @@ Uint8List _jpegWithPrivateExif() {
   final exif = Uint8List(6 + 26 + privateText.length)
     ..setRange(
         0, 16, <int>[69, 120, 105, 102, 0, 0, 73, 73, 42, 0, 8, 0, 0, 0, 1, 0]);
-  final view = ByteData.sublistView(exif)
+  ByteData.sublistView(exif)
     ..setUint16(16, 0x0112, Endian.little)
     ..setUint16(18, 3, Endian.little)
     ..setUint32(20, 1, Endian.little)
     ..setUint16(24, 6, Endian.little);
-  expect(view.lengthInBytes, exif.length);
   exif.setRange(32, exif.length, privateText);
   final length = exif.length + 2;
   return Uint8List.fromList(<int>[
@@ -38,14 +37,19 @@ Uint8List _jpegWithPrivateExif() {
 }
 
 void main() {
-  test('scrub keeps JPEG pixels, size, and orientation', () {
+  test(
+      'scrub removes private metadata and preserves JPEG scan bytes and orientation',
+      () {
     final source = _jpegWithPrivateExif();
     final result = scrubImageMetadataBytes(source, 'image/jpeg');
 
     expect(result.length, source.length);
     expect(
         result.sublist(result.length - 6), source.sublist(source.length - 6));
-    expect(String.fromCharCodes(result).contains('Alice'), isFalse);
+    final scrubbed = String.fromCharCodes(result);
+    for (final privateValue in ['Alice', 'GPS', '51.5007', '-0.1246']) {
+      expect(scrubbed, isNot(contains(privateValue)));
+    }
     expect(ByteData.sublistView(result).getUint16(30, Endian.little), 6);
   });
 

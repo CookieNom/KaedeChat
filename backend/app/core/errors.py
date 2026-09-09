@@ -16,6 +16,12 @@ from app.core.error_messages import friendly_error_message
 
 ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 MAX_ERROR_MESSAGE_LENGTH = 500
+# Aggregate server/peer capacity is private; per-resource quota errors remain actionable.
+PRIVATE_CAPACITY_ERRORS = {
+    "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED",
+    "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED",
+    "FEDERATION_OUTBOX_CAPACITY_EXCEEDED",
+}
 PUBLIC_CACHE_PATHS = {
     "/.well-known/kaede/server",
     "/_kaede/v1/keys",
@@ -143,7 +149,7 @@ def http_exception_response(request: Request, exc: StarletteHTTPException) -> JS
         resource = exc.detail.get("resource")
         if resource in {"conversations", "messages", "bytes"}:
             extensions["resource"] = resource
-        for field in ("used", "limit"):
+        for field in () if code in PRIVATE_CAPACITY_ERRORS else ("used", "limit"):
             value = exc.detail.get(field)
             if (
                 isinstance(value, int)
@@ -256,7 +262,7 @@ def parse_upstream_error(body: Any, fallback_code: str) -> dict[str, object]:
     resource = candidate.get("resource")
     if resource in {"conversations", "messages", "bytes"}:
         detail["resource"] = resource
-    for field in ("used", "limit"):
+    for field in () if detail["code"] in PRIVATE_CAPACITY_ERRORS else ("used", "limit"):
         value = candidate.get(field)
         if (
             isinstance(value, int)

@@ -17,9 +17,8 @@ describe('typing participants', () => {
       expiresAt: index === 0 ? 9 : 20
     }));
     const active = activeTypingParticipants(participants, 10);
-    expect(typingLabel(active)).toBe('B, C, and D are typing…');
-    expect(typingLabel([...active, { ref: '4@a', name: 'E', expiresAt: 20 }])).toBe(
-      'B, C, and 2 more are typing…'
-    );
+    expect(active.map(({ ref }) => ref)).toEqual(['1@a', '2@a', '3@a']);
+    expect(typingLabel(active)).toMatch(/B.*C.*D/);
+    expect(typingLabel([...active, { ref: '4@a', name: 'E', expiresAt: 20 }])).toMatch(/B.*C.*2/);
   });
 });

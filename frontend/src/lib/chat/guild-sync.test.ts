@@ -11,9 +11,8 @@ describe('guild synchronization guidance', () => {
         history_sync_resource: null
       })
     ).toEqual({
-      title: 'Older guild history is waiting for capacity.',
-      message:
-        'Recent messages remain available. Kaede will retry automatically in about 61 seconds; no action is needed.',
+      title: expect.stringMatching(/history.*capacity/i),
+      message: expect.stringMatching(/recent messages.*available.*retry.*automatic.*61 seconds/i),
       severity: 'status'
     });
   });
@@ -27,8 +26,8 @@ describe('guild synchronization guidance', () => {
     });
 
     expect(guidance?.severity).toBe('alert');
-    expect(guidance?.message).toContain('Recent and new messages still work');
-    expect(guidance?.message).toContain('history messages limit');
+    expect(guidance?.message).toMatch(/(recent|new).*messages.*work/i);
+    expect(guidance?.message).toMatch(/history.*messages.*limit/i);
   });
 
   it('renders replica identity capacity and clears when the guild recovers', () => {
@@ -37,7 +36,7 @@ describe('guild synchronization guidance', () => {
         sync_status: 'quota_paused',
         sync_error_code: 'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED'
       })?.message
-    ).toContain('another remote account');
+    ).toMatch(/remote account/i);
     expect(guildReplicaSyncGuidance({ sync_status: 'ready', sync_error_code: null })).toBeNull();
     expect(
       guildHistorySyncGuidance({

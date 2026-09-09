@@ -41088,27 +41088,31 @@ diff --git a/src/e2ee/worker/FrameCryptor.test.ts b/src/e2ee/worker/FrameCryptor
 index 8043de8b45543676ead07059c6ac294d1b3b33cc..aef4588ab157213aee3f4b1963ff36d1055f6030 100644
 --- a/src/e2ee/worker/FrameCryptor.test.ts
 +++ b/src/e2ee/worker/FrameCryptor.test.ts
-@@ -121,6 +121,25 @@ function prepareParticipantTest(
+@@ -121,6 +121,29 @@ function prepareParticipantTest(
  describe('FrameCryptor', () => {
    const participantIdentity = 'testParticipant';
  
 +  it('round trips AV1 through the actual worker cryptors and rotates keys', async () => {
-+    const encoder = prepareParticipantTestEncoder(participantIdentity, {});
-+    const decoder = prepareParticipantTest('decode', participantIdentity, {});
-+    encoder.cryptor.setVideoCodec('av1');
-+    decoder.cryptor.setVideoCodec('av1');
-+    for (const index of [0, 1]) {
-+      const material = await createKeyMaterialFromString(`av1-key-${index}`);
-+      await encoder.keys.setKey(material, index);
-+      await decoder.keys.setKey(material, index);
-+      const data = new Uint8Array([0x0a, 2, 0, 0xaa, 0x32, 5, 0, 11, 22, 33, 44]);
-+      encoder.input.write(mockRTCEncodedVideoFrame(data));
-+      await vitest.waitFor(() => expect(encoder.output.chunks).toHaveLength(index + 1));
-+      decoder.input.write(encoder.output.chunks[index]);
-+      await vitest.waitFor(() => expect(decoder.output.chunks).toHaveLength(index + 1));
-+      expect(new Uint8Array(decoder.output.chunks[index].data)).toEqual(data);
++    const { parseAv1 } = await import('./av1Frame');
++    try {
++      const encoder = prepareParticipantTestEncoder(participantIdentity, {});
++      const decoder = prepareParticipantTest('decode', participantIdentity, {});
++      encoder.cryptor.setVideoCodec('av1');
++      decoder.cryptor.setVideoCodec('av1');
++      for (const index of [0, 1]) {
++        const material = await createKeyMaterialFromString(`av1-key-${index}`);
++        await encoder.keys.setKey(material, index);
++        await decoder.keys.setKey(material, index);
++        const data = new Uint8Array([0x0a, 2, 0, 0xaa, 0x32, 5, 0, 11, 22, 33, 44]);
++        encoder.input.write(mockRTCEncodedVideoFrame(data));
++        await vitest.waitFor(() => expect(encoder.output.chunks).toHaveLength(index + 1));
++        decoder.input.write(encoder.output.chunks[index]);
++        await vitest.waitFor(() => expect(decoder.output.chunks).toHaveLength(index + 1));
++        expect(new Uint8Array(decoder.output.chunks[index].data)).toEqual(data);
++      }
++    } finally {
++      encryptionEnabledMap.clear();
 +    }
-+    encryptionEnabledMap.clear();
 +  });
 +
    it('identifies server injected frame correctly', () => {
@@ -41229,7 +41233,7 @@ index 0000000000000000000000000000000000000000..ee28a6da1664e15908b30a81437e5f77
 +    }
 +    await expect(decrypt(wire, 2)).rejects.toThrow();
 +  });
-+  it('rejects every truncated prefix without passing plaintext to a decoder', async () => {
++  it('rejects every truncated prefix in the AV1 helper', async () => {
 +    const wire = await encrypted();
 +    for (let length = 0; length < wire.length; length++) {
 +      await expect(decrypt(wire.slice(0, length))).rejects.toThrow();

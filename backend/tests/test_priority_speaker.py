@@ -316,7 +316,11 @@ async def test_authoritative_grant_computes_priority_speaking_fail_closed(
 
 
 @pytest.mark.asyncio
-async def test_suspended_actor_cannot_mint_priority_voice_grant() -> None:
+async def test_suspended_actor_cannot_mint_priority_voice_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mint = AsyncMock()
+    monkeypatch.setattr("app.voice.service.mint_join_token", mint)
     actor = SimpleNamespace(disabled_at=datetime.now(UTC))
     with pytest.raises(HTTPException) as raised:
         await authoritative_guild_token(
@@ -329,6 +333,8 @@ async def test_suspended_actor_cannot_mint_priority_voice_grant() -> None:
             connection_id="c" * 43,
         )
     assert raised.value.detail == {"code": "VOICE_DENIED"}
+
+    mint.assert_not_called()
 
 
 @pytest.mark.asyncio

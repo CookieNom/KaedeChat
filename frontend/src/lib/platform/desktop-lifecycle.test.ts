@@ -30,7 +30,7 @@ describe('desktop lifecycle', () => {
     vi.restoreAllMocks();
   });
 
-  it('polls signed updates and offers taskbar pinning only when Windows allows it', async () => {
+  it('initial update check and allowed-Windows taskbar offer', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'native_update_check') {
         return {

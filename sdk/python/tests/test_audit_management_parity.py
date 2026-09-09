@@ -39,7 +39,7 @@ ManagementCall = Callable[[Client], Awaitable[object]]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "invoke",
+    "invoke,expected_version",
     [
         pytest.param(
             lambda bot: bot.edit_guild(
@@ -49,6 +49,7 @@ ManagementCall = Callable[[Client], Awaitable[object]]
                 reason=" routine cleanup ",
                 name="Renamed",
             ),
+            "guild-v1",
             id="guild-update",
         ),
         pytest.param(
@@ -60,6 +61,7 @@ ManagementCall = Callable[[Client], Awaitable[object]]
                 reason=" routine cleanup ",
                 name="renamed",
             ),
+            "channel-v1",
             id="channel-update",
         ),
         pytest.param(
@@ -71,12 +73,14 @@ ManagementCall = Callable[[Client], Awaitable[object]]
                 reason=" routine cleanup ",
                 name="renamed",
             ),
+            "role-v1",
             id="role-update",
         ),
     ],
 )
 async def test_versioned_management_merges_audit_and_if_match_headers(
     invoke: ManagementCall,
+    expected_version: str,
 ) -> None:
     bot = client()
     bot.request = AsyncMock(side_effect=RequestObserved)  # type: ignore[method-assign]
@@ -87,6 +91,7 @@ async def test_versioned_management_merges_audit_and_if_match_headers(
     headers = bot.request.await_args.kwargs["headers"]
     assert headers["X-Audit-Log-Reason"] == "routine cleanup"
     assert set(headers) == {"If-Match", "X-Audit-Log-Reason"}
+    assert headers["If-Match"] == expected_version
 
 
 @pytest.mark.asyncio
@@ -121,14 +126,6 @@ async def test_channel_reorder_uses_partial_discord_payload_and_empty_response()
     assert bot.request.await_args.kwargs["json"] == {
         "channels": [{"id": "20", "position": 2, "parent_id": None}]
     }
-
-
-@pytest.mark.asyncio
-async def test_channel_reorder_leaves_actual_parent_change_validation_to_server() -> (
-    None
-):
-    bot = client()
-    bot.request = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
     await bot.reorder_channels(
         GUILD,
@@ -344,6 +341,11 @@ async def test_channel_delete_returns_the_typed_deleted_channel(thread: bool) ->
 @pytest.mark.asyncio
 async def test_audit_reason_rejects_more_than_512_characters() -> None:
     bot = client()
-
+    bot.request = AsyncMock(side_effect=RequestObserved)
     with pytest.raises(ValueError, match="cannot exceed 512"):
         await bot.create_channel(GUILD, "general", reason="x" * 513)
+    bot.request.assert_not_awaited()
+    with pytest.raises(RequestObserved):
+        await bot.create_channel(GUILD, "general", reason="x" * 512)
+    bot.request.assert_awaited_once()
+    assert bot.request.await_args.kwargs["headers"]["X-Audit-Log-Reason"] == "x" * 512

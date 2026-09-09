@@ -223,6 +223,19 @@ void main() {
     test('nickname authority distinguishes self and other members', () {
       final self = GuildMember(user: user('2'), roleIds: <String>['20']);
       final target = member('4', lower.ref.id.value);
+      for (final entry in [
+        (self, Permission.manageNicknames),
+        (target, Permission.changeNickname)
+      ]) {
+        expect(
+            canChangeGuildMemberNickname(
+              guild: guild(permissions: entry.$2),
+              actorRef: actorRef,
+              actorHighestRole: actorRole,
+              target: entry.$1,
+            ),
+            isFalse);
+      }
       expect(
         canChangeGuildMemberNickname(
           guild: guild(),
@@ -253,37 +266,7 @@ void main() {
     });
   });
 
-  test('role and overwrite editors enforce the actor held-bit ceiling', () {
-    final held = BigInt.from(Permission.viewChannel | Permission.manageRoles);
-    expect(rolePermissionCanChange(held, Permission.manageRoles), isTrue);
-    expect(rolePermissionCanChange(held, Permission.sendMessages), isFalse);
-    expect(
-      rolePermissionChangesWithinCeiling(
-        BigInt.zero,
-        BigInt.from(Permission.manageRoles),
-        held,
-      ),
-      isTrue,
-    );
-    expect(
-      rolePermissionChangesWithinCeiling(
-        BigInt.zero,
-        BigInt.from(Permission.sendMessages),
-        held,
-      ),
-      isFalse,
-    );
-    expect(
-      channelOverwriteCanReset(
-        BigInt.from(Permission.sendMessages),
-        BigInt.zero,
-        held,
-      ),
-      isFalse,
-    );
-  });
-
-  test('category and invite targets use current effective permissions', () {
+  test('current category permission selection', () {
     KaedeChannel channel(String id, int permissions) => KaedeChannel(
           ref: EntityRef.parse('$id@chat.example'),
           guildRef: guildRef,
@@ -395,6 +378,8 @@ void main() {
       )),
       isTrue,
     );
+    expect(canReadRetainedChannelHistory(text(Permission.readMessageHistory)),
+        isFalse);
     final forum = KaedeChannel(
       ref: EntityRef.parse('61@chat.example'),
       guildRef: guildRef,
@@ -406,6 +391,25 @@ void main() {
     );
     expect(canCreateForumPostNow(forum, hasAttachments: false), isTrue);
     expect(canCreateForumPostNow(forum, hasAttachments: true), isFalse);
+    for (final permissions in [
+      Permission.viewChannel | Permission.sendMessages | Permission.attachFiles,
+      Permission.sendMessages | Permission.attachFiles,
+      Permission.viewChannel | Permission.attachFiles,
+    ]) {
+      final candidate = KaedeChannel(
+        ref: forum.ref,
+        guildRef: guildRef,
+        type: ChannelType.forum,
+        position: 1,
+        permissions: BigInt.from(permissions),
+      );
+      expect(
+          canCreateForumPostNow(candidate, hasAttachments: true),
+          permissions ==
+              (Permission.viewChannel |
+                  Permission.sendMessages |
+                  Permission.attachFiles));
+    }
     expect(canViewGuildMemberRoster(guild(), actorRef), isFalse);
     expect(
       canViewGuildMemberRoster(
@@ -428,7 +432,7 @@ void main() {
         );
     final source = voice('70', ChannelType.voice, Permission.moveMembers);
     final allowed = voice('71', ChannelType.voice, Permission.moveMembers);
-    final denied = voice('72', ChannelType.stage, Permission.connect);
+    final denied = voice('72', ChannelType.voice, Permission.connect);
     final voiceGuild = KaedeGuild(
       ref: guildRef,
       name: 'Voice guild',

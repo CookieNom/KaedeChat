@@ -12,7 +12,7 @@ import 'package:kaede_mobile/src/domain/bot_e2ee_participation.dart';
 import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
 
 void main() {
-  test('guild invite links remain review-first across home instances', () {
+  test('cross-home review route construction', () {
     final link = MobileDeepLink.parse(
       Uri.parse('https://guild.example/invite/Ab12Cd34'),
     )!;
@@ -110,18 +110,28 @@ void main() {
     );
     final channel = EntityRef.parse('50@dm.example');
     final application = EntityRef.parse('20@apps.example');
-    await repository.dmBotE2eeParticipation(
+    final pending = await repository.dmBotE2eeParticipation(
       channel: channel,
       application: application,
     );
-    await repository.consentToDmBotE2eeParticipation(
+    final active = await repository.consentToDmBotE2eeParticipation(
       channel: channel,
       application: application,
     );
-    await repository.revokeDmBotE2eeParticipation(
+    final revoked = await repository.revokeDmBotE2eeParticipation(
       channel: channel,
       application: application,
     );
+    expect(pending.consentState, 'pending');
+    expect(active.active, isTrue);
+    expect(active.everyoneConsented, isTrue);
+    expect(revoked.revoked, isTrue);
+    for (final result in [pending, active, revoked]) {
+      expect(result.applicationRef, application);
+      expect(result.channelRef, channel);
+      expect(result.historyFloorMessageRef?.wire, '60@dm.example');
+      expect(result.consentGeneration, '3');
+    }
     expect(adapter.requests.map((request) => request.method),
         ['GET', 'PUT', 'DELETE']);
     expect(
@@ -141,17 +151,32 @@ void main() {
       throwsA(isA<FormatException>()),
     );
 
+    final valid = <String, Object?>{
+      'application_ref': '20@apps.example',
+      'channel_ref': '50@dm.example',
+      'e2ee_mode': 'required',
+      'devices': <Object?>[
+        <String, Object?>{
+          'device_id': 'kbe_device',
+          'status': 'active',
+          'consent_generation': '3',
+          'joined_epoch': '7',
+          'history_floor_message_ref': '60@dm.example',
+        }
+      ],
+    };
     expect(
-      () => BotE2eeParticipation.fromJson(<String, Object?>{
-        'application_ref': '20@apps.example',
-        'channel_ref': '50@dm.example',
-        'e2ee_mode': 'required',
-        'devices': const <Object?>['not a device'],
-      }),
-      throwsA(isA<FormatException>()),
-    );
+        BotE2eeParticipation.fromJson(valid).devices.single.joinedEpoch, '7');
+    expect(
+        () => BotE2eeParticipation.fromJson(<String, Object?>{
+              ...valid,
+              'devices': <Object?>[
+                ...(valid['devices']! as List),
+                'not a device'
+              ],
+            }),
+        throwsFormatException);
   });
-
   test('repository covers the full account installation lifecycle', () async {
     final adapter = _InstallationAdapter(<_Reply>[
       _Reply(jsonEncode(<Object?>[_installationJson()])),
@@ -204,8 +229,7 @@ void main() {
     });
   });
 
-  test('application invitation links resolve to a reviewed personal install',
-      () async {
+  test('personal install review link resolution', () async {
     final invite = ApplicationInstallInvite.fromJson(_inviteJson());
     expect(invite.application.wire, '20@apps.example');
     expect(invite.botHandle, 'tasks@apps.example');

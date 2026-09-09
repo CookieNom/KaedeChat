@@ -24,7 +24,8 @@ function occupant(overrides: Partial<VoiceOccupant> = {}): VoiceOccupant {
 
 describe('voice occupancy reconciliation', () => {
   it('removes a participant by federated user identity on leave', () => {
-    const current = { '10@chat.test': [occupant()] };
+    const remote = occupant({ identity: '78@remote.test', user_domain: 'remote.test' });
+    const current = { '10@chat.test': [occupant(), remote] };
     const update: VoiceStateUpdate = {
       channel_id: '10',
       user_id: '78',
@@ -33,7 +34,7 @@ describe('voice occupancy reconciliation', () => {
     };
 
     expect(applyVoiceStateUpdate(current, channels, update)).toEqual({
-      '10@chat.test': []
+      '10@chat.test': [remote]
     });
   });
 
@@ -68,7 +69,8 @@ describe('voice occupancy reconciliation', () => {
   });
 
   it('updates moderation flags using the federated user pair', () => {
-    const current = { '10@chat.test': [occupant()] };
+    const remote = occupant({ identity: '78@remote.test', user_domain: 'remote.test' });
+    const current = { '10@chat.test': [occupant(), remote] };
     const next = applyVoiceStateUpdate(current, channels, {
       user_id: '78',
       user_domain: 'chat.test',
@@ -76,5 +78,6 @@ describe('voice occupancy reconciliation', () => {
     });
 
     expect(next['10@chat.test'][0].server_mute).toBe(true);
+    expect(next['10@chat.test'][1]).toEqual(remote);
   });
 });

@@ -181,6 +181,14 @@ async def test_typing_relay_requires_authority_actor_membership_and_local_recipi
             authority_domain="authority.example",
         )
 
+    with pytest.raises(ValueError, match="authority"):
+        await federated_typing.validate_typing_relay_scope(
+            cast(Any, relay_session(objects, guild=guild)),
+            cast(Any, SimpleNamespace(domain="local.example")),
+            relay_projection(),
+            authority_domain="other.example",
+        )
+
     objects["membership"] = None
     with pytest.raises(ValueError, match="scope"):
         await federated_typing.validate_typing_relay_scope(
@@ -241,16 +249,17 @@ async def test_local_typing_dispatches_only_to_local_dm_participants(
         audience_user_refs={"3@local.example", "7@local.example", "99@local.example"},
     )
 
-    assert [item[0] for item in dispatched] == [
+    assert len(dispatched) == 2
+    assert {item[0] for item in dispatched} == {
         "user:local.example:3",
         "user:local.example:7",
-    ]
+    }
     assert all(item[1] == "TYPING_START" for item in dispatched)
     assert all(item[2]["timestamp"] == 1_000 for item in dispatched)
 
 
 @pytest.mark.asyncio
-async def test_authority_typing_is_ephemeral_and_does_not_queue_durable_events(
+async def test_ephemeral_fanout_delegation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = SimpleNamespace()
@@ -327,7 +336,14 @@ async def test_typing_fanout_batches_exact_destination_home_audience(
     payloads = [call.kwargs["payload"] for call in signed.await_args_list]
     assert [item["batch_index"] for item in payloads] == [0, 1]
     assert [item["batch_count"] for item in payloads] == [2, 2]
-    assert sum(len(item["audience_user_refs"]) for item in payloads) == 513
+    delivered = [ref for item in payloads for ref in item["audience_user_refs"]]
+    assert sorted(delivered) == sorted(peer_audience)
+    assert len(delivered) == len(set(delivered))
+    assert all(0 < len(item["audience_user_refs"]) <= 512 for item in payloads)
+    assert all(
+        call.args[2:5] == ("POST", "peer.example", "/_kaede/v1/typing/relay")
+        for call in signed.await_args_list
+    )
     assert all(
         ref.endswith("@peer.example") for item in payloads for ref in item["audience_user_refs"]
     )
@@ -412,3 +428,7 @@ async def test_bot_typing_reuses_exact_installation_admission(
         91,
     )
     delegated.assert_awaited_once()
+    args = delegated.await_args.args
+    assert args[:3] == (EntityRef("77@authority.example"), response, request)
+    assert args[3].user is principal.user
+    assert args[4:] == (session, redis, local_settings)

@@ -79,16 +79,19 @@ def last_await(mock: AsyncMock) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_voice_event_create_and_model_helpers_use_typed_routes() -> None:
+@pytest.mark.parametrize("entity_type", [1, 2], ids=["stage", "voice"])
+async def test_voice_event_create_and_model_helpers_use_typed_routes(
+    entity_type: int,
+) -> None:
     bot = client()
     start = datetime.now(UTC) + timedelta(hours=2)
-    bot.request = AsyncMock(return_value=event_payload())  # type: ignore[method-assign]
+    bot.request = AsyncMock(return_value=event_payload(entity_type=entity_type))  # type: ignore[method-assign]
 
     event = await bot.create_scheduled_event(
         GUILD,
         " Community call ",
         start,
-        entity_type=2,
+        entity_type=entity_type,
         target=TARGET,
         channel=CHANNEL,
         description=" Monthly project update ",
@@ -96,6 +99,7 @@ async def test_voice_event_create_and_model_helpers_use_typed_routes() -> None:
     )
 
     assert isinstance(event, ScheduledEvent)
+    assert event.entity_type == entity_type
     assert event.channel_ref == CHANNEL
     assert event.creator is not None and event.creator.bot
     assert event.user_count == 3
@@ -111,15 +115,18 @@ async def test_voice_event_create_and_model_helpers_use_typed_routes() -> None:
         "scheduled_start_time": start.isoformat(),
         "scheduled_end_time": None,
         "description": "Monthly project update",
-        "entity_type": 2,
+        "entity_type": entity_type,
     }
     assert last_await(bot.request).kwargs["headers"] == {
         "X-Audit-Log-Reason": "publish calendar"
     }
 
     bot.request.reset_mock()
-    bot.request.return_value = event_payload(status=2)
+    bot.request.return_value = event_payload(status=2, entity_type=entity_type)
     updated = await event.edit(status=2, reason="starting now")
+    assert last_await(bot.request).kwargs["headers"] == {
+        "X-Audit-Log-Reason": "starting now"
+    }
     assert updated.status == 2
     assert last_await(bot.request).args[:2] == (
         "PATCH",
@@ -131,26 +138,9 @@ async def test_voice_event_create_and_model_helpers_use_typed_routes() -> None:
     bot.request.return_value = None
     await event.delete(reason="calendar cleanup")
     assert last_await(bot.request).args[0] == "DELETE"
-
-
-@pytest.mark.asyncio
-async def test_stage_event_create_uses_stage_entity_type_and_channel() -> None:
-    bot = client()
-    start = datetime.now(UTC) + timedelta(hours=2)
-    bot.request = AsyncMock(return_value=event_payload(entity_type=1))  # type: ignore[method-assign]
-
-    event = await bot.create_scheduled_event(
-        GUILD,
-        "Stage town hall",
-        start,
-        entity_type=1,
-        target=TARGET,
-        channel=CHANNEL,
-    )
-
-    assert event.entity_type == 1
-    assert last_await(bot.request).kwargs["json"]["entity_type"] == 1
-    assert last_await(bot.request).kwargs["json"]["channel_id"] == "30@chat.example"
+    assert last_await(bot.request).kwargs["headers"] == {
+        "X-Audit-Log-Reason": "calendar cleanup"
+    }
 
 
 @pytest.mark.asyncio
@@ -162,7 +152,19 @@ async def test_recurrence_rule_uses_discord_enum_and_round_trips() -> None:
         frequency=1,
         by_n_weekday=(ScheduledEventNWeekday(1, 2),),
     )
-    bot.request = AsyncMock(return_value=event_payload(recurrence_rule=rule.to_dict()))  # type: ignore[method-assign]
+    wire = {
+        "start": start.isoformat(),
+        "end": None,
+        "frequency": 1,
+        "interval": 1,
+        "by_weekday": None,
+        "by_n_weekday": [{"n": 1, "day": 2}],
+        "by_month": None,
+        "by_month_day": None,
+        "by_year_day": None,
+        "count": None,
+    }
+    bot.request = AsyncMock(return_value=event_payload(recurrence_rule=wire))  # type: ignore[method-assign]
 
     event = await bot.create_scheduled_event(
         GUILD,
@@ -175,7 +177,7 @@ async def test_recurrence_rule_uses_discord_enum_and_round_trips() -> None:
     )
 
     assert event.recurrence_rule == rule
-    assert last_await(bot.request).kwargs["json"]["recurrence_rule"]["frequency"] == 1
+    assert last_await(bot.request).kwargs["json"]["recurrence_rule"] == wire
     with pytest.raises(ValueError, match="only weekly"):
         ScheduledEventRecurrenceRule(start=start, frequency=1, interval=2)
     with pytest.raises(ValueError, match="frequency"):
@@ -187,7 +189,7 @@ async def test_recurrence_rule_uses_discord_enum_and_round_trips() -> None:
             interval=True,  # type: ignore[arg-type]
             by_weekday=(1,),
         )
-    invalid = rule.to_dict()
+    invalid = dict(wire)
     invalid["frequency"] = True
     with pytest.raises(ValueError, match="integer"):
         ScheduledEventRecurrenceRule.from_payload(invalid)
@@ -223,8 +225,13 @@ async def test_scheduled_event_sdk_rejects_boolean_enums() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduled_event_cover_uses_two_phase_authority_routes() -> None:
+async def test_scheduled_event_cover_selects_qualified_authority_with_multiple_targets() -> (
+    None
+):
     bot = client()
+    bot._targets.update(
+        {"https://chat.example": AsyncMock(), "https://other.example": AsyncMock()}
+    )
     ticket = {
         "id": "90",
         "origin_domain": "chat.example",
@@ -250,7 +257,6 @@ async def test_scheduled_event_cover_uses_two_phase_authority_routes() -> None:
         b"image",
         filename="event.png",
         content_type="image/png",
-        target=TARGET,
         reason="event artwork",
     )
     cleared = await updated.delete_image(reason="clear artwork")
@@ -269,42 +275,13 @@ async def test_scheduled_event_cover_uses_two_phase_authority_routes() -> None:
         "DELETE",
         "/api/v1/bots/guilds/10@chat.example/scheduled-events/20@chat.example/image",
     )
-
-
-@pytest.mark.asyncio
-async def test_scheduled_event_cover_selects_qualified_authority_with_multiple_targets() -> (
-    None
-):
-    bot = client()
-    bot._targets.update(  # noqa: SLF001 - exercise target selection without network setup
-        {
-            "https://chat.example": AsyncMock(),
-            "https://other.example": AsyncMock(),
-        }
+    uploaded_ticket = bot._put_upload_ticket.await_args.args[0]
+    assert uploaded_ticket.ref == EntityRef(90, "chat.example")
+    assert uploaded_ticket.upload_url == ticket["upload_url"]
+    bot._put_upload_ticket.assert_awaited_once_with(
+        uploaded_ticket, b"image", content_type="image/png"
     )
-    ticket = {
-        "id": "90",
-        "origin_domain": "chat.example",
-        "filename": "event.png",
-        "content_type": "image/png",
-        "size": 5,
-        "scan_status": "pending",
-        "purpose": "scheduled_event_image",
-        "upload_url": "https://media.chat.example/upload",
-    }
-    bot.request = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[ticket, event_payload(image="a" * 64)]
-    )
-    bot._put_upload_ticket = AsyncMock()  # type: ignore[method-assign]
-
-    await bot.upload_scheduled_event_image(
-        GUILD,
-        EVENT,
-        b"image",
-        filename="event.png",
-        content_type="image/png",
-    )
-
+    assert bot.request.await_args_list[1].kwargs["json"] == {"attachment_id": "90"}
     assert all(
         call.kwargs["target"] == "https://chat.example"
         for call in bot.request.await_args_list
@@ -372,6 +349,17 @@ async def test_external_events_listing_fetch_and_user_pagination_are_typed() -> 
         "with_member": False,
         "after": "40@people.example",
     }
+    calls = bot.request.await_args_list
+    base = "/api/v1/bots/guilds/10@chat.example/scheduled-events"
+    assert [call.args[:2] for call in calls] == [
+        ("GET", base),
+        ("GET", base + "/20@chat.example"),
+        ("GET", base + "/20@chat.example/users"),
+    ]
+    assert calls[0].kwargs["params"] == {"with_user_count": True}
+    assert calls[1].kwargs["params"] == {"with_user_count": True}
+    assert events[0].ref == fetched.ref == EVENT
+    assert events[0].guild_ref == fetched.guild_ref == GUILD
 
 
 @pytest.mark.asyncio
@@ -435,3 +423,8 @@ async def test_scheduled_event_gateway_resource_and_subscription_events_are_type
     assert isinstance(seen[0], ScheduledEvent)
     assert isinstance(seen[1], ScheduledEventUserEvent)
     assert seen[1].added
+    assert seen[0].ref == EVENT
+    assert seen[0].guild_ref == GUILD
+    assert seen[1].event_ref == EVENT
+    assert seen[1].guild_ref == GUILD
+    assert seen[1].user_ref == EntityRef(50, "people.example")

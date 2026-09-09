@@ -57,7 +57,7 @@ void main() {
       expandedMobileEncryptedGuildMentionRecipients(
         userRefs: const <String>[],
         roleRefs: const <String>['2@guild.example'],
-        everyone: true,
+        everyone: false,
         guild: KaedeGuild(
           ref: guildRef,
           name: 'Guild',
@@ -82,5 +82,27 @@ void main() {
       ),
       isEmpty,
     );
+    for (final allowed in [false, true]) {
+      expect(
+          expandedMobileEncryptedGuildMentionRecipients(
+            userRefs: const [],
+            roleRefs: const [],
+            everyone: true,
+            guild: guild,
+            members: members,
+            canMentionEveryone: allowed,
+          ).map((item) => item.wire),
+          allowed ? ['10@guild.example', '11@guild.example'] : isEmpty);
+    }
+    expect(
+        expandedMobileEncryptedGuildMentionRecipients(
+          userRefs: const [],
+          roleRefs: const ['2@foreign.example'],
+          everyone: false,
+          guild: guild,
+          members: members,
+          canMentionEveryone: false,
+        ),
+        isEmpty);
   });
 }

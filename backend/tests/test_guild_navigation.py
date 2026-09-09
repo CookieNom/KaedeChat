@@ -57,10 +57,11 @@ def test_guild_navigation_rejects_duplicate_and_malformed_groups() -> None:
                 ]
             }
         )
-    with pytest.raises(ValidationError):
-        GuildNavigationUpdate.model_validate(
-            {"items": [{"kind": "group", "id": "bad id", "name": " ", "guilds": []}]}
-        )
+    group = {"kind": "group", "id": "group", "name": "Group", "guilds": ["11@home.example"]}
+    assert len(GuildNavigationUpdate.model_validate({"items": [group]}).items) == 1
+    for invalid in ({"id": "bad id"}, {"name": " "}, {"guilds": []}):
+        with pytest.raises(ValidationError):
+            GuildNavigationUpdate.model_validate({"items": [group | invalid]})
 
 
 def test_corrupt_stored_guild_navigation_falls_back_safely() -> None:

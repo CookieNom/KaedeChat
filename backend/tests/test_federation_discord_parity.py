@@ -447,29 +447,102 @@ async def test_follow_receipt_accepts_remote_owner_and_rejects_forged_target_con
     assert forged.value.detail == {"code": "ANNOUNCEMENT_FOLLOW_RECEIPT_INVALID"}
 
 
-def test_federated_follow_schema_does_not_fake_remote_foreign_keys() -> None:
-    assert not FederatedChannelFollow.__table__.foreign_keys
-    assert [column.name for column in FederatedChannelFollow.__table__.primary_key] == [
-        "id",
-        "target_authority_domain",
-        "local_role",
-    ]
-    assert [column.name for column in FederatedMessageCrosspost.__table__.primary_key] == [
-        "source_message_id",
-        "source_message_domain",
-        "follow_id",
-        "follow_authority_domain",
-        "local_role",
-    ]
-    crosspost_targets = {
-        foreign_key.target_fullname
-        for foreign_key in FederatedMessageCrosspost.__table__.foreign_keys
-    }
-    assert crosspost_targets == {
-        "federated_channel_follows.id",
-        "federated_channel_follows.local_role",
-        "federated_channel_follows.target_authority_domain",
-    }
+async def test_federated_follow_schema_does_not_fake_remote_foreign_keys(
+    postgres_schema, migrate_to
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import delete, null, select, text
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    await migrate_to("head")
+    now = datetime.now(UTC)
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        # No remote channels, messages, creators or instances have been cached.
+        for target, role in [
+            ("a.example", "source"),
+            ("b.example", "source"),
+            ("b.example", "target"),
+        ]:
+            session.add(
+                FederatedChannelFollow(
+                    id=1,
+                    local_role=role,
+                    source_channel_id=10,
+                    source_channel_domain="source.example",
+                    target_channel_id=20,
+                    target_channel_domain=target,
+                    source_authority_domain="source.example",
+                    target_authority_domain=target,
+                    creator_id=30,
+                    creator_domain="creator.example",
+                    generation=1,
+                    lifecycle_state="active",
+                    active=True,
+                    activated_at=now,
+                    authorization_id="kafi_" + "a" * 43,
+                    authorization_expires_at=now + timedelta(minutes=5),
+                    authority_receipt={},
+                )
+            )
+        await session.flush()
+        for target, role in [
+            ("a.example", "source"),
+            ("b.example", "source"),
+            ("b.example", "target"),
+        ]:
+            session.add(
+                FederatedMessageCrosspost(
+                    source_message_id=40,
+                    source_message_domain="source.example",
+                    follow_id=1,
+                    follow_authority_domain=target,
+                    local_role=role,
+                    destination_message_id=50,
+                    destination_message_domain=target,
+                    delivery_status="delivered",
+                    attempts=1,
+                    source_projection={} if role == "source" else null(),
+                    source_author_profile={} if role == "source" else null(),
+                )
+            )
+        await session.flush()
+        assert await session.scalar(text("SELECT count(*) FROM channels")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM messages")) == 0
+        failed = await session.begin_nested()
+        session.add(
+            FederatedMessageCrosspost(
+                source_message_id=41,
+                source_message_domain="source.example",
+                follow_id=1,
+                follow_authority_domain="unknown.example",
+                local_role="source",
+                delivery_status="pending",
+                source_projection={},
+                source_author_profile={},
+            )
+        )
+        with pytest.raises(
+            IntegrityError, match="fk_federated_message_crossposts_follow_authority_ref"
+        ):
+            await session.flush()
+        await failed.rollback()
+        await session.execute(
+            delete(FederatedChannelFollow).where(
+                FederatedChannelFollow.target_authority_domain == "a.example"
+            )
+        )
+        assert set(
+            (
+                await session.execute(
+                    select(
+                        FederatedMessageCrosspost.follow_authority_domain,
+                        FederatedMessageCrosspost.local_role,
+                    )
+                )
+            ).all()
+        ) == {("b.example", "source"), ("b.example", "target")}
 
 
 def test_signed_follow_request_attests_public_bot_application_without_a_token() -> None:
@@ -847,9 +920,18 @@ async def test_relayed_bot_actor_intent_is_bound_to_receiving_authority(
     assert validator.await_args.kwargs["runtime_target_domain"] == "target.example"
     assert validator.await_args.kwargs["redis"] is redis
 
+    assert validator.await_args.args == (session, "target.example", {"signature": "worker proof"})
+    assert validator.await_args.kwargs["expected_action"] == "announcement.follow.create"
+    assert validator.await_args.kwargs["expected_application_ref"] == (80, "apps.example")
+    assert validator.await_args.kwargs["expected_actor_ref"] == (60, "apps.example")
+    assert validator.await_args.kwargs["expected_resources"] == {
+        "source_channel": "10@source.example",
+        "target_channel": "20@target.example",
+    }
+
 
 @pytest.mark.asyncio
-async def test_bot_follow_scope_is_rechecked_at_each_channel_authority() -> None:
+async def test_required_follow_scope_implication_for_a_supplied_target_grant() -> None:
     actor = User(
         id=60,
         origin_domain="apps.example",
@@ -899,6 +981,8 @@ async def test_bot_follow_scope_is_rechecked_at_each_channel_authority() -> None
 
 
 def test_dm_history_accepts_immutable_forward_snapshot_with_optional_note() -> None:
+    from app.federation.network import FederationNetworkError
+
     created_at = datetime(2026, 8, 27, tzinfo=UTC)
     message_id = (int(created_at.timestamp() * 1_000) - EPOCH_MS) << (WORKER_BITS + SEQUENCE_BITS)
     raw = {
@@ -979,12 +1063,12 @@ def test_dm_history_accepts_immutable_forward_snapshot_with_optional_note() -> N
             }
         }
     ]
-    with pytest.raises(Exception, match="rich content"):
+    with pytest.raises(FederationNetworkError, match="rich content"):
         validate_dm_history_page(
             {
                 "conversation_id": "50",
                 "conversation_domain": "authority.example",
-                "messages": [raw | {"forward_snapshot": None, "flags": 0}],
+                "messages": [raw | {"forward_snapshot": None}],
                 "next_before": None,
                 "complete": True,
             },

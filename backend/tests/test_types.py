@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import BaseModel
 
@@ -19,7 +21,7 @@ class SnowflakePayload(BaseModel):
 
 def test_snowflake_serializes_as_string() -> None:
     payload = SnowflakePayload(id="9223372036854775807")
-    assert payload.model_dump_json() == '{"id":"9223372036854775807"}'
+    assert json.loads(payload.model_dump_json()) == {"id": "9223372036854775807"}
 
 
 @pytest.mark.parametrize("value", ["", "-1", "1.0", True, 1 << 63])
@@ -35,7 +37,7 @@ class EntityReferencePayload(BaseModel):
 def test_entity_reference_is_a_canonical_string() -> None:
     payload = EntityReferencePayload(id="42@chat.example.com")
     assert payload.id.resolve("local.example.com") == (42, "chat.example.com")
-    assert payload.model_dump_json() == '{"id":"42@chat.example.com"}'
+    assert json.loads(payload.model_dump_json()) == {"id": "42@chat.example.com"}
     assert EntityReferencePayload(id="42").id.resolve("local.example.com") == (
         42,
         "local.example.com",

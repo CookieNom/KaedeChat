@@ -66,43 +66,58 @@ def bot_user() -> User:
 
 
 @pytest.mark.asyncio
-async def test_channel_restrictions_are_canonical_target_owned_refs() -> None:
-    guild = Guild(
-        id=70,
-        origin_domain="guild.example",
-        name="Guild",
-        owner_id=80,
-        owner_domain="guild.example",
+async def test_channel_restrictions_are_canonical_target_owned_refs(postgres_schema) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    await postgres_schema.execute(
+        text("CREATE TABLE channels (LIKE public.channels INCLUDING ALL)")
     )
-    session = SimpleNamespace(scalars=AsyncMock(return_value=[9, 7]))
-
-    assert await applications_api._canonical_installation_channel_restrictions(
-        cast(Any, session),
-        guild,
-        [EntityRef("9"), EntityRef("7@guild.example")],
-    ) == ["7@guild.example", "9@guild.example"]
-
-    for requested, code in (
-        ([EntityRef("7@other.example")], "CHANNEL_RESTRICTION_WRONG_AUTHORITY"),
-        (
-            [EntityRef("7"), EntityRef("7@guild.example")],
-            "CHANNEL_RESTRICTION_DUPLICATE",
-        ),
-    ):
-        with pytest.raises(HTTPException) as denied:
-            await applications_api._canonical_installation_channel_restrictions(
-                cast(Any, session), guild, requested
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        await session.execute(
+            text(
+                "INSERT INTO channels (id, origin_domain, guild_id, guild_domain, type, "
+                "name, created_floor_id)"
+                "VALUES (7, 'guild.example', 70, 'guild.example', 0, 'allowed', 1), "
+                "(9, 'guild.example', 70, 'guild.example', 0, 'allowed2', 1), "
+                "(8, 'guild.example', 71, 'guild.example', 0, 'foreign guild', 1), "
+                "(7, 'other.example', 70, 'other.example', 0, 'foreign authority', 1)"
             )
-        assert denied.value.detail == {"code": code}
+        )
+        guild = Guild(
+            id=70,
+            origin_domain="guild.example",
+            name="Guild",
+            owner_id=80,
+            owner_domain="guild.example",
+        )
 
-    session.scalars.return_value = [7]
-    with pytest.raises(HTTPException) as missing:
-        await applications_api._canonical_installation_channel_restrictions(
+        assert await applications_api._canonical_installation_channel_restrictions(
             cast(Any, session),
             guild,
-            [EntityRef("7"), EntityRef("9")],
-        )
-    assert missing.value.detail == {"code": "CHANNEL_RESTRICTION_INVALID"}
+            [EntityRef("9"), EntityRef("7@guild.example")],
+        ) == ["7@guild.example", "9@guild.example"]
+
+        for requested, code in (
+            ([EntityRef("7@other.example")], "CHANNEL_RESTRICTION_WRONG_AUTHORITY"),
+            (
+                [EntityRef("7"), EntityRef("7@guild.example")],
+                "CHANNEL_RESTRICTION_DUPLICATE",
+            ),
+        ):
+            with pytest.raises(HTTPException) as denied:
+                await applications_api._canonical_installation_channel_restrictions(
+                    cast(Any, session), guild, requested
+                )
+            assert denied.value.detail == {"code": code}
+
+        with pytest.raises(HTTPException) as missing:
+            await applications_api._canonical_installation_channel_restrictions(
+                cast(Any, session),
+                guild,
+                [EntityRef("7"), EntityRef("8")],
+            )
+        assert missing.value.detail == {"code": "CHANNEL_RESTRICTION_INVALID"}
 
 
 def restriction_update_context(
@@ -169,7 +184,6 @@ async def test_local_restriction_noop_preserves_revision_and_runtime_grants(
     queue.assert_not_called()
     publish.assert_not_awaited()
     session.commit.assert_not_awaited()
-    assert query_result.one_or_none.called
     query = str(session.execute.await_args.args[0])
     assert "bot_installations.revoked_at IS NULL" in query
 
@@ -183,6 +197,10 @@ async def test_local_restriction_change_rotates_revision_and_runtime_grants(
     session, _query_result, revoke, queue, publish = restriction_update_context(
         monkeypatch, row, normalized
     )
+
+    trace = []
+    session.commit.side_effect = lambda: trace.append("commit")
+    publish.side_effect = lambda *_args: trace.append("publish")
 
     result = await applications_api._update_local_bot_channel_restrictions(
         Guild(id=70, origin_domain="guild.example", name="Guild"),
@@ -203,6 +221,8 @@ async def test_local_restriction_change_rotates_revision_and_runtime_grants(
     queue.assert_called_once_with(cast(Any, session), row, "UPDATE")
     session.commit.assert_awaited_once()
     publish.assert_awaited_once()
+
+    assert trace == ["commit", "publish"]
 
 
 @pytest.mark.asyncio

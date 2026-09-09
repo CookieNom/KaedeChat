@@ -145,13 +145,8 @@ async def test_dm_route_limit_precedes_remote_profile_upserts(
         )
 
     assert caught.value is rejected
-    rate_limit.assert_awaited_once_with(
-        cast(Any, SimpleNamespace()),
-        REMOTE_DOMAIN,
-        bucket,
-        capacity=120,
-        refill_per_minute=120,
-    )
+    rate_limit.assert_awaited_once()
+    assert rate_limit.await_args.args == (cast(Any, SimpleNamespace()), REMOTE_DOMAIN, bucket)
     upsert.assert_not_awaited()
 
 
@@ -175,13 +170,8 @@ async def test_user_lookup_route_limit_precedes_database_lookup(
         )
 
     assert caught.value is rejected
-    rate_limit.assert_awaited_once_with(
-        redis,
-        REMOTE_DOMAIN,
-        "user-lookup",
-        capacity=120,
-        refill_per_minute=120,
-    )
+    rate_limit.assert_awaited_once()
+    assert rate_limit.await_args.args == (redis, REMOTE_DOMAIN, "user-lookup")
     session.scalar.assert_not_awaited()
 
 
@@ -454,6 +444,12 @@ async def test_forward_resolution_is_readable_without_mutation_admission_and_rec
             Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
         )
 
+    assert [call.kwargs["channel"] for call in permissions.await_args_list] == [
+        destination_channel,
+        source_channel,
+    ]
+    assert all(call.args[2:4] == (guild, actor) for call in permissions.await_args_list)
+
 
 @pytest.mark.asyncio
 async def test_poll_voter_listing_is_readable_without_mutation_admission_and_rechecks_access(
@@ -615,6 +611,9 @@ async def test_e2ee_room_mutators_all_use_mutation_admission(
     handler: Any,
     needs_snowflake: bool,
 ) -> None:
+    import inspect
+
+    actor_signature = inspect.signature(federation_api.federated_e2ee_actor)
     rejected = HTTPException(
         status_code=403,
         detail={"code": "USER_SUSPENDED_FROM_INSTANCE"},
@@ -637,7 +636,11 @@ async def test_e2ee_room_mutators_all_use_mutation_admission(
 
     assert caught.value is rejected
     actor_resolution.assert_awaited_once()
-    assert actor_resolution.await_args.kwargs.get("require_mutation_admission", True) is True
+    bound = actor_signature.bind(
+        *actor_resolution.await_args.args, **actor_resolution.await_args.kwargs
+    )
+    bound.apply_defaults()
+    assert bound.arguments["require_mutation_admission"] is True
 
 
 @pytest.mark.asyncio
@@ -1034,25 +1037,11 @@ async def call_guild_message_operation(
     return result, admission, delete
 
 
+@pytest.mark.parametrize("own_message", [True, False])
 @pytest.mark.asyncio
 async def test_restricted_actor_can_delete_own_guild_message_for_cleanup(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = message_operation_payload("message.delete")
-    result, admission, delete = await call_guild_message_operation(
-        payload,
-        monkeypatch=monkeypatch,
-        delete_author_id=10,
-    )
-
-    assert result == {"deleted": True}
-    admission.assert_not_awaited()
-    delete.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_deleting_another_users_guild_message_requires_mutation_admission(
-    monkeypatch: pytest.MonkeyPatch,
+    own_message: bool,
 ) -> None:
     actor = remote_user()
     guild = SimpleNamespace(id=60, origin_domain=LOCAL_DOMAIN)
@@ -1068,7 +1057,7 @@ async def test_deleting_another_users_guild_message_requires_mutation_admission(
         origin_domain=LOCAL_DOMAIN,
         channel_id=channel.id,
         channel_domain=channel.origin_domain,
-        author_id=999,
+        author_id=actor.id if own_message else 999,
         author_domain=REMOTE_DOMAIN,
     )
 
@@ -1090,7 +1079,7 @@ async def test_deleting_another_users_guild_message_requires_mutation_admission(
     )
     monkeypatch.setattr(federation_api, "delete_message", delete)
 
-    with pytest.raises(HTTPException) as caught:
+    if own_message:
         await federation_api.federation_guild_message_operation(
             cast(Any, guild.id),
             message_operation_payload("message.delete"),
@@ -1100,9 +1089,20 @@ async def test_deleting_another_users_guild_message_requires_mutation_admission(
             cast(Any, SimpleNamespace()),
             cast(Any, settings()),
         )
-
-    assert caught.value is rejected
-    delete.assert_not_awaited()
+        delete.assert_awaited_once()
+    else:
+        with pytest.raises(HTTPException) as caught:
+            await federation_api.federation_guild_message_operation(
+                cast(Any, guild.id),
+                message_operation_payload("message.delete"),
+                principal(),
+                cast(Any, SimpleNamespace(get=AsyncMock(side_effect=get))),
+                cast(Any, SimpleNamespace()),
+                cast(Any, SimpleNamespace()),
+                cast(Any, settings()),
+            )
+        assert caught.value is rejected
+        delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

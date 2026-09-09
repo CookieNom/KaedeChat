@@ -129,7 +129,7 @@ def test_federated_timeout_rejection_reason_is_display_safe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_remote_replica_private_state_purge_is_bounded() -> None:
+async def test_legacy_private_field_clearing() -> None:
     legacy = member(timeout_reason="legacy reason", voice_flags=3)
     session = SimpleNamespace(
         scalars=AsyncMock(return_value=[legacy]),

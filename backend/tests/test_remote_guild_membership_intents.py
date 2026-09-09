@@ -324,8 +324,11 @@ async def test_remote_invite_commits_join_intent_before_authority_request(
     assert apply_snapshot.await_args.kwargs["required_member"] == (42, "local.example")
 
 
+@pytest.mark.parametrize("departed_before", [True, False])
 @pytest.mark.asyncio
-async def test_stale_member_add_is_consumed_without_regranting_departed_local_user() -> None:
+async def test_stale_member_add_is_consumed_without_regranting_departed_local_user(
+    departed_before: bool,
+) -> None:
     guild = Guild(
         id=10,
         origin_domain="remote.example",
@@ -337,7 +340,7 @@ async def test_stale_member_add_is_consumed_without_regranting_departed_local_us
         snapshot_generation=1,
         sync_status="ready",
     )
-    departed = intent(state=REMOTE_GUILD_DEPARTED)
+    departed = intent(state=REMOTE_GUILD_DEPARTED) if departed_before else None
     session = AsyncMock()
     session.scalar.side_effect = [guild, departed]
     session.get.return_value = None
@@ -369,52 +372,11 @@ async def test_stale_member_add_is_consumed_without_regranting_departed_local_us
     assert guild.snapshot_generation == 2
     session.add.assert_not_called()
 
-
-@pytest.mark.asyncio
-async def test_unsolicited_first_member_add_is_consumed_without_durable_state() -> None:
-    guild = Guild(
-        id=10,
-        origin_domain="remote.example",
-        name="Remote guild",
-        owner_id=9,
-        owner_domain="remote.example",
-        last_event_seq=4,
-        next_event_seq=5,
-        snapshot_generation=1,
-        sync_status="ready",
-    )
-    session = AsyncMock()
-    session.scalar.side_effect = [guild, None]
-    session.get.return_value = None
-    event = {
-        "seq": "5",
-        "type": "guild.member.add",
-        "actor": {"id": "9", "domain": "remote.example"},
-        "content": {
-            "user": {
-                "id": "42",
-                "origin_domain": "local.example",
-                "username": "local_user",
-            },
-            "joined_at": datetime(2026, 8, 12, tzinfo=UTC).isoformat(),
-        },
-        "context": {"guild_id": "10", "guild_domain": "remote.example"},
-    }
-
-    applied = await apply_guild_member_event(
-        session,
-        SimpleNamespace(domain="local.example"),  # type: ignore[arg-type]
-        guild,
-        event,
-    )
-
-    assert applied is None
-    assert guild.last_event_seq == 5
     session.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_remote_member_add_atomically_replicates_invite_roles(
+async def test_remote_member_add_queues_exact_invite_role_membership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guild = Guild(
@@ -474,9 +436,18 @@ async def test_remote_member_add_atomically_replicates_invite_roles(
     assert "INSERT INTO member_roles" in str(insert_statement)
     assert guild.last_event_seq == 5
 
+    assert insert_statement.compile().params == {
+        "guild_id_m0": 10,
+        "guild_domain_m0": "remote.example",
+        "user_id_m0": 42,
+        "user_domain_m0": "people.example",
+        "role_id_m0": 91,
+        "role_domain_m0": "remote.example",
+    }
+
 
 @pytest.mark.asyncio
-async def test_pending_remote_join_limit_is_serialized_and_actionable() -> None:
+async def test_join_limit_admission_under_a_supplied_lock() -> None:
     session = AsyncMock()
     session.get.side_effect = [None, None]
     session.scalar.side_effect = [None, REMOTE_GUILD_JOIN_INTENT_LIMIT_PER_USER]
@@ -497,7 +468,7 @@ async def test_pending_remote_join_limit_is_serialized_and_actionable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_expired_membership_intents_are_cleaned_in_a_bounded_batch() -> None:
+async def test_bounded_cleanup_query_construction() -> None:
     old_join = intent(state=REMOTE_GUILD_JOINING)
     old_departure = intent(guild_domain="another.example", state=REMOTE_GUILD_DEPARTED)
     session = AsyncMock()

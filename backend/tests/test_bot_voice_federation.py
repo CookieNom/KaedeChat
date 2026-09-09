@@ -137,7 +137,7 @@ def test_bot_call_projection_retains_only_exact_capability_lineage() -> None:
 
 
 def test_instance_voice_broker_rejects_bot_client_kind() -> None:
-    with pytest.raises(ValidationError, match="web.*desktop.*mobile"):
+    with pytest.raises(ValidationError) as rejected:
         VoiceBrokerRequest.model_validate(
             {
                 "guild_id": "12",
@@ -149,6 +149,10 @@ def test_instance_voice_broker_rejects_bot_client_kind() -> None:
                 "client_kind": "bot",
             }
         )
+
+    assert [(error["loc"], error["type"]) for error in rejected.value.errors()] == [
+        (("client_kind",), "literal_error")
+    ]
 
 
 @pytest.mark.asyncio
@@ -182,7 +186,7 @@ async def test_remote_bot_token_requires_direct_authority_target(
 
 
 @pytest.mark.asyncio
-async def test_shared_remote_voice_broker_is_human_only_and_binds_session(
+async def test_human_broker_session_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     channel = remote_channel()

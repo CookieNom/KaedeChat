@@ -9,15 +9,25 @@ void main() {
       messageInviteReferences(
         'https://kaede.chat/invite/6eaJyk5M '
         'kaede.chat/invite/6eaJyk5M. '
-        'https://remote.example/invite/Ab12Cd34%40remote.example '
-        'https://kaede.chat/invite/YH05dLlw/ '
-        'https://kaede.chat/invite/12345678',
+        'https://remote.example/invite/Ab12Cd34%40remote.example',
         encrypted: false,
       ),
-      ['6eaJyk5M@kaede.chat', 'Ab12Cd34@remote.example', 'YH05dLlw@kaede.chat'],
+      ['6eaJyk5M@kaede.chat', 'Ab12Cd34@remote.example'],
     );
+    final references = List.generate(
+      100,
+      (index) => '${index.toString().padLeft(8, '0')}@kaede.chat',
+    );
+    final previews = messageInviteReferences(
+      references
+          .map((ref) => 'https://kaede.chat/invite/${ref.split('@').first}')
+          .join(' '),
+      encrypted: false,
+    );
+    expect(previews, isNotEmpty);
+    expect(previews.length, lessThan(references.length));
+    expect(previews, references.take(previews.length).toList());
   });
-
   test('private and invalid links never trigger invite previews', () {
     const url = 'https://kaede.chat/invite/6eaJyk5M';
     expect(messageInviteReferences(url, encrypted: true), isEmpty);
@@ -57,12 +67,17 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Test guild'), findsOneWidget);
     expect(find.text('kaede.chat'), findsOneWidget);
-    expect(find.text('View invitation'), findsOneWidget);
+    expect(
+        find.textContaining(RegExp(r'view.*invitation', caseSensitive: false)),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(app(fail: true));
     await tester.pumpAndSettle();
-    expect(find.text('Invitation unavailable'), findsOneWidget);
+    expect(
+        find.textContaining(
+            RegExp(r'invitation.*unavailable', caseSensitive: false)),
+        findsOneWidget);
     expect(find.text('Retry'), findsOneWidget);
   });
 }

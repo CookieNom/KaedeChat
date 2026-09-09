@@ -22,7 +22,9 @@ from app.api.bulk_moderation import BulkBanRequest, PruneRequest
 from app.core.types import EntityRef
 from app.db.models import AuditLogEntry, Ban, Guild, GuildMember, Instance, User
 
-DATABASE_URL = os.environ.get("KAEDE_BULK_MODERATION_TEST_DATABASE_URL")
+DATABASE_URL = os.environ.get("KAEDE_BULK_MODERATION_TEST_DATABASE_URL") or os.environ.get(
+    "TEST_DATABASE_URL"
+)
 pytestmark = pytest.mark.skipif(
     DATABASE_URL is None,
     reason=(

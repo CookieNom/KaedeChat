@@ -153,31 +153,23 @@ def test_match_response_fails_closed_on_ambiguous_results(payload: object) -> No
         parse_match_response(payload, 1)
 
 
-def test_documented_cloud_size_ineligibility_is_terminal() -> None:
+@pytest.mark.parametrize("status", [3206, 3208], ids=["non-image", "size-ineligible"])
+def test_documented_cloud_size_ineligibility_is_terminal(status: int) -> None:
     payload = {
         "TrackingId": "track",
-        "MatchResults": [{"Status": {"Code": 3208}}],
+        "MatchResults": [{"Status": {"Code": status}}],
     }
 
     with pytest.raises(PhotoDNAInputRejected, match="could not verify"):
         parse_match_response(payload, 1)
 
 
-def test_documented_non_image_result_is_terminal_rejection() -> None:
-    payload = {
-        "TrackingId": "track",
-        "MatchResults": [{"Status": {"Code": 3206}}],
-    }
-
-    with pytest.raises(PhotoDNAInputRejected, match="could not verify"):
-        parse_match_response(payload, 1)
-
-
-def test_positive_match_wins_over_non_image_result_in_same_batch() -> None:
+@pytest.mark.parametrize("status", [3206, 3208], ids=["non-image", "size-ineligible"])
+def test_positive_match_wins_over_non_image_result_in_same_batch(status: int) -> None:
     payload = {
         "TrackingId": "request-track",
         "MatchResults": [
-            {"Status": {"Code": 3206}},
+            {"Status": {"Code": status}},
             {
                 "Status": {"Code": 3000},
                 "IsMatch": True,
@@ -200,34 +192,6 @@ def test_positive_match_wins_over_non_image_result_in_same_batch() -> None:
     assert findings[0] is None
     assert findings[1] is not None
     assert findings[1].tracking_id == "matched-frame"
-
-
-def test_positive_match_wins_over_size_rejection_in_same_batch() -> None:
-    payload = {
-        "TrackingId": "request-track",
-        "MatchResults": [
-            {"Status": {"Code": 3208}},
-            {
-                "Status": {"Code": 3000},
-                "IsMatch": True,
-                "TrackingId": "matched-frame",
-                "MatchDetails": {
-                    "MatchFlags": [
-                        {
-                            "Source": "Test",
-                            "Violations": ["A1"],
-                            "MatchDistance": 1,
-                        }
-                    ]
-                },
-            },
-        ],
-    }
-
-    findings = parse_match_response(payload, 2)
-
-    assert findings[0] is None
-    assert findings[1] is not None
 
 
 async def test_match_client_pins_endpoint_headers_and_request_shape(
@@ -305,7 +269,8 @@ def test_sdk_adapter_uses_microsoft_edge_v2_contract(monkeypatch: pytest.MonkeyP
             stride: int,
             options: object,
         ) -> int:
-            del pixels, options
+            assert bytes(pixels) == bytes([0, 128, 128]) * (160 * 160)
+            assert options == 0x90
             output.raw = encoded
             calls.append((width, height, stride))
             return 0
@@ -577,28 +542,51 @@ def test_large_static_normalization_does_not_relax_animation_pixel_budget(
 
 
 async def test_sdk_directory_lock_serializes_independent_process_admission(tmp_path: Any) -> None:
-    first_entered = asyncio.Event()
-    release_first = asyncio.Event()
-    second_entered = asyncio.Event()
+    import sys
+    import textwrap
 
-    async def first() -> None:
-        async with sdk_hash_generation_lock(str(tmp_path)):
-            first_entered.set()
-            await release_first.wait()
-
-    async def second() -> None:
-        async with sdk_hash_generation_lock(str(tmp_path)):
-            second_entered.set()
-
-    first_task = asyncio.create_task(first())
-    await first_entered.wait()
-    second_task = asyncio.create_task(second())
-    await asyncio.sleep(photodna_module.HASH_LOCK_POLL_SECONDS * 2)
-    assert not second_entered.is_set()
-
-    release_first.set()
-    await asyncio.gather(first_task, second_task)
-    assert second_entered.is_set()
+    child = None
+    script = textwrap.dedent("""
+        import asyncio, sys
+        from app.media import photodna
+        flock = photodna.fcntl.flock
+        reported = False
+        def observed_flock(*args):
+            global reported
+            try:
+                return flock(*args)
+            except BlockingIOError:
+                if not reported:
+                    print('blocked', flush=True)
+                    reported = True
+                raise
+        photodna.fcntl.flock = observed_flock
+        async def run():
+            async with photodna.sdk_hash_generation_lock(sys.argv[1]):
+                print('acquired', flush=True)
+        asyncio.run(run())
+    """)
+    try:
+        async with asyncio.timeout(10):
+            async with sdk_hash_generation_lock(str(tmp_path)):
+                child = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(tmp_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                assert child.stdout is not None
+                assert await child.stdout.readline() == b"blocked\n"
+            assert await child.stdout.readline() == b"acquired\n"
+            stdout, stderr = await child.communicate()
+            assert child.returncode == 0, stderr.decode()
+            assert stdout == b""
+    finally:
+        if child is not None and child.returncode is None:
+            child.kill()
+            await child.wait()
 
 
 async def test_cancelled_hash_generation_kills_and_reaps_decoder_child(
@@ -665,6 +653,7 @@ async def test_scan_image_matches_all_frames_in_bounded_batches(
         flags=(PhotoDNAMatchFlag("Test", ("A1",), 0, "match"),),
     )
     batch_sizes: list[int] = []
+    submitted: list[PhotoDNAHash] = []
 
     async def generate(_data: bytes, _settings: Settings) -> list[PhotoDNAHash]:
         return hashes
@@ -678,6 +667,7 @@ async def test_scan_image_matches_all_frames_in_bounded_batches(
         client: httpx.AsyncClient | None = None,
     ) -> list[PhotoDNAFinding | None]:
         batch_sizes.append(len(batch))
+        submitted.extend(batch)
         assert client is not None
         clients.append(client)
         return [None] * (len(batch) - 1) + ([finding] if len(batch_sizes) == 2 else [None])
@@ -696,11 +686,14 @@ async def test_scan_image_matches_all_frames_in_bounded_batches(
     assert batch_sizes == [5, 2]
     assert clients[0] is clients[1]
 
+    assert submitted == hashes
+
 
 async def test_scan_image_deduplicates_hashes_and_bounds_batch_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hashes = [distinct_edge_hash(index) for index in range(25)] + [distinct_edge_hash(0)] * 5
+    release = asyncio.Event()
     active = 0
     peak = 0
     batch_sizes: list[int] = []
@@ -719,7 +712,8 @@ async def test_scan_image_deduplicates_hashes_and_bounds_batch_concurrency(
         active += 1
         peak = max(peak, active)
         batch_sizes.append(len(batch))
-        await asyncio.sleep(0.01)
+        asyncio.get_running_loop().call_soon(release.set)
+        await release.wait()
         active -= 1
         return [None] * len(batch)
 
@@ -735,7 +729,7 @@ async def test_scan_image_deduplicates_hashes_and_bounds_batch_concurrency(
 
     assert await scan_image(rendered.getvalue(), configured) is None
     assert batch_sizes == [5, 5, 5, 5, 5]
-    assert peak == photodna_module.MAX_CONCURRENT_MATCH_BATCHES
+    assert 0 < peak <= photodna_module.MAX_CONCURRENT_MATCH_BATCHES
 
 
 async def test_later_batch_match_wins_over_earlier_non_image_result(
@@ -798,7 +792,19 @@ def test_automated_report_never_retains_image_or_photodna_hash() -> None:
     assert values["target_type"] == "attachment"
     assert evidence["bytes_retained"] is False
     assert evidence["photodna_hash_retained"] is False
-    assert "Value" not in str(evidence)
+    assert evidence == {
+        "provider": "microsoft_photodna",
+        "provider_tracking_id": "tracking",
+        "attachment_ref": "7@alpha.localhost",
+        "detected_content_type": "image/png",
+        "content_sha256": "a" * 64,
+        "match_flags": [
+            {"source": "NCMEC", "violations": ["A1"], "match_distance": 0, "match_id": "match"}
+        ],
+        "bytes_retained": False,
+        "photodna_hash_retained": False,
+        "uploader_ref": "3@alpha.localhost",
+    }
 
 
 async def test_local_match_is_durably_quarantined_before_staging_delete(

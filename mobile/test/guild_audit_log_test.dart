@@ -21,7 +21,7 @@ void main() {
       ),
     );
 
-    await repository.auditLog(
+    final entries = await repository.auditLog(
       EntityRef.parse('1@chat.example'),
       before: '900',
       userId: EntityRef.parse('7@remote.example'),
@@ -30,6 +30,18 @@ void main() {
       limit: 25,
     );
 
+    expect(entries, [
+      {
+        'id': '899',
+        'user_id': '7',
+        'user_domain': 'remote.example',
+        'action_type': 111,
+        'target_type': 'thread',
+        'target_id': '8',
+        'reason': 'cleanup'
+      }
+    ]);
+    expect(adapter.requests.single.method, 'GET');
     expect(adapter.requests, hasLength(1));
     expect(
       adapter.requests.single.path,
@@ -96,122 +108,40 @@ void main() {
       '110|',
     );
     expect(guildAuditActionFilterLabel('130|'), 'Soundboard sound created');
-  });
-
-  test('every audit filter and row label comes from one definition', () {
-    for (final definition in guildAuditActionDefinitions) {
-      final key = '${definition.actionType}|${definition.targetType ?? ''}';
-      final item = <String, Object?>{
-        'action_type': definition.actionType,
-        if (definition.targetType != null) 'target_type': definition.targetType,
-      };
-
-      expect(guildAuditActionFilterOptions[key], definition.label);
-      expect(guildAuditActionFilterLabel(key), definition.label);
-      expect(guildAuditActionLabel(item), definition.label);
-      expect(guildAuditActionFilterKey(item), key);
-      expect(guildAuditActionDefinition(item), same(definition));
-      expect(guildAuditActionTone(item), definition.tone);
-    }
-  });
-
-  test('stage audit actions match backend codes and presentation', () {
-    const cases = <({
-      int actionType,
-      String label,
-      String verb,
-      GuildAuditActionTone tone,
-    })>[
-      (
-        actionType: 83,
-        label: 'Stage instance created',
-        verb: 'created',
-        tone: GuildAuditActionTone.success,
-      ),
-      (
-        actionType: 84,
-        label: 'Stage instance updated',
-        verb: 'updated',
-        tone: GuildAuditActionTone.neutral,
-      ),
-      (
-        actionType: 85,
-        label: 'Stage instance deleted',
-        verb: 'deleted',
-        tone: GuildAuditActionTone.danger,
-      ),
-    ];
-
-    for (final value in cases) {
-      final item = <String, Object?>{
-        'action_type': value.actionType,
-        'target_type': 'stage_instance',
-      };
-
-      expect(
-          guildAuditActionFilterOptions['${value.actionType}|'], value.label);
-      expect(guildAuditActionFilterKey(item), '${value.actionType}|');
-      expect(guildAuditActionLabel(item), value.label);
-      expect(guildAuditActionTone(item), value.tone);
-      expect(guildAuditActionIcon(item), Icons.record_voice_over_outlined);
-      expect(
-        guildAuditSummary(
-          item,
-          actorName: 'Moderator',
-          targetName: 'the Stage instance',
-        ),
-        'Moderator ${value.verb} the Stage instance',
-      );
-    }
-  });
-
-  test('instance ban and unban retain distinct semantic tones', () {
-    final banned = <String, Object?>{
-      'action_type': 25,
-      'target_type': 'instance',
-    };
-    final unbanned = <String, Object?>{
-      'action_type': 26,
-      'target_type': 'instance',
+    final item = <String, Object?>{
+      'action_type': 11,
+      'target_type': 'channel',
+      'changes': <Object?>[
+        <String, Object?>{
+          'key': 'rate_limit_per_user',
+          'old_value': 0,
+          'new_value': 15,
+        },
+      ],
     };
 
-    expect(guildAuditActionTone(banned), GuildAuditActionTone.danger);
-    expect(guildAuditActionTone(unbanned), GuildAuditActionTone.success);
-    expect(
-      guildAuditActionTone(<String, Object?>{
-        'action_type': 25,
-        'target_type': 'member',
-      }),
-      GuildAuditActionTone.neutral,
-    );
-    expect(
-      guildAuditActionTone(<String, Object?>{
-        'action_type': 26,
-        'target_type': 'member',
-      }),
-      GuildAuditActionTone.neutral,
-    );
-    expect(guildAuditActionIcon(banned), Icons.public_off_outlined);
-    expect(guildAuditActionIcon(unbanned), Icons.public_off_outlined);
     expect(
       guildAuditSummary(
-        banned,
-        actorName: 'Moderator',
-        targetName: 'remote.example',
+        item,
+        actorName: 'Kaede',
+        targetName: '#general',
       ),
-      'Moderator banned remote.example',
+      matches(RegExp(r'Kaede.*updated.*#general')),
+    );
+    expect(guildAuditChanges(item), hasLength(1));
+    expect(guildAuditFieldLabel('rate_limit_per_user'),
+        matches(RegExp(r'rate limit per user', caseSensitive: false)));
+    expect(
+      guildAuditChangeDescription(guildAuditChanges(item).single),
+      matches(RegExp(r'0.*15')),
     );
     expect(
-      guildAuditSummary(
-        unbanned,
-        actorName: 'Moderator',
-        targetName: 'remote.example',
+      guildAuditRelativeTime(
+        DateTime.utc(2026, 8, 21, 10),
+        now: DateTime.utc(2026, 8, 21, 12),
       ),
-      'Moderator unbanned remote.example',
+      matches(RegExp(r'2.*hours?.*ago')),
     );
-  });
-
-  test('audit labels and targets cover advanced Discord-style categories', () {
     final guild = KaedeGuild.fromJson(<String, Object?>{
       'id': '1',
       'origin_domain': 'chat.example',
@@ -301,6 +231,116 @@ void main() {
       '12 inactive members',
     );
   });
+
+  test('every audit filter and row label comes from one definition', () {
+    for (final definition in guildAuditActionDefinitions) {
+      final key = '${definition.actionType}|${definition.targetType ?? ''}';
+      final item = <String, Object?>{
+        'action_type': definition.actionType,
+        if (definition.targetType != null) 'target_type': definition.targetType,
+      };
+
+      expect(guildAuditActionFilterOptions[key], definition.label);
+      expect(guildAuditActionFilterLabel(key), definition.label);
+      expect(guildAuditActionLabel(item), definition.label);
+      expect(guildAuditActionFilterKey(item), key);
+      expect(
+          guildAuditActionDefinition(item)?.actionType, definition.actionType);
+      expect(
+          guildAuditActionDefinition(item)?.targetType, definition.targetType);
+      expect(guildAuditActionTone(item), definition.tone);
+    }
+  });
+
+  test('stage audit actions match backend codes and presentation', () {
+    const cases = <({
+      int actionType,
+      String verb,
+      GuildAuditActionTone tone,
+    })>[
+      (
+        actionType: 83,
+        verb: 'created',
+        tone: GuildAuditActionTone.success,
+      ),
+      (
+        actionType: 84,
+        verb: 'updated',
+        tone: GuildAuditActionTone.neutral,
+      ),
+      (
+        actionType: 85,
+        verb: 'deleted',
+        tone: GuildAuditActionTone.danger,
+      ),
+    ];
+
+    for (final value in cases) {
+      final item = <String, Object?>{
+        'action_type': value.actionType,
+        'target_type': 'stage_instance',
+      };
+
+      expect(guildAuditActionFilterOptions['${value.actionType}|'], isNotEmpty);
+      expect(guildAuditActionFilterKey(item), '${value.actionType}|');
+      expect(guildAuditActionLabel(item), contains(value.verb));
+      expect(guildAuditActionTone(item), value.tone);
+      expect(
+        guildAuditSummary(
+          item,
+          actorName: 'Moderator',
+          targetName: 'the Stage instance',
+        ),
+        matches(RegExp('Moderator.*${value.verb}.*Stage instance')),
+      );
+    }
+  });
+
+  test('instance ban and unban retain distinct semantic tones', () {
+    final banned = <String, Object?>{
+      'action_type': 25,
+      'target_type': 'instance',
+    };
+    final unbanned = <String, Object?>{
+      'action_type': 26,
+      'target_type': 'instance',
+    };
+
+    expect(guildAuditActionTone(banned), GuildAuditActionTone.danger);
+    expect(guildAuditActionTone(unbanned), GuildAuditActionTone.success);
+    expect(
+      guildAuditActionTone(<String, Object?>{
+        'action_type': 25,
+        'target_type': 'member',
+      }),
+      GuildAuditActionTone.neutral,
+    );
+    expect(
+      guildAuditActionTone(<String, Object?>{
+        'action_type': 26,
+        'target_type': 'member',
+      }),
+      GuildAuditActionTone.neutral,
+    );
+    expect(guildAuditActionIcon(banned), Icons.public_off_outlined);
+    expect(guildAuditActionIcon(unbanned), Icons.public_off_outlined);
+    expect(
+      guildAuditSummary(
+        banned,
+        actorName: 'Moderator',
+        targetName: 'remote.example',
+      ),
+      'Moderator banned remote.example',
+    );
+    expect(
+      guildAuditSummary(
+        unbanned,
+        actorName: 'Moderator',
+        targetName: 'remote.example',
+      ),
+      'Moderator unbanned remote.example',
+    );
+  });
 }
 
 final class _AuditAdapter implements HttpClientAdapter {
@@ -314,7 +354,9 @@ final class _AuditAdapter implements HttpClientAdapter {
   ) async {
     requests.add(options);
     return ResponseBody.fromString(
-      '[]',
+      options.path.endsWith('/audit-logs')
+          ? '[{"id":"899","user_id":"7","user_domain":"remote.example","action_type":111,"target_type":"thread","target_id":"8","reason":"cleanup"}]'
+          : '[]',
       200,
       headers: <String, List<String>>{
         Headers.contentTypeHeader: <String>[Headers.jsonContentType],

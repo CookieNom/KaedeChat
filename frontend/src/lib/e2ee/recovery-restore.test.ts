@@ -96,6 +96,8 @@ describe('E2EE recovery restore', () => {
   });
 
   it('does not clear local state when the authenticated reset fails', async () => {
+    const saveRecoveredState = vi.fn(async () => undefined);
+    const initializeRecoveredIdentity = vi.fn(async () => ({ deviceId: 'unused' }));
     const clearLocalState = vi.fn(async () => undefined);
     await expect(
       restoreRecoveredIdentity(user, recovered, {
@@ -104,28 +106,33 @@ describe('E2EE recovery restore', () => {
           throw new Error('reset failed');
         }),
         clearLocalState,
-        saveRecoveredState: vi.fn(async () => undefined),
-        initializeRecoveredIdentity: vi.fn(async () => ({ deviceId: 'unused' }))
+        saveRecoveredState,
+        initializeRecoveredIdentity
       })
     ).rejects.toThrow('reset failed');
     expect(clearLocalState).not.toHaveBeenCalled();
+    expect(saveRecoveredState).not.toHaveBeenCalled();
+    expect(initializeRecoveredIdentity).not.toHaveBeenCalled();
   });
-
   it('does not clear local state for a malformed reset authorization', async () => {
+    const saveRecoveredState = vi.fn(async () => undefined);
+    const initializeRecoveredIdentity = vi.fn(async () => ({ deviceId: 'unused' }));
     const clearLocalState = vi.fn(async () => undefined);
     await expect(
       restoreRecoveredIdentity(user, recovered, {
         resetClient: vi.fn(async () => undefined),
         authorizeReset: vi.fn(async () => 'ker_not-canonical'),
         clearLocalState,
-        saveRecoveredState: vi.fn(async () => undefined),
-        initializeRecoveredIdentity: vi.fn(async () => ({ deviceId: 'unused' }))
+        saveRecoveredState,
+        initializeRecoveredIdentity
       })
     ).rejects.toThrow('reset response was invalid');
     expect(clearLocalState).not.toHaveBeenCalled();
+    expect(saveRecoveredState).not.toHaveBeenCalled();
+    expect(initializeRecoveredIdentity).not.toHaveBeenCalled();
   });
-
   it('rejects a different-account backup before resetting the active identity', async () => {
+    const authorizeReset = vi.fn(async () => `ker_${'A'.repeat(43)}`);
     const resetClient = vi.fn(async () => undefined);
     await expect(
       restoreRecoveredIdentity(
@@ -133,7 +140,7 @@ describe('E2EE recovery restore', () => {
         { ...recovered, accountRef: '19@example.test' },
         {
           resetClient,
-          authorizeReset: vi.fn(async () => `ker_${'A'.repeat(43)}`),
+          authorizeReset,
           clearLocalState: vi.fn(async () => undefined),
           saveRecoveredState: vi.fn(async () => undefined),
           initializeRecoveredIdentity: vi.fn(async () => ({ deviceId: 'unused' }))
@@ -141,5 +148,6 @@ describe('E2EE recovery restore', () => {
       )
     ).rejects.toThrow('different account');
     expect(resetClient).not.toHaveBeenCalled();
+    expect(authorizeReset).not.toHaveBeenCalled();
   });
 });

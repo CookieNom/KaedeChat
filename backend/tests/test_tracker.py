@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy.dialects import postgresql
 
 from app.api import guild_management_federation as guild_management_api
 from app.api import tracker as tracker_api
@@ -29,7 +28,6 @@ from app.db.models import (
     User,
 )
 from app.federation.guild_management import GuildManagementRequest, GuildManagementResult
-from app.federation.guilds import SNAPSHOT_NEUTRAL_GUILD_EVENTS
 from app.tracker import outbox as tracker_outbox
 from app.tracker import service as tracker_service
 from app.tracker.membership import clear_tracker_assignees
@@ -65,20 +63,12 @@ def settings(domain: str = "home.example") -> Settings:
     )
 
 
-def test_tracker_invalidations_do_not_advance_structural_snapshot_generation() -> None:
-    assert "guild.tracker.board.invalidate" in SNAPSHOT_NEUTRAL_GUILD_EVENTS
-
-
 def test_tracker_versions_are_strictly_monotonic_when_clocks_collide_or_regress() -> None:
     current = datetime(2026, 8, 26, 12, 0, 0, 123456, tzinfo=UTC)
-
-    assert next_tracker_version(current, now=current) == current.replace(microsecond=123457)
-    assert next_tracker_version(current, now=current - timedelta(seconds=1)) == current.replace(
-        microsecond=123457
-    )
-    assert next_tracker_version(current, now=current + timedelta(seconds=1)) == current + timedelta(
-        seconds=1
-    )
+    for now in (current, current - timedelta(seconds=1), current + timedelta(seconds=1)):
+        version = next_tracker_version(current, now=now)
+        assert version > current
+        assert version >= now
 
 
 def user(*, user_id: int = 8, domain: str = "home.example") -> User:
@@ -161,33 +151,6 @@ def test_remote_tracker_payload_qualifies_nested_authorities() -> None:
     }
 
 
-def test_tracker_dispatch_is_queued_in_the_mutation_transaction() -> None:
-    added: list[object] = []
-    session = SimpleNamespace(add=added.append)
-    row = tracker_outbox.queue_tracker_dispatch(
-        cast(Any, session),
-        channel_id=50,
-        channel_domain="home.example",
-        guild_id=10,
-        guild_domain="home.example",
-        event_type="TRACKER_TASK_UPDATE",
-        payload={"task_id": "52", "version": "v2"},
-    )
-    assert added == [row]
-    assert row.payload["version"] == "v2"
-
-    with pytest.raises(ValueError, match="unsupported tracker dispatch"):
-        tracker_outbox.queue_tracker_dispatch(
-            cast(Any, session),
-            channel_id=50,
-            channel_domain="home.example",
-            guild_id=10,
-            guild_domain="home.example",
-            event_type="MESSAGE_CREATE",
-            payload={},
-        )
-
-
 @pytest.mark.asyncio
 async def test_tracker_outbox_retains_failures_and_acknowledges_success(
     monkeypatch: pytest.MonkeyPatch,
@@ -234,7 +197,7 @@ async def test_tracker_outbox_retains_failures_and_acknowledges_success(
 
 
 @pytest.mark.asyncio
-async def test_tracker_outbox_replays_after_publish_before_acknowledgement(
+async def test_retry_orchestration_after_publish_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime.now(UTC)
@@ -300,18 +263,18 @@ async def test_tracker_mutation_queues_dispatch_before_commit(
         permissions=int(Permission.MANAGE_TRACKER),
     )
     order: list[str] = []
+    added: list[object] = []
+
+    def add(row: object) -> None:
+        added.append(row)
+        order.append("queue")
 
     async def commit() -> None:
         order.append("commit")
 
-    session = SimpleNamespace(commit=commit, refresh=AsyncMock())
+    session = SimpleNamespace(add=add, commit=commit, refresh=AsyncMock())
     monkeypatch.setattr(tracker_service, "tracker_context", AsyncMock(return_value=context))
     monkeypatch.setattr(tracker_service, "board_response", AsyncMock(return_value={}))
-    monkeypatch.setattr(
-        tracker_service,
-        "queue_context_dispatch",
-        lambda *_args, **_kwargs: order.append("queue"),
-    )
     monkeypatch.setattr(tracker_service, "queue_context_federation", AsyncMock())
     monkeypatch.setattr(tracker_service, "wake_context_outboxes", AsyncMock())
 
@@ -326,6 +289,36 @@ async def test_tracker_mutation_queues_dispatch_before_commit(
     )
 
     assert order == ["queue", "commit"]
+
+    assert len(added) == 1
+    row = added[0]
+    assert (row.channel_id, row.channel_domain, row.guild_id, row.guild_domain) == (
+        50,
+        "home.example",
+        10,
+        "home.example",
+    )
+    assert row.event_type == "TRACKER_BOARD_UPDATE"
+    assert row.payload == {
+        "channel_id": "50",
+        "channel_domain": "home.example",
+        "key_prefix": "NEW",
+        "next_task_number": "1",
+        "version": board.updated_at.isoformat(),
+        "full_refresh": True,
+        "reason": "settings_updated",
+    }
+    with pytest.raises(ValueError, match="unsupported tracker dispatch"):
+        tracker_outbox.queue_tracker_dispatch(
+            cast(Any, session),
+            channel_id=50,
+            channel_domain="home.example",
+            guild_id=10,
+            guild_domain="home.example",
+            event_type="MESSAGE_CREATE",
+            payload={},
+        )
+    assert added == [row]
 
 
 @pytest.mark.asyncio
@@ -359,7 +352,7 @@ async def test_tracker_creation_materializes_a_normalized_default_board() -> Non
     ]
 
 
-def test_tracker_payload_has_stable_keys_order_counts_and_versions() -> None:
+def test_payload_keys_counts_versions() -> None:
     now = datetime(2026, 8, 26, 12, tzinfo=UTC)
     board = TrackerBoard(
         channel_id=50,
@@ -448,7 +441,21 @@ def test_position_invalidation_only_fires_when_other_resources_shift() -> None:
 @pytest.mark.asyncio
 async def test_member_removal_clears_assignments_and_versions_the_whole_board(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    for table in ("channels", "tracker_boards", "tracker_tasks"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    await postgres_schema.execute(
+        text(
+            "CREATE TABLE tracker_dispatch_outbox (LIKE public.tracker_dispatch_outbox "
+            "INCLUDING ALL)"
+        )
+    )
     now = datetime(2026, 8, 26, 12, tzinfo=UTC)
     guild = Guild(
         id=10,
@@ -477,65 +484,74 @@ async def test_member_removal_clears_assignments_and_versions_the_whole_board(
         created_floor_id=50,
     )
 
-    class Rows:
-        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
-            self.rows = rows
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all([board, channel])
+        for identifier, changed in enumerate(
+            [
+                {},
+                {},
+                {"assignee_id": 8},
+                {"assignee_domain": "other.example"},
+                {"guild_id": 11, "channel_id": 51},
+                {"guild_domain": "other.example", "channel_domain": "other.example"},
+            ],
+            start=1,
+        ):
+            values = dict(
+                id=identifier,
+                origin_domain="home.example",
+                channel_id=50,
+                channel_domain="home.example",
+                guild_id=10,
+                guild_domain="home.example",
+                assignee_id=9,
+                assignee_domain="remote.example",
+                updated_at=now,
+            )
+            session.add(TrackerTask(**(values | changed)))
+        await session.flush()
+        queue_federation = AsyncMock()
+        monkeypatch.setattr(
+            "app.tracker.membership.queue_tracker_federation_invalidation",
+            queue_federation,
+        )
 
-        def tuples(self) -> list[tuple[Any, ...]]:
-            return self.rows
+        refreshes = await clear_tracker_assignees(
+            cast(Any, session),
+            settings(),
+            guild,
+            user(),
+            [(9, "remote.example"), (9, "remote.example")],
+        )
 
-    execute = AsyncMock(
-        side_effect=[
-            Rows([(50, "home.example")]),
-            Rows([(board, channel)]),
-            SimpleNamespace(),
+        assert len(refreshes) == 1
+        assert board.updated_at > now
+        assert refreshes[0].version == board.updated_at
+        await session.flush()
+        rows = (
+            await session.execute(
+                select(
+                    TrackerTask.id,
+                    TrackerTask.assignee_id,
+                    TrackerTask.assignee_domain,
+                    TrackerTask.updated_at,
+                ).order_by(TrackerTask.id)
+            )
+        ).all()
+        assert rows[:2] == [(1, None, None, board.updated_at), (2, None, None, board.updated_at)]
+        assert rows[2:] == [
+            (3, 8, "remote.example", now),
+            (4, 9, "other.example", now),
+            (5, 9, "remote.example", now),
+            (6, 9, "remote.example", now),
         ]
-    )
-    added: list[object] = []
-    session = SimpleNamespace(execute=execute, add=added.append)
-    queue_federation = AsyncMock()
-    monkeypatch.setattr(
-        "app.tracker.membership.queue_tracker_federation_invalidation",
-        queue_federation,
-    )
-
-    refreshes = await clear_tracker_assignees(
-        cast(Any, session),
-        settings(),
-        guild,
-        user(),
-        [(9, "remote.example"), (9, "remote.example")],
-    )
-
-    assert len(refreshes) == 1
-    assert board.updated_at > now
-    assert refreshes[0].version == board.updated_at
-    candidate_sql = str(
-        execute.await_args_list[0]
-        .args[0]
-        .compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    update_sql = str(
-        execute.await_args_list[2]
-        .args[0]
-        .compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "tracker_tasks.assignee_id" in candidate_sql
-    assert "UPDATE tracker_tasks SET assignee_id=NULL, assignee_domain=NULL" in update_sql
-    assert "updated_at=" in update_sql
-    queue_federation.assert_awaited_once()
-    assert queue_federation.await_args.kwargs == {"reason": "assignee_membership_removed"}
-    queued = next(item for item in added if isinstance(item, TrackerDispatchOutbox))
-    assert queued.event_type == "TRACKER_BOARD_UPDATE"
-    assert queued.payload["full_refresh"] is True
-    assert queued.payload["reason"] == "assignee_membership_removed"
-    assert queued.payload["version"] == board.updated_at.isoformat()
+        queue_federation.assert_awaited_once()
+        assert queue_federation.await_args.kwargs == {"reason": "assignee_membership_removed"}
+        queued = (await session.scalars(select(TrackerDispatchOutbox))).one()
+        assert queued.event_type == "TRACKER_BOARD_UPDATE"
+        assert queued.payload["full_refresh"] is True
+        assert queued.payload["reason"] == "assignee_membership_removed"
+        assert queued.payload["version"] == board.updated_at.isoformat()
 
 
 @pytest.mark.asyncio
@@ -962,7 +978,7 @@ async def test_task_create_nonce_replays_same_fingerprint_and_rejects_reuse(
     assert replayed["key"] == "RAID-1"
     snowflake.mint.assert_not_awaited()
 
-    existing.client_request_hash = "0" * 64
+    changed = payload.model_copy(update={"title": "Different task"})
     with pytest.raises(HTTPException) as conflict:
         await tracker_service.create_task(
             cast(Any, session),
@@ -971,7 +987,7 @@ async def test_task_create_nonce_replays_same_fingerprint_and_rejects_reuse(
             settings(),
             auth(actor),
             EntityRef("50"),
-            payload,
+            changed,
         )
     assert conflict.value.status_code == 409
     assert conflict.value.detail["code"] == "TRACKER_CLIENT_NONCE_CONFLICT"

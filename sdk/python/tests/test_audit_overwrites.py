@@ -104,6 +104,7 @@ async def test_audit_log_cursor_iterator_stops_at_requested_limit() -> None:
     ]
 
     assert [entry.id for entry in entries] == [9, 8, 7]
+    assert bot.fetch_audit_logs.await_count == 2
     assert bot.fetch_audit_logs.await_args_list[1].kwargs["before"] == 8
     assert bot.fetch_audit_logs.await_args_list[1].kwargs["limit"] == 1
 
@@ -148,6 +149,10 @@ async def test_channel_overwrite_methods_use_bot_routes_and_wire_masks() -> None
     )
 
     assert overwrite == ChannelOverwrite(role, "role", 4, 8)
+    assert (
+        bot.request.await_args.kwargs["headers"]["X-Audit-Log-Reason"]
+        == "private staff room"
+    )
     assert bot.request.await_args.args[:2] == (
         "PUT",
         "/api/v1/bots/guilds/10@chat.example/channels/20@chat.example/overwrites",

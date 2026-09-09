@@ -2072,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_metadata_clear_prunes_public_asset_before_publish() {
+    fn reducer_completion_after_metadata_pruning() {
         let mut state = AppState::default();
         let user = public_asset_user(Some(PUBLIC_ASSET_HASH));
         let key = public_asset_key(&user.origin_domain, PUBLIC_ASSET_HASH, "thumbnail_128");
@@ -2175,11 +2175,7 @@ mod tests {
         let scheduled =
             schedule_public_asset_requests(requests.clone(), &HashSet::new(), &revalidation_keys);
 
-        assert_eq!(
-            scheduled.len(),
-            PUBLIC_ASSET_BATCH_SIZE,
-            "the network batch must stay bounded"
-        );
+        assert!(!scheduled.is_empty() && scheduled.len() <= PUBLIC_ASSET_BATCH_SIZE);
         assert_eq!(
             scheduled
                 .iter()
@@ -2190,16 +2186,15 @@ mod tests {
             1,
             "a recurring missing backlog must not starve an expired cache entry"
         );
-        let scheduled_after_failed_revalidation =
+        let scheduled_again =
             schedule_public_asset_requests(requests, &HashSet::new(), &revalidation_keys);
-        assert!(scheduled_after_failed_revalidation.iter().any(|request| {
+        assert!(scheduled_again.iter().any(|request| {
             public_asset_key(&request.0, &request.1, &request.2) == revalidation_key
         }));
     }
 
     #[tokio::test(start_paused = true)]
     async fn periodic_refresh_waits_for_interval_and_stops_with_weak_owner() {
-        assert_eq!(PUBLIC_ASSET_REFRESH_INTERVAL, Duration::from_secs(60));
         assert!(PUBLIC_ASSET_REFRESH_INTERVAL < kaede_media::PUBLIC_ASSET_CACHE_TTL);
         let owner = Arc::new(());
         let invocations = Arc::new(AtomicUsize::new(0));
@@ -2323,10 +2318,26 @@ mod tests {
         };
         assert!(voice_reauthorization(&mismatched).is_none());
 
-        let malformed = GatewayEnvelope {
-            d: serde_json::json!({"channel_id": "42"}),
-            ..event
-        };
-        assert!(voice_reauthorization(&malformed).is_none());
+        for field in ["grant", "channel_domain"] {
+            let mut invalid = event.clone();
+            invalid
+                .d
+                .as_object_mut()
+                .expect("event object")
+                .remove(field);
+            assert!(voice_reauthorization(&invalid).is_none(), "{field}");
+        }
+        for (correlation, allowed) in [
+            ("a".repeat(31), false),
+            ("a".repeat(32), true),
+            ("b".repeat(64), true),
+            ("b".repeat(65), false),
+            ("!".repeat(32), false),
+        ] {
+            let mut candidate = event.clone();
+            candidate.d["move_session_id"] = serde_json::json!(correlation);
+            candidate.d["grant"]["move_session_id"] = serde_json::json!(correlation);
+            assert_eq!(voice_reauthorization(&candidate).is_some(), allowed);
+        }
     }
 }

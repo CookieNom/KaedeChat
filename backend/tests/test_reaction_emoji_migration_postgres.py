@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 migration = import_module("migrations.versions.3d9a5e1c7b42_reaction_emoji_canonicalization")
 
-DATABASE_URL = os.environ.get("KAEDE_REACTION_MIGRATION_TEST_DATABASE_URL")
+DATABASE_URL = os.environ.get("KAEDE_REACTION_MIGRATION_TEST_DATABASE_URL") or os.environ.get(
+    "TEST_DATABASE_URL"
+)
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="set KAEDE_REACTION_MIGRATION_TEST_DATABASE_URL to run PostgreSQL migration tests",
@@ -289,7 +291,28 @@ async def test_reaction_alias_collisions_merge_without_losing_distinct_reactors(
 
         async with engine.begin() as connection:
             await connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
-            assert (await connection.scalar(text("SELECT count(*) FROM reactions"))) == 4
+            assert (
+                await connection.execute(
+                    text(
+                        "SELECT user_id, emoji_key, created_at FROM reactions ORDER BY user_i"
+                        "d, emoji_key"
+                    )
+                )
+            ).all() == rows
+            assert (
+                dict(
+                    (
+                        await connection.execute(
+                            text("SELECT id, default_reaction_emoji FROM channels ORDER BY id")
+                        )
+                    ).all()
+                )
+                == forum_defaults
+            )
+            assert (
+                await connection.scalar(text("SELECT payload FROM guild_history_staged_messages"))
+                == staged_payload
+            )
     finally:
         async with engine.begin() as connection:
             await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

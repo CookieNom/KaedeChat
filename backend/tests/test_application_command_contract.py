@@ -5,10 +5,13 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.applications import (
+    ApplicationCreate,
+    ApplicationPatch,
     CommandChoice,
     CommandDefinition,
     CommandOptionDefinition,
     CommandsPut,
+    TemplateCreate,
     command_character_count,
 )
 from app.api.bot_federation import ManifestCommand
@@ -35,8 +38,30 @@ def test_command_names_match_discord_type_specific_contract() -> None:
     with pytest.raises(ValidationError):
         CommandDefinition(name="don't", description="ASCII apostrophes are not valid")
 
+    default_command = CommandDefinition(name="weather", description="Current weather")
+    assert default_command.name == "weather"
+    assert default_command.contexts == ["guild", "bot_dm", "private_channel"]
+    assert default_command.integration_types == ["guild_install"]
+    user_command = CommandDefinition(
+        name="share",
+        description="Share something",
+        contexts=["guild", "bot_dm", "private_channel"],
+        integration_types=["guild_install", "user_install"],
+    )
+    assert user_command.integration_types == ["guild_install", "user_install"]
+    with pytest.raises(ValidationError):
+        CommandDefinition(
+            name="duplicate",
+            description="Duplicate context",
+            contexts=["guild", "guild"],
+        )
+    with pytest.raises(ValidationError):
+        CommandDefinition(name="Not Valid")
 
-def test_command_localizations_permissions_and_nsfw_round_trip() -> None:
+
+def test_command_localizations_permissions_and_nsfw_schema_acceptance() -> None:
+    with pytest.raises(ValidationError):
+        CommandDefinition.model_validate({"name": "command", "description": "Command", "nsfw": 0})
     command = CommandDefinition(
         name="weather",
         description="Forecast",
@@ -67,8 +92,29 @@ def test_command_localizations_permissions_and_nsfw_round_trip() -> None:
             name_localizations={"xx": "weather"},
         )
 
+    with pytest.raises(ValidationError):
+        ApplicationPatch(default_permissions=1 << 63)
+    with pytest.raises(ValidationError):
+        ApplicationPatch(default_permissions=1 << 19)
+    assert ApplicationPatch(default_permissions=str(1 << 58)).default_permissions == 1 << 58
+    for invalid_mask in (True, 1.0, "+1", "01"):
+        with pytest.raises(ValidationError):
+            ApplicationPatch(default_permissions=invalid_mask)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        TemplateCreate(slug="default", name="Default", permissions=str(1 << 19))
+    with pytest.raises(ValidationError):
+        ApplicationCreate(name="Unsafe", support_url="http://apps.example/support")
+    with pytest.raises(ValidationError):
+        ApplicationPatch(privacy_url="http://apps.example/privacy")
+    assert (
+        str(ApplicationCreate(name="Safe", support_url="https://apps.example/support").support_url)
+        == "https://apps.example/support"
+    )
+
 
 def test_command_option_tree_rejects_ambiguous_definitions() -> None:
+    with pytest.raises(ValidationError):
+        CommandChoice.model_validate({"name": "boolean", "value": True})
     required = CommandOptionDefinition(
         type="string",
         name="query",
@@ -144,6 +190,40 @@ def test_command_option_tree_rejects_ambiguous_definitions() -> None:
             ],
         )
 
+    command = CommandDefinition(
+        name="poll",
+        description="Create a poll",
+        options=[
+            CommandOptionDefinition(
+                type="string",
+                name="question",
+                description="Question",
+                required=True,
+                min_length=1,
+                max_length=500,
+            )
+        ],
+    )
+    assert command.options[0].name == "question"
+    channel_command = CommandDefinition(
+        name="move",
+        description="Move a conversation",
+        options=[
+            CommandOptionDefinition(
+                type="channel",
+                name="destination",
+                description="Destination",
+                channel_types=[0, 5, 10, 11, 12, 15, 17],
+            )
+        ],
+    )
+    serialized = channel_command.model_dump(mode="json")
+    assert serialized["options"][0]["channel_types"] == [0, 5, 10, 11, 12, 15, 17]
+    assert CommandDefinition.model_validate(serialized) == channel_command
+
+    with pytest.raises(ValidationError):
+        CommandDefinition(name="poll", description="Poll", unexpected=True)
+
 
 def test_command_numeric_ranges_and_localization_budget_match_discord() -> None:
     assert (
@@ -216,16 +296,31 @@ def test_command_numeric_ranges_and_localization_budget_match_discord() -> None:
         {"type": "string", "name": "query", "description": "Query", "autocomplete": 0},
         {"type": "string", "name": "query", "description": "Query", "min_length": True},
         {"type": "number", "name": "amount", "description": "Amount", "min_value": "1"},
+        {"type": "user", "name": "person", "description": "Person", "min_length": 1},
+        {"type": "user", "name": "person", "description": "Person", "channel_types": [0]},
+        {
+            "type": "channel",
+            "name": "destination",
+            "description": "Destination",
+            "channel_types": [0, 0],
+        },
+        {
+            "type": "channel",
+            "name": "destination",
+            "description": "Destination",
+            "channel_types": [99],
+        },
+        {
+            "type": "channel",
+            "name": "destination",
+            "description": "Destination",
+            "channel_types": [True],
+        },
     ],
 )
 def test_command_options_reject_ambiguous_wire_types(payload: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         CommandOptionDefinition.model_validate(payload)
-
-    with pytest.raises(ValidationError):
-        CommandDefinition.model_validate({"name": "command", "description": "Command", "nsfw": 0})
-    with pytest.raises(ValidationError):
-        CommandChoice.model_validate({"name": "boolean", "value": True})
 
 
 def test_federated_manifest_uses_the_same_recursive_command_contract() -> None:

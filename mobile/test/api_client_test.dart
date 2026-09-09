@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
-import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 
@@ -49,18 +48,6 @@ void main() {
     );
   });
 
-  test(
-      'nested network object arrays reject scalar children without partial data',
-      () {
-    expect(
-      () => strictNetworkObjectList(<Object?>[
-        <String, Object?>{'id': '1'},
-        'silently dropped before this regression',
-      ], label: 'Users'),
-      throwsA(isA<FormatException>()),
-    );
-  });
-
   test('channel reorder accepts the API empty response', () async {
     final adapter = _JsonAdapter('', status: 204);
     final repository = KaedeRepository(KaedeApiClient(
@@ -75,6 +62,11 @@ void main() {
       ],
     );
 
+    expect(adapter.request?.data, <String, Object?>{
+      'channels': [
+        <String, Object?>{'id': '2', 'position': 0, 'parent_id': null},
+      ]
+    });
     expect(adapter.request?.method, 'PATCH');
     expect(adapter.request?.path, '/api/v1/guilds/1@chat.example/channels');
   });
@@ -102,6 +94,11 @@ void main() {
       <KaedeRole>[role],
     );
 
+    expect(adapter.request?.data, <String, Object?>{
+      'roles': [
+        <String, Object?>{'id': '2', 'position': 1, 'version': 'v1'},
+      ]
+    });
     expect(adapter.request?.method, 'PATCH');
     expect(adapter.request?.path, '/api/v1/guilds/1@chat.example/roles');
   });

@@ -85,7 +85,7 @@ def test_federated_profile_carries_all_mutable_versioned_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exact_profile_refresh_accepts_only_home_signed_composite_identity(
+async def test_consuming_a_verified_home_bound_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     local_settings = settings(domain="local.example")
@@ -287,23 +287,32 @@ async def test_profile_refresh_rejects_a_signed_proof_for_another_composite_id(
     )
     redis = SimpleNamespace(eval=AsyncMock(return_value=1))
     response = httpx.Response(200, json={}, request=httpx.Request("GET", "https://remote.example"))
-    wrong = EventEnvelope.model_validate(
+    valid = EventEnvelope.model_validate(
         {
             "event_id": "kcfe_abcdefghijklmnop",
             "origin": "remote.example",
             "type": "user.profile",
             "ts": 1,
-            "actor": {"id": "43", "domain": "remote.example"},
-            "content": {},
+            "actor": {"id": "42", "domain": "remote.example"},
+            "content": {
+                "subject": {"id": "42", "origin_domain": "remote.example"},
+                "profile": {
+                    "id": "42",
+                    "origin_domain": "remote.example",
+                    "username": "maple",
+                    "profile_version": 2,
+                },
+            },
             "signatures": {"remote.example": {"ed25519:key": "c2ln"}},
         }
     )
+    wrong = valid.model_copy(update={"actor": valid.actor.model_copy(update={"id": 43})})
     monkeypatch.setattr("app.federation.users.signed_request", AsyncMock(return_value=response))
     monkeypatch.setattr(
         "app.federation.users.validated_event_envelope", AsyncMock(return_value=wrong)
     )
 
-    with pytest.raises(Exception, match="proof is invalid"):
+    with pytest.raises(FederationNetworkError, match="proof is invalid"):
         await refresh_remote_user_by_ref(
             cast(Any, session), settings(), cast(Any, redis), 42, "remote.example"
         )
@@ -312,14 +321,62 @@ async def test_profile_refresh_rejects_a_signed_proof_for_another_composite_id(
 
 
 @pytest.mark.asyncio
-async def test_unresolved_legacy_peer_is_selected_for_bounded_discovery() -> None:
-    session = SimpleNamespace(scalars=AsyncMock(return_value=["legacy.example"]))
-    assert await unresolved_profile_peer_candidates(cast(Any, session), settings()) == [
-        "legacy.example"
-    ]
-    statement = session.scalars.await_args.args[0]
-    assert "profile_resolved" in str(statement)
-    assert "capabilities" in str(statement)
+async def test_unresolved_legacy_peer_is_selected_for_bounded_discovery(postgres_schema) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import Instance, User
+
+    for table in ("instances", "users"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    configured = settings()
+    async with AsyncSession(bind=postgres_schema) as session:
+        for index, (domain, local, resolved, capable) in enumerate(
+            [
+                ("capable.example", False, False, True),
+                ("resolved.example", False, True, False),
+                (configured.domain, False, False, False),
+                ("local.example", True, False, False),
+                ("legacy-a.example", False, False, False),
+                ("legacy-b.example", False, False, False),
+                ("legacy-c.example", False, False, False),
+            ]
+        ):
+            session.add(
+                Instance(
+                    domain=domain,
+                    is_self=False,
+                    capabilities=[PROFILE_BY_REF_CAPABILITY] if capable else [],
+                    updated_at=datetime.now(UTC) + timedelta(seconds=index),
+                )
+            )
+            session.add(
+                User(
+                    id=index + 1,
+                    origin_domain=domain,
+                    is_local=local,
+                    profile_resolved=resolved,
+                    username=f"user_{index}",
+                )
+            )
+        session.add(
+            User(
+                id=99,
+                origin_domain="legacy-a.example",
+                is_local=False,
+                profile_resolved=False,
+                username="another",
+            )
+        )
+        await session.flush()
+        assert await unresolved_profile_peer_candidates(session, configured, limit=2) == [
+            "legacy-a.example",
+            "legacy-b.example",
+        ]
 
 
 @pytest.mark.asyncio
@@ -454,9 +511,11 @@ async def test_remote_lookup_reports_local_capacity_as_507(
     assert caught.value.detail == {"code": expected_code}
 
 
+@pytest.mark.parametrize("matching", [True, False])
 @pytest.mark.asyncio
 async def test_terminal_relationship_capacity_rejection_removes_only_matching_request(
     monkeypatch: pytest.MonkeyPatch,
+    matching: bool,
 ) -> None:
     local_settings = settings(domain="local.example")
     actor = User(id=7, origin_domain="local.example", username="local", is_local=True)
@@ -468,7 +527,9 @@ async def test_terminal_relationship_capacity_rejection_removes_only_matching_re
         target_id=target.id,
         target_domain=target.origin_domain,
         type="pending_out",
-        request_id="kcr_abcdefghijklmnopqrstuvwxyz",
+        request_id="kcr_abcdefghijklmnopqrstuvwxyz"
+        if matching
+        else "kcr_newerabcdefghijklmnopqrst",
     )
     session = SimpleNamespace(
         get=AsyncMock(side_effect=[actor, target]),
@@ -501,59 +562,12 @@ async def test_terminal_relationship_capacity_rejection_removes_only_matching_re
         "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED",
     )
 
-    assert reconciled == (actor, target)
-    session.delete.assert_awaited_once_with(pending)
-
-
-@pytest.mark.asyncio
-async def test_late_relationship_capacity_rejection_preserves_newer_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    local_settings = settings(domain="local.example")
-    actor = User(id=7, origin_domain="local.example", username="local", is_local=True)
-    target = User(id=42, origin_domain="remote.example", username="maple", is_local=False)
-    newer = Relationship(
-        user_id=actor.id,
-        user_domain=actor.origin_domain,
-        user_is_local=True,
-        target_id=target.id,
-        target_domain=target.origin_domain,
-        type="pending_out",
-        request_id="kcr_newerabcdefghijklmnopqrst",
-    )
-    session = SimpleNamespace(
-        get=AsyncMock(side_effect=[actor, target]),
-        delete=AsyncMock(),
-    )
-    monkeypatch.setattr(
-        "app.federation.delivery.lock_relationship_pair", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr("app.federation.delivery.relationship", AsyncMock(return_value=newer))
-    event = SimpleNamespace(
-        event_type="relationship.request",
-        envelope={
-            "actor": {"id": "7", "domain": "local.example"},
-            "content": {
-                "actor": {
-                    "id": "7",
-                    "origin_domain": "local.example",
-                    "username": "local",
-                },
-                "target": {"id": "42", "domain": "remote.example"},
-                "request_id": "kcr_abcdefghijklmnopqrstuvwxyz",
-            },
-        },
-    )
-
-    reconciled = await reconcile_relationship_capacity_rejection(
-        cast(Any, session),
-        local_settings,
-        cast(Any, event),
-        "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED",
-    )
-
-    assert reconciled is None
-    session.delete.assert_not_awaited()
+    if matching:
+        assert reconciled == (actor, target)
+        session.delete.assert_awaited_once_with(pending)
+    else:
+        assert reconciled is None
+        session.delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -719,10 +733,12 @@ async def test_stale_outbox_resolves_exact_relationship_and_dm_open(
     assert dm_row.status == "expired"
     assert relationship_row.last_error == "KAED_FED_DELIVERY_EXPIRED"
     session.delete.assert_awaited_once_with(pending)
-    assert [call.args[2] for call in publish.await_args_list] == [
-        "USER_UPDATE",
-        "DM_OPEN_REJECTED",
-    ]
+    assert sorted(call.args[2] for call in publish.await_args_list) == sorted(
+        [
+            "USER_UPDATE",
+            "DM_OPEN_REJECTED",
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -824,8 +840,17 @@ async def test_profile_updates_are_queued_for_remote_friends_and_guild_authoriti
     )
 
     assert destinations == {"remote.example", "guild.example"}
-    assert build.await_count == 3
-    assert queue.await_count == 3
+    assert [(call.args[2], call.args[4].get("target")) for call in build.await_args_list] == [
+        ("relationship.profile", {"id": "42", "domain": "remote.example"}),
+        ("relationship.profile", {"id": "43", "domain": "remote.example"}),
+        ("guild.member.profile", None),
+    ]
+    assert all(call.args[3] is actor for call in build.await_args_list)
+    assert [call.args[2:] for call in queue.await_args_list] == [
+        ("remote.example", {"event_id": "test"}),
+        ("remote.example", {"event_id": "test"}),
+        ("guild.example", {"event_id": "test"}),
+    ]
     assert build.await_args_list[-1].args[2] == "guild.member.profile"
     assert build.await_args_list[-1].kwargs["context"] == {
         "guild_id": "70",

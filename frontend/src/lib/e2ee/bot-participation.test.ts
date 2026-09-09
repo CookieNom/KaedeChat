@@ -12,7 +12,7 @@ describe('bot E2EE participation', () => {
     );
   });
 
-  it('states the immutable history floor', () => {
+  it('displaying the history-floor reference', () => {
     expect(
       botE2eeHistoryNotice({
         device_id: 'kbe_device',

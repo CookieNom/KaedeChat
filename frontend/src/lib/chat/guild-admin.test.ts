@@ -48,6 +48,10 @@ describe('guild administration payloads', () => {
       trigger_metadata: { mention_total_limit: 8, mention_raid_protection_enabled: true },
       exempt_roles: ['3@example.test']
     });
+    expect(payload.trigger_metadata).toEqual({
+      mention_total_limit: 8,
+      mention_raid_protection_enabled: true
+    });
     expect(payload.actions).toEqual([
       { type: 'block_message', custom_message: 'Please slow down' },
       { type: 'send_alert_message', channel_id: '12@example.test' },
@@ -56,12 +60,17 @@ describe('guild administration payloads', () => {
   });
 
   it('keeps repeated prune-role query parameters and clamps playback volume', () => {
-    expect(pruneEstimateQuery(14, ['1@chat.test', '2@chat.test', '1@chat.test'])).toBe(
-      'days=14&include_roles=1%40chat.test&include_roles=2%40chat.test'
+    const query = new URLSearchParams(
+      pruneEstimateQuery(14, ['1@chat.test', '2@chat.test', '1@chat.test'])
     );
-    expect(boundedVolume(-1)).toBe(0);
-    expect(boundedVolume(1.4)).toBe(1);
-    expect(boundedVolume(Number.NaN)).toBe(1);
+    expect(query.get('days'), 'prune age').toBe('14');
+    expect(query.getAll('include_roles'), 'deduplicated repeated prune roles').toEqual([
+      '1@chat.test',
+      '2@chat.test'
+    ]);
+    expect(boundedVolume(-1), 'volume lower bound').toBe(0);
+    expect(boundedVolume(1.4), 'volume upper bound').toBe(1);
+    expect(boundedVolume(Number.NaN), 'invalid volume default').toBe(1);
   });
 
   it('uses create permission for creator-owned expressions and manage for other creators', () => {

@@ -48,7 +48,12 @@ describe('rail notification counts', () => {
   it('counts only actual guild mentions', () => {
     expect(
       guildMentionCount(
-        [state({ mention_count: 2 }), state({ channel_id: '11', mention_count: 0 })],
+        [
+          state({ mention_count: 2 }),
+          state({ channel_id: '11', mention_count: 0 }),
+          state({ guild_id: '2', mention_count: 7 }),
+          state({ guild_domain: 'remote.test', mention_count: 9 })
+        ],
         guild
       )
     ).toBe(2);
@@ -58,12 +63,24 @@ describe('rail notification counts', () => {
     expect(
       directMessageUnreadCount([
         state({ guild_id: null, guild_domain: null }),
-        state({ channel_id: '11', guild_id: null, guild_domain: null, mention_count: 3 })
+        state({ channel_id: '11', guild_id: null, guild_domain: null, mention_count: 3 }),
+        state({
+          channel_id: '12',
+          guild_id: null,
+          guild_domain: null,
+          unread: false,
+          mention_count: 8
+        }),
+        state({ mention_count: 6 })
       ])
     ).toBe(4);
   });
 
   it('caps crowded badges', () => {
+    expect(compactBadgeCount(1)).toBe('1');
+    expect(compactBadgeCount(98)).toBe('98');
+    expect(compactBadgeCount(99)).toBe('99');
+    expect(compactBadgeCount(100)).toBe('99+');
     expect(compactBadgeCount(125)).toBe('99+');
   });
 });

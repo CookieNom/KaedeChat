@@ -19,9 +19,7 @@ from app.api.soundboard import (
     SoundboardSourceCapability,
     SoundboardSourceCapabilityRequest,
 )
-from app.core.federation import FEDERATION_CAPABILITIES
 from app.db.models import Guild, SoundboardSound, User
-from app.federation.client import silence_blocks_path
 from app.federation.security import FederationPrincipal
 from app.voice.schemas import SoundboardPlayRequest
 from app.voice.state import Occupant
@@ -470,7 +468,7 @@ async def test_soundboard_play_is_signed_by_remote_owner_after_transfer(
 
 
 @pytest.mark.asyncio
-async def test_third_instance_source_capability_is_exactly_bound(
+async def test_source_capability_media_origin_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = int(time.time())
@@ -688,7 +686,7 @@ async def test_target_authority_fetches_remote_source_capability(
 
 
 @pytest.mark.asyncio
-async def test_authority_rechecks_bot_install_scope_and_membership(
+async def test_bot_scope_caller_kind_checks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = request_payload("play", caller_kind="bot")
@@ -939,10 +937,10 @@ async def test_effect_delivery_is_occupant_only_and_replay_safe(
         consume_replay=True,
     )
     assert published.await_count == 2
-    assert [call.args[1:3] for call in published.await_args_list] == [
+    assert {call.args[1:3] for call in published.await_args_list} == {
         ("user:member.example:21", "VOICE_CHANNEL_EFFECT_SEND"),
         ("user:apps.example:23", "VOICE_CHANNEL_EFFECT_SEND"),
-    ]
+    }
 
     assert await soundboard_api._deliver_soundboard_effect_to_local_occupants(
         redis,
@@ -952,6 +950,11 @@ async def test_effect_delivery_is_occupant_only_and_replay_safe(
         consume_replay=True,
     )
     assert published.await_count == 2
+
+    assert [call.args for call in redis.set.await_args_list] == [
+        (f"federation:soundboard-effect:authority.example:{play.delivery_id}", "1")
+    ] * 2
+    assert [call.kwargs for call in redis.set.await_args_list] == [{"ex": 120, "nx": True}] * 2
 
 
 def test_effect_routes_only_federate_remote_human_domains() -> None:
@@ -1001,12 +1004,13 @@ def test_effect_routes_only_federate_remote_human_domains() -> None:
         "member.example",
     )
 
-    assert local_users == [
+    assert set(local_users) == {
         (21, "member.example"),
         (23, "apps.example"),
         (24, "other.example"),
-    ]
-    assert destinations == ["other.example"]
+    }
+    assert set(destinations) == {"other.example"}
+    assert len(destinations) == 1
 
 
 @pytest.mark.parametrize("operation", ["update", "delete"])
@@ -1066,18 +1070,3 @@ async def test_soundboard_mutations_delegate_creator_aware_permission(
         "creator_id": creator_id,
         "creator_domain": "member.example",
     }
-
-
-def test_federation_routes_are_registered() -> None:
-    methods = {
-        (route.path, method)
-        for route in soundboard_api.federation_router.routes
-        for method in (route.methods or set())
-    }
-    assert ("/_kaede/v1/guilds/{guild_id}/soundboard/query", "POST") in methods
-    assert ("/_kaede/v1/guilds/{guild_id}/soundboard/play", "POST") in methods
-    assert ("/_kaede/v1/voice/soundboard-effect", "POST") in methods
-    assert "guild-soundboard/1" in FEDERATION_CAPABILITIES
-    assert silence_blocks_path("/_kaede/v1/guilds/10/soundboard/query")
-    assert silence_blocks_path("/_kaede/v1/guilds/10/soundboard/play")
-    assert silence_blocks_path("/_kaede/v1/voice/soundboard-effect")

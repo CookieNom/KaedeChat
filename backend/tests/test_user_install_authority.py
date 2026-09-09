@@ -125,39 +125,50 @@ async def test_dm_bot_e2ee_authority_rejects_malformed_installation_before_handl
     consumed.assert_not_awaited()
 
 
-def test_user_installation_authority_predicate_fails_closed_for_foreign_null_or_expiry() -> None:
-    now = datetime(2026, 8, 29, 12, tzinfo=UTC)
-    local = installation(user_domain="chat.example")
-    foreign_null = installation()
-    foreign_live = installation(expiry=now + timedelta(seconds=1))
+async def test_user_installation_authority_predicate_fails_closed_for_foreign_null_or_expiry(
+    postgres_schema,
+) -> None:
+    from sqlalchemy import func, select, text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    assert user_installation_is_usable(
-        local,
-        current_instance_domain="chat.example",
-        at=now,
+    await postgres_schema.execute(
+        text(
+            "CREATE TABLE bot_user_installations (LIKE public.bot_user_installations INCLUDING ALL)"
+        )
     )
-    assert not user_installation_is_usable(
-        foreign_null,
-        current_instance_domain="chat.example",
-        at=now,
-    )
-    assert user_installation_is_usable(
-        foreign_live,
-        current_instance_domain="chat.example",
-        at=now,
-    )
-    assert not user_installation_is_usable(
-        foreign_live,
-        current_instance_domain="chat.example",
-        at=now + timedelta(seconds=1),
-    )
-
-    statement = str(usable_user_installation(current_instance_domain="chat.example", at=now))
-    assert "bot_user_installations.status" in statement
-    assert "bot_user_installations.revoked_at IS NULL" in statement
-    assert "bot_user_installations.user_domain" in statement
-    assert "bot_user_installations.authority_expires_at IS NOT NULL" in statement
-    assert "bot_user_installations.authority_expires_at >" in statement
+    now = (await postgres_schema.execute(select(func.now()))).scalar_one()
+    async with AsyncSession(bind=postgres_schema) as session:
+        rows = [
+            installation(user_domain="chat.example"),
+            installation(),
+            installation(expiry=now + timedelta(seconds=1)),
+            installation(expiry=now),
+            installation(user_domain="chat.example", status="revoked"),
+            installation(user_domain="chat.example"),
+        ]
+        for index, row in enumerate(rows):
+            row.id = index + 1
+            row.user_id = 100 + index
+            row.source_id = 200 + index
+        rows[-1].revoked_at = now
+        session.add_all(rows)
+        await session.flush()
+        for at, expected in ((None, [1, 3]), (now, [1, 3]), (now + timedelta(seconds=1), [1])):
+            selected = (
+                await session.scalars(
+                    select(BotUserInstallation.id)
+                    .where(usable_user_installation(current_instance_domain="chat.example", at=at))
+                    .order_by(BotUserInstallation.id)
+                )
+            ).all()
+            assert selected == expected
+            assert [
+                row.id
+                for row in rows
+                if user_installation_is_usable(
+                    row, current_instance_domain="chat.example", at=now if at is None else at
+                )
+            ] == expected
 
 
 def test_authority_expiry_accepts_the_configured_ahead_clock_boundary() -> None:
@@ -351,7 +362,7 @@ async def test_expiry_sweep_preserves_authority_revision_and_converges_derived_s
 
 
 @pytest.mark.asyncio
-async def test_application_target_count_uses_the_shared_authority_lease_predicate() -> None:
+async def test_target_count_uses_shared_lease_predicate() -> None:
     session = SimpleNamespace(scalar=AsyncMock(side_effect=[2, 3]))
     application = BotApplication(
         id=12,
@@ -375,7 +386,7 @@ async def test_application_target_count_uses_the_shared_authority_lease_predicat
 
 
 @pytest.mark.asyncio
-async def test_dm_e2ee_renewal_after_expiry_sweep_reannounces_the_runtime_target(
+async def test_queue_before_grant_and_wake_after_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime.now(UTC)
@@ -978,6 +989,15 @@ async def test_dm_e2ee_grant_reactivates_the_matching_revoked_device(
         "member.example",
     )
     assert (active.status, active.joined_epoch) == ("active", 3)
+
+    assert (revoked.history_floor_message_id, revoked.history_floor_message_domain) == (
+        80,
+        "chat.example",
+    )
+    assert (active.history_floor_message_id, active.history_floor_message_domain) == (
+        2,
+        "chat.example",
+    )
 
 
 @pytest.mark.asyncio

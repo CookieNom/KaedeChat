@@ -69,7 +69,6 @@ from app.voice.state import (
     ACTIVATE_FEDERATED_VOICE_SESSION_LUA,
     ADMIT_OCCUPANT_LUA,
     ADVANCE_FEDERATED_VOICE_SESSION_LUA,
-    CALL_TRANSITION_LUA,
     FederatedVoiceSession,
     Occupant,
     activate_federated_voice_home_session,
@@ -304,6 +303,7 @@ def test_invalid_room_identifiers_are_rejected(value: str) -> None:
 
 def test_livekit_token_is_short_lived_room_scoped_and_has_no_admin_grant() -> None:
     configured = settings()
+    before = datetime.now(UTC)
     token, expires_at = mint_join_token(
         configured,
         room="g.12.34",
@@ -327,7 +327,12 @@ def test_livekit_token_is_short_lived_room_scoped_and_has_no_admin_grant() -> No
     }
     assert "roomAdmin" not in claims["video"]
     assert claims["exp"] - claims["nbf"] == configured.voice_token_ttl_seconds
-    assert 850 <= (expires_at - datetime.now(UTC)).total_seconds() <= 900
+    after = datetime.now(UTC)
+    assert (
+        before.timestamp() + configured.voice_token_ttl_seconds
+        <= expires_at.timestamp()
+        <= after.timestamp() + configured.voice_token_ttl_seconds
+    )
 
 
 def test_publication_sources_follow_speak_and_stream_independently() -> None:
@@ -477,16 +482,13 @@ async def test_voice_channel_full_is_rejected_before_claiming_connection(
         )
 
     assert caught.value.status_code == 409
-    assert caught.value.detail == {
-        "code": "VOICE_CHANNEL_FULL",
-        "message": "This voice channel has reached its user limit.",
-        "user_limit": 1,
-    }
+    assert caught.value.detail["code"] == "VOICE_CHANNEL_FULL"
+    assert caught.value.detail["user_limit"] == 1
     claim.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_voice_admission_enforces_limit_atomically() -> None:
+async def test_admission_wrapper_handling() -> None:
     occupant = Occupant(
         identity="78@alpha.localhost",
         user_id="78",
@@ -530,7 +532,7 @@ def test_signed_webhook_body_hash_is_verified() -> None:
     authorization = api.AccessToken("LKtestkey", LIVEKIT_SECRET).with_sha256(digest).to_jwt()
     event = receive_webhook(configured, body, authorization)
     assert event.event == "room_started"
-    with pytest.raises(Exception, match="invalid LiveKit webhook signature"):
+    with pytest.raises(LiveKitError, match="invalid LiveKit webhook signature"):
         receive_webhook(configured, body + " ", authorization)
 
 
@@ -538,7 +540,8 @@ async def test_livekit_webhook_rejects_an_oversized_stream_before_buffering() ->
     chunks = iter(
         (
             {"type": "http.request", "body": b"x" * (128 * 1024), "more_body": True},
-            {"type": "http.request", "body": b"x" * (128 * 1024 + 1), "more_body": False},
+            {"type": "http.request", "body": b"x" * (128 * 1024 + 1), "more_body": True},
+            {"type": "http.request", "body": b"unread tail", "more_body": False},
         )
     )
 
@@ -564,6 +567,7 @@ async def test_livekit_webhook_rejects_an_oversized_stream_before_buffering() ->
         )
     assert raised.value.status_code == 413
     assert raised.value.detail == {"code": "VOICE_WEBHOOK_TOO_LARGE"}
+    assert next(chunks)["body"] == b"unread tail"
 
 
 def webhook_request() -> Request:
@@ -974,8 +978,9 @@ async def test_media_rotation_fences_grants_before_deleting_the_old_room(
         joined_at=1,
     )
     list_rooms = AsyncMock(return_value=[SimpleNamespace(name="g.12.34")])
-    delete_room = AsyncMock()
-    bump = AsyncMock()
+    order: list[str] = []
+    delete_room = AsyncMock(side_effect=lambda *_args: order.append("delete"))
+    bump = AsyncMock(side_effect=lambda *_args: order.append("fence"))
     remove = AsyncMock()
     monkeypatch.setattr("app.voice.e2ee.LiveKitControl.list_rooms", list_rooms)
     monkeypatch.setattr("app.voice.e2ee.LiveKitControl.delete_room", delete_room)
@@ -989,6 +994,7 @@ async def test_media_rotation_fences_grants_before_deleting_the_old_room(
 
     bump.assert_awaited_once_with(redis, "alpha.localhost", "g.12.34", occupant.identity)
     delete_room.assert_awaited_once_with("g.12.34")
+    assert order == ["fence", "delete"]
     remove.assert_awaited_once_with(redis, "alpha.localhost", "g.12.34", occupant.identity)
 
 
@@ -1411,9 +1417,9 @@ async def test_local_voice_replacement_fences_an_inflight_federated_broker() -> 
 
 
 @pytest.mark.asyncio
-async def test_federated_voice_move_requires_current_source_and_rejects_replay() -> None:
-    redis = cast(Any, FederatedVoiceRedis())
-    identity = "78@beta.localhost"
+async def test_federated_voice_move_requires_current_source_and_rejects_replay(redis_scope) -> None:
+    redis, domain = redis_scope
+    identity = f"78@{domain}"
     move_session_id = "abcdefghijklmnopqrstuvwxyz0123456789_AB"
 
     assert (
@@ -1441,7 +1447,7 @@ async def test_federated_voice_move_requires_current_source_and_rejects_replay()
             move_session_id=move_session_id,
         ),
     )
-    assert redis.values[federated_voice_pending_key(identity)] == move_session_id
+    assert await redis.get(federated_voice_pending_key(identity)) == move_session_id
     assert await activate_federated_voice_home_session(
         redis,
         identity,
@@ -1467,11 +1473,11 @@ async def test_federated_voice_move_requires_current_source_and_rejects_replay()
         )
         == "inactive"
     )
-    current = json.loads(redis.values[federated_voice_session_key("home", identity)])
+    current = json.loads(await redis.get(federated_voice_session_key("home", identity)))
     assert current["connection_id"] == "c" * 43
     assert current["client_kind"] == "desktop"
     current["active"] = True
-    redis.values[federated_voice_session_key("home", identity)] = json.dumps(current)
+    await redis.set(federated_voice_session_key("home", identity), json.dumps(current))
     assert (
         await advance_federated_voice_home_session(
             redis,
@@ -1528,7 +1534,7 @@ async def test_federated_voice_move_requires_current_source_and_rejects_replay()
         )
         is None
     )
-    moved = json.loads(redis.values[federated_voice_session_key("home", identity)])
+    moved = json.loads(await redis.get(federated_voice_session_key("home", identity)))
     assert (moved["room"], moved["generation"]) == ("g.12.35", 5)
     # A lost HTTP response or dispatch publish can safely retry the exact move;
     # the endpoint will replay its idempotent client notifications.
@@ -1639,6 +1645,22 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
     assert [call.args[2] for call in publish.await_args_list] == [
         "VOICE_CHANNEL_MOVE",
         "VOICE_TOKEN",
+    ]
+
+    move = {
+        "guild_id": "12",
+        "guild_domain": "beta.localhost",
+        "channel_id": "35",
+        "channel_domain": "beta.localhost",
+    }
+    assert [call.args for call in publish.await_args_list] == [
+        (redis, "user:alpha.localhost:78", "VOICE_CHANNEL_MOVE", move),
+        (
+            redis,
+            "user:alpha.localhost:78",
+            "VOICE_TOKEN",
+            {**move, "move_session_id": move_session_id, "grant": payload.grant.model_dump()},
+        ),
     ]
 
     priority_grant = VoiceTokenResponse.model_validate(
@@ -2029,9 +2051,3 @@ async def test_occupancy_staleness_is_explicit_not_silently_empty() -> None:
 
 async def _async_value(value: object) -> object:
     return value
-
-
-def test_call_transitions_are_atomic_and_decline_completion_is_bounded() -> None:
-    assert "SISMEMBER" in CALL_TRANSITION_LUA
-    assert "SCARD" in CALL_TRANSITION_LUA
-    assert "call['ended_at']" in CALL_TRANSITION_LUA

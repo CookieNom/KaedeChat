@@ -18,11 +18,8 @@ describe('named application permission selection', () => {
   });
 
   it('projects readable permission labels and rejects malformed masks', () => {
-    expect(selectedPermissionMetadata('3').map((item) => item.label)).toEqual([
-      'Create invites',
-      'Kick members'
-    ]);
-    expect(() => permissionMask('-1')).toThrow('non-negative whole number');
-    expect(() => permissionMask('1.5')).toThrow('non-negative whole number');
+    expect(selectedPermissionMetadata('3').map((item) => item.bit)).toEqual([1n, 2n]);
+    expect(() => permissionMask('-1')).toThrow();
+    expect(() => permissionMask('1.5')).toThrow();
   });
 });

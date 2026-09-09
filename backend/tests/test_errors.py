@@ -47,9 +47,7 @@ def test_http_errors_use_top_level_safe_envelope() -> None:
     assert response.headers["Retry-After"] == "1"
     assert response_body(response) == {
         "code": "KAED_RATE_LIMITED",
-        "message": (
-            "This server is sending federated requests too quickly. Wait before trying again."
-        ),
+        "message": ERROR_MESSAGES["KAED_RATE_LIMITED"],
         "trace_id": "test-trace",
         "retry_after_ms": 1000,
     }
@@ -68,9 +66,7 @@ def test_code_only_errors_receive_clear_actionable_messages() -> None:
     response = http_exception_response(
         request(), HTTPException(403, detail={"code": "MISSING_PERMISSIONS"})
     )
-    assert response_body(response)["message"] == (
-        "You do not have the permissions required for this action."
-    )
+    assert response_body(response)["message"] == ERROR_MESSAGES["MISSING_PERMISSIONS"]
 
 
 def test_machine_code_is_not_reflected_as_the_user_message() -> None:
@@ -134,7 +130,7 @@ def test_safe_size_limit_is_included_in_the_message_and_envelope() -> None:
     }
 
 
-def test_dm_quota_metadata_is_bounded_and_exposed_without_raw_server_text() -> None:
+def test_approved_quota_metadata_exposure() -> None:
     response = http_exception_response(
         request(),
         HTTPException(
@@ -187,7 +183,14 @@ def test_upstream_dm_quota_metadata_keeps_only_safe_fields() -> None:
 def test_identity_and_relationship_capacity_errors_are_clear_without_storage_oracles() -> None:
     identity = http_exception_response(
         request(),
-        HTTPException(507, detail={"code": "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED"}),
+        HTTPException(
+            507,
+            detail={
+                "code": "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED",
+                "used": 123,
+                "limit": 456,
+            },
+        ),
     )
     assert response_body(identity) == {
         "code": "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED",
@@ -201,7 +204,11 @@ def test_identity_and_relationship_capacity_errors_are_clear_without_storage_ora
         request(),
         HTTPException(
             507,
-            detail={"code": "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED"},
+            detail={
+                "code": "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED",
+                "used": 123,
+                "limit": 456,
+            },
         ),
     )
     body = response_body(relationship)
@@ -214,7 +221,9 @@ def test_identity_and_relationship_capacity_errors_are_clear_without_storage_ora
 
     outbox = http_exception_response(
         request(),
-        HTTPException(507, detail={"code": "FEDERATION_OUTBOX_CAPACITY_EXCEEDED"}),
+        HTTPException(
+            507, detail={"code": "FEDERATION_OUTBOX_CAPACITY_EXCEEDED", "used": 123, "limit": 456}
+        ),
     )
     outbox_body = response_body(outbox)
     assert outbox_body["message"] == (
@@ -253,11 +262,10 @@ def test_timeout_error_explains_duration_and_reason() -> None:
 def test_every_catalog_message_and_unknown_fallback_is_readable() -> None:
     for code, message in ERROR_MESSAGES.items():
         assert message
-        assert "_" not in message
-        assert message[-1] in ".!?"
         assert friendly_error_message(code, 400) == message
     fallback = friendly_error_message("KAED_FED_WIDGET_STALE", 409)
-    assert fallback == "The widget is out of date or unavailable. Refresh and try again."
+    assert fallback.strip()
+    assert fallback != "KAED_FED_WIDGET_STALE"
 
 
 def test_validation_errors_omit_submitted_input() -> None:

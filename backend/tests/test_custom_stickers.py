@@ -25,13 +25,16 @@ def test_custom_sticker_refs_parse_and_deduplicate() -> None:
 
 
 def test_sticker_crop_must_stay_inside_image() -> None:
-    with pytest.raises(ValueError):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as caught:
         StickerTicketRequest(
             filename="wave.png",
             content_type="image/png",
             size=10,
             crop={"x": 0.5, "y": 0, "width": 0.75, "height": 1},
         )
+    assert [error["loc"] for error in caught.value.errors()] == [("crop",)]
 
 
 def test_discord_sticker_names_allow_meaningful_spaces() -> None:

@@ -20,15 +20,16 @@ void main() {
       ),
       isTrue,
     );
-    expect(
-      canManageStageChannel(
-        channel(
-          ChannelType.stage,
-          Permission.manageChannels | Permission.muteMembers,
-        ),
-      ),
-      isFalse,
-    );
+    for (final bit in [
+      Permission.manageChannels,
+      Permission.muteMembers,
+      Permission.moveMembers
+    ]) {
+      expect(
+          canManageStageChannel(
+              channel(ChannelType.stage, stageModeratorPermissions & ~bit)),
+          isFalse);
+    }
     expect(
       canManageStageChannel(
         channel(ChannelType.stage, Permission.administrator),
@@ -38,6 +39,18 @@ void main() {
   });
 
   test('scheduled-event channels use Stage and voice-specific access', () {
+    const granted =
+        Permission.createEvents | Permission.viewChannel | Permission.connect;
+    for (final bit in [
+      Permission.viewChannel,
+      Permission.connect,
+      Permission.createEvents
+    ]) {
+      expect(
+          canCreateScheduledEventInChannel(
+              channel(ChannelType.voice, granted & ~bit)),
+          isFalse);
+    }
     expect(
       canCreateScheduledEventInChannel(
         channel(
@@ -65,6 +78,13 @@ void main() {
   });
 
   test('event management keeps ownership rules plus Stage moderation', () {
+    expect(
+        canManageScheduledEventInChannel(
+          channel(ChannelType.stage,
+              Permission.createEvents | stageModeratorPermissions),
+          ownEvent: false,
+        ),
+        isFalse);
     expect(
       canManageScheduledEventInChannel(
         channel(

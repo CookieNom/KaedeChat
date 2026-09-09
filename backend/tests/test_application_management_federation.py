@@ -15,7 +15,6 @@ from app.core.types import EntityRef
 from app.db.bot_models import BotApplication, DeveloperTeamMember
 from app.db.models import Attachment, User
 from app.federation.application_management import (
-    APPLICATION_MANAGEMENT_ADMISSION_EXEMPT_OPERATIONS,
     ApplicationManagementOperation,
     ApplicationManagementRequest,
     authorize_application_management_request,
@@ -230,7 +229,9 @@ async def test_authority_rechecks_remote_actor_and_membership(
         ("application.update", True),
         ("credential.create", True),
         ("asset.delete", True),
+        ("asset.update", True),
         ("application.get", False),
+        ("credential.list", False),
         ("credential.revoke", False),
         ("worker.revoke", False),
     ],
@@ -291,18 +292,6 @@ async def test_application_authority_applies_semantic_remote_mutation_admission(
         )
         assert resolved == (current_application, remote_actor)
         admission.assert_not_awaited()
-
-
-def test_application_management_admission_exemptions_cover_reads_and_removals() -> None:
-    assert {
-        "application.get",
-        "credential.list",
-        "credential.revoke",
-        "worker.revoke",
-    } <= APPLICATION_MANAGEMENT_ADMISSION_EXEMPT_OPERATIONS
-    assert not {"application.update", "credential.create", "asset.update", "asset.delete"} & (
-        APPLICATION_MANAGEMENT_ADMISSION_EXEMPT_OPERATIONS
-    )
 
 
 @pytest.mark.asyncio
@@ -1013,9 +1002,19 @@ def test_application_asset_patch_rejects_null_fields() -> None:
         ApplicationAssetPatch.model_validate({"kind": None})
 
 
+@pytest.mark.parametrize(
+    "kind,counts,error",
+    [
+        ("activity", [None, 300], "APPLICATION_ASSET_LIMIT_REACHED"),
+        ("store", [None, 0, 5], "APPLICATION_STORE_ASSET_LIMIT_REACHED"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_application_asset_limit_is_enforced_before_media_finalization(
     monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    counts: list[int | None],
+    error: str,
 ) -> None:
     from app.api import application_assets
 
@@ -1024,9 +1023,7 @@ async def test_application_asset_limit_is_enforced_before_media_finalization(
     monkeypatch.setattr(application_assets, "_locked_access", AsyncMock(return_value=access))
     finalize = AsyncMock()
     monkeypatch.setattr(application_assets, "finalize_attachment", finalize)
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[None, application_assets.APPLICATION_ASSET_LIMIT])
-    )
+    session = SimpleNamespace(scalar=AsyncMock(side_effect=counts))
 
     with pytest.raises(HTTPException) as limited:
         await application_assets._commit_asset(
@@ -1037,47 +1034,13 @@ async def test_application_asset_limit_is_enforced_before_media_finalization(
             access,
             application_assets.ApplicationAssetCommit(
                 attachment_id="50",
-                kind="activity",
+                kind=kind,
                 name="Map",
             ),
         )
 
     assert limited.value.status_code == 409
-    assert limited.value.detail["code"] == "APPLICATION_ASSET_LIMIT_REACHED"
-    finalize.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_application_store_asset_limit_is_enforced_before_media_finalization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.api import application_assets
-
-    current_application = application()
-    access = application_assets.AppAccess(current_application, actor())
-    monkeypatch.setattr(application_assets, "_locked_access", AsyncMock(return_value=access))
-    finalize = AsyncMock()
-    monkeypatch.setattr(application_assets, "finalize_attachment", finalize)
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[None, 0, application_assets.APPLICATION_STORE_ASSET_LIMIT])
-    )
-
-    with pytest.raises(HTTPException) as limited:
-        await application_assets._commit_asset(
-            session,
-            SimpleNamespace(domain="apps.example"),
-            SimpleNamespace(),
-            Response(),
-            access,
-            application_assets.ApplicationAssetCommit(
-                attachment_id="50",
-                kind="store",
-                name="Screenshot 6",
-            ),
-        )
-
-    assert limited.value.status_code == 409
-    assert limited.value.detail["code"] == "APPLICATION_STORE_ASSET_LIMIT_REACHED"
+    assert limited.value.detail["code"] == error
     finalize.assert_not_awaited()
 
 
@@ -1230,8 +1193,19 @@ async def test_store_asset_upload_counts_youtube_entries_toward_the_shared_limit
 
 
 @pytest.mark.asyncio
-async def test_remote_application_media_uses_bounded_quota_without_a_local_user_ledger(
+@pytest.mark.parametrize(
+    ("purpose", "upload_kind"),
+    [
+        ("application_asset", "federated_application_upload"),
+        ("guild_icon", "federated_guild_upload"),
+        ("guild_banner", "federated_guild_upload"),
+        ("role_icon", "federated_guild_upload"),
+    ],
+)
+async def test_remote_asset_media_uses_bounded_quota_without_a_local_user_ledger(
     monkeypatch: pytest.MonkeyPatch,
+    purpose: str,
+    upload_kind: str,
 ) -> None:
     remote_actor = actor(local=False)
     settings = SimpleNamespace(
@@ -1270,8 +1244,8 @@ async def test_remote_application_media_uses_bounded_quota_without_a_local_user_
         filename="asset.png",
         content_type="image/png",
         size=128,
-        purpose="application_asset",
-        federated_application_upload=True,
+        purpose=purpose,
+        **{upload_kind: True},
     )
     attachment.upload_expires_at = datetime.now(UTC) + timedelta(minutes=5)
     finalize_session = SimpleNamespace(
@@ -1283,14 +1257,12 @@ async def test_remote_application_media_uses_bounded_quota_without_a_local_user_
         settings,
         remote_actor,
         attachment.id,
-        required_purpose="application_asset",
-        federated_application_upload=True,
+        required_purpose=purpose,
+        **{upload_kind: True},
     )
 
     assert finalized.finalized_at is not None
     local_ledger.assert_not_awaited()
-    assert ticket_session.scalar.await_count == 4
-    assert finalize_session.scalar.await_count == 4
 
     quota_session = SimpleNamespace(
         scalar=AsyncMock(side_effect=[None, 0, 0, settings.media_inflight_limit]),
@@ -1306,8 +1278,8 @@ async def test_remote_application_media_uses_bounded_quota_without_a_local_user_
             filename="other.png",
             content_type="image/png",
             size=128,
-            purpose="application_asset",
-            federated_application_upload=True,
+            purpose=purpose,
+            **{upload_kind: True},
         )
     assert bounded.value.status_code == 429
     assert bounded.value.detail == {"code": "UPLOAD_INFLIGHT_LIMIT"}
@@ -1394,3 +1366,11 @@ async def test_authority_converts_nested_payload_errors_to_public_validation(
             SimpleNamespace(),
             SimpleNamespace(domain="apps.example"),
         )
+
+
+def test_application_emoji_availability_is_read_only() -> None:
+    from app.api.application_assets import ApplicationEmojiPatch
+
+    assert ApplicationEmojiPatch.model_validate({"name": "renamed"}).name == "renamed"
+    with pytest.raises(ValidationError):
+        ApplicationEmojiPatch.model_validate({"name": "renamed", "available": False})

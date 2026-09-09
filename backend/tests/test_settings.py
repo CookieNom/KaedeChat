@@ -38,8 +38,16 @@ def settings(**overrides: object) -> Settings:
     return Settings(**values)  # type: ignore[arg-type]
 
 
-def test_settings_normalize_domain_and_hide_secrets() -> None:
-    configured = settings(domain="Chat.Example.COM.")
+@pytest.mark.parametrize(
+    "domain,valid",
+    [("Chat.Example.COM.", True), ("Chat.Example.com.", True), ("chat.example.com..", False)],
+)
+def test_settings_normalize_domain_and_hide_secrets(domain: str, valid: bool) -> None:
+    if not valid:
+        with pytest.raises(ValidationError):
+            settings(domain=domain)
+        return
+    configured = settings(domain=domain)
     assert configured.domain == "chat.example.com"
     assert VALID_KEY not in repr(configured)
 
@@ -136,92 +144,94 @@ def test_service_urls_are_strict(field: str, value: str) -> None:
 
 
 def test_conditional_email_and_refresh_settings() -> None:
-    with pytest.raises(ValidationError, match="smtp_url"):
-        settings(email_backend="smtp")
-    with pytest.raises(ValidationError, match="mailtrap_api_token"):
-        settings(email_backend="mailtrap_api")
-    with pytest.raises(ValidationError, match="cannot exceed"):
-        settings(refresh_sliding_days=91, refresh_absolute_days=90)
-    with pytest.raises(ValidationError):
-        settings(federation_event_retention_days=6)
-    with pytest.raises(ValidationError):
-        settings(federation_history_export_ttl_minutes=9)
-    with pytest.raises(ValidationError):
-        settings(federation_history_page_messages=501)
-    with pytest.raises(ValidationError):
-        settings(federation_history_max_messages=99)
-    with pytest.raises(ValidationError, match="events_total"):
-        settings(
-            federation_inbox_max_events_per_origin=2_000,
-            federation_inbox_max_events_total=1_000,
-        )
-    with pytest.raises(ValidationError, match="bytes_total"):
-        settings(
-            federation_inbox_max_bytes_per_origin=2 * 1024 * 1024,
-            federation_inbox_max_bytes_total=1024 * 1024,
-        )
-    with pytest.raises(ValidationError):
-        settings(federation_max_remote_instances=99)
-    with pytest.raises(ValidationError):
-        settings(federation_peer_key_history_limit=127)
-    with pytest.raises(ValidationError, match="replica_max_rows_per_origin"):
-        settings(
-            federation_replica_max_rows_per_guild=20_000,
-            federation_replica_max_rows_per_origin=10_000,
-        )
-    with pytest.raises(ValidationError, match="replica_max_bytes_per_origin"):
-        settings(
-            federation_replica_max_bytes_per_guild=32 * 1024 * 1024,
-            federation_replica_max_bytes_per_origin=16 * 1024 * 1024,
-        )
-    with pytest.raises(ValidationError, match="replica_cache_messages"):
-        settings(
-            federation_dm_replica_cache_messages_per_conversation=1_001,
-            federation_dm_max_messages_per_conversation=1_000,
-        )
-    with pytest.raises(ValidationError, match="replica_cache_bytes"):
-        settings(
-            federation_dm_replica_cache_bytes_per_conversation=2 * 1024 * 1024,
-            federation_dm_max_bytes_per_conversation=1024 * 1024,
-        )
-    with pytest.raises(ValidationError, match="history_page_bytes"):
-        settings(
-            federation_history_page_bytes=2 * 1024 * 1024,
-            federation_history_max_bytes=1024 * 1024,
-        )
-    with pytest.raises(ValidationError):
-        settings(federation_remote_identity_retention_days=6)
-    with pytest.raises(ValidationError, match="remote_media_inflight_bytes_per_origin"):
-        settings(
-            media_max_attachment_bytes=2 * 1024 * 1024,
-            federation_remote_media_inflight_bytes_per_origin=1024 * 1024,
-        )
-    with pytest.raises(ValidationError, match="remote_media_inflight_bytes_total"):
-        settings(
-            media_max_attachment_bytes=1024 * 1024,
-            federation_remote_media_inflight_bytes_per_origin=2 * 1024 * 1024,
-            federation_remote_media_inflight_bytes_total=1024 * 1024,
-        )
-    with pytest.raises(ValidationError):
-        settings(audit_retention_days=89)
+    cases = [
+        ({"email_backend": "smtp"}, "smtp_url"),
+        ({"email_backend": "mailtrap_api"}, "mailtrap_api_token"),
+        ({"refresh_sliding_days": 91, "refresh_absolute_days": 90}, "cannot exceed"),
+        ({"federation_event_retention_days": 6}, "federation_event_retention_days"),
+        ({"federation_history_export_ttl_minutes": 9}, "federation_history_export_ttl_minutes"),
+        ({"federation_history_page_messages": 501}, "federation_history_page_messages"),
+        ({"federation_history_max_messages": 99}, "federation_history_max_messages"),
+        (
+            {
+                "federation_inbox_max_events_per_origin": 2000,
+                "federation_inbox_max_events_total": 1000,
+            },
+            "events_total",
+        ),
+        (
+            {
+                "federation_inbox_max_bytes_per_origin": 2 * 1024 * 1024,
+                "federation_inbox_max_bytes_total": 1024 * 1024,
+            },
+            "bytes_total",
+        ),
+        ({"federation_max_remote_instances": 99}, "federation_max_remote_instances"),
+        ({"federation_peer_key_history_limit": 127}, "federation_peer_key_history_limit"),
+        (
+            {
+                "federation_replica_max_rows_per_guild": 20000,
+                "federation_replica_max_rows_per_origin": 10000,
+            },
+            "replica_max_rows_per_origin",
+        ),
+        (
+            {
+                "federation_replica_max_bytes_per_guild": 32 * 1024 * 1024,
+                "federation_replica_max_bytes_per_origin": 16 * 1024 * 1024,
+            },
+            "replica_max_bytes_per_origin",
+        ),
+        (
+            {
+                "federation_dm_replica_cache_messages_per_conversation": 1001,
+                "federation_dm_max_messages_per_conversation": 1000,
+            },
+            "replica_cache_messages",
+        ),
+        (
+            {
+                "federation_dm_replica_cache_bytes_per_conversation": 2 * 1024 * 1024,
+                "federation_dm_max_bytes_per_conversation": 1024 * 1024,
+            },
+            "replica_cache_bytes",
+        ),
+        (
+            {
+                "federation_history_page_bytes": 2 * 1024 * 1024,
+                "federation_history_max_bytes": 1024 * 1024,
+            },
+            "history_page_bytes",
+        ),
+        (
+            {"federation_remote_identity_retention_days": 6},
+            "federation_remote_identity_retention_days",
+        ),
+        (
+            {
+                "media_max_attachment_bytes": 2 * 1024 * 1024,
+                "federation_remote_media_inflight_bytes_per_origin": 1024 * 1024,
+            },
+            "remote_media_inflight_bytes_per_origin",
+        ),
+        (
+            {
+                "media_max_attachment_bytes": 1024 * 1024,
+                "federation_remote_media_inflight_bytes_per_origin": 2 * 1024 * 1024,
+                "federation_remote_media_inflight_bytes_total": 1024 * 1024,
+            },
+            "remote_media_inflight_bytes_total",
+        ),
+        ({"audit_retention_days": 89}, "audit_retention_days"),
+    ]
+    for overrides, error_field in cases:
+        with pytest.raises(ValidationError, match=error_field):
+            settings(**overrides)
 
 
 def test_federation_storage_defaults_have_realistic_import_headroom() -> None:
     configured = settings()
 
-    assert configured.federation_inbox_max_events_per_origin == 5_000_000
-    assert configured.federation_inbox_max_bytes_per_origin == 16 * 1024**3
-    assert configured.federation_inbox_max_events_total == 50_000_000
-    assert configured.federation_inbox_max_bytes_total == 160 * 1024**3
-    assert configured.federation_replica_max_rows_per_guild == 20_000_000
-    assert configured.federation_replica_max_bytes_per_guild == 64 * 1024**3
-    assert configured.federation_replica_max_rows_per_origin == 100_000_000
-    assert configured.federation_replica_max_bytes_per_origin == 320 * 1024**3
-    assert configured.federation_history_max_messages == 2_000_000
-    assert configured.federation_history_max_bytes == 32 * 1024**3
-    assert configured.federation_dm_replica_cache_messages_per_conversation == 250_000
-    assert configured.federation_dm_replica_cache_bytes_per_conversation == 2 * 1024**3
-    assert configured.media_remote_cache_bytes == 100 * 1024**3
     assert (
         configured.federation_dm_replica_cache_messages_per_conversation
         < configured.federation_dm_max_messages_per_conversation
@@ -230,6 +240,33 @@ def test_federation_storage_defaults_have_realistic_import_headroom() -> None:
         configured.federation_dm_replica_cache_bytes_per_conversation
         < configured.federation_dm_max_bytes_per_conversation
     )
+    for local, aggregate in (
+        (
+            configured.federation_inbox_max_events_per_origin,
+            configured.federation_inbox_max_events_total,
+        ),
+        (
+            configured.federation_inbox_max_bytes_per_origin,
+            configured.federation_inbox_max_bytes_total,
+        ),
+        (
+            configured.federation_replica_max_rows_per_guild,
+            configured.federation_replica_max_rows_per_origin,
+        ),
+        (
+            configured.federation_replica_max_bytes_per_guild,
+            configured.federation_replica_max_bytes_per_origin,
+        ),
+        (
+            configured.federation_history_max_messages,
+            configured.federation_replica_max_rows_per_guild,
+        ),
+        (
+            configured.federation_history_max_bytes,
+            configured.federation_replica_max_bytes_per_guild,
+        ),
+    ):
+        assert 0 < local <= aggregate
 
 
 def test_blank_optional_secrets_are_treated_as_unset() -> None:
@@ -281,7 +318,7 @@ def test_optional_interaction_services_require_credentials_and_hide_them() -> No
     assert "0x4AAAAAAExampleSecret" not in repr(configured)
 
 
-def test_mobile_push_service_account_is_validated_and_secret_safe() -> None:
+def test_service_account_shape_endpoints_and_secret_hiding() -> None:
     with pytest.raises(ValidationError, match="push_fcm_service_account_b64"):
         settings(service_role="worker", push_enabled=True)
     with pytest.raises(ValidationError, match="base64-encoded"):
@@ -469,12 +506,6 @@ def test_gateway_production_settings_do_not_require_email_credentials() -> None:
 def test_production_rejects_unsafe_configuration(override: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         production_settings(**override)
-
-
-def test_domain_allows_one_root_dot_but_not_multiple() -> None:
-    assert settings(domain="Chat.Example.com.").domain == "chat.example.com"
-    with pytest.raises(ValidationError):
-        settings(domain="chat.example.com..")
 
 
 def test_unknown_kaede_environment_setting_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

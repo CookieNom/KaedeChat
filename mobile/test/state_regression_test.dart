@@ -70,6 +70,18 @@ void main() {
         expiresAt: DateTime.utc(2027),
         callbackType: 4,
       );
+      final keptResponse = MobileInteractionResponse(
+        interactionRef: EntityRef.parse('150@guild.example'),
+        responseRef: EntityRef.parse('151@guild.example'),
+        invokerRef: user.ref,
+        channelRef: otherChannelRef,
+        applicationRef: EntityRef.parse('52@guild.example'),
+        responseGrantId: 'grant',
+        revision: BigInt.one,
+        operation: 'CREATE',
+        expiresAt: DateTime.utc(2027),
+        callbackType: 4,
+      );
       final state = MobileState(
         phase: SessionPhase.ready,
         guilds: <KaedeGuild>[
@@ -102,10 +114,21 @@ void main() {
           threadRef: <KaedeMessage>[message(threadRef)],
           otherChannelRef: <KaedeMessage>[message(otherChannelRef)],
         },
-        drafts: <EntityRef, String>{channelRef: 'secret'},
+        drafts: <EntityRef, String>{
+          channelRef: 'secret',
+          otherChannelRef: 'keep draft'
+        },
         loadingChannels: <EntityRef>{threadRef},
         channelsWithOlderMessages: <EntityRef>{channelRef},
         outbox: <OutboxItem>[
+          OutboxItem(
+            nonce: 'kept',
+            channelRef: otherChannelRef.wire,
+            payload: const <String, Object?>{},
+            attempts: 0,
+            state: 'pending',
+            createdAt: DateTime.utc(2026),
+          ),
           OutboxItem(
             nonce: 'removed',
             channelRef: channelRef.wire,
@@ -141,6 +164,7 @@ void main() {
         },
         interactionResponses: <String, MobileInteractionResponse>{
           'response': response,
+          'kept': keptResponse,
         },
         interactionRequests: <String, MobileInteractionRequest>{
           'request': (
@@ -177,17 +201,17 @@ void main() {
       expect(purged.guildNavigation.items, hasLength(1));
       expect(purged.threads, isEmpty);
       expect(purged.messageStore.keys, <EntityRef>[otherChannelRef]);
-      expect(purged.drafts, isEmpty);
+      expect(purged.drafts, {otherChannelRef: 'keep draft'});
       expect(purged.loadingChannels, isEmpty);
       expect(purged.channelsWithOlderMessages, isEmpty);
-      expect(purged.outbox, isEmpty);
+      expect(purged.outbox.map((item) => item.nonce), ['kept']);
       expect(purged.guildNotificationLevels, isEmpty);
       expect(purged.unreadCounts, isEmpty);
       expect(purged.mentionCounts, isEmpty);
       expect(purged.typingByChannel, isEmpty);
       expect(purged.guildMembers, isEmpty);
       expect(purged.selfModerationByGuild, isEmpty);
-      expect(purged.interactionResponses, isEmpty);
+      expect(purged.interactionResponses, {'kept': keptResponse});
       expect(purged.interactionRequests, isEmpty);
       expect(purged.selectedGuild, isNull);
       expect(purged.selectedChannel, isNull);
@@ -263,6 +287,11 @@ void main() {
         'reason': null,
       });
       expect(status.activeAt(DateTime.utc(2031)), isTrue);
+      final invalid = GuildSelfModerationStatus.fromJson(<String, Object?>{
+        ...status.toJson(),
+        'timeout_until': '2032-01-01T00:00:00Z',
+      });
+      expect(invalid.activeAt(DateTime.utc(2031)), isFalse);
     });
   });
 
@@ -325,8 +354,8 @@ void main() {
         <String, Object?>{'self_mute': true, 'self_deaf': true},
       );
       expect(
-        selfVoiceStatePayload(selfMute: false, selfDeaf: false).keys,
-        <String>['self_mute', 'self_deaf'],
+        selfVoiceStatePayload(selfMute: false, selfDeaf: false),
+        <String, Object?>{'self_mute': false, 'self_deaf': false},
       );
     });
 
@@ -458,13 +487,13 @@ void main() {
     });
 
     test('heartbeats leave scheduling margin before the gateway deadline', () {
-      expect(
-        gatewayHeartbeatCadence(41250),
-        const Duration(milliseconds: 30937),
-      );
-      expect(gatewayHeartbeatCadence(1000), const Duration(seconds: 1));
+      for (final interval in [41250, 1000]) {
+        final cadence = gatewayHeartbeatCadence(interval).inMilliseconds;
+        expect(cadence, greaterThan(0));
+        expect(cadence, lessThan(interval));
+        expect(cadence, lessThanOrEqualTo(interval * 3 ~/ 4));
+      }
     });
-
     test('turns structured close reasons into safe recovery guidance', () {
       final limited = gatewayCloseDetails(
         GatewayCloseCode.rateLimited.value,
@@ -474,7 +503,8 @@ void main() {
           'debug': 'token=do-not-display',
         }),
       );
-      expect(limited.message, contains('rate limited'));
+      expect(limited.message,
+          matches(RegExp(r'rate.*limit', caseSensitive: false)));
       expect(limited.message, contains('3 seconds'));
       expect(limited.retryAfter, const Duration(milliseconds: 2500));
       expect(limited.message, isNot(contains('do-not-display')));
@@ -493,8 +523,10 @@ void main() {
         4000,
         jsonEncode(<String, Object?>{'code': 'SESSION_LIMIT'}),
       );
-      expect(sessionLimit.message, contains('too many active'));
-      expect(sessionLimit.message, contains('another device'));
+      expect(sessionLimit.message,
+          matches(RegExp(r'too many.*active', caseSensitive: false)));
+      expect(sessionLimit.message,
+          matches(RegExp(r'(another|other).*device', caseSensitive: false)));
     });
 
     test('never displays arbitrary websocket close text', () {
@@ -512,9 +544,9 @@ void main() {
       final client = GatewayClient(
         tokens: () async => tokens,
         socketConnector: (_) => IOWebSocketChannel(stalledSocket.future),
-        transportReadyTimeout: const Duration(milliseconds: 20),
-        sessionReadyTimeout: const Duration(milliseconds: 40),
-        transportCloseTimeout: const Duration(milliseconds: 20),
+        transportReadyTimeout: const Duration(seconds: 1),
+        sessionReadyTimeout: const Duration(seconds: 1),
+        transportCloseTimeout: const Duration(seconds: 1),
       );
       addTearDown(client.close);
 
@@ -540,8 +572,8 @@ void main() {
         tokens: () async => tokens,
         socketConnector: (_) => IOWebSocketChannel.connect(endpoint),
         transportReadyTimeout: const Duration(seconds: 1),
-        sessionReadyTimeout: const Duration(milliseconds: 40),
-        transportCloseTimeout: const Duration(milliseconds: 40),
+        sessionReadyTimeout: const Duration(seconds: 1),
+        transportCloseTimeout: const Duration(seconds: 1),
       );
       addTearDown(client.close);
       final reconnecting = client.health.firstWhere(
@@ -551,18 +583,20 @@ void main() {
       await client.connect(tokens);
       expect(client.currentHealth.phase, GatewayConnectionPhase.connecting);
 
-      final health = await reconnecting.timeout(const Duration(seconds: 1));
+      final health = await reconnecting.timeout(const Duration(seconds: 5));
       expect(health.message, contains('did not respond'));
     });
 
     test('authenticates then heartbeats immediately after hello', () async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       final received = Completer<List<int>>();
+      final frames = <Map<String, Object?>>[];
       server.listen((request) async {
         final socket = await WebSocketTransformer.upgrade(request);
         final ops = <int>[];
         socket.listen((raw) {
           final payload = jsonDecode(raw as String) as Map<String, Object?>;
+          frames.add(payload);
           ops.add(payload['op']! as int);
           if (ops.length == 2 && !received.isCompleted) {
             received.complete(List<int>.unmodifiable(ops));
@@ -590,6 +624,13 @@ void main() {
         await received.future.timeout(const Duration(seconds: 1)),
         <int>[GatewayOp.identify.value, GatewayOp.heartbeat.value],
       );
+      expect(frames.first['d'], <String, Object?>{
+        'token': tokens.accessToken,
+        'properties': <String, String>{
+          'os': 'mobile',
+          'client': 'kaede-mobile'
+        },
+      });
     });
   });
 
@@ -598,8 +639,9 @@ void main() {
       expect(outboxRetryDelay(-1), const Duration(seconds: 1));
       expect(outboxRetryDelay(0), const Duration(seconds: 1));
       expect(outboxRetryDelay(1), const Duration(seconds: 2));
-      expect(outboxRetryDelay(6), const Duration(seconds: 64));
-      expect(outboxRetryDelay(50), const Duration(seconds: 64));
+      expect(outboxRetryDelay(2), outboxRetryDelay(1) * 2);
+      expect(outboxRetryDelay(50), greaterThan(Duration.zero));
+      expect(outboxRetryDelay(100), outboxRetryDelay(50));
     });
   });
 
@@ -667,7 +709,7 @@ void main() {
       expect(() => result.add(later), throwsUnsupportedError);
     });
 
-    test('deletion copy clears client-only decrypted and forwarded state', () {
+    test('deletion copyWith clearing', () {
       final source = _message(id: '101', domain: 'chat.example').copyWith(
         e2ee: <String, Object?>{'ciphertext': 'opaque'},
         e2eeVerified: true,

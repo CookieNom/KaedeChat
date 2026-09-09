@@ -3,7 +3,6 @@ import type { ApplicationCommand } from './application-commands';
 import {
   appContextCommandGroups,
   appContextCommandHistory,
-  appContextCommandHistoryStorageKey,
   appContextCommandMenuModel,
   appContextCommandUsageKey,
   messageAppContextCommands,
@@ -123,7 +122,7 @@ describe('Apps context-command submenu', () => {
     expect(appContextCommandGroups(entries, 'user-', 'en-US')[0].entries).toHaveLength(15);
   });
 
-  it('hoists successful frequent commands with bounded per-account history', () => {
+  it('recorded usage ranking', () => {
     const storage = new MemoryStorage();
     const firstAccount = '7@users.example';
     const secondAccount = '8@users.example';
@@ -148,9 +147,6 @@ describe('Apps context-command submenu', () => {
       commands[1]
     ]);
     expect(appContextCommandHistory(secondAccount, storage)).toEqual([]);
-    expect(appContextCommandHistoryStorageKey(firstAccount)).not.toBe(
-      appContextCommandHistoryStorageKey(secondAccount)
-    );
     expect(history).toEqual([
       appContextCommandUsageKey(remote),
       appContextCommandUsageKey(commands[0]),
@@ -160,6 +156,9 @@ describe('Apps context-command submenu', () => {
     for (let index = 0; index < 110; index += 1) {
       rememberAppContextCommand(firstAccount, remote, storage);
     }
-    expect(appContextCommandHistory(firstAccount, storage)).toHaveLength(100);
+    const retained = appContextCommandHistory(firstAccount, storage);
+    expect(retained.length).toBeGreaterThan(0);
+    expect(retained.length).toBeLessThan(110);
+    expect(retained.every((key) => key === appContextCommandUsageKey(remote))).toBe(true);
   });
 });

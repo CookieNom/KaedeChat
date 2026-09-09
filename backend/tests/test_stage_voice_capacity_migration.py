@@ -36,11 +36,6 @@ def recording_operations() -> tuple[SimpleNamespace, list[OperationCall]]:
     )
 
 
-def test_stage_capacity_revision_is_the_current_single_head() -> None:
-    assert migration.revision == "4ea6c2d8f953"
-    assert migration.down_revision == "3d9a5e1c7b42"
-
-
 def test_model_constraint_matches_type_specific_discord_limits() -> None:
     constraint = next(
         item
@@ -56,42 +51,48 @@ def test_upgrade_replaces_the_legacy_constraint(monkeypatch: pytest.MonkeyPatch)
 
     migration.upgrade()
 
-    assert calls == [
-        (
-            "drop_constraint",
-            (migration.VOICE_USER_LIMIT_CONSTRAINT, "channels"),
-            {"type_": "check"},
-        ),
-        (
-            "create_check_constraint",
-            (
-                migration.VOICE_USER_LIMIT_CONSTRAINT,
-                "channels",
-                migration.TYPE_AWARE_LIMIT,
-            ),
-            {},
-        ),
-    ]
+    drop = (
+        "drop_constraint",
+        (migration.VOICE_USER_LIMIT_CONSTRAINT, "channels"),
+        {"type_": "check"},
+    )
+    create = (
+        "create_check_constraint",
+        (migration.VOICE_USER_LIMIT_CONSTRAINT, "channels", migration.TYPE_AWARE_LIMIT),
+        {},
+    )
+    assert calls.index(drop) < calls.index(create)
 
 
-def test_downgrade_clamps_stage_capacity_before_restoring_legacy_constraint(
+async def test_downgrade_clamps_stage_capacity_before_restoring_legacy_constraint(
+    postgres_schema,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    operations, calls = recording_operations()
-    monkeypatch.setattr(migration, "op", operations)
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
 
-    migration.downgrade()
+    await postgres_schema.execute(
+        text(
+            "CREATE TABLE channels (id int PRIMARY KEY, type int, user_limit int, "
+            "CONSTRAINT ck_channels_voice_user_limit_range CHECK (user_limit IS NULL OR "
+            "(type = 2 AND user_limit BETWEEN 0 AND 99) OR (type = 13 AND user_limit "
+            "BETWEEN 0 AND 10000)))"
+        )
+    )
+    await postgres_schema.execute(
+        text("INSERT INTO channels VALUES (1,13,50),(2,13,10000),(3,2,90),(4,0,NULL)")
+    )
 
-    assert [name for name, _args, _kwargs in calls] == [
-        "drop_constraint",
-        "execute",
-        "create_check_constraint",
-    ]
-    assert calls[1][1] == (
-        "UPDATE channels SET user_limit = 99 WHERE type = 13 AND user_limit > 99",
-    )
-    assert calls[2][1] == (
-        migration.VOICE_USER_LIMIT_CONSTRAINT,
-        "channels",
-        migration.LEGACY_LIMIT,
-    )
+    def downgrade(connection):
+        monkeypatch.setattr(migration, "op", Operations(MigrationContext.configure(connection)))
+        migration.downgrade()
+
+    await postgres_schema.run_sync(downgrade)
+    assert (
+        await postgres_schema.execute(text("SELECT id,user_limit FROM channels ORDER BY id"))
+    ).all() == [(1, 50), (2, 99), (3, 90), (4, None)]
+    with pytest.raises(IntegrityError):
+        async with postgres_schema.begin_nested():
+            await postgres_schema.execute(text("UPDATE channels SET user_limit=100 WHERE id=2"))

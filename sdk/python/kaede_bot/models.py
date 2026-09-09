@@ -4361,12 +4361,9 @@ class Message:
             if referenced_message is not None:
                 if referenced_message.ref != poll_result.poll_message_ref:
                     raise ValueError("poll result referenced message is inconsistent")
-                if poll_result.source_encryption_mode == "e2ee" and isinstance(
-                    referenced_message.poll, dict
-                ):
-                    poll_result = poll_result.with_verified_poll(
-                        referenced_message.poll
-                    )
+                # A nested wire projection is not a locally verified source poll.
+                # Callers resolve private labels explicitly with with_verified_poll
+                # after authenticating/decrypting the referenced message.
         else:
             if payload.get("poll_result") is not None:
                 raise ValueError("poll result metadata requires message type 46")

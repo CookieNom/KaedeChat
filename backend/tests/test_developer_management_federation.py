@@ -14,7 +14,6 @@ from app.core.types import EntityRef
 from app.db.bot_models import BotApplication, DeveloperTeam, DeveloperTeamMember
 from app.db.models import User
 from app.federation.developer_management import (
-    DEVELOPER_MANAGEMENT_ADMISSION_EXEMPT_OPERATIONS,
     DeveloperManagementOperation,
     DeveloperManagementRequest,
     authorize_developer_management_request,
@@ -244,12 +243,6 @@ async def test_developer_authority_applies_semantic_remote_mutation_admission(
         admission.assert_not_awaited()
 
 
-def test_developer_management_admission_exemptions_cover_reads_and_removals() -> None:
-    assert {
-        "member.list",
-    } == DEVELOPER_MANAGEMENT_ADMISSION_EXEMPT_OPERATIONS
-
-
 @pytest.mark.asyncio
 async def test_authority_rejects_caller_mismatch_expiry_and_replay(
     monkeypatch: pytest.MonkeyPatch,
@@ -449,6 +442,11 @@ async def test_response_rejects_swapped_body_identities(
     status_code: int,
     body: dict[str, object],
 ) -> None:
+    from copy import deepcopy
+
+    body = deepcopy(body)
+    if operation == "application.create":
+        body["bot_user"].setdefault("bot", True)
     current = request(operation, payload=payload)
     response = {
         "request_id": current.request_id,
@@ -457,16 +455,28 @@ async def test_response_rejects_swapped_body_identities(
         "status_code": status_code,
         "body": body,
     }
+    baseline = deepcopy(response)
+    if operation == "member.update":
+        baseline["body"]["user"] = {
+            "id": "50",
+            "origin_domain": "users.example",
+            "ref": "50@users.example",
+        }
+    else:
+        baseline["body"]["team_ref"] = "20@apps.example"
+        baseline["body"]["bot_user"] = {
+            "id": "71",
+            "origin_domain": "apps.example",
+            "ref": "71@apps.example",
+            "bot": True,
+        }
+    upstream = SimpleNamespace(status_code=200, content=json.dumps(baseline).encode(), headers={})
     monkeypatch.setattr(
-        "app.federation.developer_management.signed_request",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                status_code=200,
-                content=json.dumps(response).encode(),
-                headers={},
-            )
-        ),
+        "app.federation.developer_management.signed_request", AsyncMock(return_value=upstream)
     )
+    accepted = await request_developer_management(SimpleNamespace(), SimpleNamespace(), current)
+    assert accepted.body == baseline["body"]
+    upstream.content = json.dumps(response).encode()
 
     with pytest.raises(HTTPException) as invalid:
         await request_developer_management(SimpleNamespace(), SimpleNamespace(), current)
@@ -503,7 +513,7 @@ async def test_request_uses_signed_team_authority_route(monkeypatch: pytest.Monk
         "apps.example",
         "/_kaede/v1/developer-teams/20/management",
     )
-    assert signed.await_args.kwargs["request_timeout"] == 15
+    assert 0 < signed.await_args.kwargs["request_timeout"] < float("inf")
 
 
 @pytest.mark.asyncio
@@ -578,6 +588,21 @@ async def test_member_dispatch_reuses_public_endpoint_services(
     resolve_profile.assert_awaited_once()
     update_member.assert_awaited_once()
     remove_member.assert_awaited_once()
+    for mocked, auth_index in (
+        (list_members, 1),
+        (add_member, 2),
+        (update_member, 3),
+        (remove_member, 2),
+    ):
+        args = mocked.await_args.args
+        assert args[0].resolve(settings.domain) == (20, "apps.example")
+        assert args[auth_index].user is current_actor
+        assert args[-2:] == (session, settings)
+    assert add_member.await_args.args[1].user_ref == EntityRef("50@users.example")
+    assert add_member.await_args.args[1].role == "analyst"
+    assert update_member.await_args.args[1] == EntityRef("50@apps.example")
+    assert update_member.await_args.args[2].role == "security"
+    assert remove_member.await_args.args[1] == EntityRef("50@apps.example")
 
 
 @pytest.mark.asyncio

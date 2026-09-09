@@ -247,3 +247,15 @@ async def test_password_reset_rotates_vault_salt_and_deletes_server_vault_histor
         reset_token,
     )
     revoke.assert_awaited_once_with(session, redis, settings(), user)
+
+    vault_deletes = [
+        call.args[0]
+        for call in session.execute.await_args_list
+        if getattr(getattr(call.args[0], "table", None), "name", None)
+        in {"e2ee_account_vault_digests", "e2ee_account_vaults"}
+    ]
+    assert len(vault_deletes) == 2
+    assert all(
+        statement.compile().params == {"user_id_1": 7, "user_domain_1": "chat.example.com"}
+        for statement in vault_deletes
+    )

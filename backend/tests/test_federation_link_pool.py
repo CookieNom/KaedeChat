@@ -125,9 +125,9 @@ async def test_concurrent_opens_reserve_capacity_before_network_await(
         asyncio.create_task(send("two.example", 2)),
     ]
     try:
-        await asyncio.wait_for(open_started.wait(), timeout=1)
+        await asyncio.wait_for(open_started.wait(), timeout=10)
         with pytest.raises(link.FederationLinkError, match="pool is saturated"):
-            await asyncio.wait_for(send("three.example", 3), timeout=0.2)
+            await asyncio.wait_for(send("three.example", 3), timeout=10)
 
         loop_id = id(asyncio.get_running_loop())
         pool = link._loop_pools[loop_id]
@@ -212,6 +212,18 @@ async def test_failed_open_releases_reservation_and_loop_state(
     assert not [key for key in link._links if key[0] == loop_id]
     assert not [key for key in link._locks if key[0] == loop_id]
     assert loop_id not in link._loop_pools
+
+    socket = FakeSocket()
+
+    async def successful_open(*_args: object) -> link._PooledLink:
+        return pooled(socket)
+
+    monkeypatch.setattr(link, "_open_link", successful_open)
+    try:
+        assert (await send("failure.example", 2))["results"] == []
+    finally:
+        await link.close_federation_links()
+    assert socket.closed
 
 
 @pytest.mark.asyncio

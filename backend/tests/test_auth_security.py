@@ -1,5 +1,5 @@
-import base64
 import threading
+from typing import Any
 
 import pytest
 from anyio import CapacityLimiter
@@ -39,6 +39,14 @@ async def test_async_password_helpers_use_the_bounded_worker_thread(
 ) -> None:
     event_loop_thread = threading.get_ident()
     worker_threads: list[int] = []
+    supplied_limiters: list[CapacityLimiter] = []
+    run_sync = security.to_thread.run_sync
+
+    async def observe_worker(*args: Any, **kwargs: Any) -> Any:
+        supplied_limiters.append(kwargs["limiter"])
+        return await run_sync(*args, **kwargs)
+
+    monkeypatch.setattr(security.to_thread, "run_sync", observe_worker)
 
     def fake_hash(password: str) -> str:
         worker_threads.append(threading.get_ident())
@@ -53,7 +61,9 @@ async def test_async_password_helpers_use_the_bounded_worker_thread(
 
     encoded = await hash_password_async("lantern")
     assert await verify_password_async("lantern", encoded)
-    assert ARGON2_MAX_CONCURRENCY == 1
+    assert len(supplied_limiters) == 2
+    assert all(limiter is security.ARGON2_CAPACITY_LIMITER for limiter in supplied_limiters)
+    assert supplied_limiters[0].total_tokens == ARGON2_MAX_CONCURRENCY
     assert worker_threads
     assert all(thread_id != event_loop_thread for thread_id in worker_threads)
 
@@ -81,7 +91,11 @@ def test_opaque_tokens_have_scannable_prefixes_and_hash_deterministically() -> N
     assert refresh.startswith("kc1_rt_")
     assert ticket.startswith("kc1_mfa_")
     assert len(token_hash(access)) == 32
-    assert token_hash(access) == token_hash(access)
+    assert (
+        token_hash("kc1_at_known-token").hex()
+        == "4755bd2965c141871581c8d2d7bd93d7d5ba33889bde454805646d4b798ce42d"
+    )
+    assert token_hash(access) != token_hash(refresh)
 
 
 def test_encrypted_secret_is_bound_to_user_context() -> None:
@@ -96,4 +110,7 @@ def test_recovery_codes_are_readable_but_stored_as_hashes() -> None:
     code = recovery_code()
     assert len(code.split("-")) == 4
     assert recovery_code_hash(code) == recovery_code_hash(code.upper())
-    assert base64.b16encode(recovery_code_hash(code)) != code.encode()
+    expected = bytes.fromhex("dc652f7cf6cd758abc40703d48384be3191f41f37038587d2328c60862340f88")
+    assert recovery_code_hash("ABCD-EFGH-IJKL-MNOP") == expected
+    assert recovery_code_hash("abcdefghijklmnop") == expected
+    assert recovery_code_hash("abcd-efgh-ijkl-mnoq") != expected

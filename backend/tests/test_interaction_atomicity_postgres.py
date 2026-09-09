@@ -14,7 +14,7 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -44,7 +44,9 @@ from app.db.bot_models import (
 from app.db.models import Channel, Guild, GuildMember, Instance, Message, User
 from app.db.partitions import ensure_message_partitions
 
-DATABASE_URL = os.environ.get("KAEDE_INTERACTION_TEST_DATABASE_URL")
+DATABASE_URL = os.environ.get("KAEDE_INTERACTION_TEST_DATABASE_URL") or os.environ.get(
+    "TEST_DATABASE_URL"
+)
 pytestmark = pytest.mark.skipif(
     DATABASE_URL is None,
     reason=("set KAEDE_INTERACTION_TEST_DATABASE_URL to a disposable migrated PostgreSQL database"),
@@ -65,18 +67,6 @@ class AtomicSnowflake:
             return value
 
 
-class FailAfterMessageSnowflake:
-    def __init__(self, message_id: int) -> None:
-        self.message_id = message_id
-        self.calls = 0
-
-    async def mint(self) -> int:
-        self.calls += 1
-        if self.calls == 1:
-            return self.message_id
-        raise RuntimeError("injected response-id failure")
-
-
 async def cleanup_domain(session: AsyncSession, domain: str) -> None:
     await session.execute(
         delete(InteractionDispatchOutbox).where(InteractionDispatchOutbox.user_domain == domain)
@@ -93,6 +83,7 @@ async def cleanup_domain(session: AsyncSession, domain: str) -> None:
 @pytest.mark.asyncio
 async def test_public_callback_is_atomic_under_race_and_rollback(
     monkeypatch: pytest.MonkeyPatch,
+    wait_for_postgres_lock,
 ) -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL)
@@ -392,7 +383,7 @@ async def test_public_callback_is_atomic_under_race_and_rollback(
         await asyncio.wait_for(first_locked.wait(), timeout=5)
         second = asyncio.create_task(callback())
         callback_tasks.append(second)
-        await asyncio.sleep(0.05)
+        await wait_for_postgres_lock(engine, second)
         assert not second.done(), "the competing callback did not wait on the interaction row lock"
         release_first.set()
         results = await asyncio.gather(first, second)
@@ -428,12 +419,22 @@ async def test_public_callback_is_atomic_under_race_and_rollback(
             assert interaction.response_message_id == messages[0].id
 
         monkeypatch.setattr(interactions, "bot_interaction", original_bot_interaction)
-        rollback_message_id = await ids.mint()
-        failing_ids = FailAfterMessageSnowflake(rollback_message_id)
+        original_persist = interactions.persist_interaction_callback
+
+        async def fail_response_creation(context, state):
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    interactions,
+                    "BotInteractionResponse",
+                    Mock(side_effect=RuntimeError("injected response creation failure")),
+                )
+                return await original_persist(context, state)
+
+        monkeypatch.setattr(interactions, "persist_interaction_callback", fail_response_creation)
         redis.eval.reset_mock()
         assert principal is not None
         async with sessions() as session:
-            with pytest.raises(RuntimeError, match="injected response-id failure"):
+            with pytest.raises(RuntimeError, match="injected response creation failure"):
                 await interactions.callback_interaction(
                     rollback_interaction_id,
                     interactions.InteractionCallback(
@@ -444,7 +445,7 @@ async def test_public_callback_is_atomic_under_race_and_rollback(
                     principal,
                     session,
                     redis,
-                    failing_ids,
+                    ids,
                     settings,
                     True,
                 )
@@ -455,7 +456,7 @@ async def test_public_callback_is_atomic_under_race_and_rollback(
                 await session.scalar(
                     select(func.count())
                     .select_from(Message)
-                    .where(Message.id == rollback_message_id, Message.origin_domain == domain)
+                    .where(Message.content == "must roll back", Message.origin_domain == domain)
                 )
                 == 0
             )
@@ -486,6 +487,7 @@ async def test_public_callback_is_atomic_under_race_and_rollback(
 async def test_runtime_suspend_serializes_before_user_install_create_or_reactivation(
     monkeypatch: pytest.MonkeyPatch,
     existing_installation: bool,
+    wait_for_postgres_lock,
 ) -> None:
     """A target deny holding the app lock wins over a concurrent local grant."""
 
@@ -535,6 +537,7 @@ async def test_runtime_suspend_serializes_before_user_install_create_or_reactiva
     monkeypatch.setattr(interactions, "revoke_bot_e2ee_access", AsyncMock(return_value=[]))
 
     actor: User | None = None
+    tasks = []
     try:
         async with sessions() as session:
             await cleanup(session)
@@ -694,9 +697,11 @@ async def test_runtime_suspend_serializes_before_user_install_create_or_reactiva
                     return exc
 
         deny_task = asyncio.create_task(suspend_target())
+        tasks.append(deny_task)
         await asyncio.wait_for(deny_locked.wait(), timeout=5)
         install_task = asyncio.create_task(install())
-        await asyncio.sleep(0.05)
+        tasks.append(install_task)
+        await wait_for_postgres_lock(engine, install_task)
         assert not install_task.done(), "install did not wait for the application row lock"
         release_deny.set()
         await deny_task
@@ -722,6 +727,10 @@ async def test_runtime_suspend_serializes_before_user_install_create_or_reactiva
             else:
                 assert rows == []
     finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         async with sessions() as session:
             await cleanup(session)
         await engine.dispose()

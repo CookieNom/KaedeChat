@@ -39,7 +39,7 @@ describe('directory media helpers', () => {
     expect(youtubeEmbedUrl('../evil.example')).toBeNull();
   });
 
-  it('reorders without mutating the source or crossing a boundary', () => {
+  it('reorders immutably and stops at the negative-direction boundary', () => {
     const source = ['first', 'second', 'third'];
     expect(moveDirectoryItem(source, 1, -1)).toEqual(['second', 'first', 'third']);
     expect(moveDirectoryItem(source, 0, -1)).toEqual(source);
@@ -88,7 +88,7 @@ describe('directory settings validation', () => {
         supportedLocales: [],
         descriptionLocalizations: {}
       })
-    ).toThrow();
+    ).toThrow(/external links?/i);
   });
 
   it('rejects a localization outside the selected language set', () => {

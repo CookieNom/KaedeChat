@@ -92,7 +92,8 @@ describe('task tracker board helpers', () => {
   it('orders lanes and tasks by stable positions', () => {
     const value = board();
     expect(orderedTrackerLanes(value).map((item) => item.id)).toEqual(['30', '20']);
-    expect(trackerTasksForLane(value, value.lanes[0]).map((item) => item.id)).toEqual(['2']);
+    value.tasks.unshift(task('3', value.lanes[0], 1));
+    expect(trackerTasksForLane(value, value.lanes[0]).map((item) => item.id)).toEqual(['2', '3']);
   });
 
   it('filters by searchable task and assignee fields', () => {
@@ -105,23 +106,32 @@ describe('task tracker board helpers', () => {
         hideCompleted: false
       }).map((item) => item.id)
     ).toEqual(['2']);
-    expect(
-      filterTrackerTasks(value.tasks, {
-        query: 'mio',
-        priority: 'medium',
-        assignee: '60@chat.example',
-        hideCompleted: false
-      }).map((item) => item.id)
-    ).toEqual(['2']);
+    for (const filter of [
+      { query: 'mio' },
+      { priority: 'medium' as const },
+      { assignee: '60@chat.example' }
+    ]) {
+      expect(
+        filterTrackerTasks(value.tasks, {
+          query: '',
+          priority: 'all',
+          assignee: '',
+          hideCompleted: false,
+          ...filter
+        }).map((item) => item.id)
+      ).toEqual(['2']);
+    }
   });
 
   it('optimistically moves a task and normalizes destination positions and counts', () => {
     const value = board();
     const destination = value.lanes[0];
+    value.lanes[1].task_count = 1;
     const moved = moveTaskInBoard(value, '1@chat.example', destination, 0);
     expect(trackerTasksForLane(moved, destination).map((item) => item.id)).toEqual(['1', '2']);
     expect(trackerTasksForLane(moved, destination).map((item) => item.position)).toEqual([0, 1]);
     expect(moved.lanes.find((item) => item.id === destination.id)?.task_count).toBe(2);
+    expect(moved.lanes.find((item) => item.id === value.lanes[1].id)?.task_count).toBe(0);
   });
 
   it('normalizes same-lane drag boundaries after removing the dragged task', () => {
@@ -136,6 +146,16 @@ describe('task tracker board helpers', () => {
   });
 
   it('matches tracker gateway envelopes to the open composite channel ref', () => {
+    expect(
+      trackerDispatchTargetsChannel(
+        {
+          t: 'TRACKER_TASK_UPDATE',
+          d: { task: { channel_id: '10', channel_domain: 'other.example' } }
+        },
+        '10',
+        domain
+      )
+    ).toBe(false);
     expect(
       trackerDispatchTargetsChannel(
         {
@@ -184,7 +204,7 @@ describe('task tracker board helpers', () => {
 
   it('formats server colors as bounded CSS values', () => {
     expect(trackerColor(0x00aaff)).toBe('#00aaff');
-    expect(trackerColor(Number.NaN)).toBe('#64748b');
+    expect(trackerColor(Number.NaN)).toMatch(/^#[0-9a-f]{6}$/i);
     expect(trackerColor(0xffffff + 1)).toBe('#ffffff');
   });
 

@@ -58,7 +58,7 @@ async def test_turnstile_binds_token_to_action_and_hostname() -> None:
     [
         {"success": False, "action": LOGIN_ACTION, "hostname": "chat.example.com"},
         {"success": True, "action": "login", "hostname": "chat.example.com"},
-        {"success": True, "action": "turnstile-spin-v2", "hostname": "evil.example"},
+        {"success": True, "action": LOGIN_ACTION, "hostname": "evil.example"},
     ],
 )
 async def test_turnstile_rejects_failed_or_misbinding_results(result: dict[str, object]) -> None:
@@ -97,7 +97,14 @@ async def test_native_challenge_is_origin_hosted_and_not_cached() -> None:
     assert "desktop-request-1" in body
     assert "window.ipc.postMessage" in body
     assert response.headers["cache-control"] == "no-store"
-    assert "challenges.cloudflare.com" in response.headers["content-security-policy"]
+    directives = {
+        parts[0]: set(parts[1:])
+        for clause in response.headers["content-security-policy"].split(";")
+        if (parts := clause.split())
+    }
+    assert "https://challenges.cloudflare.com" in directives["script-src"]
+    assert directives["frame-src"] == {"https://challenges.cloudflare.com"}
+    assert directives["default-src"] == {"'none'"}
 
 
 @pytest.mark.asyncio

@@ -55,13 +55,7 @@ describe('password KDF v2', () => {
   it('fails closed on a legacy or missing password protocol version', async () => {
     vi.stubGlobal('crypto', webcrypto);
     vi.stubGlobal('window', { location: { hostname: 'kaede.example' } });
-    const legacy = {
-      version: 0,
-      algorithm: 'legacy',
-      iterations: 0,
-      auth_salt: null,
-      vault_salt: CONTEXT.vault_salt
-    } as unknown as PasswordKdfContext;
+    const legacy = { ...CONTEXT, version: 0 } as unknown as PasswordKdfContext;
     const missing = { ...CONTEXT, version: undefined } as unknown as PasswordKdfContext;
 
     await expect(preparePassword('never send this password', legacy)).rejects.toThrow(

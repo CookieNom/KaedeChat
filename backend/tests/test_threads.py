@@ -34,7 +34,6 @@ from app.api.threads import (
     _encode_thread_cursor,
     _starter_reservation_identity,
     _thread_type,
-    bot_remove_thread_member,
     update_thread,
     validate_applied_tags,
 )
@@ -398,7 +397,7 @@ async def test_auto_archive_materializes_thread_dispatch_before_commit(
 
 
 @pytest.mark.asyncio
-async def test_federation_thread_projection_materializes_server_defaults_before_commit(
+async def test_server_default_materialization_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     thread = channel(
@@ -1258,7 +1257,7 @@ async def test_encrypted_parent_message_creates_independent_e2ee_child_shell(
 
 
 @pytest.mark.asyncio
-async def test_bot_encrypted_source_thread_requires_source_participation_and_floor(
+async def test_exact_source_participation_floor_delegation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parent = channel(type=0, encryption_mode="e2ee", encryption_state="active")
@@ -1305,9 +1304,13 @@ async def test_bot_encrypted_source_thread_requires_source_participation_and_flo
     assert source_access.await_args.kwargs["e2ee_device_id"] == "kbe_" + "a" * 43
 
 
+@pytest.mark.parametrize(
+    "operation", ["thread.update", "thread.delete", "thread.member.put", "thread.member.delete"]
+)
 @pytest.mark.asyncio
 async def test_remote_lifecycle_and_member_services_all_proxy_without_local_locks(
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
 ) -> None:
     actor = User(
         id=9,
@@ -1320,14 +1323,7 @@ async def test_remote_lifecycle_and_member_services_all_proxy_without_local_lock
         channel=channel(id=20, type=11),
     )
     access_check = AsyncMock(return_value=(access, int(Permission.ADMINISTRATOR)))
-    proxy = AsyncMock(
-        side_effect=[
-            {"id": "20", "origin_domain": "guild.example"},
-            {"id": "20", "origin_domain": "guild.example"},
-            {"updated": True},
-            {"updated": True},
-        ]
-    )
+    proxy = AsyncMock(return_value={"id": "20", "origin_domain": "guild.example"})
     monkeypatch.setattr(threads_api, "thread_access", access_check)
     monkeypatch.setattr(threads_api, "proxy_remote_thread_mutation", proxy)
     auth = AuthenticatedUser(actor, AccessGrant(9, "home.example", "session"), "", False)
@@ -1335,50 +1331,46 @@ async def test_remote_lifecycle_and_member_services_all_proxy_without_local_lock
     redis = cast(Any, SimpleNamespace())
     configured = settings()
 
-    updated = await threads_api.update_thread(
-        EntityRef("20@guild.example"),
-        ThreadUpdate(name="Renamed"),
-        auth,
-        session,
-        redis,
-        cast(Any, SimpleNamespace()),
-        configured,
-    )
-    deleted = await threads_api.delete_thread(
-        EntityRef("20@guild.example"),
-        auth,
-        session,
-        redis,
-        cast(Any, SimpleNamespace()),
-        configured,
-    )
-    await threads_api.put_thread_member_service(
-        EntityRef("20@guild.example"),
-        EntityRef("12@member.example"),
-        threads_api.ThreadMemberUpdate(),
-        actor,
-        session,
-        redis,
-        configured,
-    )
-    await threads_api.delete_thread_member_service(
-        EntityRef("20@guild.example"),
-        EntityRef("12@member.example"),
-        actor,
-        session,
-        redis,
-        configured,
-    )
-
-    assert updated["id"] == "20"
-    assert deleted == {"id": "20", "origin_domain": "guild.example"}
-    assert [call.args[4] for call in proxy.await_args_list] == [
-        "thread.update",
-        "thread.delete",
-        "thread.member.put",
-        "thread.member.delete",
-    ]
-    assert all(call.kwargs["lock"] is False for call in access_check.await_args_list)
+    thread_ref = EntityRef("20@guild.example")
+    target_ref = EntityRef("12@member.example")
+    if operation == "thread.update":
+        result = await threads_api.update_thread(
+            thread_ref,
+            ThreadUpdate(name="Renamed"),
+            auth,
+            session,
+            redis,
+            cast(Any, SimpleNamespace()),
+            configured,
+        )
+        assert result == proxy.return_value
+        expected = {"payload": {"name": "Renamed"}, "reason": None}
+    elif operation == "thread.delete":
+        result = await threads_api.delete_thread(
+            thread_ref, auth, session, redis, cast(Any, SimpleNamespace()), configured
+        )
+        assert result == proxy.return_value
+        expected = {"reason": None}
+    elif operation == "thread.member.put":
+        await threads_api.put_thread_member_service(
+            thread_ref,
+            target_ref,
+            threads_api.ThreadMemberUpdate(),
+            actor,
+            session,
+            redis,
+            configured,
+        )
+        expected = {"payload": {}, "target_ref": target_ref}
+    else:
+        await threads_api.delete_thread_member_service(
+            thread_ref, target_ref, actor, session, redis, configured
+        )
+        expected = {"target_ref": target_ref}
+    proxy.assert_awaited_once_with(session, configured, access, actor, operation, **expected)
+    access_check.assert_awaited_once()
+    assert access_check.await_args.args == (session, redis, configured, actor, thread_ref)
+    assert access_check.await_args.kwargs["lock"] is False
 
 
 @pytest.mark.asyncio
@@ -1521,6 +1513,7 @@ async def test_remote_encrypted_forum_claim_binds_exact_envelope_and_identity(
         "version": 2,
         "operation": "create",
         "rich_payload_digest": "opaque",
+        "ciphertext": "sealed-original",
     }
     rendered = {
         "id": "88",
@@ -1610,6 +1603,20 @@ async def test_remote_encrypted_forum_claim_binds_exact_envelope_and_identity(
             "thread.starter.claim",
             payload={"e2ee": envelope, "client_nonce": "claim-1"},
             attachments=[attachment],
+        )
+    assert invalid.value.detail["code"] == "FEDERATED_WRITE_RESPONSE_INVALID"
+
+    signed.return_value = httpx.Response(
+        200, json={"message": rendered | {"e2ee": envelope | {"ciphertext": "substituted"}}}
+    )
+    with pytest.raises(HTTPException) as invalid:
+        await threads_api.proxy_remote_thread_mutation(
+            cast(Any, SimpleNamespace()),
+            settings(),
+            access,
+            actor,
+            "thread.starter.claim",
+            payload={"e2ee": envelope, "client_nonce": "claim-1"},
         )
     assert invalid.value.detail["code"] == "FEDERATED_WRITE_RESPONSE_INVALID"
 
@@ -1776,11 +1783,27 @@ async def test_thread_proxy_endpoint_routes_lifecycle_and_membership_mutations(
     assert deleted == {"thread": {"id": "20", "origin_domain": "guild.example"}}
     assert member_added == {"updated": True}
     assert member_removed == {"updated": True}
-    update.assert_awaited_once()
-    create_from_message.assert_awaited_once()
-    delete.assert_awaited_once()
-    put_member.assert_awaited_once()
-    delete_member.assert_awaited_once()
+    for delegate, auth_position in [(update, 2), (create_from_message, 3), (delete, 1)]:
+        delegate.assert_awaited_once()
+        args = delegate.await_args.args
+        assert args[0] == EntityRef("20@guild.example")
+        assert args[auth_position].user is actor
+        assert args[auth_position + 1] is session
+        assert args[-2] is configured
+        assert args[-1] is None
+    assert update.await_args.args[1].model_dump(exclude_unset=True) == {"archived": True}
+    assert create_from_message.await_args.args[1] == EntityRef("81@guild.example")
+    assert create_from_message.await_args.args[2].model_dump(exclude_unset=True) == {
+        "name": "Source discussion",
+    }
+    for delegate, actor_position in [(put_member, 3), (delete_member, 2)]:
+        delegate.assert_awaited_once()
+        args = delegate.await_args.args
+        assert args[:2] == (EntityRef("20@guild.example"), EntityRef("12@member.example"))
+        assert args[actor_position] is actor
+        assert args[actor_position + 1] is session
+        assert args[-1] is configured
+    assert put_member.await_args.args[2].model_dump(exclude_unset=True) == {}
 
 
 def test_federated_channel_state_preserves_authoritative_creation_time() -> None:
@@ -1842,7 +1865,7 @@ def test_type21_starter_is_a_clean_reference_and_deleted_source_resolves_null() 
     assert wrapper["channel_id"] == "10"
     assert wrapper["content"] is None
     assert wrapper["attachments"] == []
-    assert wrapper["referenced_message"] is source
+    assert wrapper["referenced_message"] == source
     assert wrapper["message_reference"]["message_id"] == "10"
 
     tombstone = thread_source_starter_payload(thread, source | {"deleted_at": "now"})
@@ -2108,7 +2131,14 @@ async def test_self_thread_join_checks_interaction_policy_after_membership_autho
     )
 
     async def deny_after_authorization(*_args: object) -> None:
-        assert session.get.await_count == 5
+        assert any(
+            call.args
+            == (
+                threads_api.GuildMember,
+                (guild.id, guild.origin_domain, actor.id, actor.origin_domain),
+            )
+            for call in session.get.await_args_list
+        )
         raise HTTPException(status_code=403, detail={"code": "MEMBER_TIMED_OUT"})
 
     interaction_gate = AsyncMock(side_effect=deny_after_authorization)
@@ -2263,37 +2293,6 @@ async def test_human_thread_member_routes_forward_pagination_and_rich_member(
         "with_member": True,
     }
     assert get_member.await_args.kwargs == {"with_member": True}
-
-
-@pytest.mark.asyncio
-async def test_bot_remove_other_thread_member_requires_manage_scope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    installation = AsyncMock()
-    remove = AsyncMock()
-    monkeypatch.setattr(threads_api, "installation_for_channel", installation)
-    monkeypatch.setattr(threads_api, "delete_thread_member_service", remove)
-    principal = SimpleNamespace(user=SimpleNamespace(id=7, origin_domain="bot.example"))
-    session = SimpleNamespace()
-    settings = SimpleNamespace(domain="guild.example")
-
-    await bot_remove_thread_member(
-        EntityRef("10@guild.example"),
-        EntityRef("8@guild.example"),
-        principal,
-        session,
-        SimpleNamespace(),
-        settings,
-    )
-
-    installation.assert_awaited_once_with(
-        session,
-        settings,
-        principal,
-        EntityRef("10@guild.example"),
-        "channels.manage",
-    )
-    remove.assert_awaited_once()
 
 
 @pytest.mark.asyncio

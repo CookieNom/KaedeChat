@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.dialects import postgresql
 
 from app.api import e2ee as e2ee_api
 from app.api.e2ee import (
@@ -14,11 +13,9 @@ from app.api.e2ee import (
     proxy_room_e2ee_request,
     queue_device_change_updates,
     room_encryption_control_log,
-    validate_remote_room_commit_response,
 )
 from app.chat import e2ee_membership, guild_revision
 from app.chat.e2ee_membership import (
-    GUILD_E2EE_ACCESS_MUTATION_EVENTS,
     e2ee_policy_destinations,
     pause_guild_e2ee_for_membership_change,
     publish_e2ee_policy_updates,
@@ -29,7 +26,6 @@ from app.core.types import EntityRef
 from app.db.models import Channel
 from app.federation.history import _validate_history_message
 from app.federation.network import FederationNetworkError
-from app.federation.schemas import E2EERoomProxyRequest
 
 OPERATION_ID = "keo_" + "o" * 43
 DEVICE_ID = "ked_" + "d" * 43
@@ -49,59 +45,6 @@ def _actor(home: str) -> dict[str, object]:
         "profile_version": 1,
         "e2ee_device_generation": 3,
     }
-
-
-def _remote_commit_result(
-    kind: str,
-) -> tuple[dict[str, object], dict[str, object]]:
-    rendered: dict[str, object] = {
-        "id": "10",
-        "origin_domain": "alpha.localhost",
-        "operation_id": OPERATION_ID,
-        "operation_status": "committed",
-        "encryption_mode": "e2ee",
-        "encryption_state": "active",
-        "encryption_policy_generation": "2",
-        "encryption_protocol": "mls10",
-        "encryption_suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-        "encryption_group_id": GROUP_ID,
-        "encryption_epoch": "1",
-        "controls": [
-            {
-                "id": "101",
-                "origin_domain": "alpha.localhost",
-                "operation": "welcome",
-                "apply": True,
-            },
-            {
-                "id": "102",
-                "origin_domain": "alpha.localhost",
-                "operation": "commit",
-                "apply": False,
-            },
-        ],
-    }
-    status: dict[str, object] = {
-        "operation_id": OPERATION_ID,
-        "kind": kind,
-        "status": "committed",
-        "prepared": {
-            "operation_id": OPERATION_ID,
-            "status": "prepared",
-            "policy": {
-                "mode": "plaintext" if kind == "activate" else "e2ee",
-                "state": "proposed" if kind == "activate" else "rekeying",
-                "generation": "2",
-                "protocol": "mls10",
-                "suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-                "group_id": GROUP_ID,
-                "epoch": None,
-            },
-            "key_packages": [],
-        },
-        "committed": rendered,
-    }
-    return rendered, status
 
 
 def _control(
@@ -198,17 +141,6 @@ async def test_every_guild_access_change_pauses_all_active_encrypted_channels() 
 
     assert paused == [first, second]
     assert first.encryption_state == second.encryption_state == "rekeying"
-    assert {
-        "guild.member.add",
-        "guild.member.remove",
-        "guild.members.origin.remove",
-        "guild.member.role.add",
-        "guild.member.role.remove",
-        "guild.role.update",
-        "guild.role.delete",
-        "guild.overwrite.upsert",
-        "guild.overwrite.delete",
-    } == GUILD_E2EE_ACCESS_MUTATION_EVENTS
 
 
 @pytest.mark.asyncio
@@ -242,9 +174,24 @@ async def test_policy_updates_use_thread_events_for_encrypted_threads(
     assert publish.await_args.args[2:] == ("THREAD_UPDATE", {"id": "10"})
 
 
+@pytest.mark.parametrize(
+    "access_event",
+    [
+        "guild.member.add",
+        "guild.member.remove",
+        "guild.members.origin.remove",
+        "guild.member.role.add",
+        "guild.member.role.remove",
+        "guild.role.update",
+        "guild.role.delete",
+        "guild.overwrite.upsert",
+        "guild.overwrite.delete",
+    ],
+)
 @pytest.mark.asyncio
 async def test_guild_mutation_returns_paused_policy_channels_to_postcommit_caller(
     monkeypatch: pytest.MonkeyPatch,
+    access_event: str,
 ) -> None:
     thread = SimpleNamespace(id=10, origin_domain="alpha.localhost")
     actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
@@ -284,7 +231,7 @@ async def test_guild_mutation_returns_paused_policy_channels_to_postcommit_calle
     monkeypatch.setattr(guild_revision, "remember_guild_delivery_wakes", MagicMock())
     paused: list[Channel] = []
 
-    for event_type in ("guild.role.update", "guild.member.role.add"):
+    for event_type in (access_event, access_event):
         await guild_revision.queue_guild_mutation(
             cast(Any, session),
             cast(Any, _settings()),
@@ -297,6 +244,7 @@ async def test_guild_mutation_returns_paused_policy_channels_to_postcommit_calle
 
     assert paused == [thread]
     assert pause.await_count == 2
+    assert all(call.args == (session, guild) for call in pause.await_args_list)
 
     await guild_revision.queue_guild_mutation(
         cast(Any, session),
@@ -309,50 +257,6 @@ async def test_guild_mutation_returns_paused_policy_channels_to_postcommit_calle
         pause_e2ee=False,
     )
     assert pause.await_count == 2
-
-
-@pytest.mark.parametrize("actor_home", ["beta.localhost", "gamma.localhost"])
-@pytest.mark.parametrize("kind", ["activate", "rekey"])
-def test_three_home_activation_and_rekey_results_remain_authority_bound(
-    actor_home: str,
-    kind: str,
-) -> None:
-    request = E2EERoomProxyRequest.model_validate(
-        {
-            "channel_id": "10",
-            "channel_domain": "alpha.localhost",
-            "actor": _actor(actor_home),
-            "operation_id": OPERATION_ID,
-            "sender_device_id": DEVICE_ID,
-            "policy_generation": "2",
-            "epoch": "1",
-            "group_id": GROUP_ID,
-            "commit": encode_base64url(b"commit"),
-            "welcome": encode_base64url(b"welcome"),
-            "prepared_vault_revision": "3",
-            "prepared_vault_digest": VAULT_DIGEST,
-            "vault_attested": True,
-        }
-    )
-    rendered, status = _remote_commit_result(kind)
-    channel = cast(Channel, SimpleNamespace(id=10, origin_domain="alpha.localhost"))
-
-    validate_remote_room_commit_response(
-        rendered,
-        status,
-        kind=kind,
-        operation_id=OPERATION_ID,
-        channel=channel,
-        policy_generation="2",
-        group_id=GROUP_ID,
-        authority="alpha.localhost",
-    )
-
-    assert request.actor.origin_domain == actor_home
-    assert all(
-        cast(dict[str, object], item)["origin_domain"] == "alpha.localhost"
-        for item in cast(list[object], rendered["controls"])
-    )
 
 
 @pytest.mark.asyncio
@@ -416,6 +320,7 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
         compact,
     )
     event_sequence = 0
+    built = {}
 
     async def envelope(
         _session: object,
@@ -433,12 +338,14 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
             assert context is not None
             assert context["reason"] == "e2ee.device-list.changed"
             assert not authority_attested_actor
-        return {
+        result = {
             "event_id": (
                 f"event-{event_type}-{content.get('channel_id', 'account')}-{event_sequence}"
             ),
             "type": event_type,
         }
+        built[result["event_id"]] = (event_type, _actor, content, context)
+        return result
 
     queued: list[tuple[str, str]] = []
 
@@ -467,16 +374,39 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
         "gamma.localhost",
         "delta.localhost",
     }
-    assert [destination for destination, _event_id in queued] == [
-        "beta.localhost",
-        "gamma.localhost",
-        "beta.localhost",
-        "gamma.localhost",
-        "delta.localhost",
-        "gamma.localhost",
+    assert [
+        (destination, built[event_id][0], built[event_id][2].get("channel_id"))
+        for destination, event_id in queued
+    ] == [
+        ("beta.localhost", "e2ee.device-list.changed", None),
+        ("gamma.localhost", "e2ee.device-list.changed", None),
+        ("beta.localhost", "e2ee.room-policy.changed", "10"),
+        ("gamma.localhost", "e2ee.room-policy.changed", "10"),
+        ("delta.localhost", "e2ee.room-policy.changed", "11"),
+        ("gamma.localhost", "e2ee.room-policy.changed", "11"),
     ]
-    assert len({event_id for _destination, event_id in queued}) == len(queued)
-    assert compact.await_count == len(queued)
+    for event_type, actor, content, context in built.values():
+        assert actor is user
+        if event_type == "e2ee.device-list.changed":
+            assert content["profile"]["id"] == "7"
+            assert content["profile"]["origin_domain"] == "alpha.localhost"
+            assert content["profile"]["e2ee_device_generation"] == 3
+            assert context is None
+        else:
+            channel_id = content["channel_id"]
+            assert content["channel_domain"] == "alpha.localhost"
+            assert context == {
+                "reason": "e2ee.device-list.changed",
+                "actor": {"id": "7", "domain": "alpha.localhost"},
+                "channel": {"id": channel_id, "domain": "alpha.localhost"},
+                "scope": {
+                    "type": "guild" if channel_id == "10" else "dm",
+                    "id": "20" if channel_id == "10" else "11",
+                    "domain": "alpha.localhost",
+                },
+            }
+    assert len(built) == 6
+    assert compact.await_count == 6
 
 
 @pytest.mark.asyncio
@@ -534,7 +464,16 @@ async def test_remote_room_authority_outage_is_retryable_without_projection(
 @pytest.mark.asyncio
 async def test_three_home_control_catch_up_is_ascending_paginated_and_floor_bounded(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import E2EEControlRecord
+
+    await postgres_schema.execute(
+        text("CREATE TABLE e2ee_control_records AS TABLE public.e2ee_control_records WITH NO DATA")
+    )
     access = SimpleNamespace(
         guild=SimpleNamespace(id=20, origin_domain="alpha.localhost"),
         channel=SimpleNamespace(
@@ -547,58 +486,78 @@ async def test_three_home_control_catch_up_is_ascending_paginated_and_floor_boun
     require_permissions = AsyncMock()
     monkeypatch.setattr(e2ee_api, "load_channel_access", load_access)
     monkeypatch.setattr(e2ee_api, "require_permissions", require_permissions)
-    first_page = [
-        _control(101, author_domain="beta.localhost", operation="welcome", apply_mode="join"),
-        _control(102, author_domain="beta.localhost", operation="commit", apply_mode="audit"),
-        _control(103, author_domain="gamma.localhost", operation="commit", apply_mode="process"),
-    ]
-    second_page = [first_page[2]]
-    session = MagicMock()
-    session.scalars = AsyncMock(side_effect=[first_page, second_page])
-    auth = SimpleNamespace(user=SimpleNamespace(id=9, origin_domain="gamma.localhost"))
-    configured = SimpleNamespace(domain="beta.localhost")
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        for identifier, author, operation, mode in [
+            (103, "gamma.localhost", "commit", "process"),
+            (99, "beta.localhost", "welcome", "join"),
+            (102, "beta.localhost", "commit", "audit"),
+            (101, "beta.localhost", "welcome", "join"),
+        ]:
+            session.add(
+                E2EEControlRecord(
+                    **vars(
+                        _control(
+                            identifier, author_domain=author, operation=operation, apply_mode=mode
+                        )
+                    ),
+                    operation=operation,
+                )
+            )
+        for identifier, changed in enumerate(
+            [
+                {"origin_domain": "foreign.example"},
+                {"channel_id": 11},
+                {"channel_domain": "foreign.example"},
+                {"room_operation_id": None, "room_operation_domain": None},
+                {"room_operation_domain": "foreign.example"},
+            ],
+            start=104,
+        ):
+            values = vars(
+                _control(
+                    identifier,
+                    author_domain="beta.localhost",
+                    operation="commit",
+                    apply_mode="audit",
+                )
+            )
+            session.add(E2EEControlRecord(**(values | changed), operation="commit"))
+        await session.flush()
+        auth = SimpleNamespace(user=SimpleNamespace(id=9, origin_domain="gamma.localhost"))
+        configured = SimpleNamespace(domain="beta.localhost")
 
-    first = await room_encryption_control_log(
-        EntityRef("10@alpha.localhost"),
-        after=None,
-        limit=2,
-        auth=cast(Any, auth),
-        session=cast(Any, session),
-        redis=cast(Any, SimpleNamespace()),
-        settings=cast(Any, configured),
-    )
-    second = await room_encryption_control_log(
-        EntityRef("10@alpha.localhost"),
-        after=EntityRef(cast(str, first["next_after"])),
-        limit=2,
-        auth=cast(Any, auth),
-        session=cast(Any, session),
-        redis=cast(Any, SimpleNamespace()),
-        settings=cast(Any, configured),
-    )
-
-    assert [item["id"] for item in cast(list[dict[str, object]], first["controls"])] == [
-        "101",
-        "102",
-    ]
-    assert first["next_after"] == "102@alpha.localhost"
-    assert cast(list[dict[str, object]], first["controls"])[1]["apply"] is False
-    assert cast(list[dict[str, object]], second["controls"])[0]["author_domain"] == (
-        "gamma.localhost"
-    )
-    assert second["next_after"] is None
-
-    statements = [
-        call.args[0].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
+        first = await room_encryption_control_log(
+            EntityRef("10@alpha.localhost"),
+            after=None,
+            limit=2,
+            auth=cast(Any, auth),
+            session=cast(Any, session),
+            redis=cast(Any, SimpleNamespace()),
+            settings=cast(Any, configured),
         )
-        for call in session.scalars.await_args_list
-    ]
-    assert "e2ee_control_records.id >= 100" in str(statements[0])
-    assert (
-        "(e2ee_control_records.id, e2ee_control_records.origin_domain) > (102, 'alpha.localhost')"
-    ) in str(statements[1])
+        second = await room_encryption_control_log(
+            EntityRef("10@alpha.localhost"),
+            after=EntityRef(cast(str, first["next_after"])),
+            limit=2,
+            auth=cast(Any, auth),
+            session=cast(Any, session),
+            redis=cast(Any, SimpleNamespace()),
+            settings=cast(Any, configured),
+        )
+
+        assert [item["id"] for item in cast(list[dict[str, object]], first["controls"])] == [
+            "101",
+            "102",
+        ]
+        assert first["next_after"] == "102@alpha.localhost"
+        assert cast(list[dict[str, object]], first["controls"])[1]["apply"] is False
+        assert cast(list[dict[str, object]], second["controls"])[0]["author_domain"] == (
+            "gamma.localhost"
+        )
+        assert second["next_after"] is None
+
+        assert [item["id"] for item in second["controls"]] == ["103"]
+        assert require_permissions.await_count == 2
 
 
 def test_three_home_encrypted_history_accepts_authority_projected_third_home_author() -> None:

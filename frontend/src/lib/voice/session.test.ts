@@ -1,3 +1,4 @@
+import { webCameraDefaults } from './quality';
 import { Track, type Room } from 'livekit-client';
 import { describe, expect, it, vi } from 'vitest';
 import type { Channel } from '$lib/chat/types';
@@ -203,7 +204,7 @@ describe('self voice-state publication', () => {
       canConnect: true,
       canSpeak: false,
       canStream: true,
-      canUseVad: false
+      canUseVad: true
     });
 
     expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
@@ -220,9 +221,9 @@ describe('self voice-state publication', () => {
 
     await voice.reconcileBrowserPermissions({
       canConnect: false,
-      canSpeak: false,
-      canStream: false,
-      canUseVad: false
+      canSpeak: true,
+      canStream: true,
+      canUseVad: true
     });
 
     expect(candidate.disconnect).toHaveBeenCalled();
@@ -446,9 +447,16 @@ describe('voice grant validation', () => {
 
 describe('voice connection timeout', () => {
   it('rejects a signaling attempt that never settles', async () => {
-    await expect(withVoiceConnectTimeout(new Promise(() => undefined), 1)).rejects.toThrow(
-      'Voice connection timed out'
-    );
+    vi.useFakeTimers();
+    try {
+      const pending = expect(
+        withVoiceConnectTimeout(new Promise(() => undefined), 10_000)
+      ).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -502,8 +510,13 @@ describe('voice media key rotation', () => {
         rotatedChannel
       )
     ).toBe(true);
+    expect(
+      voiceGrantMatchesChannelPolicy(encrypted, { ...channel, encryption_policy_generation: '5' })
+    ).toBe(false);
+    expect(voiceGrantMatchesChannelPolicy(encrypted, { ...channel, encryption_epoch: '8' })).toBe(
+      false
+    );
   });
-
   it('rejects grants while the room is rekeying or for another channel', () => {
     expect(
       voiceGrantMatchesChannelPolicy(encrypted, { ...channel, encryption_state: 'rekeying' })
@@ -604,12 +617,11 @@ describe('voice media key rotation', () => {
 
     expect(options[1]?.publishDefaults).toMatchObject({
       audioPreset: { maxBitrate: 32_000 },
-      videoEncoding: { maxBitrate: 1_700_000 }
+      videoEncoding: webCameraDefaults(2).publish.videoEncoding
     });
-    expect(options[1]?.videoCaptureDefaults?.resolution).toMatchObject({
-      width: 1280,
-      height: 720
-    });
+    expect(options[1]?.videoCaptureDefaults?.resolution).toEqual(
+      webCameraDefaults(2).capture.resolution
+    );
     expect(voice.voiceMediaPolicy).toEqual({
       bitrate: 32_000,
       user_limit: 0,

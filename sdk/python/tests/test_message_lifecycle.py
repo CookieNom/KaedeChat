@@ -118,6 +118,10 @@ async def test_user_install_followup_is_lifecycle_only_and_sends_exact_device() 
         "DELETE",
         "/api/v1/bots/interactions/70/followups/82",
     )
+    assert all(
+        call.kwargs["headers"] == {"X-Kaede-E2EE-Device": DEVICE_ID}
+        for call in bot.request.await_args_list[:2]
+    )
     bot.request.reset_mock()
     with pytest.raises(ValueError, match="interaction lifecycle"):
         await message.reply("must not borrow a channel grant")
@@ -319,6 +323,7 @@ async def test_gateway_identify_binds_the_selected_e2ee_device(
 
     await bot._gateway_once(TARGET)  # noqa: SLF001
 
+    assert sent[0]["token"] == "runtime-token"
     assert sent[0]["op"] == 2
     assert sent[0]["e2ee_device_id"] == DEVICE_ID
     assert len(heartbeat_tasks) == 1
@@ -326,7 +331,7 @@ async def test_gateway_identify_binds_the_selected_e2ee_device(
 
 
 @pytest.mark.asyncio
-async def test_gateway_4009_evicts_the_exact_regular_token_before_retry() -> None:
+async def test_eviction_of_exact_regular_token_on_4009() -> None:
     bot = client()
     bot._tokens[(TARGET, None, None, False)] = SimpleNamespace()  # type: ignore[assignment]  # noqa: SLF001
     bot._tokens[(TARGET, None, None, True)] = SimpleNamespace()  # type: ignore[assignment]  # noqa: SLF001

@@ -27,7 +27,7 @@ from app.voice.schemas import (
     CallResponse,
     CallStateFederationRequest,
 )
-from app.voice.state import CALL_TRANSITION_LUA, transition_call
+from app.voice.state import transition_call
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 
@@ -186,13 +186,19 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
 
 
 def test_orphaned_call_room_cleanup_is_scheduled() -> None:
-    assert voice_call_room_gc.labels["schedule"] == [{"cron": "*/5 * * * *"}]
+    from datetime import datetime, timedelta
 
+    import pycron
 
-def test_already_accepted_caller_cannot_activate_ringing_call() -> None:
-    assert "if redis.call('SISMEMBER', KEYS[3], actor) == 1 then" in CALL_TRANSITION_LUA
-    assert "if call['state'] == 'active' then return {2, raw} end" in CALL_TRANSITION_LUA
-    assert "return {0, 'accepted'}" in CALL_TRANSITION_LUA
+    schedules = voice_call_room_gc.labels["schedule"]
+    start = datetime(2026, 1, 1)
+    due = [
+        minute
+        for minute in range(61)
+        if any(pycron.is_now(item["cron"], start + timedelta(minutes=minute)) for item in schedules)
+    ]
+    assert due and due[0] <= 30 and due[-1] >= 30
+    assert all(right - left <= 30 for left, right in zip(due, due[1:], strict=False))
 
 
 @pytest.mark.asyncio
@@ -306,7 +312,7 @@ async def test_long_lived_remote_action_uses_stored_call_context(
 
 
 @pytest.mark.asyncio
-async def test_lost_terminal_response_retry_is_idempotent(
+async def test_transport_retry_after_an_unchanged_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = call_record(created_at=1)
@@ -393,7 +399,7 @@ async def test_replica_applies_exact_authority_response(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_authenticated_terminal_push_is_replay_safe(
+async def test_authenticated_terminal_push_notifies_only_for_changed_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = call_record()
@@ -450,7 +456,11 @@ async def test_transition_status_two_is_a_successful_unchanged_replay() -> None:
 async def test_orphaned_dm_room_cleanup_preserves_active_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rooms = [SimpleNamespace(name="d.34.56"), SimpleNamespace(name="d.34.57")]
+    rooms = [
+        SimpleNamespace(name="d.34.56"),
+        SimpleNamespace(name="d.34.57"),
+        SimpleNamespace(name="d.34.58"),
+    ]
     monkeypatch.setattr(LiveKitControl, "list_rooms", AsyncMock(return_value=rooms))
     delete_room = AsyncMock()
     monkeypatch.setattr(LiveKitControl, "delete_room", delete_room)

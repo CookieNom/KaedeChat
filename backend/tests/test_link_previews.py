@@ -32,7 +32,7 @@ def test_preview_request_rejects_nul_text_before_url_processing() -> None:
         PreviewRequest.model_validate({"url": "https://example.com/\x00preview"})
 
 
-def test_preview_metadata_extracts_bounded_open_graph_values() -> None:
+def test_opengraph_extraction_and_normalization() -> None:
     result = preview_metadata(
         """
         <html><head>

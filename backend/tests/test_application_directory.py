@@ -4,8 +4,11 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.admin_portal as admin_portal
 import app.api.applications as applications
@@ -36,7 +39,14 @@ from app.api.applications import ApplicationPatch, TemplateCreate
 from app.api.bot_federation import BotManifest
 from app.core.permissions import Permission
 from app.core.types import EntityRef
-from app.db.bot_models import BotApplication
+from app.db.bot_models import (
+    ApplicationAsset,
+    ApplicationCommand,
+    BotApplication,
+    BotInstallTemplate,
+    BotInstanceRule,
+)
+from app.db.models import User
 
 
 def application(**overrides: object) -> SimpleNamespace:
@@ -64,6 +74,59 @@ def application(**overrides: object) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+@pytest_asyncio.fixture
+async def directory_session(postgres_schema):
+    for table in (
+        "bot_applications",
+        "users",
+        "bot_install_templates",
+        "bot_instance_rules",
+        "application_assets",
+        "application_commands",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )  # noqa: S608 -- fixed table names
+    await postgres_schema.execute(
+        text("CREATE TABLE bot_interactions (id bigint, command_id bigint, interaction_type text)")
+    )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        yield session
+
+
+def add_directory_app(session, identifier=10, **overrides):
+    app = BotApplication(
+        **vars(application(id=identifier, **overrides)),
+        team_id=1,
+        team_domain="alpha.example",
+        bot_user_id=identifier + 10,
+        bot_user_domain=overrides.get("origin_domain", "alpha.example"),
+        status="active",
+    )
+    session.add_all(
+        [
+            app,
+            User(
+                id=app.bot_user_id,
+                origin_domain=app.bot_user_domain,
+                username=f"bot_{identifier}",
+                is_local=False,
+                account_type="bot",
+                federation_introduced_by_domain=app.bot_user_domain,
+            ),
+            BotInstallTemplate(
+                id=identifier,
+                application_id=identifier,
+                application_domain=app.origin_domain,
+                slug="default",
+                name="Install",
+                active=True,
+            ),
+        ]
+    )
+    return app
 
 
 def application_patch_api(session: object, settings: object) -> FastAPI:
@@ -123,12 +186,18 @@ def test_directory_projection_exposes_install_paths_without_private_state() -> N
 
 
 @pytest.mark.asyncio
-async def test_bot_profile_add_app_resolution_is_authority_owned_and_target_filtered() -> None:
-    app = application(directory_enabled=False, directory_approved=False)
-    template = SimpleNamespace(slug="default", name="Install", description=None)
-    result = SimpleNamespace(one_or_none=lambda: (app, template))
-    session = SimpleNamespace(execute=AsyncMock(return_value=result))
-
+async def test_bot_profile_add_app_resolution_is_authority_owned_and_target_filtered(
+    directory_session,
+) -> None:
+    session = directory_session
+    add_directory_app(session, directory_enabled=False, directory_approved=False)
+    add_directory_app(session, 11)
+    foreign = add_directory_app(session, 12, origin_domain="foreign.example")
+    foreign.bot_user_id = 20
+    for pending in session.new:
+        if isinstance(pending, User) and pending.origin_domain == "foreign.example":
+            pending.id = 20
+    await session.flush()
     payload = await directory_bot_profile_application(
         session,
         SimpleNamespace(domain="alpha.example"),
@@ -150,9 +219,31 @@ async def test_bot_profile_add_app_resolution_is_authority_owned_and_target_filt
         },
         "directory_listed": False,
     }
-    statement = session.execute.await_args.args[0]
-    assert "bot_applications.bot_user_id" in str(statement)
-    assert "bot_instance_rules.effect" in str(statement)
+
+    rule = BotInstanceRule(
+        application_id=10,
+        application_domain="alpha.example",
+        target_domain="beta.example",
+        effect="deny",
+    )
+    session.add(rule)
+    await session.flush()
+    with pytest.raises(HTTPException) as denied:
+        await directory_bot_profile_application(
+            session,
+            SimpleNamespace(domain="alpha.example"),
+            (20, "alpha.example"),
+            target_domain="beta.example",
+        )
+    assert denied.value.status_code == 404
+    assert (
+        await directory_bot_profile_application(
+            session,
+            SimpleNamespace(domain="alpha.example"),
+            (20, "alpha.example"),
+            target_domain="other.example",
+        )
+    )["application_ref"] == "10@alpha.example"
 
 
 def test_remote_bot_profile_add_app_response_is_strict_and_request_bound() -> None:
@@ -192,7 +283,7 @@ def test_remote_bot_profile_add_app_response_is_strict_and_request_bound() -> No
             )
 
 
-def test_directory_model_has_persistent_reviewed_metadata() -> None:
+def test_directory_orm_declares_reviewed_metadata_constraints() -> None:
     columns = BotApplication.__table__.columns
     assert columns["directory_enabled"].nullable is False
     assert columns["directory_approved"].nullable is False
@@ -295,22 +386,24 @@ async def test_team_preview_renders_a_complete_unapproved_disabled_draft() -> No
     assert preview.readiness.ready is False
     assert preview.readiness.preview_available is True
     assert preview.readiness.missing == ["directory_enabled"]
-    assert [item.key for item in preview.readiness.items] == [
-        "directory_enabled",
-        "summary",
-        "category",
-        "tags",
-        "description",
-        "support_url",
-        "privacy_url",
-        "terms_url",
-        "media",
-        "external_links",
-        "supported_locales",
-        "description_localizations",
-        "install_path",
-        "user_install_command",
-    ]
+    assert sorted(item.key for item in preview.readiness.items) == sorted(
+        [
+            "directory_enabled",
+            "summary",
+            "category",
+            "tags",
+            "description",
+            "support_url",
+            "privacy_url",
+            "terms_url",
+            "media",
+            "external_links",
+            "supported_locales",
+            "description_localizations",
+            "install_path",
+            "user_install_command",
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -789,29 +882,48 @@ async def test_directory_metadata_patch_fails_closed_over_http(
 
 
 @pytest.mark.asyncio
-async def test_directory_media_references_are_owned_store_assets() -> None:
-    asset = SimpleNamespace(
-        id=42,
-        application_id=10,
-        application_domain="alpha.example",
-        kind="store",
-    )
-    session = SimpleNamespace(scalars=AsyncMock(return_value=[asset]))
+async def test_directory_media_references_are_owned_store_assets(directory_session) -> None:
+    session = directory_session
     app = application(
         directory_media=[
             {"type": "youtube", "video_id": "dQw4w9WgXcQ"},
             {"type": "image", "asset_id": "42"},
         ]
     )
-    assert await directory_media_assets_valid(session, app)
-    assert not await directory_media_assets_valid(
-        SimpleNamespace(scalars=AsyncMock(return_value=[])), app
+    asset = ApplicationAsset(
+        id=42,
+        application_id=10,
+        application_domain="alpha.example",
+        kind="store",
+        name="Dashboard",
+        media_hash="a" * 64,
+        content_type="image/png",
     )
+    session.add(asset)
+    await session.flush()
+    assert await directory_media_assets_valid(session, app)
+    for field, wrong, valid in (
+        ("application_id", 11, 10),
+        ("application_domain", "foreign.example", "alpha.example"),
+        ("kind", "icon", "store"),
+    ):
+        setattr(asset, field, wrong)
+        await session.flush()
+        assert not await directory_media_assets_valid(session, app)
+        setattr(asset, field, valid)
+        await session.flush()
+    await session.delete(asset)
+    await session.flush()
+    assert not await directory_media_assets_valid(session, app)
 
 
 @pytest.mark.asyncio
-async def test_directory_detail_projects_ordered_media_commands_and_similar_apps() -> None:
-    app = application(
+async def test_directory_detail_projects_ordered_media_commands_and_similar_apps(
+    directory_session,
+) -> None:
+    session = directory_session
+    app = add_directory_app(
+        session,
         directory_media=[
             {"type": "youtube", "video_id": "dQw4w9WgXcQ"},
             {"type": "image", "asset_id": "42"},
@@ -820,7 +932,10 @@ async def test_directory_detail_projects_ordered_media_commands_and_similar_apps
         directory_supported_locales=["en-US", "fr"],
         directory_description_localizations={"fr": "Une application utile."},
     )
-    asset = SimpleNamespace(
+    asset = ApplicationAsset(
+        application_id=10,
+        application_domain="alpha.example",
+        kind="store",
         id=42,
         name="Dashboard",
         media_hash="a" * 64,
@@ -828,24 +943,32 @@ async def test_directory_detail_projects_ordered_media_commands_and_similar_apps
         width=1280,
         height=720,
     )
-    command = SimpleNamespace(
-        authority_id=55,
-        name="forecast",
-        definition={"description": "Show the current forecast."},
+    session.add(asset)
+    for identifier in range(11, 17):
+        add_directory_app(
+            session,
+            identifier,
+            directory_tags=["tools", "productivity"] if identifier % 2 else ["tools"],
+        )
+    for identifier in range(55, 62):
+        session.add(
+            ApplicationCommand(
+                id=identifier,
+                application_id=10,
+                application_domain="alpha.example",
+                name=f"command{identifier}",
+                generation=1,
+                type="chat_input",
+                definition={"description": f"Command {identifier}"},
+            )
+        )
+    await session.flush()
+    await session.execute(
+        text(
+            "INSERT INTO bot_interactions VALUES (1, 61, 'command'), (2, 61, 'command'), "
+            "(3, 59, 'command')"
+        )
     )
-    similar = application(
-        id=11,
-        name="Another Utility",
-        directory_summary="Another useful directory app.",
-        directory_tags=["tools"],
-        directory_collections=[],
-        supported_install_types=["guild_install"],
-    )
-    session = SimpleNamespace(
-        scalars=AsyncMock(side_effect=[[asset], [similar]]),
-        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [(command, 7)])),
-    )
-
     payload = await directory_detail_projection(
         session,
         SimpleNamespace(domain="alpha.example"),
@@ -867,14 +990,18 @@ async def test_directory_detail_projects_ordered_media_commands_and_similar_apps
         },
     ]
     assert payload["popular_commands"] == [
-        {"id": "55", "name": "forecast", "description": "Show the current forecast."}
+        {
+            "id": str(identifier),
+            "name": f"command{identifier}",
+            "description": f"Command {identifier}",
+        }
+        for identifier in (61, 59, 55, 56, 57)
     ]
-    assert [item["ref"] for item in payload["similar_apps"]] == ["11@alpha.example"]
-    popular_statement = session.execute.await_args.args[0]
-    similar_statement = session.scalars.await_args_list[1].args[0]
-    assert popular_statement._limit_clause.value == 5
-    assert similar_statement._limit_clause.value == 3
-    assert "bot_instance_rules.effect" in str(similar_statement)
+    assert [item["ref"] for item in payload["similar_apps"]] == [
+        "11@alpha.example",
+        "13@alpha.example",
+        "15@alpha.example",
+    ]
 
 
 def test_remote_directory_detail_rejects_untrusted_product_page_content() -> None:
@@ -1082,25 +1209,34 @@ def test_remote_directory_response_is_bound_to_request_lineage_and_page() -> Non
 
 
 @pytest.mark.asyncio
-async def test_directory_query_applies_policy_before_a_bounded_page() -> None:
-    tuples = SimpleNamespace(all=lambda: [])
-    session = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(tuples=lambda: tuples))
+async def test_directory_query_applies_policy_before_a_bounded_page(directory_session) -> None:
+    session = directory_session
+    for identifier in range(1, 9):
+        add_directory_app(
+            session,
+            identifier,
+            target_policy="local_only" if identifier == 1 else "open",
+            directory_enabled=identifier != 2,
+            directory_approved=identifier != 3,
+        )
+    session.add(
+        BotInstanceRule(
+            application_id=4,
+            application_domain="alpha.example",
+            target_domain="beta.example",
+            effect="deny",
+        )
     )
-
+    await session.flush()
     rows = await directory_rows(
         session,
         SimpleNamespace(domain="alpha.example"),
         DirectorySearch(limit=2),
         target_domain="beta.example",
     )
-
-    assert rows == []
-    statement = session.execute.await_args.args[0]
-    assert statement._limit_clause.value == 3
-    rendered = str(statement)
-    assert "min(bot_install_templates.id)" in rendered
-    assert "bot_instance_rules.effect" in rendered
+    # The third eligible row is the pagination sentinel, after policy filtering.
+    assert [app.id for app, _template in rows] == [5, 6, 7]
+    assert [template.application_id for _app, template in rows] == [5, 6, 7]
 
 
 @pytest.mark.asyncio

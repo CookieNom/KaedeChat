@@ -226,9 +226,13 @@ void main() {
       ),
     ));
 
-    expect(find.text('Followers are unavailable'), findsOneWidget);
     expect(
-      find.textContaining('View Channel and Read Message History'),
+        find.textContaining(
+            RegExp(r'followers.*unavailable', caseSensitive: false)),
+        findsOneWidget);
+    expect(
+      find.textContaining(
+          RegExp(r'view channel.*read message history', caseSensitive: false)),
       findsOneWidget,
     );
   });
@@ -245,7 +249,8 @@ void main() {
       type: 0,
       permissions: Permission.manageWebhooks,
     );
-    final guild = _guild('1', 'Local', <KaedeChannel>[source, target]);
+    final denied = _channel(id: '4', type: 0, permissions: 0);
+    final guild = _guild('1', 'Local', <KaedeChannel>[source, target, denied]);
     final repository = KaedeRepository(
       KaedeApiClient(
         vault: const SessionVault(),
@@ -285,6 +290,20 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('No follower channels yet'), findsOneWidget);
+    final sourcePicker = tester.widget<DropdownButton<EntityRef>>(
+        find.descendant(
+            of: find.byKey(
+                const ValueKey('announcement-source-picker-2@chat.example')),
+            matching: find.byType(DropdownButton<EntityRef>)));
+    expect(sourcePicker.items!.map((item) => item.value?.wire),
+        ['2@chat.example']);
+    final targetPicker = tester.widget<DropdownButton<EntityRef>>(
+        find.descendant(
+            of: find.byKey(const ValueKey(
+                'announcement-target-picker-2@chat.example-null')),
+            matching: find.byType(DropdownButton<EntityRef>)));
+    expect(targetPicker.items!.map((item) => item.value?.wire),
+        ['3@chat.example']);
   });
 
   testWidgets('channel Follow surface fixes the source and hides management',

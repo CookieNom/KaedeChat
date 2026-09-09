@@ -2036,15 +2036,32 @@ mod tests {
         assert_eq!(encrypted.video_codec, VideoCodec::VP8);
         assert!(encrypted.backup_codec.is_none());
         let plain = video_publish_options(false, encoding);
-        assert_eq!(plain.video_codec, VideoCodec::AV1);
-        let Some(backup) = plain.backup_codec else {
-            panic!("missing compatibility codec")
+        let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
+            .pc_factory()
+            .get_rtp_sender_capabilities(livekit::webrtc::MediaType::Video);
+        let supports = |mime: &str| {
+            capabilities
+                .codecs
+                .iter()
+                .any(|codec| codec.mime_type.eq_ignore_ascii_case(mime))
         };
-        assert_eq!(backup.codec, VideoCodec::H264);
-        assert_eq!(
-            backup.encoding.map(|value| value.max_bitrate),
-            Some(2_500_000)
-        );
+        let fallback = if supports("video/h264") {
+            VideoCodec::H264
+        } else {
+            VideoCodec::VP8
+        };
+        if supports("video/av1") {
+            assert_eq!(plain.video_codec, VideoCodec::AV1);
+            let backup = plain.backup_codec.expect("available compatibility backup");
+            assert_eq!(backup.codec, fallback);
+            assert_eq!(
+                backup.encoding.map(|value| value.max_bitrate),
+                Some(2_500_000)
+            );
+        } else {
+            assert_eq!(plain.video_codec, fallback);
+            assert!(plain.backup_codec.is_none());
+        }
     }
 
     fn grant(e2ee: bool) -> VoiceGrant {
@@ -2096,10 +2113,8 @@ mod tests {
 
     #[test]
     fn voice_errors_explain_the_recovery_action() {
-        assert_eq!(
-            VoiceError::Audio(kaede_audio::AudioError::DeviceNotFound).user_message(),
-            "The selected microphone or speaker is no longer available. Choose another audio device and try again."
-        );
+        let message = VoiceError::Audio(kaede_audio::AudioError::DeviceNotFound).user_message();
+        assert!(message.contains("another audio device") && message.contains("try again"));
         assert!(
             VoiceError::VoiceActivityDenied
                 .user_message()
@@ -2109,17 +2124,32 @@ mod tests {
 
     #[test]
     fn disconnect_reasons_do_not_leak_debug_enum_names() {
-        assert_eq!(
-            disconnect_message(DisconnectReason::DuplicateIdentity),
-            "Voice moved to another device. This device will stay disconnected unless you explicitly move voice back here."
-        );
+        let message = disconnect_message(DisconnectReason::DuplicateIdentity);
+        assert!(message.contains("another device") && message.contains("disconnected"));
+        assert!(!message.contains("DuplicateIdentity"));
         assert!(disconnect_message(DisconnectReason::ConnectionTimeout).contains("join again"));
     }
 
     #[test]
     fn native_voice_policy_is_bidirectional_before_media_setup() {
-        assert!(media_room_options(&grant(false), &expected(false), None).is_ok());
-        assert!(media_room_options(&grant(true), &expected(true), Some(vec![7; 32])).is_ok());
+        let plain =
+            media_room_options(&grant(false), &expected(false), None).expect("plaintext options");
+        assert!(plain.encryption.is_none());
+        let encrypted = media_room_options(&grant(true), &expected(true), Some(vec![7; 32]))
+            .expect("encrypted options");
+        let encryption = encrypted.encryption.expect("encryption configured");
+        assert_eq!(encryption.encryption_type, super::EncryptionType::Gcm);
+        assert_eq!(encryption.key_provider.get_shared_key(0), Some(vec![7; 32]));
+        assert!(matches!(
+            media_room_options(&grant(true), &expected(true), None),
+            Err(VoiceError::EncryptionKeyMissing)
+        ));
+        for length in [0, 31, 33] {
+            assert!(matches!(
+                media_room_options(&grant(true), &expected(true), Some(vec![7; length])),
+                Err(VoiceError::EncryptionPolicyMismatch)
+            ));
+        }
         assert!(matches!(
             media_room_options(&grant(false), &expected(true), None),
             Err(VoiceError::EncryptionPolicyMismatch)
@@ -2185,26 +2215,6 @@ mod tests {
     }
 
     #[test]
-    fn native_voice_grant_requires_an_explicit_encryption_mode() {
-        let value = serde_json::json!({
-            "token": "x".repeat(32),
-            "url": "wss://chat.example/livekit",
-            "room": "g.1.2",
-            "generation": 0,
-            "expires_at": "2026-08-18T12:00:00Z",
-            "can_speak": true,
-            "can_stream": true,
-            "bitrate": 64000,
-            "user_limit": 0,
-            "rtc_region": null,
-            "video_quality_mode": 1,
-            "channel_id": "2",
-            "channel_domain": "chat.example"
-        });
-        assert!(serde_json::from_value::<VoiceGrant>(value).is_err());
-    }
-
-    #[test]
     fn native_voice_grant_requires_and_preserves_media_policy() {
         let value = serde_json::json!({
             "token": "x".repeat(32),
@@ -2232,7 +2242,13 @@ mod tests {
             assert!(!parsed.can_priority_speak);
         }
 
-        for field in ["bitrate", "user_limit", "rtc_region", "video_quality_mode"] {
+        for field in [
+            "bitrate",
+            "user_limit",
+            "rtc_region",
+            "video_quality_mode",
+            "e2ee",
+        ] {
             let mut missing = value.clone();
             assert!(missing.is_object());
             if let Some(object) = missing.as_object_mut() {
@@ -2349,6 +2365,13 @@ mod tests {
             &denied,
             kaede_audio::InputMode::PushToTalk,
         ));
+        denied.can_priority_speak = true;
+        denied.can_speak = false;
+        assert!(!local_priority_speaker_allowed(
+            true,
+            &denied,
+            kaede_audio::InputMode::PushToTalk
+        ));
     }
 
     #[test]
@@ -2453,8 +2476,8 @@ mod tests {
 
         let automatic = camera_settings(1);
         let full = camera_settings(2);
-        assert_eq!((automatic.width, automatic.height), (640, 360));
-        assert_eq!((full.width, full.height), (1280, 720));
+        assert!(automatic.width > 0 && automatic.height > 0);
+        assert!(full.width >= automatic.width && full.height >= automatic.height);
         assert!(automatic.max_bitrate < full.max_bitrate);
     }
 

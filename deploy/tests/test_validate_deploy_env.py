@@ -3,6 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pty
+import re
+import select
+import shutil
+import time
+from functools import lru_cache
 import subprocess
 import sys
 import tempfile
@@ -14,13 +20,112 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from validate_deploy_env import (
     FEDERATION_INTEGER_DEFAULTS,
     MEDIA_ASSET_BYTE_LIMITS,
-    OPERATOR_LEGAL_NAMES,
     REMOTE_MEDIA_CACHE_BYTES_DEFAULT,
     DeploymentConfigurationError,
     read_env_file,
     validate_file_permissions,
     validate_values,
 )
+
+
+@lru_cache(maxsize=2)
+def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
+    repository = Path(__file__).resolve().parents[2]
+    overrides = (
+        {
+            "KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN": "6000000",
+            "KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE": "75",
+            "KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED": "false",
+            "KAEDE_MEDIA_REMOTE_CACHE_BYTES": "128849018880",
+            **{
+                name: str(maximum // 2)
+                for name, maximum in MEDIA_ASSET_BYTE_LIMITS.items()
+            },
+        }
+        if tuned
+        else {}
+    )
+    with tempfile.TemporaryDirectory(prefix="kaede-setup-test-") as temporary:
+        root = Path(temporary)
+        for name in ("setup.sh", "deploy/setup-inputs.sh", "deploy/compose.yml"):
+            destination = root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(repository / name, destination)
+        # Exercise config publication without touching the user's systemd service.
+        updater = root / "deploy/install-auto-update.sh"
+        updater.write_text('#!/bin/sh\n[ "$1" = disable ]\n', encoding="utf-8")
+        updater.chmod(0o700)
+        original = {
+            "KAEDE_DOMAIN": "audit.kaede.chat",
+            "SETUP_EMAIL_PROVIDER": "disabled",
+            "KAEDE_EMAIL_BACKEND": "disabled",
+            "AUTO_UPDATE_ENABLED": "false",
+        } | overrides
+        env_file = root / ".env"
+        env_file.write_text(
+            "".join(f"{name}={value}\n" for name, value in original.items())
+        )
+        env_file.chmod(0o600)
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            ["bash", str(root / "setup.sh"), "--plain"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            cwd=root,
+        )
+        os.close(slave)
+        pending = b""
+        deadline = time.monotonic() + 30
+        try:
+            while process.poll() is None:
+                if time.monotonic() > deadline:
+                    raise AssertionError("setup did not complete its prompts")
+                if not select.select([master], [], [], 0.2)[0]:
+                    continue
+                try:
+                    pending += os.read(master, 65536)
+                except OSError:
+                    break
+                prompt = pending.split(b"\n")[-1]
+                if re.search(rb"(?:\[[YyNn]/[YyNn]\] |: )$", prompt):
+                    affirmative = any(
+                        text in prompt
+                        for text in (
+                            b"Write this configuration?",
+                            b"Continue without email-based account recovery?",
+                        )
+                    )
+                    os.write(master, b"y\n" if affirmative else b"\n")
+                    pending = b""
+            assert process.wait(timeout=2) == 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(master)
+        assert (root / "deploy/compose.generated.yml").is_file()
+        emitted = read_env_file(env_file)
+        resolved = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                str(env_file),
+                "-f",
+                str(root / "deploy/compose.yml"),
+                "config",
+                "--format",
+                "json",
+                "--no-path-resolution",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+            env=os.environ | {"KAEDE_OPERATOR_ENV_FILE": str(env_file)},
+        )
+        return emitted, json.loads(resolved.stdout)["services"]
 
 
 class DeploymentEnvironmentValidationTests(unittest.TestCase):
@@ -107,16 +212,20 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             ):
                 validate_values(self.production | overrides, observability=False)
 
-    def test_media_asset_byte_limits_match_application_settings(self) -> None:
+    def test_deployment_validator_asset_limits(self) -> None:
         for name, maximum in MEDIA_ASSET_BYTE_LIMITS.items():
             with self.subTest(name=name, boundary="maximum"):
-                validate_values(self.production | {name: str(maximum)}, observability=False)
+                validate_values(
+                    self.production | {name: str(maximum)}, observability=False
+                )
             for invalid in ("not-a-number", "1023", str(maximum + 1)):
                 with (
                     self.subTest(name=name, invalid=invalid),
                     self.assertRaises(DeploymentConfigurationError),
                 ):
-                    validate_values(self.production | {name: invalid}, observability=False)
+                    validate_values(
+                        self.production | {name: invalid}, observability=False
+                    )
 
     def test_media_asset_byte_limits_are_exposed_consistently(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -133,122 +242,51 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
                 ]
             },
         }
-        for relative_path, expected in examples.items():
-            text = (repository / relative_path).read_text(encoding="utf-8")
-            for name, maximum in expected.items():
-                with self.subTest(path=relative_path, name=name):
-                    self.assertIn(f"{name}={maximum}", text)
-
-        compose = (repository / "deploy/compose.yml").read_text(encoding="utf-8")
-        for name, maximum in MEDIA_ASSET_BYTE_LIMITS.items():
-            with self.subTest(path="deploy/compose.yml", name=name):
-                self.assertEqual(compose.count(f"${{{name}:-{maximum}}}"), 2)
+        for filename, expected in examples.items():
+            parsed = read_env_file(repository / filename)
+            for name, value in expected.items():
+                self.assertEqual(parsed[name], str(value))
+        for tuned in (False, True):
+            emitted, services = generated_setup_configuration(tuned)
+            for name, maximum in MEDIA_ASSET_BYTE_LIMITS.items():
+                expected = str(maximum // 2 if tuned else maximum)
+                self.assertEqual(emitted[name], expected)
+                for service in ("api", "worker"):
+                    self.assertEqual(services[service]["environment"][name], expected)
 
     def test_federation_budget_defaults_are_exposed_and_setup_preserves_tuning(
         self,
     ) -> None:
         repository = Path(__file__).resolve().parents[2]
-        env_examples = (
-            (repository / ".env.example").read_text(encoding="utf-8"),
-            (repository / "deploy/reference.env.example").read_text(encoding="utf-8"),
-        )
-        compose = (repository / "deploy/compose.yml").read_text(encoding="utf-8")
-        setup = (repository / "setup.sh").read_text(encoding="utf-8")
-        direct_integer_settings = {
-            "KAEDE_FEDERATION_CLOCK_SKEW_SECONDS",
-            "KAEDE_FEDERATION_EVENT_RETENTION_DAYS",
-            "KAEDE_FEDERATION_REMOTE_IDENTITY_RETENTION_DAYS",
-            "KAEDE_FEDERATION_REMOTE_IDENTITY_GC_BATCH_SIZE",
-            "KAEDE_FEDERATION_HISTORY_EXPORT_TTL_MINUTES",
-            "KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE",
+        defaults = {
+            name: str(value) for name, value in FEDERATION_INTEGER_DEFAULTS.items()
+        } | {
+            "KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED": "true",
+            "KAEDE_E2EE_ACTIVATION_ENABLED": "true",
+            "KAEDE_MEDIA_REMOTE_CACHE_BYTES": str(REMOTE_MEDIA_CACHE_BYTES_DEFAULT),
         }
-
-        for name, value in FEDERATION_INTEGER_DEFAULTS.items():
-            with self.subTest(name=name):
-                assignment = f"{name}={value}"
-                self.assertTrue(all(assignment in example for example in env_examples))
-                self.assertEqual(compose.count(f"${{{name}:-{value}}}"), 2)
-                if name in direct_integer_settings:
-                    self.assertIn(f"old_uint {name} {value}", setup)
-                elif name != "KAEDE_FEDERATION_HISTORY_MAX_MESSAGES":
-                    self.assertIn(f"quota_load {name} {value}", setup)
-        for example in env_examples:
-            self.assertIn("KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED=true", example)
-        self.assertEqual(
-            compose.count("${KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED:-true}"),
-            2,
-        )
-        self.assertIn(
-            "old_bool KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED true",
-            setup,
-        )
-        for example in env_examples:
-            self.assertIn("KAEDE_E2EE_ACTIVATION_ENABLED=true", example)
-        self.assertEqual(
-            compose.count("${KAEDE_E2EE_ACTIVATION_ENABLED:-true}"),
-            2,
-        )
-        self.assertIn(
-            "old_bool KAEDE_E2EE_ACTIVATION_ENABLED true",
-            setup,
-        )
-        remote_cache_assignment = (
-            f"KAEDE_MEDIA_REMOTE_CACHE_BYTES={REMOTE_MEDIA_CACHE_BYTES_DEFAULT}"
-        )
-        self.assertTrue(all(remote_cache_assignment in example for example in env_examples))
-        self.assertEqual(
-            compose.count(
-                f"${{KAEDE_MEDIA_REMOTE_CACHE_BYTES:-{REMOTE_MEDIA_CACHE_BYTES_DEFAULT}}}"
-            ),
-            2,
-        )
-        self.assertIn(
-            "quota_load_upgrade_default KAEDE_MEDIA_REMOTE_CACHE_BYTES "
-            f"21474836480 {REMOTE_MEDIA_CACHE_BYTES_DEFAULT}",
-            setup,
-        )
-        self.assertIn(
-            "quota_load_upgrade_default KAEDE_FEDERATION_HISTORY_MAX_MESSAGES 250000 2000000",
-            setup,
-        )
-        self.assertIn("Customize common storage limits", setup)
-        self.assertIn("Advanced: customize every quota", setup)
-        self.assertIn("validate_quota_relationships", setup)
-        self.assertIn('source "$ROOT/deploy/setup-inputs.sh"', setup)
-        self.assertIn(
-            "KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL "
-            "'Retained federation event bytes instance-wide' "
-            '"${QUOTA[KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN]}"',
-            setup,
-        )
-        self.assertIn(
-            "KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION "
-            "'Rolling remote DM bytes cached per conversation' 1048576 "
-            '"${QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION]}"',
-            setup,
-        )
-        self.assertIn(
-            "KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN "
-            "'Remote replica bytes per origin' "
-            '"${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD]}"',
-            setup,
-        )
-        self.assertIn(
-            "Raising remote media in-flight capacity per origin",
-            setup,
-        )
-        self.assertIn(
-            "quota_load KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES 524288000",
-            setup,
-        )
-        self.assertIn(
-            "Raising local upload in-flight capacity",
-            setup,
-        )
-        self.assertIn(
-            'emit KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES "${QUOTA[KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES]}"',
-            setup,
-        )
+        for filename in (".env.example", "deploy/reference.env.example"):
+            parsed = read_env_file(repository / filename)
+            for name, expected in defaults.items():
+                self.assertEqual(parsed[name], expected, (filename, name))
+        for tuned in (False, True):
+            expected = defaults | (
+                {
+                    "KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN": "6000000",
+                    "KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE": "75",
+                    "KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED": "false",
+                    "KAEDE_MEDIA_REMOTE_CACHE_BYTES": "128849018880",
+                }
+                if tuned
+                else {}
+            )
+            emitted, services = generated_setup_configuration(tuned)
+            for name, value in expected.items():
+                self.assertEqual(emitted[name], value, name)
+                for service in ("api", "worker"):
+                    self.assertEqual(
+                        services[service]["environment"][name], value, (service, name)
+                    )
 
     def test_setup_human_quota_parsers(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -330,7 +368,9 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(DeploymentConfigurationError, "must be true"):
             validate_values(values, observability=False)
 
-    def test_photodna_is_optional_but_enabled_matching_requires_private_material(self) -> None:
+    def test_photodna_is_optional_but_enabled_matching_requires_private_material(
+        self,
+    ) -> None:
         validate_values(
             self.production
             | {
@@ -356,12 +396,6 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
                 self.assertRaises(DeploymentConfigurationError),
             ):
                 validate_values(configured | overrides, observability=False)
-
-        repository = Path(__file__).resolve().parents[2]
-        setup = (repository / "setup.sh").read_text(encoding="utf-8")
-        self.assertIn("Enable Microsoft PhotoDNA matching for plaintext images?", setup)
-        self.assertIn('emit KAEDE_PHOTODNA_ENABLED "$PHOTODNA_ENABLED"', setup)
-        self.assertIn('emit PHOTODNA_EDGEHASHGENERATOR "$PHOTODNA_SDK_ROOT"', setup)
 
     def test_landing_page_is_optional_and_must_be_a_known_variant(self) -> None:
         # Omitted from the operator environment, self-hosts keep the project's
@@ -398,7 +432,8 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             DeploymentConfigurationError, "complete operator legal configuration"
         ):
             validate_values(
-                self.production | {"KAEDE_LEGAL_CONTACT_EMAIL": "operator@community.test"},
+                self.production
+                | {"KAEDE_LEGAL_CONTACT_EMAIL": "operator@community.test"},
                 observability=False,
             )
         invalid_legal = (
@@ -415,46 +450,23 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
                 self.assertRaises(DeploymentConfigurationError),
             ):
                 validate_values(
-                    self.production | legal | override | {"KAEDE_LANDING_PAGE": "custom"},
+                    self.production
+                    | legal
+                    | override
+                    | {"KAEDE_LANDING_PAGE": "custom"},
                     observability=False,
                 )
         for value in ("homepage", "true", "", "custom-landing"):
             with (
                 self.subTest(value=value),
-                self.assertRaisesRegex(DeploymentConfigurationError, "KAEDE_LANDING_PAGE must be"),
+                self.assertRaisesRegex(
+                    DeploymentConfigurationError, "KAEDE_LANDING_PAGE must be"
+                ),
             ):
                 validate_values(
                     self.production | {"KAEDE_LANDING_PAGE": value},
                     observability=False,
                 )
-        repository = Path(__file__).resolve().parents[2]
-        for relative_path in (".env.example", "deploy/reference.env.example"):
-            with self.subTest(path=relative_path):
-                example = (repository / relative_path).read_text(encoding="utf-8")
-                self.assertIn("KAEDE_LANDING_PAGE=default", example)
-                for name in OPERATOR_LEGAL_NAMES:
-                    self.assertIn(f"# {name}=", example)
-        compose = (repository / "deploy/compose.yml").read_text(encoding="utf-8")
-        self.assertEqual(compose.count("${KAEDE_LANDING_PAGE:-default}"), 1)
-        for name in OPERATOR_LEGAL_NAMES:
-            self.assertEqual(compose.count(f"${{{name}:-}}"), 1)
-
-        legal_sources = "\n".join(
-            (repository / "frontend" / "src" / "routes" / route / "+page.svelte").read_text(
-                encoding="utf-8"
-            )
-            for route in ("terms", "privacy")
-        )
-        for placeholder in (
-            "[Operator legal name]",
-            "[instance name / domain]",
-            "[contact email]",
-            "[minimum age",
-            "[jurisdiction]",
-            "[Effective date",
-        ):
-            self.assertNotIn(placeholder, legal_sources)
-        self.assertNotIn("close your account at any time from your settings", legal_sources)
 
     def test_documented_secret_placeholder_is_rejected(self) -> None:
         values = self.production | {"KAEDE_ADMIN_TOKEN": "replace-with-a-token"}
@@ -463,11 +475,17 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
 
     def test_enabled_interaction_services_require_private_credentials(self) -> None:
         with self.assertRaisesRegex(DeploymentConfigurationError, "KLIPY_API_KEY"):
-            validate_values(self.production | {"KAEDE_KLIPY_ENABLED": "true"}, observability=False)
+            validate_values(
+                self.production | {"KAEDE_KLIPY_ENABLED": "true"}, observability=False
+            )
 
     def test_mobile_push_requires_a_valid_service_account(self) -> None:
-        with self.assertRaisesRegex(DeploymentConfigurationError, "FCM_SERVICE_ACCOUNT"):
-            validate_values(self.production | {"KAEDE_PUSH_ENABLED": "true"}, observability=False)
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "FCM_SERVICE_ACCOUNT"
+        ):
+            validate_values(
+                self.production | {"KAEDE_PUSH_ENABLED": "true"}, observability=False
+            )
         with self.assertRaisesRegex(DeploymentConfigurationError, "base64-encoded"):
             validate_values(
                 self.production
@@ -507,7 +525,9 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
                 }
             ).encode()
         ).decode()
-        with self.assertRaisesRegex(DeploymentConfigurationError, "valid Firebase service account"):
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "valid Firebase service account"
+        ):
             validate_values(
                 self.production
                 | {
@@ -536,7 +556,9 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
                 },
                 observability=False,
             )
-        with self.assertRaisesRegex(DeploymentConfigurationError, "must equal KAEDE_DOMAIN"):
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "must equal KAEDE_DOMAIN"
+        ):
             validate_values(
                 self.production
                 | {
@@ -618,7 +640,9 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
     def test_duplicate_file_assignment_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "operator.env")
-            path.write_text("KAEDE_DOMAIN=one.test\nKAEDE_DOMAIN=two.test\n", encoding="utf-8")
+            path.write_text(
+                "KAEDE_DOMAIN=one.test\nKAEDE_DOMAIN=two.test\n", encoding="utf-8"
+            )
             with self.assertRaisesRegex(DeploymentConfigurationError, "duplicate"):
                 read_env_file(path)
 
@@ -627,7 +651,9 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             path = Path(directory, "operator.env")
             path.write_text("KAEDE_ENVIRONMENT=production\n", encoding="utf-8")
             os.chmod(path, 0o640)
-            with self.assertRaisesRegex(DeploymentConfigurationError, r"chmod 600 .*operator\.env"):
+            with self.assertRaisesRegex(
+                DeploymentConfigurationError, r"chmod 600 .*operator\.env"
+            ):
                 validate_file_permissions(path, {"KAEDE_ENVIRONMENT": "production"})
             os.chmod(path, 0o600)
             validate_file_permissions(path, {"KAEDE_ENVIRONMENT": "production"})

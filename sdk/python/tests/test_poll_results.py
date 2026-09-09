@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from kaede_bot import Message
 
@@ -88,14 +90,44 @@ def test_sdk_derives_encrypted_labels_only_from_verified_referenced_poll() -> No
     }
 
     result = parse_message(payload).poll_result
-
     assert result is not None
-    assert result.question_text == "Secret question"
-    assert result.victor_answer_text == "Secret winner"
+    assert result.question_text is None
+    assert result.victor_answer_text is None
+
+    # This API accepts caller-verified polls. Authenticate the separate fixture
+    # before handing it over; do not treat the nested network projection as proof.
+    source = json.dumps(payload["referenced_message"], sort_keys=True).encode()
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    signature = key.sign(source)
+    with pytest.raises(InvalidSignature):
+        key.public_key().verify(
+            signature, source.replace(b"Secret winner", b"Forged winner")
+        )
+    key.public_key().verify(signature, source)
+    verified = json.loads(source)
+    assert verified["id"] + "@" + verified["origin_domain"] == str(
+        result.poll_message_ref
+    )
+    resolved = result.with_verified_poll(verified["poll"])
+    assert resolved.question_text == "Secret question"
+    assert resolved.victor_answer_text == "Secret winner"
+    assert result.question_text is None
 
 
 def test_sdk_keeps_encrypted_labels_unavailable_without_verified_source() -> None:
-    result = parse_message(result_payload(mode="e2ee")).poll_result
+    payload = result_payload(mode="e2ee")
+    payload["referenced_message"] = {
+        "id": "123",
+        "origin_domain": "polls.example",
+        "channel_id": "77",
+        "channel_domain": "polls.example",
+        "poll": {
+            "question": {"text": "unverified secret"},
+            "answers": [{"answer_id": 1, "poll_media": {"text": "forged winner"}}],
+        },
+        "attachments": [],
+    }
+    result = parse_message(payload).poll_result
 
     assert result is not None
     assert result.question_text is None
@@ -143,3 +175,20 @@ def test_sdk_consumes_shared_poll_result_vectors() -> None:
         parsed = parse_message({**message, "id": raw_id})
         assert parsed.poll_result is not None
         assert parsed.poll_result.poll_message_ref == parsed.referenced_message_ref
+        result = parsed.poll_result
+        expected = message["poll_result"]
+        assert result.total_votes == expected["total_votes"]
+        assert result.victor_answer_id == expected["victor_answer_id"]
+        assert result.victor_answer_votes == expected["victor_answer_votes"]
+        assert [(item.id, item.count) for item in result.answer_counts] == [
+            (item["id"], item["count"]) for item in expected["answer_counts"]
+        ]
+        if expected["source_encryption_mode"] == "e2ee":
+            assert result.question_text is None
+            assert result.victor_answer_text is None
+        else:
+            fields = {
+                item["name"]: item["value"] for item in message["embeds"][0]["fields"]
+            }
+            assert result.question_text == fields.get("poll_question_text")
+            assert result.victor_answer_text == fields.get("victor_answer_text")

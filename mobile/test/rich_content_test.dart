@@ -217,8 +217,7 @@ void main() {
     }
   });
 
-  test('poll drafts enforce Discord wire limits and preserve emoji identity',
-      () {
+  test('minimum poll answers and emoji serialization', () {
     final draft = RichPollDraft(
       question: ' Ship now? ',
       answers: <RichPollDraftAnswer>[
@@ -303,6 +302,20 @@ void main() {
         'created_at': '2026-08-28T00:00:00Z',
       };
       final message = KaedeMessage.fromJson(payload);
+      final expected = {
+        'plaintext_unique_winner': (4, 1, 3, 'Ship it?', 'Yes'),
+        'e2ee_unique_winner_federated_ref': (7, 2, 5, null, null),
+        'tie': (4, null, 2, 'Tie?', null),
+        'no_votes': (0, null, 0, 'Anyone?', null),
+      }[vector['name']]!;
+      final result = message.pollResult!;
+      expect((
+        result.totalVotes,
+        result.victorAnswerId,
+        result.victorAnswerVotes,
+        result.questionText,
+        result.victorAnswerText
+      ), expected);
       expect(message.pollResult?.pollMessageRef, message.reference);
       expect(KaedeMessage.fromJson(message.toJson()).pollResult, isNotNull);
 
@@ -340,18 +353,21 @@ void main() {
         final resolved = resolvedMessagePollResult(message, source);
         expect(resolved?.questionText, 'Secret launch choice');
         expect(resolved?.victorAnswerText, 'Launch');
-        expect(
-          resolvedMessagePollResult(
-            message,
-            KaedeMessage(
-              ref: source.ref,
-              channelRef: source.channelRef,
-              authorRef: source.authorRef,
-              createdAt: source.createdAt,
-            ),
+        final unverified = resolvedMessagePollResult(
+          message,
+          KaedeMessage(
+            ref: source.ref,
+            channelRef: source.channelRef,
+            authorRef: source.authorRef,
+            createdAt: source.createdAt,
+            e2ee: source.e2ee,
+            e2eeVerified: false,
+            poll: source.poll,
           ),
-          isNull,
         );
+        expect(unverified?.questionText, isNull);
+        expect(unverified?.victorAnswerText, isNull);
+        expect(unverified?.totalVotes, 7);
       }
     }
 
@@ -417,6 +433,10 @@ void main() {
         );
 
     final source = channel('10', guildRef: guild);
+    expect(
+        canForwardMessageToChannel(
+            source, channel('11', guildRef: guild, permissions: 0)),
+        isFalse);
     expect(canForwardMessageToChannel(source, channel('11', guildRef: guild)),
         isTrue);
     expect(
@@ -564,8 +584,7 @@ void main() {
     expect(notice.followedGuildRef?.wire, '9@source.example');
     expect(
       channelFollowSystemMessageText(notice, <KaedeChannel>[known]),
-      'maple has added #release-notes to this channel. '
-      'Its most important updates will show up here.',
+      matches(RegExp(r'maple.*added.*#release-notes')),
     );
     expect(
       channelFollowSystemMessageText(
@@ -656,7 +675,7 @@ void main() {
       <String, Object?>{...valid, 'message_ref': '9@other.example'},
       <String, Object?>{
         ...valid,
-        'sequence': BigInt.parse('9223372036854775808'),
+        'sequence': '9223372036854775808',
       },
       <String, Object?>{...valid, 'operation': 'UPDATE', 'revision': '1'},
       <String, Object?>{...valid, 'data': <Object?>[]},
@@ -778,6 +797,17 @@ void main() {
           data: <String, Object?>{'content': 'Follow-up', 'flags': 64}),
     );
 
+    responses = applyMobileInteractionResponseEvent(
+        responses,
+        'INTERACTION_RESPONSE_CREATE',
+        interactionResponseEvent('CREATE',
+            responseId: '73',
+            sequence: 2,
+            ephemeral: true,
+            data: <String, Object?>{
+              'content': 'Other follow-up',
+              'flags': 64
+            }));
     expect(responses.keys,
         containsAll(<String>['71@c1.example', '72@c1.example']));
     expect(responses['71@c1.example']?.data['content'], 'Finished');
@@ -789,6 +819,10 @@ void main() {
           responseId: '72', revision: '2', deletedAt: '2026-08-28T00:00:00Z'),
     );
     expect(responses['72@c1.example']?.deletedAt, isNotNull);
+    expect(responses['71@c1.example']?.data['content'], 'Finished');
+    expect(responses['71@c1.example']?.deletedAt, isNull);
+    expect(responses['73@c1.example']?.data['content'], 'Other follow-up');
+    expect(responses['73@c1.example']?.deletedAt, isNull);
 
     responses = applyMobileInteractionResponseEvent(
       responses,
@@ -799,6 +833,10 @@ void main() {
           data: <String, Object?>{'content': 'revived'}),
     );
     expect(responses['72@c1.example']?.deletedAt, isNotNull);
+    expect(responses['71@c1.example']?.data['content'], 'Finished');
+    expect(responses['71@c1.example']?.deletedAt, isNull);
+    expect(responses['73@c1.example']?.data['content'], 'Other follow-up');
+    expect(responses['73@c1.example']?.deletedAt, isNull);
   });
 
   test('private response identities remain isolated across authorities', () {

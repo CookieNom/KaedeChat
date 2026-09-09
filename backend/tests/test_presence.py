@@ -59,7 +59,7 @@ async def test_account_presence_broadcast_includes_private_preference_only(
     )
 
     assert (visible, generation) == ("offline", 17)
-    assert published == [
+    expected = [
         (
             "user:alpha.test:7",
             {
@@ -88,3 +88,8 @@ async def test_account_presence_broadcast_includes_private_preference_only(
             17,
         ),
     ]
+
+    assert len(published) == len(expected)
+    assert {topic: (data, generation) for topic, data, generation in published} == {
+        topic: (data, generation) for topic, data, generation in expected
+    }

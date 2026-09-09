@@ -29,7 +29,7 @@ void main() {
     expect(parseTtsCommand('/ttsx hello'), (matched: false, content: ''));
   });
 
-  test('defaults to disabled and never speaks unexpectedly', () {
+  test('default-disabled TTS eligibility', () {
     final preferences = TtsPreferences.fromSettings(const <String, Object?>{});
     expect(preferences.enabled, isFalse);
     expect(preferences.playback, TtsPlaybackMode.never);
@@ -44,6 +44,14 @@ void main() {
   });
 
   test('current channel mode only reads the selected conversation', () {
+    expect(
+        shouldPlayTtsMessage(
+          message,
+          selectedChannel: EntityRef(Snowflake('10'), Domain('other.example')),
+          preferences: const TtsPreferences(
+              enabled: true, playback: TtsPlaybackMode.current),
+        ),
+        isFalse);
     const preferences = TtsPreferences(
       enabled: true,
       playback: TtsPlaybackMode.current,
@@ -78,6 +86,13 @@ void main() {
     );
 
     expect(
+        shouldPlayTtsMessage(
+          injected.copyWith(e2eeVerified: true),
+          selectedChannel: channel,
+          preferences: preferences,
+        ),
+        isTrue);
+    expect(
       shouldPlayTtsMessage(
         injected,
         selectedChannel: channel,
@@ -95,7 +110,12 @@ void main() {
     );
     expect(
       preferences.mergeInto(const <String, Object?>{'mentions': true}),
-      containsPair('mentions', true),
+      <String, Object?>{
+        'mentions': true,
+        'tts_enabled': true,
+        'tts_playback': 'all',
+        'tts_rate': 1.4
+      },
     );
     expect(preferences.mergeInto(null), containsPair('tts_playback', 'all'));
   });

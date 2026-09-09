@@ -43,8 +43,17 @@ describe('guild sticker identity', () => {
     expect(
       stickerOptions([other, sticker], { id: '10', origin_domain: 'chat.example' })[0].id
     ).toBe(sticker.id);
+    expect(
+      stickerOptions([sticker, other], { id: '10', origin_domain: 'chat.example' }).map(
+        ({ id }) => id
+      )
+    ).toEqual([sticker.id, other.id]);
+    expect(
+      stickerOptions([other, sticker], { id: '11', origin_domain: 'chat.example' }).map(
+        ({ id }) => id
+      )
+    ).toEqual([other.id, sticker.id]);
   });
-
   it('builds the Discord message sticker reference and immutable snapshot', () => {
     const option = stickerOptions([sticker])[0];
     expect(option.value).toBe('75512661369970688@chat.example');

@@ -107,7 +107,7 @@ void main() {
           key,
           envelope,
         ),
-        throwsA(anything),
+        throwsA(isA<SecretBoxAuthenticationError>()),
       );
     } finally {
       key.destroy();
@@ -168,7 +168,7 @@ void main() {
             'ciphertext': expectedCiphertext,
           },
         ),
-        throwsA(anything),
+        throwsA(isA<SecretBoxAuthenticationError>()),
       );
     } finally {
       key.destroy();
@@ -229,7 +229,7 @@ void main() {
 
   test('portable schema has exact ordered keys and structured cache entries',
       () {
-    expect(state.toPortableJson().keys.toList(), <String>[
+    expect(state.toPortableJson().keys.toSet(), <String>{
       'schema',
       'accountRef',
       'deviceId',
@@ -240,7 +240,7 @@ void main() {
       'messageCache',
       'controlCursors',
       'pendingRoomOperations',
-    ]);
+    });
     expect(
       state.toPortableJson()['messageCache'],
       <String, Object?>{
@@ -263,6 +263,16 @@ void main() {
   });
 
   test('plaintext cache evicts oldest entries to its byte budget', () {
+    int serializedBytes(Map<String, MobileMessageCacheEntry> entries) => utf8
+        .encode(jsonEncode(
+            entries.map((key, value) => MapEntry(key, <String, Object?>{
+                  'plaintext': value.plaintext,
+                  'authorRef': value.authorRef,
+                  'messageRef': value.messageRef,
+                  'applicationRef': null,
+                  'webhookRef': null,
+                }))))
+        .length;
     final cache = <String, MobileMessageCacheEntry>{
       'YQ': const MobileMessageCacheEntry(
         plaintext: 'first',
@@ -270,17 +280,17 @@ void main() {
         messageRef: '2@example.com',
       ),
       'Yg': const MobileMessageCacheEntry(
-        plaintext: 'second',
+        plaintext: '楓🌸',
         authorRef: accountRef,
         messageRef: '3@example.com',
       ),
       'Yw': const MobileMessageCacheEntry(
-        plaintext: 'third',
+        plaintext: '三番目',
         authorRef: accountRef,
         messageRef: '4@example.com',
       ),
     };
-    final twoNewestBytes = mobileMessageCacheSerializedBytes(
+    final twoNewestBytes = serializedBytes(
       <String, MobileMessageCacheEntry>{
         'Yg': cache['Yg']!,
         'Yw': cache['Yw']!,
@@ -288,20 +298,26 @@ void main() {
     );
     trimMobileMessageCache(cache, maximumBytes: twoNewestBytes);
     expect(cache.keys, <String>['Yg', 'Yw']);
-    expect(mobileMessageCacheSerializedBytes(cache),
-        lessThanOrEqualTo(twoNewestBytes));
+    expect(serializedBytes(cache), lessThanOrEqualTo(twoNewestBytes));
   });
 
   test('password-reset rebase clears authenticated high-water and journals',
       () {
-    final rebased = state
-        .withPendingVaultWrite('0', envelope())
-        .confirmed(
-          '1',
-          'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-          'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-        )
-        .rebasedAfterPasswordReset();
+    final confirmed = state.confirmed(
+      '1',
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    );
+    final pending = MobileE2EEState.fromJson(<String, Object?>{
+      ...confirmed.toJson(),
+      'vault_sequence': '2',
+      'vault_parent_chain': confirmed.confirmedVaultChainRoot,
+      'pending_vault_base_revision': '1',
+      'pending_vault_envelope': envelope('2'),
+    });
+    expect(pending.pendingVaultEnvelope, isNotNull);
+    expect(pending.confirmedVaultDigest, isNotNull);
+    final rebased = pending.rebasedAfterPasswordReset();
     expect(rebased.vaultSequence, '1');
     expect(rebased.confirmedVaultRevision, isNull);
     expect(rebased.confirmedVaultDigest, isNull);
@@ -357,20 +373,32 @@ void main() {
   });
 
   test('local pending-write metadata never enters the portable vault', () {
-    final pending = state.withPendingVaultWrite('0', <String, Object?>{
-      'version': 2,
-      'cipher': 'AES-256-GCM',
-      'sequence': '1',
-      'nonce': 'AAECAwQFBgcICQoL',
-      'ciphertext': expectedCiphertext,
+    final pending = MobileE2EEState.fromJson(<String, Object?>{
+      ...state
+          .confirmed('1', expectedVaultDigest, expectedVaultChainRoot)
+          .toJson(),
+      'vault_sequence': '2',
+      'vault_parent_chain': expectedVaultChainRoot,
+      'pending_vault_base_revision': '1',
+      'pending_vault_envelope': envelope('2'),
     });
+    for (final key in [
+      'pending_vault_base_revision',
+      'pending_vault_envelope',
+      'confirmed_vault_revision',
+      'confirmed_vault_digest',
+      'confirmed_vault_chain_root'
+    ]) {
+      expect(pending.toJson()[key], isNotNull);
+      expect(pending.toPortableJson(), isNot(contains(key)));
+    }
     expect(pending.toJson(), contains('pending_vault_base_revision'));
     expect(pending.toPortableJson(),
         isNot(contains('pending_vault_base_revision')));
     expect(
       pending
           .confirmed(
-            '1',
+            '2',
             'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
             'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
           )
@@ -380,7 +408,7 @@ void main() {
     expect(
       () => MobileE2EEState.fromJson(<String, Object?>{
         ...pending.toJson(),
-        'vault_parent_chain': expectedVaultChainRoot,
+        'vault_parent_chain': mobileZeroVaultChain,
       }),
       throwsFormatException,
     );

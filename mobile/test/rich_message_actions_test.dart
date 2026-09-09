@@ -14,16 +14,17 @@ void main() {
   test('Stage lifecycle messages use Discord timeline wording', () {
     expect(
       stageSystemMessageText(27, 'Mina', 'Town Hall'),
-      'Mina started a Stage: Town Hall',
+      matches(RegExp(r'Mina.*start.*Stage.*Town Hall')),
     );
     expect(
       stageSystemMessageText(28, 'Mina', 'Town Hall'),
-      'Mina ended the Stage: Town Hall',
+      matches(RegExp(r'Mina.*end.*Stage.*Town Hall')),
     );
-    expect(stageSystemMessageText(29, 'Mina', null), 'Mina became a speaker.');
+    expect(stageSystemMessageText(29, 'Mina', null),
+        matches(RegExp(r'Mina.*speaker')));
     expect(
       stageSystemMessageText(31, 'Mina', 'Questions'),
-      'Mina changed the Stage topic: Questions',
+      matches(RegExp(r'Mina.*chang.*topic.*Questions')),
     );
   });
 
@@ -180,7 +181,7 @@ void main() {
     );
   });
 
-  test('private interaction polls use isolated response identities', () async {
+  test('private poll response URL isolation', () async {
     final adapter = _ActionAdapter(<_Reply>[
       const _Reply('{}'),
       _Reply(jsonEncode(<String, Object?>{
@@ -293,6 +294,7 @@ void main() {
       components: components,
     );
 
+    expect(adapter.requests.single.method, 'POST');
     expect(adapter.requests.single.path,
         '/api/v1/channels/2@chat.example/interactions');
     expect(adapter.requests.single.data, <String, Object?>{

@@ -111,7 +111,11 @@ describe('message pin channel eligibility', () => {
         has_more: false
       }) as T;
 
-    await expect(loadPinnedMessages('5@chat.example', request)).resolves.toHaveLength(2);
+    const messages = await loadPinnedMessages('5@chat.example', request);
+    expect(messages.map(({ id, origin_domain }) => [id, origin_domain])).toEqual([
+      ['9', 'chat.example'],
+      ['8', 'chat.example']
+    ]);
   });
 
   it('uses the modern message-scoped mutation path', () => {

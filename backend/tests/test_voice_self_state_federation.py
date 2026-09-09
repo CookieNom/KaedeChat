@@ -91,7 +91,7 @@ def test_self_state_federation_schema_is_exact_and_guild_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_authority_self_state_is_locked_persisted_and_self_deaf_stops_listening(
+async def test_self_state_lock_rotation_orchestration_and_self_deaf_grant_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = occupant()
@@ -231,7 +231,7 @@ async def test_rotation_fails_closed_when_the_same_federated_move_fence_cannot_a
 
 
 @pytest.mark.asyncio
-async def test_rotation_does_not_disconnect_a_concurrently_moved_federated_session(
+async def test_rotation_recheck_preserves_a_session_reported_as_moved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = occupant(
@@ -270,7 +270,8 @@ async def test_rotation_does_not_disconnect_a_concurrently_moved_federated_sessi
     )
     remove = AsyncMock()
     monkeypatch.setattr("app.voice.service.remove_occupant_connection", remove)
-    monkeypatch.setattr("app.voice.service.release_voice_connection", AsyncMock())
+    release = AsyncMock()
+    monkeypatch.setattr("app.voice.service.release_voice_connection", release)
     monkeypatch.setattr("app.voice.service.release_voice_grant_transition", AsyncMock())
 
     updated = await update_authoritative_occupant_self_state(
@@ -284,6 +285,8 @@ async def test_rotation_does_not_disconnect_a_concurrently_moved_federated_sessi
     assert updated.participant_metadata["generation"] == 5
     control.remove_participant.assert_not_awaited()
     remove.assert_not_awaited()
+
+    release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -503,6 +506,18 @@ async def test_authority_endpoint_fences_move_session_and_fans_out(
     enqueue_call = enqueue.await_args
     assert enqueue_call is not None
     assert enqueue_call.args[1] == "g.12.34"
+
+    assert publish.await_args.args[1:3] == ("guild:alpha.localhost:12", "VOICE_STATE_UPDATE")
+    assert publish.await_args.args[3] == {
+        "room": "g.12.34",
+        "guild_id": "12",
+        "channel_id": "34",
+        "user_id": "78",
+        "user_domain": "beta.localhost",
+        "self_mute": True,
+        "self_deaf": True,
+        "state": result.state.model_dump(mode="json"),
+    }
 
 
 @pytest.mark.asyncio

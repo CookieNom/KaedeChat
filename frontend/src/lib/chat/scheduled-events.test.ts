@@ -139,7 +139,7 @@ describe('scheduled event client', () => {
         location: 'Convention center',
         endTime: ''
       })
-    ).toThrow('Choose an end time for this external event.');
+    ).toThrow(/end time/i);
     expect(() =>
       scheduledEventPayload({
         ...voiceDraft,
@@ -148,7 +148,7 @@ describe('scheduled event client', () => {
         location: 'Convention center',
         endTime: '2027-01-03T17:59:00.000Z'
       })
-    ).toThrow('The end time must be later than the start time.');
+    ).toThrow(/end time.*start time/i);
   });
 
   it('does not resend unchanged past-sensitive fields while editing', () => {
@@ -161,15 +161,41 @@ describe('scheduled event client', () => {
   });
 
   it('uses canonical event routes for create, transition, subscribers, and self subscription', async () => {
-    apiMock.mockResolvedValue(event);
-    await createScheduledEvent('1@guild.example', voiceDraft);
-    await transitionScheduledEvent('1@guild.example', event, ScheduledEventStatus.active);
-    await listScheduledEventUsers('1@guild.example', event, {
-      after: '7@remote.example',
-      limit: 25
-    });
-    await setScheduledEventSubscription('1@guild.example', event, true);
-    await setScheduledEventSubscription('1@guild.example', event, false);
+    const active = { ...event, status: ScheduledEventStatus.active };
+    const subscribers = [
+      {
+        guild_scheduled_event_id: '50',
+        guild_scheduled_event_domain: 'guild.example',
+        user: {
+          id: '8',
+          origin_domain: 'remote.example',
+          username: 'guest',
+          display_name: null,
+          avatar_hash: null,
+          handle: 'guest@remote.example'
+        },
+        member: null,
+        subscribed_at: '2027-01-02T00:00:00Z'
+      }
+    ];
+    apiMock
+      .mockResolvedValueOnce(event)
+      .mockResolvedValueOnce(active)
+      .mockResolvedValueOnce(subscribers)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+    expect(await createScheduledEvent('1@guild.example', voiceDraft)).toEqual(event);
+    expect(
+      await transitionScheduledEvent('1@guild.example', event, ScheduledEventStatus.active)
+    ).toEqual(active);
+    expect(
+      await listScheduledEventUsers('1@guild.example', event, {
+        after: '7@remote.example',
+        limit: 25
+      })
+    ).toEqual(subscribers);
+    expect(await setScheduledEventSubscription('1@guild.example', event, true)).toBeUndefined();
+    expect(await setScheduledEventSubscription('1@guild.example', event, false)).toBeUndefined();
 
     expect(apiMock.mock.calls.map(([path]) => path)).toEqual([
       '/guilds/1%40guild.example/scheduled-events',
@@ -178,6 +204,15 @@ describe('scheduled event client', () => {
       '/guilds/1%40guild.example/scheduled-events/50%40guild.example/users/@me',
       '/guilds/1%40guild.example/scheduled-events/50%40guild.example/users/@me'
     ]);
+    expect(apiMock.mock.calls[0][1].method).toBe('POST');
+    expect(JSON.parse(apiMock.mock.calls[0][1].body)).toMatchObject({
+      name: 'Town hall',
+      description: 'Quarterly community questions',
+      channel_id: '9@guild.example',
+      entity_type: 2,
+      privacy_level: 2,
+      scheduled_start_time: '2027-01-03T18:00:00.000Z'
+    });
     expect(apiMock.mock.calls[1][1]).toMatchObject({
       method: 'PATCH',
       body: JSON.stringify({ status: 2 })

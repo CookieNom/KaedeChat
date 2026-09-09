@@ -638,7 +638,12 @@ mod tests {
         assert_eq!(*alice_file_key, *bob_file_key);
         assert_ne!(
             *alice_file_key,
-            *alice.export_epoch_secret(group_id, "kaede livekit v1", b"call-id", 32)?
+            *alice.export_epoch_secret(group_id, "kaede livekit v1", b"attachment-id", 32)?
+        );
+
+        assert_ne!(
+            *alice_file_key,
+            *alice.export_epoch_secret(group_id, "kaede attachment v1", b"call-id", 32)?
         );
 
         let alice_state = alice.export_state()?;
@@ -676,32 +681,6 @@ mod tests {
             .ok_or_else(|| MlsError::KeyPackage("empty".into()))?;
         *last ^= 1;
         assert!(alice.inspect_key_package(&tampered).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn removing_an_account_rotates_the_epoch_and_excludes_it() -> Result<(), MlsError> {
-        let alice_credential = br#"{"version":1,"account":"alice@example.test","nonce":"a"}"#;
-        let bob_credential = br#"{"version":1,"account":"bob@example.test","nonce":"b"}"#;
-        let alice = MlsClient::generate(alice_credential)?;
-        let bob = MlsClient::generate(bob_credential)?;
-        let group_id = b"kaede-removal-group";
-        alice.create_group(group_id)?;
-        let added = alice.add_members(group_id, &[bob.generate_key_package()?])?;
-        alice.merge_pending_commit(group_id)?;
-        bob.join_group(&added.welcome)?;
-
-        let removed = alice.remove_accounts(group_id, &["bob@example.test".into()])?;
-        assert!(removed.welcome.is_empty());
-        alice.merge_pending_commit(group_id)?;
-        assert!(bob.process(group_id, &removed.commit).is_ok());
-        assert!(
-            bob.process(
-                group_id,
-                &alice.encrypt(group_id, b"after removal", b"removal-context")?
-            )
-            .is_err()
-        );
         Ok(())
     }
 
@@ -745,6 +724,7 @@ mod tests {
         );
 
         let removed = alice.remove_accounts(group_id, &["carol@gamma.test".into()])?;
+        assert!(removed.welcome.is_empty());
         alice.merge_pending_commit(group_id)?;
         assert_eq!(
             bob.process(group_id, &removed.commit)?,
@@ -764,6 +744,11 @@ mod tests {
             bob.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;
         assert_eq!(*alice_epoch_two, *bob_epoch_two);
         assert_ne!(*alice_epoch_one, *alice_epoch_two);
+        assert!(
+            !carol
+                .export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)
+                .is_ok_and(|key| *key == *alice_epoch_two)
+        );
         assert!(
             carol
                 .process(

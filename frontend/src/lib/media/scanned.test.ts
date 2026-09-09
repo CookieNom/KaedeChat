@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { completeScannedMediaResource } from './scanned';
 
 describe('federated scanned media lifecycle', () => {
-  it('retries the same authority-scoped commit instead of a local attachment lookup', async () => {
+  it('retrying the supplied commit callback', async () => {
     const commit = vi
       .fn<() => Promise<Record<string, unknown>>>()
       .mockResolvedValueOnce({

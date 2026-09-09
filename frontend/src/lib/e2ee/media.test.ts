@@ -64,9 +64,13 @@ describe('encrypted attachments', () => {
       decryptFile(new Blob([changed], { type: 'application/octet-stream' }), manifest)
     ).rejects.toThrow('modified');
     await expect(decryptFile(ciphertext.slice(0, -1), manifest)).rejects.toThrow('size');
-    await expect(
-      decryptFile(ciphertext, { ...manifest, filename: 'changed.txt', plaintext_size: 1 })
-    ).rejects.toThrow('header');
+    await expect(decryptFile(ciphertext, { ...manifest, plaintext_size: 1 })).rejects.toThrow(
+      'header'
+    );
+    // Filename is bound by the MLS-authenticated manifest digest, not the binary file header.
+    expect(await encryptedManifestDigest([{ ...manifest, filename: 'changed.txt' }])).not.toBe(
+      await encryptedManifestDigest([manifest])
+    );
   });
 
   it('binds attachment ordering and keys into the MLS envelope digest', async () => {

@@ -47,16 +47,29 @@ function role(id: string, name: string, position: number, hoist = true): Role {
 }
 
 describe('groupGuildMembers', () => {
-  it('builds a bounded authority member search without preloading the full guild', () => {
-    expect(guildMemberSearchPath('1@guild.example', '  @ari  ')).toBe(
-      '/guilds/1%40guild.example/members?limit=26&query=%40ari'
+  it('bounded member-search URL construction', () => {
+    const search = new URL(
+      guildMemberSearchPath('1@guild.example', '  @ari  '),
+      'https://client.example'
     );
-    expect(guildMemberSearchPath('1@guild.example', '', 500)).toBe(
-      '/guilds/1%40guild.example/members?limit=100'
+    expect(search.pathname).toBe('/guilds/1%40guild.example/members');
+    expect(search.searchParams.get('query')).toBe('@ari');
+    const bounded = new URL(
+      guildMemberSearchPath('1@guild.example', '', 500),
+      'https://client.example'
     );
-    expect(guildMemberSearchPath('1@guild.example', 'ari', 26, '55@remote.example')).toBe(
-      '/guilds/1%40guild.example/members?limit=26&after=55%40remote.example&query=ari'
+    expect(Number(bounded.searchParams.get('limit'))).toBeGreaterThan(0);
+    expect(Number(bounded.searchParams.get('limit'))).toBeLessThan(500);
+    expect(bounded.searchParams.has('query')).toBe(false);
+    const page = new URL(
+      guildMemberSearchPath('1@guild.example', 'ari', 26, '55@remote.example'),
+      'https://client.example'
     );
+    expect(Object.fromEntries(page.searchParams)).toEqual({
+      limit: '26',
+      after: '55@remote.example',
+      query: 'ari'
+    });
   });
 
   it('merges paged member matches without duplicates and advances by composite cursor', () => {
@@ -135,7 +148,10 @@ describe('highestIconRole', () => {
     const item = member('1', 'Ari', 'online');
     item.role_ids = [lower.id, higherWithoutIcon.id, higherWithIcon.id];
 
-    expect(highestIconRole(item, [lower, higherWithoutIcon, higherWithIcon])).toBe(higherWithIcon);
+    expect(highestIconRole(item, [lower, higherWithoutIcon, higherWithIcon])).toMatchObject({
+      id: higherWithIcon.id,
+      origin_domain: higherWithIcon.origin_domain
+    });
   });
 });
 
@@ -150,7 +166,10 @@ describe('memberRoleColor', () => {
     const item = member('1', 'Ari', 'online');
     item.role_ids = [lower.id, colorless.id, higher.id];
 
-    expect(highestColoredRole(item, [lower, colorless, higher])).toBe(higher);
+    expect(highestColoredRole(item, [lower, colorless, higher])).toMatchObject({
+      id: higher.id,
+      origin_domain: higher.origin_domain
+    });
     expect(memberRoleColor(item, [lower, colorless, higher])).toBe('#8b5cf6');
   });
 

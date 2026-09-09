@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -78,16 +77,107 @@ def test_room_operation_requests_require_canonical_operation_and_vault_context()
         )
 
 
-def test_control_capture_migration_defaults_unreconciled_controls_to_audit() -> None:
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations/versions/e5c7b9a1d204_fail_closed_e2ee_control_capture.py"
-    ).read_text()
-    assert 'down_revision: str | None = "a1c6e8f2d940"' in migration
-    assert (
-        '_create_control_capture_function(welcome_mode="audit", commit_mode="audit")' in migration
+async def test_control_capture_migration_defaults_unreconciled_controls_to_audit(
+    postgres_schema,
+) -> None:
+    import importlib
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+
+    from app.db.base import Base
+
+    connection = postgres_schema
+    migration = importlib.import_module(
+        "migrations.versions.e5c7b9a1d204_fail_closed_e2ee_control_capture"
     )
-    assert "WHERE room_operation_id IS NULL" in migration
+    await connection.execute(
+        text(
+            "CREATE TABLE e2ee_control_records (id bigint, origin_domain text, channel_id "
+            "bigint, channel_domain text, author_id bigint, author_domain text, "
+            "policy_generation bigint, epoch bigint, operation text, apply_mode text, "
+            "envelope jsonb, created_at timestamptz, room_operation_id text, PRIMARY KEY "
+            "(id, origin_domain), CONSTRAINT ck_e2ee_control_records_apply_mode_value CHECK "
+            "((operation = 'welcome' AND apply_mode = 'join') OR (operation = 'commit' AND "
+            "apply_mode IN ('process', 'audit'))))"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE TABLE messages (id bigint, origin_domain text, channel_id bigint, "
+            "channel_domain text, author_id bigint, author_domain text, "
+            "encryption_policy_generation bigint, encryption_epoch bigint, e2ee jsonb, "
+            "created_at timestamptz DEFAULT now())"
+        )
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO e2ee_control_records (id, origin_domain, operation, apply_mode, "
+            "room_operation_id) VALUES (1, 'home.example', 'welcome', 'join', NULL), (2, "
+            "'home.example', 'commit', 'process', NULL), (3, 'home.example', 'welcome', "
+            "'join', 'signed-operation'), (4, 'home.example', 'commit', 'process', "
+            "'signed-operation')"
+        )
+    )
+
+    def upgrade(sync):
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.upgrade()
+
+    await connection.run_sync(upgrade)
+    assert (
+        await connection.execute(
+            text("SELECT id, apply_mode FROM e2ee_control_records ORDER BY id")
+        )
+    ).all() == [(1, "audit"), (2, "audit"), (3, "join"), (4, "process")]
+    await connection.execute(
+        text(
+            "CREATE TRIGGER capture AFTER INSERT ON messages FOR EACH ROW EXECUTE FUNCTION "
+            "kaede_capture_e2ee_control_record()"
+        )
+    )
+    for identifier, operation in ((5, "welcome"), (6, "commit")):
+        await connection.execute(
+            text(
+                "INSERT INTO messages (id, origin_domain, channel_id, channel_domain, "
+                "author_id, author_domain, encryption_policy_generation, encryption_epoch, "
+                "e2ee) VALUES (:id, 'home.example', 10, 'home.example', 7, 'home.example', "
+                "2, 1, jsonb_build_object('operation', CAST(:operation AS text), "
+                "'ciphertext', 'sealed'))"
+            ),
+            {"id": identifier, "operation": operation},
+        )
+    assert (
+        await connection.execute(
+            text(
+                "SELECT id, apply_mode, envelope->>'ciphertext' FROM e2ee_control_records "
+                "WHERE id >= 5 ORDER BY id"
+            )
+        )
+    ).all() == [(5, "audit", "sealed"), (6, "audit", "sealed")]
+
+    def downgrade(sync):
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+
+    await connection.run_sync(downgrade)
+    assert (
+        await connection.execute(
+            text("SELECT id, apply_mode FROM e2ee_control_records ORDER BY id")
+        )
+    ).all() == [
+        (1, "join"),
+        (2, "process"),
+        (3, "join"),
+        (4, "process"),
+        (5, "join"),
+        (6, "process"),
+    ]
 
 
 def test_federation_activation_requires_complete_positive_attestation() -> None:
@@ -125,7 +215,7 @@ def test_federation_activation_requires_complete_positive_attestation() -> None:
         )
 
 
-def _remote_commit_result() -> tuple[dict[str, object], dict[str, object]]:
+def _remote_commit_result(kind: str = "activate") -> tuple[dict[str, object], dict[str, object]]:
     rendered: dict[str, object] = {
         "id": "10",
         "origin_domain": "alpha.localhost",
@@ -157,8 +247,8 @@ def _remote_commit_result() -> tuple[dict[str, object], dict[str, object]]:
         "operation_id": OPERATION_ID,
         "status": "prepared",
         "policy": {
-            "mode": "plaintext",
-            "state": "proposed",
+            "mode": "plaintext" if kind == "activate" else "e2ee",
+            "state": "proposed" if kind == "activate" else "rekeying",
             "generation": "2",
             "protocol": "mls10",
             "suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
@@ -169,7 +259,7 @@ def _remote_commit_result() -> tuple[dict[str, object], dict[str, object]]:
     }
     status: dict[str, object] = {
         "operation_id": OPERATION_ID,
-        "kind": "activate",
+        "kind": kind,
         "status": "committed",
         "prepared": prepared,
         "committed": rendered,
@@ -177,24 +267,7 @@ def _remote_commit_result() -> tuple[dict[str, object], dict[str, object]]:
     return rendered, status
 
 
-def test_remote_commit_response_is_bound_before_projection() -> None:
-    rendered, status = _remote_commit_result()
-    channel = cast(
-        Channel,
-        SimpleNamespace(id=10, origin_domain="alpha.localhost"),
-    )
-    validate_remote_room_commit_response(
-        rendered,
-        status,
-        kind="activate",
-        operation_id=OPERATION_ID,
-        channel=channel,
-        policy_generation="2",
-        group_id=GROUP_ID,
-        authority="alpha.localhost",
-    )
-
-
+@pytest.mark.parametrize("kind", ["activate", "rekey"])
 @pytest.mark.parametrize(
     ("target", "key", "value"),
     [
@@ -206,11 +279,26 @@ def test_remote_commit_response_is_bound_before_projection() -> None:
     ],
 )
 def test_remote_commit_response_rejects_unbound_authority_results(
+    kind: str,
     target: str,
     key: str,
     value: object,
 ) -> None:
-    rendered, status = deepcopy(_remote_commit_result())
+    rendered, status = deepcopy(_remote_commit_result(kind))
+    channel = cast(
+        Channel,
+        SimpleNamespace(id=10, origin_domain="alpha.localhost"),
+    )
+    validate_remote_room_commit_response(
+        rendered,
+        status,
+        kind=kind,
+        operation_id=OPERATION_ID,
+        channel=channel,
+        policy_generation="2",
+        group_id=GROUP_ID,
+        authority="alpha.localhost",
+    )
     if target == "rendered":
         rendered[key] = value
     elif target == "status":
@@ -218,15 +306,11 @@ def test_remote_commit_response_rejects_unbound_authority_results(
     else:
         controls = cast(list[dict[str, object]], rendered["controls"])
         controls[0 if target == "welcome" else 1][key] = value
-    channel = cast(
-        Channel,
-        SimpleNamespace(id=10, origin_domain="alpha.localhost"),
-    )
     with pytest.raises(HTTPException) as caught:
         validate_remote_room_commit_response(
             rendered,
             status,
-            kind="activate",
+            kind=kind,
             operation_id=OPERATION_ID,
             channel=channel,
             policy_generation="2",
@@ -237,7 +321,7 @@ def test_remote_commit_response_rejects_unbound_authority_results(
     assert caught.value.detail == {"code": "E2EE_ROOM_AUTHORITY_INVALID_RESPONSE"}
 
 
-def test_federation_operation_status_is_actor_and_channel_bound() -> None:
+def test_operation_status_schema_acceptance() -> None:
     request = E2EERoomOperationStatusRequest.model_validate(
         {
             "channel_id": "10",
@@ -273,26 +357,14 @@ def test_account_vault_digest_binds_format_nonce_and_ciphertext() -> None:
     digest = account_vault_digest(vault)
     assert len(digest) == 32
     assert digest.hex() == "6448c7e03807d27468a4276d5bca771bcf8d8ed1620922cec03dd3546fbd782f"
-    changed = cast(
-        E2EEAccountVault,
-        SimpleNamespace(
-            format_version=2,
-            revision=7,
-            nonce=b"m" * 12,
-            ciphertext=b"ciphertext",
-        ),
-    )
-    assert digest != account_vault_digest(changed)
-    changed_revision = cast(
-        E2EEAccountVault,
-        SimpleNamespace(
-            format_version=2,
-            revision=8,
-            nonce=b"n" * 12,
-            ciphertext=b"ciphertext",
-        ),
-    )
-    assert digest != account_vault_digest(changed_revision)
+    for field, value in (
+        ("format_version", 3),
+        ("revision", 8),
+        ("nonce", b"m" * 12),
+        ("ciphertext", b"other ciphertext"),
+    ):
+        changed = cast(E2EEAccountVault, SimpleNamespace(**{**vars(vault), field: value}))
+        assert digest != account_vault_digest(changed), field
 
 
 def test_account_vault_chain_root_matches_mobile_and_web_vector() -> None:

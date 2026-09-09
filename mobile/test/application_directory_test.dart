@@ -15,6 +15,7 @@ import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/application_launcher.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('strict mobile Application Directory contract', () {
@@ -84,9 +85,13 @@ void main() {
   });
 
   group('launcher ranking and request helpers', () {
-    test('recents are bounded, canonical, and scoped by composite account', () {
+    test('recents are bounded, canonical, and scoped by composite account',
+        () async {
       final application = EntityRef.parse('20@apps.example');
       var history = <String>['invalid', application.wire, application.wire];
+      history = mobileRememberRecentApplication(
+          history, EntityRef.parse('21@apps.example'));
+      expect(history, ['20@apps.example', '21@apps.example']);
       for (var index = 21; index < 50; index += 1) {
         history = mobileRememberRecentApplication(
           history,
@@ -96,14 +101,17 @@ void main() {
 
       expect(history, hasLength(20));
       expect(mobileRecentApplicationRefs(history), hasLength(20));
-      expect(
-        mobileAppRecentStorageKey(EntityRef.parse('1@users.example')),
-        isNot(
-          mobileAppRecentStorageKey(EntityRef.parse('2@users.example')),
-        ),
-      );
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final firstKey =
+          mobileAppRecentStorageKey(EntityRef.parse('1@users.example'));
+      final secondKey =
+          mobileAppRecentStorageKey(EntityRef.parse('1@other.example'));
+      await preferences.setStringList(firstKey, history);
+      await preferences.setStringList(secondKey, ['20@apps.example']);
+      expect(preferences.getStringList(firstKey), history);
+      expect(preferences.getStringList(secondKey), ['20@apps.example']);
     });
-
     test('curated sections remove duplicates with stable priority', () {
       final first = MobileDirectoryApplication.fromJson(
         _applicationJson(),
@@ -145,8 +153,7 @@ void main() {
   });
 
   group('Application Directory repository', () {
-    test('searches the selected catalog authority with bounded parameters',
-        () async {
+    test('selected authority and supplied limit parameters', () async {
       final adapter = _DirectoryAdapter(<_Reply>[
         _Reply(jsonEncode(_pageJson(
           items: <Map<String, Object?>>[
@@ -247,11 +254,24 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(selected, isA<MobileAppLauncherInstallSelection>());
+      final application =
+          (selected as MobileAppLauncherInstallSelection).application;
+      expect(application.ref.wire, '20@home.example');
+      expect(mobileApplicationInstallPath(application, Domain('home.example')),
+          '/applications/20%40home.example/install/standard?instance=home.example');
     });
 
     testWidgets('stale debounced searches cannot replace the latest result',
         (tester) async {
+      for (final criteria in [(2, 'weather'), (3, 'other')]) {
+        expect(
+            mobileDirectoryResponseIsCurrent(
+                requestGeneration: criteria.$1,
+                currentGeneration: 3,
+                requestQuery: criteria.$2,
+                currentQuery: 'weather'),
+            isFalse);
+      }
       final searches = <String, Completer<MobileDirectoryPage>>{};
       await tester.pumpWidget(
         _LauncherHarness(
@@ -341,7 +361,11 @@ void main() {
       await tester.tap(find.text('/forecast'));
       await tester.pumpAndSettle();
 
-      expect(selected, isA<MobileAppLauncherCommandSelection>());
+      final chosen = (selected as MobileAppLauncherCommandSelection).command;
+      expect(chosen.id, command.id);
+      expect(chosen.application, command.application);
+      expect(chosen.name, command.name);
+      expect(chosen.type, command.type);
     });
 
     testWidgets('zero-command recent and search rows open attested app review',
@@ -384,7 +408,17 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(selected, isA<MobileAppLauncherBotInstallSelection>());
+      expect(
+          (selected as MobileAppLauncherBotInstallSelection)
+              .application
+              .application
+              .wire,
+          '20@apps.example');
+      expect(
+          mobileBotApplicationInstallPath(
+              (selected as MobileAppLauncherBotInstallSelection).application,
+              Domain('home.example')),
+          '/applications/20%40apps.example/install/standard?instance=home.example');
       expect(lookups, 1);
 
       selected = null;
@@ -400,7 +434,17 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(selected, isA<MobileAppLauncherBotInstallSelection>());
+      expect(
+          (selected as MobileAppLauncherBotInstallSelection)
+              .application
+              .application
+              .wire,
+          '20@apps.example');
+      expect(
+          mobileBotApplicationInstallPath(
+              (selected as MobileAppLauncherBotInstallSelection).application,
+              Domain('home.example')),
+          '/applications/20%40apps.example/install/standard?instance=home.example');
       expect(lookups, 2);
     });
 
@@ -589,6 +633,17 @@ void main() {
     expect(find.text('Send friend request'), findsNothing);
     await tester.tap(find.text('Add App'));
     expect(selected, profile);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: UserProfileSheet(
+      user: bot,
+      presence: PresenceStatus.online,
+      applicationLookup: (_) async => null,
+      onAddApplication: (application) => selected = application,
+    ))));
+    await tester.pumpAndSettle();
+    expect(find.text('Add App'), findsNothing);
   });
 }
 

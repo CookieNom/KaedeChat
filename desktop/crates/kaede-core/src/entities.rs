@@ -571,7 +571,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tracker_channel_kind_has_a_stable_wire_value() {
+    fn supported_channel_kind_wire_values() {
         assert_eq!(ChannelKind::from(17), ChannelKind::Tracker);
         assert_eq!(u8::from(ChannelKind::Tracker), 17);
         assert_eq!(ChannelKind::from(10), ChannelKind::AnnouncementThread);
@@ -602,7 +602,7 @@ mod tests {
             "history_sync_status": "retrying",
             "history_sync_error_code": "KAED_FED_HISTORY_CAPACITY",
             "history_sync_retry_after_ms": 60000,
-            "history_sync_resource": null,
+            "history_sync_resource": "messages",
             "version": "2026-08-07T12:00:00+00:00",
             "channels": [{
                 "id": "43", "origin_domain": "chat.example",
@@ -627,6 +627,19 @@ mod tests {
         );
         assert_eq!(guild.history_sync_status.as_deref(), Some("retrying"));
         assert_eq!(guild.history_sync_retry_after_ms, Some(60_000));
+        assert_eq!(
+            guild.history_sync_error_code.as_deref(),
+            Some("KAED_FED_HISTORY_CAPACITY")
+        );
+        assert_eq!(guild.history_sync_resource.as_deref(), Some("messages"));
+        let legacy: User = serde_json::from_value(serde_json::json!({
+            "id":"9", "origin_domain":"remote.example", "username":"maple",
+            "display_name":null, "avatar_hash":null, "banner_hash":null,
+            "bio":null, "custom_status":null
+        }))
+        .expect("legacy user payload");
+        assert!(legacy.profile_resolved);
+        assert_eq!(legacy.label(), "maple");
     }
 
     #[test]
@@ -709,11 +722,11 @@ mod tests {
         let Ok(attachment) = serde_json::from_value::<Attachment>(payload) else {
             panic!("history attachment should deserialize");
         };
-        assert!(
-            attachment
-                .history_media_url
-                .as_deref()
-                .is_some_and(|path| path.starts_with("/api/v1/dms/"))
+        assert_eq!(
+            attachment.history_media_url.as_deref(),
+            Some(
+                "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO"
+            )
         );
     }
 
@@ -741,6 +754,14 @@ mod tests {
         );
         assert_eq!(state.mention_count, 3);
         assert!(state.unread);
+        assert_eq!(
+            state
+                .last_read_message_domain
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("remote.example")
+        );
     }
 
     #[test]

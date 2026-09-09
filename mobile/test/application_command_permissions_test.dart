@@ -58,7 +58,11 @@ void main() {
 
     expect(scopes.single.applicationName, 'Tasks');
     expect(scopes.single.permissions.single.permission, isFalse);
-    expect(updated.permissions.single.type, 'channel');
+    expect(updated.permissions.single.toJson(), <String, Object?>{
+      'id': '31@guilds.example',
+      'type': 'channel',
+      'permission': true,
+    });
     expect(adapter.requests.map((request) => request.method), ['GET', 'PUT']);
     expect(
       adapter.requests.map((request) => request.path),

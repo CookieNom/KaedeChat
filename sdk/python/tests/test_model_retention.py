@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -342,13 +343,17 @@ def test_message_and_attachment_retain_exact_dm_and_encrypted_lineage() -> None:
     assert message.mention_user_refs == (EntityRef(9, "remote.example"),)
     assert message.webhook_ref == EntityRef(71, "chat.example")
     assert message.webhook is not None and message.webhook["name"] == "Federated Hook"
-    assert message.published_at is not None
+    assert message.published_at == datetime(2026, 8, 28, 12, 1, tzinfo=UTC)
     assert message.forwarded_message_ref == EntityRef(88, "source.example")
     assert message.forwarded_channel_ref == EntityRef(77, "source.example")
     assert message.forward_snapshot == {"content": "snapshot"}
-    assert message.message_reference is not None
+    assert message.message_reference == {
+        "type": 1,
+        "message_id": "88",
+        "message_domain": "source.example",
+    }
     assert message.view_persistent is True
-    assert message.view_expires_at is not None
+    assert message.view_expires_at == datetime(2026, 8, 29, 12, tzinfo=UTC)
     assert message.dm_capability_id == grant_id
     assert message.dm_capability_revision == 5
     assert message.installation_ref == EntityRef(60, "guilds.example")
@@ -512,16 +517,6 @@ def test_ready_event_retains_bootstrap_dm_capabilities() -> None:
         "expires_at": "2026-08-28T12:10:00+00:00",
     }
 
-    ready = ReadyEvent(
-        target="https://apps.example",
-        application_ref=EntityRef(1, "apps.example"),
-        worker_id=2,
-        installations=(),
-        dm_capabilities=(capability,),
-    )
-
-    assert ready.dm_capabilities == (capability,)
-
     client = Client(
         worker_state=WorkerState(
             EntityRef(1, "apps.example"),
@@ -603,6 +598,8 @@ def test_call_rejects_substituted_identity_and_ambiguous_wire_values(
             fallback_dm_capability_id="kbdg_" + "c" * 43,
         )
 
+
+def test_call_rejects_mismatched_fallback_dm_capability() -> None:
     with pytest.raises(ValueError, match="requested DM capability"):
         Call.from_payload(
             StubClient(),  # type: ignore[arg-type]
@@ -661,8 +658,29 @@ async def test_channel_conveniences_pin_the_retained_dm_capability() -> None:
         target=channel.target,
         dm_capability_id=grant_id,
     )
-    assert client.connect_voice.await_args.kwargs["dm_capability_id"] == grant_id  # type: ignore[attr-defined]
-    assert client.upload_attachment.await_args.kwargs["dm_capability_id"] == grant_id  # type: ignore[attr-defined]
+    client.connect_voice.assert_awaited_once_with(
+        channel.ref,
+        target=channel.target,
+        listen=False,
+        speak=False,
+        stream=False,
+        takeover=False,
+        transport=None,
+        e2ee_context=None,
+        call=None,
+        dm_capability_id=grant_id,
+    )
+    client.upload_attachment.assert_awaited_once_with(
+        channel.ref,
+        b"payload",
+        target=channel.target,
+        filename="payload.bin",
+        content_type="application/octet-stream",
+        installation_id=None,
+        dm_capability_id=grant_id,
+        encryption_mode="plaintext",
+        encryption_protocol=None,
+    )  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -809,7 +827,10 @@ async def test_channel_and_message_resources_do_not_switch_to_a_new_default_gran
     for name in operation_names:
         mock = getattr(client, name)
         assert mock.await_count > 0, name
-        assert mock.await_args.kwargs["dm_capability_id"] == retained_grant, name
+        for awaited in mock.await_args_list:
+            assert awaited.kwargs["dm_capability_id"] == retained_grant, name
+            assert awaited.kwargs["target"] == "https://chat.example", name
+    assert client.send_message.await_count == 2
 
 
 @pytest.mark.asyncio

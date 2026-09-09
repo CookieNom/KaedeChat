@@ -856,12 +856,14 @@ services:
       - "./.env.beta:/repository/deploy/.env.beta:ro"
       - "./.env.schema:/repository/deploy/.env.schema:ro"
       - "./nginx:/repository/deploy/nginx:ro"
-    command: ["sh", "-ec", "ruff check . && ruff format --check . && mypy app scripts && pytest"]
+    command: ["sh", "-ec", "ruff check . && ruff format --check . && mypy app scripts"]
 
   backend-test:
     <<: *backend-dev
     profiles: [validation]
-    environment: *validation-environment
+    environment:
+      <<: *validation-environment
+      TEST_REDIS_URL: ${KAEDE_DRAGONFLY_URL:?set KAEDE_DRAGONFLY_URL}
     volumes:
       - "../backend:/workspace"
       - "../frontend:/frontend:ro"
@@ -885,7 +887,7 @@ services:
       [
         "sh",
         "-ec",
-        "pnpm lint && pnpm check && pnpm test && pnpm build && pnpm check:csp && pnpm check:e2ee-wasm",
+        "pnpm lint && pnpm check && pnpm build && pnpm check:csp && pnpm check:e2ee-wasm",
       ]
     environment:
       KAEDE_MEDIA_PUBLIC_BASE_URL: ${KAEDE_MEDIA_PUBLIC_BASE_URL:-http://media.schema.localhost}
@@ -900,7 +902,7 @@ services:
     build: { context: ../frontend, target: development }
     profiles: [validation]
     logging: *default-logging
-    command: ["sh", "-ec", "pnpm exec svelte-kit sync && pnpm test"]
+    command: ["sh", "-ec", "pnpm exec svelte-kit sync && pnpm test && pnpm test:livekit-crypto"]
     networks: [data]
 
   migration-check:
@@ -963,15 +965,7 @@ services:
         python -m scripts.verify_migration_guards cleanup-guild &&
         alembic downgrade base &&
         alembic upgrade head &&
-        KAEDE_BULK_MODERATION_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
-        KAEDE_INTERACTION_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
-        KAEDE_GUILD_AUTHORITY_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
-        KAEDE_REACTION_MIGRATION_TEST_DATABASE_URL="$$KAEDE_DATABASE_URL"
-        pytest -q
-        tests/test_bulk_moderation_postgres.py
-        tests/test_interaction_atomicity_postgres.py
-        tests/test_guild_owner_authority_postgres.py
-        tests/test_reaction_emoji_migration_postgres.py &&
+        TEST_DATABASE_URL="$$KAEDE_DATABASE_URL" pytest -q -m postgres &&
         alembic check
 
   identity-check:

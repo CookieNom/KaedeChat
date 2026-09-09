@@ -239,9 +239,30 @@ mod tests {
     #[test]
     fn protocol_mentions_and_custom_emoji_are_typed() {
         let spans = parse("hello <@42@chat.example> <:wave:99@chat.example> ||secret||");
-        assert!(matches!(spans[1].kind, SpanKind::UserMention(_)));
-        assert!(matches!(spans[3].kind, SpanKind::CustomEmoji { .. }));
-        assert_eq!(spans[5].kind, SpanKind::Spoiler);
+        assert_eq!(spans.len(), 6);
+        assert_eq!(
+            spans[0],
+            Span {
+                kind: SpanKind::Text,
+                text: "hello ".into()
+            }
+        );
+        assert!(
+            matches!(&spans[1].kind, SpanKind::UserMention(reference) if reference.to_string() == "42@chat.example")
+        );
+        assert_eq!(spans[2].text, " ");
+        assert!(
+            matches!(&spans[3].kind, SpanKind::CustomEmoji {reference, name, animated}
+            if reference.to_string() == "99@chat.example" && name == "wave" && !animated)
+        );
+        assert_eq!(spans[4].text, " ");
+        assert_eq!(
+            spans[5],
+            Span {
+                kind: SpanKind::Spoiler,
+                text: "secret".into()
+            }
+        );
     }
 
     #[test]
@@ -262,8 +283,10 @@ mod tests {
         };
         assert_eq!(query.marker, CompletionMarker::Emoji);
         assert_eq!(
-            replace_completion("hello :hea later", &query, "❤️"),
-            "hello ❤️  later"
+            replace_completion("hello :hea later", &query, "❤️")
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["hello", "❤️", "later"]
         );
     }
 }

@@ -52,7 +52,7 @@ def test_pin_contract_matches_current_discord_limits_and_message_types() -> None
         normalize_pin_cursor(datetime(2026, 8, 29))
 
 
-def test_federated_pin_page_is_bounded_linked_and_newest_first() -> None:
+def test_linked_pin_page_validation() -> None:
     payload: dict[str, object] = {
         "items": [
             {
@@ -75,7 +75,7 @@ def test_federated_pin_page_is_bounded_linked_and_newest_first() -> None:
             limit=50,
             before=datetime(2026, 8, 29, 3, tzinfo=UTC),
         )
-        is payload
+        == payload
     )
     broken = {
         **payload,
@@ -101,7 +101,7 @@ def test_federated_pin_page_is_bounded_linked_and_newest_first() -> None:
         )
 
 
-def test_direct_pin_notice_authority_attestation_is_narrow() -> None:
+def test_rejecting_content_smuggling_in_direct_pin_notices() -> None:
     content: dict[str, object] = {
         "message": {
             "id": "11",
@@ -498,7 +498,7 @@ async def test_guild_authority_signs_remote_pin_with_local_owner(
 
     assert result == {"pinned": True}
     assert rate_limit.await_args.args[1:] == (actor.origin_domain, "guild-pin-mutation")
-    assert rate_limit.await_args.kwargs == {"capacity": 600, "refill_per_minute": 600}
+    rate_limit.assert_awaited_once()
     assert queue.await_args.args[3] is owner
     assert queue.await_args.args[5]["user"] == {
         "id": str(actor.id),

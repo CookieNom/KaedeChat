@@ -84,7 +84,6 @@ def test_proxy_request_fingerprint_binds_semantics_not_refreshable_receipts() ->
             {
                 **payload.attachments[0],
                 "content_sha256": "b" * 64,
-                "scan_status": "pending",
             }
         ]
     )
@@ -770,8 +769,22 @@ def test_message_replay_fingerprint_binds_rich_and_forward_identity() -> None:
     assert plain != sticker
     assert plain != webhook
 
+    for mutation in (
+        {"embeds": [{"title": "Authority-owned"}]},
+        {"application_id": 30, "application_domain": "apps.example"},
+        {"view_version": 1},
+        {"forwarded_message_id": 9, "forwarded_message_domain": "guild.example"},
+    ):
+        assert replicated_message_create_fingerprint(**shared, **mutation) != plain
+    assert (
+        replicated_message_create_fingerprint(
+            **shared, forwarded_message_id=9, forwarded_message_domain="other.example"
+        )
+        != forwarded
+    )
 
-def test_webhook_attribution_is_type_zero_qualified_and_url_bounded() -> None:
+
+def test_qualified_webhook_attribution_with_an_accepted_url() -> None:
     attribution = validate_webhook_attribution(
         {
             "id": "70",
@@ -898,7 +911,7 @@ def test_federated_rich_projection_rejects_dangling_attachment_media() -> None:
         )
 
 
-def test_sticker_only_messages_are_bounded_and_preserve_immutable_projection() -> None:
+def test_bounded_sticker_projection_preservation() -> None:
     message = MessageCreate(sticker_ids=["71@guild.example"])
     assert [str(item) for item in message.sticker_ids] == ["71@guild.example"]
     with pytest.raises(ValidationError, match="unique"):
@@ -1104,15 +1117,23 @@ def test_federated_dm_rejects_restricted_or_unattested_forward_snapshots() -> No
 
 def test_forward_payload_is_an_author_free_snapshot_and_batch_is_limited_to_five() -> None:
     created_at = datetime(2026, 8, 27, tzinfo=UTC)
-    snapshot = {
-        "content": "immutable source",
-        "embeds": [],
-        "components": [],
-        "attachments": [],
-        "message_type": 0,
-        "flags": 0,
-        "created_at": created_at.isoformat(),
-    }
+    from app.chat.forwarding import build_forward_snapshot
+
+    source = Message(
+        id=99,
+        origin_domain="source.example",
+        channel_id=199,
+        channel_domain="source.example",
+        author_id=777,
+        author_domain="private.example",
+        content="immutable source",
+        message_type=0,
+        flags=0,
+        e2ee=None,
+        created_at=created_at,
+    )
+    snapshot = build_forward_snapshot(source, [])
+    assert not ({"author", "author_id", "author_domain"} & snapshot.keys())
     forwarded = Message(
         id=101,
         origin_domain="home.example",

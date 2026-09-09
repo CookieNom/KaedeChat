@@ -16,7 +16,6 @@ from kaede_bot.e2ee import (
     E2EEProtocolError,
     WebhookE2EEDevice,
     webhook_device_protocol_id,
-    webhook_key_package_upload_input,
     webhook_mls_credential,
 )
 from kaede_bot.models import Webhook
@@ -125,9 +124,10 @@ def test_webhook_credential_and_device_projection_are_exactly_bound() -> None:
 
     assert device.webhook_ref == EntityRef(7, "guild.example")
     assert device.author_ref == EntityRef(9, "remote-user.example")
-    assert device.protocol_id.startswith("kwe_")
-    assert device.credential == webhook_mls_credential(
-        device.webhook_ref, device.identity_key
+    assert device.protocol_id == "kwe_e8UoirPWMXLe-0abjGxyiFmJjMQoeeqthlFMZ_2np7k"
+    assert (
+        device.credential
+        == b'{"account":"webhook:7@guild.example","credential_type":"kaede-webhook-device-v1","device_id":"kwe_e8UoirPWMXLe-0abjGxyiFmJjMQoeeqthlFMZ_2np7k","webhook_ref":"7@guild.example"}'
     )
 
     tampered = device_payload()
@@ -172,13 +172,36 @@ async def test_registration_and_key_packages_prove_one_token_scoped_device() -> 
 
     assert provider.signed[0] == challenge_input
     packages = [b"webhook-package-1", b"webhook-package-2"]
-    assert provider.signed[1] == webhook_key_package_upload_input(
-        protocol_id=device.protocol_id,
-        generation=3,
-        cipher_suite=MLS_SUITE,
-        expires_at=expiry,
-        package_hashes=(hashlib.sha256(item).digest() for item in packages),
+    expected = b"\n".join(
+        [
+            b"kaede-webhook-e2ee-key-packages-v1",
+            b"kwe_e8UoirPWMXLe-0abjGxyiFmJjMQoeeqthlFMZ_2np7k",
+            b"3",
+            b"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+            expiry.isoformat().encode(),
+            b"LY1GsIWT89tDO-AnDqF_W2ihJKkrnM5VRhcv33o6Ay0,LlFCDIREQ5EiHyQGqi3hwA2ohKK_hG9N3BwhpyQLsGc",
+        ]
     )
+    assert provider.signed[1] == expected
+    challenge, registration, upload = bot.request.await_args_list
+    assert challenge.args == (
+        "POST",
+        "/api/v1/webhooks/7/secret/e2ee/devices/challenge",
+    )
+    assert registration.args == ("POST", "/api/v1/webhooks/7/secret/e2ee/devices")
+    assert registration.kwargs["json"]["signature"] == b64(b"s" * 64)
+    assert (
+        registration.kwargs["json"]["credential"]
+        == "eyJhY2NvdW50Ijoid2ViaG9vazo3QGd1aWxkLmV4YW1wbGUiLCJjcmVkZW50aWFsX3R5cGUiOiJrYWVkZS13ZWJob29rLWRldmljZS12MSIsImRldmljZV9pZCI6Imt3ZV9lOFVvaXJQV01YTGUtMGFiakd4eWlGbUpqTVFvZWVxdGhsRk1aXzJucDdrIiwid2ViaG9va19yZWYiOiI3QGd1aWxkLmV4YW1wbGUifQ"
+    )
+    assert upload.args == (
+        "POST",
+        "/api/v1/webhooks/7/secret/e2ee/devices/"
+        + device.protocol_id
+        + "/key-packages",
+    )
+    assert upload.kwargs["json"]["packages"] == [b64(package) for package in packages]
+    assert upload.kwargs["json"]["signature"] == b64(b"s" * 64)
     assert result.accepted == 2
     assert all(
         call.kwargs["target"] == "https://guild.example"
@@ -256,6 +279,12 @@ async def test_encrypted_webhook_send_edit_and_attachment_bind_exact_device() ->
     assert upload.kwargs["params"] == {"channel_id": str(channel)}
     assert upload.kwargs["headers"] == {"X-Kaede-E2EE-Device": device_id}
     assert upload.kwargs["json"]["encryption_mode"] == "e2ee"
+    uploaded = bot._put_upload_ticket.await_args.args[0]
+    assert uploaded.ref == EntityRef(30, "guild.example")
+    assert uploaded.upload_url == ticket["upload_url"]
+    bot._put_upload_ticket.assert_awaited_once_with(
+        uploaded, b"ciphertext", content_type="application/octet-stream"
+    )
 
 
 @pytest.mark.asyncio

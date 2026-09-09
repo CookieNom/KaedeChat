@@ -18,7 +18,6 @@ from app.db.base import Base
 from app.db.models import Channel, Guild, GuildMember
 from app.search.meili import (
     FILTERABLE_ATTRIBUTES,
-    TYPO_TOLERANCE,
     MeiliClient,
     attachment_search_projection,
     document_id,
@@ -166,7 +165,7 @@ def test_search_filter_projection_is_exact_and_nsfw_fails_closed() -> None:
                 "mention_everyone": True,
                 "replied_to_user_ids": ["8@beta.localhost"],
                 "replied_to_message_ids": ["90@alpha.localhost"],
-                "has": ["image", "-video"],
+                "has": ["image", "audio", "-video"],
                 "embed_types": ["article"],
                 "embed_providers": ["YouTube"],
                 "link_hostnames": ["example.com"],
@@ -175,7 +174,7 @@ def test_search_filter_projection_is_exact_and_nsfw_fails_closed() -> None:
                 "max_id": "100@alpha.localhost",
                 "min_id": "10@alpha.localhost",
                 "pinned": False,
-                "author_types": ["bot", "-webhook"],
+                "author_types": ["bot", "user", "-webhook"],
             },
             "include_nsfw": True,
         }
@@ -183,28 +182,29 @@ def test_search_filter_projection_is_exact_and_nsfw_fails_closed() -> None:
     bot = SimpleNamespace(account_type="bot", age_assurance_state="unknown")
     filters = search_service.meili_filters(request, bot, settings())  # type: ignore[arg-type]
 
-    for expected in (
+    # Each outer entry is AND; alternatives inside an entry are OR.
+    assert set(filters) == {
         'guild_ref = "42@alpha.localhost"',
-        'channel_ref = "43@alpha.localhost"',
-        'author_ref = "5@beta.localhost"',
-        'mention_refs = "6@beta.localhost"',
-        'mention_role_refs = "7@alpha.localhost"',
+        '(channel_ref = "43@alpha.localhost")',
+        '(author_ref = "5@beta.localhost")',
+        '(mention_refs = "6@beta.localhost")',
+        '(mention_role_refs = "7@alpha.localhost")',
         "mention_everyone = true",
-        'replied_to_user_ref = "8@beta.localhost"',
-        'replied_to_message_ref = "90@alpha.localhost"',
+        '(replied_to_user_ref = "8@beta.localhost")',
+        '(replied_to_message_ref = "90@alpha.localhost")',
+        '(content_types = "image" OR content_types = "audio")',
         'content_types != "video"',
-        'embed_types = "article"',
-        'embed_providers = "YouTube"',
-        'link_hostnames = "example.com"',
-        'attachment_filenames = "release.txt"',
-        'attachment_extensions = "txt"',
+        '(embed_types = "article")',
+        '(embed_providers = "YouTube")',
+        '(link_hostnames = "example.com")',
+        '(attachment_filenames = "release.txt")',
+        '(attachment_extensions = "txt")',
         "pinned = false",
+        '(author_type = "bot" OR author_type = "user")',
         'author_type != "webhook"',
         "message_id < 100",
         "message_id > 10",
-    ):
-        assert any(expected in item for item in filters)
-    assert "nsfw = false" not in filters
+    }
 
     human = SimpleNamespace(account_type="human", age_assurance_state="unknown")
     assert "nsfw = false" in search_service.meili_filters(  # type: ignore[arg-type]
@@ -357,18 +357,20 @@ async def test_account_dm_search_fanout_merges_without_skipping_source_pages(
             authority="alpha.localhost",
         ),
     ]
-    monkeypatch.setattr(
-        search_service,
-        "local_search",
-        AsyncMock(
-            return_value={
-                "results": local_results,
-                "next_cursor": search_service.encode_cursor(2),
-                "encrypted_channel_refs": ["90@alpha.localhost"],
-                "indexing": False,
-            }
-        ),
-    )
+    local_cursors = []
+
+    async def local_page(*args, **kwargs):
+        cursor = args[4].cursor
+        local_cursors.append(cursor)
+        assert cursor in (None, search_service.encode_cursor(1))
+        return {
+            "results": local_results if cursor is None else local_results[1:],
+            "next_cursor": None,
+            "encrypted_channel_refs": ["90@alpha.localhost"],
+            "indexing": False,
+        }
+
+    monkeypatch.setattr(search_service, "local_search", local_page)
     monkeypatch.setattr(
         search_service,
         "search_authority_available",
@@ -403,6 +405,8 @@ async def test_account_dm_search_fanout_merges_without_skipping_source_pages(
         "b.example": wire("b.example", (6,)),
     }
 
+    remote_calls = []
+
     async def remote_wire(
         _factory: object,
         _settings: Settings,
@@ -410,6 +414,8 @@ async def test_account_dm_search_fanout_merges_without_skipping_source_pages(
         authority: str,
         _request: MessageSearchRequest,
     ) -> FederatedMessageSearchResponse:
+        assert _request.cursor is None
+        remote_calls.append(authority)
         return remote_pages[authority]
 
     monkeypatch.setattr(search_service, "remote_search_wire_response", remote_wire)
@@ -464,6 +470,18 @@ async def test_account_dm_search_fanout_merges_without_skipping_source_pages(
     }
     assert stored["authorities"]["a.example"]["exhausted"] is True
     assert stored["authorities"]["b.example"]["cursor"] is None
+
+    second = await search_service.search_account_dms(
+        session,
+        cast(Any, redis),
+        configured,
+        actor,
+        request.model_copy(update={"cursor": page["next_cursor"]}),
+    )
+    assert [item["message"]["id"] for item in second["results"]] == ["7", "6"]
+    assert second["next_cursor"] is None
+    assert local_cursors == [None, search_service.encode_cursor(1)]
+    assert sorted(remote_calls) == ["a.example", "b.example", "b.example"]
 
     tampered = request.model_copy(update={"query": "different", "cursor": page["next_cursor"]})
     with pytest.raises(HTTPException) as exc:
@@ -524,27 +542,9 @@ def test_search_schema_and_federation_are_e2ee_aware() -> None:
 
 
 def test_search_outbox_has_no_message_content_column() -> None:
-    columns = set(Base.metadata.tables["search_index_outbox"].columns.keys())
-    assert columns == {
-        "message_id",
-        "message_domain",
-        "attempts",
-        "next_attempt_at",
-        "locked_at",
-        "last_error_code",
-        "updated_at",
-    }
-    state_columns = set(Base.metadata.tables["search_index_state"].columns.keys())
-    assert state_columns == {
-        "id",
-        "enabled",
-        "reset_required",
-        "backfill_after_id",
-        "backfill_after_domain",
-        "backfill_completed",
-        "updated_at",
-    }
-    assert TYPO_TOLERANCE["minWordSizeForTypos"] == {"oneTypo": 4, "twoTypos": 8}
+    sensitive = {"content", "message_content", "body", "attachments", "embeds"}
+    for table in ("search_index_outbox", "search_index_state"):
+        assert sensitive.isdisjoint(Base.metadata.tables[table].columns.keys())
 
 
 def test_federated_search_response_is_minimal_and_bounded() -> None:
@@ -567,23 +567,14 @@ def test_federated_search_response_is_minimal_and_bounded() -> None:
         }
     )
     assert response.results[0].message_ref == "10@alpha.localhost"
-    with pytest.raises(ValidationError):
-        FederatedMessageSearchResponse.model_validate(
-            {
-                "results": [
-                    {
-                        "message_ref": "10@alpha.localhost",
-                        "channel_ref": "20@alpha.localhost",
-                        "author_ref": "40@beta.localhost",
-                        "snippet": "x" * 281,
-                        "created_at": "2026-08-12T12:00:00Z",
-                        "ranking_score": 0.75,
-                        "cursor_after": search_service.encode_cursor(1),
-                        "attachment_url": "https://evil.example/file",
-                    }
-                ]
-            }
-        )
+    baseline = response.model_dump(mode="json")
+    for mutation in ({"snippet": "x" * 281}, {"attachment_url": "https://evil.example/file"}):
+        changed = {**baseline, "results": [{**baseline["results"][0], **mutation}]}
+        with pytest.raises(ValidationError) as denied:
+            FederatedMessageSearchResponse.model_validate(changed)
+        assert [error["loc"] for error in denied.value.errors()] == [
+            ("results", 0, next(iter(mutation)))
+        ]
 
 
 @pytest.mark.asyncio
@@ -640,7 +631,11 @@ async def test_guild_e2ee_search_disclosure_only_lists_visible_channels(
         get=AsyncMock(side_effect=get),
         scalars=AsyncMock(return_value=[hidden, visible]),
     )
-    permissions = AsyncMock(side_effect=[Permission(0), Permission.VIEW_CHANNEL])
+    permissions = AsyncMock(
+        side_effect=lambda *_args, channel: (
+            Permission.VIEW_CHANNEL if channel is visible else Permission(0)
+        )
+    )
     monkeypatch.setattr(search_service, "get_permissions", permissions)
 
     authority, disabled = await search_service.authorize_scope(
@@ -659,7 +654,7 @@ async def test_guild_e2ee_search_disclosure_only_lists_visible_channels(
 
     assert authority == "alpha.localhost"
     assert disabled == ["51@alpha.localhost"]
-    assert permissions.await_count == 2
+    assert [call.kwargs["channel"] for call in permissions.await_args_list] == [hidden, visible]
 
 
 @pytest.mark.asyncio
@@ -764,3 +759,5 @@ async def test_bot_guild_search_requires_content_intent_and_redacts_attachments(
             ),
         )
     assert exc.value.detail == {"code": "BOT_INTENT_REQUIRED", "intent": "message_content"}
+
+    search.assert_awaited_once()

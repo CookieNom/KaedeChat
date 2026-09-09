@@ -491,7 +491,9 @@ def test_moderation_parsers_reject_duplicates_overlap_and_detail_reordering() ->
         PruneEstimate.from_payload({"pruned": True, "days": 14})
     with pytest.raises(ValueError):
         PruneResult.from_payload(
-            prune_payload(pruned_user_ids=["50@users.example", "50@users.example"])
+            prune_payload(
+                pruned=2, pruned_user_ids=["50@users.example", "50@users.example"]
+            )
         )
     with pytest.raises(ValueError):
         PruneResult.from_payload(

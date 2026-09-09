@@ -215,65 +215,63 @@ async def test_restricted_bot_audit_filter_includes_category_thread_descendant()
 @pytest.mark.asyncio
 async def test_human_audit_query_applies_cursor_actor_action_and_target_filters(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import AuditLogEntry
+
+    await postgres_schema.execute(
+        text("CREATE TABLE audit_log_entries (LIKE public.audit_log_entries INCLUDING ALL)")
+    )
     guild = SimpleNamespace(id=10, origin_domain="chat.example")
     monkeypatch.setattr(moderation_api, "local_guild", AsyncMock(return_value=guild))
     permission_check = AsyncMock()
     monkeypatch.setattr(moderation_api, "require_permissions", permission_check)
-    session = SimpleNamespace(scalars=AsyncMock(return_value=[]))
-    auth = SimpleNamespace(user=SimpleNamespace(id=1, origin_domain="chat.example"))
-
-    result = await moderation_api.list_audit_logs(
-        EntityRef("10@chat.example"),
-        25,
-        900,
-        None,
-        EntityRef("11@remote.example"),
-        25,
-        "instance",
-        auth,
-        session,
-        SimpleNamespace(),
-        SimpleNamespace(domain="chat.example"),
+    auth = SimpleNamespace(
+        user=SimpleNamespace(id=1, origin_domain="chat.example", account_type="human")
     )
-
-    assert result == []
-    statement = str(session.scalars.await_args.args[0])
-    assert "audit_log_entries.id <" in statement
-    assert "audit_log_entries.actor_id =" in statement
-    assert "audit_log_entries.actor_domain =" in statement
-    assert "audit_log_entries.action_type =" in statement
-    assert "audit_log_entries.target_type =" in statement
-    permission_check.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_human_audit_query_supports_ascending_after_cursor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    guild = SimpleNamespace(id=10, origin_domain="chat.example")
-    monkeypatch.setattr(moderation_api, "local_guild", AsyncMock(return_value=guild))
-    monkeypatch.setattr(moderation_api, "require_permissions", AsyncMock())
-    session = SimpleNamespace(scalars=AsyncMock(return_value=[]))
-    auth = SimpleNamespace(user=SimpleNamespace(id=1, origin_domain="chat.example"))
-
-    await moderation_api.list_audit_logs(
-        EntityRef("10@chat.example"),
-        25,
-        None,
-        900,
-        None,
-        None,
-        None,
-        auth,
-        session,
-        SimpleNamespace(),
-        SimpleNamespace(domain="chat.example"),
-    )
-
-    statement = str(session.scalars.await_args.args[0])
-    assert "audit_log_entries.id >" in statement
-    assert "audit_log_entries.id ASC" in statement
+    async with AsyncSession(bind=postgres_schema) as session:
+        base = dict(
+            guild_id=10,
+            guild_domain="chat.example",
+            actor_id=11,
+            actor_domain="remote.example",
+            action_type=25,
+            target_type="instance",
+        )
+        for identifier in (100, 200, 300, 400):
+            session.add(AuditLogEntry(id=identifier, **base))
+        for identifier, changed in enumerate(
+            [
+                {"guild_id": 12},
+                {"guild_domain": "foreign.example"},
+                {"actor_id": 12},
+                {"actor_domain": "foreign.example"},
+                {"action_type": 26},
+                {"target_type": "user"},
+            ],
+            start=210,
+        ):
+            session.add(AuditLogEntry(id=identifier, **(base | changed)))
+        await session.flush()
+        for before, after, expected in [(400, None, [300, 200]), (None, 100, [200, 300])]:
+            result = await moderation_api.list_audit_logs(
+                EntityRef("10@chat.example"),
+                2,
+                before,
+                after,
+                EntityRef("11@remote.example"),
+                25,
+                "instance",
+                auth,
+                session,
+                SimpleNamespace(),
+                SimpleNamespace(domain="chat.example"),
+            )
+            assert [int(entry.id) for entry in result] == expected
+        assert permission_check.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -299,10 +297,8 @@ async def test_human_audit_query_rejects_conflicting_cursors(
             SimpleNamespace(domain="chat.example"),
         )
 
-    assert rejected.value.detail == {
-        "code": "AUDIT_LOG_CURSOR_CONFLICT",
-        "message": "Choose either a before cursor or an after cursor, not both.",
-    }
+    assert rejected.value.status_code == 400
+    assert rejected.value.detail["code"] == "AUDIT_LOG_CURSOR_CONFLICT"
 
 
 @pytest.mark.asyncio
@@ -384,25 +380,38 @@ async def test_bot_audit_wrapper_requires_scope_then_delegates_live_permission_c
     session = SimpleNamespace()
     settings = SimpleNamespace(domain="chat.example")
 
+    redis = SimpleNamespace()
     result = await bots_api.bot_list_audit_logs(
         EntityRef("10@chat.example"),
         principal,
         session,
-        SimpleNamespace(),
+        redis,
         settings,
-        50,
+        25,
+        99,
         None,
-        None,
-        None,
-        None,
-        None,
+        EntityRef("2@apps.example"),
+        42,
+        "channel",
     )
 
     assert result == []
     authorize.assert_awaited_once_with(
         session, settings, principal, EntityRef("10@chat.example"), "audit_logs.read"
     )
-    delegate.assert_awaited_once()
+    delegate.assert_awaited_once_with(
+        EntityRef("10@chat.example"),
+        25,
+        99,
+        None,
+        EntityRef("2@apps.example"),
+        42,
+        "channel",
+        principal,
+        session,
+        redis,
+        settings,
+    )
 
 
 @pytest.mark.asyncio
@@ -418,12 +427,13 @@ async def test_bot_overwrite_wrapper_uses_channel_scope_and_human_handler(
     settings = SimpleNamespace(domain="chat.example")
     channel = EntityRef("20@chat.example")
 
+    redis = SimpleNamespace()
     result = await bots_api.bot_list_channel_overwrites(
         EntityRef("10@chat.example"),
         channel,
         principal,
         session,
-        SimpleNamespace(),
+        redis,
         settings,
     )
 
@@ -431,7 +441,9 @@ async def test_bot_overwrite_wrapper_uses_channel_scope_and_human_handler(
     authorize.assert_awaited_once_with(
         session, settings, principal, channel, "channels.overwrites.read"
     )
-    delegate.assert_awaited_once()
+    delegate.assert_awaited_once_with(
+        EntityRef("10@chat.example"), channel, principal, session, redis, settings
+    )
 
 
 @pytest.mark.asyncio

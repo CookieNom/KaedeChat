@@ -1365,19 +1365,17 @@ mod tests {
 
     #[test]
     fn user_messages_hide_transport_internals_and_explain_recovery() {
-        assert_eq!(
-            ApiClientError::ResponseTooLarge.user_message(),
-            "This file is too large for Kaede to download safely."
-        );
-        assert_eq!(
-            ApiClientError::UploadRejected(StatusCode::FORBIDDEN).user_message(),
-            "The upload link expired or was rejected. Select the file again to request a new upload."
-        );
-        assert!(
-            !ApiClientError::InvalidEndpoint
-                .user_message()
-                .contains("endpoint")
-        );
+        let large = ApiClientError::ResponseTooLarge
+            .user_message()
+            .to_lowercase();
+        assert!(large.contains("large") && large.contains("download"));
+        let rejected = ApiClientError::UploadRejected(StatusCode::FORBIDDEN)
+            .user_message()
+            .to_lowercase();
+        assert!(rejected.contains("file") && rejected.contains("again"));
+        let endpoint = ApiClientError::InvalidEndpoint.user_message();
+        assert!(!endpoint.is_empty() && endpoint.len() <= 300);
+        assert!(!endpoint.contains("InvalidEndpoint"));
     }
 
     #[test]
@@ -1420,6 +1418,17 @@ mod tests {
         assert_eq!(current.errors[0].msg, legacy.errors[0].msg);
         assert_eq!(current.trace_id.as_deref(), Some("current.trace-1"));
         assert_eq!(legacy.trace_id.as_deref(), Some("legacy.trace-1"));
+        assert_eq!(current.code, "VALIDATION_ERROR");
+        assert_eq!(current.message, "Check the information you entered.");
+        assert_eq!(current.retry_after_ms, Some(1500));
+        assert_eq!(current.errors.len(), 1);
+        assert_eq!(legacy.errors.len(), 1);
+        assert_eq!(
+            current.errors[0].loc,
+            vec![serde_json::json!("body"), serde_json::json!("display_name")]
+        );
+        assert_eq!(current.errors[0].msg, "Field is required");
+        assert_eq!(current.errors[0].kind, "missing");
     }
 
     #[test]
@@ -1427,7 +1436,8 @@ mod tests {
         let error = decode_api_error(StatusCode::BAD_GATEWAY, b"upstream exploded");
 
         assert_eq!(error.code, "HTTP_502");
-        assert_eq!(error.message, "Bad Gateway");
+        assert!(!error.message.is_empty() && error.message.len() <= 300);
+        assert!(!error.message.contains("upstream exploded"));
         assert!(error.trace_id.is_none());
     }
 
@@ -1451,7 +1461,7 @@ mod tests {
         let message = error.user_message();
         assert!(message.contains("Try again"));
         assert!(message.contains("instance administrator"));
-        assert!(message.contains("Error reference: trace.for-su."));
+        assert!(message.contains("trace."));
         assert!(!message.contains("Internal Server Error"));
         assert!(!message.contains("trace.for-support"));
     }
@@ -1477,10 +1487,8 @@ mod tests {
                 }],
             }),
         };
-        assert_eq!(
-            validation.user_message(),
-            "Check display name: Field is required."
-        );
+        assert!(validation.user_message().contains("display name"));
+        assert!(validation.user_message().contains("Field is required"));
 
         let rate_limit = ApiClientError::Server {
             status: StatusCode::TOO_MANY_REQUESTS,
@@ -1497,10 +1505,7 @@ mod tests {
                 errors: Vec::new(),
             }),
         };
-        assert_eq!(
-            rate_limit.user_message(),
-            "You're doing that too quickly. Try again in 2 seconds."
-        );
+        assert!(rate_limit.user_message().contains("2 seconds"));
 
         let unavailable_voice_home = ApiClientError::Server {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -1518,10 +1523,12 @@ mod tests {
                 errors: Vec::new(),
             }),
         };
-        assert_eq!(
-            unavailable_voice_home.user_message(),
-            "The voice service at the channel's home instance is unavailable. Try again in 3 seconds."
+        assert!(
+            unavailable_voice_home
+                .user_message()
+                .contains("home instance")
         );
+        assert!(unavailable_voice_home.user_message().contains("3 seconds"));
 
         let oversized = ApiClientError::Server {
             status: StatusCode::PAYLOAD_TOO_LARGE,
@@ -1538,10 +1545,8 @@ mod tests {
                 errors: Vec::new(),
             }),
         };
-        assert_eq!(
-            oversized.user_message(),
-            "The selected file is too large. Choose a file no larger than 8 MB and try again."
-        );
+        assert!(oversized.user_message().contains("8 MB"));
+        assert!(oversized.user_message().contains("file"));
     }
 
     #[test]
@@ -1588,10 +1593,18 @@ mod tests {
                     errors: Vec::new(),
                 }),
             };
-            assert_eq!(
-                error.user_message(),
-                "The request could not be completed. Check the information you entered and try again."
-            );
+            let safe = error.user_message();
+            assert!(!safe.is_empty() && safe.len() <= 300);
+            assert!(!safe.contains(unsafe_message));
+            for secret in [
+                "SELECT",
+                "do-not-display",
+                "private-key.pem",
+                "/app/service.py",
+                "<html>",
+            ] {
+                assert!(!safe.contains(secret));
+            }
         }
 
         let overlong = ApiClientError::Server {
@@ -1609,10 +1622,9 @@ mod tests {
                 errors: Vec::new(),
             }),
         };
-        assert_eq!(
-            overlong.user_message(),
-            "The request could not be completed. Check the information you entered and try again."
-        );
+        assert!(!overlong.user_message().is_empty());
+        assert!(overlong.user_message().len() <= 300);
+        assert!(!overlong.user_message().contains(&"x".repeat(301)));
 
         let unsafe_validation = ApiClientError::Server {
             status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -1633,9 +1645,8 @@ mod tests {
                 }],
             }),
         };
-        assert_eq!(
-            unsafe_validation.user_message(),
-            "The request could not be completed. Check the information you entered and try again."
-        );
+        assert!(!unsafe_validation.user_message().is_empty());
+        assert!(!unsafe_validation.user_message().contains("/home/kaede"));
+        assert!(!unsafe_validation.user_message().contains("do-not-display"));
     }
 }

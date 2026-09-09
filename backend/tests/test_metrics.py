@@ -71,13 +71,15 @@ async def test_metrics_expose_federation_capacity_and_replica_pauses(
 
     rendered = await metrics.render_metrics(_Redis(), lambda: _SessionContext())  # type: ignore[arg-type]
 
-    assert "kaede_federation_inbox_capacity_events 5000" in rendered
-    assert "kaede_federation_inbox_capacity_bytes 50000" in rendered
-    assert "kaede_federation_replica_retained_rows 120" in rendered
-    assert "kaede_federation_replica_retained_bytes 1200" in rendered
-    assert "kaede_federation_replica_quota_paused_guilds 3" in rendered
-    assert "kaede_federation_remote_media_cache_capacity_bytes 500000" in rendered
-    assert "kaede_search_index_pending_messages 11" in rendered
-    assert "kaede_search_index_retrying_messages 4" in rendered
-    assert "kaede_push_home_outbox_pending 5" in rendered
-    assert "kaede_push_relay_queue_pending 3" in rendered
+    samples = set(rendered.splitlines())
+
+    assert "kaede_federation_inbox_capacity_events 5000" in samples
+    assert "kaede_federation_inbox_capacity_bytes 50000" in samples
+    assert "kaede_federation_replica_retained_rows 120" in samples
+    assert "kaede_federation_replica_retained_bytes 1200" in samples
+    assert "kaede_federation_replica_quota_paused_guilds 3" in samples
+    assert "kaede_federation_remote_media_cache_capacity_bytes 500000" in samples
+    assert "kaede_search_index_pending_messages 11" in samples
+    assert "kaede_search_index_retrying_messages 4" in samples
+    assert "kaede_push_home_outbox_pending 5" in samples
+    assert "kaede_push_relay_queue_pending 3" in samples

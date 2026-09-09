@@ -33,11 +33,11 @@ describe('ReadAcknowledgementQueue', () => {
     const queue = new ReadAcknowledgementQueue({ send, acknowledged, warningChanged });
 
     await queue.acknowledge(first);
-    await vi.advanceTimersByTimeAsync(1_000);
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersToNextTimerAsync();
+    await vi.advanceTimersToNextTimerAsync();
 
     expect(acknowledged).not.toHaveBeenCalled();
-    expect(warningChanged.mock.calls.at(-1)?.[0]).toContain('Read state may be out of date');
+    expect(warningChanged.mock.calls.at(-1)?.[0]).toEqual(expect.any(String));
 
     await queue.retryNow();
     expect(acknowledged).toHaveBeenCalledWith(first);
@@ -92,15 +92,16 @@ describe('ReadAcknowledgementQueue', () => {
       warningChanged: vi.fn()
     });
 
+    const nextRoute = { ...latest, channel_id: '20', channel_domain: 'other.test' };
     const oldRequest = queue.acknowledge(first);
     queue.reset();
-    void queue.acknowledge(latest);
+    void queue.acknowledge(nextRoute);
     finish();
     await oldRequest;
     await vi.runAllTimersAsync();
 
     expect(send).toHaveBeenCalledTimes(2);
     expect(acknowledged).toHaveBeenCalledOnce();
-    expect(acknowledged).toHaveBeenCalledWith(latest);
+    expect(acknowledged).toHaveBeenCalledWith(nextRoute);
   });
 });

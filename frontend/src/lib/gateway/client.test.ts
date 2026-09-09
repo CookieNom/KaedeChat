@@ -114,9 +114,10 @@ describe('GatewayClient lifecycle', () => {
 
     expect(statuses.at(-1)).toEqual({
       state: 'reconnecting',
-      message: 'Live updates were interrupted. Reconnecting automatically…',
-      retryInMs: 750
+      message: expect.stringMatching(/reconnect/i),
+      retryInMs: expect.any(Number)
     });
+    expect(statuses.at(-1)?.retryInMs).toBeGreaterThan(0);
     client.close();
   });
 
@@ -128,7 +129,11 @@ describe('GatewayClient lifecycle', () => {
       statuses.push((event as CustomEvent<{ state: string; message: string }>).detail);
     });
     client.connect();
-    const socket = FakeWebSocket.instances[0];
+    FakeWebSocket.instances[0].close(1006);
+    expect(statuses.at(-1)?.state).toBe('reconnecting');
+    expect(statuses.at(-1)?.message.length).toBeGreaterThan(0);
+    await vi.advanceTimersToNextTimerAsync();
+    const socket = FakeWebSocket.instances[1];
     socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
     socket.message({
       op: GatewayOp.DISPATCH,
@@ -211,6 +216,7 @@ describe('GatewayClient lifecycle', () => {
       d: { session_id: 'presence-session' }
     });
 
+    expect(localStorageMemory.getItem('kaede.presence')).toBe('dnd');
     client.setPresence('dnd');
     expect(JSON.parse(socket.sent[1])).toEqual({
       op: GatewayOp.PRESENCE_UPDATE,
@@ -295,6 +301,10 @@ describe('GatewayClient lifecycle', () => {
       GatewayOp.IDENTIFY,
       GatewayOp.REQUEST_MEMBERS,
       GatewayOp.SUBSCRIBE_MEMBER_LIST
+    ]);
+    expect(socket.sent.slice(1).map((payload) => JSON.parse(payload))).toEqual([
+      { op: GatewayOp.REQUEST_MEMBERS, d: { guild_id: '10@remote.test', query: 'ali', limit: 25 } },
+      { op: GatewayOp.SUBSCRIBE_MEMBER_LIST, d: { guild_id: '10@remote.test', ranges: [[0, 49]] } }
     ]);
     client.close();
   });
@@ -434,12 +444,11 @@ describe('GatewayClient lifecycle', () => {
       JSON.stringify({ code: 'SESSION_LIMIT', limit: 5 })
     );
 
-    expect(statuses.at(-1)).toMatchObject({
-      message:
-        'This account has too many active live-update sessions. Close Kaede on another device; this session will keep retrying.',
-      retryInMs: 30_000
-    });
-    await vi.advanceTimersByTimeAsync(29_999);
+    const delay = statuses.at(-1)?.retryInMs;
+    expect(delay).toBeGreaterThan(0);
+    expect(delay).toBeLessThanOrEqual(300_000);
+    expect(statuses.at(-1)?.message).toMatch(/sessions.*(close|device)/i);
+    await vi.advanceTimersByTimeAsync(delay! - 1);
     expect(FakeWebSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(FakeWebSocket.instances).toHaveLength(2);
@@ -524,6 +533,7 @@ describe('GatewayClient lifecycle', () => {
     const second = FakeWebSocket.instances[1];
     second.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
     expect(JSON.parse(second.sent[0])).toEqual({ op: GatewayOp.IDENTIFY, d: {} });
+    expect(reset).not.toHaveBeenCalled();
     second.message({
       op: GatewayOp.DISPATCH,
       t: 'READY',
@@ -531,6 +541,8 @@ describe('GatewayClient lifecycle', () => {
       d: { session_id: 'new-session' }
     });
 
+    expect(reset).toHaveBeenCalledOnce();
+    second.message({ op: GatewayOp.DISPATCH, t: 'READY', s: 0, d: { session_id: 'new-session' } });
     expect(reset).toHaveBeenCalledOnce();
     client.close();
   });

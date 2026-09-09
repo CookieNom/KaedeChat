@@ -73,6 +73,18 @@ describe('composer completion', () => {
             position: 2,
             hoist: true,
             mentionable: true
+          },
+          {
+            id: '75512661369970690',
+            origin_domain: 'chat.example',
+            guild_id: '75512661369970680',
+            guild_domain: 'chat.example',
+            name: 'Secret cooks',
+            color: 0,
+            permissions: '0',
+            position: 3,
+            hoist: false,
+            mentionable: false
           }
         ],
         'cook'

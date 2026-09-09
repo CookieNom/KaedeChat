@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { Message, UserSummary } from '$lib/chat/types';
+import { fetchChannel } from '$lib/chat/threads';
+import type { Channel, Message, UserSummary } from '$lib/chat/types';
 import { chatEntities } from '$lib/stores/entities.svelte';
 import {
   browserNotificationsConfigured,
@@ -13,7 +14,10 @@ import {
   shouldOfferBrowserNotificationPrompt
 } from './browser.svelte';
 
+vi.mock('$lib/chat/threads', () => ({ fetchChannel: vi.fn() }));
+
 afterEach(() => {
+  vi.clearAllMocks();
   chatEntities.clearSession();
   vi.unstubAllGlobals();
 });
@@ -27,21 +31,21 @@ const message = {
 
 describe('browser notification settings', () => {
   it('never exposes an unresolved local placeholder handle in notification titles', () => {
-    expect(
-      notificationAuthorName({
-        id: '2',
-        origin_domain: 'remote.test',
-        username: 'history_deadbeef',
-        handle: 'history_deadbeef@remote.test',
-        display_name: null,
-        avatar_hash: null,
-        banner_hash: null,
-        bio: null,
-        custom_status: null,
-        profile_version: '1',
-        profile_resolved: false
-      })
-    ).toBe('Remote user · remote.test');
+    const title = notificationAuthorName({
+      id: '2',
+      origin_domain: 'remote.test',
+      username: 'history_deadbeef',
+      handle: 'history_deadbeef@remote.test',
+      display_name: null,
+      avatar_hash: null,
+      banner_hash: null,
+      bio: null,
+      custom_status: null,
+      profile_version: '1',
+      profile_resolved: false
+    });
+    expect(title).toContain('remote.test');
+    expect(title).not.toContain('history_deadbeef');
   });
 
   it('uses the same normalized key for stored and live guild references', () => {
@@ -65,7 +69,7 @@ describe('browser notification settings', () => {
     expect(browserNotificationsConfigured({ browser_notifications: true })).toBe(true);
   });
 
-  it('offers notification opt-in once without attempting to prompt automatically', () => {
+  it('opt-in eligibility', () => {
     expect(shouldOfferBrowserNotificationPrompt(true, 'default', false, false)).toBe(true);
     expect(shouldOfferBrowserNotificationPrompt(true, 'default', true, false)).toBe(true);
     expect(shouldOfferBrowserNotificationPrompt(true, 'granted', false, false)).toBe(true);
@@ -127,7 +131,7 @@ describe('browser notification settings', () => {
     ).toBe(false);
   });
 
-  it('uses the locally selected presence immediately instead of waiting for projection sync', () => {
+  it('presence preference/projection precedence', () => {
     expect(resolveNotificationPresence('dnd', 'online')).toBe('dnd');
     expect(resolveNotificationPresence('online', 'dnd')).toBe('dnd');
     expect(resolveNotificationPresence('invisible', 'online')).toBe('offline');
@@ -160,12 +164,33 @@ describe('browser notification settings', () => {
   });
 
   it('deliberately skips alerts when notifications are disabled without creating a failure', async () => {
+    const delivered = vi.fn();
     class GrantedNotification {
+      constructor() {
+        delivered();
+      }
+      close() {}
       static permission: NotificationPermission = 'granted';
     }
     vi.stubGlobal('window', { Notification: GrantedNotification });
     vi.stubGlobal('Notification', GrantedNotification);
     vi.stubGlobal('document', { visibilityState: 'hidden', hasFocus: () => false });
+    chatEntities.ingestCurrentUser(currentUser);
+    chatEntities.channels.upsert({
+      id: '10',
+      origin_domain: 'home.test',
+      guild_id: null,
+      guild_domain: null,
+      type: 1,
+      name: null,
+      topic: null,
+      position: 0,
+      parent_id: null,
+      parent_domain: null,
+      rate_limit_per_user: 0,
+      last_message_id: null,
+      last_message_domain: null
+    });
     const notifications = new BrowserNotifications();
     notifications.apply({ browser_notifications: false });
     notifications.applyGuildPreferences([]);
@@ -180,17 +205,38 @@ describe('browser notification settings', () => {
     await Promise.resolve();
 
     expect(notifications.health).toEqual({ message: '', retryable: false, pendingCount: 0 });
+    expect(delivered).not.toHaveBeenCalled();
   });
-
   it('pauses delivery after a preference refresh fails instead of using a stale snapshot', async () => {
+    const delivered = vi.fn();
     class GrantedNotification {
+      constructor() {
+        delivered();
+      }
+      close() {}
       static permission: NotificationPermission = 'granted';
     }
     vi.stubGlobal('window', { Notification: GrantedNotification });
     vi.stubGlobal('Notification', GrantedNotification);
     vi.stubGlobal('document', { visibilityState: 'hidden', hasFocus: () => false });
+    chatEntities.ingestCurrentUser(currentUser);
+    chatEntities.channels.upsert({
+      id: '10',
+      origin_domain: 'home.test',
+      guild_id: null,
+      guild_domain: null,
+      type: 1,
+      name: null,
+      topic: null,
+      position: 0,
+      parent_id: null,
+      parent_domain: null,
+      rate_limit_per_user: 0,
+      last_message_id: null,
+      last_message_domain: null
+    });
     const notifications = new BrowserNotifications();
-    notifications.apply({ browser_notifications: false });
+    notifications.apply({ browser_notifications: true });
     notifications.applyGuildPreferences([]);
     notifications.reportHealthIssue(
       'guild-preferences',
@@ -206,11 +252,12 @@ describe('browser notification settings', () => {
     });
 
     expect(notifications.health.pendingCount).toBe(1);
+    expect(delivered).not.toHaveBeenCalled();
     notifications.applyGuildPreferences([]);
     await Promise.resolve();
     expect(notifications.health).toEqual({ message: '', retryable: false, pendingCount: 0 });
+    expect(delivered).toHaveBeenCalledOnce();
   });
-
   it('does not retain own-message or do-not-disturb alerts in the retry queue', async () => {
     let delivered = 0;
     class GrantedNotification {
@@ -268,6 +315,70 @@ describe('browser notification settings', () => {
 
     expect(delivered).toBe(0);
     expect(notifications.health).toEqual({ message: '', retryable: false, pendingCount: 0 });
+  });
+
+  it('fetches an uncached channel with permission already granted', async () => {
+    const delivered = vi.fn();
+    class GrantedNotification {
+      static permission = 'granted';
+      constructor() {
+        delivered();
+      }
+    }
+    vi.stubGlobal('window', { Notification: GrantedNotification });
+    vi.stubGlobal('Notification', GrantedNotification);
+    vi.stubGlobal('document', { visibilityState: 'hidden', hasFocus: () => false });
+    chatEntities.ingestCurrentUser(currentUser);
+    vi.mocked(fetchChannel).mockResolvedValue({
+      id: '10',
+      origin_domain: 'home.test',
+      guild_id: null,
+      guild_domain: null
+    } as Channel);
+    const notifications = new BrowserNotifications();
+    notifications.apply({ browser_notifications: true });
+    notifications.applyGuildPreferences([]);
+    notifications.notifyMessage({
+      ...message,
+      id: '26',
+      origin_domain: 'home.test',
+      channel_id: '10',
+      channel_domain: 'home.test'
+    });
+    await vi.waitFor(() => expect(delivered).toHaveBeenCalledOnce());
+    expect(fetchChannel).toHaveBeenCalledWith('10@home.test');
+    expect(notifications.health).toEqual({ message: '', retryable: false, pendingCount: 0 });
+  });
+
+  it('dismisses without disabling delivery and clears stale entity warnings on retry', async () => {
+    class GrantedNotification {
+      static permission = 'granted';
+    }
+    vi.stubGlobal('window', { Notification: GrantedNotification });
+    vi.stubGlobal('Notification', GrantedNotification);
+    vi.stubGlobal('document', { visibilityState: 'hidden', hasFocus: () => false });
+    const notifications = new BrowserNotifications();
+    notifications.apply({ browser_notifications: true });
+    notifications.applyGuildPreferences([]);
+    notifications.notifyMessage({
+      ...message,
+      id: '27',
+      origin_domain: 'home.test',
+      channel_id: '10',
+      channel_domain: 'home.test'
+    });
+    await Promise.resolve();
+    expect(notifications.health.message).toContain('details are still loading');
+    notifications.dismissHealth();
+    notifications.applyGuildPreferences([]);
+    await Promise.resolve();
+    expect(notifications.dismissedHealthMessage).toBe(notifications.health.message);
+    expect(notifications.enabled).toBe(true);
+    expect(notifications.health.pendingCount).toBe(1);
+    vi.stubGlobal('document', { visibilityState: 'visible', hasFocus: () => true });
+    notifications.retryPending();
+    expect(notifications.health).toEqual({ message: '', retryable: false, pendingCount: 0 });
+    expect(notifications.dismissedHealthMessage).toBe('');
   });
 
   it('does not requeue an old-account native notification after disable', async () => {

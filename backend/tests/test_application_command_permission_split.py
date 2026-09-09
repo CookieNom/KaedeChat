@@ -403,39 +403,11 @@ def test_user_install_continuation_response_is_forced_ephemeral_without_use_comm
     assert ephemeral
 
 
-@pytest.mark.parametrize("interaction_type", ["component", "modal_submit"])
-@pytest.mark.parametrize("callback_type", [6, 7])
-def test_user_install_public_update_is_blocked_when_private_response_is_required(
-    interaction_type: str,
-    callback_type: int,
-) -> None:
-    interaction = cast(
-        Any,
-        SimpleNamespace(
-            status="pending",
-            interaction_type=interaction_type,
-            guild_id=30,
-            message_id=40,
-            invocation_permissions=int(Permission.SEND_MESSAGES | Permission.USE_EXTERNAL_APPS),
-            invocation_channel_type=0,
-            payload={},
-        ),
-    )
-
-    with pytest.raises(HTTPException) as denied:
-        interactions.validate_interaction_callback_type(
-            interaction,
-            interactions.InteractionCallback(type=cast(Any, callback_type)),
-            user_installation(),
-        )
-
-    assert denied.value.status_code == 403
-    assert denied.value.detail["code"] == "USER_INSTALL_EPHEMERAL_REQUIRED"
-
-
+@pytest.mark.parametrize("private_source", [True, False])
 @pytest.mark.parametrize("interaction_type", ["component", "modal_submit"])
 @pytest.mark.parametrize("callback_type", [6, 7])
 def test_user_install_private_source_update_remains_available_when_private_response_is_required(
+    private_source: bool,
     interaction_type: str,
     callback_type: int,
 ) -> None:
@@ -445,12 +417,23 @@ def test_user_install_private_source_update_remains_available_when_private_respo
             status="pending",
             interaction_type=interaction_type,
             guild_id=30,
-            message_id=None,
+            message_id=None if private_source else 40,
             invocation_permissions=int(Permission.SEND_MESSAGES | Permission.USE_EXTERNAL_APPS),
             invocation_channel_type=0,
-            payload={"response_id": "40"},
+            payload={"response_id": "40"} if private_source else {},
         ),
     )
+
+    if not private_source:
+        with pytest.raises(HTTPException) as denied:
+            interactions.validate_interaction_callback_type(
+                interaction,
+                interactions.InteractionCallback(type=cast(Any, callback_type)),
+                user_installation(),
+            )
+        assert denied.value.status_code == 403
+        assert denied.value.detail["code"] == "USER_INSTALL_EPHEMERAL_REQUIRED"
+        return
 
     flags, ephemeral = interactions.validate_interaction_callback_type(
         interaction,

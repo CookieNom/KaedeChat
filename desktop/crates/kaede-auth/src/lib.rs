@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn password_protocol_fields_are_always_version_two() {
+    fn password_request_serde_preserves_supplied_protocol_fields() {
         let Ok(login) = serde_json::to_value(LoginRequest {
             identifier: "turtle",
             password: "authentication-secret",
@@ -714,5 +714,25 @@ mod tests {
             validate_password_kdf(&password_kdf(false), true),
             Err(AuthError::InvalidPasswordProtocol)
         ));
+        for (field, invalid) in [
+            ("version", json!(0)),
+            ("algorithm", json!("legacy")),
+            ("iterations", json!(1)),
+            ("auth_salt", serde_json::Value::Null),
+            ("auth_salt", json!("A".repeat(21))),
+            ("auth_salt", json!(format!("{}B", "A".repeat(21)))),
+            ("vault_salt", json!(format!("{}=", "A".repeat(22)))),
+        ] {
+            let mut value = password_kdf(true);
+            value[field] = invalid;
+            assert!(
+                matches!(
+                    validate_password_kdf(&value, true),
+                    Err(AuthError::InvalidPasswordProtocol)
+                ),
+                "{field}"
+            );
+        }
+        assert!(validate_authentication_secret(&format!("{}B", "A".repeat(42))).is_err());
     }
 }

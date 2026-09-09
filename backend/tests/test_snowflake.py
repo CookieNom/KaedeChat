@@ -224,16 +224,26 @@ async def test_reassignment_quarantines_and_fences_former_owner() -> None:
         wall_ms[0] += (LEASE_TTL_SECONDS * 1_000) + 1
 
     second_task = asyncio.create_task(WorkerLease.acquire(redis, sleep=controlled_quarantine))
-    await quarantine_started.wait()
+    second = None
+    try:
+        await quarantine_started.wait()
 
-    assert redis.values[first.key].startswith("quarantine:")
-    with pytest.raises(RuntimeError, match="lease"):
-        await first_generator.mint()
+        assert redis.values[first.key].startswith("quarantine:")
+        with pytest.raises(RuntimeError, match="lease"):
+            await first_generator.mint()
 
-    release_quarantine.set()
-    second = await second_task
-    assert second.worker_id == first.worker_id
-    assert redis.values[second.key] == second.active_value
+        release_quarantine.set()
+        second = await second_task
+        assert second.worker_id == first.worker_id
+        assert redis.values[second.key] == second.active_value
 
-    second_id = await SnowflakeGenerator(second, clock_ms=lambda: wall_ms[0]).mint()
-    assert second_id > first_id
+        second_id = await SnowflakeGenerator(second, clock_ms=lambda: wall_ms[0]).mint()
+        assert second_id > first_id
+    finally:
+        release_quarantine.set()
+        if not second_task.done():
+            second_task.cancel()
+        outcome = await asyncio.gather(second_task, return_exceptions=True)
+        if isinstance(outcome[0], WorkerLease):
+            await outcome[0].close()
+        await first.close()

@@ -46,6 +46,7 @@
     "eslint": "^9.19.0",
     "eslint-plugin-svelte": "^3.0.3",
     "globals": "^15.14.0",
+    "happy-dom": "^20.14.0",
     "prettier": "^3.5.0",
     "prettier-plugin-svelte": "^3.3.3",
     "svelte": "^5.20.1",

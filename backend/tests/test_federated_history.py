@@ -17,7 +17,6 @@ from app.db.models import Channel, Guild
 from app.federation import history as history_module
 from app.federation.history import (
     HISTORY_CAPACITY_CODE,
-    HISTORY_EVENT_TYPES,
     HISTORY_LIMIT_REACHED_CODE,
     HISTORY_TEMPORARILY_UNAVAILABLE_CODE,
     FederatedHistoryLimitExceeded,
@@ -252,7 +251,7 @@ def history_settings(**overrides: object) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_history_cleanup_reports_expired_and_abandoned_rows_without_committing() -> None:
+async def test_cleanup_rowcount_accounting_without_commit() -> None:
     session = AsyncMock()
     session.execute.side_effect = [
         SimpleNamespace(rowcount=3),
@@ -375,6 +374,12 @@ def test_history_policy_defaults_to_disabled_and_supports_channel_overrides() ->
     child = channel()
     assert effective_history_policy(parent, child) == "disabled"
 
+    parent.federated_history_policy = "full_retained"
+    child.federated_history_policy = "inherit"
+    assert effective_history_policy(parent, child) == "full_retained"
+    child.federated_history_policy = "disabled"
+    assert effective_history_policy(parent, child) == "disabled"
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("channel_type", [0, 2, 5, 10, 11, 12, 13])
@@ -409,10 +414,6 @@ async def test_history_rejects_non_message_guild_channels(
     child.type = channel_type
 
     assert await history_channel_allowed(AsyncMock(), parent, object(), child) is False
-    parent.federated_history_policy = "full_retained"
-    assert effective_history_policy(parent, child) == "full_retained"
-    child.federated_history_policy = "disabled"
-    assert effective_history_policy(parent, child) == "disabled"
 
 
 def test_new_channel_federation_state_materializes_pre_flush_defaults() -> None:
@@ -448,31 +449,20 @@ def test_history_policy_schemas_reject_unknown_and_explicit_null_values() -> Non
         ChannelUpdate(federated_history_policy="public")  # type: ignore[arg-type]
 
 
-def test_history_placeholder_handles_are_random_bounded_and_do_not_expose_the_id() -> None:
+def test_history_placeholder_handles_use_entropy_without_identity_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entropy = iter(["a" * 24, "b" * 24, "a" * 24])
+    monkeypatch.setattr("app.federation.replication.secrets.token_hex", lambda _size: next(entropy))
     first = unresolved_history_username(1234, "remote.example")
     second = unresolved_history_username(1234, "remote.example")
+    same_entropy_other_identity = unresolved_history_username(5678, "other.example")
     assert first != second
+    assert first == same_entropy_other_identity
     assert "1234" not in first
     assert first.startswith("history_")
-    assert len(first) == 32
+    assert 0 < len(first) <= 32
     assert first.removeprefix("history_").isalnum()
-
-
-def test_history_delta_registry_contains_only_mutations_needed_for_reconciliation() -> None:
-    assert {
-        "guild.message.update",
-        "guild.message.delete",
-        "guild.message.bulk_delete",
-        "guild.message.purge",
-        "guild.reaction.add",
-        "guild.reaction.remove",
-        "guild.reaction.clear",
-        "guild.poll.vote.add",
-        "guild.poll.vote.remove",
-        "guild.poll.finalize",
-        "guild.pin.add",
-        "guild.pin.remove",
-    } == HISTORY_EVENT_TYPES
 
 
 def test_history_message_validation_binds_author_channel_and_range() -> None:
@@ -542,6 +532,16 @@ def test_history_message_validation_binds_author_channel_and_range() -> None:
             after=0,
             upper_bound=message_snowflake,
         )
+
+    for change in ({"channel_id": "31"}, {"channel_domain": "other.example"}):
+        with pytest.raises(ValueError, match="wrong channel"):
+            _validate_history_message(
+                {**raw, **change},
+                guild_origin="home.example",
+                channel_id=30,
+                after=0,
+                upper_bound=message_snowflake,
+            )
 
 
 @pytest.mark.parametrize(
@@ -787,30 +787,97 @@ async def test_history_delta_applies_aggregate_reaction_clear(
 
 
 @pytest.mark.asyncio
-async def test_history_delta_applies_one_aggregate_bulk_delete() -> None:
-    first = SimpleNamespace()
-    second = SimpleNamespace()
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "message.update",
+        "message.delete",
+        "message.bulk_delete",
+        "message.purge",
+        "poll.vote.add",
+        "poll.vote.remove",
+        "poll.finalize",
+        "pin.add",
+        "pin.remove",
+    ],
+)
+async def test_history_delta_applies_message_poll_and_pin_mutations(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    timestamp = datetime(2026, 8, 1, tzinfo=UTC)
+    stamp = timestamp.isoformat()
+    vote = {"answer_id": 1, "user_id": "20", "user_domain": "home.example", "created_at": stamp}
+    first = SimpleNamespace(
+        payload={
+            "content": "original",
+            "author_id": "20",
+            "author_domain": "home.example",
+            "created_at": stamp,
+            "poll_votes": [] if mutation == "poll.vote.add" else [vote],
+            "poll": {"results": {"is_finalized": False}},
+            "pin": {"pinned_by_id": "old"},
+        }
+    )
+    second = SimpleNamespace(
+        payload={"author_id": "21", "author_domain": "home.example", "created_at": stamp}
+    )
     session = AsyncMock()
     session.get.side_effect = [first, second]
+    session.scalars.return_value = [first, second]
 
+    async def revalidate(_session, _settings, _import, staged, **_kwargs):
+        return staged.payload
+
+    monkeypatch.setattr(
+        history_module, "_revalidate_staged_history_message", AsyncMock(side_effect=revalidate)
+    )
+    content = {
+        "message": {"id": "30", "origin_domain": "home.example"},
+        "messages": [
+            {"id": "30", "origin_domain": "home.example"},
+            {"id": "31", "origin_domain": "member.example"},
+        ],
+        "user": {"id": "20", "origin_domain": "home.example"},
+        "answer_id": 1,
+        "author": {"id": "20", "origin_domain": "home.example"},
+        "created_after": stamp,
+        "deleted_at": stamp,
+        "finalized_at": stamp,
+    }
+    if mutation == "message.update":
+        content["message"]["content"] = "edited"
     await history_module._apply_history_delta_event(
         session,
-        history_settings(),  # type: ignore[arg-type]
-        SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
+        history_settings(),
+        SimpleNamespace(export_id=7, export_domain="home.example"),
         {
-            "type": "guild.message.bulk_delete",
-            "ts": int(datetime.now(UTC).timestamp() * 1000),
-            "content": {
-                "messages": [
-                    {"id": "30", "origin_domain": "home.example"},
-                    {"id": "31", "origin_domain": "member.example"},
-                ],
-                "deleted_at": datetime.now(UTC).isoformat(),
-            },
+            "type": "guild." + mutation,
+            "ts": int(timestamp.timestamp() * 1000),
+            "content": content,
+            "actor": {"id": "20", "origin_domain": "home.example"},
         },
     )
-
-    assert [item.args[0] for item in session.delete.await_args_list] == [first, second]
+    if mutation in {"message.delete", "message.purge", "message.bulk_delete"}:
+        assert [call.args[0] for call in session.delete.await_args_list] == (
+            [first, second] if mutation == "message.bulk_delete" else [first]
+        )
+    else:
+        session.delete.assert_not_awaited()
+        if mutation == "message.update":
+            assert first.payload["content"] == "edited"
+        elif mutation.startswith("poll.vote."):
+            assert first.payload["poll_votes"] == ([vote] if mutation == "poll.vote.add" else [])
+        elif mutation == "poll.finalize":
+            assert first.payload["poll"] == {
+                "results": {"is_finalized": True},
+                "finalized_at": stamp,
+            }
+        else:
+            assert first.payload["pin"] == (
+                {"pinned_by_id": "20", "pinned_by_domain": "home.example", "pinned_at": stamp}
+                if mutation == "pin.add"
+                else None
+            )
 
 
 def test_encrypted_history_operation_matches_the_message_projection() -> None:

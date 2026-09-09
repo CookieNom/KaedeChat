@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -65,15 +65,11 @@ def test_email_payload_rejects_tampering_and_context_swaps() -> None:
 
 
 def test_retry_backoff_is_bounded() -> None:
+    assert retry_delay(1) < timedelta(minutes=30)
     assert retry_delay(0) == RETRY_DELAYS[0]
     assert retry_delay(1) == RETRY_DELAYS[0]
     assert retry_delay(2) == RETRY_DELAYS[1]
     assert retry_delay(10_000) == RETRY_DELAYS[-1]
-
-
-def test_retry_schedule_fits_normal_token_lifetimes() -> None:
-    now = datetime.now(UTC)
-    assert now + retry_delay(1) < now + timedelta(minutes=30)
 
 
 @pytest.mark.asyncio
@@ -117,7 +113,7 @@ async def test_resend_stays_uniform_when_candidate_disappears(
 
 
 @pytest.mark.asyncio
-async def test_unverified_purge_candidates_use_nonblocking_user_locks() -> None:
+async def test_nonblocking_lock_query_construction() -> None:
     session = AsyncMock()
     empty_result = MagicMock()
     empty_result.tuples.return_value = []

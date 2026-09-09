@@ -119,7 +119,7 @@ def test_expression_projection_covers_content_components_polls_and_e2ee() -> Non
     ) == ["<a:secret:91@s.example>"]
 
 
-def test_expression_receipt_is_a_closed_authority_attested_actor_contract() -> None:
+def test_receipt_context_and_actor_binding() -> None:
     content = _authorization_content()
     context = {
         "source_authority": "s.example",
@@ -383,7 +383,9 @@ async def test_source_rechecks_bot_installation_for_every_expression_guild(
     )
     application = SimpleNamespace(id=3, origin_domain="apps.example")
     emoji = SimpleNamespace(guild_id=77, guild_domain="s.example")
-    session = SimpleNamespace(get=AsyncMock(return_value=emoji))
+    sticker = SimpleNamespace(guild_id=78, guild_domain="s.example")
+    objects = {(88, "s.example"): emoji, (89, "s.example"): emoji, (90, "s.example"): sticker}
+    session = SimpleNamespace(get=AsyncMock(side_effect=lambda _model, key: objects[key]))
     require_installations = AsyncMock()
     monkeypatch.setattr(expressions_api, "consume_actor_intent_nonce", AsyncMock())
     monkeypatch.setattr(expressions_api, "validate_custom_emoji_tokens", AsyncMock())
@@ -412,7 +414,8 @@ async def test_source_rechecks_bot_installation_for_every_expression_guild(
         target_channel_ref="20@t.example",
         operation="message.create",
         operation_id="create-1",
-        emoji_tokens=["<:wave:88@s.example>"],
+        emoji_tokens=["<:other:89@s.example>", "<:wave:88@s.example>"],
+        sticker_refs=["90@s.example"],
         nonce="n" * 24,
     )
 
@@ -429,7 +432,7 @@ async def test_source_rechecks_bot_installation_for_every_expression_guild(
         session,
         application,
         actor,
-        {(77, "s.example")},
+        {(77, "s.example"), (78, "s.example")},
     )
 
 
@@ -497,7 +500,34 @@ async def test_destination_verifies_exact_receipt_and_consumes_replay_nonce(
     )
 
     assert authorization.operation_id == "create-1"
-    redis.set.assert_awaited_once()
+    import hashlib
+    import json
+
+    key_material = {
+        "authority": "s.example",
+        "intent_kind": "expression-source",
+        "action": "message.create",
+        "actor_ref": "1@a.example",
+        "audience": "t.example",
+        "nonce": "n" * 24,
+    }
+    key = (
+        "federation:actor-intent:v1:"
+        + hashlib.sha256(
+            json.dumps(key_material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    digest = hashlib.sha256(
+        json.dumps(
+            authorization.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    redis.set.assert_awaited_once_with(
+        key,
+        digest,
+        nx=True,
+        ex=int(authorization.expires_at.timestamp()) - int(now.timestamp()) + 60,
+    )
     with pytest.raises(ValueError, match="binding"):
         await validated_expression_use_authorization(
             cast(Any, SimpleNamespace()),
@@ -513,6 +543,48 @@ async def test_destination_verifies_exact_receipt_and_consumes_replay_nonce(
             target_message_ref=None,
             operation="message.create",
             operation_id="create-1",
+            expected_emoji_tokens=["<:wave:88@s.example>"],
+            expected_sticker_items=[],
+            now=now,
+        )
+
+    # Exact retries are idempotent; reusing the nonce for changed claims is rejected.
+    redis.set.return_value = False
+    redis.get.return_value = digest
+    await validated_expression_use_authorization(
+        cast(Any, SimpleNamespace()),
+        cast(Any, redis),
+        cast(Any, SimpleNamespace(federation_clock_skew_seconds=60)),
+        {},
+        source_authority="s.example",
+        requester_ref="1@a.example",
+        requester_type="human",
+        application_ref=None,
+        target_guild_ref="10@t.example",
+        target_channel_ref="20@t.example",
+        target_message_ref=None,
+        operation="message.create",
+        operation_id="create-1",
+        expected_emoji_tokens=["<:wave:88@s.example>"],
+        expected_sticker_items=[],
+        now=now,
+    )
+    envelope.content = {**content, "operation_id": "create-2"}
+    with pytest.raises(ValueError, match="nonce was reused"):
+        await validated_expression_use_authorization(
+            cast(Any, SimpleNamespace()),
+            cast(Any, redis),
+            cast(Any, SimpleNamespace(federation_clock_skew_seconds=60)),
+            {},
+            source_authority="s.example",
+            requester_ref="1@a.example",
+            requester_type="human",
+            application_ref=None,
+            target_guild_ref="10@t.example",
+            target_channel_ref="20@t.example",
+            target_message_ref=None,
+            operation="message.create",
+            operation_id="create-2",
             expected_emoji_tokens=["<:wave:88@s.example>"],
             expected_sticker_items=[],
             now=now,
@@ -597,7 +669,7 @@ async def test_destination_requires_complete_authority_partition(
             cast(Any, SimpleNamespace()),
             cast(Any, SimpleNamespace()),
             cast(Any, SimpleNamespace()),
-            {"evil.example": {}},
+            {"s.example": {}, "evil.example": {}},
             **kwargs,
         )
     validate.assert_not_awaited()

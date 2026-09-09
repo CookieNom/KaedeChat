@@ -58,15 +58,28 @@ describe('guild webhook management', () => {
   beforeEach(() => apiMock.mockReset().mockResolvedValue({}));
 
   it('uses qualified authority routes for list, create, edit, rotate, and delete', async () => {
-    await listGuildWebhooks('1@remote.example');
-    await listChannelWebhooks('1@remote.example', '2@remote.example');
-    await createGuildWebhook('1@remote.example', '2@remote.example', 'Builds');
-    await updateGuildWebhook('1@remote.example', webhook, {
-      name: 'Deploys',
-      channel_id: '3@remote.example'
-    });
-    await rotateGuildWebhook('1@remote.example', webhook);
-    await deleteGuildWebhook('1@remote.example', webhook);
+    const edited = { ...webhook, name: 'Deploys', channel_id: '3' };
+    const rotated = { ...edited, token: 'test-rotated-token' };
+    apiMock
+      .mockResolvedValueOnce([webhook])
+      .mockResolvedValueOnce([webhook])
+      .mockResolvedValueOnce(webhook)
+      .mockResolvedValueOnce(edited)
+      .mockResolvedValueOnce(rotated)
+      .mockResolvedValueOnce(undefined);
+    expect(await listGuildWebhooks('1@remote.example')).toEqual([webhook]);
+    expect(await listChannelWebhooks('1@remote.example', '2@remote.example')).toEqual([webhook]);
+    expect(await createGuildWebhook('1@remote.example', '2@remote.example', 'Builds')).toEqual(
+      webhook
+    );
+    expect(
+      await updateGuildWebhook('1@remote.example', webhook, {
+        name: 'Deploys',
+        channel_id: '3@remote.example'
+      })
+    ).toEqual(edited);
+    expect(await rotateGuildWebhook('1@remote.example', webhook)).toEqual(rotated);
+    expect(await deleteGuildWebhook('1@remote.example', webhook)).toBeUndefined();
 
     expect(apiMock.mock.calls).toEqual([
       ['/guilds/1%40remote.example/webhooks', { signal: undefined }],

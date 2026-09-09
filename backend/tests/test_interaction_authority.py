@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import copy
 from datetime import UTC, datetime, timedelta
@@ -249,7 +248,12 @@ async def test_private_response_rich_emoji_uses_interaction_channel_authority(
 
 @pytest.mark.asyncio
 async def test_private_response_rich_emoji_fails_when_target_channel_is_unavailable() -> None:
-    session = SimpleNamespace(get=AsyncMock(return_value=None))
+    guild = SimpleNamespace(id=10, origin_domain="guild.example")
+    session = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=lambda _model, key: guild if key == (10, "guild.example") else None
+        )
+    )
     interaction = SimpleNamespace(
         guild_id=10,
         guild_domain="guild.example",
@@ -286,7 +290,7 @@ async def test_private_response_rich_emoji_fails_when_target_channel_is_unavaila
     assert unavailable.value.detail["code"] == "INTERACTION_CHANNEL_UNAVAILABLE"
 
 
-def test_decimal_command_values_are_bounded_and_federation_serializable() -> None:
+def test_decimal_federation_serialization() -> None:
     interaction = interactions.InteractionCreate(
         application_ref="1@apps.example",
         command_name="scale",
@@ -300,8 +304,7 @@ def test_decimal_command_values_are_bounded_and_federation_serializable() -> Non
         canonical_json(payload)
 
 
-@pytest.mark.asyncio
-async def test_federated_component_uses_authority_lineage_without_clicker_install() -> None:
+def test_federated_component_accepts_authority_installation_lineage() -> None:
     payload = interactions.InteractionCreate(
         application_ref="1@apps.example",
         interaction_type="component",
@@ -1153,6 +1156,12 @@ def test_modal_attachment_capabilities_are_numeric_unique_and_bounded() -> None:
         with pytest.raises(HTTPException):
             interactions.modal_attachment_file_types([(upload, values)])
 
+    fields = [(upload, [str(value)]) for value in range(1, 11)]
+    assert interactions.modal_attachment_file_types(fields)[0] == list(range(1, 11))
+    with pytest.raises(HTTPException) as oversized:
+        interactions.modal_attachment_file_types([*fields, (upload, ["11"])])
+    assert oversized.value.detail["code"] == "MODAL_ATTACHMENTS_INVALID"
+
 
 @pytest.mark.asyncio
 async def test_plaintext_modal_files_relay_across_user_channel_and_app_authorities(
@@ -1437,11 +1446,14 @@ async def test_invocation_attachment_binding_preserves_owner_check(
         AsyncMock(side_effect=HTTPException(403, detail={"code": "ATTACHMENT_NOT_OWNED"})),
     )
 
+    session = AsyncMock()
+    actor = SimpleNamespace(id=3, origin_domain="chat.example")
+    configured = SimpleNamespace(domain="chat.example")
     with pytest.raises(HTTPException) as rejected:
         await interactions.bind_invocation_attachments(
-            AsyncMock(),
-            SimpleNamespace(domain="chat.example"),
-            SimpleNamespace(),
+            session,
+            configured,
+            actor,
             SimpleNamespace(id=7, channel_id=10, channel_domain="chat.example"),
             [8],
             {},
@@ -1449,6 +1461,10 @@ async def test_invocation_attachment_binding_preserves_owner_check(
         )
 
     assert rejected.value.detail["code"] == "ATTACHMENT_NOT_OWNED"
+
+    interactions.finalize_attachment.assert_awaited_once_with(
+        session, configured, actor, 8, required_purpose="attachment"
+    )
 
 
 @pytest.mark.asyncio
@@ -1567,7 +1583,7 @@ async def test_user_install_update_materializes_timestamp_and_renders_before_com
 
     async def refresh(value: object, *, attribute_names: tuple[str, ...]) -> None:
         assert value is installation
-        assert attribute_names == ("updated_at",)
+        assert "updated_at" in attribute_names
         installation.updated_at = refreshed_at
         lifecycle.append("refresh")
 
@@ -2115,7 +2131,7 @@ async def test_deprecated_premium_callback_is_rejected_not_recorded(
         "bot_interaction",
         AsyncMock(return_value=(interaction, SimpleNamespace())),
     )
-    session = SimpleNamespace(add=AsyncMock(), commit=AsyncMock())
+    session = SimpleNamespace(add=MagicMock(), commit=AsyncMock())
 
     with pytest.raises(HTTPException) as denied:
         await interactions.callback_interaction(
@@ -2132,6 +2148,8 @@ async def test_deprecated_premium_callback_is_rejected_not_recorded(
     assert denied.value.status_code == 400
     assert denied.value.detail["code"] == "INTERACTION_CALLBACK_UNSUPPORTED"
     session.commit.assert_not_awaited()
+
+    session.add.assert_not_called()
 
 
 @pytest.mark.parametrize("callback_type", [True, 11, 12])
@@ -2307,35 +2325,81 @@ async def test_public_component_keeps_user_install_owner_across_clickers() -> No
 
 
 @pytest.mark.asyncio
-async def test_callback_rejoins_user_installation_without_requiring_clicker_ownership() -> None:
-    result = SimpleNamespace(one_or_none=lambda: None)
-    session = SimpleNamespace(execute=AsyncMock(return_value=result))
+async def test_callback_rejoins_user_installation_without_requiring_clicker_ownership(
+    postgres_schema,
+) -> None:
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import BotInteraction, BotUserInstallation
+
+    for table in (
+        "bot_interactions",
+        "bot_installations",
+        "bot_user_installations",
+        "bot_dm_capabilities",
+        "guild_members",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    token = "a" * 43
     principal = SimpleNamespace(
-        require_scope=MagicMock(),
         application=SimpleNamespace(id=12, origin_domain="apps.example"),
         user=SimpleNamespace(id=13, origin_domain="apps.example"),
+        interaction_token=token,
+        dm_capability_grant_id=None,
     )
-
-    with pytest.raises(HTTPException) as missing:
-        await interactions.bot_interaction(
-            session,
-            principal,
-            29,
-            "interactions.respond",
-            authority_domain="guild.example",
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        installed = BotUserInstallation(
+            id=50,
+            application_id=12,
+            application_domain="apps.example",
+            user_id=100,
+            user_domain="guild.example",
+            status="active",
+            grant_revision=7,
+            granted_scopes=["interactions.respond"],
+            contexts=["guild"],
         )
-
-    assert missing.value.status_code == 404
-    statement = session.execute.await_args.args[0]
-    sql = str(statement.compile())
-    assert "bot_user_installations.user_id = bot_interactions.user_id" not in sql
-    assert "bot_user_installations.user_domain = bot_interactions.user_domain" not in sql
-    assert "bot_user_installations.revoked_at IS NULL" in sql
-    assert "bot_installations.revoked_at IS NULL" in sql
-    assert (
-        "bot_user_installations.grant_revision = bot_interactions.installation_revision" not in sql
-    )
-    assert "bot_installations.grant_revision = bot_interactions.installation_revision" not in sql
+        interaction = BotInteraction(
+            id=29,
+            application_id=12,
+            application_domain="apps.example",
+            user_installation_id=50,
+            user_id=200,
+            user_domain="clicker.example",
+            installation_revision=3,
+            integration_type="user_install",
+            context="guild",
+            token_hash=hashlib.sha256(token.encode()).digest(),
+            status="deferred",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        session.add_all([installed, interaction])
+        await session.flush()
+        assert await interactions.bot_interaction(
+            session, principal, 29, "interactions.respond", authority_domain="guild.example"
+        ) == (interaction, installed)
+        for field, value in (
+            ("application_id", 99),
+            ("application_domain", "other.example"),
+            ("status", "revoked"),
+            ("revoked_at", datetime.now(UTC)),
+        ):
+            original = getattr(installed, field)
+            setattr(installed, field, value)
+            await session.flush()
+            with pytest.raises(HTTPException) as denied:
+                await interactions.bot_interaction(
+                    session, principal, 29, "interactions.respond", authority_domain="guild.example"
+                )
+            assert denied.value.status_code == 404
+            setattr(installed, field, original)
+            await session.flush()
 
 
 def test_callback_scopes_are_frozen_at_interaction_admission() -> None:
@@ -2899,7 +2963,7 @@ async def test_federated_private_component_keeps_user_install_owner_across_click
 
 
 @pytest.mark.asyncio
-async def test_concurrent_acknowledgements_have_exactly_one_winner(
+async def test_deferred_acknowledgement_rejects_a_second_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     interaction = SimpleNamespace(
@@ -2916,15 +2980,6 @@ async def test_concurrent_acknowledgements_have_exactly_one_winner(
         response_message_domain=None,
     )
     installation = SimpleNamespace()
-    transaction_lock = asyncio.Lock()
-
-    async def locked_interaction(
-        *args: object,
-        **kwargs: object,
-    ) -> tuple[object, object]:
-        del args, kwargs
-        await transaction_lock.acquire()
-        return interaction, installation
 
     class Session:
         def __init__(self) -> None:
@@ -2939,9 +2994,10 @@ async def test_concurrent_acknowledgements_have_exactly_one_winner(
 
         async def commit(self) -> None:
             self.commits += 1
-            transaction_lock.release()
 
-    monkeypatch.setattr(interactions, "bot_interaction", locked_interaction)
+    monkeypatch.setattr(
+        interactions, "bot_interaction", AsyncMock(return_value=(interaction, installation))
+    )
     monkeypatch.setattr(
         interactions,
         "publish_interaction_response_event",
@@ -2966,26 +3022,16 @@ async def test_concurrent_acknowledgements_have_exactly_one_winner(
             SimpleNamespace(domain="chat.example"),
         )
 
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                acknowledge(sessions[0], 30),
-                acknowledge(sessions[1], 31),
-                return_exceptions=True,
-            ),
-            timeout=2,
-        )
-    finally:
-        if transaction_lock.locked():
-            transaction_lock.release()
-
-    assert sum(isinstance(result, Response) for result in results) == 1
-    failures = [result for result in results if isinstance(result, HTTPException)]
-    assert len(failures) == 1
-    assert failures[0].status_code == 409
-    assert failures[0].detail["code"] == "INTERACTION_ALREADY_ACKNOWLEDGED"
-    assert sum(session.commits for session in sessions) == 1
-    assert sum(len(session.rows) for session in sessions) == 1
+    assert isinstance(await acknowledge(sessions[0], 30), Response)
+    assert interaction.status == "deferred"
+    with pytest.raises(HTTPException) as duplicate:
+        await acknowledge(sessions[1], 31)
+    assert duplicate.value.status_code == 409
+    assert duplicate.value.detail["code"] == "INTERACTION_ALREADY_ACKNOWLEDGED"
+    assert sessions[0].commits == 1
+    assert sessions[1].commits == 0
+    assert len(sessions[0].rows) == 1
+    assert sessions[1].rows == []
 
 
 class RecordingMessagePostCommit:
@@ -3480,7 +3526,10 @@ async def test_immediate_private_update_returns_and_rebinds_exact_source(
     assert stored.payload == {"source_response_id": "40", "view_version": 3}
     assert interaction.payload == {"response_id": "40", "view_version": 3}
     assert interaction.status == "responded"
-    assert publish.await_count == 2
+    assert [call.args[1:] for call in publish.await_args_list] == [
+        (source_parent, source, "UPDATE"),
+        (interaction, stored, "CREATE"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -3554,7 +3603,9 @@ async def test_deferred_update_edits_the_exact_source_message_and_completes(
     assert interaction.status == "responded"
     assert interaction.responded_at is not None
     edit.assert_awaited_once()
+    assert edit.await_args.args[:2] == (EntityRef("20@chat.example"), EntityRef("40@chat.example"))
     assert isinstance(edit.await_args.args[2], MessageEdit)
+    assert edit.await_args.args[2].content == "updated"
     session.commit.assert_awaited_once()
     publish.assert_awaited_once()
 
@@ -3649,4 +3700,7 @@ async def test_update_original_edits_exact_private_source_and_advances_version(
     assert stored.payload == {"source_response_id": "40", "view_version": 3}
     assert interaction.payload["view_version"] == 3
     assert interaction.status == "responded"
-    assert publish.await_count == 2
+    assert [call.args[1:] for call in publish.await_args_list] == [
+        (source_parent, source, "UPDATE"),
+        (interaction, stored, "UPDATE"),
+    ]

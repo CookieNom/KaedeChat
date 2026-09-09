@@ -1,5 +1,6 @@
 import { userErrorMessage } from '$lib/api/client';
 import { entityKey } from '$lib/chat/refs';
+import { fetchChannel } from '$lib/chat/threads';
 import type { Message, PresenceStatus, UserSummary } from '$lib/chat/types';
 import { userDisplayName } from '$lib/chat/users';
 import { assetUrl } from '$lib/media/assets';
@@ -98,6 +99,7 @@ export class BrowserNotifications {
   permissionError = $state('');
   promptHandled = $state(false);
   health = $state<NotificationHealth>({ message: '', retryable: false, pendingCount: 0 });
+  dismissedHealthMessage = $state('');
   #settingsLoaded = false;
   #guildPreferencesLoaded = false;
   #guildLevels = new SvelteMap<string, GuildNotificationLevel>();
@@ -211,6 +213,7 @@ export class BrowserNotifications {
     this.#deliveryInFlight.clear();
     this.#deliveryFailures.clear();
     this.#healthIssues.clear();
+    this.dismissedHealthMessage = '';
     this.#syncHealth();
   }
 
@@ -241,6 +244,10 @@ export class BrowserNotifications {
     this.#flushPending();
   }
 
+  dismissHealth(): void {
+    this.dismissedHealthMessage = this.health.message;
+  }
+
   async #attemptDelivery(message: Message, generation: number): Promise<void> {
     if (generation !== this.#generation) return;
     const key = entityKey(message);
@@ -252,6 +259,7 @@ export class BrowserNotifications {
       if (generation !== this.#generation) return;
       if (delivered) {
         this.#pendingMessages.delete(key);
+        if (!this.#pendingMessages.size) this.#healthIssues.delete('entities');
         this.#deliveryFailures.delete(key);
         if (!this.#deliveryFailures.size) this.#healthIssues.delete('delivery');
       } else {
@@ -292,6 +300,27 @@ export class BrowserNotifications {
       this.#syncHealth();
       return false;
     }
+    const channelRef = `${message.channel_id}@${message.channel_domain}`;
+    let channel = chatEntities.channels.get(channelRef);
+    if (!channel) {
+      try {
+        channel = await fetchChannel(channelRef);
+        if (generation !== this.#generation) return true;
+        chatEntities.channels.upsert(channel);
+      } catch (caught) {
+        if (generation !== this.#generation) return true;
+        this.#deliveryFailed(
+          message,
+          userErrorMessage(
+            caught,
+            'Could not load the channel for this notification. Retry to load it again.'
+          )
+        );
+        return false;
+      }
+      if (document.visibilityState === 'visible' && document.hasFocus()) return true;
+    }
+    if (!this.enabled) return true;
     const projectedPresence = chatEntities.presenceFor(currentUser);
     let storedPresence: string | null = null;
     try {
@@ -300,15 +329,6 @@ export class BrowserNotifications {
       // The live presence projection remains authoritative when storage is unavailable.
     }
     const currentPresence = resolveNotificationPresence(storedPresence, projectedPresence);
-    const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
-    if (!channel) {
-      this.#healthIssues.set(
-        'entities',
-        'Notification details are still loading. Kaede is holding the alert until they are available.'
-      );
-      this.#syncHealth();
-      return false;
-    }
     this.#healthIssues.delete('entities');
     const isDirectMessage = channel.guild_id === null;
     const guildLevel =
@@ -423,11 +443,13 @@ export class BrowserNotifications {
       }
     }
     if (!this.#deliveryFailures.size) this.#healthIssues.delete('delivery');
+    if (!this.#pendingMessages.size) this.#healthIssues.delete('entities');
     this.#syncHealth();
   }
 
   #syncHealth(): void {
     const message = this.#healthIssues.values().next().value ?? '';
+    if (!message) this.dismissedHealthMessage = '';
     this.health = {
       message,
       retryable: this.#healthIssues.size > 0,

@@ -26,7 +26,6 @@ from app.db.models import (
     TrackerTask,
     User,
 )
-from app.federation.guilds import GUILD_MUTATION_EVENT_TYPES
 from app.federation.tracker import (
     TrackerSnapshotChanged,
     apply_tracker_invalidation,
@@ -240,7 +239,10 @@ async def test_tracker_invalidation_queue_contract_round_trips_to_durable_applie
         board,
         reason="task_updated",
     )
+    from app.federation.guilds import SNAPSHOT_NEUTRAL_GUILD_EVENTS
+
     assert queued.await_args.args[4] == "guild.tracker.board.invalidate"
+    assert queued.await_args.args[4] in SNAPSHOT_NEUTRAL_GUILD_EVENTS
     assert queued.await_args.kwargs["channel"] is channel
     content = queued.await_args.args[5]
     session = InvalidationSession(channel)
@@ -392,7 +394,6 @@ async def test_remote_hydration_runs_only_after_live_tracker_permission(
         )
     assert exc.value.status_code == 403
     hydrate.assert_not_awaited()
-    assert "guild.tracker.board.invalidate" in GUILD_MUTATION_EVENT_TYPES
 
 
 @pytest.mark.asyncio
@@ -456,7 +457,7 @@ async def test_tracker_snapshot_pagination_rejects_a_changed_board_revision(
 
 
 @pytest.mark.asyncio
-async def test_tracker_hydration_rolls_back_an_incomplete_atomic_replace(
+async def test_rollback_invocation_on_incomplete_hydration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guild = cast(Guild, SimpleNamespace(id=10, origin_domain="remote.example"))
@@ -531,7 +532,9 @@ async def test_initial_remote_tracker_hydration_commits_validated_snapshot(
     config = settings()
     fetch = AsyncMock(return_value=snapshot)
     apply = AsyncMock(return_value=board)
-    lock = AsyncMock()
+    trace = []
+    lock = AsyncMock(side_effect=lambda *_args: trace.append("lock"))
+    session.commit.side_effect = lambda: trace.append("commit")
     monkeypatch.setattr(tracker_federation, "lock_replicated_tracker", lock)
     monkeypatch.setattr(
         tracker_federation,
@@ -556,7 +559,7 @@ async def test_initial_remote_tracker_hydration_commits_validated_snapshot(
     session.rollback.assert_not_awaited()
     # The first transaction serializes replacement; the second lock remains
     # held while the caller renders the board, closing the post-commit race.
-    assert lock.await_count == 2
+    assert trace == ["lock", "commit", "lock"]
 
 
 class PurgeSession:
@@ -597,3 +600,8 @@ async def test_inaccessible_remote_channel_prunes_its_tracker_cache() -> None:
     ]
     assert len(tracker_deletes) == 1
     assert channel.unavailable is True
+
+    assert tracker_deletes[0].compile().params == {
+        "channel_id_1": 20,
+        "channel_domain_1": "remote.example",
+    }

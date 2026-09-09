@@ -127,10 +127,13 @@ describe('announcement client', () => {
       .mockResolvedValueOnce({ ...message(), flags: MESSAGE_FLAG_CROSSPOSTED });
     const source = channel('2', 5, Permission.ADMINISTRATOR);
     const post = message();
-    await listAnnouncementFollows('2@chat.example');
-    await createAnnouncementFollow('2@chat.example', '3@remote.example');
-    await deleteAnnouncementFollow('2@chat.example', '42@remote.example');
-    await publishAnnouncementMessage(source, post);
+    expect(await listAnnouncementFollows('2@chat.example')).toEqual([follow()]);
+    expect(await createAnnouncementFollow('2@chat.example', '3@remote.example')).toEqual(follow());
+    expect(await deleteAnnouncementFollow('2@chat.example', '42@remote.example')).toBeUndefined();
+    expect(await publishAnnouncementMessage(source, post)).toEqual({
+      ...message(),
+      flags: MESSAGE_FLAG_CROSSPOSTED
+    });
 
     expect(apiMock.mock.calls).toEqual([
       ['/channels/2%40chat.example/followers', { signal: undefined }],
@@ -152,7 +155,11 @@ describe('announcement client', () => {
     apiMock.mockResolvedValueOnce([{ ...follow(), id: '43', ref: '43@remote.example' }, follow()]);
     await expect(listAnnouncementFollows('2@chat.example')).rejects.toThrow(/unordered/u);
 
-    apiMock.mockResolvedValueOnce({ ...message(), channel_id: '20' });
+    apiMock.mockResolvedValueOnce({
+      ...message(),
+      channel_id: '20',
+      flags: MESSAGE_FLAG_CROSSPOSTED
+    });
     await expect(
       publishAnnouncementMessage(channel('2', 5, Permission.ADMINISTRATOR), message())
     ).rejects.toThrow(/requested lineage/u);
@@ -223,8 +230,8 @@ describe('announcement client', () => {
     const known = channel('8', 5, Permission.VIEW_CHANNEL, 'remote.example');
     known.name = 'release-notes';
 
-    expect(channelFollowSystemMessageText(follow, [known], 'Maple')).toBe(
-      'Maple has added #release-notes to this channel. Its most important updates will show up here.'
+    expect(channelFollowSystemMessageText(follow, [known], 'Maple')).toMatch(
+      /Maple.*add.*#release-notes/i
     );
     expect(channelFollowSystemMessageText(follow, [], 'Maple')).toContain('#upstream-news');
     expect(

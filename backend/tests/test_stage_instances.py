@@ -208,7 +208,8 @@ def test_stage_schema_binds_channel_guild_and_scheduled_event_lineage() -> None:
 
 def test_stage_moderator_requires_all_three_discord_permissions() -> None:
     assert is_stage_moderator(STAGE_INSTANCE_MODERATOR_PERMISSIONS)
-    assert not is_stage_moderator(Permission.MANAGE_CHANNELS | Permission.MUTE_MEMBERS)
+    for missing in (Permission.MANAGE_CHANNELS, Permission.MUTE_MEMBERS, Permission.MOVE_MEMBERS):
+        assert not is_stage_moderator(STAGE_INSTANCE_MODERATOR_PERMISSIONS & ~missing)
 
 
 def test_stage_speaker_state_replaces_voice_only_speak_and_vad_permissions() -> None:
@@ -481,9 +482,11 @@ async def test_stage_voice_read_distinguishes_self_from_other_for_humans_and_bot
     channel_grant.assert_awaited_once()
 
 
+@pytest.mark.parametrize("moderator", [False, True])
 @pytest.mark.asyncio
 async def test_stage_join_defaults_a_non_moderator_to_audience(
     monkeypatch: pytest.MonkeyPatch,
+    moderator: bool,
 ) -> None:
     actor = SimpleNamespace(
         id=78,
@@ -519,7 +522,11 @@ async def test_stage_join_defaults_a_non_moderator_to_audience(
     monkeypatch.setattr("app.voice.service.LiveKitControl", lambda _settings: control)
     monkeypatch.setattr(
         "app.voice.service.require_permissions",
-        AsyncMock(return_value=Permission.CONNECT | Permission.SPEAK | Permission.STREAM),
+        AsyncMock(
+            return_value=Permission.CONNECT
+            | Permission.STREAM
+            | (STAGE_INSTANCE_MODERATOR_PERMISSIONS if moderator else Permission.SPEAK)
+        ),
     )
     monkeypatch.setattr("app.voice.service.require_e2ee_voice_device", AsyncMock())
     monkeypatch.setattr(
@@ -538,77 +545,13 @@ async def test_stage_join_defaults_a_non_moderator_to_audience(
         connection_id="c" * 43,
     )
 
-    assert grant.can_speak is False
-    assert grant.can_stream is False
-    assert grant.can_priority_speak is False
-    assert captured["can_publish_data"] is False
-    assert cast(dict[str, object], captured["metadata"])["suppressed"] is True
-
-
-@pytest.mark.asyncio
-async def test_stage_moderator_can_publish_without_voice_only_speak_permission(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    actor = SimpleNamespace(
-        id=78,
-        origin_domain="alpha.localhost",
-        profile_resolved=True,
-        display_name=None,
-        username="moderator",
-        account_type="human",
-    )
-    channel = SimpleNamespace(
-        id=34,
-        origin_domain="alpha.localhost",
-        type=13,
-        encryption_mode="plaintext",
-        encryption_state="disabled",
-        encryption_policy_generation=0,
-        encryption_epoch=None,
-        bitrate=64_000,
-        user_limit=0,
-        rtc_region=None,
-        video_quality_mode=1,
-    )
-    guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
-    session = AsyncMock()
-    session.get.return_value = SimpleNamespace(voice_flags=0)
-    control = SimpleNamespace(ensure_room=AsyncMock(), remove_participant=AsyncMock())
-    captured: dict[str, object] = {}
-
-    def mint(*_args: object, **kwargs: object) -> tuple[str, datetime]:
-        captured.update(kwargs)
-        return "x" * 32, datetime.now(UTC) + timedelta(minutes=1)
-
-    permissions = Permission.CONNECT | Permission.STREAM | STAGE_INSTANCE_MODERATOR_PERMISSIONS
-    monkeypatch.setattr("app.voice.service.LiveKitControl", lambda _settings: control)
-    monkeypatch.setattr(
-        "app.voice.service.require_permissions", AsyncMock(return_value=permissions)
-    )
-    monkeypatch.setattr("app.voice.service.require_e2ee_voice_device", AsyncMock())
-    monkeypatch.setattr(
-        "app.voice.service.claim_voice_connection",
-        AsyncMock(return_value=(True, 4, "", "")),
-    )
-    monkeypatch.setattr("app.voice.service.mint_join_token", mint)
-
-    grant = await authoritative_guild_token(
-        session,
-        AsyncMock(),
-        settings(),
-        channel=channel,
-        guild=guild,
-        actor=actor,
-        connection_id="c" * 43,
-    )
-
-    assert grant.can_speak is True
-    assert grant.can_stream is True
+    assert grant.can_speak is moderator
+    assert grant.can_stream is moderator
     assert grant.can_priority_speak is False
     assert captured["can_publish_data"] is False
     metadata = cast(dict[str, object], captured["metadata"])
-    assert metadata["suppressed"] is False
-    assert metadata["can_use_vad"] is True
+    assert metadata["suppressed"] is (not moderator)
+    assert metadata["can_use_vad"] is True  # Stage publication is gated by suppression.
 
 
 @pytest.mark.asyncio
@@ -758,8 +701,10 @@ async def test_request_to_speak_preserves_audience_and_fans_out(
         AsyncMock(return_value=Permission.SPEAK | Permission.STREAM),
     )
     monkeypatch.setattr("app.api.stage_instances.update_authoritative_occupant_grant", update_grant)
-    monkeypatch.setattr("app.api.stage_instances.publish_ephemeral", AsyncMock())
-    monkeypatch.setattr("app.api.stage_instances.enqueue_best_effort", AsyncMock())
+    publish = AsyncMock()
+    fanout = AsyncMock()
+    monkeypatch.setattr("app.api.stage_instances.publish_ephemeral", publish)
+    monkeypatch.setattr("app.api.stage_instances.enqueue_best_effort", fanout)
 
     rendered = await update_local_stage_voice_state(
         cast(Any, AsyncMock()),
@@ -778,6 +723,19 @@ async def test_request_to_speak_preserves_audience_and_fans_out(
     assert rendered["request_to_speak_timestamp"] == requested
     assert require.await_args.kwargs["channel"] is channel
     assert [call.args[4] for call in require.await_args_list] == [Permission.REQUEST_TO_SPEAK]
+
+    publish.assert_awaited_once()
+    assert publish.await_args.args[1:3] == ("guild:alpha.localhost:12", "VOICE_STATE_UPDATE")
+    emitted = publish.await_args.args[3]
+    assert {key: value for key, value in emitted.items() if key != "state"} == {
+        **rendered,
+        "connected": True,
+    }
+    assert emitted["state"]["request_to_speak_timestamp"] == requested
+    assert emitted["state"]["suppressed"] is True
+    from app.tasks import voice_replicate_room
+
+    fanout.assert_awaited_once_with(voice_replicate_room, "g.12.34")
 
 
 @pytest.mark.asyncio
@@ -842,7 +800,7 @@ async def test_stage_voice_moderation_uses_mute_members(
 
 
 @pytest.mark.asyncio
-async def test_grant_rotation_updates_live_participant_and_supersedes_old_token(
+async def test_control_api_grant_generation_propagation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = occupant()

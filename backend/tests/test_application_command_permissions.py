@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, Mock
 
@@ -439,21 +438,63 @@ def test_command_overwrites_replace_application_synchronized_rows() -> None:
     ) == [app_deny]
 
 
-def test_permission_table_and_migration_preserve_scope_uniqueness() -> None:
+async def test_permission_table_and_migration_preserve_scope_uniqueness(
+    postgres_schema, migrate_to
+) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
     table = Base.metadata.tables["application_command_permissions"]
     indexes = {index.name: index for index in table.indexes if isinstance(index, Index)}
     assert indexes["uq_application_command_permission_application_target"].unique
     assert indexes["uq_application_command_permission_command_target"].unique
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    assert 'op.create_table(\n        "application_command_permissions"' in migration
-    assert migration.index('op.drop_table("application_command_permissions")') < migration.index(
-        'op.drop_column("bot_applications", "supported_install_types")'
+    await migrate_to("fc9a4b7d2e10")
+    # Copy the executed migration's indexes, isolating uniqueness from unrelated parent FKs.
+    await postgres_schema.execute(
+        text("CREATE TABLE permission_probe (LIKE application_command_permissions INCLUDING ALL)")
     )
+    insert = text(
+        "INSERT INTO permission_probe (id, application_id, application_domain, guild_id, "
+        "guild_domain,"
+        "command_id, target_id, target_domain, target_type, permission) "
+        "VALUES (:id, :app, :app_domain, :guild, :guild_domain, :command, :target, :domain, "
+        ":kind, true)"
+    )
+    base = dict(
+        app=1,
+        app_domain="apps.example",
+        guild=2,
+        guild_domain="guild.example",
+        command=None,
+        target=3,
+        domain="users.example",
+        kind="user",
+    )
+    identifier = 0
+    for command in (None, 10):
+        identifier += 1
+        values = base | {"command": command}
+        await postgres_schema.execute(insert, values | {"id": identifier})
+        failed = await postgres_schema.begin_nested()
+        with pytest.raises(IntegrityError) as caught:
+            await postgres_schema.execute(insert, values | {"id": identifier + 1000})
+        assert caught.value.orig.sqlstate == "23505"
+        await failed.rollback()
+        changes = [{"target": 4}, {"domain": "other.example"}, {"kind": "role"}]
+        changes += (
+            [
+                {"app": 2},
+                {"app_domain": "other.example"},
+                {"guild": 3},
+                {"guild_domain": "other.example"},
+            ]
+            if command is None
+            else [{"command": 11}]
+        )
+        for changed in changes:
+            identifier += 1
+            await postgres_schema.execute(insert, values | changed | {"id": identifier})
+    assert await postgres_schema.scalar(text("SELECT count(*) FROM permission_probe")) == 13
 
 
 def test_guild_command_projection_has_fixed_context_and_strips_local_metadata() -> None:
@@ -505,18 +546,64 @@ def test_guild_command_projection_has_fixed_context_and_strips_local_metadata() 
 
 
 @pytest.mark.asyncio
-async def test_guild_command_resolution_prefers_scoped_override() -> None:
-    session = SimpleNamespace(scalar=AsyncMock(return_value=None))
-    await guild_install_command(
-        session,
-        guild(),
-        application_ref=(300, "apps.example"),
-        name="weather",
-        command_type="chat_input",
+async def test_guild_command_resolution_prefers_scoped_override(postgres_schema) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import ApplicationCommand
+
+    await postgres_schema.execute(
+        text("CREATE TABLE application_commands (LIKE public.application_commands INCLUDING ALL)")
     )
-    query = str(session.scalar.await_args.args[0])
-    assert "application_commands.guild_id DESC NULLS LAST" in query
-    assert "application_commands.guild_id IS NULL" in query
+    async with AsyncSession(bind=postgres_schema) as session:
+        baseline = dict(
+            application_id=300,
+            application_domain="apps.example",
+            name="weather",
+            type="chat_input",
+            definition={},
+            generation=1,
+            state="active",
+            contexts=["guild"],
+            integration_types=["guild_install"],
+        )
+        candidates = [
+            ApplicationCommand(id=1, **baseline),
+            ApplicationCommand(id=2, **baseline, guild_id=100, guild_domain="guild.example"),
+            ApplicationCommand(id=3, **baseline, guild_id=100, guild_domain="other.example"),
+            ApplicationCommand(
+                id=4,
+                **{**baseline, "application_domain": "other.example"},
+                guild_id=100,
+                guild_domain="guild.example",
+            ),
+            ApplicationCommand(
+                id=5,
+                **{**baseline, "application_id": 301},
+                guild_id=100,
+                guild_domain="guild.example",
+            ),
+        ]
+        session.add_all(candidates)
+        await session.flush()
+        winner = await guild_install_command(
+            session,
+            guild(),
+            application_ref=(300, "apps.example"),
+            name="weather",
+            command_type="chat_input",
+        )
+        assert winner is candidates[1]
+        await session.delete(candidates[1])
+        await session.flush()
+        fallback = await guild_install_command(
+            session,
+            guild(),
+            application_ref=(300, "apps.example"),
+            name="weather",
+            command_type="chat_input",
+        )
+        assert fallback is candidates[0]
 
 
 @pytest.mark.asyncio

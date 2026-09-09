@@ -17,7 +17,7 @@ PASSWORD_KDF = {
 }
 
 
-def test_registration_normalizes_username_and_email() -> None:
+def test_username_normalization_and_email_preservation() -> None:
     payload = RegisterRequest(
         username="Maple.Leaf",
         email="USER@example.com",

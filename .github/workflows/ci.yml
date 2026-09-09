@@ -19,6 +19,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults: { run: { working-directory: backend } }
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       KAEDE_DOMAIN: ci.localhost
       KAEDE_ENVIRONMENT: test
@@ -39,6 +46,12 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy app scripts
       - run: uv run pytest --cov=app
+        env:
+          TEST_REDIS_URL: redis://127.0.0.1:6379/0
+      - name: Test Python SDK with the locked backend test dependencies
+        env:
+          PYTHONPATH: ../sdk/python
+        run: uv run pytest -q -o asyncio_mode=auto ../sdk/python/tests
       - run: uv run pip-audit --skip-editable
       - name: Verify generated protocol constants
         run: uv run python -m scripts.generate_protocol && git diff --exit-code -- ../frontend/src/lib/generated ../desktop/crates/kaede-protocol/src/generated.rs ../mobile/lib/src/protocol/generated.dart ../deploy/validate_deploy_env.py ../setup.sh
@@ -94,6 +107,8 @@ jobs:
       - run: dart format --output=none --set-exit-if-changed lib test
       - run: flutter analyze
       - run: flutter test
+        env:
+          TZ: America/Los_Angeles
       - run: flutter build apk --debug
       - name: Enforce mobile cache size budgets
         if: always()
@@ -119,6 +134,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm check
       - run: pnpm test
+      - run: pnpm test:livekit-crypto
       - run: pnpm check:e2ee-wasm
       - run: pnpm build
       - run: pnpm check:csp
@@ -203,9 +219,9 @@ jobs:
           enableCrossOsArchive: true
       - name: Check native desktop stack
         run: cargo +1.97.1 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
-      - name: Test native audio and capture boundaries
+      - name: Test native audio, capture, and Tauri boundaries
         if: runner.os == 'Linux'
-        run: cargo +1.97.1 test --locked --manifest-path desktop/Cargo.toml -p kaede-audio -p kaede-capture
+        run: cargo +1.97.1 test --locked --manifest-path desktop/Cargo.toml -p kaede-audio -p kaede-capture -p kaede-tauri
       - name: Enforce Cargo cache size budget
         if: always()
         shell: bash
@@ -235,6 +251,8 @@ jobs:
         with: { version: "0.11.8", enable-cache: true }
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12.13" }
+      - name: Install backend native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libvips42
       - run: uv lock --check
       - run: uv sync --locked
       - run: uv run alembic upgrade head
@@ -272,6 +290,10 @@ jobs:
       - run: uv run python -m scripts.verify_migration_guards cleanup-thread-permissions
       - run: uv run alembic downgrade base
       - run: uv run alembic upgrade head
+      - name: Exercise PostgreSQL contracts against the migrated disposable database
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://kaede:kaede@127.0.0.1:5432/kaede
+        run: uv run pytest -q -m postgres
       - run: uv run alembic check
 
   compose:
@@ -280,6 +302,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - run: make compose-check
+      - run: make auto-update-check
 
   identity:
     runs-on: ubuntu-24.04

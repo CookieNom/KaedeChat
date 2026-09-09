@@ -79,8 +79,16 @@ describe('message mention matching', () => {
         true
       )
     ).toEqual(['10@guild.example', '11@guild.example', '20@remote.example']);
+    expect(
+      expandedEncryptedGuildMentionRecipients(
+        { userRefs: [], roleRefs: [], everyone: true },
+        members,
+        roles,
+        undefined,
+        true
+      )
+    ).toEqual(['10@guild.example', '11@guild.example']);
   });
-
   it('does not expand broad or unmentionable roles without permission', () => {
     const members = [
       {
@@ -117,5 +125,16 @@ describe('message mention matching', () => {
         roles
       )
     ).toEqual([]);
+    for (const intent of [
+      { userRefs: [], roleRefs: [], everyone: true },
+      { userRefs: [], roleRefs: ['2@guild.example'], everyone: false }
+    ]) {
+      expect(
+        expandedEncryptedGuildMentionRecipients(intent, members, roles, undefined, true)
+      ).toEqual(['10@guild.example']);
+      expect(
+        expandedEncryptedGuildMentionRecipients(intent, members, roles, undefined, false)
+      ).toEqual([]);
+    }
   });
 });

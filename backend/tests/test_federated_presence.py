@@ -148,6 +148,14 @@ async def test_remote_presence_is_ttl_bound_and_projected(
         session, redis, type("Settings", (), {"domain": "home.test"})(), payload
     )
     assert len(redis.calls) == 1
+    assert redis.calls[0][1:5] == (
+        3,
+        "presence:generation:remote.test:7",
+        "presence:remote.test:7",
+        "presence:expirations",
+    )
+    assert redis.calls[0][5] == "1000000000"
+    assert redis.calls[0][7:] == ("1090", "remote.test:7")
     assert projected == [
         (
             "guild:home.test:9",
@@ -268,7 +276,7 @@ async def test_silenced_remote_presence_projects_to_friends_but_not_shared_guild
 
 
 @pytest.mark.asyncio
-async def test_remote_presence_checks_user_admission_after_friend_authorization(
+async def test_admission_rejection_after_authorized_friend_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = User(id=7, origin_domain="remote.test", is_local=False, username="maple")
@@ -341,11 +349,6 @@ def test_presence_worker_drops_stale_fanout_and_accepts_final_offline_state() ->
         123,
         True,
     )
-
-
-def test_remote_presence_lua_stores_validated_python_json_verbatim() -> None:
-    assert "cjson." not in presence.SET_REMOTE_PRESENCE_SCRIPT
-    assert "redis.call('SET', KEYS[2], ARGV[2])" in presence.SET_REMOTE_PRESENCE_SCRIPT
 
 
 def test_federated_presence_rejects_undocumented_bot_activity_fields() -> None:

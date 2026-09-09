@@ -238,3 +238,18 @@ async def test_worker_actor_intent_binds_live_worker_and_runtime_revision(
             runtime_target_domain="target.example",
             now=now,
         )
+
+    monkeypatch.setattr(actor_intents, "worker_runtime_ready", lambda *_args, **_kwargs: False)
+    with pytest.raises(ValueError, match="runtime"):
+        await validate_worker_actor_intent(
+            cast(Any, session),
+            "target.example",
+            raw,
+            expected_action="announcement.follow.create",
+            expected_audience="target.example",
+            expected_application_ref=(80, "apps.example"),
+            expected_actor_ref=(30, "apps.example"),
+            expected_resources=cast(dict[str, str], raw["resources"]),
+            runtime_target_domain="target.example",
+            now=now,
+        )

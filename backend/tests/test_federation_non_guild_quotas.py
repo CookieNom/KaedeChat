@@ -153,7 +153,23 @@ async def test_multi_home_group_uses_its_authority_as_the_replica_quota_scope() 
 
     assert admitted
     assert registered is usage
-    assert session.execute.await_count == 1  # type: ignore[attr-defined]
+    session.execute.assert_awaited_once()
+    values = session.execute.await_args.args[0].compile().params
+    assert {
+        key: values[key]
+        for key in (
+            "conversation_id",
+            "conversation_domain",
+            "authority_domain",
+            "remote_origin_domain",
+        )
+    } == {
+        "conversation_id": 99,
+        "conversation_domain": "beta.localhost",
+        "authority_domain": "beta.localhost",
+        "remote_origin_domain": "beta.localhost",
+    }
+    assert session.get.await_args.args[1] == (99, "beta.localhost")  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -181,7 +197,13 @@ async def test_local_group_authority_does_not_charge_an_arbitrary_invited_home()
     )
 
     assert admitted
-    assert session.scalar.await_count == 3  # type: ignore[attr-defined]
+    statements = [call.args[0].compile() for call in session.scalar.await_args_list]
+    usage = [
+        statement for statement in statements if "federated_dm_storage_usage" in str(statement)
+    ]
+    assert usage
+    assert all("remote_origin_domain =" not in str(statement) for statement in usage)
+    assert all("alpha.localhost" in statement.params.values() for statement in usage)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

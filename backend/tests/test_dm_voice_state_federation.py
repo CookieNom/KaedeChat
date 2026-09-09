@@ -306,7 +306,7 @@ async def test_dm_snapshot_rejects_a_stale_connection_before_replacing_state(
 
 
 @pytest.mark.asyncio
-async def test_dm_self_state_is_fenced_and_normalizes_deaf_to_muted(
+async def test_self_state_normalization_with_a_valid_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = occupant(
@@ -434,6 +434,16 @@ async def test_dm_room_replication_sends_private_fences_but_local_public_state(
     public_participant = publish_call.args[3]["participants"][0]
     assert "connection_id" not in public_participant
     assert "generation" not in public_participant
+    assert signed_call.args == (
+        session,
+        settings(),
+        "POST",
+        "beta.localhost",
+        "/_kaede/v1/voice/dm-state",
+    )
+    assert signed_call.kwargs["payload"]["call_id"] == "56"
+    assert signed_call.kwargs["payload"]["channel_id"] == "34"
+    assert signed_call.kwargs["payload"]["room"] == "d.34.56"
 
 
 @pytest.mark.asyncio
@@ -553,3 +563,6 @@ async def test_dm_livekit_leave_uses_connection_generation_and_session_fences(
         "generation": 4,
     }
     enqueue.assert_awaited_once()
+    assert remove_call.args == (redis, "alpha.localhost", "d.34.56", "90@beta.localhost", "c" * 43)
+    assert release_call.args == (redis, "alpha.localhost", "90@beta.localhost", "c" * 43)
+    assert discard_call.args == (redis, "authority", "90@beta.localhost")

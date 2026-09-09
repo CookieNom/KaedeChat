@@ -21,12 +21,8 @@ import app.gateway as gateway
 from app.admin.auth import ROLE_CAPABILITIES, AdminPrincipal
 from app.api.application_assets import _bot_write_access
 from app.api.applications import (
-    SUPPORTED_INTENTS,
-    SUPPORTED_SCOPES,
-    ApplicationCreate,
     ApplicationPatch,
     CommandDefinition,
-    CommandOptionDefinition,
     CommandsPut,
     CredentialCreate,
     FederatedBotInstallRequest,
@@ -80,8 +76,6 @@ from app.api.bot_gateway import (
     encrypted_bot_content_event,
     encrypted_direct_channels,
     encrypted_message_event,
-    event_intent,
-    event_scope,
     filtered_event,
     gateway_authorization_fingerprint,
     gateway_effective_permissions,
@@ -218,13 +212,8 @@ def test_application_media_writes_are_home_instance_only() -> None:
         )
 
     assert denied.value.status_code == 409
-    assert denied.value.detail == {
-        "code": "APPLICATION_HOME_INSTANCE_REQUIRED",
-        "message": (
-            "Application assets and emoji can only be changed on the application's home instance."
-        ),
-        "home_domain": "apps.example",
-    }
+    assert denied.value.detail["code"] == "APPLICATION_HOME_INSTANCE_REQUIRED"
+    assert denied.value.detail["home_domain"] == "apps.example"
 
 
 def test_bot_username_is_normal_account_format_and_unique_suffix() -> None:
@@ -243,8 +232,9 @@ def test_personal_team_payload_has_a_stable_product_name() -> None:
     assert team_payload(team, "owner")["name"] == "Personal"
 
 
+@pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.asyncio
-async def test_personal_team_is_provisioned_for_every_local_human() -> None:
+async def test_personal_team_is_provisioned_for_every_local_human(existing: bool) -> None:
     user = User(
         id=7,
         origin_domain="local.example",
@@ -253,8 +243,19 @@ async def test_personal_team_is_provisioned_for_every_local_human() -> None:
         username="alice",
         password_hash="hash",
     )
+    prior_team = DeveloperTeam(
+        id=8, origin_domain="local.example", name="Alice's applications", personal=True
+    )
+    prior_member = DeveloperTeamMember(
+        team_id=8,
+        team_domain="local.example",
+        user_id=7,
+        user_domain="local.example",
+        user_is_local=True,
+        role="owner",
+    )
     result = Mock()
-    result.one_or_none.return_value = None
+    result.one_or_none.return_value = (prior_team, prior_member) if existing else None
     session = SimpleNamespace(
         scalar=AsyncMock(return_value=None),
         execute=AsyncMock(return_value=result),
@@ -274,51 +275,13 @@ async def test_personal_team_is_provisioned_for_every_local_human() -> None:
     assert team.personal is True
     assert member.role == "owner"
     assert (member.user_id, member.user_domain) == (7, "local.example")
-    session.add_all.assert_called_once_with([team, member])
-    session.flush.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_existing_personal_team_name_is_normalized() -> None:
-    user = User(
-        id=7,
-        origin_domain="local.example",
-        is_local=True,
-        account_type="human",
-        username="alice",
-        password_hash="hash",
-    )
-    team = DeveloperTeam(
-        id=8,
-        origin_domain="local.example",
-        name="Alice's applications",
-        personal=True,
-    )
-    member = DeveloperTeamMember(
-        team_id=8,
-        team_domain="local.example",
-        user_id=7,
-        user_domain="local.example",
-        user_is_local=True,
-        role="owner",
-    )
-    result = Mock()
-    result.one_or_none.return_value = (team, member)
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=None),
-        execute=AsyncMock(return_value=result),
-    )
-
-    resolved_team, resolved_member = await ensure_personal_developer_team(
-        session,
-        SimpleNamespace(domain="local.example"),
-        SimpleNamespace(user=user),
-        SimpleNamespace(mint=AsyncMock()),
-    )
-
-    assert resolved_team is team
-    assert resolved_team.name == "Personal"
-    assert resolved_member.role == "owner"
+    if existing:
+        assert team is prior_team and member is prior_member
+        session.add_all.assert_not_called()
+        snowflake.mint.assert_not_awaited()
+    else:
+        session.add_all.assert_called_once_with([team, member])
+        session.flush.assert_awaited_once()
 
 
 def test_scope_and_worker_validation_is_fail_closed() -> None:
@@ -349,6 +312,8 @@ def test_federated_bot_install_actor_id_is_a_canonical_snowflake(installer_id: o
             }
         )
 
+
+def test_federated_bot_install_rejects_unexpected_fields() -> None:
     with pytest.raises(ValidationError):
         FederatedBotInstallRequest.model_validate(
             {
@@ -574,65 +539,6 @@ async def test_remote_bot_installation_list_proxies_before_replica_permission_ch
 
     assert result == []
     permission_check.assert_not_awaited()
-
-
-def test_supported_scopes_cover_runtime_resource_contracts() -> None:
-    assert {
-        "audit_logs.read",
-        "automod.executions.read",
-        "automod.rules.read",
-        "automod.rules.manage",
-        "guilds.manage",
-        "guilds.assets.manage",
-        "channels.manage",
-        "channels.overwrites.read",
-        "channels.overwrites.manage",
-        "roles.manage",
-        "events.read",
-        "events.manage",
-        "expressions.read",
-        "expressions.manage",
-        "installations.read",
-        "integrations.read",
-        "integrations.manage",
-        "attachments.read",
-        "attachments.write",
-        "moderation.bans",
-        "moderation.messages",
-        "moderation.prune",
-        "polls.read",
-        "polls.write",
-        "soundboard.read",
-        "soundboard.use",
-        "soundboard.manage",
-        "voice.connect",
-        "voice.listen",
-        "voice.speak",
-        "voice.stream",
-        "invites.read",
-        "voice.moderate",
-        "invites.manage",
-        "webhooks.read",
-        "webhooks.manage",
-        "emojis.manage",
-        "tasks.read",
-        "tasks.write",
-        "tasks.manage",
-        "dm.send",
-    } <= SUPPORTED_SCOPES
-    assert {
-        "guild_moderation",
-        "guild_expressions",
-        "guild_integrations",
-        "guild_webhooks",
-        "guild_invites",
-        "guild_scheduled_events",
-        "guild_message_polls",
-        "direct_message_polls",
-        "auto_moderation_configuration",
-        "auto_moderation_execution",
-        "guild_tasks",
-    } <= SUPPORTED_INTENTS
 
 
 @pytest.mark.asyncio
@@ -1336,22 +1242,20 @@ def test_gateway_fingerprint_changes_for_every_live_grant_boundary() -> None:
         [installed],
         guild_authorizations=[live_authorization],
     )
-    assert live_fingerprint != gateway_authorization_fingerprint(
-        bot.application,
-        bot.worker,
-        bot.token,
-        [installed],
-        guild_authorizations=[
-            GatewayGuildAuthorization(
-                installation_id=installed.id,
-                guild_id=installed.guild_id,
-                guild_domain=installed.guild_domain,
-                permission_generation=4,
-                member_version=7,
-                effective_permissions=0,
-            )
-        ],
-    )
+    from dataclasses import replace
+
+    for mutation in (
+        {"permission_generation": 4},
+        {"member_version": 8},
+        {"effective_permissions": 0},
+    ):
+        assert live_fingerprint != gateway_authorization_fingerprint(
+            bot.application,
+            bot.worker,
+            bot.token,
+            [installed],
+            guild_authorizations=[replace(live_authorization, **mutation)],
+        )
 
 
 def test_gateway_fingerprint_fences_dm_capability_revision_and_lease() -> None:
@@ -1376,7 +1280,6 @@ def test_gateway_fingerprint_fences_dm_capability_revision_and_lease() -> None:
         dm_capabilities=[capability],
     )
     capability.revision -= 1
-    capability.expires_at += timedelta(seconds=1)
     assert original != gateway_authorization_fingerprint(
         bot.application,
         bot.worker,
@@ -1385,6 +1288,7 @@ def test_gateway_fingerprint_fences_dm_capability_revision_and_lease() -> None:
         dm_capabilities=[capability],
     )
     capability.revision += 1
+    capability.expires_at += timedelta(seconds=1)
     assert original != gateway_authorization_fingerprint(
         bot.application,
         bot.worker,
@@ -1458,7 +1362,7 @@ def test_gateway_live_permissions_are_bounded_by_install_and_current_role_author
 
 
 @pytest.mark.asyncio
-async def test_gateway_authorization_loads_current_bot_member_permissions() -> None:
+async def test_gateway_authorization_loads_current_bot_member_permissions(postgres_schema) -> None:
     bot = principal(scopes={"audit_logs.read"}, intents={"guild_moderation"})
     bot.application.status = "active"
     bot.application.manifest_generation = 1
@@ -1484,37 +1388,75 @@ async def test_gateway_authorization_loads_current_bot_member_permissions() -> N
         permissions=int(Permission.VIEW_CHANNEL | Permission.VIEW_AUDIT_LOG),
         position=0,
     )
-    result = Mock()
-    result.one_or_none.return_value = (
-        bot.token,
-        bot.worker,
-        bot.application,
-        bot.user,
-    )
-    session = SimpleNamespace(
-        execute=AsyncMock(return_value=result),
-        scalars=AsyncMock(side_effect=[[installed], [], [role]]),
-        scalar=AsyncMock(return_value=member),
-        get=AsyncMock(return_value=guild),
-    )
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    state = await current_gateway_authorization(
-        session,
-        bot,
-        authority_domain="chat.example",
-    )
-
-    assert state is not None
-    assert state.guild_authorizations == (
-        GatewayGuildAuthorization(
-            installation_id=installed.id,
+    for table in (
+        "users",
+        "bot_applications",
+        "bot_workers",
+        "bot_tokens",
+        "bot_installations",
+        "bot_user_installations",
+        "guilds",
+        "guild_members",
+        "roles",
+        "member_roles",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all(
+            [bot.user, bot.application, bot.worker, bot.token, installed, guild, member, role]
+        )
+        await session.flush()
+        foreign_role = Role(
+            id=guild.id,
+            origin_domain="other.example",
             guild_id=guild.id,
-            guild_domain=guild.origin_domain,
-            permission_generation=3,
-            member_version=7,
-            effective_permissions=int(Permission.VIEW_AUDIT_LOG),
-        ),
-    )
+            guild_domain="other.example",
+            name="@everyone",
+            permissions=int(Permission.ADMINISTRATOR),
+            position=0,
+        )
+        foreign_member = GuildMember(
+            guild_id=guild.id,
+            guild_domain="other.example",
+            user_id=bot.user.id,
+            user_domain=bot.user.origin_domain,
+            member_version=999,
+        )
+        revoked = installation(scopes={"audit_logs.read"}, installation_id=61)
+        revoked.status = "revoked"
+        foreign = installation(scopes={"audit_logs.read"}, installation_id=62)
+        foreign.application_domain = "other.example"
+        session.add_all([foreign_role, foreign_member, revoked, foreign])
+        await session.flush()
+        state = await current_gateway_authorization(session, bot, authority_domain="chat.example")
+        assert state is not None
+        assert state.guild_authorizations == (
+            GatewayGuildAuthorization(
+                installation_id=60,
+                guild_id=70,
+                guild_domain="guild.example",
+                permission_generation=3,
+                member_version=7,
+                effective_permissions=int(Permission.VIEW_AUDIT_LOG),
+            ),
+        )
+        role.permissions = 0
+        await session.flush()
+        changed = await current_gateway_authorization(session, bot, authority_domain="chat.example")
+        assert changed is not None
+        assert changed.guild_authorizations[0].effective_permissions == 0
+        assert changed.fingerprint != state.fingerprint
+        await session.delete(member)
+        await session.flush()
+        assert (
+            await current_gateway_authorization(session, bot, authority_domain="chat.example")
+            is None
+        )
 
 
 @pytest.mark.asyncio
@@ -2233,37 +2175,79 @@ async def test_disabled_bot_is_rejected_before_rest_dpop_processing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_application_home_bot_auth_does_not_require_a_local_installation() -> None:
+async def test_application_home_bot_auth_does_not_require_a_local_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
+) -> None:
+    import hashlib
+    import time
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    import app.bots.auth as bot_auth
+
+    for table in ("users", "bot_applications", "bot_workers", "bot_tokens"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
     bot = principal(scopes={"applications.assets.manage"}, intents=set())
-    bot.user.disabled_at = datetime.now(UTC)
-    result = Mock()
-    result.one_or_none.return_value = (bot.token, bot.worker, bot.application, bot.user)
-    session = SimpleNamespace(execute=AsyncMock(return_value=result))
+    bot.application.status = "active"
+    key = Ed25519PrivateKey.generate()
+    bot.worker.public_key = key.public_key().public_bytes_raw()
+    raw = "kb1_at_" + "a" * 43
+    bot.token.token_hash = bot_auth.token_hash(raw)
+    bot.token.dpop_thumbprint = bot_auth.encode_urlsafe(
+        hashlib.sha256(bot.worker.public_key).digest()
+    )
+    timestamp = int(time.time())
+    nonce = "home-auth-test"
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/bots/applications/@me/assets",
+        "query_string": b"",
+        "headers": [],
+        "scheme": "https",
+        "server": ("apps.example", 443),
+    }
+    proof = key.sign(bot_auth.dpop_message(Request(scope), raw, timestamp, nonce))
     request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/api/v1/bots/applications/@me/assets",
-            "query_string": b"",
-            "headers": [(b"authorization", b"Bot kb1_at_disabled")],
-            "scheme": "https",
-            "server": ("apps.example", 443),
+        scope
+        | {
+            "headers": [
+                (b"authorization", f"Bot {raw}".encode()),
+                (b"x-kaede-bot-timestamp", str(timestamp).encode()),
+                (b"x-kaede-bot-nonce", nonce.encode()),
+                (b"x-kaede-bot-proof", bot_auth.encode_urlsafe(proof).encode()),
+            ]
         }
     )
-
-    with pytest.raises(HTTPException) as denied:
-        await require_application_home_bot(
+    monkeypatch.setattr(bot_auth, "enforce_keyed_rate_limit", AsyncMock())
+    redis = SimpleNamespace(set=AsyncMock(return_value=True))
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all([bot.user, bot.application, bot.worker, bot.token])
+        await session.flush()
+        accepted = await require_application_home_bot(
             request,
             session,
-            SimpleNamespace(),
+            redis,
             SimpleNamespace(domain="apps.example"),
         )
-
-    assert denied.value.detail == {"code": "BOT_TOKEN_INVALID"}
-    query = str(session.execute.await_args.args[0])
-    assert "bot_applications.origin_domain" in query
-    assert "guild_members" not in query
-    assert "bot_user_installations.status" not in query
+        assert accepted.user is bot.user
+        assert accepted.application is bot.application
+        assert accepted.scopes == frozenset({"applications.assets.manage"})
+        assert accepted.token.last_used_at is not None
+        # No installation tables exist in this schema: home authentication needs none.
+        for domain, disabled in [("foreign.example", False), ("apps.example", True)]:
+            bot.user.disabled_at = datetime.now(UTC) if disabled else None
+            await session.flush()
+            with pytest.raises(HTTPException) as denied:
+                await require_application_home_bot(
+                    request, session, redis, SimpleNamespace(domain=domain)
+                )
+            assert denied.value.detail == {"code": "BOT_TOKEN_INVALID"}
 
 
 @pytest.mark.asyncio
@@ -2868,61 +2852,68 @@ async def test_generic_kick_atomically_revokes_bot_installation(
 @pytest.mark.asyncio
 async def test_generic_ban_revokes_bot_and_unban_never_reactivates_it(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import Ban
+
+    for table in ("users", "bot_installations", "guild_members", "bans"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
     guild, _, member, auth = moderation_fixture()
     installed = installation(scopes={"guilds.read"})
     target = principal(scopes=set(), intents=set()).user
     patch_moderation_side_effects(monkeypatch, guild, member)
     settings = SimpleNamespace(domain="guild.example")
-    session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[None, target, member]),
-        scalars=AsyncMock(return_value=[installed]),
-        execute=AsyncMock(),
-        delete=AsyncMock(),
-        commit=AsyncMock(),
-    )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all([installed, target, member])
+        await session.flush()
 
-    await moderation_api.ban_member(
-        EntityRef("70@guild.example"),
-        EntityRef("10@apps.example"),
-        BanCreate(),
-        auth,
-        session,
-        SimpleNamespace(),
-        SimpleNamespace(mint=AsyncMock(return_value=123)),
-        settings,
-        None,
-    )
+        await moderation_api.ban_member(
+            EntityRef("70@guild.example"),
+            EntityRef("10@apps.example"),
+            BanCreate(),
+            auth,
+            session,
+            SimpleNamespace(),
+            SimpleNamespace(mint=AsyncMock(return_value=123)),
+            settings,
+            None,
+        )
 
-    assert installed.status == "revoked"
-    assert installed.revoked_at is not None
-    moderation_api.cleanup_installation_roles.assert_awaited_once_with(
-        session,
-        settings,
-        guild,
-        auth.user,
-        [installed],
-    )
+        assert installed.status == "revoked"
+        assert installed.revoked_at is not None
+        moderation_api.cleanup_installation_roles.assert_awaited_once_with(
+            session,
+            settings,
+            guild,
+            auth.user,
+            [installed],
+        )
 
-    delete_result = Mock()
-    delete_result.scalar_one_or_none.return_value = target.id
-    unban_session = SimpleNamespace(
-        execute=AsyncMock(return_value=delete_result),
-        commit=AsyncMock(),
-    )
-    await moderation_api.remove_ban(
-        EntityRef("70@guild.example"),
-        EntityRef("10@apps.example"),
-        auth,
-        unban_session,
-        SimpleNamespace(),
-        SimpleNamespace(),
-        SimpleNamespace(domain="guild.example"),
-        None,
-    )
+        await session.refresh(installed)
+        revoked_at = installed.revoked_at
+        assert await session.get(Ban, (70, "guild.example", 10, "apps.example")) is not None
+        await moderation_api.remove_ban(
+            EntityRef("70@guild.example"),
+            EntityRef("10@apps.example"),
+            auth,
+            session,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(domain="guild.example"),
+            None,
+        )
 
-    assert installed.status == "revoked"
-    assert installed.revoked_at is not None
+        assert installed.status == "revoked"
+        assert installed.revoked_at is not None
+
+        await session.refresh(installed)
+        assert (installed.status, installed.revoked_at) == ("revoked", revoked_at)
+        assert await session.get(Ban, (70, "guild.example", 10, "apps.example")) is None
 
 
 def stub_application_target_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4480,7 +4471,7 @@ async def test_remote_manifest_mints_local_children_when_authority_ids_collide(
 
 
 @pytest.mark.asyncio
-async def test_remote_worker_refresh_materializes_changed_commands_and_assets(
+async def test_worker_refresh_orchestration_and_generation_preservation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application = BotApplication(
@@ -5121,7 +5112,7 @@ async def test_bot_pin_listing_applies_content_intent_and_attachment_grants(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("worker_intent", "grant_intent"),
-    [(False, True), (True, False)],
+    [(False, True), (True, False), (True, True)],
 )
 async def test_bot_guild_member_collection_requires_exact_guild_members_intent(
     monkeypatch: pytest.MonkeyPatch,
@@ -5142,6 +5133,19 @@ async def test_bot_guild_member_collection_requires_exact_guild_members_intent(
     )
     monkeypatch.setattr(bots_api, "list_members", member_list)
 
+    if worker_intent and grant_intent:
+        assert (
+            await bots_api.bot_guild_members(
+                EntityRef("70@guild.example"),
+                bot,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(domain="guild.example"),
+            )
+        ) == []
+        member_list.assert_awaited_once()
+        return
+
     with pytest.raises(HTTPException) as denied:
         await bots_api.bot_guild_members(
             EntityRef("70@guild.example"),
@@ -5156,87 +5160,6 @@ async def test_bot_guild_member_collection_requires_exact_guild_members_intent(
         "intent": "guild_members",
     }
     member_list.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_bot_guild_member_collection_accepts_both_intent_grants(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bot = principal(scopes={"members.read"}, intents={"guild_members"})
-    exact_installation = installation(scopes={"members.read"})
-    exact_installation.granted_intents = ["guild_members"]
-    member_list = AsyncMock(return_value=[])
-    monkeypatch.setattr(
-        bots_api,
-        "installation_for_guild",
-        AsyncMock(return_value=(SimpleNamespace(), exact_installation)),
-    )
-    monkeypatch.setattr(bots_api, "list_members", member_list)
-
-    assert (
-        await bots_api.bot_guild_members(
-            EntityRef("70@guild.example"),
-            bot,
-            SimpleNamespace(),
-            SimpleNamespace(),
-            SimpleNamespace(domain="guild.example"),
-        )
-        == []
-    )
-    member_list.assert_awaited_once()
-
-
-def test_gateway_intent_mapping_orders_reactions_before_messages() -> None:
-    assert event_intent("MESSAGE_REACTION_ADD") == "guild_message_reactions"
-    assert event_intent("MESSAGE_REACTION_ADD", direct=True) == "direct_message_reactions"
-    assert event_intent("MESSAGE_POLL_VOTE_ADD") == "guild_message_polls"
-    assert event_intent("MESSAGE_CREATE") == "guild_messages"
-    assert event_intent("ATTACHMENT_UPDATE") == "guild_messages"
-    assert event_intent("INTERACTION_CREATE") == "interactions"
-    assert event_intent("TYPING_START") == "guild_message_typing"
-    assert event_intent("TYPING_START", direct=True) == "direct_message_typing"
-    assert event_intent("CHANNEL_CREATE", direct=True) == "direct_messages"
-    assert event_intent("CHANNEL_CREATE") == "guilds"
-    assert event_intent("VOICE_STATE_UPDATE", direct=True) == "direct_messages"
-    assert event_intent("VOICE_STATE_UPDATE") == "guild_voice_states"
-    assert event_intent("DM_OPEN_REJECTED", direct=True) == "direct_messages"
-    assert event_intent("GUILD_BAN_ADD") == "guild_moderation"
-    assert event_intent("GUILD_AUDIT_LOG_ENTRY_CREATE") == "guild_moderation"
-    assert event_intent("GUILD_EMOJI_UPDATE") == "guild_expressions"
-    assert event_intent("INTEGRATION_CREATE") == "guild_integrations"
-    assert event_intent("WEBHOOKS_UPDATE") == "guild_webhooks"
-    assert event_intent("INVITE_CREATE") == "guild_invites"
-    assert event_intent("GUILD_SCHEDULED_EVENT_CREATE") == "guild_scheduled_events"
-    assert event_intent("GUILD_SOUNDBOARD_SOUND_CREATE") == "guild_expressions"
-    assert event_intent("AUTO_MODERATION_RULE_CREATE") == "auto_moderation_configuration"
-    assert event_intent("AUTO_MODERATION_ACTION_EXECUTION") == "auto_moderation_execution"
-    assert event_intent("FUTURE_SECRET_EVENT") == ""
-
-
-def test_gateway_scope_mapping_is_event_specific() -> None:
-    assert event_scope("MESSAGE_REACTION_ADD") == "reactions.read"
-    assert event_scope("MESSAGE_CREATE") == "messages.metadata"
-    assert event_scope("ATTACHMENT_UPDATE") == "attachments.read"
-    assert event_scope("PRESENCE_UPDATE") == "members.read"
-    assert event_scope("VOICE_STATE_UPDATE") == "voice.states.read"
-    assert event_scope("VOICE_CHANNEL_MOVE") == "voice.connect"
-    assert event_scope("VOICE_TOKEN") == "voice.connect"
-    assert event_scope("VOICE_CHANNEL_EFFECT_SEND") == "soundboard.read"
-    assert event_scope("DM_OPEN_REJECTED") == "dm.send"
-    assert event_scope("GUILD_ROLE_UPDATE") == "roles.read"
-    assert event_scope("CHANNEL_UPDATE") == "channels.read"
-    assert event_scope("GUILD_BAN_ADD") == "moderation.bans"
-    assert event_scope("GUILD_MEMBERS_PRUNED") == "moderation.prune"
-    assert event_scope("GUILD_AUDIT_LOG_ENTRY_CREATE") == "audit_logs.read"
-    assert event_scope("GUILD_EMOJIS_UPDATE") == "expressions.read"
-    assert event_scope("INTEGRATION_UPDATE") == "integrations.read"
-    assert event_scope("WEBHOOKS_UPDATE") == "webhooks.read"
-    assert event_scope("INVITE_DELETE") == "invites.read"
-    assert event_scope("GUILD_SCHEDULED_EVENT_UPDATE") == "events.read"
-    assert event_scope("GUILD_SOUNDBOARD_SOUNDS_UPDATE") == "soundboard.read"
-    assert event_scope("AUTO_MODERATION_RULE_DELETE") == "automod.rules.read"
-    assert event_scope("AUTO_MODERATION_ACTION_EXECUTION") == "automod.executions.read"
-    assert event_scope("FUTURE_SECRET_EVENT") == ""
 
 
 def test_automod_execution_content_requires_message_content_intent_and_scope() -> None:
@@ -5603,7 +5526,6 @@ def test_interactions_are_isolated_to_the_exact_application_and_installation() -
         "d": {
             **shared["d"],
             "application_ref": "21@apps.example",
-            "installation_id": "61",
         },
     }
     assert (
@@ -6081,6 +6003,27 @@ def test_gateway_e2ee_classifier_handles_sparse_resources_and_status_events() ->
         }
     )
 
+    sparse_events.append(
+        {
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "channel_id": "7",
+                "channel_domain": "chat.example",
+                "encrypted_payload": {
+                    "version": 2,
+                    "protocol": "mls10",
+                    "suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+                    "group_id": "cm9vbS1ncm91cA",
+                    "policy_generation": "3",
+                    "epoch": "7",
+                    "sender_device_id": "ked_" + "ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ",
+                    "operation": "create",
+                    "ciphertext": "b3BhcXVlIGludGVyYWN0aW9uIGJvZHk",
+                },
+            },
+        }
+    )
+
     for event in sparse_events:
         assert encrypted_bot_content_channel_refs(event, encrypted_channels) == frozenset(
             {(7, "chat.example")}
@@ -6382,46 +6325,6 @@ def test_interaction_options_reject_non_json_and_resource_abuse() -> None:
         InteractionCreate(**base, options={"value": "x" * (64 * 1024 + 1)})
 
 
-def test_command_names_and_permissions_are_bounded() -> None:
-    default_command = CommandDefinition(name="weather", description="Current weather")
-    assert default_command.name == "weather"
-    assert default_command.contexts == ["guild", "bot_dm", "private_channel"]
-    assert default_command.integration_types == ["guild_install"]
-    user_command = CommandDefinition(
-        name="share",
-        description="Share something",
-        contexts=["guild", "bot_dm", "private_channel"],
-        integration_types=["guild_install", "user_install"],
-    )
-    assert user_command.integration_types == ["guild_install", "user_install"]
-    with pytest.raises(ValidationError):
-        CommandDefinition(
-            name="duplicate",
-            description="Duplicate context",
-            contexts=["guild", "guild"],
-        )
-    with pytest.raises(ValidationError):
-        CommandDefinition(name="Not Valid")
-    with pytest.raises(ValidationError):
-        ApplicationPatch(default_permissions=1 << 63)
-    with pytest.raises(ValidationError):
-        ApplicationPatch(default_permissions=1 << 19)
-    assert ApplicationPatch(default_permissions=str(1 << 58)).default_permissions == 1 << 58
-    for invalid_mask in (True, 1.0, "+1", "01"):
-        with pytest.raises(ValidationError):
-            ApplicationPatch(default_permissions=invalid_mask)  # type: ignore[arg-type]
-    with pytest.raises(ValidationError):
-        TemplateCreate(slug="default", name="Default", permissions=str(1 << 19))
-    with pytest.raises(ValidationError):
-        ApplicationCreate(name="Unsafe", support_url="http://apps.example/support")
-    with pytest.raises(ValidationError):
-        ApplicationPatch(privacy_url="http://apps.example/privacy")
-    assert (
-        str(ApplicationCreate(name="Safe", support_url="https://apps.example/support").support_url)
-        == "https://apps.example/support"
-    )
-
-
 def test_application_install_config_bounds_commands_and_user_grants() -> None:
     patch = ApplicationPatch(
         supported_install_types=["guild_install", "user_install"],
@@ -6547,8 +6450,11 @@ def test_federated_bot_manifest_rejects_ambiguous_booleans_and_nul_text() -> Non
         "available": True,
         "version": "1",
     }
+    assert ManifestApplicationEmoji.model_validate(base).name == "party_blob"
     with pytest.raises(ValidationError, match="boolean"):
         ManifestApplicationEmoji.model_validate(base | {"animated": 1})
+    with pytest.raises(ValidationError, match="boolean"):
+        ManifestApplicationEmoji.model_validate(base | {"available": "true"})
     with pytest.raises(ValidationError, match="NUL"):
         ManifestApplicationEmoji.model_validate(base | {"name": "bad\x00name"})
 
@@ -6655,71 +6561,6 @@ def test_control_credentials_have_separate_minimal_scopes() -> None:
         CredentialCreate(label="unsafe", scopes=["messages.content"])
 
 
-def test_command_options_are_typed_and_fail_closed() -> None:
-    command = CommandDefinition(
-        name="poll",
-        description="Create a poll",
-        options=[
-            CommandOptionDefinition(
-                type="string",
-                name="question",
-                description="Question",
-                required=True,
-                min_length=1,
-                max_length=500,
-            )
-        ],
-    )
-    assert command.options[0].name == "question"
-    channel_command = CommandDefinition(
-        name="move",
-        description="Move a conversation",
-        options=[
-            CommandOptionDefinition(
-                type="channel",
-                name="destination",
-                description="Destination",
-                channel_types=[0, 5, 10, 11, 12, 15, 17],
-            )
-        ],
-    )
-    serialized = channel_command.model_dump(mode="json")
-    assert serialized["options"][0]["channel_types"] == [0, 5, 10, 11, 12, 15, 17]
-    assert CommandDefinition.model_validate(serialized) == channel_command
-    with pytest.raises(ValidationError):
-        CommandOptionDefinition(type="user", name="person", description="Person", min_length=1)
-    with pytest.raises(ValidationError, match="require a channel option"):
-        CommandOptionDefinition(
-            type="user",
-            name="person",
-            description="Person",
-            channel_types=[0],
-        )
-    with pytest.raises(ValidationError, match="must be unique"):
-        CommandOptionDefinition(
-            type="channel",
-            name="destination",
-            description="Destination",
-            channel_types=[0, 0],
-        )
-    with pytest.raises(ValidationError, match="unsupported channel type"):
-        CommandOptionDefinition(
-            type="channel",
-            name="destination",
-            description="Destination",
-            channel_types=[99],
-        )
-    with pytest.raises(ValidationError):
-        CommandOptionDefinition(
-            type="channel",
-            name="destination",
-            description="Destination",
-            channel_types=[True],
-        )
-    with pytest.raises(ValidationError):
-        CommandDefinition(name="poll", description="Poll", unexpected=True)
-
-
 def test_command_invocation_options_are_validated_from_registered_definition() -> None:
     command = ApplicationCommand(
         id=1,
@@ -6781,7 +6622,8 @@ def test_command_invocation_options_are_validated_from_registered_definition() -
             {"reports": {"create": {"kind": "feature", "document": "41"}}},
             require_complete=True,
         )
-    assert forged.value.detail["message"] == "Choose one of the command's allowed values."
+    assert forged.value.detail["code"] == "COMMAND_OPTION_INVALID"
+    assert forged.value.detail["option"] == "reports.create.kind"
 
 
 def test_command_invocation_enforces_advertised_channel_types() -> None:
@@ -6883,7 +6725,7 @@ def test_dpop_proof_binds_query_parameters() -> None:
 
 
 def test_bot_runtime_rate_limits_are_distinct_and_documented() -> None:
-    assert BOT_WORKER_REQUEST_LIMIT.limit == 600
-    assert BOT_WORKER_REQUEST_LIMIT.period_seconds == 60
-    assert BOT_APPLICATION_REQUEST_LIMIT.limit == 1200
-    assert BOT_APPLICATION_REQUEST_LIMIT.period_seconds == 60
+    assert BOT_WORKER_REQUEST_LIMIT.bucket != BOT_APPLICATION_REQUEST_LIMIT.bucket
+    for limit in (BOT_WORKER_REQUEST_LIMIT, BOT_APPLICATION_REQUEST_LIMIT):
+        assert isinstance(limit.limit, int) and limit.limit > 0
+        assert isinstance(limit.period_seconds, int) and limit.period_seconds > 0

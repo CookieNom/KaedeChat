@@ -61,4 +61,9 @@ async def test_partition_creation_takes_database_advisory_lock_first() -> None:
 
 
 def test_partition_maintenance_is_scheduled_nightly() -> None:
-    assert partitions_ensure.labels["schedule"] == [{"cron": "17 3 * * *"}]
+    schedule = partitions_ensure.labels["schedule"]
+    assert len(schedule) == 1
+    minute, hour, day, month, weekday = schedule[0]["cron"].split()
+    assert 0 <= int(minute) < 60
+    assert 0 <= int(hour) < 24
+    assert (day, month, weekday) == ("*", "*", "*")

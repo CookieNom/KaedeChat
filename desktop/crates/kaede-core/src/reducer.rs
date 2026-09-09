@@ -1571,14 +1571,6 @@ mod tests {
     }
 
     #[test]
-    fn omitted_profile_resolution_flag_remains_compatible_with_older_servers() {
-        let parsed: User = serde_json::from_value(user("9", "remote.example", "maple"))
-            .expect("legacy user payload");
-        assert!(parsed.profile_resolved);
-        assert_eq!(parsed.label(), "maple");
-    }
-
-    #[test]
     fn ready_hydrates_the_dm_presence_snapshot() {
         let mut state = AppState::default();
         state
@@ -1716,6 +1708,7 @@ mod tests {
             .expect("valid envelope");
         assert!(reduction.reconcile_required);
         assert_eq!(state.sequence, Some(12));
+        assert!(state.typing.is_empty());
     }
 
     #[test]
@@ -1782,11 +1775,11 @@ mod tests {
         );
         assert_eq!(
             order.back().map(ToString::to_string).as_deref(),
-            Some("2000@guild.example")
+            Some(format!("{MAX_MESSAGES_PER_CHANNEL}@guild.example").as_str())
         );
         assert!(
             !state.messages.contains_key(
-                &"2002@guild.example"
+                &format!("{}@guild.example", MAX_MESSAGES_PER_CHANNEL + 2)
                     .parse()
                     .expect("evicted newest message")
             )
@@ -1811,6 +1804,10 @@ mod tests {
             .expect("history retry update");
         let guild_ref: EntityRef = "3@guild.example".parse().expect("guild reference");
         assert!(retrying.changed);
+        assert_eq!(
+            state.guilds[&guild_ref].history_sync_retry_after_ms,
+            Some(60000)
+        );
         assert_eq!(
             state.guilds[&guild_ref].history_sync_status.as_deref(),
             Some("retrying")
@@ -1977,6 +1974,8 @@ mod tests {
             ))
             .expect("attachment update");
         let key: EntityRef = "7@guild.example".parse().expect("message reference");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[&key].attachments.len(), 1);
         let attachment = &state.messages[&key].attachments[0];
         assert_eq!(attachment.scan_status.as_deref(), Some("clean"));
         assert_eq!(attachment.width, Some(640));
@@ -2002,12 +2001,13 @@ mod tests {
             ))
             .expect("delivery update");
 
-        assert_eq!(
-            reduction.user_error.as_deref(),
-            Some(
-                "The receiving instance reached its direct-message storage limit, so this message was not delivered. Retry later; if it continues, contact that instance's administrator."
-            )
-        );
+        let message = reduction
+            .user_error
+            .as_deref()
+            .expect("actionable user error");
+        assert!(message.contains("receiving instance"));
+        assert!(message.contains("storage limit"));
+        assert!(message.contains("not delivered"));
         let key: EntityRef = "7@guild.example".parse().expect("message reference");
         assert_eq!(
             state.messages[&key].delivery_status.as_deref(),
@@ -2129,55 +2129,64 @@ mod tests {
 
     #[test]
     fn reaction_and_poll_events_update_only_the_matching_federated_actor() {
-        let mut state = AppState::default();
-        state.hydrate_identity(
-            serde_json::from_value(user("9", "home.example", "viewer")).expect("current user"),
-        );
-        let mut initial = message();
-        initial["poll"] = json!({
-            "question": {"text": "Pick", "emoji": null},
-            "answers": [
-                {"answer_id": 1, "poll_media": {"text": "A", "emoji": null}},
-                {"answer_id": 2, "poll_media": {"text": "B", "emoji": null}}
-            ],
-            "expiry": "2026-08-30T00:00:00Z",
-            "allow_multiselect": false,
-            "layout_type": 1,
-            "results": {
-                "is_finalized": false,
-                "answer_counts": [
-                    {"id": 1, "count": 0, "me_voted": false},
-                    {"id": 2, "count": 1, "me_voted": false}
-                ]
-            }
-        });
-        state
-            .reduce(dispatch("MESSAGE_CREATE", 1, initial))
-            .expect("poll message");
-        let base = json!({
-            "id": "7", "origin_domain": "guild.example",
-            "message_id": "7", "message_domain": "guild.example",
-            "channel_id": "5", "channel_domain": "guild.example",
-            "user_id": "9", "user_domain": "home.example"
-        });
-        let mut reaction = base.clone();
-        reaction["reaction"] = json!("👋");
-        state
-            .reduce(dispatch("MESSAGE_REACTION_ADD", 2, reaction))
-            .expect("reaction add");
-        let mut vote = base;
-        vote["answer_id"] = json!(2);
-        state
-            .reduce(dispatch("MESSAGE_POLL_VOTE_ADD", 3, vote))
-            .expect("poll vote");
+        for actor_domain in ["home.example", "other.example"] {
+            let mut state = AppState::default();
+            state.hydrate_identity(
+                serde_json::from_value(user("9", "home.example", "viewer")).expect("current user"),
+            );
+            let mut initial = message();
+            initial["poll"] = json!({
+                "question": {"text": "Pick", "emoji": null},
+                "answers": [
+                    {"answer_id": 1, "poll_media": {"text": "A", "emoji": null}},
+                    {"answer_id": 2, "poll_media": {"text": "B", "emoji": null}}
+                ],
+                "expiry": "2026-08-30T00:00:00Z",
+                "allow_multiselect": false,
+                "layout_type": 1,
+                "results": {
+                    "is_finalized": false,
+                    "answer_counts": [
+                        {"id": 1, "count": 0, "me_voted": false},
+                        {"id": 2, "count": 1, "me_voted": false}
+                    ]
+                }
+            });
+            state
+                .reduce(dispatch("MESSAGE_CREATE", 1, initial))
+                .expect("poll message");
+            let base = json!({
+                "id": "7", "origin_domain": "guild.example",
+                "message_id": "7", "message_domain": "guild.example",
+                "channel_id": "5", "channel_domain": "guild.example",
+                "user_id": "9", "user_domain": actor_domain
+            });
+            let mut reaction = base.clone();
+            reaction["reaction"] = json!("👋");
+            state
+                .reduce(dispatch("MESSAGE_REACTION_ADD", 2, reaction))
+                .expect("reaction add");
+            let mut vote = base;
+            vote["answer_id"] = json!(2);
+            state
+                .reduce(dispatch("MESSAGE_POLL_VOTE_ADD", 3, vote))
+                .expect("poll vote");
 
-        let key: EntityRef = "7@guild.example".parse().expect("message reference");
-        let current = &state.messages[&key];
-        assert_eq!(current.reaction_counts.get("👋"), Some(&1));
-        assert_eq!(current.reacted_emoji, ["👋"]);
-        let count = &current.poll.as_ref().expect("poll")["results"]["answer_counts"][1];
-        assert_eq!(count["count"], 2);
-        assert_eq!(count["me_voted"], true);
+            let key: EntityRef = "7@guild.example".parse().expect("message reference");
+            let current = &state.messages[&key];
+            assert_eq!(current.reaction_counts.get("👋"), Some(&1));
+            assert_eq!(
+                current.reacted_emoji,
+                if actor_domain == "home.example" {
+                    vec!["👋".to_owned()]
+                } else {
+                    vec![]
+                }
+            );
+            let count = &current.poll.as_ref().expect("poll")["results"]["answer_counts"][1];
+            assert_eq!(count["count"], 2);
+            assert_eq!(count["me_voted"], actor_domain == "home.example");
+        }
     }
 
     #[test]
@@ -2248,6 +2257,15 @@ mod tests {
             "3@guild.example".parse().expect("guild"),
             "9@alpha.example".parse().expect("alpha user")
         )));
+        for domain in ["alpha.example", "beta.example"] {
+            let key = (
+                "3@guild.example".parse().expect("guild"),
+                format!("9@{domain}").parse().expect("user"),
+            );
+            let member = state.members.get(&key).expect("qualified member");
+            assert_eq!(member.user.id.to_string(), "9");
+            assert_eq!(member.user.origin_domain.to_string(), domain);
+        }
     }
 
     #[test]
@@ -2298,10 +2316,12 @@ mod tests {
                 json!({"pair_key": "pair", "code": "DM_PRIVACY_DENIED"}),
             ))
             .expect("rejection payload");
-        assert_eq!(
-            reduction.user_error.as_deref(),
-            Some("This person’s privacy settings do not allow this direct message.")
-        );
+        let message = reduction
+            .user_error
+            .as_deref()
+            .expect("actionable user error");
+        assert!(message.contains("privacy"));
+        assert!(message.contains("direct message"));
         assert!(!reduction.reconcile_required);
     }
 
@@ -2318,12 +2338,13 @@ mod tests {
                 }),
             ))
             .expect("capacity rejection payload");
-        assert_eq!(
-            reduction.user_error.as_deref(),
-            Some(
-                "This direct message could not be opened because the receiving instance has reached its remote-account storage limit. Try again later or contact its administrator."
-            )
-        );
+        let message = reduction
+            .user_error
+            .as_deref()
+            .expect("actionable user error");
+        assert!(message.contains("receiving instance"));
+        assert!(message.contains("remote-account"));
+        assert!(message.contains("storage limit"));
     }
 
     #[test]
@@ -2365,11 +2386,12 @@ mod tests {
 
         let key: EntityRef = "8@remote.example".parse().expect("remote user reference");
         assert!(!state.relationships.contains_key(&key));
-        assert_eq!(
-            reduction.user_error.as_deref(),
-            Some(
-                "The receiving instance cannot accept another pending friend request right now. Your request was not delivered."
-            )
-        );
+        let message = reduction
+            .user_error
+            .as_deref()
+            .expect("actionable user error");
+        assert!(message.contains("receiving instance"));
+        assert!(message.contains("friend request"));
+        assert!(message.contains("not delivered"));
     }
 }

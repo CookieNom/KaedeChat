@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -100,6 +99,8 @@ async def test_public_command_metadata_is_authority_derived_and_federation_valid
         validate_replicated_rich_projection(
             {
                 "attachments": [],
+                "author_id": "6",
+                "author_domain": "apps.example",
                 "application_id": "5",
                 "application_domain": "apps.example",
                 "interaction_metadata": tampered,
@@ -156,6 +157,16 @@ def test_context_command_metadata_requires_type_23_and_target_reference() -> Non
             referenced_message_ref=(20, "guild.example"),
             message_ref=(30, "guild.example"),
         )
+
+    for target in ((21, "guild.example"), (20, "other.example")):
+        with pytest.raises(ValueError):
+            validate_interaction_metadata(
+                metadata,
+                message_type=23,
+                application_ref=(5, "apps.example"),
+                referenced_message_ref=target,
+                message_ref=(30, "guild.example"),
+            )
 
 
 @pytest.mark.asyncio
@@ -221,6 +232,18 @@ async def test_federated_interaction_proxy_replay_binds_type_and_metadata() -> N
         mentions=federation_api.ProxyMentionProjection((), (), (), frozenset(), False),
     )
     changed = payload.model_copy(update={"interaction_message_type": 23})
+    assert not await federation_api.proxy_message_matches_request(
+        cast(Any, session),
+        message,
+        changed,
+        application_ref=(5, "apps.example"),
+        forwarded_message=None,
+        mentions=federation_api.ProxyMentionProjection((), (), (), frozenset(), False),
+    )
+
+    changed = payload.model_copy(
+        update={"interaction_metadata": {**metadata, "command_name": "different"}}
+    )
     assert not await federation_api.proxy_message_matches_request(
         cast(Any, session),
         message,
@@ -305,7 +328,7 @@ def test_allowed_mentions_read_visible_text_from_stored_component_json() -> None
 
 
 @pytest.mark.asyncio
-async def test_disallowed_everyone_mention_renders_without_notifying() -> None:
+async def test_everyone_recipient_suppression() -> None:
     session = SimpleNamespace(execute=AsyncMock())
     access = ChannelAccess(
         channel=cast(Any, SimpleNamespace()),
@@ -349,7 +372,16 @@ async def test_interaction_edit_without_visible_mentions_clears_projection_witho
         cast(Any, SimpleNamespace()),
         cast(Any, SimpleNamespace()),
         interactions.InteractionResponseEdit(content="still done"),
-        cast(Any, SimpleNamespace(content="old", e2ee=None)),
+        cast(
+            Any,
+            SimpleNamespace(
+                content="old <@4@users.example>",
+                e2ee=None,
+                mention_user_refs=[{"id": "4", "domain": "users.example"}],
+                mention_role_refs=[{"id": "5", "domain": "chat.example"}],
+                mention_everyone=True,
+            ),
+        ),
     )
 
     assert created_refs == interactions.ResolvedMentions((), (), False)
@@ -421,7 +453,7 @@ def test_age_restricted_command_requires_both_home_and_channel_authorities() -> 
         guild_id=1,
         guild_domain="guild.example",
         type=0,
-        nsfw=False,
+        nsfw=True,
         created_floor_id=3,
     )
     access = ChannelAccess(channel=channel, guild=guild, participants=[])
@@ -435,6 +467,7 @@ def test_age_restricted_command_requires_both_home_and_channel_authorities() -> 
     assert cast(dict[str, object], minor.value.detail)["code"] == (
         "APPLICATION_COMMAND_AGE_RESTRICTED"
     )
+    channel.nsfw = False
     with pytest.raises(HTTPException) as channel_denied:
         interactions.require_age_restricted_command(
             cast(Any, command),
@@ -610,11 +643,15 @@ async def test_remote_command_page_accepts_130_and_rejects_more(
             cast(Any, SimpleNamespace()),
             cast(Any, SimpleNamespace(id=1, origin_domain="guild.example")),
             cast(Any, SimpleNamespace(id=2, age_assurance_state="adult")),
+            channel=cast(Any, SimpleNamespace(id=3)),
         )
     assert rejected.value.status_code == 502
 
 
-def test_age_assurance_storage_is_authoritative_and_migration_is_reversible() -> None:
+@pytest.mark.asyncio
+async def test_age_assurance_storage_is_authoritative_and_migration_is_reversible(
+    migrate_to,
+) -> None:
     users = Base.metadata.tables["users"]
     channels = Base.metadata.tables["channels"]
     user_settings = Base.metadata.tables["user_settings"]
@@ -638,15 +675,65 @@ def test_age_assurance_storage_is_authoritative_and_migration_is_reversible() ->
     with pytest.raises(ValidationError):
         UserStatePatch.model_validate({"disabled": 1})
 
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    authority_check = 'op.f("ck_users_age_assurance_local_human_only")'
-    age_column = 'op.drop_column("users", "age_assurance_state")'
-    assert migration.rindex(authority_check) < migration.index(age_column)
+    import importlib
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import IntegrityError
+
+    connection = await migrate_to("fc9a4b7d2e10")
+    migration = importlib.import_module("migrations.versions.fc9a4b7d2e10_bot_parity_foundation")
+    await connection.execute(
+        text(
+            "INSERT INTO instances (domain, is_self, current_key_id, encrypted_private_key, "
+            "private_key_nonce) VALUES ('test.example', true, 'key', decode('aa', 'hex'), "
+            "decode('bb', 'hex')), ('remote.example', false, NULL, NULL, NULL)"
+        )
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO users (id, origin_domain, username, is_local, account_type, "
+            "password_hash, password_kdf_version, password_auth_salt, e2ee_vault_salt, "
+            "federation_introduced_by_domain) VALUES (1, 'test.example', 'localhuman', "
+            "true, 'human', 'hash', 2, decode(repeat('aa', 16), 'hex'), decode(repeat('bb', "
+            "16), 'hex'), NULL), (2, 'remote.example', 'remotehuman', false, 'human', NULL, "
+            "NULL, NULL, NULL, 'remote.example'), (3, 'test.example', 'bot', true, 'bot', "
+            "NULL, NULL, NULL, NULL, NULL)"
+        )
+    )
+    assert (
+        await connection.scalar(text("SELECT age_assurance_state FROM users WHERE id = 1"))
+        == "unknown"
+    )
+    for user_id in (2, 3):
+        with pytest.raises(IntegrityError, match="age_assurance_local_human_only"):
+            async with connection.begin_nested():
+                await connection.execute(
+                    text("UPDATE users SET age_assurance_state = 'adult' WHERE id = :id"),
+                    {"id": user_id},
+                )
+    await connection.execute(text("UPDATE users SET age_assurance_state = 'adult' WHERE id = 1"))
+    assert (
+        await connection.scalar(text("SELECT age_assurance_state FROM users WHERE id = 1"))
+        == "adult"
+    )
+    await connection.execute(text("UPDATE users SET age_assurance_state = 'unknown' WHERE id = 1"))
+
+    def downgrade(sync):
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+        assert "age_assurance_state" not in {
+            column["name"] for column in inspect(sync).get_columns("users")
+        }
+        assert "age_restricted_dm_commands_enabled" not in {
+            column["name"] for column in inspect(sync).get_columns("user_settings")
+        }
+
+    await connection.run_sync(downgrade)
+    assert await connection.scalar(text("SELECT count(*) FROM users")) == 3
 
 
 def test_nsfw_channel_state_round_trips_through_federation_validation() -> None:
@@ -720,3 +807,6 @@ async def test_only_administration_can_change_age_assurance_with_audit_metadata(
         "new_state": "adult",
         "reason": "vendor check 42",
     }
+
+    assert (audit_event.actor_id, audit_event.actor_domain) == (1, "chat.example")
+    assert (audit_event.target_type, audit_event.target_ref) == ("user", "2@chat.example")

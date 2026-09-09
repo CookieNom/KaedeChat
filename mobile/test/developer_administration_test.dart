@@ -100,8 +100,7 @@ void main() {
     expect(application.canManageState, isFalse);
   });
 
-  test('repositories use audited human routes and qualified application refs',
-      () async {
+  test('human route and qualified-ref request construction', () async {
     final adapter = _QueueAdapter(<_Reply>[
       _Reply(jsonEncode(<Object?>[
         <String, Object?>{
@@ -279,7 +278,7 @@ void main() {
         'Integration removed');
   });
 
-  test('report attachments enforce authority, encryption and scan fences', () {
+  test('report attachment authority/encryption checks', () {
     final report = AdministrationReport.fromJson(<String, Object?>{
       'id': '88',
       'source': 'user',

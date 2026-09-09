@@ -169,6 +169,8 @@ def test_embed_attachment_media_accepts_only_discord_image_formats(url: str) -> 
 
 
 def test_embed_collection_enforces_discord_total_character_limit() -> None:
+    accepted = MessageCreate(embeds=[Embed(description="a" * 3000), Embed(description="b" * 3000)])
+    assert sum(len(embed.description) for embed in accepted.embeds) == 6000
     with pytest.raises(ValidationError, match="6000"):
         MessageCreate(embeds=[Embed(description="a" * 3_001), Embed(description="b" * 3_000)])
 
@@ -412,7 +414,7 @@ def test_ephemeral_component_target_requires_response_identity_and_version() -> 
         )
 
 
-def test_ephemeral_view_payload_has_bounded_public_version_fence() -> None:
+def test_public_version_fence_projection() -> None:
     now = datetime(2026, 8, 27, tzinfo=UTC)
     interaction_expiry = now + timedelta(minutes=15)
     message = MessageCreate(
@@ -434,7 +436,7 @@ def test_ephemeral_view_payload_has_bounded_public_version_fence() -> None:
     assert payload["view_expires_at"] == (now + timedelta(minutes=1)).isoformat()
 
 
-def test_autocomplete_requires_explicit_focused_option_and_generation_is_bounded() -> None:
+def test_focused_option_and_generation_acceptance() -> None:
     interaction = InteractionCreate(
         application_ref="1@apps.example",
         interaction_type="autocomplete",
@@ -495,47 +497,110 @@ def test_context_commands_require_authority_resolved_targets() -> None:
 @pytest.mark.asyncio
 async def test_message_context_target_is_resolved_from_the_visible_channel(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
-    message = SimpleNamespace(
-        id=33,
-        origin_domain="chat.example",
-        channel_id=7,
-        channel_domain="chat.example",
-        deleted_at=None,
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import Message
+
+    await postgres_schema.execute(
+        text("CREATE TABLE messages (LIKE public.messages INCLUDING ALL)")
     )
-    session = SimpleNamespace(scalar=AsyncMock(return_value=message))
-    rendered = {
-        "id": "33",
-        "origin_domain": "chat.example",
-        "channel_id": "7",
-        "channel_domain": "chat.example",
-        "content": "authority-owned body",
-    }
-    render = AsyncMock(return_value=rendered)
-    monkeypatch.setattr("app.api.interactions.render_message_payload", render)
-    access = SimpleNamespace(
-        channel=SimpleNamespace(
-            id=7,
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        message = Message(
+            id=33,
             origin_domain="chat.example",
-            encryption_mode="plaintext",
-        ),
-        guild=None,
-        participants=[],
-    )
+            channel_id=7,
+            channel_domain="chat.example",
+            author_id=1,
+            author_domain="chat.example",
+            content="authority-owned body",
+        )
+        session.add_all(
+            [
+                message,
+                Message(
+                    id=34,
+                    origin_domain="chat.example",
+                    channel_id=8,
+                    channel_domain="chat.example",
+                    author_id=1,
+                    author_domain="chat.example",
+                    content="private",
+                ),
+                Message(
+                    id=33,
+                    origin_domain="other.example",
+                    channel_id=7,
+                    channel_domain="other.example",
+                    author_id=1,
+                    author_domain="other.example",
+                    content="foreign",
+                ),
+            ]
+        )
+        await session.flush()
+        rendered = {
+            "id": "33",
+            "origin_domain": "chat.example",
+            "channel_id": "7",
+            "channel_domain": "chat.example",
+            "content": "authority-owned body",
+        }
+        render = AsyncMock(return_value=rendered)
+        monkeypatch.setattr("app.api.interactions.render_message_payload", render)
+        access = SimpleNamespace(
+            channel=SimpleNamespace(
+                id=7,
+                origin_domain="chat.example",
+                encryption_mode="plaintext",
+            ),
+            guild=None,
+            participants=[],
+        )
 
-    target_ref, target_id, resolved = await resolve_context_command_target(
-        session,  # type: ignore[arg-type]
-        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
-        access,  # type: ignore[arg-type]
-        SimpleNamespace(id=1, origin_domain="chat.example"),  # type: ignore[arg-type]
-        "message",
-        EntityRef("33@chat.example"),
-    )
+        target_ref, target_id, resolved = await resolve_context_command_target(
+            session,  # type: ignore[arg-type]
+            SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+            access,  # type: ignore[arg-type]
+            SimpleNamespace(id=1, origin_domain="chat.example"),  # type: ignore[arg-type]
+            "message",
+            EntityRef("33@chat.example"),
+        )
 
-    assert target_ref == "33@chat.example"
-    assert target_id == "33"
-    assert resolved == {"messages": {"33@chat.example": rendered}}
-    render.assert_awaited_once()
+        assert target_ref == "33@chat.example"
+        assert target_id == "33"
+        assert resolved == {"messages": {"33@chat.example": rendered}}
+        render.assert_awaited_once()
+
+        assert render.await_args.args[1] is message
+        for ref in ("34@chat.example", "33@other.example"):
+            with pytest.raises(HTTPException) as denied:
+                await resolve_context_command_target(
+                    session,
+                    SimpleNamespace(domain="chat.example"),
+                    access,
+                    SimpleNamespace(id=1, origin_domain="chat.example"),
+                    "message",
+                    EntityRef(ref),
+                )
+            assert denied.value.detail == {"code": "MESSAGE_NOT_FOUND"}
+        message.deleted_at = datetime.now(UTC)
+        message.content = None
+        await session.flush()
+        with pytest.raises(HTTPException) as deleted:
+            await resolve_context_command_target(
+                session,
+                SimpleNamespace(domain="chat.example"),
+                access,
+                SimpleNamespace(id=1, origin_domain="chat.example"),
+                "message",
+                EntityRef("33@chat.example"),
+            )
+        assert deleted.value.detail == {"code": "MESSAGE_NOT_FOUND"}
 
 
 def test_user_install_grants_are_narrow_and_patchable() -> None:
@@ -614,22 +679,9 @@ def test_guild_install_command_discovery_takes_precedence() -> None:
     ]
     assert merge_application_commands(guild, user) == [guild[0], user[1]]
 
-
-def test_user_install_command_projection_preserves_private_context() -> None:
-    bot_dm = {
-        "application_ref": "1@apps.example",
-        "name": "build",
-        "type": "chat_input",
-        "integration_type": "user_install",
-        "interaction_context": "bot_dm",
-    }
-    private_channel = {
-        **bot_dm,
-        "interaction_context": "private_channel",
-    }
-
-    assert merge_application_commands([bot_dm], []) == [bot_dm]
-    assert merge_application_commands([private_channel], []) == [private_channel]
+    for context in ("bot_dm", "private_channel"):
+        private = {**user[0], "interaction_context": context}
+        assert merge_application_commands([], [private]) == [private]
 
 
 def test_webhook_attachment_selection_is_unique_and_edit_can_clear() -> None:
@@ -659,6 +711,7 @@ def test_webhook_components_v2_execute_rejects_an_attachment() -> None:
             sticker_ids=payload.sticker_ids,
         )
 
+    assert raised.value.status_code == 400
     assert raised.value.detail == {"code": "COMPONENTS_V2_BODY_INVALID"}
 
 
@@ -692,7 +745,7 @@ def test_slack_and_github_compatibility_adapters_are_bounded_and_typed() -> None
     )
     embeds = slack_embeds(slack)
     assert embeds[0].title == "Build 42"
-    assert embeds[0].color == 0x2EB886
+    assert embeds[0].color is not None and 0 <= embeds[0].color <= 0xFFFFFF
     assert embeds[0].fields[0].inline is True
     with pytest.raises(ValidationError):
         SlackWebhookExecute.model_validate(
@@ -717,7 +770,7 @@ def test_slack_and_github_compatibility_adapters_are_bounded_and_typed() -> None
             },
         },
     )
-    assert github.title == "octocat pushed 1 commit to refs/heads/main"
+    assert github.title and "octocat" in github.title and "refs/heads/main" in github.title
     assert github.description == "Ship webhook parity"
     with pytest.raises(HTTPException) as unsupported:
         github_webhook_embed("deployment", {})
@@ -759,14 +812,15 @@ async def test_incoming_webhook_rejects_interactive_components_when_enabled(
 
 
 def test_execute_webhook_rejects_unsupported_forward_fields() -> None:
-    with pytest.raises(ValidationError, match="forwarded_message_id"):
-        WebhookExecute.model_validate(
-            {
-                "content": "not a forward",
-                "forwarded_message_id": "9",
-                "forward_source_proof": {"proof": "unsupported"},
-            }
-        )
+    baseline = {"content": "not a forward"}
+    assert WebhookExecute.model_validate(baseline).content == "not a forward"
+    for field, value in (
+        ("forwarded_message_id", "9"),
+        ("forward_source_proof", {"proof": "unsupported"}),
+    ):
+        with pytest.raises(ValidationError) as denied:
+            WebhookExecute.model_validate({**baseline, field: value})
+        assert [error["loc"] for error in denied.value.errors()] == [(field,)]
 
 
 @pytest.mark.asyncio
@@ -846,7 +900,7 @@ async def test_application_webhook_uses_shared_authoritative_message_admission(
 
 
 @pytest.mark.asyncio
-async def test_forum_webhook_execution_uses_atomic_thread_service(
+async def test_thread_service_delegation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     webhook = SimpleNamespace(

@@ -35,7 +35,10 @@ def user(user_id: int, domain: str) -> User:
 def test_relationship_pair_lock_is_direction_independent() -> None:
     first = user(10, "alpha.localhost")
     second = user(20, "beta.localhost")
-    assert relationship_pair_lock_id(first, second) == relationship_pair_lock_id(second, first)
+    pair = relationship_pair_lock_id(first, second)
+    assert pair == relationship_pair_lock_id(second, first)
+    assert pair != relationship_pair_lock_id(first, user(21, "beta.localhost"))
+    assert pair != relationship_pair_lock_id(first, user(20, "other.localhost"))
 
 
 @pytest.mark.asyncio
@@ -72,9 +75,11 @@ async def test_shared_guild_policy_share_locks_both_memberships() -> None:
     assert "FOR SHARE OF guild_members_1, guild_members_2" in sql
 
 
+@pytest.mark.parametrize("friends", [True, False])
 @pytest.mark.asyncio
 async def test_shared_guild_policy_always_allows_accepted_friends(
     monkeypatch: pytest.MonkeyPatch,
+    friends: bool,
 ) -> None:
     sender = user(10, "beta.localhost")
     recipient = user(20, "alpha.localhost")
@@ -82,31 +87,17 @@ async def test_shared_guild_policy_always_allows_accepted_friends(
         AsyncSession,
         SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(dm_privacy="shared_guild"))),
     )
-    relation = Relationship(type="friend")
+    relation = Relationship(type="friend") if friends else None
     shared_guild = AsyncMock(return_value=False)
     monkeypatch.setattr("app.chat.privacy.blocked_between", AsyncMock(return_value=False))
     monkeypatch.setattr("app.chat.privacy.relationship", AsyncMock(return_value=relation))
     monkeypatch.setattr("app.chat.privacy.share_guild", shared_guild)
 
-    assert await can_direct_message(session, sender, recipient)
-    shared_guild.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_shared_guild_policy_rejects_unrelated_users_without_a_shared_guild(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sender = user(10, "beta.localhost")
-    recipient = user(20, "alpha.localhost")
-    session = cast(
-        AsyncSession,
-        SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(dm_privacy="shared_guild"))),
-    )
-    monkeypatch.setattr("app.chat.privacy.blocked_between", AsyncMock(return_value=False))
-    monkeypatch.setattr("app.chat.privacy.relationship", AsyncMock(return_value=None))
-    monkeypatch.setattr("app.chat.privacy.share_guild", AsyncMock(return_value=False))
-
-    assert not await can_direct_message(session, sender, recipient)
+    assert await can_direct_message(session, sender, recipient) is friends
+    if friends:
+        shared_guild.assert_not_awaited()
+    else:
+        shared_guild.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -143,7 +134,14 @@ async def test_remote_dm_send_serializes_and_rechecks_local_block(
     remote = user(20, "beta.localhost")
     lock = AsyncMock()
     monkeypatch.setattr("app.api.channels.lock_relationship_pair", lock)
-    monkeypatch.setattr("app.api.channels.blocked_between", AsyncMock(return_value=True))
+
+    async def blocked(session: object, current: object, participant: object) -> bool:
+        assert current is actor
+        assert participant is remote
+        lock.assert_awaited_once_with(session, actor, remote)
+        return True
+
+    monkeypatch.setattr("app.api.channels.blocked_between", blocked)
 
     with pytest.raises(HTTPException) as error:
         await require_dm_send(

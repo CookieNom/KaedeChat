@@ -146,9 +146,7 @@ Map<String, Object?> _proof({
 }
 
 void main() {
-  test(
-      'plaintext forwards freshly copy attachments into plaintext destinations',
-      () {
+  test('requiring attachment copy policy', () {
     expect(
       mobilePreparedForwardNeedsCopies('plaintext', <String>['plaintext'], 1),
       isTrue,
@@ -213,7 +211,16 @@ void main() {
     );
 
     expect(prepared.destinations, hasLength(2));
-    expect(prepared.destinations.first.requiresPlaintextDisclosure, isTrue);
+    expect(
+        prepared.destinations.map((item) => (
+              item.channel.ref.wire,
+              item.nonce,
+              item.requiresPlaintextDisclosure
+            )),
+        [
+          ('20@source.example', 'forward-local', true),
+          ('30@remote.example', 'forward-remote', false),
+        ]);
 
     final tampered = jsonDecode(jsonEncode(response)) as Map<String, Object?>;
     final destinations = tampered['destinations']! as List;
@@ -247,9 +254,25 @@ void main() {
       seed: 20,
       plaintextSha256: original['plaintext_sha256']! as String,
     );
+    final second = _manifest(
+        id: '502',
+        domain: 'source.example',
+        seed: 5,
+        plaintextSha256: _b64(32, 100));
+    final secondReplacement = _manifest(
+        id: '602',
+        domain: 'destination.example',
+        seed: 25,
+        plaintextSha256: second['plaintext_sha256']! as String);
     final source = _snapshot(original);
+    source['attachments'] = [original, second];
+    ((source['message_snapshots']! as List).single as Map)['attachments'] = [
+      second,
+      original
+    ];
     final rebound = rebindMobileForwardSnapshot(source, <Map<String, Object?>>[
       replacement,
+      secondReplacement,
     ]);
 
     expect(
@@ -262,8 +285,9 @@ void main() {
     );
     final nested = (rebound['message_snapshots']! as List).single as Map;
     expect(
-      ((nested['attachments']! as List).single as Map)['attachment_id'],
-      '601',
+      (nested['attachments']! as List)
+          .map((item) => (item as Map)['attachment_id']),
+      ['602', '601'],
     );
 
     final changedPlaintext = <String, Object?>{
@@ -273,6 +297,7 @@ void main() {
     expect(
       () => rebindMobileForwardSnapshot(source, <Map<String, Object?>>[
         changedPlaintext,
+        secondReplacement,
       ]),
       throwsFormatException,
     );
@@ -281,12 +306,12 @@ void main() {
     final foreignChild =
         (foreignNested['message_snapshots']! as List).single as Map;
     final foreignAttachment =
-        (foreignChild['attachments']! as List).single as Map;
+        (foreignChild['attachments']! as List).first as Map;
     foreignAttachment['attachment_id'] = '999';
     expect(
       () => rebindMobileForwardSnapshot(
         foreignNested,
-        <Map<String, Object?>>[replacement],
+        <Map<String, Object?>>[replacement, secondReplacement],
       ),
       throwsFormatException,
     );
@@ -371,7 +396,7 @@ void main() {
       'client_nonce': 'forward-wire',
       'attachment_ids': <String>['601'],
     };
-    await repository.submitPreparedMessageForward(
+    final result = await repository.submitPreparedMessageForward(
       sourceChannel: sourceChannel,
       sourceMessage: sourceMessage,
       destinations: <({EntityRef channel, Map<String, Object?> message})>[
@@ -379,6 +404,12 @@ void main() {
       ],
     );
 
+    expect(adapter.requests.map((item) => item.method), ['POST', 'POST']);
+    expect(((adapter.requests.last.data as Map)['destinations'] as List).single,
+        {'destination_channel_id': '30@remote.example', 'message': body});
+    expect(result.forwards, isEmpty);
+    expect(result.failures.single.destination.wire, '30@remote.example');
+    expect(result.failures.single.status, 409);
     expect(adapter.requests.map((item) => item.path), <String>[
       '/api/v1/channels/80@source.example/messages/90@source.example/forward/prepare',
       '/api/v1/channels/80@source.example/messages/90@source.example/forward',

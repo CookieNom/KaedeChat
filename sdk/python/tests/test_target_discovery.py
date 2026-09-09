@@ -75,7 +75,7 @@ async def test_start_failure_closes_partial_runtime_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_rejects_a_concurrent_start_before_network_io() -> None:
+async def test_already_starting_guard_before_i_o() -> None:
     bot = target_client()
     bot._starting = True  # noqa: SLF001
     bot.fetch_bot_identity = AsyncMock()  # type: ignore[method-assign]
@@ -241,13 +241,17 @@ async def test_discovery_removes_revoked_auto_target_but_keeps_explicit_target()
         "https://one.example",
         "https://two.example",
     }
-    remove = AsyncMock()
-    bot._remove_discovered_target = remove  # type: ignore[method-assign]  # noqa: SLF001
-    bot._ensure_gateway_task = lambda _: AsyncMock()  # type: ignore[assignment]  # noqa: SLF001
+    explicit = SimpleNamespace(aclose=AsyncMock())
+    automatic = SimpleNamespace(aclose=AsyncMock())
+    bot._targets.update(
+        {"https://one.example": explicit, "https://two.example": automatic}
+    )
 
-    await bot._apply_discovered_targets(["https://one.example"])  # noqa: SLF001
+    await bot._apply_discovered_targets([])  # noqa: SLF001
 
-    remove.assert_awaited_once_with("https://two.example")
+    assert set(bot._targets) == {"https://one.example"}
+    explicit.aclose.assert_not_awaited()
+    automatic.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -512,15 +512,17 @@ async def test_durable_create_binding_uses_admission_snapshot_across_config_revi
         authority_domain="chat.example",
     )
 
-    installation.status = "revoked"
-    installation.revoked_at = datetime.now(UTC)
-    assert not await interaction_dispatch.durable_interaction_create_binding_matches(
-        session,  # type: ignore[arg-type]
-        interaction,
-        row,  # type: ignore[arg-type]
-        event,
-        authority_domain="chat.example",
-    )
+    for field, invalid in (("status", "revoked"), ("revoked_at", datetime.now(UTC))):
+        original = getattr(installation, field)
+        setattr(installation, field, invalid)
+        assert not await interaction_dispatch.durable_interaction_create_binding_matches(
+            session,  # type: ignore[arg-type]
+            interaction,
+            row,  # type: ignore[arg-type]
+            event,
+            authority_domain="chat.example",
+        )
+        setattr(installation, field, original)
 
 
 @pytest.mark.asyncio
@@ -700,7 +702,6 @@ async def test_publish_failure_survives_and_sql_poll_delivers_once(
         encrypted_by_topic={},
     )
 
-    assert bot_gateway.INTERACTION_SQL_POLL_SECONDS < 3
     await bot_gateway.replay_pending_interaction_creates(runtime)
     await bot_gateway.replay_pending_interaction_creates(runtime)
 

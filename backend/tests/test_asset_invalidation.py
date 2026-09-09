@@ -23,6 +23,43 @@ REMOTE_DOMAIN = "beta.localhost"
 DIGEST = "a" * 64
 
 
+@pytest.fixture
+async def terminal_worker_database(postgres_schema, monkeypatch):
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    for table in (
+        "instances",
+        "attachments",
+        "messages",
+        "media_tombstone_sources",
+        "federation_events",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO instances (domain,is_self,current_key_id) VALUES "
+            "(:domain,true,'ed25519:current')"
+        ),
+        dict(domain=LOCAL_DOMAIN),
+    )
+    engine = SimpleNamespace(dispose=AsyncMock())
+    config = SimpleNamespace(
+        domain=LOCAL_DOMAIN,
+        database_url=SimpleNamespace(get_secret_value=lambda: "unused"),
+        dragonfly_url=SimpleNamespace(get_secret_value=lambda: "redis://unused"),
+    )
+    monkeypatch.setattr(tasks, "get_settings", lambda: config)
+    monkeypatch.setattr(
+        tasks,
+        "create_engine_and_sessionmaker",
+        lambda _url: (engine, async_sessionmaker(bind=postgres_schema, expire_on_commit=False)),
+    )
+    return postgres_schema, engine
+
+
 def settings() -> Settings:
     return cast(Settings, SimpleNamespace(domain=LOCAL_DOMAIN))
 
@@ -423,69 +460,74 @@ async def test_terminal_soundboard_asset_deletes_its_playable_projection(
 
 @pytest.mark.asyncio
 async def test_public_asset_requires_a_current_non_null_binding(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, postgres_schema
 ) -> None:
-    statements: list[object] = []
-    digest_lock = AsyncMock()
-    monkeypatch.setattr(media_api, "lock_asset_digest", digest_lock)
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    class Session:
-        async def scalar(self, statement: object) -> None:
-            statements.append(statement)
-            return None
-
-    with pytest.raises(HTTPException) as raised:
-        await media_api.public_asset(
-            content_hash=DIGEST,
-            variant="original",
-            session=cast(Any, Session()),
-            settings=settings(),
+    for table in ("attachments", "media_tombstone_sources"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
         )
-
-    assert raised.value.status_code == 404
-    digest_lock.assert_awaited_once_with(ANY, DIGEST)
-    statement_sql = str(statements[0].compile(dialect=postgresql.dialect()))
-    assert "attachments.asset_binding IS NOT NULL" in statement_sql
-    assert "attachments_1.scan_status IN" in statement_sql
+    redirect = Mock(return_value=SimpleNamespace(status_code=307))
+    monkeypatch.setattr(media_api, "redirect_to_object", redirect)
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        bound = attachment(f"guild:{LOCAL_DOMAIN}:10:icon")
+        bound.scan_status = "clean"
+        unbound = attachment("")
+        unbound.id, unbound.asset_binding, unbound.scan_status = 31, None, "clean"
+        foreign = attachment(f"guild:{REMOTE_DOMAIN}:10:icon")
+        foreign.origin_domain, foreign.scan_status = REMOTE_DOMAIN, "clean"
+        session.add_all([bound, unbound, foreign])
+        await session.flush()
+        assert (
+            await media_api.public_asset(DIGEST, "original", session, settings())
+            is redirect.return_value
+        )
+        redirect.assert_called_once_with(settings(), bound, "original", public=True)
+        bound.asset_binding = None
+        await session.flush()
+        with pytest.raises(HTTPException) as denied:
+            await media_api.public_asset(DIGEST, "original", session, settings())
+        assert denied.value.status_code == 404
+        assert denied.value.detail == {"code": "MEDIA_NOT_FOUND"}
+        redirect.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_public_emoji_rejects_a_hash_with_any_terminal_duplicate(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, postgres_schema
 ) -> None:
-    emoji = SimpleNamespace(id=40, origin_domain=LOCAL_DOMAIN, media_hash=DIGEST)
-    statements: list[object] = []
-    scalar_values = iter((emoji, None))
-    digest_lock = AsyncMock()
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    class Session:
-        async def get(self, model: object, key: object) -> object:
-            assert model is Emoji
-            assert key == (emoji.id, emoji.origin_domain)
-            return emoji
-
-        async def scalar(self, statement: object) -> object:
-            statements.append(statement)
-            return next(scalar_values)
-
-    monkeypatch.setattr(media_api, "lock_asset_digest", digest_lock)
-
-    with pytest.raises(HTTPException) as raised:
-        await media_api.public_emoji(
-            emoji_id=cast(Any, emoji.id),
-            variant="original",
-            session=cast(Any, Session()),
-            settings=settings(),
+    for table in ("attachments", "emojis", "media_tombstone_sources"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
         )
-
-    assert raised.value.status_code == 404
-    digest_lock.assert_awaited_once_with(ANY, DIGEST)
-    emoji_sql = str(statements[0].compile(dialect=postgresql.dialect()))
-    statement_sql = str(statements[1].compile(dialect=postgresql.dialect()))
-    assert "emojis.media_hash =" in emoji_sql
-    assert "attachments.content_sha256 =" in statement_sql
-    assert "attachments_1.content_sha256 = attachments.content_sha256" in statement_sql
-    assert "attachments_1.scan_status IN" in statement_sql
+    redirect = Mock(return_value=SimpleNamespace(status_code=307))
+    monkeypatch.setattr(media_api, "redirect_to_object", redirect)
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        emoji = Emoji(id=40, origin_domain=LOCAL_DOMAIN, media_hash=DIGEST, available=True)
+        clean = attachment(f"emoji:{LOCAL_DOMAIN}:40")
+        clean.scan_status = "clean"
+        duplicate = attachment("")
+        duplicate.id, duplicate.asset_binding, duplicate.scan_status = 31, None, "infected"
+        duplicate.content_sha256 = "b" * 64
+        session.add_all([emoji, clean, duplicate])
+        await session.flush()
+        assert (
+            await media_api.public_emoji(40, "original", session, settings())
+            is redirect.return_value
+        )
+        redirect.assert_called_once_with(settings(), clean, "original", public=True)
+        duplicate.content_sha256 = DIGEST
+        await session.flush()
+        with pytest.raises(HTTPException) as denied:
+            await media_api.public_emoji(40, "original", session, settings())
+        assert denied.value.status_code == 404
+        assert denied.value.detail == {"code": "EMOJI_NOT_FOUND"}
+        redirect.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -772,58 +814,51 @@ async def test_bounded_digest_repair_clears_duplicate_user_projection(
 
 
 @pytest.mark.asyncio
-async def test_digest_repair_terminal_marker_advances_past_first_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    terminal = attachment("")
-    terminal.id = 1
-    duplicates = []
-    for item_id in range(100, 130):
-        duplicate = attachment("")
-        duplicate.id = item_id
-        duplicate.scan_status = "clean"
-        duplicate.asset_binding = None
-        duplicates.append(duplicate)
-    scalar_phase = 0
+async def test_digest_repair_terminal_marker_advances_past_first_page(postgres_schema) -> None:
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    class Session:
-        async def scalar(self, _statement: object) -> int | None:
-            nonlocal scalar_phase
-            scalar_phase += 1
-            if scalar_phase % 2:
-                return terminal.id
-            remaining = [item for item in duplicates if item.scan_status == "clean"]
-            return remaining[0].id if remaining else None
-
-        async def scalars(self, _statement: object) -> list[Attachment]:
-            return [item for item in duplicates if item.scan_status == "clean"][:25]
-
-        async def flush(self) -> None:
-            return None
-
-    digest_lock = AsyncMock()
-    monkeypatch.setattr(asset_invalidation, "lock_asset_digest", digest_lock)
-    session = cast(Any, Session())
-
-    first = await asset_invalidation.invalidate_terminal_digest_binding_batch(
-        session,
-        settings(),
-        DIGEST,
-        limit=25,
-    )
-    second = await asset_invalidation.invalidate_terminal_digest_binding_batch(
-        session,
-        settings(),
-        DIGEST,
-        limit=25,
-    )
-
-    assert first[1] == [(item.id, item.origin_domain) for item in duplicates[:25]]
-    assert first[2:] == (25, True)
-    assert second[1] == [(item.id, item.origin_domain) for item in duplicates[25:]]
-    assert second[2:] == (5, False)
-    assert all(item.scan_status == "rejected" for item in duplicates)
-    assert digest_lock.await_count == 2
+    for table in ("attachments", "media_tombstone_sources"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        terminal = attachment("")
+        terminal.id, terminal.asset_binding, terminal.scan_status = 1, None, "infected"
+        session.add(terminal)
+        for identifier in range(100, 130):
+            duplicate = attachment("")
+            duplicate.id, duplicate.asset_binding, duplicate.scan_status = identifier, None, "clean"
+            session.add(duplicate)
+        unrelated = attachment("")
+        unrelated.id, unrelated.asset_binding, unrelated.scan_status = 2, None, "clean"
+        unrelated.content_sha256 = "b" * 64
+        session.add(unrelated)
+        await session.flush()
+        first = await asset_invalidation.invalidate_terminal_digest_binding_batch(
+            session, settings(), DIGEST, limit=25
+        )
+        assert first == (
+            [],
+            [(identifier, LOCAL_DOMAIN) for identifier in range(100, 125)],
+            25,
+            True,
+        )
+        second = await asset_invalidation.invalidate_terminal_digest_binding_batch(
+            session, settings(), DIGEST, limit=25
+        )
+        assert second == (
+            [],
+            [(identifier, LOCAL_DOMAIN) for identifier in range(125, 130)],
+            5,
+            False,
+        )
+        assert set(
+            (
+                await session.execute(select(Attachment.scan_status).where(Attachment.id >= 100))
+            ).scalars()
+        ) == {"rejected"}
+        assert unrelated.scan_status == "clean"
 
 
 @pytest.mark.asyncio
@@ -988,57 +1023,38 @@ async def test_digest_repair_wakes_durable_duplicate_purge_after_commit(
 
 @pytest.mark.asyncio
 async def test_terminal_sweep_rediscovers_lost_source_purge_wake(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, terminal_worker_database
 ) -> None:
-    executed: list[object] = []
+    from sqlalchemy import text
 
-    class Session:
-        def __init__(self) -> None:
-            self.execute_calls = 0
-
-        async def __aenter__(self) -> Session:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def scalar(self, _statement: object) -> str:
-            return "ed25519:current"
-
-        async def scalars(self, _statement: object) -> list[object]:
-            return []
-
-        async def execute(self, statement: object) -> object:
-            executed.append(statement)
-            self.execute_calls += 1
-            rows = [(30, LOCAL_DOMAIN)] if self.execute_calls == 1 else []
-            return SimpleNamespace(all=lambda: rows)
-
-    class Engine:
-        dispose = AsyncMock()
-
-    session = Session()
-    engine = Engine()
-    worker_settings = SimpleNamespace(
-        domain=LOCAL_DOMAIN,
-        database_url=SimpleNamespace(get_secret_value=lambda: "postgresql://unused"),
+    connection, engine = terminal_worker_database
+    await connection.execute(
+        text(
+            "INSERT INTO attachments (id,origin_domain,purpose,scan_status,deleted_at) "
+            "VALUES "
+            "(30,:local,'attachment','clean',NULL),(31,:local,'attachment','clean',NULL),(32,:local,'attachment','clean',now()),(30,:remote,'attachment','clean',NULL)"
+        ),
+        dict(local=LOCAL_DOMAIN, remote=REMOTE_DOMAIN),
     )
-    monkeypatch.setattr(tasks, "get_settings", lambda: worker_settings)
-    monkeypatch.setattr(
-        tasks,
-        "create_engine_and_sessionmaker",
-        lambda _url: (engine, lambda: session),
+    await connection.execute(
+        text(
+            "INSERT INTO media_tombstone_sources "
+            "(attachment_id,attachment_domain,event_id,key_id,generation) VALUES "
+            "(30,:local,'proof30','ed25519:current',1),(32,:local,'proof32','ed25519:current',1),(30,:remote,'foreign','ed25519:current',1)"
+        ),
+        dict(local=LOCAL_DOMAIN, remote=REMOTE_DOMAIN),
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO federation_events (origin_domain,event_id) VALUES "
+            "(:local,'proof30'),(:local,'proof32'),(:remote,'foreign')"
+        ),
+        dict(local=LOCAL_DOMAIN, remote=REMOTE_DOMAIN),
     )
     enqueue = AsyncMock()
     monkeypatch.setattr(tasks, "enqueue_best_effort", enqueue)
-
-    result = await unwrap(tasks.media_terminal_tombstone_sweep.original_func)()
-
-    assert result == 1
+    assert await unwrap(tasks.media_terminal_tombstone_sweep.original_func)() == 1
     enqueue.assert_awaited_once_with(tasks.media_local_purge, 30, LOCAL_DOMAIN)
-    query_sql = str(executed[0].compile(dialect=postgresql.dialect()))
-    assert "JOIN media_tombstone_sources" in query_sql
-    assert "attachments.deleted_at IS NULL" in query_sql
     engine.dispose.assert_awaited_once()
 
 
@@ -1075,29 +1091,71 @@ def test_public_asset_redirect_has_a_short_revocable_cache_window(
     assert response.headers["X-Kaede-Media-Origin"] == "https://objects.example"
 
 
-def test_terminal_cleanup_retains_proof_for_bound_or_clean_unbound_public_duplicates() -> None:
+async def test_terminal_cleanup_retains_proof_for_bound_or_clean_unbound_public_duplicates(
+    media_cleanup_session,
+) -> None:
+    from sqlalchemy import text
+
+    session = media_cleanup_session
     now = datetime.now(UTC)
-    statement_sql = str(
-        tombstones._media_tombstone_cleanup_candidates(
-            settings(),
-            now=now,
-            cutoff=now - timedelta(days=30),
-            limit=17,
-        ).compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
+    await session.execute(
+        text(
+            "INSERT INTO media_tombstone_sources "
+            "(attachment_id,attachment_domain,event_id,updated_at) SELECT "
+            "id,:domain,'proof'||id,:old FROM generate_series(1,4) AS id"
+        ),
+        dict(domain=LOCAL_DOMAIN, old=now - timedelta(days=40)),
+    )
+    for identifier in range(1, 5):
+        await session.execute(
+            text(
+                "INSERT INTO attachments "
+                "(id,origin_domain,deleted_at,purpose,content_sha256,"
+                "scan_status,staging_object_key) "
+                "VALUES (:id,:domain,:old,'attachment',:digest,'infected',:staging)"
+            ),
+            dict(
+                id=identifier,
+                domain=LOCAL_DOMAIN,
+                old=now - timedelta(days=40),
+                digest=str(identifier) * 64,
+                staging="staging" if identifier == 4 else None,
+            ),
+        )
+    await session.execute(
+        text(
+            "INSERT INTO attachments "
+            "(id,origin_domain,purpose,content_sha256,scan_status,asset_binding) VALUES "
+            "(101,:domain,'avatar',:a,'rejected','user:1'),(102,:domain,'avatar',:b,'clean',NULL),(103,:domain,'avatar',:c,'rejected',NULL)"
+        ),
+        dict(domain=LOCAL_DOMAIN, a="1" * 64, b="2" * 64, c="3" * 64),
+    )
+    config = settings()
+    config.federation_event_retention_days = 30
+    config.federation_clock_skew_seconds = 60
+    assert await tombstones.cleanup_media_tombstone_sources(session, config, now=now) == 1
+    await session.flush()
+    assert set(
+        await session.scalars(text("SELECT attachment_id FROM media_tombstone_sources"))
+    ) == {1, 2, 4}
+    assert set(await session.scalars(text("SELECT id FROM attachments"))) == {
+        1,
+        2,
+        4,
+        101,
+        102,
+        103,
+    }
+    await session.execute(
+        text(
+            "UPDATE attachments SET asset_binding=NULL,scan_status='rejected' WHERE id IN (101,102)"
         )
     )
-
-    assert "asset_binding IS NOT NULL" in statement_sql
-    assert "content_sha256" in statement_sql
-    assert "scan_status IN ('" in statement_sql
-    assert "scan_status = 'clean'" in statement_sql
-    assert "purpose != 'attachment'" in statement_sql
-    assert "asset_binding IS NOT NULL OR" in statement_sql
-    # Source compaction remains blocked while the staging marker is retained
-    # through the strict post-expiry upload-completion grace.
-    assert "staging_object_key IS NOT NULL" in statement_sql
+    await session.execute(text("UPDATE attachments SET staging_object_key=NULL WHERE id=4"))
+    assert await tombstones.cleanup_media_tombstone_sources(session, config, now=now) == 3
+    await session.flush()
+    assert await session.scalar(text("SELECT count(*) FROM media_tombstone_sources")) == 0
+    assert set(await session.scalars(text("SELECT id FROM attachments"))) == {101, 102, 103}
 
 
 @pytest.mark.asyncio
@@ -1109,111 +1167,68 @@ async def test_terminal_tombstone_sweep_repairs_only_terminal_bound_assets(
     monkeypatch: pytest.MonkeyPatch,
     scan_status: str,
     expects_invalidation: bool,
+    terminal_worker_database,
 ) -> None:
-    item = SimpleNamespace(
-        id=30,
-        origin_domain=LOCAL_DOMAIN,
-        asset_binding=f"guild:{LOCAL_DOMAIN}:10:icon",
-        scan_status=scan_status,
-        content_sha256=DIGEST,
+    from sqlalchemy import text
+
+    connection, engine = terminal_worker_database
+    await connection.execute(
+        text(
+            "INSERT INTO attachments "
+            "(id,origin_domain,purpose,scan_status,content_sha256,asset_binding) VALUES "
+            "(30,:local,'avatar',:status,:digest,'user:30'),(31,:local,'avatar','clean',:clean,'user:31'),(32,:local,'attachment','rejected',:unbound,NULL),(30,:remote,'avatar','rejected',:foreign,'user:30')"
+        ),
+        dict(
+            local=LOCAL_DOMAIN,
+            remote=REMOTE_DOMAIN,
+            status=scan_status,
+            digest=DIGEST,
+            clean="b" * 64,
+            unbound="c" * 64,
+            foreign="d" * 64,
+        ),
     )
-    scalar_statements: list[object] = []
-    scalars_statements: list[object] = []
-
-    class Session:
-        def __init__(self) -> None:
-            self.committed = False
-            self.scalar_calls = 0
-            self.scalars_calls = 0
-
-        async def __aenter__(self) -> Session:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def scalar(self, statement: object) -> object:
-            scalar_statements.append(statement)
-            self.scalar_calls += 1
-            return "ed25519:current" if self.scalar_calls == 1 else item
-
-        async def scalars(self, statement: object) -> list[object]:
-            scalars_statements.append(statement)
-            self.scalars_calls += 1
-            return [item] if self.scalars_calls == 1 else []
-
-        async def execute(self, _statement: object) -> object:
-            return SimpleNamespace(all=lambda: [])
-
-        async def commit(self) -> None:
-            self.committed = True
-
-    class Engine:
-        dispose = AsyncMock()
-
-    class Redis:
-        aclose = AsyncMock()
-
-    session = Session()
-    engine = Engine()
-    redis = Redis()
-    worker_settings = SimpleNamespace(
-        domain=LOCAL_DOMAIN,
-        database_url=SimpleNamespace(get_secret_value=lambda: "postgresql://unused"),
-        dragonfly_url=SimpleNamespace(get_secret_value=lambda: "redis://unused"),
-    )
-    monkeypatch.setattr(tasks, "get_settings", lambda: worker_settings)
-    monkeypatch.setattr(
-        tasks,
-        "create_engine_and_sessionmaker",
-        lambda _url: (engine, lambda: session),
-    )
-    redis_factory = Mock(return_value=redis)
-    monkeypatch.setattr(tasks.Redis, "from_url", redis_factory)
-    monkeypatch.setattr(tasks, "lock_media_tombstone_ref", AsyncMock())
-    digest_try_lock = AsyncMock(return_value=True)
-    monkeypatch.setattr(tasks, "try_lock_asset_digest", digest_try_lock)
-    monkeypatch.setattr(
-        tasks,
-        "queue_terminal_attachment_tombstone",
-        AsyncMock(return_value=set()),
-    )
+    redis = SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr(tasks.Redis, "from_url", Mock(return_value=redis))
     prepared = tasks.TerminalAssetInvalidation()
+    repaired_session = []
 
-    async def invalidate_before_commit(*_args: object) -> tasks.TerminalAssetInvalidation:
-        assert not session.committed
+    async def invalidate(session, _settings, item):
+        assert session.in_transaction()
+        assert (item.id, item.origin_domain, item.asset_binding) == (30, LOCAL_DOMAIN, "user:30")
+        repaired_session.append(session)
         return prepared
 
-    invalidate = AsyncMock(side_effect=invalidate_before_commit)
-    monkeypatch.setattr(tasks, "invalidate_terminal_asset_binding", invalidate)
+    invalidate_mock = AsyncMock(side_effect=invalidate)
+    monkeypatch.setattr(tasks, "invalidate_terminal_asset_binding", invalidate_mock)
+    tombstone = AsyncMock(return_value=set())
+    monkeypatch.setattr(tasks, "queue_terminal_attachment_tombstone", tombstone)
 
-    async def publish_after_commit(*_args: object) -> None:
-        assert session.committed
+    async def after_commit(*args):
+        assert repaired_session and not repaired_session[0].in_transaction()
 
-    publish = AsyncMock(side_effect=publish_after_commit)
-    monkeypatch.setattr(tasks, "_publish_terminal_asset_invalidation", publish)
-    enqueue = AsyncMock(side_effect=publish_after_commit)
+    enqueue = AsyncMock(side_effect=after_commit)
+    publish = AsyncMock(side_effect=after_commit)
     monkeypatch.setattr(tasks, "enqueue_best_effort", enqueue)
-
-    result = await unwrap(tasks.media_terminal_tombstone_sweep.original_func)()
-
-    assert result == 1
-    assert invalidate.await_count == int(expects_invalidation)
-    assert publish.await_count == int(expects_invalidation)
-    assert redis_factory.call_count == int(expects_invalidation)
-    assert redis.aclose.await_count == int(expects_invalidation)
-    assert digest_try_lock.await_count == int(expects_invalidation)
-    assert enqueue.await_count == int(expects_invalidation)
+    monkeypatch.setattr(tasks, "_publish_terminal_asset_invalidation", publish)
+    assert await unwrap(tasks.media_terminal_tombstone_sweep.original_func)() == int(
+        expects_invalidation
+    )
     if expects_invalidation:
+        invalidate_mock.assert_awaited_once()
+        assert (tombstone.await_args.args[2].id, tombstone.await_args.args[2].origin_domain) == (
+            30,
+            LOCAL_DOMAIN,
+        )
+        assert tombstone.await_args.kwargs == {"force_authoritative": True}
         enqueue.assert_awaited_once_with(tasks.media_terminal_asset_digest_repair, DIGEST)
-    candidate_sql = str(scalars_statements[0].compile(dialect=postgresql.dialect()))
-    locked_sql = str(scalar_statements[1].compile(dialect=postgresql.dialect()))
-    assert "attachments_1.asset_binding IS NOT NULL" in candidate_sql
-    assert "attachments.scan_status IN" in candidate_sql
-    assert "attachments_1.scan_status =" in candidate_sql
-    assert "attachments_1.purpose !=" in candidate_sql
-    assert "media_tombstone_sources" in candidate_sql
-    assert "FOR UPDATE" in locked_sql
+        publish.assert_awaited_once_with(repaired_session[0], redis, prepared)
+        redis.aclose.assert_awaited_once()
+    else:
+        invalidate_mock.assert_not_awaited()
+        tombstone.assert_not_awaited()
+        enqueue.assert_not_awaited()
+        publish.assert_not_awaited()
     engine.dispose.assert_awaited_once()
 
 

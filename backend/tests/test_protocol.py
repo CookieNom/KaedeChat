@@ -11,7 +11,6 @@ from app.core.federation import (
     verify_request,
 )
 from app.core.gateway_ops import EVENT_NAMES
-from app.core.permissions import ALL_PERMISSIONS, Permission
 
 
 def test_canonical_query_is_sorted_and_in_signature_scope() -> None:
@@ -88,16 +87,7 @@ def test_dm_pair_is_order_independent_and_authority_is_lower_domain() -> None:
     assert dm_authority_domain("Alice@beta.test", "bob@alpha.test") == "alpha.test"
 
 
-def test_permissions_fit_decimal_64_bit_wire_format() -> None:
-    # Permission masks are persisted in signed PostgreSQL BIGINT columns.
-    assert ALL_PERMISSIONS == 576_456_216_817_434_111
-    assert not ALL_PERMISSIONS & (1 << 19)
-    assert ALL_PERMISSIONS & Permission.PRIORITY_SPEAKER
-    assert ALL_PERMISSIONS < 1 << 63
-    assert Permission.CONNECT & Permission.SPEAK == 0
-
-
-def test_additive_gateway_event_registry_is_unique_and_complete() -> None:
+def test_selected_additive_gateway_event_registration() -> None:
     assert len(EVENT_NAMES) == len(set(EVENT_NAMES))
     assert {
         "GUILD_BAN_ADD",

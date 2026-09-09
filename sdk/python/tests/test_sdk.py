@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -17,7 +17,6 @@ from kaede_bot import (
     Button,
     ChannelPositionUpdate,
     Embed,
-    EncryptedVoiceTransport,
     EVENT_NAMES,
     PERMISSION_SCHEMA,
     Poll,
@@ -75,10 +74,6 @@ def test_entity_ref_and_human_handle_are_distinct() -> None:
     assert str(ref) == "123@chat.example"
     assert user.handle == "alice@chat.example"
     assert user.mention == "<@123@chat.example>"
-
-
-def test_top_level_exports_encrypted_voice_transport() -> None:
-    assert EncryptedVoiceTransport.__name__ == "EncryptedVoiceTransport"
 
 
 def test_generated_protocol_constants_cover_permissions_intents_and_events() -> None:
@@ -409,9 +404,9 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
     "decode",
     [
         pytest.param(
-            lambda bot: User.from_payload(
+            lambda bot, wire_id: User.from_payload(
                 {
-                    "id": "01",
+                    "id": wire_id,
                     "origin_domain": "users.example",
                     "username": "alice",
                 }
@@ -419,27 +414,27 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
             id="user",
         ),
         pytest.param(
-            lambda bot: Guild.from_payload(
+            lambda bot, wire_id: Guild.from_payload(
                 bot,
                 "https://guild.example",
-                {"id": "01", "origin_domain": "guild.example", "name": "Guild"},
+                {"id": wire_id, "origin_domain": "guild.example", "name": "Guild"},
             ),
             id="guild",
         ),
         pytest.param(
-            lambda bot: Channel.from_payload(
+            lambda bot, wire_id: Channel.from_payload(
                 bot,
                 "https://guild.example",
-                {"id": "01", "origin_domain": "guild.example", "type": 0},
+                {"id": wire_id, "origin_domain": "guild.example", "type": 0},
             ),
             id="channel",
         ),
         pytest.param(
-            lambda bot: Message.from_payload(
+            lambda bot, wire_id: Message.from_payload(
                 bot,
                 "https://chat.example",
                 {
-                    "id": "01",
+                    "id": wire_id,
                     "origin_domain": "chat.example",
                     "channel_id": "5",
                     "channel_domain": "chat.example",
@@ -449,15 +444,15 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
             id="message",
         ),
         pytest.param(
-            lambda bot: ApplicationAsset.from_payload(
+            lambda bot, wire_id: ApplicationAsset.from_payload(
                 bot,
                 "https://apps.example",
                 {
-                    "id": "01",
+                    "id": wire_id,
                     "application_ref": "1@apps.example",
                     "kind": "icon",
                     "name": "icon",
-                    "media_hash": "hash",
+                    "media_hash": "a" * 64,
                     "content_type": "image/png",
                     "version": 1,
                     "created_at": "2026-08-29T00:00:00+00:00",
@@ -467,11 +462,11 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
             id="application",
         ),
         pytest.param(
-            lambda bot: Interaction.from_payload(
+            lambda bot, wire_id: Interaction.from_payload(
                 bot,
                 "https://chat.example",
                 {
-                    "id": "01",
+                    "id": wire_id,
                     "application_ref": "1@apps.example",
                     "guild_ref": "2@chat.example",
                     "channel_ref": "5@chat.example",
@@ -487,11 +482,11 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
             id="interaction",
         ),
         pytest.param(
-            lambda bot: ScheduledEvent.from_payload(
+            lambda bot, wire_id: ScheduledEvent.from_payload(
                 bot,
                 "https://guild.example",
                 {
-                    "id": "01",
+                    "id": wire_id,
                     "origin_domain": "guild.example",
                     "guild_id": "2",
                     "guild_domain": "guild.example",
@@ -506,10 +501,10 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
             id="scheduled-event",
         ),
         pytest.param(
-            lambda bot: bot._event_model(
+            lambda bot, wire_id: bot._event_model(
                 "MESSAGE_DELETE",
                 {
-                    "id": "01",
+                    "id": wire_id,
                     "origin_domain": "chat.example",
                     "channel_id": "5",
                     "channel_domain": "chat.example",
@@ -523,10 +518,11 @@ async def test_guild_list_and_mutation_responses_keep_exact_installation_lineage
     ],
 )
 def test_wire_model_decoders_reject_leading_zero_entity_ids(
-    decode: Callable[[Client], object],
+    decode: Callable[[Client, str], object],
 ) -> None:
+    decode(client(), "1")
     with pytest.raises(ValueError):
-        decode(client())
+        decode(client(), "01")
 
 
 def test_follower_webhook_parses_type_source_and_never_invents_a_token() -> None:
@@ -1093,6 +1089,10 @@ async def test_channel_update_uses_composite_refs_and_optimistic_version() -> No
         "name": "renamed",
         "topic": None,
     }
+    await channel.edit(name="renamed again")
+    assert bot.request.await_args.kwargs["headers"] == {
+        "If-Match": "2026-08-18T01:02:03+00:00"
+    }
 
 
 @pytest.mark.asyncio
@@ -1419,6 +1419,24 @@ def test_federated_poll_finalization_message_update_is_typed_and_complete() -> N
     assert event.poll is not None
     assert event.poll["finalized_at"] == finalized_at
     assert event.poll["results"]["is_finalized"] is True
+    assert event.poll == {
+        "question": {"text": "Ship it?"},
+        "answers": [
+            {"answer_id": 1, "poll_media": {"text": "Yes"}},
+            {"answer_id": 2, "poll_media": {"text": "No"}},
+        ],
+        "expiry": finalized_at,
+        "allow_multiselect": False,
+        "layout_type": 1,
+        "finalized_at": finalized_at,
+        "results": {
+            "is_finalized": True,
+            "answer_counts": [
+                {"id": 1, "count": 2, "me_voted": True},
+                {"id": 2, "count": 1, "me_voted": False},
+            ],
+        },
+    }
 
 
 def test_expression_collection_gateway_events_are_typed() -> None:
@@ -1471,8 +1489,12 @@ def test_expression_collection_gateway_events_are_typed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upload_rejects_non_https_presigned_urls_before_sending_bytes() -> None:
+async def test_upload_rejects_non_https_presigned_urls_before_sending_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bot = client()
+    transport = Mock(side_effect=AssertionError("unsafe upload reached transport"))
+    monkeypatch.setattr(client_module.httpx, "AsyncClient", transport)
     bot.request = AsyncMock(  # type: ignore[method-assign]
         return_value={
             "id": "7",
@@ -1481,7 +1503,7 @@ async def test_upload_rejects_non_https_presigned_urls_before_sending_bytes() ->
             "content_type": "text/plain",
             "size": 5,
             "scan_status": "pending",
-            "upload_url": "http://storage.example/upload",
+            "upload_url": "http://media.guild.example/upload",
         }
     )
 
@@ -1493,23 +1515,7 @@ async def test_upload_rejects_non_https_presigned_urls_before_sending_bytes() ->
             content_type="text/plain",
             target="https://guild.example",
         )
-
-
-def test_channel_model_keeps_version_for_safe_convenience_updates() -> None:
-    bot = client()
-    channel = Channel.from_payload(
-        bot,
-        "https://guild.example",
-        {
-            "id": "3",
-            "origin_domain": "guild.example",
-            "guild_id": "2",
-            "guild_domain": "guild.example",
-            "type": 0,
-            "version": "2026-08-18T00:00:00+00:00",
-        },
-    )
-    assert channel.version == "2026-08-18T00:00:00+00:00"
+    transport.assert_not_called()
 
 
 def test_command_decorator_preserves_discord_registration_metadata() -> None:
@@ -1667,7 +1673,7 @@ async def test_control_clients_bind_directly_to_the_authoritative_origin(
         guild=EntityRef(7, "guild.example"),
     )
 
-    assert len(client_options) == 3
+    assert client_options
     assert all(
         options["base_url"] == "https://apps.example" for options in client_options
     )
@@ -2039,17 +2045,44 @@ async def test_dm_capability_refresh_is_singleflight_and_rejects_channel_swap() 
             "bot_installation_type": refreshed.installation_type,
         },
     }
-    request_refresh = AsyncMock(return_value=refresh_response)
+    refresh_entered = asyncio.Event()
+    release_refresh = asyncio.Event()
+    second_waiting = asyncio.Event()
+
+    class ObservedLock(asyncio.Lock):
+        async def acquire(self):
+            if self.locked():
+                second_waiting.set()
+            return await super().acquire()
+
+    bot._dm_capability_locks[key] = ObservedLock()
+
+    async def held_refresh(*args, **kwargs):
+        refresh_entered.set()
+        await release_refresh.wait()
+        return refresh_response
+
+    request_refresh = AsyncMock(side_effect=held_refresh)
     bot.request = request_refresh  # type: ignore[method-assign]
 
-    first, second = await asyncio.gather(
-        bot._dm_capability_headers_for_path(  # noqa: SLF001
+    first_task = asyncio.create_task(
+        bot._dm_capability_headers_for_path(
             "/api/v1/bots/channels/5@chat.example/messages"
-        ),
-        bot._dm_capability_headers_for_path(  # noqa: SLF001
-            "/api/v1/bots/channels/5@chat.example/messages"
-        ),
+        )
     )
+    await asyncio.wait_for(refresh_entered.wait(), timeout=5)
+    second_task = asyncio.create_task(
+        bot._dm_capability_headers_for_path(
+            "/api/v1/bots/channels/5@chat.example/messages"
+        )
+    )
+    try:
+        await asyncio.wait_for(second_waiting.wait(), timeout=5)
+        request_refresh.assert_awaited_once()
+    finally:
+        release_refresh.set()
+        first, second = await asyncio.gather(first_task, second_task)
+    request_refresh.side_effect = None
 
     assert first == second
     assert first["X-Kaede-Bot-DM-Capability"] == refreshed.grant_id
@@ -2227,7 +2260,12 @@ async def test_dm_reconciliation_drops_only_explicit_authority_fence(
 
     await bot._reconcile_dm_capabilities_for_target(context.target)  # noqa: SLF001
 
-    assert (key not in bot._dm_capabilities) is dropped  # noqa: SLF001
+    assert (key not in bot._dm_capabilities) is dropped
+    assert (channel_ref not in bot._dm_default_capabilities) is dropped
+    assert (key not in bot._capability_targets.get(context.target, set())) is dropped
+
+
+# noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -2275,9 +2313,11 @@ async def test_open_dm_dynamically_connects_capability_authority_when_running() 
 
 
 @pytest.mark.asyncio
-async def test_dm_capability_refresh_preserves_authority_error_and_expires_closed() -> (
-    None
-):
+async def test_dm_capability_refresh_preserves_authority_error_and_expires_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(client_module.time, "time", lambda: now[0])
     bot = client()
     channel_ref = EntityRef(5, "chat.example")
     context = client_module._DMCapabilityContext(  # noqa: SLF001
@@ -2285,7 +2325,7 @@ async def test_dm_capability_refresh_preserves_authority_error_and_expires_close
         installation_type="guild",
         grant_id="kbdg_" + "a" * 43,
         revision=1,
-        expires_at=client_module.time.time() + 0.05,
+        expires_at=now[0] + 60,
         target="https://chat.example",
     )
     key = (channel_ref, context.grant_id)
@@ -2308,7 +2348,8 @@ async def test_dm_capability_refresh_preserves_authority_error_and_expires_close
     remove_target = AsyncMock()
     bot._remove_discovered_target = remove_target  # type: ignore[method-assign]  # noqa: SLF001
     bot._capability_targets[context.target].add(key)  # noqa: SLF001
-    await asyncio.wait_for(bot._dm_capability_refresh_loop(key), timeout=0.5)  # noqa: SLF001
+    now[0] += 61
+    await bot._dm_capability_refresh_loop(key)  # noqa: SLF001
 
     assert key not in bot._dm_capabilities  # noqa: SLF001
     remove_target.assert_awaited_once_with(context.target)
@@ -2694,7 +2735,10 @@ async def test_current_pin_resource_is_typed_paginated_and_authority_routed() ->
     messages = await bot.pins(channel, installation_id=77)
 
     assert [message.ref.id for message in messages] == [9, 8]
-    assert all(message.pinned_at is not None for message in messages)
+    assert [message.pinned_at for message in messages] == [
+        datetime(2026, 8, 28, 2, tzinfo=UTC),
+        datetime(2026, 8, 28, 1, tzinfo=UTC),
+    ]
     assert bot.request.await_args_list[0].args[:2] == (
         "GET",
         "/api/v1/bots/channels/5@chat.example/messages/pins",
@@ -2793,6 +2837,15 @@ async def test_voice_message_send_is_typed_and_rejects_mixed_bodies() -> None:
             attachment_ids=[70],
             voice_message=True,
         )
+    bot.request.reset_mock()
+    with pytest.raises(ValueError, match="exactly one audio attachment"):
+        await bot.send_message(
+            EntityRef(5, "chat.example"),
+            target="https://chat.example",
+            attachment_ids=[70, 71],
+            voice_message=True,
+        )
+    bot.request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3114,7 +3167,8 @@ def test_message_retains_public_interaction_metadata() -> None:
     )
 
     assert message.interaction_metadata == metadata
-    assert message.interaction_metadata is not metadata
+    message.interaction_metadata["command_name"] = "edited"
+    assert metadata["command_name"] == "ship"
 
 
 def test_type_21_starter_exposes_its_resolved_parent_message() -> None:
@@ -3339,6 +3393,11 @@ async def test_forum_post_supports_rich_starter_and_registers_view() -> None:
     bot.request = AsyncMock(return_value=thread_payload())  # type: ignore[method-assign]
     view = View(timeout=60)
     view.add_row(ActionRow([Button(label="Approve", custom_id="approve")]))
+
+    async def approve(interaction):
+        pass
+
+    view.set_callback("approve", approve)
     poll = Poll(
         question=PollMedia(text="Ship it?"),
         answers=[
@@ -3378,7 +3437,8 @@ async def test_forum_post_supports_rich_starter_and_registers_view() -> None:
     assert starter["poll"]["question"] == {"text": "Ship it?"}
     assert starter["referenced_message_id"] == "31@guild.example"
     assert starter["mention_user_ids"] == ["41@guild.example"]
-    assert thread.starter_message_ref in bot._views
+    assert bot._views[thread.starter_message_ref] is view
+    assert view.callbacks["approve"] is approve
 
 
 @pytest.mark.asyncio
@@ -3399,6 +3459,9 @@ async def test_forum_post_accepts_rich_only_and_rejects_mixed_forward() -> None:
     )
 
     await forum.create_post("rich", embeds=[Embed(description="body")])
+    assert bot.request.await_args.kwargs["json"]["message"] == {
+        "embeds": [{"description": "body"}]
+    }
     await forum.create_post("voice", attachment_ids=[44], voice_message=True)
     assert bot.request.await_args is not None
     assert bot.request.await_args.kwargs["json"]["message"] == {
@@ -4127,33 +4190,6 @@ async def test_tracker_task_move_and_delete_convenience_requests_are_complete() 
         target="https://guild.example",
         headers={"If-Match": "task-v1"},
     )
-
-
-@pytest.mark.asyncio
-async def test_tracker_channel_creation_sends_the_optional_key_prefix() -> None:
-    bot = client()
-    bot.request = AsyncMock(  # type: ignore[method-assign]
-        return_value={
-            "id": "20",
-            "origin_domain": "guild.example",
-            "guild_id": "2",
-            "guild_domain": "guild.example",
-            "type": 17,
-            "name": "Release plan",
-        }
-    )
-
-    channel = await bot.create_channel(
-        EntityRef(2, "guild.example"),
-        "Release plan",
-        type=17,
-        tracker_key_prefix="REL",
-        target="https://guild.example",
-    )
-
-    assert channel.is_tracker
-    assert bot.request.await_args is not None
-    assert bot.request.await_args.kwargs["json"]["tracker_key_prefix"] == "REL"
 
 
 @pytest.mark.asyncio

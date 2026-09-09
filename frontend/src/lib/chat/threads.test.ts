@@ -171,7 +171,7 @@ describe('thread and forum helpers', () => {
       }),
       channel('3', 11, {
         name: 'Newest web bug',
-        applied_tag_ids: ['bug', 'web'],
+        applied_tag_ids: ['web'],
         starter_message: { created_at: '2026-03-01T00:00:00Z' } as never
       }),
       channel('4', 11, {
@@ -263,7 +263,7 @@ describe('thread and forum helpers', () => {
       has_more: true,
       next_cursor: 'opaque+/=cursor'
     });
-    await fetchThreads(channel('1', 15), {
+    const result = await fetchThreads(channel('1', 15), {
       query: 'release notes',
       tagIds: ['7', '8'],
       sort: 'creation_date',
@@ -271,7 +271,15 @@ describe('thread and forum helpers', () => {
       cursor: 'opaque+/=cursor'
     });
     const [url] = apiMock.mock.calls[0] as [string];
-    const params = new URL(`https://example.test${url}`).searchParams;
+    const parsed = new URL(`https://example.test${url}`);
+    expect(parsed.pathname).toBe('/channels/1%40guild.test/threads');
+    expect(result).toEqual({
+      threads: [],
+      members: [],
+      has_more: true,
+      next_cursor: 'opaque+/=cursor'
+    });
+    const params = parsed.searchParams;
     expect(params.get('query')).toBe('release notes');
     expect(params.getAll('tag_id')).toEqual(['7', '8']);
     expect(params.get('sort_order')).toBe('1');

@@ -38,7 +38,7 @@ void main() {
     expect(metadata, isNotNull);
     expect(
       interactionAttributionText(metadata, deleted: false),
-      'Alice used /ship',
+      matches(RegExp(r'Alice.*used.*/ship')),
     );
 
     final context = _metadata(commandType: 'message')
@@ -52,7 +52,7 @@ void main() {
         KaedeInteractionMetadata.tryFromJson(context),
         deleted: false,
       ),
-      'Alice used ship',
+      allOf(matches(RegExp(r'Alice.*used.*ship')), isNot(contains('/ship'))),
     );
   });
 

@@ -187,9 +187,9 @@ async def test_interaction_upload_stages_bytes_without_forwarding_bot_credential
         },
         "headers": {},
     }
+    assert uploaded["client_kwargs"].pop("timeout") > 0
     assert uploaded == {
         "client_kwargs": {
-            "timeout": 60,
             "follow_redirects": False,
             "trust_env": False,
         },
@@ -205,12 +205,18 @@ async def test_interaction_upload_stages_bytes_without_forwarding_bot_credential
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    ["http://media.chat.example/staged/41", "https://storage.example/staged/41"],
+    ids=["scheme", "host"],
+)
 async def test_interaction_upload_rejects_unsafe_ticket_before_sending_bytes(
     monkeypatch: pytest.MonkeyPatch,
+    url: str,
 ) -> None:
     bot = client()
     bot.request = AsyncMock(  # type: ignore[method-assign]
-        return_value=upload_ticket(url="http://storage.example/staged/41")
+        return_value=upload_ticket(url=url)
     )
 
     def unexpected_client(**_: Any) -> object:
@@ -385,6 +391,13 @@ async def test_interaction_voice_upload_normalizes_duration_and_waveform() -> No
             content_type="audio/ogg",
             duration_secs=1,
         )
+    with pytest.raises(ValueError, match="both duration_secs and waveform"):
+        await interaction(bot).upload_attachment(
+            b"opus",
+            filename="voice.ogg",
+            content_type="audio/ogg",
+            waveform=b"\x00\x7f\xff",
+        )
 
 
 @pytest.mark.asyncio
@@ -440,6 +453,7 @@ async def test_components_v2_and_allowed_mentions_cover_followup_edits() -> None
     assert body["flags"] == 1 << 15
     assert body["allowed_mentions"] == mentions
     assert body["view_version"] == 2
+    assert body["components"] == [{"type": 10, "content": "Edited V2"}]
 
 
 @pytest.mark.asyncio

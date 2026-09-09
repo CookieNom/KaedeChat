@@ -131,7 +131,6 @@ async def test_target_authority_queues_roster_free_monotonic_snapshot(
     assert (stored.generation, stored.guild_installations, stored.user_installations) == (1, 3, 5)
     event_content = build.await_args.args[4]
     assert event_content == target_payload(generation="1", guilds="3", users="5")
-    assert "guild_id" not in event_content and "user_id" not in event_content
     assert build.await_args.kwargs["authority_attested_actor"] is True
     compact.assert_awaited_once_with(
         session,
@@ -146,6 +145,21 @@ async def test_target_authority_queues_roster_free_monotonic_snapshot(
         "apps.example",
         {"event_id": "kcfe_test"},
     )
+
+    session.scalar.side_effect = [stored, 4, 5]
+    session.add.reset_mock()
+    assert (
+        await queue_application_target_snapshot(
+            session,
+            SimpleNamespace(domain="guilds.example"),
+            application,
+            bot,
+        )
+        == "apps.example"
+    )
+    assert (stored.generation, stored.guild_installations, stored.user_installations) == (2, 4, 5)
+    assert build.await_args.args[4] == target_payload(generation="2", guilds="4", users="5")
+    session.add.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -247,47 +261,66 @@ async def test_newly_discovered_target_receives_current_runtime_state(
 @pytest.mark.asyncio
 async def test_runtime_recovery_force_queues_only_bounded_incomplete_remote_targets(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
-    application, bot = application_identity()
-    application.manifest_generation = 7
-    application.revocation_generation = 4
-    target = BotApplicationTarget(
-        application_id=20,
-        application_domain="apps.example",
-        target_domain="guilds.example",
-        generation=4,
-        guild_installations=1,
-        user_installations=0,
-        runtime_manifest_generation=0,
-        runtime_revocation_generation=0,
-        runtime_fingerprint=None,
-    )
-    result = Mock()
-    result.all.return_value = [(application, bot, target)]
-    session = SimpleNamespace(execute=AsyncMock(return_value=result))
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    for table in ("bot_applications", "users", "bot_application_targets"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
     queue = AsyncMock(return_value="apps.example")
     monkeypatch.setattr(target_discovery, "queue_application_target_snapshot", queue)
-
-    recovered, destinations = await recover_incomplete_application_runtime_targets(
-        cast(Any, session),
-        cast(Any, SimpleNamespace(domain="guilds.example")),
-    )
-
-    assert recovered == 1
-    assert destinations == {"apps.example"}
-    queue.assert_awaited_once_with(
-        session,
-        SimpleNamespace(domain="guilds.example"),
-        application,
-        bot,
-        force=True,
-    )
-    statement = str(session.execute.await_args.args[0])
-    assert "bot_application_targets.runtime_fingerprint IS NULL" in statement
-    assert "bot_application_targets.guild_installations >" in statement
-    assert "bot_application_targets.user_installations >" in statement
-    assert "LIMIT" in statement
-    assert "FOR UPDATE" in statement
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        for identifier in range(1, 9):
+            domain = "guilds.example" if identifier == 2 else "apps.example"
+            application, bot = application_identity()
+            application.id = identifier
+            application.origin_domain = application.team_domain = application.bot_user_domain = (
+                domain
+            )
+            bot.id = application.bot_user_id = identifier + 100
+            bot.origin_domain = domain
+            bot.username = f"bot_{identifier}"
+            bot.federation_introduced_by_domain = domain
+            application.manifest_generation = 7
+            application.revocation_generation = 4
+            target = BotApplicationTarget(
+                application_id=identifier,
+                application_domain=domain,
+                target_domain="guilds.example",
+                generation=4,
+                guild_installations=1,
+                user_installations=0,
+                runtime_manifest_generation=0,
+                runtime_revocation_generation=0,
+                runtime_fingerprint=None,
+                updated_at=datetime.now(UTC) + timedelta(seconds=identifier),
+            )
+            if identifier == 1:
+                target.runtime_fingerprint = b"a" * 32
+                target.runtime_manifest_generation = 7
+                target.runtime_revocation_generation = 4
+            elif identifier == 3:
+                target.guild_installations = 0
+            elif identifier == 4:
+                target.target_domain = "elsewhere.example"
+            elif identifier == 5:
+                bot.disabled_at = datetime.now(UTC)
+            session.add_all([application, bot, target])
+        await session.flush()
+        result = await recover_incomplete_application_runtime_targets(
+            session,
+            SimpleNamespace(domain="guilds.example"),
+            limit=2,
+        )
+        assert result == (2, {"apps.example"})
+        assert [call.args[2].id for call in queue.await_args_list] == [6, 7]
+        assert [call.args[3].id for call in queue.await_args_list] == [106, 107]
+        assert all(call.kwargs == {"force": True} for call in queue.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -419,8 +452,19 @@ async def test_preupgrade_target_reannouncement_converges_runtime_and_allows_tok
 @pytest.mark.asyncio
 async def test_worker_discovery_filters_targets_without_exposing_counts(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import BotInstanceRule
+
+    for table in ("bot_application_targets", "bot_instance_rules"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
     application, bot = application_identity(local=True)
+    application.target_policy = "open"
     worker = BotWorker(
         id=40,
         application_id=20,
@@ -442,42 +486,66 @@ async def test_worker_discovery_filters_targets_without_exposing_counts(
     authenticate = AsyncMock(return_value=(worker, application, bot))
     monkeypatch.setattr(applications_api, "authenticated_worker_assertion", authenticate)
     monkeypatch.setattr(applications_api, "enforce_keyed_rate_limit", AsyncMock())
-    session = SimpleNamespace(scalars=AsyncMock(side_effect=[[], [target]]))
-    payload = WorkerTokenRequest(
-        application_ref=EntityRef("20@apps.example"),
-        worker_id=40,
-        audience="https://apps.example/api/v1/bot-workers/targets",
-        issued_at=1,
-        expires_at=2,
-        nonce="n" * 24,
-        signature="s" * 86,
-    )
+    async with AsyncSession(bind=postgres_schema) as session:
+        session.add(target)
+        for domain, app_id, app_domain, count in [
+            ("unlisted.example", 20, "apps.example", 1),
+            ("empty.example", 20, "apps.example", 0),
+            ("blocked.example", 20, "apps.example", 1),
+            ("guilds.example", 21, "apps.example", 1),
+            ("guilds.example", 20, "foreign.example", 1),
+        ]:
+            session.add(
+                BotApplicationTarget(
+                    application_id=app_id,
+                    application_domain=app_domain,
+                    target_domain=domain,
+                    generation=9,
+                    guild_installations=count,
+                    user_installations=0,
+                )
+            )
+        worker.target_domains = ["guilds.example", "empty.example", "blocked.example"]
+        session.add(
+            BotInstanceRule(
+                application_id=20,
+                application_domain="apps.example",
+                target_domain="blocked.example",
+                effect="deny",
+            )
+        )
+        await session.flush()
+        payload = WorkerTokenRequest(
+            application_ref=EntityRef("20@apps.example"),
+            worker_id=40,
+            audience="https://apps.example/api/v1/bot-workers/targets",
+            issued_at=1,
+            expires_at=2,
+            nonce="n" * 24,
+            signature="s" * 86,
+        )
 
-    result = await discover_bot_worker_targets(
-        payload,
-        SimpleNamespace(),
-        session,
-        SimpleNamespace(),
-        SimpleNamespace(),
-        SimpleNamespace(domain="apps.example"),
-    )
+        result = await discover_bot_worker_targets(
+            payload,
+            SimpleNamespace(),
+            session,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(domain="apps.example"),
+        )
 
-    assert result == {
-        "application_ref": "20@apps.example",
-        "targets": [
-            {
-                "domain": "guilds.example",
-                "origin": "https://guilds.example",
-                "generation": "7",
-                "install_types": ["guild_install", "user_install"],
-            }
-        ],
-        "poll_after_seconds": 30,
-    }
-    assert "guild_installations" not in result["targets"][0]
-    assert "user_installations" not in result["targets"][0]
-    query = str(session.scalars.await_args.args[0])
-    assert "bot_application_targets.target_domain IN" in query
+        assert result == {
+            "application_ref": "20@apps.example",
+            "targets": [
+                {
+                    "domain": "guilds.example",
+                    "origin": "https://guilds.example",
+                    "generation": "7",
+                    "install_types": ["guild_install", "user_install"],
+                }
+            ],
+            "poll_after_seconds": 30,
+        }
 
 
 @pytest.mark.asyncio

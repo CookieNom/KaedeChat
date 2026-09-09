@@ -57,7 +57,18 @@ describe('task tracker API client', () => {
   beforeEach(() => apiMock.mockReset());
 
   it('uses canonical composite channel refs for board reads', async () => {
-    await fetchTracker(channel);
+    const board = {
+      channel_id: '10',
+      channel_domain: 'chat.example',
+      key_prefix: 'PLAN',
+      next_task_number: '2',
+      version: lane.version,
+      permissions: '0',
+      lanes: [lane],
+      tasks: [task]
+    };
+    apiMock.mockResolvedValue(board);
+    expect(await fetchTracker(channel)).toEqual(board);
     expect(apiMock).toHaveBeenCalledWith('/channels/10%40chat.example/tracker', {
       signal: undefined
     });

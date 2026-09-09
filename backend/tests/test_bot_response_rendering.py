@@ -66,7 +66,7 @@ async def test_message_response_uses_one_grant_and_own_content_exemption(
 
 
 @pytest.mark.asyncio
-async def test_foreign_message_response_redacts_content_and_history_floor(
+async def test_foreign_message_response_rejects_history_floor_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = principal(scopes={"messages.metadata", "messages.content"})
@@ -88,7 +88,7 @@ async def test_foreign_message_response_redacts_content_and_history_floor(
     floor = AsyncMock(return_value=[])
     monkeypatch.setattr(bots_api, "bot_messages_after_history_floor", floor)
 
-    with pytest.raises(Exception) as hidden:
+    with pytest.raises(HTTPException) as hidden:
         await render_bot_message_response(
             SimpleNamespace(),
             actor,
@@ -98,7 +98,7 @@ async def test_foreign_message_response_redacts_content_and_history_floor(
             e2ee_device_id="kbe_" + "d" * 43,
         )
 
-    assert getattr(hidden.value, "status_code", None) == 404
+    assert hidden.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -148,7 +148,13 @@ async def test_thread_response_binds_channel_and_starter_to_exact_grant(
     assert result["starter_message"]["e2ee"] == {"ciphertext": "opaque"}
     assert result["starter_message"]["content"] == "own encrypted starter"
     assert result["starter_message"]["attachments"] == []
-    require_access.assert_awaited_once()
+    require_access.assert_awaited_once_with(
+        session,
+        thread,
+        grant,
+        "kbe_" + "d" * 43,
+        worker_id=actor.worker.id,
+    )
     floor.assert_awaited_once_with(session, participation, [starter])
 
 

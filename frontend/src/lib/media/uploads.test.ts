@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { uploadObject, type PendingUpload, type UploadTicket } from './uploads';
+import { uploadObject, type UploadTicket } from './uploads';
 
 class FakeXMLHttpRequest {
   static latest: FakeXMLHttpRequest | null = null;
@@ -46,21 +46,6 @@ describe('media upload contracts', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps API snowflakes as strings', () => {
-    expect(typeof ticket().id).toBe('string');
-  });
-
-  it('models progress as an explicit lifecycle', () => {
-    const upload = {
-      key: 'one',
-      file: new File(['x'], 'x.txt'),
-      progress: 100,
-      status: 'ready',
-      attachmentId: '1'
-    } satisfies PendingUpload;
-    expect(upload.status).toBe('ready');
-  });
-
   it('aborts an in-flight object upload with its route signal', async () => {
     vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest as unknown as typeof XMLHttpRequest);
     const controller = new AbortController();
@@ -90,9 +75,7 @@ describe('media upload contracts', () => {
 
     FakeXMLHttpRequest.latest?.onerror?.();
 
-    await expect(request).rejects.toThrow(
-      'Could not reach media storage. Check your connection and try again.'
-    );
+    await expect(request).rejects.toThrow(/media storage.*connection.*(try|retry)/i);
   });
 
   it('explains an expired or rejected signed upload instead of showing only a status code', async () => {
@@ -107,8 +90,6 @@ describe('media upload contracts', () => {
 
     FakeXMLHttpRequest.latest?.onload?.();
 
-    await expect(request).rejects.toThrow(
-      'Media storage rejected the upload authorization. Choose the file again and retry.'
-    );
+    await expect(request).rejects.toThrow(/upload authorization.*file.*retry/i);
   });
 });

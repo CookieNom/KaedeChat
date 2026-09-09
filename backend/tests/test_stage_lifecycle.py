@@ -87,7 +87,7 @@ def actor() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_stage_system_message_is_durable_and_federated(
+async def test_queued_persistence_and_federation_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     added: list[object] = []
@@ -226,7 +226,7 @@ async def test_stage_create_emits_start_message_and_visible_notification_marker(
 
 @pytest.mark.parametrize(
     ("event_guild_id", "event_channel_id"),
-    [(11, 31), (10, 31)],
+    [(11, 30), (10, 31)],
 )
 @pytest.mark.asyncio
 async def test_stage_create_rejects_scheduled_event_outside_exact_channel_lineage(
@@ -508,7 +508,7 @@ async def test_empty_stage_closes_after_grace_with_end_message(
 
 
 @pytest.mark.asyncio
-async def test_speaker_returning_at_close_edge_wins_the_race(
+async def test_occupancy_recheck_preserving_a_returned_speaker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 8, 28, 12, 5, tzinfo=UTC)

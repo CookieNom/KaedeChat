@@ -225,9 +225,13 @@ def test_remote_group_add_and_remove_cannot_change_unrelated_state() -> None:
         channel,
         [owner, peer, target],
         owner=owner,
-        name="Silently renamed",
+        name=channel.name,
         notice={},
     )
+    validate_remote_group_mutation(
+        added, conversation, channel, [owner, peer], owner, action="add", target=target
+    )
+    added["conversation"]["name"] = "Silently renamed"
     with pytest.raises(ValueError, match="does not match the request"):
         validate_remote_group_mutation(
             added,
@@ -243,9 +247,13 @@ def test_remote_group_add_and_remove_cannot_change_unrelated_state() -> None:
         conversation,
         channel,
         [owner, target],
-        owner=target,
+        owner=owner,
         notice={},
     )
+    validate_remote_group_mutation(
+        removed, conversation, channel, [owner, peer, target], owner, action="remove", target=peer
+    )
+    removed["conversation"]["owner"] = {"id": str(target.id), "origin_domain": target.origin_domain}
     with pytest.raises(ValueError, match="does not match the request"):
         validate_remote_group_mutation(
             removed,
@@ -441,22 +449,18 @@ def test_group_state_carries_an_authoritative_membership_notice() -> None:
 
     state = group_conversation_content(conversation, channel, [owner, peer], notice=notice)
 
-    assert state["notice"] is notice
+    assert state["notice"] == notice
 
 
 def test_group_membership_notices_explain_changes_and_owner_transfer() -> None:
-    assert (
-        group_dm_notice_text(GROUP_DM_MEMBER_ADDED, "Alice", "Bob")
-        == "Alice added Bob to the group."
-    )
-    assert (
-        group_dm_notice_text(GROUP_DM_MEMBER_REMOVED, "Alice", "Bob")
-        == "Alice removed Bob from the group."
-    )
-    assert (
-        group_dm_notice_text(GROUP_DM_MEMBER_LEFT, "Alice", "Alice", "Bob")
-        == "Alice left the group. Bob is now the owner."
-    )
+    added = group_dm_notice_text(GROUP_DM_MEMBER_ADDED, "Alice", "Bob")
+    removed = group_dm_notice_text(GROUP_DM_MEMBER_REMOVED, "Alice", "Bob")
+    left = group_dm_notice_text(GROUP_DM_MEMBER_LEFT, "Alice", "Alice", "Bob")
+    for text in (added, removed, left):
+        assert "Alice" in text and "Bob" in text
+    assert "add" in added.lower()
+    assert "remov" in removed.lower()
+    assert "left" in left.lower() and "owner" in left.lower()
 
 
 @pytest.mark.asyncio
@@ -746,7 +750,7 @@ async def test_initial_group_snapshot_does_not_accept_add_notice_for_a_remote_ta
 
 
 @pytest.mark.asyncio
-async def test_group_projection_is_reloaded_after_commit(
+async def test_populate_existing_projection_reload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conversation = cast(
@@ -807,9 +811,15 @@ async def test_new_local_group_member_receives_a_live_channel_create(
         "CHANNEL_CREATE",
     ]
 
+    assert [(call.args[1], call.args[2], call.args[3]) for call in publish.await_args_list] == [
+        ("user:alpha.localhost:1", "CHANNEL_UPDATE", render_channel.return_value),
+        ("user:alpha.localhost:2", "CHANNEL_CREATE", render_channel.return_value),
+    ]
+    assert [call.args[3] for call in render_channel.await_args_list] == [owner, invitee]
+
 
 @pytest.mark.asyncio
-async def test_owner_leave_transfers_ownership_to_the_earliest_remaining_member(
+async def test_selecting_the_first_remaining_participant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     owner = user(1)

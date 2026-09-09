@@ -4,7 +4,6 @@ import {
   acknowledgeEncryptedRoom,
   confirmEncryptedRoomJoin,
   encryptedRoomJoinWarning,
-  encryptedRoomWarningKey,
   hasAcknowledgedEncryptedRoom
 } from './disclosures';
 
@@ -24,7 +23,6 @@ describe('encrypted room disclosures', () => {
     expect(hasAcknowledgedEncryptedRoom('1@home.test', '2@room.test', storage)).toBe(true);
     expect(hasAcknowledgedEncryptedRoom('1@home.test', '3@room.test', storage)).toBe(false);
     expect(hasAcknowledgedEncryptedRoom('4@home.test', '2@room.test', storage)).toBe(false);
-    expect(encryptedRoomWarningKey('1@home.test', '2@room.test')).toContain('v1');
   });
 
   it('does not acknowledge a warning the user declines', () => {
@@ -53,8 +51,9 @@ describe('encrypted room disclosures', () => {
 
   it('uses media-specific tradeoffs for encrypted voice rooms', () => {
     const warning = encryptedRoomJoinWarning('media');
-    expect(warning).toContain('microphone, camera, screen video, and screen audio');
-    expect(warning).toContain('Server recording and transcription are unavailable');
+    for (const media of ['microphone', 'camera', 'screen video', 'screen audio'])
+      expect(warning).toContain(media);
+    expect(warning).toMatch(/server.*recording.*transcription.*unavailable/i);
     expect(warning).toContain('safety number');
   });
 
@@ -73,5 +72,9 @@ describe('encrypted room disclosures', () => {
       confirmEncryptedRoomJoin('1@home.test', '2@room.test', 'messages', confirm, storage)
     ).toBe(true);
     expect(confirm).toHaveBeenCalledOnce();
+    expect(
+      confirmEncryptedRoomJoin('1@home.test', '2@room.test', 'messages', confirm, storage)
+    ).toBe(true);
+    expect(confirm).toHaveBeenCalledTimes(2);
   });
 });

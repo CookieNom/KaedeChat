@@ -18,6 +18,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     cast as sql_cast,
 )
+from sqlalchemy.dialects.postgresql import JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -730,8 +731,11 @@ def _attachment_json_carrier(
 
     return func.jsonb_path_exists(
         value,
-        "$.**.attachments[*] ? "
-        "((@.id == $wire_id || @.id == $number_id) && @.origin_domain == $domain)",
+        sql_cast(
+            "$.**.attachments[*] ? "
+            "((@.id == $wire_id || @.id == $number_id) && @.origin_domain == $domain)",
+            JSONPATH,
+        ),
         func.jsonb_build_object(
             "wire_id",
             str(attachment_id),
@@ -748,8 +752,11 @@ def _attachment_json_carrier_for_source(value: Any, source: Any) -> Any:
 
     return func.jsonb_path_exists(
         value,
-        "$.**.attachments[*] ? "
-        "((@.id == $wire_id || @.id == $number_id) && @.origin_domain == $domain)",
+        sql_cast(
+            "$.**.attachments[*] ? "
+            "((@.id == $wire_id || @.id == $number_id) && @.origin_domain == $domain)",
+            JSONPATH,
+        ),
         func.jsonb_build_object(
             "wire_id",
             sql_cast(source.attachment_id, String),

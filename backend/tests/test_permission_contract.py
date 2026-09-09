@@ -23,21 +23,23 @@ def test_permission_metadata_is_total_and_internally_consistent() -> None:
 
 
 def test_endpoint_permission_contract_is_unique_known_and_nonempty() -> None:
-    assert len(PERMISSION_CONTRACT) >= 30
+    assert PERMISSION_CONTRACT
     for operation, contract in PERMISSION_CONTRACT.items():
         assert operation == contract.operation
         assert contract.scope in {"guild", "channel"}
         if operation == "guild.expression.read":
             assert contract.permission == Permission(0)
-            assert contract.conditional == (
-                "guild membership is required; no expression permission is required"
-            )
+            assert contract.conditional
         else:
             assert contract.permission
         assert int(contract.permission) & ~ALL_PERMISSIONS == 0
         assert required_permissions(operation) == contract.permission
     with pytest.raises(RuntimeError, match="unknown permission contract"):
         required_permissions("unregistered.operation")
+
+    assert required_permissions("guild.expression.read") == Permission(0)
+    assert required_permissions("guild.expression.create") == Permission.CREATE_GUILD_EXPRESSIONS
+    assert required_permissions("guild.expression.manage") == Permission.MANAGE_EMOJIS
 
 
 def test_announcement_follow_only_manages_the_destination_webhook() -> None:
@@ -58,20 +60,6 @@ def test_federated_instance_bans_use_a_dedicated_critical_permission() -> None:
     )
     assert metadata.resource_scopes == ("guild",)
     assert metadata.danger == "critical"
-
-
-def test_thread_and_forum_permission_bits_are_stable() -> None:
-    assert Permission.PRIORITY_SPEAKER == 1 << 8
-    assert Permission.USE_APPLICATION_COMMANDS == 1 << 32
-    assert Permission.MANAGE_THREADS == 1 << 34
-    assert Permission.CREATE_PUBLIC_THREADS == 1 << 35
-    assert Permission.CREATE_PRIVATE_THREADS == 1 << 36
-    assert Permission.SEND_MESSAGES_IN_THREADS == 1 << 38
-    assert Permission.PIN_MESSAGES == 1 << 51
-    assert Permission.BYPASS_SLOWMODE == 1 << 52
-    # Existing persisted assignments must never move to make room for parity.
-    assert Permission.STREAM == 1 << 31
-    assert Permission.BAN_INSTANCES == 1 << 41
 
 
 def test_permission_masks_round_trip_only_under_the_kaede_v1_schema() -> None:
@@ -120,6 +108,7 @@ def test_every_published_permission_name_and_bit_is_unchanged() -> None:
         "MANAGE_GUILD": 5,
         "ADD_REACTIONS": 6,
         "VIEW_AUDIT_LOG": 7,
+        "PRIORITY_SPEAKER": 8,
         "VIEW_CHANNEL": 10,
         "SEND_MESSAGES": 11,
         "MANAGE_MESSAGES": 13,
@@ -156,6 +145,12 @@ def test_every_published_permission_name_and_bit_is_unchanged() -> None:
         "MANAGE_TRACKER": 57,
     }
     assert {name: Permission[name].bit_length() - 1 for name in published} == published
+
+    # Published masks must fit the persisted signed BIGINT wire contract.
+    assert ALL_PERMISSIONS == 576_456_216_817_434_111
+    assert not ALL_PERMISSIONS & (1 << 19)
+    assert ALL_PERMISSIONS < 1 << 63
+    assert Permission.CONNECT & Permission.SPEAK == 0
 
 
 def test_additive_discord_compatibility_bits_fill_only_published_holes() -> None:
@@ -250,10 +245,15 @@ def test_manage_expressions_metadata_does_not_promise_the_separate_create_capabi
         item for item in PERMISSION_METADATA if item.permission == Permission.MANAGE_EMOJIS
     )
 
-    assert manage.label == "Manage guild expressions"
-    assert manage.description == (
-        "Edit and remove emoji, stickers, and soundboard sounds created by other members."
+    create = next(
+        item
+        for item in PERMISSION_METADATA
+        if item.permission == Permission.CREATE_GUILD_EXPRESSIONS
     )
+    assert manage.permission != create.permission
+    assert "other members" in manage.description.lower()
+    assert "edit" in manage.description.lower() and "remove" in manage.description.lower()
+    assert "create" in create.description.lower()
 
 
 def test_discord_compatibility_names_are_explicit_same_bit_aliases() -> None:

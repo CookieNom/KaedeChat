@@ -151,20 +151,29 @@ void main() {
     ];
 
     expect(
-      mobileContextCommandGroups(commands, '', 'en-US').single.commands,
-      hasLength(30),
+      mobileContextCommandGroups(commands, '', 'en-US')
+          .single
+          .commands
+          .map((item) => item.name),
+      unorderedEquals(commands.map((item) => item.name)),
     );
     expect(
-      mobileContextCommandGroups(commands, 'message-', 'en-US').single.commands,
-      hasLength(15),
+      mobileContextCommandGroups(commands, 'message-', 'en-US')
+          .single
+          .commands
+          .map((item) => item.name),
+      unorderedEquals(List.generate(15, (index) => 'message-$index')),
     );
     expect(
-      mobileContextCommandGroups(commands, 'user-', 'en-US').single.commands,
-      hasLength(15),
+      mobileContextCommandGroups(commands, 'user-', 'en-US')
+          .single
+          .commands
+          .map((item) => item.name),
+      unorderedEquals(List.generate(15, (index) => 'user-$index')),
     );
   });
 
-  test('context Apps hoists bounded successful history per account', () {
+  test('recorded usage/key scoping', () {
     final inspect = command('inspect', 'user');
     final quote = command('quote', 'message');
     var history = <String>[];
@@ -194,7 +203,8 @@ void main() {
     for (var index = 0; index < 110; index += 1) {
       history = mobileRememberContextCommand(history, quote);
     }
-    expect(history, hasLength(100));
+    expect(history.length, inInclusiveRange(1, 109));
+    expect(history, everyElement(mobileContextCommandUsageKey(quote)));
     expect(history.last, mobileContextCommandUsageKey(quote));
   });
 
@@ -241,7 +251,7 @@ void main() {
   });
 
   test('bot-DM discovery retains exact capability lineage', () {
-    final parsed = MobileApplicationCommand.fromJson(<String, Object?>{
+    final wire = <String, Object?>{
       'application_ref': '7@apps.example',
       'id': '91',
       'application_name': 'Tools',
@@ -252,26 +262,18 @@ void main() {
       'name': 'inspect',
       'type': 'chat_input',
       'description': 'Inspect a record',
-    });
+    };
+    final parsed = MobileApplicationCommand.fromJson(wire);
 
     expect(parsed.integrationType, 'dm_capability');
     expect(parsed.dmCapabilityId, 'kbdg_${List.filled(43, 'a').join()}');
     expect(parsed.dmCapabilityRevision, '7');
-    expect(
-      () => MobileApplicationCommand.fromJson(<String, Object?>{
-        'application_ref': '7@apps.example',
-        'id': '91',
-        'application_name': 'Tools',
-        'integration_type': 'dm_capability',
-        'interaction_context': 'bot_dm',
-        'name': 'inspect',
-        'type': 'chat_input',
-        'description': 'Inspect a record',
-      }),
-      throwsA(isA<FormatException>()),
-    );
+    for (final field in ['dm_capability_id', 'dm_capability_revision']) {
+      final incomplete = <String, Object?>{...wire}..remove(field);
+      expect(() => MobileApplicationCommand.fromJson(incomplete),
+          throwsFormatException);
+    }
   });
-
   test('same-name commands retain stable app identity and remain ambiguous',
       () {
     final local = command('inspect', 'chat_input');

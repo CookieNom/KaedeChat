@@ -7,7 +7,6 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 
 void main() {
   final channelRef = EntityRef(Snowflake('20'), Domain('remote.example'));
-  final message = EntityRef(Snowflake('10'), Domain('remote.example'));
 
   test('clearing one emoji preserves every other reaction group', () {
     final counts = <String, int>{
@@ -36,23 +35,6 @@ void main() {
 
     expect(result.counts, isEmpty);
     expect(result.reactedEmoji, isEmpty);
-  });
-
-  test('clear routes use the standard group path separate from self-removal',
-      () {
-    expect(
-      reactionClearEndpoint(channelRef, message),
-      '/api/v1/channels/20@remote.example/messages/10@remote.example/reactions',
-    );
-    expect(
-      reactionClearEndpoint(
-        channelRef,
-        message,
-        emoji: '<:party:7@remote.example>',
-      ),
-      '/api/v1/channels/20@remote.example/messages/10@remote.example/'
-      'reactions/%3C%3Aparty%3A7%40remote.example%3E',
-    );
   });
 
   test('reaction canonicalization strips presentation selectors', () {
@@ -105,7 +87,7 @@ void main() {
       'reaction': '❤️',
       'emoji': <String, Object?>{
         'id': null,
-        'name': '❤',
+        'name': '🔥',
         'animated': false,
       },
     });

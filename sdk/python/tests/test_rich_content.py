@@ -220,7 +220,25 @@ def test_components_v2_and_official_modal_inputs_serialize() -> None:
             )
         ]
     )
-    assert view.to_components()[0]["type"] == 17
+    assert view.to_components() == [
+        {
+            "type": 17,
+            "spoiler": False,
+            "components": [
+                {
+                    "type": 9,
+                    "components": [{"type": 10, "content": "**Ready**"}],
+                    "accessory": {
+                        "type": 2,
+                        "style": 1,
+                        "label": "Run",
+                        "custom_id": "run",
+                        "disabled": False,
+                    },
+                }
+            ],
+        }
+    ]
     modal = Modal(
         "Pick",
         "pick",
@@ -239,7 +257,31 @@ def test_components_v2_and_official_modal_inputs_serialize() -> None:
             Label("Confirm", CheckboxV2("confirm")),
         ],
     )
-    assert [item["type"] for item in modal.to_dict()["components"]] == [10, 18, 18]
+    assert modal.to_dict() == {
+        "title": "Pick",
+        "custom_id": "pick",
+        "components": [
+            {"type": 10, "content": "Choose carefully"},
+            {
+                "type": 18,
+                "label": "Environment",
+                "component": {
+                    "type": 21,
+                    "custom_id": "environment",
+                    "required": True,
+                    "options": [
+                        {"label": "Production", "value": "prod", "default": False},
+                        {"label": "Staging", "value": "stage", "default": False},
+                    ],
+                },
+            },
+            {
+                "type": 18,
+                "label": "Confirm",
+                "component": {"type": 23, "custom_id": "confirm", "default": False},
+            },
+        ],
+    }
     premium = Button(style=ButtonStyle.premium, sku_id=EntityRef(1, "chat.example"))
     assert premium.to_dict()["sku_id"] == "1@chat.example"
     with pytest.raises(ValueError, match="premium button"):
@@ -518,7 +560,7 @@ async def test_interaction_edit_message_alias_registers_public_source_view() -> 
 
 @pytest.mark.asyncio
 async def test_interaction_update_message_clears_private_view_registration() -> None:
-    removed: list[int] = []
+    removed: list[tuple[int, str]] = []
 
     class UpdateClient:
         async def interaction_callback(
@@ -527,7 +569,7 @@ async def test_interaction_update_message_clears_private_view_registration() -> 
             return {"id": "42", "interaction_id": "90", "view_version": 4}
 
         def remove_response_view(self, response_id: int, *, target: str) -> None:
-            removed.append(response_id)
+            removed.append((response_id, target))
 
     interaction = Interaction.from_payload(
         UpdateClient(),  # type: ignore[arg-type]
@@ -550,7 +592,7 @@ async def test_interaction_update_message_clears_private_view_registration() -> 
 
     await interaction.update_message(view=View(rows=[]))
 
-    assert removed == [42]
+    assert removed == [(42, "chat.example")]
     with pytest.raises(ValueError, match="at least one"):
         await interaction.update_message()
     with pytest.raises(ValueError, match="view_version requires a components update"):

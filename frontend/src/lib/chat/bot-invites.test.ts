@@ -28,6 +28,8 @@ describe('bot invite links', () => {
 
   it('deduplicates embedded invitations', () => {
     const link = 'https://apps.example/applications/123@apps.example/install/community';
-    expect(botInvitesInMessage(`${link} ${link}`)).toHaveLength(1);
+    expect(botInvitesInMessage(`${link} ${link}`)).toEqual([
+      { applicationRef: '123@apps.example', templateSlug: 'community' }
+    ]);
   });
 });

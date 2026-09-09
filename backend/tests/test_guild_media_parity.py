@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Response
-from fastapi.routing import APIRoute
 
 from app.api import bots as bot_api
 from app.api import media as media_api
@@ -15,38 +14,8 @@ from app.core.types import EntityRef
 from app.db.models import Attachment, User
 from app.federation.guild_management import GuildManagementResult
 from app.media.schemas import AssetCommitRequest, UploadTicketRequest
-from app.media.service import FEDERATED_GUILD_UPLOAD_PURPOSES
 from app.tasks import federation_deliver, media_local_purge
 from app.voice.schemas import VoiceModerationUpdate, VoiceMoveRequest
-
-
-def test_all_guild_media_surfaces_have_human_and_bot_routes() -> None:
-    routes = {
-        (method, route.path)
-        for route in (*media_api.router.routes, *bot_api.router.routes)
-        if isinstance(route, APIRoute)
-        for method in (route.methods or set())
-    }
-    expected = {
-        ("DELETE", "/api/v1/users/@me/assets/{kind}"),
-        ("POST", "/api/v1/guilds/{guild_id}/assets/{kind}"),
-        ("PUT", "/api/v1/guilds/{guild_id}/assets/{kind}"),
-        ("DELETE", "/api/v1/guilds/{guild_id}/assets/{kind}"),
-        ("POST", "/api/v1/guilds/{guild_id}/roles/{role_id}/icon"),
-        ("PUT", "/api/v1/guilds/{guild_id}/roles/{role_id}/icon"),
-        ("DELETE", "/api/v1/guilds/{guild_id}/roles/{role_id}/icon"),
-        ("POST", "/api/v1/bots/guilds/{guild_ref}/assets/{kind}"),
-        ("PUT", "/api/v1/bots/guilds/{guild_ref}/assets/{kind}"),
-        ("DELETE", "/api/v1/bots/guilds/{guild_ref}/assets/{kind}"),
-        ("POST", "/api/v1/bots/guilds/{guild_ref}/roles/{role_ref}/icon"),
-        ("PUT", "/api/v1/bots/guilds/{guild_ref}/roles/{role_ref}/icon"),
-        ("DELETE", "/api/v1/bots/guilds/{guild_ref}/roles/{role_ref}/icon"),
-    }
-    assert expected <= routes
-
-
-def test_federated_guild_upload_accounting_includes_every_guild_asset_kind() -> None:
-    assert {"guild_icon", "guild_banner", "role_icon"} <= set(FEDERATED_GUILD_UPLOAD_PURPOSES)
 
 
 @pytest.mark.asyncio
@@ -155,10 +124,11 @@ async def test_user_asset_clear_unbinds_and_fans_out(
     publish_call = publish.await_args
     assert publish_call is not None
     assert publish_call.args[2] == "USER_UPDATE"
-    assert [call.args[0] for call in enqueue.await_args_list] == [
-        federation_deliver,
-        media_local_purge,
-    ]
+    assert {call.args for call in enqueue.await_args_list} == {
+        (federation_deliver, "peer.example"),
+        (media_local_purge, 40, "home.example"),
+    }
+    assert enqueue.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -220,6 +190,12 @@ async def test_bot_role_icon_commit_requires_installation_owned_attachment(
     monkeypatch.setattr(bot_api, "require_owned_attachments_for_installation", owned)
     monkeypatch.setattr(bot_api, "commit_role_icon", delegate)
 
+    trace = []
+    owned.side_effect = lambda *_args: trace.append("ownership")
+    delegate.side_effect = lambda *_args: (
+        trace.append("commit"),
+        {"id": "20", "icon_hash": "a" * 64},
+    )[1]
     rendered = await bot_api.bot_commit_role_icon(
         EntityRef("10@home.example"),
         EntityRef("20@home.example"),
@@ -237,6 +213,9 @@ async def test_bot_role_icon_commit_requires_installation_owned_attachment(
     assert owned.await_args is not None
     assert owned.await_args.args[-1] == [40]
     delegate.assert_awaited_once()
+
+    assert owned.await_args.args[2:5] == (principal, installation, [40])
+    assert trace == ["ownership", "commit"]
 
 
 @pytest.mark.asyncio
@@ -342,3 +321,6 @@ async def test_remote_human_voice_management_routes_to_guild_authority(
     assert proxy_call.args[5]["resource_ref"] == "9@remote.example"
     if operation == "voice_member.move":
         assert proxy_call.args[5]["data"]["channel_id"] == "20@home.example"
+
+    assert proxy_call.args[:4] == (session, settings, guild_ref, auth.user)
+    assert proxy_call.args[5]["reason"] == "reason"

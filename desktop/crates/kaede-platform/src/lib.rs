@@ -830,7 +830,7 @@ mod tests {
     fn deep_links_require_composite_identifiers() {
         assert!(matches!(
             parse_deep_link("kaede://open/channel/42@chat.example"),
-            Ok(DeepLink::Channel(_))
+            Ok(DeepLink::Channel(value)) if value.to_string() == "42@chat.example"
         ));
         assert!(parse_deep_link("https://chat.example/channel/42").is_err());
         assert!(parse_deep_link("kaede://open/channel/42").is_err());
@@ -839,6 +839,15 @@ mod tests {
             parse_deep_link("kaede://open/invite/Ab12Cd34@Chat.Example"),
             Ok(DeepLink::Invite(value)) if value == "Ab12Cd34@chat.example"
         ));
+        let DeepLink::Message { channel, message } =
+            parse_deep_link("kaede://open/message/7@home.example/9").expect("message link")
+        else {
+            panic!("expected message link")
+        };
+        assert_eq!(channel.to_string(), "7@home.example");
+        assert_eq!(message.to_string(), "9@home.example");
+        assert!(parse_deep_link("https://example.test/channel/7").is_err());
+        assert!(parse_deep_link("kaede://evil/message/7@home.example/9").is_err());
     }
 
     #[test]

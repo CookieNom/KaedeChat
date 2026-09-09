@@ -37,6 +37,8 @@ def test_smtp_backend_parses_tls_credentials() -> None:
     assert backend.host == "smtp.example.com"
     assert backend.use_tls
 
+    assert (backend.username, backend.password, backend.port) == ("user", "pass", 465)
+
 
 def test_smtp_backend_requires_url() -> None:
     with pytest.raises(ValueError, match="smtp_url"):

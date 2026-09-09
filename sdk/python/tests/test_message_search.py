@@ -118,6 +118,7 @@ async def test_search_guild_messages_uses_authority_and_retains_runtime() -> Non
     assert bot.request.await_args is not None
     assert bot.request.await_args.kwargs["target"] == "https://guild.example"
     body = bot.request.await_args.kwargs["json"]
+    assert body["query"] == "deploy"
     assert body["sort"] == "newest"
 
     assert body["include_nsfw"] is True

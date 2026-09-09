@@ -14,6 +14,7 @@ const operatorLegalConfig = resolveOperatorLegalConfig(process.env, landingPage)
 
 export default defineConfig({
   plugins: [sveltekit()],
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   define: {
     'import.meta.env.KAEDE_LANDING_PAGE': JSON.stringify(landingPage),
     'import.meta.env.KAEDE_OPERATOR_LEGAL_CONFIG': JSON.stringify(operatorLegalConfig)

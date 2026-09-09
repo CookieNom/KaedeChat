@@ -32,9 +32,9 @@ describe('text to speech', () => {
         rate: 1
       })
     ).toBe(false);
+    expect(shouldPlayTts(message, '10@chat.example', defaults)).toBe(false);
   });
-
-  it('speaks encrypted text only after authenticated decryption', () => {
+  it('encrypted TTS eligibility after authenticated decryption', () => {
     const encrypted = {
       tts: true,
       content: 'untrusted outer text',

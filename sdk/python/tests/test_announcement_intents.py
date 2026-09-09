@@ -58,7 +58,7 @@ def follow_payload(
 
 
 @pytest.mark.asyncio
-async def test_follow_from_third_party_relay_signs_distinct_source_and_target_proofs() -> (
+async def test_follow_from_third_party_relay_constructs_distinct_source_and_target_proofs() -> (
     None
 ):
     bot = client()
@@ -80,6 +80,14 @@ async def test_follow_from_third_party_relay_signs_distinct_source_and_target_pr
         "target.example": {"audience": "https://target.example"},
     }
     calls = bot._federated_actor_intent.await_args_list  # type: ignore[attr-defined]
+    assert len(calls) == 2
+    for call in calls:
+        assert call.kwargs["action"] == "announcement.follow.create"
+        assert call.kwargs["audience"] == call.kwargs["runtime_target"]
+        assert call.kwargs["resources"] == {
+            "source_channel": "10@source.example",
+            "target_channel": "20@target.example",
+        }
     assert {call.kwargs["runtime_target"] for call in calls} == {
         "https://source.example",
         "https://target.example",
@@ -110,9 +118,12 @@ async def test_list_from_third_party_relay_signs_only_for_source_authority() -> 
             "audience": "https://source.example",
         }
     }
-    assert bot._federated_actor_intent.await_args.kwargs["resources"] == {
-        "source_channel": "10@source.example"
-    }
+    bot._federated_actor_intent.assert_awaited_once_with(
+        action="announcement.follow.list",
+        audience="https://source.example",
+        runtime_target="https://source.example",
+        resources={"source_channel": "10@source.example"},
+    )
 
 
 @pytest.mark.asyncio
@@ -138,10 +149,19 @@ async def test_delete_from_third_party_relay_carries_both_receiver_proofs() -> N
         "source.example": {"audience": "https://source.example"},
         "target.example": {"audience": "https://target.example"},
     }
-    assert bot._federated_actor_intent.await_args_list[0].kwargs["resources"] == {
-        "source_channel": "10@source.example",
-        "follow_id": "44@target.example",
+    calls = bot._federated_actor_intent.await_args_list
+    assert len(calls) == 2
+    assert {call.kwargs["audience"] for call in calls} == {
+        "https://source.example",
+        "https://target.example",
     }
+    for call in calls:
+        assert call.kwargs["action"] == "announcement.follow.delete"
+        assert call.kwargs["runtime_target"] == call.kwargs["audience"]
+        assert call.kwargs["resources"] == {
+            "source_channel": "10@source.example",
+            "follow_id": "44@target.example",
+        }
     assert bot.request.await_args.args[1].endswith("/followers/44@target.example")
 
 
@@ -156,7 +176,9 @@ async def test_delete_requires_qualified_ref_when_authorities_reuse_id() -> None
         ]
     )
 
+    bot.request = AsyncMock()
     with pytest.raises(ApiError) as ambiguous:
         await bot.delete_announcement_follow(EntityRef(10, "source.example"), 44)
     assert ambiguous.value.status == 409
     assert ambiguous.value.code == "CHANNEL_FOLLOW_REF_REQUIRED"
+    bot.request.assert_not_awaited()

@@ -104,26 +104,47 @@ describe('API session recovery', () => {
   });
 
   it('shares one refresh across concurrent requests in a tab', async () => {
-    let protectedCalls = 0;
-    let refreshCalls = 0;
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input);
-      if (url === '/api/v1/users/@me') return jsonResponse({}, 401);
-      if (url === '/api/v1/auth/refresh') {
-        refreshCalls += 1;
-        await Promise.resolve();
-        return jsonResponse({ expires_in: 900 });
-      }
-      protectedCalls += 1;
-      return protectedCalls <= 2 ? jsonResponse({}, 401) : jsonResponse({ ok: true });
+    const calls = new Map<string, number>();
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
     });
-    vi.stubGlobal('fetch', fetchMock);
+    let refreshing!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      refreshing = resolve;
+    });
+    let bothRequested!: () => void;
+    const originalRequestsStarted = new Promise<void>((resolve) => {
+      bothRequested = resolve;
+    });
+    let refreshCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url === '/api/v1/users/@me') return jsonResponse({}, 401);
+        if (url === '/api/v1/auth/refresh') {
+          refreshCalls += 1;
+          refreshing();
+          await refreshGate;
+          return jsonResponse({ expires_in: 900 });
+        }
+        const count = (calls.get(url) ?? 0) + 1;
+        calls.set(url, count);
+        if (calls.size === 2) bothRequested();
+        return count === 1 ? jsonResponse({}, 401) : jsonResponse({ path: url });
+      })
+    );
     const { api } = await import('./client');
-
-    await Promise.all([api('/guilds/1'), api('/guilds/2')]);
+    const pending = Promise.all([api('/guilds/1'), api('/guilds/2')]);
+    await Promise.all([refreshStarted, originalRequestsStarted]);
+    expect(refreshCalls).toBe(1);
+    expect([...calls.values()]).toEqual([1, 1]);
+    releaseRefresh();
+    expect(await pending).toEqual([{ path: '/api/v1/guilds/1' }, { path: '/api/v1/guilds/2' }]);
+    expect([...calls.values()]).toEqual([2, 2]);
     expect(refreshCalls).toBe(1);
   });
-
   it('clears browser resume state only when refresh credentials are invalid', async () => {
     storage.setItem('kaede.gateway.session', 'session');
     storage.setItem('kaede.gateway.sequence', '7');
@@ -141,11 +162,12 @@ describe('API session recovery', () => {
 
     await expect(api('/guilds/1')).rejects.toBeInstanceOf(ApiError);
     expect(storage.getItem('kaede.gateway.session')).toBeNull();
+    expect(storage.getItem('kaede.gateway.sequence')).toBeNull();
     expect(expired).toHaveBeenCalledOnce();
     browserWindow.removeEventListener('kaede:session-expired', expired);
   });
 
-  it('preserves the browser session during a transient refresh outage', async () => {
+  it('session recovery outage', async () => {
     storage.setItem('kaede.gateway.session', 'session');
     const expired = vi.fn();
     browserWindow.addEventListener('kaede:session-expired', expired);
@@ -167,31 +189,17 @@ describe('API session recovery', () => {
     browserWindow.removeEventListener('kaede:session-expired', expired);
   });
 
-  it('turns permission responses into useful messages', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn<typeof fetch>()
-        .mockResolvedValue(jsonResponse({ detail: { code: 'MISSING_PERMISSIONS' } }, 403))
-    );
+  it.each([
+    [{ detail: { code: 'MISSING_PERMISSIONS' } }, 'MISSING_PERMISSIONS'],
+    [{ detail: 'Forbidden' }, 'REQUEST_FAILED']
+  ])('turns permission responses into useful messages: %j', async (body, code) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(body, 403)));
     const { api } = await import('./client');
 
     await expect(api('/channels/1/messages')).rejects.toMatchObject({
-      code: 'MISSING_PERMISSIONS',
-      message: "You don't have permission to do that.",
+      code,
+      message: expect.stringMatching(/permission/i),
       status: 403
-    });
-  });
-
-  it('does not expose a bare Forbidden response to the interface', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ detail: 'Forbidden' }, 403))
-    );
-    const { api } = await import('./client');
-
-    await expect(api('/channels/1/messages')).rejects.toMatchObject({
-      message: "You don't have permission to do that."
     });
   });
 

@@ -24,7 +24,9 @@ from app.chat.guild_revision import federation_channel_state
 from app.db.models import Channel, Guild, GuildMember, Instance, User
 from app.federation.guilds import apply_guild_mutation_event
 
-DATABASE_URL = os.environ.get("KAEDE_GUILD_AUTHORITY_TEST_DATABASE_URL")
+DATABASE_URL = os.environ.get("KAEDE_GUILD_AUTHORITY_TEST_DATABASE_URL") or os.environ.get(
+    "TEST_DATABASE_URL"
+)
 pytestmark = pytest.mark.skipif(
     DATABASE_URL is None,
     reason=(
@@ -106,6 +108,7 @@ async def _seed(
 async def test_mutation_and_owner_transfer_use_serialized_current_owner(
     monkeypatch: pytest.MonkeyPatch,
     first_operation: str,
+    wait_for_postgres_lock,
 ) -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL)
@@ -215,11 +218,21 @@ async def test_mutation_and_owner_transfer_use_serialized_current_owner(
 
             operations = {"mutation": mutate, "transfer": transfer}
             second_operation = "transfer" if first_operation == "mutation" else "mutation"
-            first_task = asyncio.create_task(operations[first_operation]())
-            await asyncio.wait_for(first_envelope.wait(), timeout=5)
-            second_task = asyncio.create_task(operations[second_operation]())
-            release_first.set()
-            await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=10)
+            tasks = []
+            try:
+                first_task = asyncio.create_task(operations[first_operation]())
+                tasks.append(first_task)
+                await asyncio.wait_for(first_envelope.wait(), timeout=5)
+                second_task = asyncio.create_task(operations[second_operation]())
+                tasks.append(second_task)
+                await wait_for_postgres_lock(engine, second_task)
+                release_first.set()
+                await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=10)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         owner_a_ref = (7, owner_a_domain)
         owner_b_ref = (8, owner_b_domain)

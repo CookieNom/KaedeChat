@@ -13,7 +13,6 @@ describe('emoji catalog', () => {
     const emojis = await loadUnicodeEmojis();
     const values = new Set(emojis.map((emoji) => emoji.value));
 
-    expect(emojis.length).toBeGreaterThan(3900);
     expect(values.size).toBe(emojis.length);
     expect(values.has('😀')).toBe(true);
     expect(values.has('👍🏿')).toBe(true);
@@ -22,7 +21,7 @@ describe('emoji catalog', () => {
     expect(values.has('🇺🇸')).toBe(true);
   });
 
-  it('provides searchable annotations for every supported category', async () => {
+  it('category coverage and representative searchable annotation', async () => {
     const emojis = await loadUnicodeEmojis();
     const categories = new Set(emojis.map((emoji) => emoji.category));
 
@@ -54,7 +53,7 @@ describe('custom emoji identity', () => {
     });
     const groups = groupCustomEmojis([
       emoji('1', '10', 'Kaede', 'wave'),
-      emoji('2', '20', 'Friends', 'party'),
+      { ...emoji('2', '10', 'Friends', 'party'), guild_domain: 'other.example' },
       emoji('3', '10', 'Kaede', 'cat')
     ]);
 

@@ -40,7 +40,8 @@ impl FromStr for Snowflake {
     type Err = IdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+        if value.is_empty() || value.starts_with('+') || (value.len() > 1 && value.starts_with('0'))
+        {
             return Err(IdError::NonCanonical);
         }
         let parsed = value.parse::<u64>().map_err(|_| IdError::InvalidInteger)?;
@@ -230,7 +231,8 @@ pub mod decimal_u64 {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+        if value.is_empty() || value.starts_with('+') || (value.len() > 1 && value.starts_with('0'))
+        {
             return Err(de::Error::custom("permission mask is not canonical"));
         }
         value.parse().map_err(de::Error::custom)
@@ -267,7 +269,10 @@ pub mod optional_decimal_u64 {
         let value = Option::<String>::deserialize(deserializer)?;
         value
             .map(|value| {
-                if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+                if value.is_empty()
+                    || value.starts_with('+')
+                    || (value.len() > 1 && value.starts_with('0'))
+                {
                     return Err(de::Error::custom("integer is not canonical"));
                 }
                 value.parse().map_err(de::Error::custom)
@@ -357,6 +362,20 @@ mod tests {
             panic!("object reference should deserialize");
         };
         assert_eq!(object, reference);
+        assert!("+42".parse::<Snowflake>().is_err());
+        assert!(serde_json::from_str::<Snowflake>("42").is_err());
+        assert!(
+            serde_json::from_str::<EntityRef>(r#"{"id":42,"origin_domain":"chat.example"}"#)
+                .is_err()
+        );
+        let envelope: GatewayEnvelope = serde_json::from_value(serde_json::json!({
+            "op": 0, "t": "CHANNEL_ACCESS_REVOKED", "s": 18,
+            "d": {"channel_id": "76426998884343809", "channel_domain": "remote.example"}
+        }))
+        .expect("large decimal envelope");
+        assert_eq!(envelope.d["channel_id"], "76426998884343809");
+        assert_eq!(envelope.d["channel_domain"], "remote.example");
+        assert_eq!(envelope.t.as_deref(), Some("CHANNEL_ACCESS_REVOKED"));
     }
 
     #[test]
@@ -369,6 +388,7 @@ mod tests {
             panic!("permission mask should serialize");
         };
         assert_eq!(serialized, "\"2048\"");
+        assert!(serde_json::from_str::<PermissionBits>("2048").is_err());
     }
 
     #[test]
@@ -427,5 +447,9 @@ mod tests {
             panic!("legacy error envelope should decode");
         };
         assert_eq!(legacy.errors[0].msg, "Field is required");
+        assert_eq!(
+            legacy.errors[0].loc,
+            vec![serde_json::json!("body"), serde_json::json!("display_name")]
+        );
     }
 }

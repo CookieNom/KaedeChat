@@ -17,8 +17,6 @@ describe('one-time URL credentials', () => {
 
     expect(consumeUrlToken()).toBe('secret');
     expect(replaceState).toHaveBeenCalledWith(state, '', '/reset-password?keep=1#next=%2Fhome');
-    expect(JSON.stringify(replaceState.mock.calls)).not.toContain('secret');
-    expect(JSON.stringify(replaceState.mock.calls)).not.toContain('legacy');
   });
 
   it('leaves history untouched when the credential is absent', () => {

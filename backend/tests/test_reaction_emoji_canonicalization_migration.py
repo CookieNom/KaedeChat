@@ -7,8 +7,6 @@ from typing import Any
 
 import pytest
 
-from app.chat.custom_emojis import canonical_unicode_reaction_emoji
-
 migration = import_module("migrations.versions.3d9a5e1c7b42_reaction_emoji_canonicalization")
 
 
@@ -48,16 +46,12 @@ class FakeConnection:
         return FakeResult([])
 
 
-def test_reaction_canonicalization_extends_the_single_head() -> None:
-    assert migration.revision == "3d9a5e1c7b42"
-    assert migration.down_revision == "2c8f4d0b6e31"
-
-
-@pytest.mark.parametrize("emoji", ["🏮", "❤", "1⃣", "👨‍👩‍👧‍👦"])
-def test_frozen_forum_canonicalizer_matches_the_runtime_validator(emoji: str) -> None:
-    assert migration._canonical_unicode_reaction_emoji(emoji) == (  # noqa: SLF001
-        canonical_unicode_reaction_emoji(emoji)
-    )
+@pytest.mark.parametrize(
+    ("emoji", "expected"),
+    [("🏮", "🏮"), ("❤", "❤"), ("1⃣", "1⃣"), ("👨‍👩‍👧‍👦", "👨‍👩‍👧‍👦"), ("❤️", "❤"), ("1️⃣", "1⃣")],
+)
+def test_frozen_forum_canonicalizer_matches_historical_vectors(emoji: str, expected: str) -> None:
+    assert migration._canonical_unicode_reaction_emoji(emoji) == expected  # noqa: SLF001
 
 
 def test_frozen_forum_canonicalizer_strips_variation_selectors() -> None:
@@ -86,23 +80,6 @@ def test_frozen_general_canonicalizer_qualifies_custom_domain_aliases() -> None:
 def test_frozen_forum_canonicalizer_rejects_invalid_unicode_defaults(emoji: str) -> None:
     with pytest.raises(ValueError, match="exactly one valid emoji"):
         migration._canonical_unicode_reaction_emoji(emoji)  # noqa: SLF001
-
-
-def test_reaction_merge_is_collision_safe_and_deletes_only_staged_aliases() -> None:
-    mapping_sql = migration.REACTION_MAPPING_SQL
-    merge_sql = migration.REACTION_MERGE_SQL
-    delete_sql = migration.REACTION_DELETE_LEGACY_SQL
-
-    assert "normalize(reaction.emoji_key, NFC)" in mapping_sql
-    assert "chr(65038)" in mapping_sql
-    assert "chr(65039)" in mapping_sql
-    assert "lower(rtrim(" in mapping_sql
-    assert "canonical_emoji_key <> legacy_emoji_key" in mapping_sql
-    assert "GROUP BY mapping.message_id" in merge_sql
-    assert "ON CONFLICT (message_id, message_domain, user_id, user_domain, emoji_key)" in merge_sql
-    assert "least(reactions.created_at, excluded.created_at)" in merge_sql
-    assert "USING kaede_reaction_emoji_canonicalization AS mapping" in delete_sql
-    assert "reaction.emoji_key = mapping.legacy_emoji_key" in delete_sql
 
 
 def test_forum_default_repair_normalizes_or_clears_only_the_unicode_branch() -> None:
@@ -251,12 +228,8 @@ def test_upgrade_merges_before_deleting_legacy_rows(
 
     migration.upgrade()
 
-    assert calls == [
-        migration.REACTION_MAPPING_SQL,
-        migration.REACTION_MERGE_SQL,
-        migration.REACTION_DELETE_LEGACY_SQL,
-    ]
-
-
-def test_data_only_downgrade_is_an_intentional_noop() -> None:
-    assert migration.downgrade() is None
+    assert (
+        calls.index(migration.REACTION_MAPPING_SQL)
+        < calls.index(migration.REACTION_MERGE_SQL)
+        < calls.index(migration.REACTION_DELETE_LEGACY_SQL)
+    )

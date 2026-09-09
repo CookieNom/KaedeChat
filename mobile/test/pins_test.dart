@@ -104,6 +104,7 @@ void main() {
       },
       channel: channel,
     );
-    expect(tied.items, hasLength(2));
+    expect(tied.items.map((message) => message.ref.wire),
+        ['9@remote.example', '8@remote.example']);
   });
 }

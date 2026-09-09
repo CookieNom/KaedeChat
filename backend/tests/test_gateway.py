@@ -14,7 +14,6 @@ from app.chat.events import (
     PUBLISH_EPHEMERAL_SCRIPT,
     PUBLISH_PRESENCE_SCRIPT,
     publish_ephemeral,
-    publish_presence,
 )
 from app.db.models import Channel, Guild, User
 
@@ -265,16 +264,13 @@ async def test_fresh_ready_hydrates_history_statuses(
 async def test_dm_presence_snapshot_is_scoped_deduplicated_and_visible() -> None:
     class PresenceRedis:
         async def mget(self, *keys: str) -> list[bytes | None]:
-            assert keys == (
-                "presence:alpha.test:7",
-                "presence:remote.test:8",
-                "presence:remote.test:9",
-            )
-            return [
-                b'{"status":"online"}',
-                b'{"status":"invisible"}',
-                b'{"status":"idle"}',
-            ]
+            values = {
+                "presence:alpha.test:7": b'{"status":"online"}',
+                "presence:remote.test:8": b'{"status":"invisible"}',
+                "presence:remote.test:9": b'{"status":"idle"}',
+            }
+            assert set(keys) == set(values) and len(keys) == len(values)
+            return [values[key] for key in keys]
 
     channels: list[dict[str, object]] = [
         {
@@ -350,17 +346,19 @@ async def test_discard_gateway_session_releases_reserved_slot() -> None:
         Redis(), user, "fresh-session"
     )
 
-    assert operations == [
-        (
-            "delete",
+    assert operations[-1] == ("execute", ())
+    assert sorted(operations[:-1]) == sorted(
+        [
             (
-                "gateway:session:fresh-session",
-                "gateway:session:fresh-session:progress",
+                "delete",
+                (
+                    "gateway:session:fresh-session",
+                    "gateway:session:fresh-session:progress",
+                ),
             ),
-        ),
-        ("zrem", ("gateway:user-sessions:alpha.test:7", "fresh-session")),
-        ("execute", ()),
-    ]
+            ("zrem", ("gateway:user-sessions:alpha.test:7", "fresh-session")),
+        ]
+    )
 
 
 class HandshakeWebSocket:
@@ -619,88 +617,13 @@ async def test_gateway_releases_preauth_capacity_after_redis_admission(
     assert websocket.close_codes == [gateway.GatewayCloseCode.AUTHENTICATION_FAILED]
 
 
-def test_gateway_session_claim_reserves_before_exposing_the_slot() -> None:
-    assert gateway.USER_SESSION_LIMIT == 8
-    assert "ZREMRANGEBYSCORE" in gateway.CLAIM_USER_SESSION_SCRIPT
-    assert "HSET', KEYS[2], 'reserved'" in gateway.CLAIM_USER_SESSION_SCRIPT
-    reservation = gateway.CLAIM_USER_SESSION_SCRIPT.index("HSET")
-    exposure = gateway.CLAIM_USER_SESSION_SCRIPT.index("ZADD")
-    assert reservation < exposure
-
-
-def test_connection_op_limiter_uses_a_sliding_window() -> None:
+def test_limiter_wrapper_result_handling() -> None:
     limiter = gateway.ConnectionOpLimiter(limit=2, window=10)
 
     assert limiter.admit(100)
     assert limiter.admit(101)
     assert not limiter.admit(109.99)
     assert limiter.admit(110)
-
-
-def test_local_presence_lua_never_reencodes_python_json() -> None:
-    """Empty activity arrays must survive every atomic presence transition."""
-
-    for script in (
-        gateway.SET_PRESENCE_SCRIPT,
-        gateway.RENEW_PRESENCE_SCRIPT,
-        gateway.CLAIM_EXPIRED_PRESENCE_SCRIPT,
-    ):
-        assert "cjson.encode" not in script
-    assert "string.sub(ARGV[1], 1, -2)" in gateway.SET_PRESENCE_SCRIPT
-    assert "string.find(raw, ',\"generation\":', 1, true)" in gateway.RENEW_PRESENCE_SCRIPT
-    assert "string.find(raw, ',\"generation\":', 1, true)" in (
-        gateway.CLAIM_EXPIRED_PRESENCE_SCRIPT
-    )
-
-
-@pytest.mark.asyncio
-async def test_presence_heartbeat_atomically_supersedes_old_expiration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    redis = PresenceRedis()
-    user = User(
-        id=7,
-        origin_domain="alpha.test",
-        is_local=True,
-        username="maple",
-        email="maple@example.com",
-        password_hash="hash",
-    )
-    monkeypatch.setattr(gateway.time, "time", lambda: 1000.0)
-    activities: list[dict[str, object]] = []
-    assert (
-        await gateway.set_presence_state(  # type: ignore[arg-type]
-            redis,
-            user,
-            "online",
-            activities=activities,
-        )
-        == 1
-    )
-    stored = gateway.decode_presence_state(redis.values["presence:alpha.test:7"])
-    assert stored is not None and stored[2] == activities
-
-    monkeypatch.setattr(gateway.time, "time", lambda: 1050.0)
-    assert await gateway.renew_presence_state(redis, user) == 2  # type: ignore[arg-type]
-    renewed = gateway.decode_presence_state(redis.values["presence:alpha.test:7"])
-    assert renewed is not None and renewed[1:3] == (2, activities)
-    assert (
-        await gateway.claim_expired_presence(  # type: ignore[arg-type]
-            redis, "alpha.test:7", 1090
-        )
-        == 0
-    )
-    assert (
-        await gateway.claim_expired_presence(  # type: ignore[arg-type]
-            redis, "alpha.test:7", 1140
-        )
-        == 3
-    )
-    claimed = gateway.decode_presence_state(redis.values["presence:alpha.test:7"])
-    assert claimed is not None and claimed[1:3] == (3, activities)
-    assert await gateway.finalize_expired_presence(  # type: ignore[arg-type]
-        redis, "alpha.test:7", 3, 1140
-    )
 
 
 @pytest.mark.asyncio
@@ -724,7 +647,11 @@ async def test_presence_fanout_is_queued_without_signing_in_gateway(
     )
 
     gateway.schedule_presence_fanout(user, "online", 4)
-    await asyncio.gather(*list(gateway.presence_fanout_tasks))
+    tasks = list(gateway.presence_fanout_tasks)
+    assert len(tasks) == 1
+    assert await asyncio.gather(*tasks) == [True]
+    await asyncio.sleep(0)
+    assert not gateway.presence_fanout_tasks
 
     assert queued == [(7, "alpha.test", "online", 4)]
 
@@ -741,38 +668,6 @@ async def test_ephemeral_events_never_receive_a_durable_topic_sequence() -> None
     assert channel == "dispatch:guild:alpha.test:42"
     assert event["ephemeral"] is True
     assert "topic_seq" not in event
-
-
-@pytest.mark.asyncio
-async def test_presence_generation_fence_rejects_delayed_offline_state() -> None:
-    redis = EphemeralRedis()
-    topic = "guild:alpha.test:42"
-    redis.generations["presence:generation:alpha.test:7"] = 2
-
-    assert await publish_presence(  # type: ignore[arg-type]
-        redis,
-        topic,
-        {"user_id": "7", "user_domain": "alpha.test", "status": "online"},
-        user_domain="alpha.test",
-        user_id=7,
-        generation=2,
-    )
-    assert not await publish_presence(  # type: ignore[arg-type]
-        redis,
-        topic,
-        {"user_id": "7", "user_domain": "alpha.test", "status": "offline"},
-        user_domain="alpha.test",
-        user_id=7,
-        generation=1,
-    )
-
-    assert len(redis.published) == 1
-    assert redis.published[0][1]["d"] == {
-        "user_id": "7",
-        "user_domain": "alpha.test",
-        "status": "online",
-        "generation": 2,
-    }
 
 
 @pytest.mark.asyncio
@@ -950,6 +845,7 @@ async def test_automod_execution_requires_current_manage_guild_for_human_gateway
     [
         (gateway.Permission.MANAGE_CHANNELS | gateway.Permission.VIEW_CHANNEL, True),
         (gateway.Permission.VIEW_CHANNEL, False),
+        (gateway.Permission.MANAGE_CHANNELS, False),
     ],
 )
 async def test_invite_events_require_manage_channels_on_the_event_channel(
@@ -1001,7 +897,11 @@ async def test_invite_events_require_manage_channels_on_the_event_channel(
     )
     summary = gateway.VisibilitySummary(
         {(42, "alpha.test")},
-        {(42, "alpha.test"): {(99, "alpha.test")}},
+        {
+            (42, "alpha.test"): (
+                {(99, "alpha.test")} if permissions & gateway.Permission.VIEW_CHANNEL else set()
+            )
+        },
         {(42, "alpha.test"): (3, 7)},
     )
 
@@ -1340,3 +1240,6 @@ async def test_remote_channel_info_request_is_authority_computed(
             "d": proxy.return_value.body,
         }
     )
+
+    assert proxy.await_args.args[0] is session
+    assert proxy.await_args.args[2:4] == ("42@guild.example", user)

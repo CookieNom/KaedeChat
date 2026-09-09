@@ -32,6 +32,7 @@ class FakeNativeLibrary:
         self.allocations: list[ctypes.Array[ctypes.c_char]] = []
         self.closed: list[int] = []
         self.freed = 0
+        self.calls = []
         self.kaede_e2ee_invoke = NativeFunction(self.invoke)
         self.kaede_e2ee_close = NativeFunction(self.close)
         self.kaede_e2ee_buffer_free = NativeFunction(self.free)
@@ -46,6 +47,7 @@ class FakeNativeLibrary:
     ) -> e2ee._NativeBuffer:
         method = ctypes.string_at(method_pointer, method_length).decode()
         payload = json.loads(ctypes.string_at(input_pointer, input_length))
+        self.calls.append((handle, method, payload))
         if method == "generate":
             assert handle == 0
             assert payload["credential"]
@@ -79,7 +81,7 @@ class FakeNativeLibrary:
         self.freed += 1
 
 
-def test_native_provider_uses_bounded_ffi_and_closes_handle(
+def test_native_provider_forwards_ffi_inputs_and_closes_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     library = FakeNativeLibrary()
@@ -100,6 +102,20 @@ def test_native_provider_uses_bounded_ffi_and_closes_handle(
 
     assert library.freed == 5
     assert library.closed == [7]
+    assert library.calls[2:] == [
+        (7, "sign", {"input": "Y2hhbGxlbmdl"}),
+        (
+            7,
+            "export_epoch_secret",
+            {
+                "group_id": "Z3JvdXA",
+                "label": "kaede livekit v1",
+                "context": "Y29udGV4dA",
+                "length": 32,
+            },
+        ),
+        (7, "group_epoch", {"group_id": "Z3JvdXA"}),
+    ]
 
 
 def test_native_provider_surfaces_openmls_error(
@@ -113,6 +129,8 @@ def test_native_provider_surfaces_openmls_error(
         provider.generate_key_package()
 
     provider.close()
+    assert library.freed == 2
+    assert library.closed == [7]
 
 
 def test_loader_rejects_world_writable_library(tmp_path: Path) -> None:

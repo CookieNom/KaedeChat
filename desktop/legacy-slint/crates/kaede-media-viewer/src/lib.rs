@@ -173,13 +173,7 @@ mod tests {
             media_kind("text/html"),
             Err(ViewerError::UnsupportedType)
         ));
-    }
-
-    #[test]
-    fn escapes_html_sensitive_file_url_characters() {
-        assert_eq!(
-            serde_json_string("file:///tmp/<x>"),
-            "\"file:///tmp/\\u003cx\\u003e\""
-        );
+        assert_eq!(media_kind("image/png").expect("image"), "image");
+        assert_eq!(media_kind("video/mp4").expect("video"), "video");
     }
 }

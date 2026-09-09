@@ -147,6 +147,12 @@ def test_follow_authorization_id_is_stable_per_generation_and_pair() -> None:
         2,
     )
     assert first.startswith("kafi_") and len(first) == 48
+    baseline = [(10, "source.example"), (20, "target.example"), (30, "member.example"), 1]
+    for index in range(3):
+        for replacement in [(99, baseline[index][1]), (baseline[index][0], "other.example")]:
+            changed = list(baseline)
+            changed[index] = replacement
+            assert channels_api.announcement_follow_authorization_id(*changed) != first
 
 
 def test_signed_channel_follow_page_is_exact_unique_and_ordered() -> None:
@@ -250,28 +256,108 @@ async def test_source_follow_resolution_requires_authority_for_reused_id() -> No
 
 
 @pytest.mark.asyncio
-async def test_deletion_guard_covers_follow_sagas_and_pending_or_live_deliveries() -> None:
-    session = SimpleNamespace(scalar=AsyncMock(return_value=True))
+async def test_deletion_guard_covers_follow_sagas_and_pending_or_live_deliveries(
+    postgres_schema,
+) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    assert await announcement_dependencies_exist(
-        cast(Any, session),
-        {(10, "source.example"), (20, "target.example")},
-    )
-
-    statement = session.scalar.await_args.args[0]
-    compiled = statement.compile(
-        dialect=postgresql.dialect(),
-        compile_kwargs={"literal_binds": True},
-    )
-    sql = str(compiled)
-    assert "channel_follows.active IS true" in sql
-    assert "federated_channel_follows.lifecycle_state IN" in sql
-    assert all(f"'{state}'" in sql for state in ("pending", "accepted", "active"))
-    assert "message_crossposts" in sql
-    assert "federated_message_crossposts.delivery_status IN" in sql
-    assert "'retry'" in sql
-    assert "federated_message_crossposts.delivery_status = 'delivered'" in sql
-    assert "messages.deleted_at IS NULL" in sql
+    # Only queried columns are needed; migration integrity is covered separately.
+    definitions = {
+        "channel_follows": (
+            "source_channel_id bigint, source_channel_domain text, "
+            "target_channel_id bigint, target_channel_domain text, active boolean"
+        ),
+        "federated_channel_follows": (
+            "id bigint, target_authority_domain text, local_role text, "
+            "source_channel_id bigint, source_channel_domain text, "
+            "target_channel_id bigint, target_channel_domain text, lifecycle_state "
+            "text"
+        ),
+        "messages": (
+            "id bigint, origin_domain text, channel_id bigint, channel_domain text,"
+            " deleted_at timestamptz"
+        ),
+        "message_crossposts": "source_message_id bigint, source_message_domain text",
+        "federated_message_crossposts": (
+            "follow_id bigint, follow_authority_domain text, local_role text, "
+            "source_message_id bigint, source_message_domain text, delivery_status "
+            "text"
+        ),
+    }
+    for table, columns in definitions.items():
+        await postgres_schema.execute(text(f"CREATE TABLE {table} ({columns})"))
+    async with AsyncSession(bind=postgres_schema) as session:
+        refs = {(10, "source.example"), (20, "target.example")}
+        assert not await announcement_dependencies_exist(session, refs)
+        assert not await announcement_dependencies_exist(session, set())
+        for active in (False, True):
+            async with session.begin_nested() as savepoint:
+                await session.execute(
+                    text(
+                        "INSERT INTO channel_follows VALUES (10, 'source.example', 20, "
+                        "'target.example', :active)"
+                    ),
+                    {"active": active},
+                )
+                assert await announcement_dependencies_exist(session, refs) is active
+                assert not await announcement_dependencies_exist(session, {(10, "foreign.example")})
+                await savepoint.rollback()
+        for lifecycle in ("pending", "accepted", "active", "revoked"):
+            for delivery in (None, "pending", "retry", "delivered", "rejected"):
+                async with session.begin_nested() as savepoint:
+                    await session.execute(
+                        text(
+                            "INSERT INTO federated_channel_follows VALUES "
+                            "(1, 'target.example', 'source', 10, 'source.example', 20, "
+                            "'target.example', :state)"
+                        ),
+                        {"state": lifecycle},
+                    )
+                    if delivery is not None:
+                        await session.execute(
+                            text(
+                                "INSERT INTO federated_message_crossposts VALUES "
+                                "(1, 'target.example', 'source', 30, 'source.example', :state)"
+                            ),
+                            {"state": delivery},
+                        )
+                    expected = lifecycle != "revoked" or delivery in {"pending", "retry"}
+                    assert await announcement_dependencies_exist(session, refs) is expected
+                    for endpoint in refs:
+                        assert (
+                            await announcement_dependencies_exist(session, {endpoint}) is expected
+                        )
+                    assert not await announcement_dependencies_exist(
+                        session, {(10, "foreign.example")}
+                    )
+                    await savepoint.rollback()
+        for federated in (False, True):
+            async with session.begin_nested() as savepoint:
+                await session.execute(
+                    text(
+                        "INSERT INTO messages VALUES (30, 'source.example', 10, "
+                        "'source.example', NULL),"
+                        "(30, 'foreign.example', 99, 'foreign.example', NULL)"
+                    )
+                )
+                statement = (
+                    "INSERT INTO federated_message_crossposts VALUES "
+                    "(1, 'target.example', 'source', 30, 'source.example', 'delivered')"
+                    if federated
+                    else "INSERT INTO message_crossposts VALUES (30, 'source.example')"
+                )
+                await session.execute(text(statement))
+                assert await announcement_dependencies_exist(session, {(10, "source.example")})
+                assert not await announcement_dependencies_exist(session, {(99, "foreign.example")})
+                await session.execute(
+                    text(
+                        "UPDATE messages SET deleted_at = now() WHERE origin_domain = "
+                        "'source.example'"
+                    )
+                )
+                assert not await announcement_dependencies_exist(session, refs)
+                await savepoint.rollback()
 
 
 def announcement_message(**overrides: object) -> SimpleNamespace:
@@ -443,7 +529,17 @@ async def test_announcement_edit_materializes_and_removes_component_view() -> No
 
 
 @pytest.mark.asyncio
-async def test_announcement_copy_view_rebinds_to_exact_target_installation() -> None:
+async def test_announcement_copy_view_rebinds_to_exact_target_installation(postgres_schema) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.bot_models import BotApplication, BotInstallation
+    from app.db.models import GuildMember
+
+    for table in ("bot_applications", "bot_installations", "guild_members"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
     guild = Guild(id=50, origin_domain="target.example", name="Target", owner_id=1)
     source_view = AnnouncementCopyViewProjection(
         application_ref=(80, "app.example"),
@@ -454,24 +550,65 @@ async def test_announcement_copy_view_rebinds_to_exact_target_installation() -> 
         persistent=True,
         expires_at=None,
     )
-    installation = SimpleNamespace(
-        id=91,
-        guild_domain="target.example",
-        grant_revision=7,
-    )
-    session = SimpleNamespace(scalar=AsyncMock(return_value=installation))
-
-    rebound = await target_announcement_copy_view_projection(
-        cast(Any, session),
-        guild,
-        source_view,
-    )
-
-    assert rebound is not None
-    assert rebound.application_ref == source_view.application_ref
-    assert rebound.installation_ref == (91, "target.example")
-    assert rebound.installation_revision == 7
-    assert rebound.integration_type == "guild_install"
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        for app_id, domain in [(80, "app.example"), (81, "app.example"), (80, "foreign.example")]:
+            session.add(
+                BotApplication(
+                    id=app_id,
+                    origin_domain=domain,
+                    team_id=1,
+                    team_domain=domain,
+                    bot_user_id=app_id,
+                    bot_user_domain=domain,
+                    name="Application",
+                    status="active",
+                )
+            )
+        for identifier, app_id, domain, guild_id, guild_domain in [
+            (90, 80, "app.example", 49, "source.example"),
+            (92, 81, "app.example", 50, "target.example"),
+            (93, 80, "foreign.example", 50, "target.example"),
+            (91, 80, "app.example", 50, "target.example"),
+        ]:
+            session.add(
+                BotInstallation(
+                    id=identifier,
+                    application_id=app_id,
+                    application_domain=domain,
+                    guild_id=guild_id,
+                    guild_domain=guild_domain,
+                    bot_user_id=app_id,
+                    bot_user_domain=domain,
+                    installer_id=1,
+                    installer_domain=guild_domain,
+                    status="active",
+                    grant_revision=7,
+                    granted_scopes=["applications.commands"],
+                )
+            )
+            session.add(
+                GuildMember(
+                    guild_id=guild_id,
+                    guild_domain=guild_domain,
+                    user_id=app_id,
+                    user_domain=domain,
+                    joined_at=datetime.now(UTC),
+                )
+            )
+        await session.flush()
+        rebound = await target_announcement_copy_view_projection(session, guild, source_view)
+        assert rebound is not None
+        assert rebound.application_ref == source_view.application_ref
+        assert rebound.installation_ref == (91, "target.example")
+        assert rebound.installation_revision == 7
+        assert rebound.integration_type == "guild_install"
+        matching = await session.get(BotInstallation, 91)
+        for status, scopes in [("suspended", ["applications.commands"]), ("active", [])]:
+            matching.status, matching.granted_scopes = status, scopes
+            await session.flush()
+            assert (
+                await target_announcement_copy_view_projection(session, guild, source_view) is None
+            )
 
 
 @pytest.mark.asyncio
@@ -1619,6 +1756,28 @@ async def test_target_finalize_rejection_is_retained_for_idempotent_retry(
     assert wakes == {"source.example"}
     assert follow.lifecycle_state == "revoked"
     assert follow.authority_receipt == rejected
+    queued.assert_awaited_once()
+
+    with pytest.raises(ValueError, match="acceptance is stale"):
+        await channels_api.apply_announcement_follow_lifecycle_event(
+            cast(Any, session),
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace(domain="target.example")),
+            event_type="guild.announcement.follow.accepted",
+            event_origin="source.example",
+            event_timestamp_ms=int(datetime.now(UTC).timestamp() * 1000),
+            event_content=content,
+            event_context={
+                "guild_id": "9",
+                "guild_domain": "source.example",
+                "channel_id": "10",
+                "channel_domain": "source.example",
+            },
+            raw_envelope={"type": "guild.announcement.follow.accepted"},
+        )
+    assert follow.lifecycle_state == "revoked"
+    assert follow.authority_receipt is rejected
     queued.assert_awaited_once()
 
 

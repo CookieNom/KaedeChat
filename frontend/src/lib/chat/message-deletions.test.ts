@@ -21,10 +21,32 @@ function message(id: string, domain = 'guild.example'): Message {
     decrypted_content: 'decrypted secret',
     e2ee_verified: true,
     decrypted_attachments: [{ attachment_id: '9' } as never],
-    attachments: [],
+    attachments: [
+      {
+        id: '9',
+        origin_domain: domain,
+        filename: 'secret.png',
+        content_type: 'image/png',
+        size: 3,
+        width: 1,
+        height: 1,
+        blurhash: null,
+        scan_status: 'clean',
+        variants: {}
+      }
+    ],
     embeds: [{ type: 'rich', description: 'cached' }],
-    components: [],
-    poll: null,
+    components: [{ type: 10, content: 'private component' }],
+    poll: {
+      question: { text: 'Private question', emoji: null },
+      answers: [{ answer_id: 1, poll_media: { text: 'Private answer', emoji: null } }],
+      expiry: '2026-08-30T00:00:00Z',
+      allow_multiselect: false,
+      layout_type: 1,
+      results: { is_finalized: false, answer_counts: [{ id: 1, count: 2, me_voted: true }] }
+    },
+    reaction_counts: { '❤': 2 },
+    reacted_emoji: ['❤'],
     message_type: 0,
     flags: 0,
     client_nonce: null,
@@ -48,7 +70,10 @@ describe('message deletion reconciliation', () => {
       decrypted_attachments: [],
       embeds: [],
       attachments: [],
+      components: [],
+      poll: null,
       reaction_counts: {},
+      reacted_emoji: [],
       deleted_at: '2026-08-29T01:00:00Z'
     });
   });

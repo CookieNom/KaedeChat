@@ -60,7 +60,7 @@ def test_external_secret_preflight_is_not_applied_to_test_environment() -> None:
     validate_external_secrets("test", {})
 
 
-def test_core_preflight_does_not_require_disabled_voice_secrets() -> None:
+def test_core_preflight_with_include_voice_false() -> None:
     values = production_values()
     values["KAEDE_VOICE_ENABLED"] = "false"
     for name in (
@@ -117,16 +117,10 @@ def test_external_secret_preflight_separates_edge_and_proxy_trust() -> None:
         validate_external_secrets("production", values)
 
 
-def test_external_secret_preflight_separates_gateway_and_master_keys() -> None:
+@pytest.mark.parametrize("padding", ["", "="])
+def test_external_secret_preflight_separates_gateway_and_master_keys(padding: str) -> None:
     values = production_values()
     values["KAEDE_GATEWAY_SECRET_KEY"] = values["KAEDE_SECRET_KEY"]
-    with pytest.raises(ValueError, match="must differ"):
-        validate_external_secrets("production", values)
-
-
-def test_external_secret_preflight_compares_decoded_key_material() -> None:
-    values = production_values()
-    values["KAEDE_GATEWAY_SECRET_KEY"] = values["KAEDE_SECRET_KEY"]
-    values["KAEDE_SECRET_KEY"] += "="
+    values["KAEDE_SECRET_KEY"] += padding
     with pytest.raises(ValueError, match="must differ"):
         validate_external_secrets("production", values)

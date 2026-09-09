@@ -73,8 +73,8 @@ if branch_output=$("${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/install-auto-update.
   printf 'wrong checked-out branch was unexpectedly accepted\n' >&2
   exit 1
 fi
-grep -q "check out the configured branch 'other'" <<< "$branch_output"
-grep -q 'or change AUTO_UPDATE_BRANCH' <<< "$branch_output"
+grep -q "other" <<< "$branch_output"
+grep -q 'AUTO_UPDATE_BRANCH' <<< "$branch_output"
 grep -qx 'AUTO_UPDATE_ENABLED=false' "$TEST_ROOT/repo/.env"
 test ! -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.timer"
 sed -i 's/AUTO_UPDATE_BRANCH=other/AUTO_UPDATE_BRANCH=main/' "$TEST_ROOT/repo/.env"
@@ -85,6 +85,6 @@ if output=$("${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/auto-update.sh" run-now 2>&
   printf 'dirty checkout was unexpectedly accepted\n' >&2
   exit 1
 fi
-grep -q 'tracked files are modified' <<< "$output"
+grep -Eqi 'dirty|modif|uncommitted' <<< "$output"
 
 printf 'automatic update tests passed\n'

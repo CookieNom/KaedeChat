@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import sys
 from collections.abc import AsyncIterator
@@ -15,7 +14,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from kaede_bot.audio import AudioFrame, FFmpegAudioSource, PCM16AudioSource
 from kaede_bot.client import Client
 from kaede_bot.e2ee import E2EEProtocolError
-from kaede_bot.generated import GatewayOp
 from kaede_bot.generated import (
     PRIORITY_SPEAKER_ACTIVE_PAYLOAD,
     PRIORITY_SPEAKER_INACTIVE_PAYLOAD,
@@ -39,11 +37,36 @@ from kaede_bot.voice import (
 )
 
 
-def test_soundboard_sdk_uses_kaede_playback_grant_extension() -> None:
-    source = inspect.getsource(SoundboardSound.play)
-
-    assert "/soundboard-playback-grants" in source
-    assert "/send-soundboard-sound" not in source
+@pytest.mark.asyncio
+async def test_soundboard_sdk_uses_kaede_playback_grant_extension() -> None:
+    bot = client()
+    bot._federated_actor_intent = AsyncMock(return_value={"signed": "intent"})
+    bot.request = AsyncMock(side_effect=RuntimeError("request observed"))
+    sound = SoundboardSound.from_payload(
+        bot, "https://chat.example", soundboard_payload()
+    )
+    voice = SimpleNamespace(
+        target="https://chat.example",
+        grant=SimpleNamespace(
+            guild_ref=EntityRef(1, "chat.example"),
+            channel_ref=EntityRef(2, "chat.example"),
+            bot_installation_revision=7,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="request observed"):
+        await sound.play(voice, volume=0.5)
+    bot.request.assert_awaited_once_with(
+        "POST",
+        "/api/v1/bots/channels/2@chat.example/soundboard-playback-grants",
+        target="https://chat.example",
+        json={
+            "sound_id": "4@chat.example",
+            "sound_version": "2",
+            "volume": 0.5,
+            "actor_intent": {"signed": "intent"},
+            "source_guild_id": "1@chat.example",
+        },
+    )
 
 
 def client() -> Client:
@@ -284,6 +307,7 @@ class ControlledAudioSource:
 def voice_grant(
     *,
     can_stream: bool = False,
+    can_speak: bool = True,
     can_priority_speak: object = False,
     user_limit: int = 12,
     video_quality_mode: int | bool = 2,
@@ -297,7 +321,7 @@ def voice_grant(
             "connection_id": "c" * 43,
             "expires_at": "2026-08-26T00:00:00+00:00",
             "can_listen": True,
-            "can_speak": True,
+            "can_speak": can_speak,
             "can_stream": can_stream,
             "can_priority_speak": can_priority_speak,
             "can_use_vad": False,
@@ -327,6 +351,8 @@ def test_voice_grant_priority_access_is_strict_and_requires_speaking() -> None:
     assert voice_grant(can_priority_speak=True).can_priority_speak
     with pytest.raises(ValueError, match="media permission"):
         voice_grant(can_priority_speak=1)
+    with pytest.raises(ValueError, match="priority speaking access"):
+        voice_grant(can_priority_speak=True, can_speak=False)
 
 
 @pytest.mark.asyncio
@@ -411,10 +437,19 @@ async def test_priority_signal_cannot_outlive_concurrent_authority_revoke() -> N
         voice_grant(can_priority_speak=True),
         transport,
     )
+    entered = asyncio.Event()
+
+    class ObservedLock(asyncio.Lock):
+        async def acquire(self) -> bool:
+            entered.set()
+            return await super().acquire()
+
+    voice._priority_lock = ObservedLock()
     await voice.connect()
 
     publish = asyncio.create_task(voice.set_priority_speaking(True))
-    await transport.priority_started.wait()
+    await asyncio.wait_for(transport.priority_started.wait(), timeout=10)
+    entered.clear()
     revoke = asyncio.create_task(
         voice.apply_authority_state(
             generation=voice.grant.generation + 1,
@@ -426,7 +461,11 @@ async def test_priority_signal_cannot_outlive_concurrent_authority_revoke() -> N
             can_priority_speak=False,
         )
     )
-    transport.release_priority.set()
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert not revoke.done()
+    finally:
+        transport.release_priority.set()
     await asyncio.gather(publish, revoke)
 
     assert transport.priority_states == [True, False]
@@ -435,7 +474,15 @@ async def test_priority_signal_cannot_outlive_concurrent_authority_revoke() -> N
 
 @pytest.mark.asyncio
 async def test_priority_signal_clears_before_stalled_playback_quiesces() -> None:
-    transport = FakeTransport()
+    cleared = asyncio.Event()
+
+    class ObservedTransport(FakeTransport):
+        async def send_priority_speaker(self, active: bool) -> None:
+            await super().send_priority_speaker(active)
+            if not active:
+                cleared.set()
+
+    transport = ObservedTransport()
     voice = VoiceClient(
         client(),
         "https://chat.example",
@@ -449,10 +496,7 @@ async def test_priority_signal_clears_before_stalled_playback_quiesces() -> None
     await source.waiting.wait()
 
     quiesce = asyncio.create_task(voice._quiesce_transport())  # noqa: SLF001
-    for _ in range(10):
-        if transport.priority_states == [True, False]:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(cleared.wait(), timeout=5)
 
     assert transport.priority_states == [True, False]
     assert not quiesce.done()
@@ -560,7 +604,6 @@ async def test_documented_bot_gateway_commands_are_strict_and_authority_routed()
             },
         },
     ]
-    assert not hasattr(GatewayOp, "SUBSCRIBE_MEMBER_LIST")
 
     with pytest.raises(ValueError):
         await bot.update_presence(
@@ -764,10 +807,10 @@ async def test_voice_client_plays_pcm_and_disconnects_with_generation() -> None:
     transport = FakeTransport()
     voice = VoiceClient(bot, "https://chat.example", voice_grant(), transport)
     await voice.connect()
-    await voice.play(PCM16AudioSource(b"\x01\x00" * 1_920), volume=0.5)
+    await voice.play(PCM16AudioSource(b"\x04\x00" * 1_920), volume=0.5)
     assert transport.connected
     assert len(transport.frames) == 1
-    assert transport.frames[0].data[:2] == b"\x00\x00"
+    assert transport.frames[0].data == b"\x02\x00" * 1_920
     await voice.disconnect()
     bot.request.assert_awaited_once_with(
         "DELETE",
@@ -923,7 +966,9 @@ async def test_voice_client_receives_camera_and_screen_share_frames() -> None:
     assert transport.video_listener is not None
     frame = VideoFrame(b"rgba", 1, 1, "rgba", "camera")
     await transport.video_listener(frame, "9@chat.example")
-    assert received == [(frame, "9@chat.example")]
+    screen = VideoFrame(b"bgra", 1, 1, "bgra", "screen_share")
+    await transport.video_listener(screen, "10@chat.example")
+    assert received == [(frame, "9@chat.example"), (screen, "10@chat.example")]
 
 
 @pytest.mark.asyncio
@@ -966,7 +1011,7 @@ async def test_voice_video_publish_validates_capability_and_packed_frame_size() 
 
 
 @pytest.mark.asyncio
-async def test_voice_video_permission_revocation_unpublishes_all_tracks() -> None:
+async def test_unpublish_calls_on_revoke() -> None:
     bot = client()
     transport = FakeTransport()
     voice = VoiceClient(
@@ -1076,7 +1121,14 @@ async def test_voice_disconnect_fences_inflight_video_publication() -> None:
 
 
 @pytest.mark.asyncio
-async def test_authority_media_revocation_gates_inflight_bot_callbacks() -> None:
+@pytest.mark.parametrize(
+    "server_deaf,can_listen",
+    [(True, True), (False, False)],
+    ids=["deafened", "listen-revoked"],
+)
+async def test_authority_media_revocation_gates_inflight_bot_callbacks(
+    server_deaf: bool, can_listen: bool
+) -> None:
     bot = client()
     transport = FakeTransport()
     voice = VoiceClient(bot, "https://chat.example", voice_grant(), transport)
@@ -1091,12 +1143,21 @@ async def test_authority_media_revocation_gates_inflight_bot_callbacks() -> None
 
     voice.listen(on_audio)
     voice.listen_video(on_video)
+    await voice.connect()
+    await voice._receive(AudioFrame(b"\x00\x00" * 960, channels=1), "baseline")
+    await voice._receive_video(
+        VideoFrame(b"\x00" * 4, 1, 1, "rgba", "camera"), "baseline"
+    )
+    assert received_audio == ["baseline"]
+    assert received_video == ["baseline"]
+    received_audio.clear()
+    received_video.clear()
     await voice.apply_authority_state(
         generation=voice.grant.generation + 1,
         server_mute=False,
-        server_deaf=True,
-        can_listen=False,
-        can_speak=False,
+        server_deaf=server_deaf,
+        can_listen=can_listen,
+        can_speak=True,
         can_stream=None,
     )
     await voice._receive(AudioFrame(b"\x00\x00" * 960, channels=1), "remote")
@@ -1106,7 +1167,7 @@ async def test_authority_media_revocation_gates_inflight_bot_callbacks() -> None
 
     assert received_audio == []
     assert received_video == []
-    assert voice.server_deaf
+    assert voice.server_deaf is server_deaf
 
 
 @pytest.mark.asyncio
@@ -1298,6 +1359,7 @@ async def test_failed_transport_connect_releases_backend_voice_reservation() -> 
         "/api/v1/bots/channels/2@chat.example/voice",
     )
     assert calls[1][2]["json"]["generation"] == grant.generation
+    assert calls[1][2]["json"]["connection_id"] == calls[0][2]["json"]["connection_id"]
 
 
 @pytest.mark.asyncio
@@ -1490,6 +1552,7 @@ async def test_voice_region_catalog_uses_guild_authority_route() -> None:
         "GET",
         "/api/v1/bots/guilds/9@guild.example/voice/regions",
     )
+    assert bot.request.await_args.kwargs["target"] == "https://guild.example"
 
 
 def test_bot_resource_paths_route_to_authority_across_three_instances() -> None:

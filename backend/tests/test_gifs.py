@@ -1,24 +1,32 @@
+import pytest
+
 from app.api.gifs import parse_klipy_items
 
 
-def test_klipy_response_parser_only_accepts_provider_https_media() -> None:
+@pytest.mark.parametrize(
+    ("host", "format_", "identifier", "has_next_page"),
+    [("media.klipy.com", "gif", "safe", True), ("static.klipy.com", "webp", 42, False)],
+)
+def test_klipy_response_parser_only_accepts_provider_https_media(
+    host: str, format_: str, identifier: str | int, has_next_page: bool
+) -> None:
     payload = {
         "result": True,
         "data": {
-            "has_next": True,
+            "has_next": has_next_page,
             "data": [
                 {
-                    "id": "safe",
+                    "id": identifier,
                     "title": "Waving",
                     "file": {
                         "md": {
-                            "gif": {
-                                "url": "https://media.klipy.com/example/wave.gif",
+                            format_: {
+                                "url": f"https://{host}/example/wave.{format_}",
                                 "width": 320,
                                 "height": 180,
                             }
                         },
-                        "sm": {"webp": {"url": "https://media.klipy.com/example/wave.webp"}},
+                        "sm": {"webp": {"url": f"https://{host}/example/wave.webp"}},
                     },
                 },
                 {
@@ -29,59 +37,25 @@ def test_klipy_response_parser_only_accepts_provider_https_media() -> None:
         },
     }
     items, has_next = parse_klipy_items(payload)
-    assert has_next is True
+    assert has_next is has_next_page
     assert items == [
         {
-            "id": "safe",
+            "id": str(identifier),
             "title": "Waving",
-            "url": "https://media.klipy.com/example/wave.gif",
-            "preview_url": "https://media.klipy.com/example/wave.webp",
+            "url": f"https://{host}/example/wave.{format_}",
+            "preview_url": f"https://{host}/example/wave.webp",
             "width": 320,
             "height": 180,
         }
     ]
 
+    from copy import deepcopy
 
-def test_klipy_response_parser_accepts_current_static_media_host() -> None:
-    payload = {
-        "result": True,
-        "data": {
-            "has_next": False,
-            "data": [
-                {
-                    "id": 42,
-                    "title": "Current response",
-                    "file": {
-                        "md": {
-                            "webp": {
-                                "url": "https://static.klipy.com/ii/example/full.webp",
-                                "width": 498,
-                                "height": 314,
-                            }
-                        },
-                        "sm": {
-                            "webp": {
-                                "url": "https://static.klipy.com/ii/example/preview.webp",
-                                "width": 220,
-                                "height": 138,
-                            }
-                        },
-                    },
-                }
-            ],
-        },
-    }
-
-    items, has_next = parse_klipy_items(payload)
-
-    assert has_next is False
-    assert items == [
-        {
-            "id": "42",
-            "title": "Current response",
-            "url": "https://static.klipy.com/ii/example/full.webp",
-            "preview_url": "https://static.klipy.com/ii/example/preview.webp",
-            "width": 498,
-            "height": 314,
-        }
-    ]
+    for size, invalid_format, invalid_url in (
+        ("md", format_, f"http://{host}/example/wave.{format_}"),
+        ("sm", "webp", "https://evil.example/tracker.webp"),
+    ):
+        invalid = deepcopy(payload)
+        invalid["data"]["data"] = [invalid["data"]["data"][0]]
+        invalid["data"]["data"][0]["file"][size][invalid_format]["url"] = invalid_url
+        assert parse_klipy_items(invalid)[0] == []

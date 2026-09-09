@@ -34,7 +34,7 @@ function jpegWithPrivateExif(): Uint8Array {
 }
 
 describe('image privacy metadata', () => {
-  it('preserves JPEG pixels, size, and orientation while clearing private EXIF', () => {
+  it('preserves JPEG scan bytes, size, and orientation while clearing private EXIF', () => {
     const source = jpegWithPrivateExif();
     const result = scrubImageMetadataBytes(source, 'image/jpeg');
 
@@ -42,11 +42,12 @@ describe('image privacy metadata', () => {
     expect(result.slice(-6)).toEqual(source.slice(-6));
     expect(new TextDecoder().decode(result)).not.toContain('Alice');
     expect(new DataView(result.buffer).getUint16(30, true)).toBe(6);
+    expect(new TextDecoder().decode(result)).not.toContain('51.5007');
+    expect(new TextDecoder().decode(result)).not.toContain('-0.1246');
   });
-
   it('does not touch non-image uploads', () => {
     const source = Uint8Array.from([1, 2, 3]);
-    expect(scrubImageMetadataBytes(source, 'application/octet-stream')).toBe(source);
+    expect(scrubImageMetadataBytes(source, 'application/octet-stream')).toEqual(source);
   });
 
   it('scrubs images detected from bytes when the picker has no MIME type', () => {

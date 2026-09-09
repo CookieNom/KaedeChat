@@ -531,6 +531,29 @@ mod tests {
             )
             .await?;
 
+        for (account, channel_id, domain, cache_key) in [
+            ("account", 9, "guild.example", "target-message"),
+            ("other-account", 9, "guild.example", "other-account-message"),
+            ("account", 9, "other.example", "other-origin-message"),
+            ("account", 10, "guild.example", "other-channel-message"),
+        ] {
+            cache.connection.lock().execute(
+                "INSERT INTO channel_messages(account, channel_id, channel_domain,
+                 message_id, message_domain, created_at, payload) VALUES (?1, ?2, ?3, ?4, ?3, '2026-09-09', '{}')",
+                rusqlite::params![account, channel_id.to_string(), domain, cache_key],
+            )?;
+            if cache_key != "target-message" {
+                cache
+                    .put_media(
+                        account.into(),
+                        key(channel_id, domain)?,
+                        cache_key.into(),
+                        format!("/cache/{cache_key}"),
+                        128,
+                    )
+                    .await?;
+            }
+        }
         let paths = cache
             .purge_channel("account".into(), revoked.clone())
             .await?;
@@ -547,6 +570,29 @@ mod tests {
                 .await?
                 .is_some()
         );
+        for table in ["channel_messages", "media_cache"] {
+            let connection = cache.connection.lock();
+            let mut statement = connection.prepare(&format!(
+                "SELECT account, channel_id, channel_domain FROM {table} ORDER BY account, channel_id, channel_domain"
+            ))?;
+            let remaining = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(
+                remaining,
+                vec![
+                    ("account".into(), "10".into(), "guild.example".into()),
+                    ("account".into(), "9".into(), "other.example".into()),
+                    ("other-account".into(), "9".into(), "guild.example".into()),
+                ]
+            );
+        }
         drop(cache);
         let _ = fs::remove_file(path);
         Ok(())
@@ -555,8 +601,7 @@ mod tests {
     #[tokio::test]
     async fn media_budget_evicts_oldest_entries_without_crossing_accounts()
     -> Result<(), Box<dyn Error>> {
-        let path = cache_path("media-budget")?;
-        let cache = Cache::open(&path)?;
+        let cache = Cache::open(std::path::Path::new(":memory:"))?;
         let channel = key(9, "guild.example")?;
         cache
             .put_media(
@@ -586,12 +631,19 @@ mod tests {
             )
             .await?;
 
+        cache.connection.lock().execute(
+            "UPDATE media_cache SET last_accessed = CASE cache_key WHEN 'old' THEN 1 ELSE 2 END",
+            [],
+        )?;
         let evicted = cache.prune_media("account-a".into(), 100).await?;
-        assert_eq!(evicted.len(), 1);
-        assert!(matches!(evicted[0].as_str(), "/cache/old" | "/cache/new"));
+        assert_eq!(evicted, vec!["/cache/old"]);
         assert!(cache.prune_media("account-b".into(), 600).await?.is_empty());
-        drop(cache);
-        let _ = fs::remove_file(path);
+        let remaining: String = cache.connection.lock().query_row(
+            "SELECT path FROM media_cache WHERE account = 'account-b' AND cache_key = 'other'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(remaining, "/cache/other");
         Ok(())
     }
 }

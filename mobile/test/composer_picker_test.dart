@@ -195,7 +195,7 @@ void main() {
         'channel_domain': 'home.example',
         'author_id': '7',
         'author_domain': 'home.example',
-        'content': null,
+        'content': '<sticker:other:42@other.example>',
         'sticker_items': <Object?>[
           <String, Object?>{
             'id': '41',
@@ -550,16 +550,27 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('composer-gif-load-more')));
     await tester.pump();
     expect(calls.last, (null, 2));
+    for (final title in ['Celebration', 'Happy dance']) {
+      expect(
+          find.byWidgetPredicate((widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Send GIF: $title'),
+          findsOneWidget);
+    }
 
     await tester.enterText(
       find.byKey(const ValueKey('composer-gif-search')),
       'cats',
     );
-    await tester.pump(const Duration(milliseconds: 299));
+    await tester.pump(const Duration(milliseconds: 100));
     expect(calls.last, (null, 2));
-    await tester.pump(const Duration(milliseconds: 2));
+    await tester.enterText(
+        find.byKey(const ValueKey('composer-gif-search')), 'cats playing');
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(calls.last, (null, 2));
+    await tester.pump(const Duration(milliseconds: 200));
     await tester.pump();
-    expect(calls.last, ('cats', 1));
+    expect(calls.last, ('cats playing', 1));
     expect(tester.takeException(), isNull);
   });
 
@@ -573,7 +584,7 @@ void main() {
           home: MediaQuery(
             data: const MediaQueryData(
               size: Size(360, 320),
-              viewInsets: EdgeInsets.only(bottom: 260),
+              viewInsets: EdgeInsets.only(bottom: 180),
             ),
             child: Scaffold(
               resizeToAvoidBottomInset: false,
@@ -582,7 +593,10 @@ void main() {
           ),
         );
 
+    String? selectedEmoji;
+    ComposerGif? selectedGif;
     await tester.pumpWidget(shortKeyboardFrame(ComposerEmojiPicker(
+      onSelected: (value) => selectedEmoji = value,
       loader: () async => const <Map<String, Object?>>[],
       channel: KaedeChannel(
         ref: EntityRef.parse('30@home.example'),
@@ -603,11 +617,35 @@ void main() {
     );
     expect(tester.takeException(), isNull);
 
+    Finder compactScroll() => find
+        .descendant(
+            of: find.byKey(const ValueKey('composer-picker-compact-scroll')),
+            matching: find.byType(Scrollable))
+        .first;
+    await tester.scrollUntilVisible(find.text('Smileys'), 40,
+        scrollable: compactScroll());
+    await tester.pump();
+    await tester.tap(find.text('Smileys'));
+    await tester.pump();
+    final emoji = find.text('😀');
+    await tester.scrollUntilVisible(emoji, 40, scrollable: compactScroll());
+    await tester.pump();
+    await tester.tap(emoji);
+    expect(selectedEmoji, '😀');
+
     await tester.pumpWidget(shortKeyboardFrame(ComposerGifPicker(
+      onSelected: (value) => selectedGif = value,
       loader: ({String? query, int page = 1}) async => <String, Object?>{
         'page': page,
         'next_page': null,
-        'items': const <Object?>[],
+        'items': const <Object?>[
+          {
+            'id': 'short',
+            'title': 'Short GIF',
+            'url': 'https://media.klipy.com/short.gif',
+            'preview_url': 'https://static.klipy.com/short.webp'
+          }
+        ],
       },
     )));
     await tester.pump();
@@ -618,6 +656,13 @@ void main() {
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
+    final gif = find.byWidgetPredicate((widget) =>
+        widget is Semantics &&
+        widget.properties.label == 'Send GIF: Short GIF');
+    await tester.scrollUntilVisible(gif, 40, scrollable: compactScroll());
+    await tester.pump();
+    await tester.tap(gif);
+    expect(selectedGif?.id, 'short');
   });
 
   testWidgets('GIF picker exposes loading, empty, error, and retry states',

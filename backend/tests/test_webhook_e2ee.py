@@ -140,9 +140,17 @@ def test_device_projection_binds_webhook_and_storage_author_without_token() -> N
         available_key_packages=4,
     )
 
-    assert rendered["webhook_ref"] == "7@guild.example"
-    assert rendered["author_ref"] == "9@remote-user.example"
-    assert "token" not in rendered
+    assert rendered == {
+        "webhook_ref": "7@guild.example",
+        "author_ref": "9@remote-user.example",
+        "device_id": "kwe_" + "a" * 43,
+        "identity_key": b64(b"w" * 32),
+        "credential": b64(b"credential"),
+        "capabilities": ["e2ee-mls/1"],
+        "generation": "2",
+        "trust_state": "trusted",
+        "available_key_packages": 4,
+    }
 
 
 @pytest.mark.asyncio
@@ -158,14 +166,15 @@ async def test_token_delete_revokes_mls_access_and_rekeys_before_event(
     )
     guild = SimpleNamespace(id=11, origin_domain="guild.example")
     channel = SimpleNamespace(id=13, origin_domain="guild.example")
+    order: list[str] = []
     session = SimpleNamespace(
         get=AsyncMock(return_value=creator),
-        commit=AsyncMock(),
+        commit=AsyncMock(side_effect=lambda: order.append("commit")),
     )
     redis = SimpleNamespace()
-    revoke = AsyncMock(return_value=(guild, [channel]))
-    publish_revoke = AsyncMock()
-    publish_update = AsyncMock()
+    revoke = AsyncMock(side_effect=lambda *_: (order.append("revoke"), (guild, [channel]))[1])
+    publish_revoke = AsyncMock(side_effect=lambda *_: order.append("publish_revoke"))
+    publish_update = AsyncMock(side_effect=lambda *_: order.append("publish_update"))
     settings = SimpleNamespace(domain="guild.example")
     monkeypatch.setattr("app.api.webhooks.token_webhook", AsyncMock(return_value=item))
     monkeypatch.setattr("app.api.webhook_e2ee.revoke_webhook_e2ee_access", revoke)
@@ -190,6 +199,8 @@ async def test_token_delete_revokes_mls_access_and_rekeys_before_event(
     )
     publish_revoke.assert_awaited_once_with(session, redis, guild, [channel])
     publish_update.assert_awaited_once_with(redis, item)
+
+    assert order == ["revoke", "commit", "publish_revoke", "publish_update"]
 
 
 @pytest.mark.asyncio
@@ -275,6 +286,11 @@ async def test_webhook_forum_reservation_binds_and_clones_exact_device_consent(
     assert options.webhook_e2ee_device_id == device.protocol_id
     assert create_thread.await_args.kwargs["starter_claimant_device_id"] == device.protocol_id
 
+    assert (
+        created_participation.consenting_actor_id,
+        created_participation.consenting_actor_domain,
+    ) == (4, "guild.example")
+
 
 @pytest.mark.asyncio
 async def test_webhook_forum_activation_fences_device_generation_and_credential(
@@ -322,17 +338,22 @@ async def test_webhook_forum_activation_fences_device_generation_and_credential(
     assert rendered == {"operation_status": "committed"}
     activate.assert_awaited_once()
 
-    tampered = payload.model_copy(update={"prepared_vault_revision": "5"})
-    with pytest.raises(HTTPException) as mismatch:
-        await activate_webhook_encrypted_forum_room(
-            7,
-            "secret",
-            EntityRef("21@guild.example"),
-            tampered,
-            device.protocol_id,
-            session=SimpleNamespace(),  # type: ignore[arg-type]
-            redis=SimpleNamespace(),  # type: ignore[arg-type]
-            snowflake=SimpleNamespace(),  # type: ignore[arg-type]
-            settings=SimpleNamespace(domain="guild.example"),  # type: ignore[arg-type]
-        )
-    assert mismatch.value.detail["code"] == "WEBHOOK_E2EE_DEVICE_STATE_MISMATCH"
+    for mutation in (
+        {"prepared_vault_revision": "5"},
+        {"prepared_vault_digest": b64(hashlib.sha256(b"other credential").digest())},
+    ):
+        tampered = payload.model_copy(update=mutation)
+        with pytest.raises(HTTPException) as mismatch:
+            await activate_webhook_encrypted_forum_room(
+                7,
+                "secret",
+                EntityRef("21@guild.example"),
+                tampered,
+                device.protocol_id,
+                session=SimpleNamespace(),  # type: ignore[arg-type]
+                redis=SimpleNamespace(),  # type: ignore[arg-type]
+                snowflake=SimpleNamespace(),  # type: ignore[arg-type]
+                settings=SimpleNamespace(domain="guild.example"),  # type: ignore[arg-type]
+            )
+        assert mismatch.value.detail["code"] == "WEBHOOK_E2EE_DEVICE_STATE_MISMATCH"
+    activate.assert_awaited_once()

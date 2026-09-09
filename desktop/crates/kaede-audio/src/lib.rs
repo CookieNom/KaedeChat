@@ -1030,21 +1030,23 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    struct RenderRecorder(Arc<Mutex<Vec<f32>>>);
+    struct RenderRecorder(Arc<Mutex<(Vec<f32>, u32)>>);
 
     impl AudioProcessor for RenderRecorder {
-        fn observe_render(&mut self, samples: &[f32], _sample_rate: u32) {
-            self.0
+        fn observe_render(&mut self, samples: &[f32], sample_rate: u32) {
+            let mut observed = self
+                .0
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend(samples);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            observed.0.extend(samples);
+            observed.1 = sample_rate;
         }
 
         fn process(&mut self, _interleaved_mono: &mut [f32], _sample_rate: u32) {}
     }
 
     #[test]
-    fn resampler_preserves_duration() {
+    fn resampled_duration_dc_preservation() {
         let source = vec![0.25; 441];
         let result = resample_linear(&source, 44_100, 48_000);
         assert_eq!(result.len(), 480);
@@ -1056,24 +1058,15 @@ mod tests {
     }
 
     #[test]
-    fn push_to_talk_gate_is_explicit() {
-        let gate = CaptureGate::new(&CaptureSettings {
-            mode: InputMode::PushToTalk,
-            ..CaptureSettings::default()
-        });
-        assert!(!gate.permits(0.5));
-        gate.set_push_to_talk(true);
-        assert!(gate.permits(0.5));
-        gate.set_muted(true);
-        assert!(!gate.permits(0.5));
-    }
-
-    #[test]
     fn normal_and_priority_push_to_talk_keys_have_independent_state() {
         let push_to_talk = CaptureGate::new(&CaptureSettings {
             mode: InputMode::PushToTalk,
             ..CaptureSettings::default()
         });
+        assert!(!push_to_talk.permits(0.5));
+        push_to_talk.set_push_to_talk(true);
+        assert!(push_to_talk.permits(0.5));
+        push_to_talk.set_push_to_talk(false);
         push_to_talk.set_priority_push_to_talk(true);
         assert!(push_to_talk.permits(0.1));
         push_to_talk.set_push_to_talk(true);
@@ -1094,7 +1087,7 @@ mod tests {
 
     #[test]
     fn processor_chain_receives_render_reference() {
-        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::new(Mutex::new((Vec::new(), 0)));
         let mut chain = ProcessorChain::default();
         chain.push(Box::new(RenderRecorder(observed.clone())));
         chain.observe_render(&[0.25, -0.25], VOICE_SAMPLE_RATE);
@@ -1102,7 +1095,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        assert_eq!(recorded, vec![0.25, -0.25]);
+        assert_eq!(recorded, (vec![0.25, -0.25], VOICE_SAMPLE_RATE));
     }
 
     #[test]
@@ -1114,14 +1107,6 @@ mod tests {
         let scale = 1.0 / 2.0_f32.sqrt();
         assert!((output[0] - scale).abs() < 0.000_01);
         assert!(output[1].abs() < 0.000_01);
-    }
-
-    #[test]
-    fn removing_participant_discards_buffered_audio() {
-        let mixer = VoiceMixer::default();
-        mixer.push("gone", &[0.8; 480], VOICE_SAMPLE_RATE, 1);
-        mixer.remove("gone");
-        assert_eq!(mixer.drain(2), vec![0.0, 0.0]);
     }
 
     #[test]
@@ -1158,15 +1143,17 @@ mod tests {
 
     #[test]
     fn participant_removal_discards_all_of_their_audio_tracks() {
-        let mixer = VoiceMixer::default();
-        mixer.push_track("gone", "microphone", true, &[0.5], VOICE_SAMPLE_RATE, 1);
-        mixer.push_track("gone", "screen-audio", false, &[0.5], VOICE_SAMPLE_RATE, 1);
-        mixer.remove_participant("gone");
-        assert_eq!(mixer.drain(1), vec![0.0]);
+        for remove in [VoiceMixer::remove, VoiceMixer::remove_participant] {
+            let mixer = VoiceMixer::default();
+            mixer.push_track("gone", "microphone", true, &[0.5], VOICE_SAMPLE_RATE, 1);
+            mixer.push_track("gone", "screen-audio", false, &[0.5], VOICE_SAMPLE_RATE, 1);
+            remove(&mixer, "gone");
+            assert_eq!(mixer.drain(1), vec![0.0]);
+        }
     }
 
     #[test]
-    fn replacing_a_microphone_does_not_clear_priority_until_the_last_track_ends() {
+    fn remove_track_return_semantics() {
         let mixer = VoiceMixer::default();
         mixer.register_track("priority", "old-microphone", true);
         mixer.register_track("priority", "new-microphone", true);
@@ -1194,13 +1181,15 @@ mod tests {
         mixer.set_priority_capability("priority", true);
         assert!(mixer.set_priority_active("priority", true));
         mixer.remove("priority");
+        mixer.push("priority", &[0.25], VOICE_SAMPLE_RATE, 1);
         mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
-        assert_eq!(mixer.drain(1), vec![0.5]);
+        assert!((mixer.drain(1)[0] - 0.75 / 2.0_f32.sqrt()).abs() < 0.000_01);
 
         mixer.set_priority_capability("priority", true);
         assert!(mixer.set_priority_active("priority", true));
         mixer.clear_priority_active();
+        mixer.push("priority", &[0.25], VOICE_SAMPLE_RATE, 1);
         mixer.push("normal", &[0.5], VOICE_SAMPLE_RATE, 1);
-        assert_eq!(mixer.drain(1), vec![0.5]);
+        assert!((mixer.drain(1)[0] - 0.75 / 2.0_f32.sqrt()).abs() < 0.000_01);
     }
 }

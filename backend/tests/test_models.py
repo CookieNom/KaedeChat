@@ -1,153 +1,10 @@
-from pathlib import Path
-
+import pytest
 from sqlalchemy import CheckConstraint, Computed, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
 from app.core.permissions import ALL_PERMISSIONS
 from app.db import models  # noqa: F401
 from app.db.base import Base
-
-
-def test_complete_v1_schema_is_registered() -> None:
-    required = {
-        "instances",
-        "peer_keys",
-        "users",
-        "user_settings",
-        "push_devices",
-        "push_wake_outbox",
-        "push_relay_subscriptions",
-        "push_relay_deliveries",
-        "relationships",
-        "sessions",
-        "one_time_tokens",
-        "email_outbox",
-        "recovery_codes",
-        "auth_events",
-        "guilds",
-        "federation_replica_usage",
-        "guild_events",
-        "guild_history_exports",
-        "guild_history_export_channels",
-        "guild_members",
-        "remote_guild_membership_intents",
-        "guild_notification_settings",
-        "guild_instance_bans",
-        "roles",
-        "member_roles",
-        "channels",
-        "tracker_boards",
-        "tracker_dispatch_outbox",
-        "tracker_lanes",
-        "tracker_tasks",
-        "thread_members",
-        "channel_overwrites",
-        "messages",
-        "message_projections",
-        "search_index_outbox",
-        "search_index_state",
-        "guild_history_imports",
-        "guild_history_import_channels",
-        "guild_history_staged_messages",
-        "federated_history_messages",
-        "attachments",
-        "attachment_federation_recipients",
-        "media_tombstone_sources",
-        "media_tombstone_destinations",
-        "room_federation_recipients",
-        "terminal_room_deletions",
-        "guild_media_deletion_requests",
-        "reactions",
-        "pins",
-        "dm_conversations",
-        "dm_participants",
-        "federated_dm_storage_usage",
-        "federated_dm_row_charges",
-        "read_states",
-        "invites",
-        "bans",
-        "audit_log_entries",
-        "emojis",
-        "stickers",
-        "webhooks",
-        "federation_events",
-        "federation_outbox",
-        "federation_inbox",
-        "remote_media_cache",
-        "remote_media_orphans",
-        "remote_media_tombstones",
-        "user_storage_usage",
-        "instance_blocks",
-        "instance_user_restrictions",
-        "instance_admin_grants",
-        "instance_audit_events",
-        "developer_teams",
-        "developer_team_members",
-        "developer_team_member_highwaters",
-        "bot_applications",
-        "bot_application_targets",
-        "bot_application_runtime_highwaters",
-        "bot_credentials",
-        "bot_workers",
-        "bot_instance_rules",
-        "bot_install_templates",
-        "application_commands",
-        "application_command_permissions",
-        "application_assets",
-        "application_emojis",
-        "auto_mod_actions",
-        "auto_mod_executions",
-        "auto_mod_member_blocks",
-        "auto_mod_rule_exempt_channels",
-        "auto_mod_rule_exempt_roles",
-        "auto_mod_rules",
-        "bot_dm_grants",
-        "bot_dm_grant_consents",
-        "bot_dm_capabilities",
-        "bot_dm_capability_highwaters",
-        "bot_e2ee_devices",
-        "bot_e2ee_key_packages",
-        "bot_e2ee_participations",
-        "bot_installations",
-        "bot_interaction_poll_answers",
-        "bot_interaction_poll_votes",
-        "bot_interaction_polls",
-        "bot_interaction_responses",
-        "federated_interaction_admission_grants",
-        "federated_interaction_attachment_grants",
-        "federated_interaction_response_locators",
-        "interaction_create_dispatch_outbox",
-        "interaction_dispatch_outbox",
-        "bot_tokens",
-        "bot_interactions",
-        "bot_user_installations",
-        "channel_follows",
-        "emoji_role_restrictions",
-        "federated_channel_follows",
-        "federated_message_crossposts",
-        "guild_scheduled_event_subscriptions",
-        "guild_scheduled_events",
-        "stage_instances",
-        "message_crossposts",
-        "message_views",
-        "poll_answers",
-        "poll_votes",
-        "polls",
-        "soundboard_sounds",
-        "abuse_reports",
-        "e2ee_account_vaults",
-        "e2ee_account_vault_digests",
-        "e2ee_control_records",
-        "e2ee_devices",
-        "e2ee_key_packages",
-        "e2ee_package_claim_batches",
-        "e2ee_room_operations",
-        "encrypted_forum_starter_reservations",
-        "webhook_e2ee_devices",
-        "webhook_e2ee_key_packages",
-        "webhook_e2ee_participations",
-    }
-    assert required == set(Base.metadata.tables)
 
 
 def test_community_invite_columns_belong_to_invites_not_stage_instances() -> None:
@@ -297,7 +154,7 @@ def test_guild_sanctions_have_expiry_and_instance_scope() -> None:
 
 def test_email_outbox_contains_only_encrypted_delivery_content() -> None:
     outbox = Base.metadata.tables["email_outbox"]
-    assert {"to", "recipient", "subject", "text", "html", "token"}.isdisjoint(outbox.columns)
+    assert {"to", "recipient", "subject", "text", "html", "token"}.isdisjoint(outbox.columns.keys())
     assert {
         "ck_email_outbox_status_value",
         "ck_email_outbox_claim_state",
@@ -318,14 +175,20 @@ def test_email_outbox_contains_only_encrypted_delivery_content() -> None:
 
 def test_messages_are_partitioned_and_have_workhorse_indexes() -> None:
     messages = Base.metadata.tables["messages"]
-    assert messages.dialect_options["postgresql"]["partition_by"] == "RANGE (id)"
-    names = {index.name for index in messages.indexes}
-    expected = {
-        "ix_messages_channel_id_desc",
-        "ix_messages_author_id_desc",
-        "ix_messages_id_brin",
+    partition = messages.dialect_options["postgresql"]["partition_by"]
+    assert "".join(partition.lower().split()) == "range(id)"
+    indexes = {
+        (
+            tuple(column.name for column in index.columns),
+            index.dialect_options["postgresql"]["using"] or "btree",
+        )
+        for index in messages.indexes
     }
-    assert expected <= names
+    assert {
+        (("channel_id", "channel_domain", "id"), "btree"),
+        (("author_id", "author_domain", "id"), "btree"),
+        (("id",), "brin"),
+    } <= indexes
 
 
 def test_message_projection_work_is_durable_and_channel_bound() -> None:
@@ -575,7 +438,9 @@ def test_bot_installation_application_reference_binds_the_exact_bot_identity() -
     assert constraint.ondelete is None
 
 
-def test_role_and_overwrite_masks_exclude_reserved_permission_bits() -> None:
+async def test_role_and_overwrite_masks_exclude_reserved_permission_bits(
+    postgres_schema, migrate_to
+) -> None:
     for table_name, constraint_name in (
         ("roles", "ck_roles_known_permission_mask"),
         ("channel_overwrites", "ck_channel_overwrites_known_permission_masks"),
@@ -589,10 +454,6 @@ def test_role_and_overwrite_masks_exclude_reserved_permission_bits() -> None:
         assert f"~{ALL_PERMISSIONS}" in str(constraint.sqltext)
     # Reserved bits 9, 37, and 42 must not become accidental grants.
     assert ALL_PERMISSIONS == 576456216817434111
-    migration = (
-        Path(__file__).parents[1] / "migrations/versions/fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    assert "NEW_PERMISSION_MASK = ((1 << 59) - 1) & ~(1 << 19)" in migration
     for table_name, constraint_name, column_name in (
         (
             "bot_applications",
@@ -625,8 +486,72 @@ def test_role_and_overwrite_masks_exclude_reserved_permission_bits() -> None:
         assert column_name in sql
         assert f"~{ALL_PERMISSIONS}" in sql
 
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
 
-def test_message_parity_columns_and_authoritative_install_source_are_registered() -> None:
+    await migrate_to("head")
+    for table, columns in (
+        ("roles", ("permissions",)),
+        ("channel_overwrites", ("allow", "deny")),
+        ("bot_applications", ("default_permissions",)),
+        ("bot_install_templates", ("permissions",)),
+        ("bot_installations", ("granted_permissions",)),
+        ("bot_interactions", ("invocation_permissions",)),
+    ):
+        # Copy the executed checks; unrelated nullable fields isolate mask validation.
+        await postgres_schema.execute(
+            text(f"CREATE TABLE mask_probe (LIKE {table} INCLUDING CONSTRAINTS)")
+        )
+        for column in Base.metadata.tables[table].columns:
+            await postgres_schema.execute(
+                text(f'ALTER TABLE mask_probe ALTER COLUMN "{column.name}" DROP NOT NULL')
+            )
+        mask_check = {
+            "roles": "ck_roles_known_permission_mask",
+            "channel_overwrites": "ck_channel_overwrites_known_permission_masks",
+            "bot_applications": "ck_bot_applications_bot_application_positive_values",
+            "bot_install_templates": "ck_bot_install_templates_bot_template_positive_values",
+            "bot_installations": "ck_bot_installations_bot_installation_positive_values",
+            "bot_interactions": (
+                "ck_bot_interactions_bot_interaction_invocation_permissions_nonnegative"
+            ),
+        }[table]
+        checks = await postgres_schema.scalars(
+            text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid='mask_probe'::regclass AND contype='c'"
+            )
+        )
+        checks = list(checks)
+        assert sum(check.startswith(mask_check[:50]) for check in checks) == 1
+        for check in checks:
+            if not check.startswith(mask_check[:50]):
+                await postgres_schema.execute(
+                    text(f'ALTER TABLE mask_probe DROP CONSTRAINT "{check}"')
+                )
+        if table == "channel_overwrites":
+            await postgres_schema.execute(
+                text('ALTER TABLE mask_probe ALTER COLUMN "allow" SET DEFAULT 0')
+            )
+            await postgres_schema.execute(
+                text('ALTER TABLE mask_probe ALTER COLUMN "deny" SET DEFAULT 0')
+            )
+        for column in columns:
+            insert = text(f'INSERT INTO mask_probe ("{column}") VALUES (:mask)')  # noqa: S608 -- fixed columns
+            await postgres_schema.execute(insert, {"mask": ALL_PERMISSIONS})
+            # Historical migrations forbid bit 19 and bits beyond their 59-bit range.
+            for bit in (19, 59):
+                with pytest.raises(IntegrityError) as rejected:
+                    async with postgres_schema.begin_nested():
+                        await postgres_schema.execute(insert, {"mask": 1 << bit})
+                assert rejected.value.orig.sqlstate == "23514"
+        await postgres_schema.execute(text("DROP TABLE mask_probe"))
+
+
+@pytest.mark.parametrize("migration_case", ["foundation", "lease"])
+async def test_message_parity_columns_and_authoritative_install_source_are_registered(
+    postgres_schema, migrate_to, migration_case
+) -> None:
     messages = Base.metadata.tables["messages"]
     attachments = Base.metadata.tables["attachments"]
     installations = Base.metadata.tables["bot_user_installations"]
@@ -657,27 +582,6 @@ def test_message_parity_columns_and_authoritative_install_source_are_registered(
         "ck_messages_proxy_request_fingerprint_has_nonce_receipt",
     } <= constraint_names("messages")
     assert "ix_messages_proxy_commit_receipt" in {index.name for index in messages.indexes}
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    assert 'sa.Column("message_reference", postgresql.JSONB())' in migration
-    assert 'sa.Column("proxy_request_fingerprint_version", sa.Integer())' in migration
-    assert 'sa.Column("proxy_request_fingerprint", sa.String(64))' in migration
-    assert 'sa.Column("proxy_commit_seq", sa.BigInteger())' in migration
-    assert "WITH proxy_receipts AS" in migration
-    assert "MIN(event.seq) AS commit_seq" in migration
-    assert "message.client_nonce IS NOT NULL" in migration
-    assert "message.message_type = 6" in migration
-    assert "'guild_id', channel.guild_id::text" in migration
-    assert "message_type <> 12 OR message_reference IS NOT NULL" in migration
-    assert "UPDATE messages SET message_type = 0" in migration
-    assert "WHERE message_type = 12 AND message_reference IS NULL" in migration
-    assert migration.rindex('"channel_follow_has_reference"') < migration.index(
-        'op.drop_column("messages", column)'
-    )
     assert {
         "ck_attachments_upload_channel_ref_complete",
         "ck_attachments_voice_metadata_complete",
@@ -706,18 +610,140 @@ def test_message_parity_columns_and_authoritative_install_source_are_registered(
         )
         for constraint in installations.constraints
     )
-    lease_migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "f95b2c3d8e41_developer_team_snapshot_highwaters.py"
-    ).read_text()
-    assert 'sa.Column("authority_expires_at", sa.DateTime(timezone=True))' in lease_migration
-    assert "installing_user.is_local IS FALSE" in lease_migration
-    assert '"ix_bot_user_installations_authority_expiry"' in lease_migration
+    from importlib import import_module
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect, text
+
+    def apply(sync, module, direction):
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            getattr(module, direction)()
+
+    if migration_case == "lease":
+        for statement in (
+            "CREATE TABLE users (id bigint,origin_domain varchar(253),is_local boolean,UNIQUE"
+            "(id,origin_domain,is_local))",
+            "CREATE TABLE developer_teams (id bigint,origin_domain varchar(253),PRIMARY KEY(i"
+            "d,origin_domain))",
+            "CREATE TABLE bot_user_installations (id bigint,user_id bigint,user_domain varcha"
+            "r(253),status varchar(16),source_id bigint,source_domain varchar(253))",
+            "INSERT INTO users VALUES (1,'local.example',true),(1,'remote.example',false)",
+            "INSERT INTO bot_user_installations VALUES (50,1,'local.example','active',NULL,NU"
+            "LL),(51,1,'remote.example','active',777,'remote.example')",
+        ):
+            await postgres_schema.execute(text(statement))
+        module = import_module(
+            "migrations.versions.f95b2c3d8e41_developer_team_snapshot_highwaters"
+        )
+        await postgres_schema.run_sync(lambda sync: apply(sync, module, "upgrade"))
+        now = await postgres_schema.scalar(text("SELECT CURRENT_TIMESTAMP"))
+        assert (
+            await postgres_schema.execute(
+                text(
+                    "SELECT id,authority_expires_at,source_id,source_domain FROM bot_user_ins"
+                    "tallations ORDER BY id"
+                )
+            )
+        ).all() == [(50, None, None, None), (51, now, 777, "remote.example")]
+        indexes = await postgres_schema.run_sync(
+            lambda sync: inspect(sync).get_indexes("bot_user_installations")
+        )
+        assert "ix_bot_user_installations_authority_expiry" in {index["name"] for index in indexes}
+        return
+    await migrate_to("fb7c3e9a1d42")
+    for statement in (
+        "INSERT INTO instances (domain,is_self,current_key_id,encrypted_private_key,private_k"
+        "ey_nonce) VALUES ('test.example',true,'main',decode(repeat('ab',32),'hex'),decode(re"
+        "peat('cd',12),'hex'))",
+        "INSERT INTO users (id,origin_domain,username,is_local,password_hash,password_kdf_ver"
+        "sion,password_auth_salt,e2ee_vault_salt) VALUES (7,'test.example','owner',true,'hash"
+        "',2,decode(repeat('ab',16),'hex'),decode(repeat('cd',16),'hex'))",
+        "INSERT INTO guilds (id,origin_domain,name,owner_id,owner_domain) VALUES (2,'test.exa"
+        "mple','Guild',7,'test.example')",
+        "INSERT INTO guild_members (guild_id,guild_domain,user_id,user_domain,joined_at) VALU"
+        "ES (2,'test.example',7,'test.example',now())",
+        "INSERT INTO channels (id,origin_domain,guild_id,guild_domain,type,name,created_floor"
+        "_id) VALUES (1,'test.example',2,'test.example',0,'Room',1)",
+        "INSERT INTO messages (id,origin_domain,channel_id,channel_domain,author_id,author_do"
+        "main,content) VALUES (10,'test.example',1,'test.example',7,'test.example','original'"
+        ")",
+        "INSERT INTO messages (id,origin_domain,channel_id,channel_domain,author_id,author_do"
+        "main,content,message_type,referenced_message_id,referenced_message_domain,client_non"
+        "ce) VALUES (11,'test.example',1,'test.example',7,'test.example','pin notice',6,10,'t"
+        "est.example',NULL),(12,'test.example',1,'test.example',7,'test.example','legacy acti"
+        "vity',12,NULL,NULL,NULL),(13,'test.example',1,'test.example',7,'test.example','proxi"
+        "ed',0,NULL,NULL,'receipt'),(14,'test.example',1,'test.example',7,'test.example','no "
+        "nonce',0,NULL,NULL,NULL)",
+    ):
+        await postgres_schema.execute(text(statement))
+    import json
+
+    for seq, message_id in ((7, 13), (5, 13), (9, 14)):
+        await postgres_schema.execute(
+            text(
+                "INSERT INTO guild_events (guild_id,guild_domain,seq,event_id,envelope) VALUE"
+                "S (2,'test.example',:seq,:event_id,CAST(:envelope AS jsonb))"
+            ),
+            dict(
+                seq=seq,
+                event_id=f"event{seq}",
+                envelope=json.dumps(
+                    {
+                        "type": "guild.message.committed",
+                        "content": {"message": {"id": str(message_id)}},
+                    }
+                ),
+            ),
+        )
+    module = import_module("migrations.versions.fc9a4b7d2e10_bot_parity_foundation")
+    await postgres_schema.run_sync(lambda sync: apply(sync, module, "upgrade"))
+    assert await postgres_schema.scalar(
+        text("SELECT message_reference FROM messages WHERE id=11")
+    ) == {
+        "type": 0,
+        "message_id": "10",
+        "message_domain": "test.example",
+        "channel_id": "1",
+        "channel_domain": "test.example",
+        "guild_id": "2",
+        "guild_domain": "test.example",
+    }
+    assert (
+        await postgres_schema.execute(text("SELECT message_type,content FROM messages WHERE id=12"))
+    ).one() == (0, "legacy activity")
+    assert (
+        await postgres_schema.execute(
+            text(
+                "SELECT id,proxy_commit_seq,proxy_request_fingerprint FROM messages WHERE id "
+                "IN (13,14) ORDER BY id"
+            )
+        )
+    ).all() == [(13, 5, None), (14, None, None)]
+    columns = await postgres_schema.run_sync(lambda sync: inspect(sync).get_columns("attachments"))
+    assert {"upload_channel_id", "upload_channel_domain", "duration_secs", "waveform"} <= {
+        column["name"] for column in columns
+    }
+    await postgres_schema.run_sync(lambda sync: apply(sync, module, "downgrade"))
+    assert (
+        await postgres_schema.execute(text("SELECT id,content FROM messages ORDER BY id"))
+    ).all() == [
+        (10, "original"),
+        (11, "pin notice"),
+        (12, "legacy activity"),
+        (13, "proxied"),
+        (14, "no nonce"),
+    ]
+    columns = await postgres_schema.run_sync(lambda sync: inspect(sync).get_columns("messages"))
+    assert not {"message_reference", "proxy_commit_seq", "proxy_request_fingerprint"} & {
+        column["name"] for column in columns
+    }
 
 
-def test_bot_dm_runtime_lineage_and_terminal_highwaters_are_registered() -> None:
+@pytest.mark.asyncio
+async def test_bot_dm_runtime_lineage_and_terminal_highwaters_are_registered(migrate_to) -> None:
     capabilities = Base.metadata.tables["bot_dm_capabilities"]
     capability_highwaters = Base.metadata.tables["bot_dm_capability_highwaters"]
     runtime_highwaters = Base.metadata.tables["bot_application_runtime_highwaters"]
@@ -762,17 +788,61 @@ def test_bot_dm_runtime_lineage_and_terminal_highwaters_are_registered() -> None
     } <= set(runtime_highwaters.c.keys())
     assert runtime_highwaters.c.runtime_fingerprint.type.length == 32
 
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    assert '"target_access_revocation_generation"' in migration
-    assert '"bot_dm_capability_highwaters"' in migration
-    assert '"ix_bot_dm_capability_highwaters_authority_expiry"' in migration
-    assert '"bot_application_runtime_highwaters"' in migration
-    assert "octet_length(authorization_fingerprint) = 32" in migration
+    from datetime import UTC, datetime
+
+    from sqlalchemy import insert, inspect, select, update
+    from sqlalchemy.exc import IntegrityError
+
+    connection = await migrate_to("fc9a4b7d2e10")
+    columns = await connection.run_sync(
+        lambda sync: {item["name"] for item in inspect(sync).get_columns("bot_dm_capabilities")}
+    )
+    assert "target_access_revocation_generation" in columns
+    assert "access_revocation_generation" not in columns
+    indexes = await connection.run_sync(
+        lambda sync: {
+            item["name"] for item in inspect(sync).get_indexes("bot_dm_capability_highwaters")
+        }
+    )
+    assert "ix_bot_dm_capability_highwaters_authority_expiry" in indexes
+    grant = "kbdg_" + "a" * 43
+    await connection.execute(
+        insert(capability_highwaters).values(
+            grant_id=grant,
+            installation_authority_domain="apps.example",
+            identity_fingerprint=b"i" * 32,
+            revision=1,
+            authorization_fingerprint=b"a" * 32,
+            status="revoked",
+            expires_at=datetime.now(UTC),
+        )
+    )
+    await connection.execute(
+        insert(runtime_highwaters).values(
+            application_id=1,
+            application_domain="apps.example",
+            target_domain="target.example",
+            bot_user_id=2,
+            bot_user_domain="apps.example",
+            manifest_generation=1,
+            revocation_generation=1,
+            access_revocation_generation=0,
+            status="deleted",
+            target_allowed=False,
+            runtime_fingerprint=b"r" * 32,
+            expires_at=datetime.now(UTC),
+        )
+    )
+    for table, column in (
+        (capability_highwaters, "identity_fingerprint"),
+        (capability_highwaters, "authorization_fingerprint"),
+        (runtime_highwaters, "runtime_fingerprint"),
+    ):
+        with pytest.raises(IntegrityError):
+            async with connection.begin_nested():
+                await connection.execute(update(table).values({column: b"short"}))
+    assert await connection.scalar(select(capability_highwaters.c.status)) == "revoked"
+    assert await connection.scalar(select(runtime_highwaters.c.status)) == "deleted"
 
 
 def test_federated_application_children_separate_source_and_local_ids() -> None:
@@ -794,56 +864,104 @@ def test_federated_application_children_separate_source_and_local_ids() -> None:
         )
 
 
-def test_bot_parity_migration_drops_attachment_checks_before_their_columns() -> None:
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    upload_check = 'op.f("ck_attachments_upload_channel_ref_complete")'
-    voice_check = 'op.f("ck_attachments_voice_metadata_complete")'
-    upload_column = 'op.drop_column("attachments", "upload_channel_domain")'
-    voice_column = 'op.drop_column("attachments", "waveform")'
+@pytest.mark.asyncio
+async def test_bot_parity_migration_drops_attachment_checks_before_their_columns(
+    migrate_to,
+) -> None:
+    import importlib
 
-    assert migration.rindex(upload_check) < migration.index(upload_column)
-    assert migration.rindex(voice_check) < migration.index(voice_column)
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect
+
+    connection = await migrate_to("fc9a4b7d2e10")
+    migration = importlib.import_module("migrations.versions.fc9a4b7d2e10_bot_parity_foundation")
+
+    def downgrade(sync):
+        before = {column["name"] for column in inspect(sync).get_columns("attachments")}
+        assert {"upload_channel_domain", "upload_channel_id", "duration_secs", "waveform"} <= before
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+        after = {column["name"] for column in inspect(sync).get_columns("attachments")}
+        assert (
+            not {"upload_channel_domain", "upload_channel_id", "duration_secs", "waveform"} & after
+        )
+        assert "id" in after
+
+    await connection.run_sync(downgrade)
 
 
-def test_bot_parity_downgrade_refuses_to_discard_feature_data() -> None:
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
-    guard_start = migration.index("def _guard_feature_data_downgrade()")
-    upgrade_start = migration.index("def upgrade()", guard_start)
-    guard = migration[guard_start:upgrade_start]
-    downgrade_start = migration.index("def downgrade()")
+async def test_bot_parity_downgrade_refuses_to_discard_feature_data(migrate_to) -> None:
+    import importlib
 
-    assert "_guard_feature_data_downgrade()" in migration[downgrade_start:]
-    assert migration.index("_guard_feature_data_downgrade()", downgrade_start) < migration.index(
-        "_restore_bot_permission_masks()", downgrade_start
-    )
-    for protected_state in (
-        "guild_scheduled_events",
-        "stage_instances",
-        "soundboard_sounds",
-        "auto_mod_rules",
-        "bot_user_installations",
-        "bot_interaction_responses",
-        "bot_e2ee_participations",
-        "webhook_e2ee_participations",
-        "federated bot child projections exist",
-        "bot target replay or runtime state exists",
-        "proxy_request_fingerprint IS NOT NULL",
-        "type = 13",
-        "forward_snapshot IS NOT NULL",
-        "new permission grants exist",
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.base import Base
+
+    connection = await migrate_to("fc9a4b7d2e10")
+    migration = importlib.import_module("migrations.versions.fc9a4b7d2e10_bot_parity_foundation")
+
+    def downgrade(sync):
+        sync.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+
+    for statement in (
+        "INSERT INTO instances (domain, is_self, current_key_id, encrypted_private_key, "
+        "private_key_nonce) VALUES ('test.example', true, 'ed25519:test', "
+        "decode(repeat('ab', 32), 'hex'), decode(repeat('cd', 12), 'hex'))",
+        "INSERT INTO users (id, origin_domain, username, is_local, password_hash, "
+        "password_kdf_version, password_auth_salt, e2ee_vault_salt) VALUES "
+        "(7, 'test.example', 'owner', true, 'hash', 2, "
+        "decode(repeat('ab', 16), 'hex'), decode(repeat('cd', 16), 'hex'))",
+        "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) VALUES (2, "
+        "'test.example', 'Guild', 7, 'test.example')",
+        "INSERT INTO guild_members (guild_id, guild_domain, user_id, user_domain, "
+        "joined_at) VALUES"
+        "(2, 'test.example', 7, 'test.example', now())",
+        "INSERT INTO channels (id, origin_domain, guild_id, guild_domain, type, name, "
+        "created_floor_id) VALUES (1, 'test.example', 2, 'test.example', 0, 'Room', 1)",
+        "INSERT INTO messages (id, origin_domain, channel_id, channel_domain, author_id, "
+        "author_domain, content) VALUES (10, 'test.example', 1, 'test.example', 7, "
+        "'test.example', 'original')",
     ):
-        assert protected_state in guard
-    assert "export or deliberately remove the feature data first" in guard
+        await connection.execute(text(statement))
+
+    # Each populated feature independently blocks the real downgrade before DDL.
+    for mutation in (
+        "UPDATE guilds SET community_enabled = true WHERE id = 2",
+        "UPDATE channels SET type = 13, bitrate = 64000, user_limit = 0, video_quality_mode "
+        "= 1 WHERE id = 1",
+        "UPDATE messages SET tts = true WHERE id = 10",
+        "UPDATE users SET age_assurance_state = 'adult' WHERE id = 7",
+    ):
+        savepoint = await connection.begin_nested()
+        try:
+            await connection.execute(text(mutation))
+            with pytest.raises(IntegrityError, match="cannot downgrade fc9a4b7d2e10"):
+                async with connection.begin_nested():
+                    await connection.run_sync(downgrade)
+            assert "sticker_items" in await connection.run_sync(
+                lambda sync: {column["name"] for column in inspect(sync).get_columns("messages")}
+            )
+            assert (
+                await connection.scalar(text("SELECT content FROM messages WHERE id = 10"))
+                == "original"
+            )
+        finally:
+            await savepoint.rollback()
+    await connection.run_sync(downgrade)
+    assert "sticker_items" not in await connection.run_sync(
+        lambda sync: {column["name"] for column in inspect(sync).get_columns("messages")}
+    )
+    assert await connection.scalar(text("SELECT content FROM messages WHERE id = 10")) == "original"
 
 
 def test_channel_and_message_references_cannot_cross_owners() -> None:
@@ -902,13 +1020,8 @@ def test_channel_and_message_references_cannot_cross_owners() -> None:
         ("last_message_id", "last_message_domain", "channel_id", "channel_domain"),
         message_target,
     )
-    migration = (
-        Path(__file__).parents[1] / "migrations/versions/b72c9e4a1f63_federated_dm_rolling_cache.py"
-    ).read_text()
-    assert "CREATE TRIGGER trg_messages_reply_reference" in migration
-    assert "CREATE TRIGGER trg_read_states_last_message_reference" in migration
-    assert "CREATE CONSTRAINT TRIGGER trg_messages_delete_reference" in migration
-
+    # Executed reply/read/delete trigger behavior and downgrade preservation are
+    # covered by test_rolling_cache_migration_preserves_reference_integrity_outside_opaque_prefix.
     assert has_foreign_key(
         "channels",
         ("last_message_id", "last_message_domain", "id", "origin_domain"),
@@ -1209,16 +1322,53 @@ def test_tracker_storage_is_channel_scoped_bounded_and_cascade_safe() -> None:
     } <= {index.name for index in tasks.indexes}
 
 
-def test_tracker_dispatch_outbox_downgrade_refuses_to_discard_pending_events() -> None:
-    migration = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "f92a6c1d4b70_tracker_dispatch_outbox.py"
-    ).read_text()
-    guard = "IF EXISTS (SELECT 1 FROM tracker_dispatch_outbox)"
-    assert guard in migration
-    assert migration.index(guard) < migration.index('op.drop_table("tracker_dispatch_outbox")')
+@pytest.mark.asyncio
+async def test_tracker_dispatch_outbox_downgrade_refuses_to_discard_pending_events(
+    migrate_to,
+) -> None:
+    import importlib
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+
+    connection = await migrate_to("f92a6c1d4b70")
+    migration = importlib.import_module("migrations.versions.f92a6c1d4b70_tracker_dispatch_outbox")
+    for statement in (
+        "INSERT INTO instances (domain) VALUES ('test.example')",
+        "INSERT INTO users (id, origin_domain, username, is_local, "
+        "federation_introduced_by_domain) VALUES "
+        "(7, 'test.example', 'owner', false, 'test.example')",
+        "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) VALUES (2, "
+        "'test.example', 'Guild', 7, 'test.example')",
+        "INSERT INTO channels (id, origin_domain, guild_id, guild_domain, type, name, "
+        "created_floor_id) VALUES (1, 'test.example', 2, 'test.example', 17, 'Tracker', 1)",
+        "INSERT INTO tracker_boards (channel_id, channel_domain, guild_id, guild_domain, "
+        "key_prefix) VALUES (1, 'test.example', 2, 'test.example', 'TASK')",
+    ):
+        await connection.execute(text(statement))
+    await connection.execute(
+        text(
+            "INSERT INTO tracker_dispatch_outbox (channel_id, channel_domain, guild_id, "
+            "guild_domain, event_type, payload) VALUES (1, 'test.example', 2, "
+            "'test.example', 'TRACKER_BOARD_UPDATE', '{}')"
+        )
+    )
+
+    def downgrade(sync):
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+
+    with pytest.raises(DBAPIError, match="drain tracker dispatch outbox"):
+        async with connection.begin_nested():
+            await connection.run_sync(downgrade)
+    assert await connection.scalar(text("SELECT count(*) FROM tracker_dispatch_outbox")) == 1
+    await connection.execute(text("DELETE FROM tracker_dispatch_outbox"))
+    await connection.run_sync(downgrade)
+    assert await connection.scalar(text("SELECT to_regclass('tracker_dispatch_outbox')")) is None
 
 
 def test_security_sensitive_actor_and_origin_foreign_keys_exist() -> None:

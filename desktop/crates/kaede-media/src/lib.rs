@@ -518,16 +518,21 @@ mod tests {
         let media = client()?;
         let directory =
             std::env::temp_dir().join(format!("kaede-media-invalid-{}", std::process::id()));
-        let result = media
-            .cache_public_asset(
-                &Domain::parse("remote.example")?,
-                "../../credential",
-                "original",
-                &directory,
-            )
-            .await;
-        assert!(matches!(result, Err(MediaError::InvalidAssetReference)));
-        assert!(!tokio::fs::try_exists(directory).await?);
+        for (hash, variant) in [
+            ("../../credential".to_owned(), "thumbnail_128"),
+            ("a".repeat(64), "../../credential"),
+        ] {
+            let result = media
+                .cache_public_asset(
+                    &Domain::parse("remote.example")?,
+                    &hash,
+                    variant,
+                    &directory,
+                )
+                .await;
+            assert!(matches!(result, Err(MediaError::InvalidAssetReference)));
+            assert!(!tokio::fs::try_exists(&directory).await?);
+        }
         Ok(())
     }
 

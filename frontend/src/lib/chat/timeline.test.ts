@@ -47,8 +47,12 @@ describe('buildTimeline', () => {
       false,
       false
     ]);
+    const adjacent = buildTimeline([message('10'), message('11', '1', '2026-07-20T10:01:00Z')]);
+    expect(adjacent.filter((item) => item.kind === 'message').map((item) => item.compact)).toEqual([
+      false,
+      true
+    ]);
   });
-
   it('does not treat optimistic identifiers as an unread boundary', () => {
     const items = buildTimeline([message('pending-one')], {
       id: '10',

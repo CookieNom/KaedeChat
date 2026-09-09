@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -371,10 +370,3 @@ async def test_signed_receiver_uses_the_same_closed_group_authority_contract() -
             signed_group_message(private_key, swap_room=True),
             allow_authority_attested_actor=True,
         )
-
-
-def test_signed_group_fixture_has_a_real_signature() -> None:
-    private_key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
-    envelope = signed_group_message(private_key)
-    signature = cast(dict[str, dict[str, str]], envelope["signatures"])[AUTHORITY]["ed25519:test"]
-    assert len(base64.b64decode(signature, validate=True)) == 64

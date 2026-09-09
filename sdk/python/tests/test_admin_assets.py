@@ -136,7 +136,11 @@ async def test_auto_mod_create_and_model_convenience_use_typed_contract() -> Non
     bot.request.return_value = auto_mod_payload(enabled=False)
     updated = await rule.edit(enabled=False)
     assert not updated.enabled
-    assert last_await(bot.request).args[0] == "PATCH"
+    assert last_await(bot.request).args[:2] == (
+        "PATCH",
+        "/api/v1/bots/guilds/10@chat.example/auto-moderation/rules/20",
+    )
+    assert last_await(bot.request).kwargs["target"] == TARGET
     assert last_await(bot.request).kwargs["json"] == {"enabled": False}
 
 
@@ -160,6 +164,14 @@ async def test_auto_mod_list_fetch_and_delete_routes() -> None:
     assert last_await(bot.request).kwargs["headers"] == {
         "X-Audit-Log-Reason": "obsolete"
     }
+    calls = bot.request.await_args_list
+    base = "/api/v1/bots/guilds/10@chat.example/auto-moderation/rules"
+    assert [call.args[:2] for call in calls] == [
+        ("GET", base),
+        ("GET", base + "/20"),
+        ("DELETE", base + "/20"),
+    ]
+    assert all(call.kwargs["target"] == TARGET for call in calls)
 
 
 @pytest.mark.asyncio
@@ -295,6 +307,9 @@ async def test_auto_mod_inputs_reject_invalid_discord_style_combinations() -> No
     with pytest.raises(ValueError, match="mention_total_limit"):
         AutoModTriggerMetadata(mention_total_limit=51)
     bot = client()
+    bot.request = AsyncMock(
+        side_effect=AssertionError("invalid input reached transport")
+    )
     with pytest.raises(ValueError, match="keyword rules require"):
         await bot.create_auto_mod_rule(
             GUILD,
@@ -302,7 +317,7 @@ async def test_auto_mod_inputs_reject_invalid_discord_style_combinations() -> No
             "keyword",
             [AutoModAction.block_message()],
             target=TARGET,
-        ).send(None)
+        )
 
     preset_allow_list = [f"allowed-{index}" for index in range(1_000)]
     preset_metadata = AutoModTriggerMetadata(
@@ -322,7 +337,7 @@ async def test_auto_mod_inputs_reject_invalid_discord_style_combinations() -> No
                 keyword_filter=["blocked"],
                 allow_list=preset_allow_list[:101],
             ),
-        ).send(None)
+        )
 
     with pytest.raises(ValueError, match="member-profile rule"):
         await bot.create_auto_mod_rule(
@@ -332,7 +347,7 @@ async def test_auto_mod_inputs_reject_invalid_discord_style_combinations() -> No
             [AutoModAction.block_member_interaction()],
             target=TARGET,
             trigger_metadata=AutoModTriggerMetadata(keyword_filter=["blocked"]),
-        ).send(None)
+        )
 
     with pytest.raises(ValueError, match="require keyword_filter or regex_patterns"):
         await bot.create_auto_mod_rule(
@@ -342,7 +357,7 @@ async def test_auto_mod_inputs_reject_invalid_discord_style_combinations() -> No
             [AutoModAction.block_member_interaction()],
             target=TARGET,
             event_type="member_update",
-        ).send(None)
+        )
 
     with pytest.raises(ValueError, match="duplicate action types"):
         await bot.edit_auto_mod_rule(
@@ -353,7 +368,8 @@ async def test_auto_mod_inputs_reject_invalid_discord_style_combinations() -> No
                 AutoModAction.block_message(),
                 AutoModAction.block_message("Still blocked"),
             ],
-        ).send(None)
+        )
+    bot.request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -418,6 +434,22 @@ async def test_prune_and_bulk_ban_return_structured_partial_results() -> None:
         "delete_message_seconds": 3_600,
         "reason": "raid",
     }
+    estimate_call, prune_call, _ = bot.request.await_args_list
+    assert estimate_call.args[:2] == (
+        "GET",
+        "/api/v1/bots/guilds/10@chat.example/prune/estimate",
+    )
+    assert estimate_call.kwargs["params"] == {
+        "days": 14,
+        "include_roles": ["40@chat.example"],
+    }
+    assert prune_call.args[:2] == ("POST", "/api/v1/bots/guilds/10@chat.example/prune")
+    assert prune_call.kwargs["json"] == {
+        "days": 14,
+        "include_roles": ["40@chat.example"],
+        "compute_prune_count": True,
+    }
+    assert all(call.kwargs["target"] == TARGET for call in bot.request.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -792,11 +824,33 @@ async def test_application_assets_and_emojis_cover_bot_crud() -> None:
         "DELETE",
         "/api/v1/bots/applications/@me/emojis/81",
     )
+    calls = bot.request.await_args_list
+    base = "/api/v1/bots/applications/@me"
+    assert [call.args[:2] for call in calls] == [
+        ("GET", base + "/assets"),
+        ("GET", base + "/assets/80"),
+        ("PATCH", base + "/assets/80"),
+        ("POST", base + "/assets"),
+        ("GET", base + "/emojis"),
+        ("GET", base + "/emojis/81"),
+        ("PATCH", base + "/emojis/81"),
+        ("DELETE", base + "/assets/80"),
+        ("DELETE", base + "/emojis/81"),
+    ]
+    assert all(call.kwargs["target"] == APPLICATION_HOME for call in calls)
+    assert calls[3].kwargs["json"] == {
+        "attachment_id": "90",
+        "kind": "icon",
+        "name": "primary",
+    }
 
 
 @pytest.mark.asyncio
 async def test_application_upload_ticket_is_exposed_without_forcing_upload() -> None:
     bot = client()
+    bot._put_upload_ticket = AsyncMock(
+        side_effect=AssertionError("ticket creation uploaded bytes")
+    )
     bot.request = AsyncMock(  # type: ignore[method-assign]
         return_value={
             "id": "90",
@@ -820,11 +874,13 @@ async def test_application_upload_ticket_is_exposed_without_forcing_upload() -> 
         "POST",
         "/api/v1/bots/applications/@me/assets/tickets",
     )
+    bot._put_upload_ticket.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_application_emoji_ticket_and_commit_are_typed() -> None:
     bot = client()
+    bot._put_upload_ticket = AsyncMock()
     bot.request = AsyncMock(  # type: ignore[method-assign]
         side_effect=[
             {
@@ -841,10 +897,10 @@ async def test_application_emoji_ticket_and_commit_are_typed() -> None:
         ]
     )
 
-    ticket = await bot.create_application_emoji_ticket(
+    ticket = await bot.upload_application_emoji(
+        b"gif bytes",
         filename="party.gif",
         content_type="image/gif",
-        size=456,
         target=APPLICATION_HOME,
     )
     emoji = await bot.commit_application_emoji(
@@ -861,6 +917,11 @@ async def test_application_emoji_ticket_and_commit_are_typed() -> None:
         "attachment_id": "91",
         "name": "party",
     }
+    bot._put_upload_ticket.assert_awaited_once_with(
+        ticket, b"gif bytes", content_type="image/gif"
+    )
+    assert ticket.ref == EntityRef(91, "apps.example")
+    assert emoji.ref == EntityRef(81, "apps.example")
 
 
 @pytest.mark.asyncio
@@ -1162,6 +1223,18 @@ def test_targeted_invite_sdk_rejects_ambiguous_or_cross_authority_data() -> None
 async def test_invite_sdk_enforces_discord_max_use_limit() -> None:
     with pytest.raises(ValueError, match="between 1 and 100"):
         await client().create_invite(GUILD, target=TARGET, max_uses=101)
+    bot = client()
+    bot.request = AsyncMock(
+        return_value={
+            "code": "abcdefgh",
+            "guild": {"id": "10", "origin_domain": "chat.example"},
+            "created_at": "2026-08-28T00:00:00+00:00",
+            "max_uses": 100,
+        }
+    )
+    invite = await bot.create_invite(GUILD, target=TARGET, max_uses=100)
+    assert invite.max_uses == 100
+    assert bot.request.await_args.kwargs["json"]["max_uses"] == 100
 
 
 def webhook_payload(
@@ -1269,6 +1342,13 @@ async def test_webhook_move_and_scanned_avatar_have_full_sdk_helpers() -> None:
         "DELETE",
         "/api/v1/bots/guilds/10@chat.example/webhooks/70/avatar",
     )
+    uploaded_ticket = bot._put_upload_ticket.await_args.args[0]
+    assert uploaded_ticket.ref == EntityRef(90, "chat.example")
+    assert uploaded_ticket.upload_url == ticket["upload_url"]
+    bot._put_upload_ticket.assert_awaited_once_with(
+        uploaded_ticket, b"image", content_type="image/png"
+    )
+    assert bot.request.await_args_list[2].kwargs["json"]["attachment_id"] == "90"
 
 
 @pytest.mark.asyncio
@@ -1323,6 +1403,14 @@ async def test_token_webhook_object_crud_and_avatar_helpers_preserve_token() -> 
         "DELETE",
         "/api/v1/webhooks/70/kwh_secret",
     )
+    uploaded_ticket = bot._put_upload_ticket.await_args.args[0]
+    assert uploaded_ticket.ref == EntityRef(91, "chat.example")
+    assert uploaded_ticket.upload_url == ticket["upload_url"]
+    bot._put_upload_ticket.assert_awaited_once_with(
+        uploaded_ticket, b"image", content_type="image/png"
+    )
+    assert bot.request.await_args_list[3].kwargs["json"]["attachment_id"] == "91"
+    assert updated.avatar_hash == "b" * 64
 
 
 @pytest.mark.asyncio
@@ -1380,6 +1468,14 @@ async def test_guild_asset_upload_commit_and_clear_use_authority_routes() -> Non
         ("PUT", "/api/v1/bots/guilds/10@chat.example/assets/icon"),
         ("DELETE", "/api/v1/bots/guilds/10@chat.example/assets/icon"),
     ]
+    uploaded_ticket = bot._put_upload_ticket.await_args.args[0]
+    assert uploaded_ticket.ref == EntityRef(90, "chat.example")
+    assert uploaded_ticket.upload_url == ticket["upload_url"]
+    bot._put_upload_ticket.assert_awaited_once_with(
+        uploaded_ticket, b"image", content_type="image/png"
+    )
+    assert bot.request.await_args_list[1].kwargs["json"]["attachment_id"] == "90"
+    assert committed.ref == EntityRef(90, "chat.example")
 
 
 @pytest.mark.asyncio
@@ -1435,6 +1531,14 @@ async def test_role_icon_upload_commit_and_clear_are_typed() -> None:
         ("PUT", "/api/v1/bots/guilds/10@chat.example/roles/20@chat.example/icon"),
         ("DELETE", "/api/v1/bots/guilds/10@chat.example/roles/20@chat.example/icon"),
     ]
+    uploaded_ticket = bot._put_upload_ticket.await_args.args[0]
+    assert uploaded_ticket.ref == EntityRef(91, "chat.example")
+    assert uploaded_ticket.upload_url == ticket["upload_url"]
+    bot._put_upload_ticket.assert_awaited_once_with(
+        uploaded_ticket, b"image", content_type="image/png"
+    )
+    assert bot.request.await_args_list[1].kwargs["json"]["attachment_id"] == "91"
+    assert committed.icon_hash == "a" * 64
 
 
 @pytest.mark.asyncio
@@ -1490,9 +1594,13 @@ async def test_slack_and_github_webhook_compatibility_routes_are_exposed() -> No
 
     assert slack is None and github is None
     slack_call, github_call = bot.request.await_args_list
-    assert slack_call.args[1].endswith("/slack")
+    assert slack_call.args[:2] == ("POST", "/api/v1/webhooks/70/kwh_secret/slack")
+    assert slack_call.kwargs["json"] == {"text": "deployed"}
+    assert slack_call.kwargs["target"] == TARGET
     assert slack_call.kwargs["params"]["thread_id"] == "22@chat.example"
-    assert github_call.args[1].endswith("/github")
+    assert github_call.args[:2] == ("POST", "/api/v1/webhooks/70/kwh_secret/github")
+    assert github_call.kwargs["json"] == {"ref": "refs/heads/main"}
+    assert github_call.kwargs["target"] == TARGET
     assert github_call.kwargs["headers"] == {
         "X-GitHub-Event": "push",
         "X-GitHub-Delivery": "delivery-1",

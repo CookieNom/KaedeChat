@@ -61,7 +61,53 @@ describe('rich message contracts', () => {
   });
 
   it('consumes strict shared type-46 poll result vectors without leaking E2EE labels', () => {
-    for (const vector of pollResultVectors.vectors) {
+    const expected = [
+      {
+        total_votes: 4,
+        victor_answer_id: 1,
+        victor_answer_votes: 3,
+        answer_counts: [
+          { id: 1, count: 3 },
+          { id: 2, count: 1 }
+        ],
+        question_text: 'Ship it?',
+        victor_answer_text: 'Yes'
+      },
+      {
+        total_votes: 7,
+        victor_answer_id: 2,
+        victor_answer_votes: 5,
+        answer_counts: [
+          { id: 1, count: 2 },
+          { id: 2, count: 5 }
+        ],
+        question_text: 'Secret launch choice',
+        victor_answer_text: 'Launch'
+      },
+      {
+        total_votes: 4,
+        victor_answer_id: null,
+        victor_answer_votes: 2,
+        answer_counts: [
+          { id: 1, count: 2 },
+          { id: 2, count: 2 }
+        ],
+        question_text: 'Tie?',
+        victor_answer_text: null
+      },
+      {
+        total_votes: 0,
+        victor_answer_id: null,
+        victor_answer_votes: 0,
+        answer_counts: [
+          { id: 1, count: 0 },
+          { id: 2, count: 0 }
+        ],
+        question_text: 'Anyone?',
+        victor_answer_text: null
+      }
+    ];
+    for (const [index, vector] of pollResultVectors.vectors.entries()) {
       const message = vector.message as unknown as Message;
       const verifiedSource =
         vector.name === 'e2ee_unique_winner_federated_ref'
@@ -86,7 +132,7 @@ describe('rich message contracts', () => {
             } as unknown as Message)
           : null;
       const result = messagePollResult(message, verifiedSource);
-      expect(result).not.toBeNull();
+      expect(result, vector.name).toMatchObject(expected[index]);
       if (vector.name === 'e2ee_unique_winner_federated_ref') {
         expect(result?.question_text).toBe('Secret launch choice');
         expect(result?.victor_answer_text).toBe('Launch');
@@ -130,8 +176,26 @@ describe('rich message contracts', () => {
         e2ee: null
       } as unknown as Message)
     ).toBeNull();
+    const source = {
+      id: '456',
+      origin_domain: 'author.example',
+      e2ee: { version: 2 },
+      e2ee_verified: true,
+      poll: {
+        ...pollResultVectors.vectors[1].verified_source_poll,
+        expiry: '2099-01-01T00:00:00Z',
+        allow_multiselect: false,
+        layout_type: 1
+      }
+    } as unknown as Message;
+    expect(messagePollResult(base, source)?.question_text).toBe('Secret launch choice');
+    expect(messagePollResult(base, { ...source, e2ee_verified: false })).toMatchObject({
+      total_votes: 7,
+      question_text: null,
+      victor_answer_text: null,
+      victor_answer_emoji: null
+    });
   });
-
   it('builds a correlated component interaction only for application messages', () => {
     const message = {
       id: '1',
@@ -185,16 +249,18 @@ describe('rich message contracts', () => {
           { id: '1', origin_domain: 'chat.example', name: 'general', type: 0 } as never,
           { id: '2', origin_domain: 'chat.example', name: 'voice', type: 2 } as never
         ]
-      })
+      }),
+      'channel type filtering'
     ).toEqual([{ value: '1@chat.example', label: '#general', type: 'channel' }]);
     expect(
       modalFromInteractionEvent({
         interaction_id: '4',
         response_type: 9,
         data: { title: 'Details', custom_id: 'details', components: [] }
-      })
+      }),
+      'modal callback envelope'
     ).toEqual({ title: 'Details', custom_id: 'details', components: [] });
-    expect(embedAccent(0x12ab)).toBe('#0012ab');
+    expect(embedAccent(0x12ab), 'embed accent formatting').toBe('#0012ab');
   });
 
   it('stages multi-select values until the authored min/max contract is satisfied', () => {
@@ -206,7 +272,8 @@ describe('rich message contracts', () => {
       options: [
         { label: 'One', value: 'one', default: true },
         { label: 'Two', value: 'two' },
-        { label: 'Three', value: 'three' }
+        { label: 'Three', value: 'three' },
+        { label: 'Four', value: 'four' }
       ]
     } satisfies import('./rich-content').StringSelectComponent;
     expect(selectDefaultValues(component)).toEqual(['one']);
@@ -217,8 +284,11 @@ describe('rich message contracts', () => {
       minimum: 2,
       maximum: 3
     });
+    expect(selectSubmissionState(component, ['one', 'two', 'three', 'four'])).toMatchObject({
+      staged: true,
+      valid: false
+    });
   });
-
   it('correlates modal submissions and preserves typed field values', () => {
     const message = {
       id: '1',

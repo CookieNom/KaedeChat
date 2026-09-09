@@ -59,11 +59,12 @@ void main() {
         name: '   ',
         kind: ApplicationAssetKind.icon,
       ).validationMessage,
-      'Enter an asset name.',
+      matches(RegExp(r'asset name', caseSensitive: false)),
     );
     expect(
       applicationEmojiNameValidation('not valid!'),
-      'Emoji names use 2–32 letters, numbers, or underscores.',
+      matches(RegExp(r'2.*32.*letters.*numbers.*underscores',
+          caseSensitive: false)),
     );
     expect(applicationEmojiNameValidation('valid_name'), isNull);
     expect(
@@ -72,7 +73,7 @@ void main() {
         contentType: null,
         size: 12,
       ),
-      'Choose a PNG, JPEG, GIF, or WebP image.',
+      matches(RegExp(r'PNG.*JPEG.*GIF.*WebP', caseSensitive: false)),
     );
     expect(
       applicationImageValidation(
@@ -80,7 +81,7 @@ void main() {
         contentType: 'image/png',
         size: 0,
       ),
-      'The selected image is empty.',
+      matches(RegExp(r'image.*empty', caseSensitive: false)),
     );
   });
 
@@ -107,7 +108,7 @@ void main() {
         'Launch cover');
     expect(
         (await repository.applicationEmojis(application)).single.name, 'sunny');
-    await repository.updateApplicationAsset(
+    final asset = await repository.updateApplicationAsset(
       application,
       Snowflake('20'),
       const ApplicationAssetDraft(
@@ -116,7 +117,7 @@ void main() {
       ),
     );
     await repository.deleteApplicationAsset(application, Snowflake('20'));
-    await repository.updateApplicationEmoji(
+    final emoji = await repository.updateApplicationEmoji(
       application,
       Snowflake('30'),
       const ApplicationEmojiDraft(name: 'sunny_day'),
@@ -140,7 +141,16 @@ void main() {
       '/api/v1/applications/10@apps.example/emojis/30',
       '/api/v1/applications/10@apps.example/assets/tickets',
     ]);
-    expect(adapter.requests[3].method, 'PATCH');
+    expect(adapter.requests.map((request) => request.method),
+        ['GET', 'GET', 'GET', 'PATCH', 'DELETE', 'PATCH', 'DELETE', 'POST']);
+    expect(asset.id.value, '20');
+    expect(asset.applicationRef, application);
+    expect(asset.name, 'Launch art');
+    expect(asset.kind, ApplicationAssetKind.activity);
+    expect(emoji.id.value, '30');
+    expect(emoji.applicationRef, application);
+    expect(emoji.name, 'sunny_day');
+    expect(emoji.available, isFalse);
     expect(adapter.requests[3].data, <String, Object?>{
       'kind': 'activity',
       'name': 'Launch art',
@@ -179,7 +189,7 @@ void main() {
   test('synchronous commit returns without polling or duplicate commit',
       () async {
     var commits = 0;
-    await completeScannedMediaResource<ApplicationEmoji>(
+    final result = await completeScannedMediaResource<ApplicationEmoji>(
       commit: () async {
         commits += 1;
         return _emojiJson();
@@ -188,6 +198,10 @@ void main() {
       parse: ApplicationEmoji.fromJson,
       pollInterval: Duration.zero,
     );
+    expect(result.id.value, '30');
+    expect(result.applicationRef.wire, '10@apps.example');
+    expect(result.name, 'sunny');
+    expect(result.available, isTrue);
     expect(commits, 1);
   });
 
@@ -195,7 +209,7 @@ void main() {
     await expectLater(
       completeScannedMediaResource<ApplicationEmoji>(
         commit: () async => <String, Object?>{
-          'status': 'rejected',
+          'status': 'processing',
           'attachment': <String, Object?>{'scan_status': 'infected'},
         },
         isComplete: (json) => json['application_ref'] != null,
@@ -299,9 +313,13 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    expect(find.text('Media management is restricted'), findsOneWidget);
     expect(
-      find.textContaining('owners, administrators, and developers'),
+        find.textContaining(
+            RegExp(r'media management.*restrict', caseSensitive: false)),
+        findsOneWidget);
+    expect(
+      find.textContaining(
+          RegExp(r'owners.*administrators.*developers', caseSensitive: false)),
       findsOneWidget,
     );
   });

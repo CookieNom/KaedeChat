@@ -213,13 +213,23 @@ mod tests {
         let challenge = TurnstileChallenge {
             origin,
             site_key: "public-key".to_owned(),
-            action: "kaede-login-v1".to_owned(),
-            request_id: "nonce-1".to_owned(),
+            action: "kaede-login-v1&extra=#".to_owned(),
+            request_id: "nonce +&=#1".to_owned(),
         };
         let Ok(url) = challenge_url(&challenge) else {
             panic!("challenge URL should build");
         };
-        assert_eq!(url.host_str(), Some("chat.example"));
-        assert!(url.as_str().contains("request_id=nonce-1"));
+        assert_eq!(url.origin().ascii_serialization(), "https://chat.example");
+        assert_eq!(url.path(), "/api/v1/auth/native-challenge");
+        assert!(url.fragment().is_none());
+        assert_eq!(
+            url.query_pairs()
+                .into_owned()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            std::collections::BTreeMap::from([
+                ("action".to_owned(), challenge.action),
+                ("request_id".to_owned(), challenge.request_id)
+            ])
+        );
     }
 }

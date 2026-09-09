@@ -128,6 +128,26 @@ async def test_remote_human_route_requires_replica_membership_then_uses_authorit
         target_type="instance",
     )
 
+    member = None
+    remote.reset_mock()
+    with pytest.raises(HTTPException) as denied:
+        await moderation_api.list_audit_logs(
+            EntityRef("10@beta.example"),
+            25,
+            900,
+            None,
+            EntityRef("11@gamma.example"),
+            25,
+            "instance",
+            SimpleNamespace(user=requester),
+            session,
+            SimpleNamespace(),
+            settings,
+        )
+    assert denied.value.status_code == 404
+    assert denied.value.detail == {"code": "GUILD_NOT_FOUND"}
+    remote.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_authority_rechecks_live_requester_permission_and_consumes_nonce(
@@ -212,18 +232,22 @@ async def test_authority_rejects_requester_substitution_and_application_nonce_re
     settings = SimpleNamespace(domain="beta.example", federation_clock_skew_seconds=30)
     principal = FederationPrincipal(origin="alpha.example", key_id="ed25519:test")
 
-    substituted = audit_request().model_copy(update={"requesting_instance": "gamma.example"})
-    with pytest.raises(HTTPException) as mismatch:
-        await moderation_api.federation_guild_audit_logs(
-            10,
-            substituted,
-            principal,
-            SimpleNamespace(),
-            SimpleNamespace(),
-            settings,
-        )
-    assert mismatch.value.status_code == 403
-    assert mismatch.value.detail == {"code": "KAED_FED_AUDIT_LOG_REQUESTER_MISMATCH"}
+    for change in (
+        {"requesting_instance": "gamma.example"},
+        {"requester": audit_request().requester.model_copy(update={"domain": "gamma.example"})},
+    ):
+        substituted = audit_request().model_copy(update=change)
+        with pytest.raises(HTTPException) as mismatch:
+            await moderation_api.federation_guild_audit_logs(
+                10,
+                substituted,
+                principal,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                settings,
+            )
+        assert mismatch.value.status_code == 403
+        assert mismatch.value.detail == {"code": "KAED_FED_AUDIT_LOG_REQUESTER_MISMATCH"}
 
     replay_redis = SimpleNamespace(set=AsyncMock(return_value=False))
     with pytest.raises(HTTPException) as replayed:
@@ -270,7 +294,7 @@ def test_signed_page_validation_rejects_request_filter_and_order_substitution() 
 
 
 @pytest.mark.asyncio
-async def test_remote_page_accepts_only_bounded_home_signed_exact_response(
+async def test_bounded_signed_response_verification_delegation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}

@@ -80,7 +80,6 @@ def test_client_staging_and_server_clean_keys_cannot_alias() -> None:
     final = clean_object_key("alpha.localhost", 123, "a" * 64)
     assert staging == "alpha.localhost/123/staging/original"
     assert final == f"alpha.localhost/123/clean/{'a' * 64}/original"
-    assert staging != final
 
 
 def test_external_s3_presigning_uses_configured_region_and_session_token() -> None:
@@ -167,11 +166,12 @@ async def test_external_bucket_creation_uses_region_and_temporary_credentials(
         requests.append(request)
         if request.method == "HEAD":
             return httpx.Response(404, request=request)
-        assert await request.aread() == (
-            b'<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
-            b"<LocationConstraint>us-west-004</LocationConstraint>"
-            b"</CreateBucketConfiguration>"
-        )
+        from xml.etree import ElementTree
+
+        document = ElementTree.fromstring(await request.aread())  # noqa: S314 -- locally generated request
+        namespace = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert document.tag == namespace + "CreateBucketConfiguration"
+        assert document.findtext(namespace + "LocationConstraint") == "us-west-004"
         return httpx.Response(200, request=request)
 
     original_client = httpx.AsyncClient
@@ -375,6 +375,12 @@ def test_guild_payload_exposes_safe_replica_health_without_internal_detail() -> 
     assert payload["sync_error_code"] == "KAED_FED_REPLICA_QUOTA_EXCEEDED"
     assert "sync_error" not in payload
 
+    guild.sync_error_code = "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED"
+    payload = guild_payload(guild)
+    assert payload["sync_error_code"] == "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED"
+    assert "sync_error" not in payload
+    assert "internal database sizing detail" not in str(payload)
+
 
 @pytest.mark.parametrize(
     ("kind", "purpose", "field"),
@@ -453,6 +459,8 @@ async def test_guild_asset_commit_refreshes_server_version_before_render(
     def render_guild(value: Guild) -> dict[str, object]:
         # A synchronous serializer must never be the operation that triggers
         # an async lazy load for PostgreSQL's expired ``updated_at`` value.
+        assert value is guild
+        assert value.updated_at == datetime(2026, 8, 11, tzinfo=UTC)
         assert "refresh" in calls
         calls.append("render")
         return original_guild_payload(value)
@@ -482,7 +490,7 @@ async def test_guild_asset_commit_refreshes_server_version_before_render(
     assert calls[:3] == ["flush", "refresh", "render"]
 
 
-async def test_role_icon_commit_binds_digest_and_publishes_role_update(
+async def test_role_icon_mutation_queueing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     digest = "c" * 64
@@ -592,10 +600,6 @@ async def test_role_icon_commit_binds_digest_and_publishes_role_update(
     assert mutations == [("guild.role.update", {"role": rendered})]
 
 
-def test_role_icons_only_generate_the_compact_chat_derivative() -> None:
-    assert image_derivative_sizes("role_icon") == (128,)
-
-
 @pytest.mark.parametrize(("kind", "field"), (("avatar", "avatar_hash"), ("banner", "banner_hash")))
 async def test_user_asset_commit_updates_each_profile_image_kind(
     monkeypatch: pytest.MonkeyPatch, kind: str, field: str
@@ -636,8 +640,7 @@ async def test_user_asset_commit_updates_each_profile_image_kind(
     async def finalize_attachment(*args: object, **kwargs: object) -> Attachment:
         return attachment
 
-    async def bind_asset(*args: object, **kwargs: object) -> None:
-        return None
+    bind_asset = AsyncMock(return_value=None)
 
     async def friend_updates(*args: object, **kwargs: object) -> set[str]:
         return set()
@@ -650,12 +653,13 @@ async def test_user_asset_commit_updates_each_profile_image_kind(
     monkeypatch.setattr(media_api, "queue_profile_updates", friend_updates)
     monkeypatch.setattr(media_api, "publish_dispatch", no_op)
 
+    session = Session()
     rendered = await media_api.commit_user_asset(
         kind=kind,  # type: ignore[arg-type]
         payload=media_api.AssetCommitRequest(attachment_id=str(attachment.id)),
         response=Response(),
         auth=SimpleNamespace(user=user),  # type: ignore[arg-type]
-        session=Session(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
         redis=object(),  # type: ignore[arg-type]
         settings=settings(),
     )
@@ -663,6 +667,10 @@ async def test_user_asset_commit_updates_each_profile_image_kind(
     assert getattr(user, field) == digest
     assert user.profile_version == 2
     assert rendered["id"] == str(attachment.id)
+
+    bind_asset.assert_awaited_once_with(
+        session, attachment, f"user:alpha.localhost:{user.id}:{kind}"
+    )
 
 
 def test_missing_image_derivative_falls_back_to_scanned_original() -> None:
@@ -713,7 +721,8 @@ def test_legacy_animated_image_derivatives_are_marked_for_repair() -> None:
     assert image_derivatives_are_current(attachment)
 
 
-def test_compact_profile_assets_require_only_their_display_variant() -> None:
+@pytest.mark.parametrize("purpose", ["avatar", "role_icon"])
+def test_compact_profile_assets_require_only_their_display_variant(purpose: str) -> None:
     attachment = Attachment(
         id=32,
         origin_domain="alpha.localhost",
@@ -731,20 +740,20 @@ def test_compact_profile_assets_require_only_their_display_variant() -> None:
             }
         },
         scan_status="clean",
-        purpose="avatar",
+        purpose=purpose,
     )
 
-    assert image_derivative_sizes("avatar") == (128,)
+    assert image_derivative_sizes(purpose) == (128,)
     assert image_derivatives_are_current(attachment)
 
 
-def test_webhook_tokens_are_prefixed_random_and_only_stored_as_digests() -> None:
+def test_webhook_token_generation_returns_distinct_tokens_and_hashes() -> None:
     first = new_webhook_token()
     second = new_webhook_token()
     assert first.startswith("kwh_")
     assert first != second
     assert len(token_digest(first)) == 32
-    assert first.encode() not in token_digest(first)
+    assert token_digest(first) != token_digest(second)
 
 
 def test_image_pipeline_emits_safe_metadata_and_preserves_animation() -> None:
@@ -779,9 +788,8 @@ def test_image_pipeline_emits_safe_metadata_and_preserves_animation() -> None:
             rendered.seek(1)
             second_frame = rendered.convert("RGB").getpixel((0, 0))
             assert first_frame != second_frame
-    # Variants that resolve to the same dimensions reuse one expensive
-    # animated WebP encode while retaining both public variant names.
-    assert derivatives[1].content is derivatives[2].content
+    # Equal-sized variants preserve equivalent encoded content.
+    assert derivatives[1].content == derivatives[2].content
 
 
 def test_sticker_crop_preserves_animation_timing() -> None:

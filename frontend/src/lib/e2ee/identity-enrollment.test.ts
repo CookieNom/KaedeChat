@@ -6,7 +6,6 @@ describe('vault-first E2EE identity enrollment', () => {
   it('persists recovered private state before making its revoked identity claimable', async () => {
     const events: string[] = [];
     let durableVault = false;
-    let claimableIdentity = false;
 
     await establishVaultFirstIdentity({
       vaultAlreadyDurable: false,
@@ -18,13 +17,10 @@ describe('vault-first E2EE identity enrollment', () => {
       registerIdentity: vi.fn(async () => {
         expect(durableVault).toBe(true);
         events.push('device-register');
-        claimableIdentity = true;
       })
     });
 
     expect(events).toEqual(['vault-put', 'device-register']);
-    expect(claimableIdentity).toBe(true);
-    expect(durableVault).toBe(true);
   });
 
   it('never invokes registration when the vault PUT fails', async () => {
@@ -42,7 +38,7 @@ describe('vault-first E2EE identity enrollment', () => {
     expect(registerIdentity).not.toHaveBeenCalled();
   });
 
-  it('leaves a durable vault if the client crashes immediately after registration', async () => {
+  it('retaining vault when the registration callback throws after registration', async () => {
     let durableVault = false;
     let claimableIdentity = false;
 

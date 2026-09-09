@@ -127,7 +127,7 @@ def test_interaction_hydrates_discord_event_metadata_and_source_message() -> Non
     }
     assert current.member is not None
     assert current.member.permissions == 274877906944
-    assert current.user is current.member.user
+    assert current.user == current.member.user
     assert isinstance(current.message, Message)
     assert current.message_ref == EntityRef(20, "guild.example")
 
@@ -378,6 +378,24 @@ async def test_same_snowflake_view_dispatch_uses_event_authority() -> None:
     )
 
     assert calls == ["first:one.example", "second:two.example"]
+    for authority, token in [("one.example", "a" * 43), ("two.example", "b" * 43)]:
+        assert (
+            bot._interaction_lifecycle_headers_for_path(
+                "/api/v1/bots/interactions/90/callback",
+                origin="https://" + authority,
+            )["X-Kaede-Interaction-Token"]
+            == token
+        )
+    bot.remove_response_view(42, target="https://one.example")
+    assert EntityRef(42, "one.example") not in bot._response_views
+    assert bot._response_views[EntityRef(42, "two.example")] is second
+    for authority, token in [("one.example", "a" * 43), ("two.example", "b" * 43)]:
+        await bot.dispatch(
+            "INTERACTION_CREATE",
+            component_event(authority=authority, token=token),
+            target="https://" + authority,
+        )
+    assert calls == ["first:one.example", "second:two.example", "second:two.example"]
 
 
 @pytest.mark.parametrize(
@@ -430,6 +448,13 @@ async def test_interaction_upload_preflights_event_attachment_limit() -> None:
         )
 
     bot.upload_interaction_attachment.assert_not_awaited()
+    expected = object()
+    bot.upload_interaction_attachment.return_value = expected
+    actual = await current.upload_attachment(
+        b"abc", filename="fits.bin", content_type="application/octet-stream"
+    )
+    assert actual is expected
+    assert bot.upload_interaction_attachment.await_args.args[1] == b"abc"
 
 
 @pytest.mark.asyncio

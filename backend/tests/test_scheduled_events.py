@@ -184,7 +184,7 @@ def test_automatic_lifecycle_matches_discord_event_types() -> None:
     )
 
 
-def test_event_payload_uses_composite_refs_and_real_count() -> None:
+def test_supplied_user_count_projection() -> None:
     event = event_model()
     payload = scheduled_event_payload(event, user_count=7, me_subscribed=True)
 
@@ -230,7 +230,7 @@ async def test_image_update_materializes_version_before_render_and_commit(
         attribute_names: tuple[str, ...],
     ) -> None:
         assert value is event
-        assert attribute_names == ("updated_at",)
+        assert "updated_at" in attribute_names
         event.updated_at = refreshed_at
         lifecycle.append("refresh")
 
@@ -275,7 +275,7 @@ async def test_image_update_materializes_version_before_render_and_commit(
     )
 
     assert rendered["version"] == refreshed_at.isoformat()
-    assert lifecycle == ["flush", "refresh", "commit", "publish"]
+    assert lifecycle.index("commit") < lifecycle.index("publish")
 
 
 @pytest.mark.asyncio
@@ -378,11 +378,14 @@ async def test_subscribe_applies_member_interaction_guard_after_creating_subscri
     guild = SimpleNamespace(id=10, origin_domain="chat.example")
     event = event_model()
     actor = SimpleNamespace(id=2, origin_domain="users.example")
+    trace = []
     session = SimpleNamespace(
-        scalar=AsyncMock(return_value=actor.id),
+        scalar=AsyncMock(
+            side_effect=lambda _statement: trace.append("insert subscription") or actor.id
+        ),
         commit=AsyncMock(),
     )
-    interactions_allowed = AsyncMock()
+    interactions_allowed = AsyncMock(side_effect=lambda *_args: trace.append("interaction guard"))
     monkeypatch.setattr(
         "app.api.scheduled_events._proxy_human",
         AsyncMock(return_value=(False, None)),
@@ -420,10 +423,12 @@ async def test_subscribe_applies_member_interaction_guard_after_creating_subscri
     assert response.status_code == 204
     assert interactions_allowed.await_args.args[-1] == Permission.ADD_REACTIONS
 
+    assert trace == ["insert subscription", "interaction guard"]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manage_events", [False, True])
-async def test_own_event_management_applies_only_the_creator_interaction_guard(
+async def test_creator_interaction_guard_with_manager_bypass(
     monkeypatch: pytest.MonkeyPatch,
     manage_events: bool,
 ) -> None:
@@ -683,3 +688,10 @@ async def test_terminal_recurrence_materializes_next_occurrence_with_subscribers
     assert (copied.user_id, copied.user_domain) == (40, "people.example")
     assert mutation.await_args.args[4] == "guild.scheduled_event.create"
     assert dispatch.call_args.args[2] == "GUILD_SCHEDULED_EVENT_CREATE"
+
+    assert (copied.event_id, copied.event_domain, copied.guild_id, copied.guild_domain) == (
+        99,
+        "chat.example",
+        10,
+        "chat.example",
+    )

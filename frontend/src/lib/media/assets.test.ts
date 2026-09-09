@@ -13,9 +13,9 @@ describe('assetUrl', () => {
   });
 
   it('uses the authoritative instance for a remote asset', () => {
-    expect(assetUrl(hash, 'thumbnail_128', 'beta.example')).toBe(
-      `https://beta.example/media/assets/${hash}/thumbnail_128?v=2`
-    );
+    const url = new URL(assetUrl(hash, 'thumbnail_128', 'beta.example')!);
+    expect(url.origin).toBe('https://beta.example');
+    expect(url.pathname).toBe(`/media/assets/${hash}/thumbnail_128`);
   });
 
   it('uses the selected home instance for ownerless assets in the desktop app', () => {
@@ -27,9 +27,9 @@ describe('assetUrl', () => {
       location: { hostname: '127.0.0.1' }
     });
 
-    expect(assetUrl(hash, 'thumbnail_128')).toBe(
-      `https://kaede.chat/media/assets/${hash}/thumbnail_128?v=2`
-    );
+    const url = new URL(assetUrl(hash, 'thumbnail_128')!);
+    expect(url.origin).toBe('https://kaede.chat');
+    expect(url.pathname).toBe(`/media/assets/${hash}/thumbnail_128`);
   });
 
   it('rejects values that cannot be safe route segments', () => {

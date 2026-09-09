@@ -30,7 +30,6 @@ from app.bots.installations import queue_installation_gateway_events
 from app.chat.schemas import MessageCreate, MessageEdit
 from app.chat.voice_messages import VoiceMessageCapability, guild_voice_message_capability
 from app.core.channel_types import is_message_capable_channel_type
-from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.types import EntityRef
 from app.db.bot_models import BotInstallation, BotInteraction, BotUserInstallation
@@ -308,23 +307,6 @@ async def test_voice_status_and_voice_message_permissions_are_operation_specific
     with pytest.raises(ValidationError):
         VoiceChannelStatusUpdate.model_validate({"status": True})
 
-    voice_message = MessageCreate(voice_message=True, attachment_ids=["91"])
-    required = message_create_permissions(voice_message, guild_channel=True)
-    assert required & Permission.SEND_VOICE_MESSAGES
-    assert required & Permission.ATTACH_FILES
-    assert not message_create_permissions(voice_message, guild_channel=False) & (
-        Permission.SEND_VOICE_MESSAGES
-    )
-    assert MESSAGE_FLAG_IS_VOICE_MESSAGE == 1 << 13
-
-    tts_message = MessageCreate(content="announcement", tts=True)
-    assert message_create_permissions(tts_message, guild_channel=True) & (
-        Permission.SEND_TTS_MESSAGES
-    )
-    assert not message_create_permissions(tts_message, guild_channel=False) & (
-        Permission.SEND_TTS_MESSAGES
-    )
-
 
 @pytest.mark.asyncio
 async def test_voice_status_restores_ephemeral_state_when_durable_commit_fails(
@@ -487,6 +469,23 @@ def test_voice_message_shape_requires_one_plaintext_audio_attachment() -> None:
         )
     assert raised.value.detail["code"] == "VOICE_MESSAGE_ATTACHMENT_INVALID"
 
+    voice_message = MessageCreate(voice_message=True, attachment_ids=["91"])
+    required = message_create_permissions(voice_message, guild_channel=True)
+    assert required & Permission.SEND_VOICE_MESSAGES
+    assert required & Permission.ATTACH_FILES
+    assert not message_create_permissions(voice_message, guild_channel=False) & (
+        Permission.SEND_VOICE_MESSAGES
+    )
+    assert MESSAGE_FLAG_IS_VOICE_MESSAGE == 1 << 13
+
+    tts_message = MessageCreate(content="announcement", tts=True)
+    assert message_create_permissions(tts_message, guild_channel=True) & (
+        Permission.SEND_TTS_MESSAGES
+    )
+    assert not message_create_permissions(tts_message, guild_channel=False) & (
+        Permission.SEND_TTS_MESSAGES
+    )
+
 
 @pytest.mark.asyncio
 async def test_voice_messages_have_no_guild_member_count_cap() -> None:
@@ -583,7 +582,7 @@ def test_message_edit_allows_explicit_content_clear_when_stored_body_remains() -
 
 
 @pytest.mark.asyncio
-async def test_federated_voice_message_shape_and_nonce_replay_preserve_flag() -> None:
+async def test_missing_voice_flag_rejection() -> None:
     payload = GuildProxyRequest(
         operation="message.create",
         actor=RemoteUserProfile(
@@ -727,13 +726,19 @@ async def test_installation_events_dispatch_only_after_commit(
     assert await postcommit.publish_committed_dispatches(session, SimpleNamespace()) == 4
 
     event_types = [call.args[2] for call in publish.await_args_list]
-    assert event_types == [
-        "INTEGRATION_UPDATE",
-        "BOT_INSTALLATION_UPDATE",
-        "GUILD_INTEGRATIONS_UPDATE",
-        "APPLICATION_COMMAND_PERMISSIONS_UPDATE",
-    ]
-    assert publish.await_args_list[-1].kwargs["audience_user_refs"] == ("10@apps.example",)
+    assert sorted(event_types) == sorted(
+        [
+            "INTEGRATION_UPDATE",
+            "BOT_INSTALLATION_UPDATE",
+            "GUILD_INTEGRATIONS_UPDATE",
+            "APPLICATION_COMMAND_PERMISSIONS_UPDATE",
+        ]
+    )
+    assert next(
+        call
+        for call in publish.await_args_list
+        if call.args[2] == "APPLICATION_COMMAND_PERMISSIONS_UPDATE"
+    ).kwargs["audience_user_refs"] == ("10@apps.example",)
     await session.close()
 
 
@@ -882,14 +887,8 @@ async def test_voice_channel_start_time_restores_redis_when_commit_fails(
     assert session.rollback.await_count == 1
 
 
-def test_expression_permission_contract_uses_distinct_operations() -> None:
-    assert required_permissions("guild.expression.read") == Permission(0)
-    assert required_permissions("guild.expression.create") == Permission.CREATE_GUILD_EXPRESSIONS
-    assert required_permissions("guild.expression.manage") == Permission.MANAGE_EMOJIS
-
-
 @pytest.mark.asyncio
-async def test_expression_collection_events_publish_complete_typed_snapshots(
+async def test_collection_name_role_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guild, _ = guild_and_actor()

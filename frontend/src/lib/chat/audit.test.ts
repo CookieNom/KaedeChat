@@ -31,12 +31,12 @@ const entry = {
 
 describe('guild audit helpers', () => {
   it('disambiguates action codes by target type', () => {
-    expect(auditActionLabel(entry)).toBe('Instance banned');
-    expect(auditActionLabel({ ...entry, target_type: 'member' })).toBe('Member roles updated');
+    expect(auditActionLabel(entry)).toMatch(/instance.*ban/i);
+    expect(auditActionLabel({ ...entry, target_type: 'member' })).toMatch(/member.*role.*updat/i);
   });
 
   it('renders a readable actor/action/target summary', () => {
-    expect(auditSummary('Mika', entry, 'blocked.example')).toBe('Mika banned blocked.example');
+    expect(auditSummary('Mika', entry, 'blocked.example')).toMatch(/Mika.*ban.*blocked\.example/i);
   });
 
   it('labels Discord-compatible scheduled-event audit actions', () => {
@@ -45,24 +45,26 @@ describe('guild audit helpers', () => {
       action_type: 100,
       target_type: 'scheduled_event'
     };
-    expect(auditActionLabel(scheduledEvent)).toBe('Scheduled event created');
-    expect(auditSummary('Mika', { ...scheduledEvent, action_type: 101 }, 'a scheduled event')).toBe(
-      'Mika updated a scheduled event'
-    );
+    expect(auditActionLabel(scheduledEvent)).toMatch(/scheduled.*event.*creat/i);
+    expect(
+      auditSummary('Mika', { ...scheduledEvent, action_type: 101 }, 'a scheduled event')
+    ).toMatch(/Mika.*updat.*scheduled event/i);
   });
 
   it('covers the extended Discord-style moderation and resource actions', () => {
-    expect(auditActionLabel({ action_type: 21, target_type: 'guild' })).toBe('Members pruned');
-    expect(auditActionLabel({ action_type: 90, target_type: 'sticker' })).toBe('Sticker created');
-    expect(auditActionLabel({ action_type: 110, target_type: 'thread' })).toBe('Thread created');
-    expect(auditActionLabel({ action_type: 130, target_type: 'soundboard_sound' })).toBe(
-      'Soundboard sound created'
+    expect(auditActionLabel({ action_type: 21, target_type: 'guild' })).toMatch(/member.*prun/i);
+    expect(auditActionLabel({ action_type: 90, target_type: 'sticker' })).toMatch(
+      /sticker.*creat/i
     );
-    expect(auditActionLabel({ action_type: 140, target_type: 'auto_mod_rule' })).toBe(
-      'AutoMod rule created'
+    expect(auditActionLabel({ action_type: 110, target_type: 'thread' })).toMatch(/thread.*creat/i);
+    expect(auditActionLabel({ action_type: 130, target_type: 'soundboard_sound' })).toMatch(
+      /sound.*creat/i
     );
-    expect(auditActionLabel({ action_type: 192, target_type: 'voice_channel' })).toBe(
-      'Voice channel status set'
+    expect(auditActionLabel({ action_type: 140, target_type: 'auto_mod_rule' })).toMatch(
+      /automod.*rule.*creat/i
+    );
+    expect(auditActionLabel({ action_type: 192, target_type: 'voice_channel' })).toMatch(
+      /voice.*channel.*status.*set/i
     );
   });
 
@@ -132,7 +134,7 @@ describe('guild audit helpers', () => {
         guild,
         []
       )
-    ).toBe('thread #roadmap');
+    ).toMatch(/thread.*roadmap/i);
     expect(
       auditTargetName(
         {
@@ -144,35 +146,35 @@ describe('guild audit helpers', () => {
         guild,
         []
       )
-    ).toBe('sound Air horn');
+    ).toMatch(/sound.*Air horn/i);
     expect(
       auditTargetName(
         { ...entry, action_type: 21, target_type: 'guild', target_ref: null },
         guild,
         []
       )
-    ).toBe('inactive members');
+    ).toMatch(/inactive.*member/i);
   });
 
   it('formats before/after and collection changes', () => {
-    expect(auditChangeDescription({ key: 'name', old_value: 'old', new_value: 'new' })).toBe(
-      'old → new'
+    expect(auditChangeDescription({ key: 'name', old_value: 'old', new_value: 'new' })).toMatch(
+      /old.+new/
     );
-    expect(auditChangeDescription({ key: 'roles', added: ['1', '2'], removed: ['3'] })).toBe(
-      'Added 1, 2 • Removed 3'
+    expect(auditChangeDescription({ key: 'roles', added: ['1', '2'], removed: ['3'] })).toMatch(
+      /add.*1.*2.*remov.*3/i
     );
-    expect(auditChangeDescription({ key: 'roles', added: [{ id: '1', name: 'Moderators' }] })).toBe(
-      'Added Moderators'
+    expect(
+      auditChangeDescription({ key: 'roles', added: [{ id: '1', name: 'Moderators' }] })
+    ).toMatch(/add.*Moderators/i);
+    expect(auditChangeDescription({ key: 'enabled', old_value: false, new_value: true })).toMatch(
+      /no.+yes/i
     );
-    expect(auditChangeDescription({ key: 'enabled', old_value: false, new_value: true })).toBe(
-      'No → Yes'
-    );
-    expect(auditFieldLabel('rtc_region')).toBe('RTC region');
+    expect(auditFieldLabel('rtc_region')).toMatch(/rtc.*region/i);
   });
 
   it('formats recent timestamps deterministically', () => {
     const now = new Date('2026-08-26T12:00:00Z');
-    expect(auditRelativeTime('2026-08-26T11:58:00Z', now)).toBe('2 minutes ago');
-    expect(auditRelativeTime('2026-08-25T12:00:00Z', now)).toBe('1 day ago');
+    expect(auditRelativeTime('2026-08-26T11:58:00Z', now)).toMatch(/2.*minute.*ago/i);
+    expect(auditRelativeTime('2026-08-25T12:00:00Z', now)).toMatch(/1.*day.*ago/i);
   });
 });

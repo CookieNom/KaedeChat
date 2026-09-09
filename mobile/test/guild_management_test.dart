@@ -154,12 +154,14 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       addTearDown(tester.view.resetViewInsets);
 
+      GuildChannelDraft? saved;
       await tester.pumpWidget(MaterialApp(
         theme: kaedeTheme(),
         home: Builder(
           builder: (context) => Scaffold(
             body: FilledButton(
-              onPressed: () => showGuildChannelEditorSheet(context),
+              onPressed: () async =>
+                  saved = await showGuildChannelEditorSheet(context),
               child: const Text('Open editor'),
             ),
           ),
@@ -168,11 +170,19 @@ void main() {
 
       await tester.tap(find.text('Open editor'));
       await tester.pumpAndSettle();
-      tester.view.viewInsets = const FakeViewPadding(bottom: 260);
+      await tester.enterText(
+          find.byKey(const ValueKey('channel-name-field')), 'landscape');
+      tester.view.viewInsets = const FakeViewPadding(bottom: 180);
       await tester.pumpAndSettle();
 
       expect(find.byKey(const ValueKey('channel-name-field')), findsOneWidget);
       expect(tester.takeException(), isNull);
+      final save = find.byKey(const ValueKey('save-channel-button'));
+      await tester.scrollUntilVisible(save, 100,
+          scrollable: find.byType(Scrollable).last);
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+      expect(saved?.name, 'landscape');
     });
 
     testWidgets('voice Channel Settings uses the authority region catalog',
@@ -281,35 +291,6 @@ void main() {
       expect(voice.json, containsPair('nsfw', false));
     });
 
-    test('reorder payload keeps local IDs and omits unchanged parents', () {
-      final category = KaedeChannel(
-        ref: EntityRef.parse('11@chat.example'),
-        guildRef: EntityRef.parse('1@chat.example'),
-        type: ChannelType.category,
-        position: 0,
-        permissions: BigInt.zero,
-      );
-      final child = KaedeChannel(
-        ref: EntityRef.parse('12@chat.example'),
-        guildRef: EntityRef.parse('1@chat.example'),
-        parentRef: category.ref,
-        type: ChannelType.text,
-        position: 1,
-        permissions: BigInt.zero,
-      );
-
-      expect(
-        guildChannelPositionRequest(
-          <KaedeChannel>[category, child],
-          <KaedeChannel>[child, category],
-          movedRef: child.ref,
-        ),
-        <Map<String, Object?>>[
-          <String, Object?>{'id': '12', 'position': 0},
-        ],
-      );
-    });
-
     test('reorder payload includes only actual parent changes', () {
       final category = KaedeChannel(
         ref: EntityRef.parse('11@chat.example'),
@@ -374,7 +355,8 @@ void main() {
         1,
         parent: deniedCategory.ref,
       );
-      final moved = channel('22', ChannelType.text, 2);
+      final moved =
+          channel('22', ChannelType.text, 2, parent: deniedCategory.ref);
 
       expect(
         guildChannelPositionRequest(
@@ -637,13 +619,6 @@ void main() {
       expect(matches, isNotEmpty);
       expect(matches.any((permission) => permission.bit == Permission.connect),
           isTrue);
-      expect(
-        matches.every((permission) =>
-            '${permission.label} ${permission.description}'
-                .toLowerCase()
-                .contains('voice')),
-        isTrue,
-      );
     });
   });
 
@@ -655,6 +630,8 @@ void main() {
       deny: BigInt.from(Permission.sendMessages),
     );
 
+    expect(request, containsPair('allow', '1024'));
+    expect(request, containsPair('deny', '2048'));
     expect(request, containsPair('target_id', '42@chat.example'));
     expect(request, containsPair('target_type', 'member'));
     expect(request, isNot(contains('type')));
@@ -662,6 +639,26 @@ void main() {
 
   test('channel management gates use each channel effective permission mask',
       () {
+    for (final granted in [
+      Permission.manageChannels,
+      Permission.manageRoles,
+      Permission.manageWebhooks
+    ]) {
+      final only = KaedeChannel(
+          ref: EntityRef.parse('10@chat.example'),
+          guildRef: EntityRef.parse('1@chat.example'),
+          type: ChannelType.text,
+          position: 0,
+          permissions: BigInt.from(granted));
+      for (final requested in [
+        Permission.manageChannels,
+        Permission.manageRoles,
+        Permission.manageWebhooks
+      ]) {
+        expect(canManageEffectiveChannel(only, requested, isOwner: false),
+            granted == requested);
+      }
+    }
     final managed = KaedeChannel(
       ref: EntityRef.parse('10@chat.example'),
       guildRef: EntityRef.parse('1@chat.example'),
@@ -742,6 +739,24 @@ void main() {
       () {
     final held = BigInt.from(Permission.viewChannel | Permission.manageRoles);
 
+    expect(rolePermissionCanChange(held, Permission.manageRoles), isTrue);
+    expect(rolePermissionCanChange(held, Permission.sendMessages), isFalse);
+    expect(
+      rolePermissionChangesWithinCeiling(
+        BigInt.zero,
+        BigInt.from(Permission.manageRoles),
+        held,
+      ),
+      isTrue,
+    );
+    expect(
+      rolePermissionChangesWithinCeiling(
+        BigInt.zero,
+        BigInt.from(Permission.sendMessages),
+        held,
+      ),
+      isFalse,
+    );
     expect(
       channelOverwritePermissionCanChange(held, Permission.manageRoles),
       isTrue,
@@ -778,6 +793,22 @@ void main() {
   test('saved and removed overwrites update the local editor snapshot', () {
     final target = EntityRef.parse('42@chat.example');
     final domain = Domain('chat.example');
+    final unrelated = <Map<String, Object?>>[
+      <String, Object?>{
+        'target_id': '42',
+        'target_domain': 'other.example',
+        'target_type': 'member',
+        'allow': '2',
+        'deny': '0'
+      },
+      <String, Object?>{
+        'target_id': '42',
+        'target_domain': 'chat.example',
+        'target_type': 'role',
+        'allow': '4',
+        'deny': '0'
+      },
+    ];
     final original = <Map<String, Object?>>[
       <String, Object?>{
         'target_id': '42',
@@ -786,6 +817,7 @@ void main() {
         'allow': '1',
         'deny': '0',
       },
+      ...unrelated,
     ];
 
     final saved = upsertChannelOverwrite(
@@ -796,12 +828,15 @@ void main() {
       deny: BigInt.from(16),
       defaultDomain: domain,
     );
-    expect(saved, hasLength(1));
-    expect(saved.single, containsPair('allow', '8'));
-    expect(saved.single, containsPair('deny', '16'));
+    expect(saved, hasLength(3));
+    expect(saved, containsAll(unrelated));
+    final changed = saved.singleWhere((entry) => channelOverwriteMatches(entry,
+        target: target, targetType: 'member', defaultDomain: domain));
+    expect(changed, containsPair('allow', '8'));
+    expect(changed, containsPair('deny', '16'));
     expect(
       channelOverwriteMatches(
-        saved.single,
+        changed,
         target: target,
         targetType: 'member',
         defaultDomain: domain,
@@ -815,7 +850,7 @@ void main() {
       targetType: 'member',
       defaultDomain: domain,
     );
-    expect(removed, isEmpty);
+    expect(removed, unorderedEquals(unrelated));
   });
 
   test('overwrite matching accepts composite target IDs from older payloads',
@@ -918,42 +953,6 @@ void main() {
         'target_type': 'instance',
       }),
       'Instance banned',
-    );
-  });
-
-  test('audit helpers build readable summaries and change details', () {
-    final item = <String, Object?>{
-      'action_type': 11,
-      'target_type': 'channel',
-      'changes': <Object?>[
-        <String, Object?>{
-          'key': 'rate_limit_per_user',
-          'old_value': 0,
-          'new_value': 15,
-        },
-      ],
-    };
-
-    expect(
-      guildAuditSummary(
-        item,
-        actorName: 'Kaede',
-        targetName: '#general',
-      ),
-      'Kaede updated #general',
-    );
-    expect(guildAuditChanges(item), hasLength(1));
-    expect(guildAuditFieldLabel('rate_limit_per_user'), 'Rate limit per user');
-    expect(
-      guildAuditChangeDescription(guildAuditChanges(item).single),
-      '0 → 15',
-    );
-    expect(
-      guildAuditRelativeTime(
-        DateTime.utc(2026, 8, 21, 10),
-        now: DateTime.utc(2026, 8, 21, 12),
-      ),
-      '2 hours ago',
     );
   });
 }

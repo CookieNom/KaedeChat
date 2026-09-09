@@ -87,7 +87,7 @@ async def test_rule_create_queues_gateway_event_before_commit(
         commit=AsyncMock(side_effect=lambda: lifecycle.append("commit")),
     )
     rendered = {"id": "20", "origin_domain": "home.example"}
-    queued_dispatch = Mock()
+    queued_dispatch = Mock(side_effect=lambda *_args: lifecycle.append("queue"))
     monkeypatch.setattr(
         "app.automod.service._require_rule_capacity",
         AsyncMock(),
@@ -127,7 +127,7 @@ async def test_rule_create_queues_gateway_event_before_commit(
     )
     session.commit.assert_awaited_once()
     publish.assert_awaited_once_with(session, redis)
-    assert lifecycle == ["commit", "publish"]
+    assert lifecycle == ["queue", "commit", "publish"]
 
 
 @pytest.mark.asyncio
@@ -300,17 +300,28 @@ def test_presets_and_spam_are_functional() -> None:
         "keyword_preset", {"presets": ["profanity"]}, "this is bullshit"
     ).matched
     assert evaluate_trigger("spam", {}, " ".join(["repeat"] * 8)).matched
-
-
-def test_user_regexes_run_in_linear_time_and_reject_unsupported_syntax() -> None:
-    # This shape is catastrophic in Python's backtracking ``re`` engine. RE2
-    # evaluates it in linear time even against the maximum inspected body.
-    rule = _rule(trigger_metadata={"regex_patterns": ["(a+)+$"]})
     assert not evaluate_trigger(
-        "keyword",
-        rule.trigger_metadata.model_dump(mode="json"),
-        "a" * 3_999 + "!",
+        "keyword_preset", {"presets": ["profanity"]}, "Good morning everyone"
     ).matched
+    assert not evaluate_trigger("spam", {}, "Good morning everyone").matched
+
+
+def test_user_regexes_complete_bounded_pathological_input_and_reject_unsupported_syntax() -> None:
+    # A subprocess deadline catches accidental backtracking without a timing benchmark.
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from app.automod.engine import evaluate_trigger; "
+            "assert not evaluate_trigger('keyword', {'regex_patterns': ['(a+)+$']}, "
+            "'a' * 3999 + '!').matched",
+        ],
+        check=True,
+        timeout=10,
+    )
 
     with pytest.raises(ValidationError, match="lookarounds"):
         _rule(trigger_metadata={"regex_patterns": [r"secret(?=token)"]})

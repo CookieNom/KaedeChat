@@ -25,6 +25,21 @@ async def test_known_pending_join_makes_pre_snapshot_events_retryable() -> None:
 
     assert pending
 
+    assert session.scalar.await_args.args[0].compile().params == {
+        "guild_id_1": 100,
+        "guild_domain_1": "alpha.localhost",
+        "user_domain_1": "gamma.localhost",
+        "state_1": "joining",
+        "param_1": 1,
+    }
+    session.scalar.return_value = None
+    assert not await federation_api.remote_guild_snapshot_is_pending(
+        cast(Any, session),
+        cast(Settings, SimpleNamespace(domain="gamma.localhost")),
+        100,
+        "alpha.localhost",
+    )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("inserted", "returns_message"), [(300, True), (None, False)])

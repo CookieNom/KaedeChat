@@ -127,6 +127,11 @@ async def test_stage_instance_lifecycle_uses_bot_routes_and_typed_model() -> Non
             "Invalid",
             privacy_level=True,  # type: ignore[arg-type]
         )
+    calls = bot.request.await_args_list
+    assert calls[1].args[:2] == ("GET", "/api/v1/bots/stage-instances/30@chat.example")
+    for index, reason in [(0, "open stage"), (2, "next segment"), (3, "finished")]:
+        assert calls[index].kwargs["headers"] == {"X-Audit-Log-Reason": reason}
+    assert all(call.kwargs["target"] == "https://chat.example" for call in calls)
 
 
 @pytest.mark.asyncio
@@ -176,6 +181,24 @@ async def test_stage_voice_state_get_self_request_and_moderation_routes() -> Non
     }
     assert bot.request.await_args_list[4].kwargs["json"]["suppress"] is False
     assert bot.request.await_args_list[5].kwargs["json"]["suppress"] is True
+    calls = bot.request.await_args_list
+    base = "/api/v1/bots/guilds/10@chat.example/voice-states/"
+    assert [call.args[:2] for call in calls] == [
+        ("GET", base + "@me"),
+        ("GET", base + "40@people.example"),
+        ("PATCH", base + "@me"),
+        ("PATCH", base + "@me"),
+        ("PATCH", base + "40@people.example"),
+        ("PATCH", base + "40@people.example"),
+    ]
+    assert all(call.kwargs["target"] == "https://chat.example" for call in calls)
+    assert member.user_ref == USER
+    assert current.channel_ref == CHANNEL
+    for call, suppress in zip(calls[4:], [False, True], strict=True):
+        assert call.kwargs["json"] == {
+            "channel_id": "30@chat.example",
+            "suppress": suppress,
+        }
 
 
 @pytest.mark.asyncio

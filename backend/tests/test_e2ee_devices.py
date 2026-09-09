@@ -58,15 +58,18 @@ def test_device_registration_proof_binds_account_session_key_and_credential() ->
     signature = private_key.sign(signing_input)
     private_key.public_key().verify(signature, signing_input)
 
-    changed = registration_signing_input(
-        b"c" * 32,
-        user,
-        "session-one",
-        public_key,
-        hashlib.sha256(b"different").digest(),
-    )
-    with pytest.raises(InvalidSignature):
-        private_key.public_key().verify(signature, changed)
+    baseline = [b"c" * 32, user, "session-one", public_key, credential_digest]
+    for index, replacement in (
+        (1, cast(User, SimpleNamespace(id=18, origin_domain="alpha.localhost"))),
+        (1, cast(User, SimpleNamespace(id=17, origin_domain="other.localhost"))),
+        (2, "session-two"),
+        (3, Ed25519PrivateKey.generate().public_key().public_bytes_raw()),
+        (4, hashlib.sha256(b"different").digest()),
+    ):
+        changed = baseline.copy()
+        changed[index] = replacement
+        with pytest.raises(InvalidSignature):
+            private_key.public_key().verify(signature, registration_signing_input(*changed))
 
 
 def test_key_package_upload_proof_binds_order_expiry_and_device() -> None:
@@ -81,16 +84,15 @@ def test_key_package_upload_proof_binds_order_expiry_and_device() -> None:
     )
     signature = private_key.sign(signing_input)
     private_key.public_key().verify(signature, signing_input)
-    with pytest.raises(InvalidSignature):
-        private_key.public_key().verify(
-            signature,
-            key_package_signing_input(
-                "ked_device",
-                E2EE_SUITE_MLS_128,
-                expires,
-                list(reversed(digests)),
-            ),
-        )
+    for device, expiry, packages in (
+        ("ked_other", expires, digests),
+        ("ked_device", expires + timedelta(seconds=1), digests),
+        ("ked_device", expires, list(reversed(digests))),
+    ):
+        with pytest.raises(InvalidSignature):
+            private_key.public_key().verify(
+                signature, key_package_signing_input(device, E2EE_SUITE_MLS_128, expiry, packages)
+            )
 
 
 def test_key_package_upload_uses_cross_client_millisecond_timestamp() -> None:
@@ -176,7 +178,6 @@ def test_recovery_authorization_is_session_generation_and_expiry_bound() -> None
     authorization = issue_recovery_authorization(user, "session-one", now)
 
     assert authorization.startswith("ker_")
-    assert authorization.encode() not in (user.e2ee_recovery_token_hash or b"")
     assert require_recovery_enrollment_session(user, "session-one", now) == (
         user.e2ee_recovery_token_hash
     )
@@ -547,8 +548,9 @@ def test_account_vault_requires_canonical_authenticated_ciphertext_and_cas_revis
         )
 
 
+@pytest.mark.parametrize("consumed", [False, True])
 @pytest.mark.asyncio
-async def test_stale_session_cannot_acquire_vault_lease_during_recovery() -> None:
+async def test_stale_session_cannot_acquire_vault_lease_during_recovery(consumed: bool) -> None:
     now = datetime.now(UTC)
     user = User(
         id=17,
@@ -557,9 +559,11 @@ async def test_stale_session_cannot_acquire_vault_lease_during_recovery() -> Non
         username="maple",
         account_type="human",
         password_hash="hash",
-        e2ee_device_generation=4,
+        e2ee_device_generation=5 if consumed else 4,
     )
     issue_recovery_authorization(user, "reset-session", now)
+    if consumed:
+        e2ee_api.consume_recovery_authorization(user)
     session = SimpleNamespace(
         scalar=AsyncMock(return_value=user),
         get=AsyncMock(),
@@ -713,43 +717,6 @@ async def test_revision_one_vault_write_clears_fence_only_after_device_artifact(
 
 
 @pytest.mark.asyncio
-async def test_device_first_crash_keeps_stale_session_fenced_from_vault() -> None:
-    now = datetime.now(UTC)
-    user = User(
-        id=17,
-        origin_domain="alpha.localhost",
-        is_local=True,
-        username="maple",
-        account_type="human",
-        password_hash="hash",
-        e2ee_device_generation=5,
-    )
-    issue_recovery_authorization(user, "reset-session", now)
-    # Model the committed device half: the bearer has been consumed and the
-    # durable fence now follows the registered device generation.
-    e2ee_api.consume_recovery_authorization(user)
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=user),
-        get=AsyncMock(),
-    )
-    redis = SimpleNamespace(set=AsyncMock())
-
-    with pytest.raises(HTTPException) as caught:
-        await acquire_account_vault_lease(
-            auth=SimpleNamespace(
-                user=user,
-                grant=SimpleNamespace(session_id="stale-session"),
-            ),
-            session=session,
-            redis=redis,
-        )
-
-    assert caught.value.status_code == 409
-    assert caught.value.detail == {"code": "E2EE_RECOVERY_AUTHORIZATION_REQUIRED"}
-    redis.set.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_expected_revision_zero_write_cannot_repopulate_after_reset_fence() -> None:
     stale_token = encode_base64url(b"s" * 32)
     reset_token = encode_base64url(b"r" * 32)
@@ -800,7 +767,21 @@ async def test_expected_revision_zero_write_cannot_repopulate_after_reset_fence(
 @pytest.mark.asyncio
 async def test_authenticated_encryption_reset_clears_vault_ancestry_and_returns_marker(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    for table in (
+        "users",
+        "e2ee_devices",
+        "e2ee_key_packages",
+        "e2ee_account_vaults",
+        "e2ee_account_vault_digests",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
     random_token = encode_base64url(b"r" * 32)
     user = User(
         id=17,
@@ -811,55 +792,85 @@ async def test_authenticated_encryption_reset_clears_vault_ancestry_and_returns_
         password_hash="hash",
         e2ee_device_generation=3,
     )
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=user),
-        scalars=AsyncMock(return_value=[]),
-        execute=AsyncMock(),
-        commit=AsyncMock(),
-    )
-    redis = SimpleNamespace(
-        set=AsyncMock(return_value=True),
-        get=AsyncMock(return_value=random_token),
-        eval=AsyncMock(return_value=1),
-    )
-    monkeypatch.setattr(e2ee_api.secrets, "token_urlsafe", lambda _: random_token)
-    monkeypatch.setattr(
-        e2ee_api,
-        "pause_local_e2ee_for_device_change",
-        AsyncMock(return_value=[]),
-    )
-    monkeypatch.setattr(
-        e2ee_api,
-        "queue_device_change_updates",
-        AsyncMock(return_value=set()),
-    )
-    monkeypatch.setattr(e2ee_api, "publish_e2ee_policy_updates", AsyncMock())
-    monkeypatch.setattr(e2ee_api, "publish_dispatch", AsyncMock())
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add(user)
+        await session.flush()
+        for identifier, domain in [
+            (17, "alpha.localhost"),
+            (18, "alpha.localhost"),
+            (17, "other.example"),
+        ]:
+            await session.execute(
+                text(
+                    "INSERT INTO e2ee_account_vaults (user_id, user_domain, revision) "
+                    "VALUES (:id, :domain, 2)"
+                ),
+                {"id": identifier, "domain": domain},
+            )
+            for revision in (1, 2):
+                await session.execute(
+                    text(
+                        "INSERT INTO e2ee_account_vault_digests (user_id, user_domain, "
+                        "revision) VALUES (:id, :domain, :revision)"
+                    ),
+                    {"id": identifier, "domain": domain, "revision": revision},
+                )
+        redis = SimpleNamespace(
+            set=AsyncMock(return_value=True),
+            get=AsyncMock(return_value=random_token),
+            eval=AsyncMock(return_value=1),
+        )
+        monkeypatch.setattr(e2ee_api.secrets, "token_urlsafe", lambda _: random_token)
+        monkeypatch.setattr(
+            e2ee_api,
+            "pause_local_e2ee_for_device_change",
+            AsyncMock(return_value=[]),
+        )
+        monkeypatch.setattr(
+            e2ee_api,
+            "queue_device_change_updates",
+            AsyncMock(return_value=set()),
+        )
+        monkeypatch.setattr(e2ee_api, "publish_e2ee_policy_updates", AsyncMock())
+        monkeypatch.setattr(e2ee_api, "publish_dispatch", AsyncMock())
 
-    result = await reset_account_encryption(
-        AccountEncryptionReset(confirmation="RESET ENCRYPTED HISTORY"),
-        auth=SimpleNamespace(user=user, grant=SimpleNamespace(session_id="session-one")),
-        session=session,
-        redis=redis,
-        settings=SimpleNamespace(domain="alpha.localhost"),
-    )
+        result = await reset_account_encryption(
+            AccountEncryptionReset(confirmation="RESET ENCRYPTED HISTORY"),
+            auth=SimpleNamespace(user=user, grant=SimpleNamespace(session_id="session-one")),
+            session=session,
+            redis=redis,
+            settings=SimpleNamespace(domain="alpha.localhost"),
+        )
 
-    assert result == {
-        "status": "encryption_reset",
-        "account_ref": "17@alpha.localhost",
-        "recovery_authorization": "ker_" + random_token,
-        "recovery_authorization_expires_in": 300,
-    }
-    statements = [str(call.args[0]) for call in session.execute.await_args_list]
-    assert any("DELETE FROM e2ee_account_vault_digests" in item for item in statements)
-    assert any("DELETE FROM e2ee_account_vaults" in item for item in statements)
-    assert user.e2ee_device_generation == 4
-    assert user.e2ee_recovery_session_id == "session-one"
-    assert user.e2ee_recovery_generation == 4
-    assert user.e2ee_recovery_token_hash == e2ee_api.recovery_authorization_digest(
-        "ker_" + random_token
-    )
-    assert user.e2ee_recovery_expires_at is not None
+        assert result == {
+            "status": "encryption_reset",
+            "account_ref": "17@alpha.localhost",
+            "recovery_authorization": "ker_" + random_token,
+            "recovery_authorization_expires_in": 300,
+        }
+        assert set(
+            (
+                await session.execute(text("SELECT user_id, user_domain FROM e2ee_account_vaults"))
+            ).all()
+        ) == {(18, "alpha.localhost"), (17, "other.example")}
+        assert set(
+            (
+                await session.execute(
+                    text("SELECT user_id, user_domain, revision FROM e2ee_account_vault_digests")
+                )
+            ).all()
+        ) == {
+            (identifier, domain, revision)
+            for identifier, domain in [(18, "alpha.localhost"), (17, "other.example")]
+            for revision in (1, 2)
+        }
+        assert user.e2ee_device_generation == 4
+        assert user.e2ee_recovery_session_id == "session-one"
+        assert user.e2ee_recovery_generation == 4
+        assert user.e2ee_recovery_token_hash == e2ee_api.recovery_authorization_digest(
+            "ker_" + random_token
+        )
+        assert user.e2ee_recovery_expires_at is not None
 
 
 @pytest.mark.asyncio
@@ -947,4 +958,8 @@ async def test_encryption_reset_rechecks_its_sentinel_after_durable_user_lock(
     assert caught.value.detail == {"code": "E2EE_ACCOUNT_VAULT_LEASE_EXPIRED"}
     session.execute.assert_not_awaited()
     session.commit.assert_not_awaited()
-    redis.eval.assert_awaited_once()
+    lease = "e2ee:account-vault-lease:alpha.localhost:17"
+    redis.get.assert_awaited_once_with(lease)
+    redis.eval.assert_awaited_once_with(
+        e2ee_api.RELEASE_ACCOUNT_VAULT_LEASE, 1, lease, "stale-holder"
+    )

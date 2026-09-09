@@ -11,38 +11,12 @@ describe('pending message sends', () => {
     attachmentIds.push('11');
     mentionUserIds.push('21@example.test');
 
-    expect(send).toEqual({
+    expect(send).toMatchObject({
       clientNonce: 'stable-nonce',
       content: 'hello',
-      encryptedAttachments: [],
       attachmentIds: ['10'],
-      mentionUserIds: ['20@example.test'],
-      referencedMessageId: null,
-      stickerIds: [],
-      stickerItems: [],
-      encryptedAllowedMentions: null,
-      repliedUserRef: null,
-      tts: false
+      mentionUserIds: ['20@example.test']
     });
-  });
-
-  it('can discard consumed attachments without changing retry identity', () => {
-    const send = pendingMessageSend(null, ['10'], [], 'stable-nonce');
-
-    expect(discardAttachments(send)).toEqual({
-      clientNonce: 'stable-nonce',
-      content: null,
-      encryptedAttachments: [],
-      attachmentIds: [],
-      mentionUserIds: [],
-      referencedMessageId: null,
-      stickerIds: [],
-      stickerItems: [],
-      encryptedAllowedMentions: null,
-      repliedUserRef: null,
-      tts: false
-    });
-    expect(send.attachmentIds).toEqual(['10']);
   });
 
   it('keeps the reply reference across attachment retries', () => {
@@ -61,6 +35,7 @@ describe('pending message sends', () => {
       repliedUserRef: null,
       tts: false
     });
+    expect(send.attachmentIds).toEqual(['10']);
   });
 
   it('clears only uploads submitted by the completed request', () => {

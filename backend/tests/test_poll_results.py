@@ -201,7 +201,7 @@ def test_encrypted_poll_result_wire_rejects_private_embed_labels() -> None:
         )
 
 
-def test_direct_dm_poll_result_authority_attestation_is_narrow() -> None:
+def test_direct_poll_result_rejects_smuggled_body_content() -> None:
     raw = wire_message(mode="e2ee")
     content = {
         "message": raw,
@@ -223,7 +223,7 @@ def test_direct_dm_poll_result_authority_attestation_is_narrow() -> None:
     )
 
 
-def test_dm_poll_mutation_authority_attestation_is_exact() -> None:
+def test_dm_poll_mutation_rejects_mismatched_actor() -> None:
     context = {"conversation_id": "77", "conversation_domain": "polls.example"}
     vote = {
         "message_id": "123",
@@ -282,14 +282,67 @@ def test_message_schema_pins_poll_result_type_and_reference() -> None:
     assert has_reference == ("message_type <> 46 OR referenced_message_id IS NOT NULL")
 
 
-def test_foundation_migration_guards_poll_result_downgrade() -> None:
-    migration = (
-        Path(__file__).resolve().parents[1]
-        / "migrations"
-        / "versions"
-        / "fc9a4b7d2e10_bot_parity_foundation.py"
-    ).read_text()
+async def test_foundation_migration_guards_poll_result_downgrade(migrate_to) -> None:
+    import importlib
 
-    assert 'sa.Column("poll_result", postgresql.JSONB())' in migration
-    assert "OR poll_result IS NOT NULL" in migration
-    assert '"poll_result",' in migration
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.base import Base
+
+    connection = await migrate_to("fc9a4b7d2e10")
+    migration = importlib.import_module("migrations.versions.fc9a4b7d2e10_bot_parity_foundation")
+
+    def downgrade(sync):
+        sync.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+
+    for statement in (
+        "INSERT INTO instances (domain) VALUES ('test.example')",
+        "INSERT INTO users (id, origin_domain, username, is_local, "
+        "federation_introduced_by_domain) VALUES (7, 'test.example', 'owner', false, "
+        "'test.example')",
+        "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) VALUES (2, "
+        "'test.example', 'Guild', 7, 'test.example')",
+        "INSERT INTO guild_members (guild_id, guild_domain, user_id, user_domain, "
+        "joined_at) VALUES"
+        "(2, 'test.example', 7, 'test.example', now())",
+        "INSERT INTO channels (id, origin_domain, guild_id, guild_domain, type, name, "
+        "created_floor_id) VALUES (1, 'test.example', 2, 'test.example', 0, 'Room', 1)",
+        "INSERT INTO messages (id, origin_domain, channel_id, channel_domain, author_id, "
+        "author_domain, content) VALUES (10, 'test.example', 1, 'test.example', 7, "
+        "'test.example', 'original')",
+    ):
+        await connection.execute(text(statement))
+
+    await connection.execute(
+        text(
+            "INSERT INTO messages (id, origin_domain, channel_id, channel_domain, "
+            "author_id, author_domain, message_type, referenced_message_id, "
+            "referenced_message_domain, poll_result) VALUES (11, 'test.example', 1, "
+            "'test.example', 7, 'test.example', 46, 10, 'test.example', CAST(:result AS "
+            "jsonb))"
+        ),
+        {"result": '{"question":"Lunch?"}'},
+    )
+    with pytest.raises(IntegrityError, match="rich message data exists"):
+        async with connection.begin_nested():
+            await connection.run_sync(downgrade)
+    assert (
+        await connection.scalar(text("SELECT poll_result->>'question' FROM messages WHERE id = 11"))
+        == "Lunch?"
+    )
+    assert "poll_result" in await connection.run_sync(
+        lambda sync: {column["name"] for column in inspect(sync).get_columns("messages")}
+    )
+    await connection.execute(text("DELETE FROM messages WHERE id = 11"))
+    await connection.run_sync(downgrade)
+    assert "poll_result" not in await connection.run_sync(
+        lambda sync: {column["name"] for column in inspect(sync).get_columns("messages")}
+    )
+    assert await connection.scalar(text("SELECT content FROM messages WHERE id = 10")) == "original"

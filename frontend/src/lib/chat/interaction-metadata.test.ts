@@ -39,19 +39,18 @@ describe('interaction metadata attribution', () => {
     ).toBe('Alice used ship');
   });
 
-  it('labels component/modal activity without response content', () => {
-    expect(
-      interactionAttributionText({
+  it('component/modal activity label', () => {
+    for (const [type, action] of [
+      ['component', /component/i],
+      ['modal_submit', /form|modal/i]
+    ] as const) {
+      const label = interactionAttributionText({
         deleted_at: null,
-        interaction_metadata: metadata({ type: 'component', command_name: undefined })
-      })
-    ).toBe('Alice used a message component');
-    expect(
-      interactionAttributionText({
-        deleted_at: null,
-        interaction_metadata: metadata({ type: 'modal_submit', command_name: undefined })
-      })
-    ).toBe('Alice submitted a form');
+        interaction_metadata: metadata({ type, command_name: undefined })
+      });
+      expect(label).toContain('Alice');
+      expect(label).toMatch(action);
+    }
   });
 
   it('fails closed for deleted or malformed command attribution', () => {

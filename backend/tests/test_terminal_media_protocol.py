@@ -300,7 +300,7 @@ async def test_process_event_classifies_superseded_proof_before_inbox_claim(
 
 
 @pytest.mark.asyncio
-async def test_cascade_ack_requires_exact_current_event_delivery(
+async def test_current_delivery_ack_query_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     historical = AsyncMock(
@@ -504,49 +504,159 @@ async def test_key_rotation_queues_e2_and_compacts_pending_e1(
     assert "media.delete" in compact_sql
 
 
-def test_media_cleanup_filters_blocked_sources_before_the_batch_limit() -> None:
+async def test_media_cleanup_filters_blocked_sources_before_the_batch_limit(
+    media_cleanup_session,
+) -> None:
+    from sqlalchemy import text
+
+    session = media_cleanup_session
     now = datetime.now(UTC)
-    statement_sql = sql(
-        tombstones._media_tombstone_cleanup_candidates(
-            cast(Any, settings()),
-            now=now,
-            cutoff=now - timedelta(days=30),
-            limit=17,
-        )
+    await session.execute(
+        text(
+            "INSERT INTO media_tombstone_sources "
+            "(attachment_id,attachment_domain,event_id,updated_at) SELECT "
+            "id,:domain,'proof'||id,:old FROM generate_series(1,10) AS id"
+        ),
+        dict(domain=LOCAL_DOMAIN, old=now - timedelta(days=40)),
     )
+    await session.execute(
+        text(
+            "INSERT INTO attachments "
+            "(id,origin_domain,deleted_at,staging_object_key,upload_expires_at) VALUES "
+            "(1,:domain,NULL,NULL,NULL),(7,:domain,:old,'staging',NULL),(8,:domain,:old,NULL,:future)"
+        ),
+        dict(domain=LOCAL_DOMAIN, old=now - timedelta(days=40), future=now + timedelta(hours=1)),
+    )
+    await session.execute(
+        text("INSERT INTO remote_media_cache (attachment_id,origin_domain) VALUES (2,:domain)"),
+        dict(domain=LOCAL_DOMAIN),
+    )
+    await session.execute(
+        text(
+            "INSERT INTO media_tombstone_destinations "
+            "(attachment_id,attachment_domain,destination_domain) VALUES "
+            "(3,:domain,'offline.example')"
+        ),
+        dict(domain=LOCAL_DOMAIN),
+    )
+    import json
 
-    # Every reason the cleanup loop can skip a source is correlated in the
-    # candidate query. A fixed prefix of live attachments, cached variants,
-    # offline destinations, or retained carriers therefore cannot consume the
-    # LIMIT and starve later cleanable rows.
-    assert "LIMIT 17" in statement_sql
-    assert "attachments.deleted_at IS NULL" in statement_sql
-    assert "remote_media_cache" in statement_sql
-    assert "federation_outbox.status = 'delivered'" in statement_sql
-    assert "federation_events" in statement_sql
-    assert "guild_events" in statement_sql
-    assert "guild_history_staged_messages" in statement_sql
-    assert statement_sql.count("NOT (EXISTS") >= 6
+    for table, column, identifier in (
+        ("federation_events", "envelope", 4),
+        ("guild_events", "envelope", 5),
+        ("guild_history_staged_messages", "payload", 6),
+    ):
+        extra = ",origin_domain,event_id" if table == "federation_events" else ""
+        extra_values = ",'carrier.example','carrier'" if table == "federation_events" else ""
+        await session.execute(
+            text(
+                f"INSERT INTO {table} ({column}{extra}) "  # noqa: S608 -- fixed fixture tables
+                f"VALUES (CAST(:payload AS jsonb){extra_values})"
+            ),
+            dict(
+                payload=json.dumps(
+                    {"attachments": [{"id": str(identifier), "origin_domain": LOCAL_DOMAIN}]}
+                )
+            ),
+        )
+    statement = tombstones._media_tombstone_cleanup_candidates(
+        cast(Any, settings()), now=now, cutoff=now - timedelta(days=30), limit=1
+    )
+    assert (await session.execute(statement)).all() == [(9, LOCAL_DOMAIN)]
 
 
-def test_terminal_cleanup_filters_blocked_rooms_before_the_batch_limit() -> None:
+async def test_terminal_cleanup_filters_blocked_rooms_before_the_batch_limit(
+    postgres_schema,
+) -> None:
+    from sqlalchemy import text
+
     now = datetime.now(UTC)
-    statement_sql = sql(
-        terminal_rooms._terminal_room_cleanup_candidates(
-            cast(Any, settings()),
-            cutoff=now - timedelta(days=30),
-            limit=19,
+    for table in (
+        "terminal_room_deletions",
+        "media_tombstone_destinations",
+        "guilds",
+        "dm_conversations",
+        "channels",
+        "dm_participants",
+        "messages",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
         )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO terminal_room_deletions "
+            "(room_kind,room_id,room_domain,destination_domain,acknowledged_at,updated_at) "
+            "SELECT 'group_dm',id,:domain,'child.example',:old,:old FROM "
+            "generate_series(1,10) AS id"
+        ),
+        dict(domain=ORIGIN_DOMAIN, old=now - timedelta(days=40)),
     )
-
-    assert "LIMIT 19" in statement_sql
-    assert "acknowledged_at IS NULL" in statement_sql
-    assert "media_tombstone_destinations" in statement_sql
-    assert "guilds" in statement_sql
-    assert "dm_conversations" in statement_sql
-    assert "channels.unavailable IS true" in statement_sql
-    assert "dm_participants" in statement_sql
-    assert "messages" in statement_sql
+    await postgres_schema.execute(
+        text("UPDATE terminal_room_deletions SET acknowledged_at=NULL WHERE room_id=1")
+    )
+    await postgres_schema.execute(
+        text("UPDATE terminal_room_deletions SET updated_at=:now WHERE room_id=2"), dict(now=now)
+    )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO media_tombstone_destinations (room_kind,room_id,room_domain) "
+            "VALUES ('group_dm',3,:domain)"
+        ),
+        dict(domain=ORIGIN_DOMAIN),
+    )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO dm_conversations (id,origin_domain,type) SELECT id,:domain,'group' "
+            "FROM generate_series(4,8) AS id"
+        ),
+        dict(domain=ORIGIN_DOMAIN),
+    )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO channels (id,origin_domain,unavailable) VALUES "
+            "(4,:domain,false),(5,:domain,true),(6,:domain,true),(8,:domain,true)"
+        ),
+        dict(domain=ORIGIN_DOMAIN),
+    )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO dm_participants (conversation_id,conversation_domain,user_id) "
+            "VALUES (5,:domain,99)"
+        ),
+        dict(domain=ORIGIN_DOMAIN),
+    )
+    await postgres_schema.execute(
+        text("INSERT INTO messages (id,channel_id,channel_domain) VALUES (99,6,:domain)"),
+        dict(domain=ORIGIN_DOMAIN),
+    )
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO terminal_room_deletions "
+            "(room_kind,room_id,room_domain,destination_domain,acknowledged_at,updated_at) "
+            "VALUES ('guild',1,:domain,'child.example',:old,:old),"
+            "('guild',2,:domain,'child.example',:old,:old)"
+        ),
+        dict(domain=ORIGIN_DOMAIN, old=now - timedelta(days=40)),
+    )
+    await postgres_schema.execute(
+        text("INSERT INTO guilds (id,origin_domain) VALUES (1,:domain)"), dict(domain=ORIGIN_DOMAIN)
+    )
+    all_candidates = terminal_rooms._terminal_room_cleanup_candidates(
+        cast(Any, settings()), cutoff=now - timedelta(days=30), limit=100
+    )
+    assert set((await postgres_schema.execute(all_candidates)).all()) == {
+        ("group_dm", 8, ORIGIN_DOMAIN),
+        ("group_dm", 9, ORIGIN_DOMAIN),
+        ("group_dm", 10, ORIGIN_DOMAIN),
+        ("guild", 2, ORIGIN_DOMAIN),
+    }
+    statement = terminal_rooms._terminal_room_cleanup_candidates(
+        cast(Any, settings()), cutoff=now - timedelta(days=30), limit=1
+    )
+    assert (await postgres_schema.execute(statement)).all() == [("group_dm", 8, ORIGIN_DOMAIN)]
+    await postgres_schema.execute(text("DELETE FROM terminal_room_deletions WHERE room_id=8"))
+    assert (await postgres_schema.execute(statement)).all() == [("group_dm", 9, ORIGIN_DOMAIN)]
 
 
 @pytest.mark.asyncio
@@ -676,9 +786,11 @@ async def test_terminal_receiver_cleanup_requires_projection_and_routes_to_be_ab
     assert bool(destructive) is bool(expected_cleaned)
 
 
+@pytest.mark.parametrize("unavailable", [True, False])
 @pytest.mark.asyncio
 async def test_terminal_receiver_cleanup_removes_empty_unavailable_group_projection(
     monkeypatch: pytest.MonkeyPatch,
+    unavailable: bool,
 ) -> None:
     old = datetime.now(UTC) - timedelta(days=60)
     row = SimpleNamespace(
@@ -691,7 +803,7 @@ async def test_terminal_receiver_cleanup_removes_empty_unavailable_group_project
         updated_at=old,
     )
     conversation = SimpleNamespace(type="group")
-    channel = SimpleNamespace(unavailable=True, guild_id=None)
+    channel = SimpleNamespace(unavailable=unavailable, guild_id=None)
 
     class Session:
         def __init__(self) -> None:
@@ -729,6 +841,13 @@ async def test_terminal_receiver_cleanup_removes_empty_unavailable_group_project
         now=datetime.now(UTC),
     )
 
+    if not unavailable:
+        assert cleaned == 0
+        session.delete.assert_not_awaited()
+        session.flush.assert_not_awaited()
+        assert len(session.statements) == 1
+        return
+
     assert cleaned == 1
     session.delete.assert_awaited_once_with(conversation)
     session.flush.assert_awaited_once()
@@ -739,64 +858,6 @@ async def test_terminal_receiver_cleanup_removes_empty_unavailable_group_project
     assert any("DELETE FROM terminal_room_deletions" in value for value in destructive)
     assert any("DELETE FROM federation_inbox" in value for value in destructive)
     assert any("DELETE FROM federation_events" in value for value in destructive)
-
-
-@pytest.mark.asyncio
-async def test_terminal_receiver_cleanup_preserves_nonterminal_group_projection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    old = datetime.now(UTC) - timedelta(days=60)
-    row = SimpleNamespace(
-        room_kind="group_dm",
-        room_id=9,
-        room_domain=ORIGIN_DOMAIN,
-        destination_domain=LOCAL_DOMAIN,
-        event_id="kcfe_2222222222222222",
-        acknowledged_at=old,
-        updated_at=old,
-    )
-    conversation = SimpleNamespace(type="group")
-    channel = SimpleNamespace(unavailable=False, guild_id=None)
-
-    class Session:
-        def __init__(self) -> None:
-            self.statements: list[object] = []
-            self.delete = AsyncMock()
-            self.flush = AsyncMock()
-
-        async def execute(self, statement: object) -> object:
-            self.statements.append(statement)
-            if len(self.statements) == 1:
-                return TupleResult([("group_dm", 9, ORIGIN_DOMAIN)])
-            return TupleResult([])
-
-        async def scalars(self, _statement: object) -> list[object]:
-            return [row]
-
-        async def scalar(self, _statement: object) -> None:
-            return None
-
-        async def get(self, model: object, key: object) -> object | None:
-            assert key == (9, ORIGIN_DOMAIN)
-            if model is DMConversation:
-                return conversation
-            if model is Channel:
-                return channel
-            raise AssertionError(f"unexpected projection lookup: {model!r}")
-
-    session = Session()
-    monkeypatch.setattr(terminal_rooms, "lock_terminal_room", AsyncMock())
-
-    cleaned = await terminal_rooms.cleanup_terminal_room_deletions(
-        cast(Any, session),
-        cast(Any, settings()),
-        now=datetime.now(UTC),
-    )
-
-    assert cleaned == 0
-    session.delete.assert_not_awaited()
-    session.flush.assert_not_awaited()
-    assert len(session.statements) == 1
 
 
 @pytest.mark.asyncio
@@ -1173,75 +1234,64 @@ def test_staging_upload_completion_grace_is_strict_at_boundary() -> None:
 @pytest.mark.asyncio
 async def test_staging_sweep_rotates_a_full_prefix_of_delete_failures(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
-    old = datetime.now(UTC) - timedelta(days=1)
-    attachments = [
-        SimpleNamespace(
-            id=item_id,
-            staging_object_key=f"staging/{item_id}/original",
-            upload_expires_at=datetime.now(UTC) - timedelta(minutes=17),
-            scan_status="clean",
-            deleted_at=None,
-            finalized_at=datetime.now(UTC),
-            updated_at=old,
-        )
-        for item_id in range(1, 102)
-    ]
-    selected_pages: list[list[int]] = []
-    statements: list[object] = []
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    class Session:
-        def __init__(self) -> None:
-            self.commits = 0
+    from app.db.models import Attachment
 
-        async def scalars(self, statement: object) -> list[object]:
-            statements.append(statement)
-            selected = sorted(attachments, key=lambda item: (item.updated_at, item.id))[:100]
-            selected_pages.append([item.id for item in selected])
-            return selected
-
-        async def commit(self) -> None:
-            self.commits += 1
-
-    deleted: list[int] = []
+    await postgres_schema.execute(
+        text("CREATE TABLE attachments AS TABLE public.attachments WITH NO DATA")
+    )
+    now = datetime.now(UTC)
+    attempts: list[int] = []
 
     class Storage:
         def __init__(self, _settings: object) -> None:
             pass
 
         async def delete(self, _bucket: str, key: str) -> None:
-            item_id = int(key.split("/")[1])
-            if item_id <= 100:
+            identifier = int(key.split("/")[1])
+            attempts.append(identifier)
+            if identifier <= 100:
                 raise StorageError("temporary failure", retryable=True)
-            deleted.append(item_id)
 
-    session = Session()
     monkeypatch.setattr(media_jobs, "S3Storage", Storage)
-
-    first = await media_jobs.sweep_staging_objects(
-        cast(Any, session),
-        cast(Any, settings()),
-    )
-    second = await media_jobs.sweep_staging_objects(
-        cast(Any, session),
-        cast(Any, settings()),
-    )
-
-    assert first == 0
-    assert second == 1
-    assert selected_pages[0] == list(range(1, 101))
-    assert selected_pages[1][0] == 101
-    assert deleted == [101]
-    assert attachments[100].staging_object_key is None
-    assert session.commits == 2
-    statement_sql = str(
-        statements[0].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        attachments = [
+            Attachment(
+                id=identifier,
+                origin_domain=LOCAL_DOMAIN,
+                staging_object_key=f"staging/{identifier}/original",
+                upload_expires_at=now - timedelta(minutes=17),
+                scan_status="clean",
+                finalized_at=now,
+                updated_at=now - timedelta(days=1),
+            )
+            for identifier in range(1, 102)
+        ]
+        ineligible = Attachment(
+            id=102,
+            origin_domain=LOCAL_DOMAIN,
+            staging_object_key="staging/102/original",
+            upload_expires_at=now + timedelta(hours=1),
+            scan_status="clean",
+            finalized_at=now,
+            updated_at=now - timedelta(days=2),
         )
-    )
-    assert "attachments.upload_expires_at IS NULL OR" in statement_sql
-    assert "attachments.scan_status IN ('clean', 'encrypted')" in statement_sql
+        session.add_all([*attachments, ineligible])
+        await session.flush()
+        assert await media_jobs.sweep_staging_objects(session, cast(Any, settings())) == 0
+        assert attempts == list(range(1, 101))
+        attempts.clear()
+        assert await media_jobs.sweep_staging_objects(session, cast(Any, settings())) == 1
+        assert attempts[0] == 101
+        assert len(attempts) == 100
+        assert set(attempts[1:]) <= set(range(1, 101))
+        assert attachments[-1].staging_object_key is None
+        assert ineligible.staging_object_key == "staging/102/original"
+        assert all(item.staging_object_key is not None for item in attachments[:-1])
 
 
 @pytest.mark.asyncio
@@ -1495,20 +1545,22 @@ async def test_clean_duplicate_purge_deletes_objects_before_one_quota_discard(
     )
 
     assert result == "deleted"
-    assert events == [
+    deletes = [event for event in events if isinstance(event, tuple)]
+    assert set(deletes) == {
         ("kaede-attachments", "clean/43/original"),
         ("kaede-attachments", "staging/43/original"),
         ("kaede-derived", "derived/43/thumbnail"),
-        "discard",
-        "commit",
-    ]
+    }
+    assert len(deletes) == 3
+    assert all(events.index(item) < events.index("discard") for item in deletes)
+    assert events.index("discard") < events.index("commit")
     quota_discard.assert_awaited_once()
     assert attachment.deleted_at is not None
     assert attachment.staging_object_key is None
 
 
 @pytest.mark.asyncio
-async def test_purge_retains_shared_announcement_objects_until_last_copy(
+async def test_retaining_objects_while_another_announcement_copy_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attachment = SimpleNamespace(

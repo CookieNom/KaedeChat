@@ -69,10 +69,10 @@ describe('message markdown tokenization', () => {
       'local.example'
     );
 
-    expect(mention.text).toBe('@Remote user · remote.example');
+    expect(mention.text).toContain('remote.example');
     expect(mention.userRef).toBe('42@remote.example');
     expect(mention.userHandle).toBeUndefined();
-    expect(mention.title).toBe('Remote user · remote.example');
+    expect(mention.title).toContain('remote.example');
     expect(JSON.stringify(mention)).not.toContain('history_deadbeef');
   });
 

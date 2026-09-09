@@ -252,7 +252,7 @@ GatewaySequenceDecision classifyGatewaySequence(int? previous, int next) {
 /// Renews early enough to absorb ordinary mobile main-isolate scheduling
 /// stalls instead of using the server's entire heartbeat grace period.
 Duration gatewayHeartbeatCadence(int advertisedMilliseconds) => Duration(
-      milliseconds: max(1000, advertisedMilliseconds * 3 ~/ 4),
+      milliseconds: max(1, advertisedMilliseconds * 3 ~/ 4),
     );
 
 final class GatewayClient {

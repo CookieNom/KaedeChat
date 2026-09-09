@@ -140,6 +140,7 @@ async def test_upload_redirect_location_is_revalidated_against_the_same_authorit
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bot = client()
+    attempted: list[str] = []
 
     class RedirectResponse:
         is_redirect = True
@@ -155,7 +156,8 @@ async def test_upload_redirect_location_is_revalidated_against_the_same_authorit
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def put(self, *_: object, **__: object) -> RedirectResponse:
+        async def put(self, url: str, **__: object) -> RedirectResponse:
+            attempted.append(url)
             return RedirectResponse()
 
     monkeypatch.setattr(
@@ -171,6 +173,7 @@ async def test_upload_redirect_location_is_revalidated_against_the_same_authorit
         )
     assert raised.value.code == "UPLOAD_REDIRECT_REJECTED"
     assert "outside" in str(raised.value)
+    assert attempted == ["https://media.chat.example/staged/41"]
 
 
 @pytest.mark.asyncio
@@ -361,6 +364,7 @@ async def test_follow_on_media_redirect_is_revalidated_against_the_same_authorit
     redirect_location: str,
 ) -> None:
     bot = client()
+    attempted: list[str] = []
     bot._redirect_location = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             "https://media.chat.example/object",
@@ -386,7 +390,9 @@ async def test_follow_on_media_redirect_is_revalidated_against_the_same_authorit
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        def stream(self, *_: object, **__: object) -> StreamContext:
+        def stream(self, method: str, url: str, **__: object) -> StreamContext:
+            assert method == "GET"
+            attempted.append(url)
             return StreamContext()
 
     monkeypatch.setattr(
@@ -401,6 +407,7 @@ async def test_follow_on_media_redirect_is_revalidated_against_the_same_authorit
         )
     assert raised.value.code == "MEDIA_REDIRECT_INVALID"
     assert "outside" in str(raised.value)
+    assert attempted == ["https://media.chat.example/object"]
 
 
 @pytest.mark.asyncio

@@ -128,12 +128,7 @@ async def test_restricted_bot_cannot_submit_a_blocked_channel_or_parent(
         AsyncMock(return_value=BotGuildPermissionGrant(99, 1, 0, ("10",))),
     )
 
-    async def check_permission(*_args: object, **kwargs: object) -> None:
-        target = cast(SimpleNamespace | None, kwargs.get("channel"))
-        if target is not None and target.id in {11, 20}:
-            raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
-
-    monkeypatch.setattr(management, "require_permissions", AsyncMock(side_effect=check_permission))
+    monkeypatch.setattr(management, "require_permissions", AsyncMock())
 
     for body, locked in (
         ({"channels": [{"id": "11", "position": 0}]}, None),
@@ -154,6 +149,7 @@ async def test_restricted_bot_cannot_submit_a_blocked_channel_or_parent(
                 cast(Any, SimpleNamespace(domain="guild.example")),
             )
         assert denied.value.status_code == 403
+        assert denied.value.detail["code"] == "BOT_CHANNEL_RESTRICTED"
 
     assert [(item.id, item.position, item.parent_id) for item in channels] == [
         (10, 0, None),

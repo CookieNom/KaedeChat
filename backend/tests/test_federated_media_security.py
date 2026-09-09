@@ -214,7 +214,11 @@ async def test_final_remote_capability_recheck_observes_concurrent_tombstone() -
     session.cache_lookup.assert_not_awaited()
 
 
-async def test_known_remote_photodna_match_is_rejected_without_refetch() -> None:
+async def test_known_remote_photodna_match_is_rejected_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = AsyncMock()
+    monkeypatch.setattr(media_api, "signed_stream_request", stream)
     session = CacheSession(None, photodna_report=900)
     configured = media_settings()
 
@@ -230,6 +234,8 @@ async def test_known_remote_photodna_match_is_rejected_without_refetch() -> None
     assert raised.value.status_code == 422
     assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_REJECTED"
     assert session.commits == 0
+
+    stream.assert_not_called()
 
 
 async def test_remote_media_not_yet_published_is_retryable(
@@ -290,7 +296,7 @@ async def test_photodna_match_retires_every_previously_clean_cached_variant(
     enqueue.assert_awaited_once_with(media_api.media_cache_gc)
 
 
-async def test_remote_media_is_spooled_scanned_and_uploaded_without_a_body_buffer(
+async def test_spool_scan_upload_pipeline_behavior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     body = b"\x89PNG\r\n\x1a\n" + (b"a" * 700)
@@ -598,6 +604,9 @@ async def test_retry_refreshes_an_expired_orphan_reservation_before_put(
             pass
 
         async def put_file(self, *args: object, **kwargs: object) -> None:
+            assert reservation.next_retry_at > before
+            assert reservation.last_error is None
+            assert session.commits == 1
             await put_file(*args, **kwargs)
 
         async def delete(self, *_args: object, **_kwargs: object) -> None:
@@ -904,21 +913,19 @@ async def test_failed_physical_orphan_delete_remains_durable_for_retry() -> None
 async def test_cache_gc_evicts_below_low_water_when_cache_is_at_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = media_jobs.datetime.now(media_jobs.UTC)
-    cached = RemoteMediaCache(
-        origin_domain="beta.example",
-        attachment_id=7,
-        variant="original",
-        object_key="beta.example/7/original/hash",
-        size=20,
-        content_type="image/png",
-        scan_status="clean",
-        last_accessed_at=now,
-        expires_at=now + media_jobs.timedelta(days=1),
-    )
+    candidates = [
+        SimpleNamespace(
+            origin_domain="beta.example",
+            attachment_id=index,
+            variant="original",
+            object_key=f"beta.example/{index}/original/hash",
+            size=size,
+        )
+        for index, size in ((7, 4), (8, 7), (9, 20))
+    ]
     session = SimpleNamespace(
         scalar=AsyncMock(side_effect=[True, 100, 0]),
-        scalars=AsyncMock(side_effect=[[], [cached]]),
+        scalars=AsyncMock(side_effect=[[], candidates]),
         execute=AsyncMock(),
         delete=AsyncMock(),
         commit=AsyncMock(),
@@ -932,7 +939,7 @@ async def test_cache_gc_evicts_below_low_water_when_cache_is_at_limit(
         cast(Any, media_settings(cache_bytes=100)),
     )
 
-    assert removed == 1
-    session.delete.assert_awaited_once_with(cached)
+    assert removed == 2
+    assert [call.args[0] for call in session.delete.await_args_list] == candidates[:2]
     session.commit.assert_awaited_once()
     assert drain.await_count == 2

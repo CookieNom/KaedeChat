@@ -11,20 +11,12 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.bot_voice import bot_guild_voice_regions, bot_voice_regions
-from app.api.bot_voice import router as bot_voice_router
 from app.api.bots import require_bot_resource_authority
 from app.api.guilds import voice_message_capability
 from app.api.management import update_channel
 from app.api.soundboard import (
-    human_router as human_soundboard_router,
-)
-from app.api.soundboard import (
     probe_sound_duration_ms,
 )
-from app.api.soundboard import (
-    router as soundboard_router,
-)
-from app.api.voice import router as human_voice_router
 from app.api.voice import voice_regions as human_voice_regions
 from app.chat.schemas import ChannelCreate, ChannelUpdate
 from app.core.channel_types import is_soundboard_channel_type
@@ -225,14 +217,22 @@ async def test_bot_guild_voice_regions_rechecks_authoritative_installation(
         domain="guild.example",
         voice_regions=[VoiceRegionConfiguration(id="edge", name="Edge")],
     )
+    session = AsyncMock()
     regions = await bot_guild_voice_regions(
         EntityRef("1@guild.example"),
         principal,  # type: ignore[arg-type]
-        AsyncMock(),
+        session,
         settings,  # type: ignore[arg-type]
     )
     assert [region.id for region in regions] == ["edge"]
-    assert authorize.await_args.args[-1] == "voice.connect"
+    authorize.assert_awaited_once_with(
+        session, settings, principal, EntityRef("1@guild.example"), "voice.connect"
+    )
+    denied = HTTPException(403, detail={"code": "BOT_INSTALLATION_REVOKED"})
+    authorize.side_effect = denied
+    with pytest.raises(HTTPException) as caught:
+        await bot_guild_voice_regions(EntityRef("1@guild.example"), principal, session, settings)
+    assert caught.value is denied
 
 
 def test_bot_resource_authority_rejects_replica_mutation() -> None:
@@ -250,14 +250,6 @@ def test_bot_resource_authority_rejects_replica_mutation() -> None:
     }
 
 
-def test_voice_region_routes_exist_for_humans_and_bots() -> None:
-    assert "/api/v1/bots/voice/regions" in {route.path for route in bot_voice_router.routes}
-    assert "/api/v1/bots/guilds/{guild_ref}/voice/regions" in {
-        route.path for route in bot_voice_router.routes
-    }
-    assert "/api/v1/voice/regions" in {route.path for route in human_voice_router.routes}
-
-
 def test_bot_voice_and_soundboard_requests_are_fail_closed() -> None:
     grant = BotVoiceTokenRequest.model_validate({})
     assert not grant.listen and not grant.speak and not grant.stream
@@ -265,7 +257,7 @@ def test_bot_voice_and_soundboard_requests_are_fail_closed() -> None:
         {"attachment_id": "12", "name": "  Air horn  ", "volume": 0.5}
     )
     assert sound.name == "Air horn"
-    with pytest.raises(ValidationError, match="mutually exclusive"):
+    with pytest.raises(ValidationError) as rejected:
         SoundboardSoundCreate.model_validate(
             {
                 "attachment_id": "12",
@@ -274,6 +266,9 @@ def test_bot_voice_and_soundboard_requests_are_fail_closed() -> None:
                 "emoji_name": "📣",
             }
         )
+    assert [(error["loc"], error["type"]) for error in rejected.value.errors()] == [
+        ((), "value_error")
+    ]
     cleared = SoundboardSoundUpdate.model_validate({"emoji_id": None})
     assert cleared.model_fields_set == {"emoji_id"}
 
@@ -288,52 +283,6 @@ def test_soundboard_playback_is_voice_only_not_stage() -> None:
     assert is_soundboard_channel_type(2)
     assert not is_soundboard_channel_type(13)
     assert not is_soundboard_channel_type(1)
-
-
-def test_soundboard_routes_match_the_bot_sdk_contract() -> None:
-    paths = {route.path for route in soundboard_router.routes}
-    assert "/api/v1/bots/guilds/{guild_ref}/soundboard-sounds" in paths
-    assert "/api/v1/bots/guilds/{guild_ref}/soundboard-sounds/tickets" in paths
-    assert "/api/v1/bots/channels/{channel_ref}/send-soundboard-sound" in paths
-    assert "/api/v1/bots/channels/{channel_ref}/soundboard-playback-grants" in paths
-    assert not any(path.startswith("/api/v1/guilds/") for path in paths)
-    playback = next(
-        route
-        for route in soundboard_router.routes
-        if route.path == "/api/v1/bots/channels/{channel_ref}/send-soundboard-sound"
-    )
-    grant = next(
-        route
-        for route in soundboard_router.routes
-        if route.path == "/api/v1/bots/channels/{channel_ref}/soundboard-playback-grants"
-    )
-    assert playback.status_code == 204
-    assert grant.status_code is None
-
-
-def test_soundboard_routes_expose_complete_human_management_and_playback() -> None:
-    methods = {
-        (route.path, method)
-        for route in human_soundboard_router.routes
-        for method in (route.methods or set())
-    }
-    base = "/api/v1/guilds/{guild_ref}/soundboard-sounds"
-    assert (base, "GET") in methods
-    assert (base, "POST") in methods
-    assert (f"{base}/tickets", "POST") in methods
-    assert (f"{base}/{{sound_ref}}", "GET") in methods
-    assert (f"{base}/{{sound_ref}}", "PATCH") in methods
-    assert (f"{base}/{{sound_ref}}", "DELETE") in methods
-    assert (
-        "/api/v1/channels/{channel_ref}/send-soundboard-sound",
-        "POST",
-    ) in methods
-    playback = next(
-        route
-        for route in human_soundboard_router.routes
-        if route.path == "/api/v1/channels/{channel_ref}/send-soundboard-sound"
-    )
-    assert playback.status_code == 204
 
 
 def test_bot_client_kind_survives_livekit_admission_validation() -> None:

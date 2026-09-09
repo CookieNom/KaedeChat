@@ -317,7 +317,10 @@ async def test_remote_report_ban_is_owned_locally_and_removes_local_memberships(
     actor = cast(User, SimpleNamespace(id=1, origin_domain="local.test"))
     principal = AdminPrincipal(actor, frozenset({"trust_safety"}), frozenset({"*"}))
     session = FakeSession(report, target)
-    remove_memberships = AsyncMock(return_value=[SimpleNamespace()])
+    removals = [SimpleNamespace()]
+    redis = object()
+    settings = SimpleNamespace(domain="local.test", access_token_ttl_seconds=900)
+    remove_memberships = AsyncMock(return_value=removals)
     publish_removals = AsyncMock()
     monkeypatch.setattr(admin_portal, "remove_remote_user_from_local_guilds", remove_memberships)
     monkeypatch.setattr(admin_portal, "publish_remote_user_guild_removals", publish_removals)
@@ -327,16 +330,19 @@ async def test_remote_report_ban_is_owned_locally_and_removes_local_memberships(
         ReportActionCreate(account_action="ban_permanent", reason="confirmed abuse"),
         principal,
         cast(Any, session),
-        cast(Any, object()),
+        cast(Any, redis),
         cast(Any, FakeSnowflake()),
-        cast(Any, SimpleNamespace(domain="local.test", access_token_ttl_seconds=900)),
+        cast(Any, settings),
     )
 
     restriction = next(item for item in session.added if isinstance(item, InstanceUserRestriction))
     assert restriction.restriction_type == "banned"
     assert restriction.expires_at is None
-    remove_memberships.assert_awaited_once()
-    publish_removals.assert_awaited_once()
+    assert (restriction.user_id, restriction.user_domain) == (8, "remote.test")
+    assert (restriction.actor_id, restriction.actor_domain) == (1, "local.test")
+    assert restriction.reason == "confirmed abuse"
+    remove_memberships.assert_awaited_once_with(session, settings, actor, target)
+    publish_removals.assert_awaited_once_with(session, redis, settings, removals, target)
     enforcement = cast(dict[str, object], result["enforcement"])
     assert enforcement["banned"] is True
     assert enforcement["guild_memberships_removed"] == 1

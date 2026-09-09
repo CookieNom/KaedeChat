@@ -97,7 +97,9 @@
   $effect(() => {
     const embedded = message.message_snapshots?.[0]?.message ?? null;
     const legacyEmbedded = message.forwarded_message ?? null;
-    snapshot = embedded ?? (legacyEmbedded ? materialFromMessage(legacyEmbedded) : null);
+    const initialSnapshot =
+      embedded ?? (legacyEmbedded ? materialFromMessage(legacyEmbedded) : null);
+    snapshot = initialSnapshot;
     sourceHref = '';
     unavailable = '';
 
@@ -110,7 +112,7 @@
     const destinationChannel = `${message.channel_id}@${message.channel_domain}`;
     const destinationMessage = `${message.id}@${message.origin_domain}`;
     const controller = new AbortController();
-    loading = snapshot === null;
+    loading = initialSnapshot === null;
     void api<ForwardAccess | (Message & { source_channel_ref?: string })>(
       forwardedMessagePath(destinationChannel, destinationMessage),
       { signal: controller.signal }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import time
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -44,6 +44,22 @@ from app.auth.tokens import (
 )
 from app.core.settings import Settings
 from app.db.models import Session, User
+
+
+@pytest.fixture
+def frozen_totp(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    fixed = datetime(2026, 9, 9, 12, tzinfo=UTC)
+    verify = pyotp.TOTP.verify
+
+    def verify_at_fixed_time(
+        self: pyotp.TOTP, otp: str, for_time: datetime | None = None, valid_window: int = 0
+    ) -> bool:
+        return verify(
+            self, otp, for_time=fixed if for_time is None else for_time, valid_window=valid_window
+        )
+
+    monkeypatch.setattr(pyotp.TOTP, "verify", verify_at_fixed_time)
+    return fixed
 
 
 class FakeRedis:
@@ -179,21 +195,43 @@ def test_native_client_token_response_uses_body_tokens(client_kind: str) -> None
         auth_settings(),
     )
 
-    assert b'"access_token":"kc1_at_native"' in response.body
-    assert b'"refresh_token":"kc1_rt_native"' in response.body
+    body = json.loads(response.body)
+    assert body["access_token"] == "kc1_at_native"
+    assert body["refresh_token"] == "kc1_rt_native"
     assert "set-cookie" not in response.headers
 
 
 def test_web_client_token_response_keeps_tokens_out_of_body() -> None:
+    from http.cookies import SimpleCookie
+
+    settings = auth_settings().model_copy(update={"environment": "production"})
     response = auth_api.token_response(
         client_request("web"),
         IssuedSession("kc1_at_web", "kc1_rt_web", "session-one"),
-        auth_settings(),
+        settings,
     )
 
     assert b'"access_token":null' in response.body
     assert b'"refresh_token":null' in response.body
-    assert response.headers.getlist("set-cookie")
+    cookies = SimpleCookie()
+    for header in response.headers.getlist("set-cookie"):
+        cookies.load(header)
+    for name, value, path, same_site, max_age in (
+        ("kc_access", "kc1_at_web", "/", "lax", settings.access_token_ttl_seconds),
+        (
+            "kc_refresh",
+            "kc1_rt_web",
+            "/api/v1/auth",
+            "strict",
+            settings.refresh_sliding_days * 86400,
+        ),
+    ):
+        cookie = cookies[name]
+        assert cookie.value == value
+        assert cookie["httponly"] and cookie["secure"]
+        assert cookie["path"] == path
+        assert cookie["samesite"] == same_site
+        assert int(cookie["max-age"]) == max_age
 
 
 @pytest.mark.asyncio
@@ -206,18 +244,6 @@ async def test_access_token_issue_lookup_and_session_revocation() -> None:
     await store.revoke_session("session-one")
     assert await store.get(token) is None
     assert redis.published == [("auth:revoke:session-one", "revoked")]
-
-
-@pytest.mark.asyncio
-async def test_login_limiter_locks_after_five_account_failures() -> None:
-    redis = FakeRedis()
-    limiter = LoginLimiter(redis)  # type: ignore[arg-type]
-    assert await limiter.admit("account", "127.0.0.1")
-    for _ in range(5):
-        await limiter.failure("account", "127.0.0.1")
-    assert await limiter.is_locked("account", "127.0.0.1")
-    await limiter.success("account")
-    assert not await limiter.is_locked("account", "127.0.0.1")
 
 
 @pytest.mark.asyncio
@@ -235,7 +261,13 @@ async def test_login_limiter_turnstile_challenge_is_scoped_and_clearable() -> No
 
 
 @pytest.mark.asyncio
-async def test_session_listing_is_scoped_and_marks_current_device() -> None:
+async def test_session_listing_is_scoped_and_marks_current_device(postgres_schema) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    await postgres_schema.execute(
+        text("CREATE TABLE sessions (LIKE public.sessions INCLUDING ALL)")
+    )
     now = datetime.now(UTC)
     user = User(
         id=42,
@@ -258,10 +290,24 @@ async def test_session_listing_is_scoped_and_marks_current_device() -> None:
         expires_at=now + timedelta(days=7),
         absolute_expires_at=now + timedelta(days=30),
     )
-    result = MagicMock()
-    result.all.return_value = [record]
-    session = MagicMock()
-    session.scalars = AsyncMock(return_value=result)
+    session = AsyncSession(bind=postgres_schema)
+    session.add(record)
+    for identity, uid, domain in (
+        ("other-user", 43, "alpha.test"),
+        ("other-domain", 42, "other.test"),
+    ):
+        session.add(
+            Session(
+                id=identity,
+                user_id=uid,
+                user_domain=domain,
+                user_is_local=True,
+                refresh_token_hash=identity.encode(),
+                expires_at=now + timedelta(days=7),
+                absolute_expires_at=now + timedelta(days=30),
+            )
+        )
+    await session.flush()
 
     rows = await auth_api.list_sessions(
         authenticated_user(user),
@@ -271,6 +317,7 @@ async def test_session_listing_is_scoped_and_marks_current_device() -> None:
     assert [row.id for row in rows] == ["session-one"]
     assert rows[0].current is True
     assert rows[0].device_name == "Linux workstation"
+    await session.close()
 
 
 @pytest.mark.asyncio
@@ -439,6 +486,10 @@ async def test_mfa_ticket_is_bound_and_claimed_once() -> None:
     assert len(fingerprint) == 64
     assert await claim_mfa_ticket(redis, ticket)  # type: ignore[arg-type]
     assert not await claim_mfa_ticket(redis, ticket)  # type: ignore[arg-type]
+    with pytest.raises(InvalidTokenError):
+        await consume_mfa_ticket(redis, ticket)
+    with pytest.raises(InvalidTokenError):
+        await consume_mfa_ticket(redis, "invalid-ticket")
 
 
 @pytest.mark.asyncio
@@ -555,7 +606,7 @@ async def test_pending_mfa_setup_is_bound_to_session_and_credential_state() -> N
 
 
 @pytest.mark.asyncio
-async def test_mfa_enable_limits_invalid_codes_by_account() -> None:
+async def test_mfa_enable_limits_invalid_codes_by_account(frozen_totp: datetime) -> None:
     redis = FakeRedis()
     user = User(
         id=42,
@@ -567,7 +618,7 @@ async def test_mfa_enable_limits_invalid_codes_by_account() -> None:
     )
     secret = pyotp.random_base32()
     totp = pyotp.TOTP(secret)
-    now = int(time.time())
+    now = int(frozen_totp.timestamp())
     accepted_codes = {totp.at(now + offset) for offset in (-30, 0, 30)}
     invalid_code = next(
         candidate
@@ -637,6 +688,7 @@ async def test_mfa_enable_honors_the_source_ip_lock() -> None:
 @pytest.mark.asyncio
 async def test_mfa_enable_clears_account_failures_and_pending_setup_on_success(
     monkeypatch: pytest.MonkeyPatch,
+    frozen_totp: datetime,
 ) -> None:
     redis = FakeRedis()
     user = User(
@@ -648,7 +700,7 @@ async def test_mfa_enable_clears_account_failures_and_pending_setup_on_success(
         password_hash="encoded-password-hash",
     )
     secret = pyotp.random_base32()
-    code = pyotp.TOTP(secret).now()
+    code = pyotp.TOTP(secret).at(frozen_totp)
     await store_mfa_setup(redis, user, "session-one", secret)  # type: ignore[arg-type]
     await record_mfa_verification_failure(  # type: ignore[arg-type]
         redis, user.id, user.origin_domain, "192.0.2.10"

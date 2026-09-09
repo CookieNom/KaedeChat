@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_BROWSER_TIMER_DELAY_MS,
   activeSelfModerationStatus,
@@ -17,6 +17,8 @@ const finite: SelfModerationStatus = {
   timeout_indefinite: false,
   reason: 'Repeated spam'
 };
+
+afterEach(() => vi.useRealTimers());
 
 describe('self moderation status', () => {
   it('renders the private reason for an active affected-user status', () => {
@@ -43,7 +45,9 @@ describe('self moderation status', () => {
   it('provides a bounded expiry delay for automatic UI clearing', () => {
     expect(selfModerationExpiryDelay(finite, Date.parse('2030-01-02T03:03:59Z'))).toBe(1000);
     expect(selfModerationExpiryDelay(finite, Date.parse('2031-01-01T00:00:00Z'))).toBe(0);
-    expect(selfModerationExpiryDelay({ ...finite, timeout_indefinite: true })).toBeNull();
+    expect(
+      selfModerationExpiryDelay({ ...finite, timeout_indefinite: true, timeout_until: null })
+    ).toBeNull();
   });
 
   it('keeps a timeout active and reschedulable beyond the browser timer limit', () => {
@@ -74,11 +78,12 @@ describe('self moderation status', () => {
   });
 
   it('automatically retries only a live non-authoritative fallback', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2029-01-01T00:00:00Z'));
     const fallback = { ...finite, reason: null, details_available: false };
-    expect(selfModerationRetryDelay(fallback)).toBe(15_000);
-    expect(selfModerationGuidance(fallback)?.message).toBe(
-      'Kaede is retrieving the reason from the guild’s home instance.'
-    );
+    expect(selfModerationRetryDelay(fallback)).toBeGreaterThan(0);
+    expect(selfModerationRetryDelay(fallback)).toBeLessThanOrEqual(MAX_BROWSER_TIMER_DELAY_MS);
+    expect(selfModerationGuidance(fallback)?.message).toMatch(/reason.*home instance/i);
     expect(selfModerationRetryDelay({ ...finite, details_available: true })).toBeNull();
     expect(
       selfModerationRetryDelay({

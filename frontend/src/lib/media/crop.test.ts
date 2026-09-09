@@ -24,11 +24,12 @@ describe('normalized crop interactions', () => {
     expect(northwest.y).toBeCloseTo(0);
     expect(northwest.width).toBeCloseTo(0.3);
     expect(northwest.height).toBeCloseTo(0.7);
-    expect(resizeCrop({ x: 0.2, y: 0.2, width: 0.5, height: 0.5 }, 'se', -1, -1)).toEqual({
-      x: 0.2,
-      y: 0.2,
-      width: 0.1,
-      height: 0.1
-    });
+    const minimum = resizeCrop({ x: 0.2, y: 0.2, width: 0.5, height: 0.5 }, 'se', -1, -1);
+    expect(minimum).toMatchObject({ x: 0.2, y: 0.2 });
+    expect(minimum.width).toBeGreaterThan(0);
+    expect(minimum.height).toBeGreaterThan(0);
+    expect(minimum.width).toBeLessThan(0.5);
+    expect(minimum.height).toBeLessThan(0.5);
+    expect(resizeCrop(minimum, 'se', -1, -1)).toEqual(minimum);
   });
 });

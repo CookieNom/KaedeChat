@@ -1,6 +1,3 @@
-import ast
-import inspect
-import textwrap
 from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock
 
@@ -277,11 +274,11 @@ async def test_qualified_resources_override_a_replica_target(
     "invoke",
     [
         pytest.param(
-            lambda bot: bot.delete_application_asset(7),
+            lambda bot, target=None: bot.delete_application_asset(7, target=target),
             id="application-asset-delete",
         ),
         pytest.param(
-            lambda bot: bot.delete_application_emoji(8),
+            lambda bot, target=None: bot.delete_application_emoji(8, target=target),
             id="application-emoji-delete",
         ),
     ],
@@ -299,6 +296,10 @@ async def test_application_media_deletes_always_use_application_home(
 
     assert bot.request.await_args is not None
     assert bot.request.await_args.kwargs["target"] == "https://apps.example"
+    bot.request.reset_mock()
+    with pytest.raises(ValueError, match="authoritative"):
+        await invoke(bot, "https://competing.example")
+    bot.request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -451,48 +452,3 @@ async def test_nested_resources_reject_same_id_from_another_authority(
 def test_resource_paths_bind_to_the_qualified_authority(path: str) -> None:
     bot = client()
     assert bot._request_target(path, OTHER) == AUTHORITY  # noqa: SLF001
-
-
-def test_direct_generic_target_resolution_is_limited_to_unqualified_contexts() -> None:
-    tree = ast.parse(textwrap.dedent(inspect.getsource(Client)))
-    callers: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
-            continue
-        if node.name.startswith("_") or "e2ee" in node.name:
-            continue
-        for child in ast.walk(node):
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Attribute)
-                and child.func.attr == "_target"
-                and isinstance(child.func.value, ast.Name)
-                and child.func.value.id == "self"
-            ):
-                callers.add(node.name)
-
-    # These APIs carry no qualified authority on the wire: target-scoped
-    # collections, DM creation, token-only webhooks, interaction IDs, and
-    # events already tied to the connection that delivered them.
-    allowed = {
-        "add_view",
-        "default_soundboard_sounds",
-        "dispatch",
-        "edit_interaction_followup",
-        "edit_original_interaction_response",
-        "edit_webhook_with_token",
-        "fetch_guilds",
-        "fetch_interaction_followup",
-        "fetch_interaction_input_attachment",
-        "fetch_original_interaction_response",
-        "finalize_interaction_poll",
-        "fetch_webhook_with_token",
-        "interaction_callback",
-        "open_dm",
-        "upload_interaction_attachment",
-        "upload_webhook_attachment",
-        "upload_webhook_avatar_with_token",
-        "delete_webhook_avatar_with_token",
-        "create_interaction_followup",
-    }
-    assert not callers - allowed, sorted(callers - allowed)

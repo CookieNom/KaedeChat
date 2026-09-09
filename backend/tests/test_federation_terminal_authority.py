@@ -269,7 +269,7 @@ async def process(event: EventEnvelope, session: ProcessSession) -> object:
 
 
 @pytest.mark.asyncio
-async def test_inbox_quota_locks_do_not_block_federation_foreign_keys(
+async def test_no_key_update_query_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     patch_process_dependencies(monkeypatch)
@@ -529,12 +529,14 @@ async def test_exact_guild_media_request_does_not_consult_stale_guild_owner(
     assert (attachment.message_id, attachment.message_domain) == (None, None)
 
 
+@pytest.mark.parametrize("actor_domain", [AUTHORITY_DOMAIN, CURRENT_ACTOR_DOMAIN])
 @pytest.mark.asyncio
 async def test_terminal_guild_delete_accepts_current_actor_over_stale_owner(
     monkeypatch: pytest.MonkeyPatch,
+    actor_domain: str,
 ) -> None:
     patch_process_dependencies(monkeypatch)
-    event = guild_terminal(terminal=True)
+    event = guild_terminal(terminal=True, actor_domain=actor_domain)
     global_ledger, peer = ledgers()
     stale_guild = SimpleNamespace(
         id=9,
@@ -566,41 +568,7 @@ async def test_terminal_guild_delete_accepts_current_actor_over_stale_owner(
     receipt = session.added[0]
     assert (cast(Any, receipt).actor_id, cast(Any, receipt).actor_domain) == (
         99,
-        AUTHORITY_DOMAIN,
-    )
-
-
-@pytest.mark.asyncio
-async def test_terminal_guild_delete_accepts_authority_attested_remote_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    patch_process_dependencies(monkeypatch)
-    event = guild_terminal(terminal=True, actor_domain=CURRENT_ACTOR_DOMAIN)
-    global_ledger, peer = ledgers()
-    stale_guild = SimpleNamespace(
-        id=9,
-        origin_domain=AUTHORITY_DOMAIN,
-        owner_id=7,
-        owner_domain=AUTHORITY_DOMAIN,
-    )
-    session = ProcessSession(
-        event,
-        [None, global_ledger, peer, event.event_id, event.event_id],
-        {(Guild, (9, AUTHORITY_DOMAIN)): stale_guild},
-    )
-    prepare = AsyncMock(return_value=([], set(), set()))
-    apply = AsyncMock(return_value=[])
-    monkeypatch.setattr(federation_api, "prepare_terminal_guild_media", prepare)
-    monkeypatch.setattr(federation_api, "apply_guild_instance_access_revocation", apply)
-
-    result = await process(event, session)
-
-    assert cast(Any, result).status == "accepted", session.inbox.error
-    assert len(session.added) == 1
-    receipt = session.added[0]
-    assert (cast(Any, receipt).actor_id, cast(Any, receipt).actor_domain) == (
-        99,
-        CURRENT_ACTOR_DOMAIN,
+        actor_domain,
     )
 
 
@@ -668,6 +636,12 @@ async def test_terminal_queue_marks_exact_remote_guild_actor_as_authority_attest
     assert build.await_args.kwargs["retained_authority_attested_actor"] is True
     assert len(session.added) == 1
 
+    assert build.await_args.args[2] == "guild.instance_access.revoked"
+    actor = build.await_args.args[3]
+    assert (actor.id, actor.origin_domain) == (99, CURRENT_ACTOR_DOMAIN)
+    assert build.await_args.args[4] == built["content"]
+    assert build.await_args.kwargs["context"] == built["context"]
+
 
 @pytest.mark.asyncio
 async def test_nonterminal_guild_control_still_requires_retained_owner(
@@ -700,9 +674,11 @@ async def test_nonterminal_guild_control_still_requires_retained_owner(
     assert "not signed for the guild owner" in session.inbox.error
 
 
+@pytest.mark.parametrize("failure", ["redis", "deadlock"])
 @pytest.mark.asyncio
 async def test_transient_redis_failure_releases_inbox_for_retry(
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     patch_process_dependencies(monkeypatch)
     event = guild_terminal(terminal=False)
@@ -718,10 +694,20 @@ async def test_transient_redis_failure_releases_inbox_for_retry(
         [global_ledger, peer, event.event_id, event.event_id],
         {(Guild, (9, AUTHORITY_DOMAIN)): guild},
     )
+    error: Exception = RedisConnectionError("cache unavailable")
+    if failure == "deadlock":
+        deadlock = AsyncAdapt_asyncpg_dbapi.Error("deadlock detected")
+        deadlock.sqlstate = "40P01"
+        error = DBAPIError("SELECT ... FOR UPDATE", None, deadlock)
+    unique = AsyncAdapt_asyncpg_dbapi.Error("unique violation")
+    unique.sqlstate = "23505"
+    assert not federation_api._is_transient_event_infrastructure_error(
+        DBAPIError("INSERT ...", None, unique)
+    )
     monkeypatch.setattr(
         federation_api,
         "apply_guild_instance_access_revocation",
-        AsyncMock(side_effect=RedisConnectionError("cache unavailable")),
+        AsyncMock(side_effect=error),
     )
 
     result = await process(event, session)
@@ -732,52 +718,6 @@ async def test_transient_redis_failure_releases_inbox_for_retry(
     )
     assert session.deleted == [session.inbox]
     assert session.inbox.status == "pending"
-    assert session.savepoint.rollbacks == 1
-    assert peer.federation_inbox_events == 0
-    assert global_ledger.federation_inbox_events == 0
-
-
-@pytest.mark.asyncio
-async def test_postgres_deadlock_releases_inbox_for_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    patch_process_dependencies(monkeypatch)
-    event = guild_terminal(terminal=False)
-    global_ledger, peer = ledgers()
-    guild = SimpleNamespace(
-        id=9,
-        origin_domain=AUTHORITY_DOMAIN,
-        owner_id=99,
-        owner_domain=AUTHORITY_DOMAIN,
-    )
-    session = ProcessSession(
-        event,
-        [global_ledger, peer, event.event_id, event.event_id],
-        {(Guild, (9, AUTHORITY_DOMAIN)): guild},
-    )
-    asyncpg_deadlock = AsyncAdapt_asyncpg_dbapi.Error(
-        "<class 'asyncpg.exceptions.DeadlockDetectedError'>: deadlock detected"
-    )
-    asyncpg_deadlock.sqlstate = "40P01"
-    deadlock = DBAPIError("SELECT ... FOR UPDATE", None, asyncpg_deadlock)
-    asyncpg_constraint = AsyncAdapt_asyncpg_dbapi.Error("unique violation")
-    asyncpg_constraint.sqlstate = "23505"
-    assert not federation_api._is_transient_event_infrastructure_error(
-        DBAPIError("INSERT ...", None, asyncpg_constraint)
-    )
-    monkeypatch.setattr(
-        federation_api,
-        "apply_guild_instance_access_revocation",
-        AsyncMock(side_effect=deadlock),
-    )
-
-    result = await process(event, session)
-
-    assert (cast(Any, result).status, cast(Any, result).code) == (
-        "retry",
-        "KAED_FED_EVENT_RETRY",
-    )
-    assert session.deleted == [session.inbox]
     assert session.savepoint.rollbacks == 1
     assert peer.federation_inbox_events == 0
     assert global_ledger.federation_inbox_events == 0

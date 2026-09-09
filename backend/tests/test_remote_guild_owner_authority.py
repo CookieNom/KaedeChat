@@ -371,10 +371,11 @@ def _replicated_message_event(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("member_exists", [True, False])
+@pytest.mark.parametrize("member_exists,forged", [(True, False), (False, False), (True, True)])
 async def test_owner_attested_remote_message_requires_semantic_author_membership(
     monkeypatch: pytest.MonkeyPatch,
     member_exists: bool,
+    forged: bool,
 ) -> None:
     guild = Guild(
         id=100,
@@ -407,7 +408,7 @@ async def test_owner_attested_remote_message_requires_semantic_author_membership
         guild,
         channel,
         author,
-        actor=(guild.owner_id, guild.owner_domain),
+        actor=(3, "forged.example") if forged else (guild.owner_id, guild.owner_domain),
     )
 
     async def get_model(model: object, _key: object) -> object | None:
@@ -438,8 +439,9 @@ async def test_owner_attested_remote_message_requires_semantic_author_membership
     monkeypatch.setattr(federation_guilds, "advance_channel_cursor", AsyncMock())
     monkeypatch.setattr(federation_guilds, "apply_e2ee_control_metadata", AsyncMock())
 
-    if not member_exists:
-        with pytest.raises(ValueError, match="author is not a guild member"):
+    if forged or not member_exists:
+        expected = "actor does not match its author" if forged else "author is not a guild member"
+        with pytest.raises(ValueError, match=expected):
             await apply_guild_message_event(
                 cast(Any, session),
                 cast(Settings, SimpleNamespace(domain="replica.localhost")),
@@ -549,70 +551,6 @@ async def test_proxy_commit_replica_uses_federation_author_profile(
     parsed_profile = resolve_profile.await_args.args[2]
     assert parsed_profile.profile_version == 3
     assert parsed_profile.e2ee_device_generation == 0
-
-
-@pytest.mark.asyncio
-async def test_forged_remote_message_authority_actor_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    guild = Guild(
-        id=100,
-        origin_domain="alpha.localhost",
-        name="Guild",
-        owner_id=1,
-        owner_domain="owner.example",
-        last_event_seq=0,
-        next_event_seq=1,
-    )
-    channel = Channel(
-        id=200,
-        origin_domain=guild.origin_domain,
-        guild_id=guild.id,
-        guild_domain=guild.origin_domain,
-        type=0,
-        name="general",
-        created_floor_id=200,
-        unavailable=False,
-    )
-    author = _remote_user(2, "member.example", "author")
-    membership = GuildMember(
-        guild_id=guild.id,
-        guild_domain=guild.origin_domain,
-        user_id=author.id,
-        user_domain=author.origin_domain,
-        joined_at=datetime.now(UTC),
-    )
-    event, _ = _replicated_message_event(
-        guild,
-        channel,
-        author,
-        actor=(3, "forged.example"),
-    )
-
-    async def get_model(model: object, _key: object) -> object | None:
-        if model is Channel:
-            return channel
-        if model is GuildMember:
-            return membership
-        return None
-
-    session = SimpleNamespace(
-        scalar=AsyncMock(return_value=guild),
-        get=AsyncMock(side_effect=get_model),
-    )
-    monkeypatch.setattr(
-        federation_guilds,
-        "resolve_delegated_profile",
-        AsyncMock(return_value=author),
-    )
-
-    with pytest.raises(ValueError, match="actor does not match its author"):
-        await apply_guild_message_event(
-            cast(Any, session),
-            cast(Settings, SimpleNamespace(domain="replica.localhost")),
-            guild,
-            event,
-        )
 
 
 def _signed_guild_update(

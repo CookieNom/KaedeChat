@@ -413,6 +413,14 @@ async def test_local_bulk_delete_queues_one_aggregate_federation_event(
     assert published.await_args.args[2] == "MESSAGE_DELETE_BULK"
     assert published.await_args.args[3]["ids"] == queued.await_args.args[5]["messages"]
 
+    published.assert_awaited_once()
+    assert published.await_args.args[1] is access
+    assert queued.await_args.args[2:4] == (guild, actor)
+    assert all(
+        message.content is None and message.e2ee is None and message.deleted_at is not None
+        for message in messages
+    )
+
 
 @pytest.mark.asyncio
 async def test_reaction_summaries_merge_canonical_aliases() -> None:
@@ -709,7 +717,7 @@ def reaction_user(identifier: int, domain: str, username: str) -> SimpleNamespac
 
 
 @pytest.mark.asyncio
-async def test_reaction_users_are_permission_checked_and_composite_paginated(
+async def test_reaction_user_page_requires_history_permission_and_emits_composite_cursor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = reaction_user(9, "local.example", "viewer")
@@ -757,3 +765,11 @@ async def test_reaction_users_are_permission_checked_and_composite_paginated(
         ("7", "alpha.example"),
         ("7", "beta.example"),
     ]
+
+    assert load_access.await_args.args[2:] == (actor, EntityRef("20@remote.example"))
+    assert require_permissions.await_args.args[2:4] == (access, actor)
+    assert (
+        require_permissions.await_args.args[4]
+        == Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
+    )
+    assert load_message.await_args.args[2:] == (access.channel, EntityRef("40@author.example"))

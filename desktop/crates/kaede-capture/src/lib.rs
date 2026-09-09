@@ -143,9 +143,9 @@ mod tests {
     #[test]
     fn converts_bgra_with_odd_dimensions_and_padding() {
         let bytes = [
-            0, 0, 255, 255, 0, 255, 0, 255, 9, 9, 9, 9, // red, green, padding
-            255, 0, 0, 255, 255, 255, 255, 255, 9, 9, 9, 9, // blue, white, padding
-            0, 0, 0, 255, 128, 128, 128, 255, 9, 9, 9, 9, // black, gray, padding
+            0, 0, 255, 255, 0, 0, 255, 255, 9, 9, 9, 9, // red, red, padding
+            0, 0, 255, 255, 0, 0, 255, 255, 9, 9, 9, 9, // red, red, padding
+            255, 0, 0, 255, 0, 255, 0, 255, 9, 9, 9, 9, // blue, green, padding
         ];
         let converted = PackedFrame {
             width: 2,
@@ -158,15 +158,23 @@ mod tests {
         let Some(frame) = converted else {
             panic!("valid frame was rejected");
         };
+        // Full-range BT.601 red/blue/green, allowing fixed-point rounding by one.
+        for (actual, expected) in frame.y.iter().zip([76_i16, 76, 76, 76, 29, 150]) {
+            assert!((i16::from(*actual) - expected).abs() <= 1);
+        }
         assert_eq!(frame.y.len(), 6);
         assert_eq!(frame.u.len(), 2);
         assert_eq!(frame.v.len(), 2);
-        assert!(frame.y[0] > frame.y[2]);
-        assert_eq!(frame.y[4], 0);
+        for (actual, expected) in frame.u.iter().zip([85_i16, 149]) {
+            assert!((i16::from(*actual) - expected).abs() <= 1);
+        }
+        for (actual, expected) in frame.v.iter().zip([255_i16, 64]) {
+            assert!((i16::from(*actual) - expected).abs() <= 1);
+        }
     }
 
     #[test]
-    fn rejects_short_or_invalid_frames() {
+    fn invalid_stride_rejection() {
         assert!(
             PackedFrame {
                 width: 4,

@@ -149,7 +149,6 @@ def test_voice_metadata_uses_local_worker_surrogate_not_colliding_source_id() ->
     lineage = guild_lineage()
 
     assert lineage["bot_worker_id"] == 900
-    assert lineage["bot_worker_id"] != 40
     parsed = parse_minted_metadata(
         json.dumps(
             {
@@ -305,8 +304,23 @@ async def test_runtime_revoke_fences_prejoin_and_joined_exact_worker(
         "g.50.70",
         "10@apps.example",
     )
-    release.assert_awaited_once()
-    remove.assert_awaited_once()
+    release.assert_awaited_once_with(
+        redis,
+        "guilds.example",
+        "10@apps.example",
+        connection_id,
+        room="g.50.70",
+        generation=4,
+        client_kind="bot",
+    )
+    remove.assert_awaited_once_with(
+        redis,
+        "guilds.example",
+        "g.50.70",
+        "10@apps.example",
+        connection_id,
+        generation=4,
+    )
     if joined:
         control.remove_participant.assert_awaited_once_with("g.50.70", "10@apps.example")
     else:
@@ -466,18 +480,22 @@ async def test_application_revoke_evicts_all_simultaneous_guild_claims(
 
 
 @pytest.mark.parametrize(
-    ("field", "wrong_value"),
+    ("grant_kind", "field", "wrong_value"),
     [
-        ("bot_worker_id", 901),
-        ("bot_installation_id", 31),
-        ("bot_installation_revision", 8),
+        ("guild", "bot_worker_id", 901),
+        ("guild", "bot_installation_id", 31),
+        ("guild", "bot_installation_revision", 8),
+        ("dm", "bot_worker_id", 901),
+        ("dm", "bot_dm_capability_grant_id", "kbdg_" + "x" * 43),
+        ("dm", "bot_dm_capability_revision", 8),
     ],
 )
 def test_guild_voice_control_requires_exact_occupant_lineage(
+    grant_kind: str,
     field: str,
     wrong_value: object,
 ) -> None:
-    installation = guild_installation()
+    installation = guild_installation() if grant_kind == "guild" else dm_capability()
     exact = occupant(bot_voice_lineage_metadata(worker(), installation))
     assert bot_voice_api._occupant_has_exact_bot_lineage(
         exact,
@@ -490,34 +508,6 @@ def test_guild_voice_control_requires_exact_occupant_lineage(
         exact,
         principal(),
         installation,
-    )
-
-
-@pytest.mark.parametrize(
-    ("field", "wrong_value"),
-    [
-        ("bot_worker_id", 901),
-        ("bot_dm_capability_grant_id", "kbdg_" + "x" * 43),
-        ("bot_dm_capability_revision", 8),
-    ],
-)
-def test_dm_voice_control_requires_exact_occupant_lineage(
-    field: str,
-    wrong_value: object,
-) -> None:
-    capability = dm_capability()
-    exact = occupant(bot_voice_lineage_metadata(worker(), capability))
-    assert bot_voice_api._occupant_has_exact_bot_lineage(
-        exact,
-        principal(),
-        capability,
-    )
-
-    exact.participant_metadata[field] = wrong_value
-    assert not bot_voice_api._occupant_has_exact_bot_lineage(
-        exact,
-        principal(),
-        capability,
     )
 
 

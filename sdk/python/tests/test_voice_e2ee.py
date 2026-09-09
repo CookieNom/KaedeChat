@@ -151,6 +151,7 @@ def test_voice_context_binds_group_epoch_and_exporter_context() -> None:
     context = e2ee_context(provider, group_id)
     grant = encrypted_grant(group_id)
 
+    assert grant.media_session_id == "7pR_gBnDK_-lcbHj8leDdqAjYeNB3ZehUM7EPhdhEJs"
     key = context.derive_media_key(grant)
 
     assert key == bytearray(b"\x07" * MEDIA_KEY_BYTES)
@@ -160,7 +161,7 @@ def test_voice_context_binds_group_epoch_and_exporter_context() -> None:
             "kaede livekit v1",
             (
                 "kaede-livekit-key-v1\0livekit-e2ee-v1\0AES-256-GCM\0"
-                f"{grant.media_session_id}\0"
+                "7pR_gBnDK_-lcbHj8leDdqAjYeNB3ZehUM7EPhdhEJs\x00"
                 "7\0g.1.2"
             ).encode(),
             MEDIA_KEY_BYTES,
@@ -183,7 +184,7 @@ def test_voice_context_rejects_mismatched_group_and_stale_provider_epoch() -> No
     assert provider.exports == []
 
 
-def test_epoch_rotation_requires_fresh_context_and_derives_a_fresh_key() -> None:
+def test_epoch_and_policy_changes_bind_exporter_context_independently() -> None:
     group_id = b"g" * 32
     provider = DeterministicMLSProvider(7)
     old_context = e2ee_context(provider, group_id)
@@ -196,10 +197,16 @@ def test_epoch_rotation_requires_fresh_context_and_derives_a_fresh_key() -> None
 
     rotated_context = e2ee_context(provider, group_id, epoch=8)
     rotated_key = rotated_context.derive_media_key(
-        encrypted_grant(group_id, epoch=8, policy_generation=5)
+        encrypted_grant(group_id, epoch=8, policy_generation=4)
     )
     assert old_key == bytearray(b"\x07" * MEDIA_KEY_BYTES)
     assert rotated_key == bytearray(b"\x08" * MEDIA_KEY_BYTES)
+    epoch_export = provider.exports[-1]
+    rotated_context.derive_media_key(
+        encrypted_grant(group_id, epoch=8, policy_generation=5)
+    )
+    assert provider.exports[-1][2] != epoch_export[2]
+    assert provider.exports[-1][0:2] == epoch_export[0:2]
 
 
 class FakeKeyProvider:
@@ -282,6 +289,8 @@ async def test_livekit_transport_installs_key_before_connect_and_clears_on_leave
     transport = LiveKitTransport()
     staged = bytearray(b"k" * MEDIA_KEY_BYTES)
     transport.configure_e2ee(grant, staged)
+    owned_key = transport._configured_media_key
+    assert owned_key == staged
 
     async def listener(_frame: AudioFrame, _participant: str) -> None:
         return None
@@ -296,6 +305,8 @@ async def test_livekit_transport_installs_key_before_connect_and_clears_on_leave
     assert room.e2ee_manager.enabled_updates == [False]
     assert room.e2ee_manager.key_provider.keys == [(b"\0" * MEDIA_KEY_BYTES, 0)]
     assert room.disconnected
+    assert owned_key == bytearray(MEDIA_KEY_BYTES)
+    assert transport._configured_media_key is None
 
 
 class EncryptedFakeTransport:

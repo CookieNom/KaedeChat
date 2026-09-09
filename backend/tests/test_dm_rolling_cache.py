@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -7,7 +6,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import HTTPException, Response
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.channels as channels_api
@@ -267,7 +265,20 @@ def test_history_merge_preserves_local_body_and_attachments() -> None:
 @pytest.mark.asyncio
 async def test_authority_dm_history_filters_controls_before_spanning_page_limit(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from sqlalchemy import text
+
+    from app.db.models import E2EEControlRecord
+
+    for table in ("messages", "attachments", "polls", "message_views", "dm_conversations"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
+    for table in ("users", "dm_participants", "e2ee_control_records"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
     configured = settings()
     conversation = DMConversation(
         id=100,
@@ -304,83 +315,121 @@ async def test_authority_dm_history_filters_controls_before_spanning_page_limit(
         profile_resolved=True,
         account_type="human",
     )
-    captured: list[object] = []
-    scalar_batches: list[list[object]] = [messages, [author], [], [], []]
-
-    async def get(model: object, key: object) -> object | None:
-        if model is DMConversation and key == (100, configured.domain):
-            return conversation
-        return None
-
-    async def scalars(statement: object) -> list[object]:
-        captured.append(statement)
-        return scalar_batches.pop(0)
-
-    session = cast(
-        AsyncSession,
-        SimpleNamespace(
-            get=get,
-            scalar=AsyncMock(return_value=200),
-            scalars=scalars,
-        ),
-    )
-    monkeypatch.setattr(
-        federation_api,
-        "enforce_federation_route_rate_limit",
-        AsyncMock(),
-    )
-    reaction_summaries = AsyncMock(
-        return_value={
-            (500, configured.domain): ({"❤": 2}, ["❤"]),
-        }
-    )
-    monkeypatch.setattr(
-        federation_api,
-        "reaction_payloads_for_messages",
-        reaction_summaries,
-    )
-
-    result = await federation_dm_history_page(
-        conversation_id=cast(Any, 100),
-        before_id=None,
-        before_domain=None,
-        limit=2,
-        requester_id=None,
-        requester_domain=None,
-        principal=FederationPrincipal("requester.example", "ed25519:test"),
-        session=session,
-        redis=cast(Any, object()),
-        settings=configured,
-    )
-
-    sql = str(
-        captured[0].compile(  # type: ignore[union-attr]
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": False},
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        session.add_all([conversation, author, *messages])
+        session.add(
+            DMParticipant(
+                conversation_id=100,
+                conversation_domain=configured.domain,
+                user_id=201,
+                user_domain="requester.example",
+            )
         )
-    )
-    assert "e2ee_control_records" in sql
-    assert "NOT (EXISTS" in sql
-    assert [item["id"] for item in cast(list[dict[str, object]], result["messages"])] == [
-        "500",
-        "498",
-    ]
-    assert result["next_before"] == {
-        "id": "498",
-        "origin_domain": configured.domain,
-    }
-    assert result["complete"] is False
-    rendered_author = cast(list[dict[str, Any]], result["messages"])[0]["author"]
-    strict_author = RemoteUserProfile.model_validate(rendered_author)
-    assert strict_author.profile_version == 1
-    assert strict_author.e2ee_device_generation == 0
-    assert cast(list[dict[str, Any]], result["messages"])[0]["reaction_counts"] == {"❤": 2}
-    assert cast(list[dict[str, Any]], result["messages"])[0]["reacted_emoji"] == ["❤"]
-    reaction_summaries.assert_awaited_once()
+        for identifier in (499, 497):
+            session.add(
+                Message(
+                    id=identifier,
+                    origin_domain=configured.domain,
+                    channel_id=100,
+                    channel_domain=configured.domain,
+                    author_id=200,
+                    author_domain=configured.domain,
+                    content="control",
+                    created_at=now,
+                )
+            )
+            session.add(E2EEControlRecord(id=identifier, origin_domain=configured.domain))
+        # Neither another conversation nor the requesting home can fill the page.
+        session.add(
+            Message(
+                id=501,
+                origin_domain=configured.domain,
+                channel_id=101,
+                channel_domain=configured.domain,
+                author_id=200,
+                author_domain=configured.domain,
+                content="another room",
+                created_at=now,
+            )
+        )
+        session.add(
+            Message(
+                id=502,
+                origin_domain="requester.example",
+                channel_id=100,
+                channel_domain=configured.domain,
+                author_id=201,
+                author_domain="requester.example",
+                content="requester's source",
+                created_at=now,
+            )
+        )
+        await session.flush()
+        monkeypatch.setattr(
+            federation_api,
+            "enforce_federation_route_rate_limit",
+            AsyncMock(),
+        )
+        reaction_summaries = AsyncMock(
+            return_value={
+                (500, configured.domain): ({"❤": 2}, ["❤"]),
+            }
+        )
+        monkeypatch.setattr(
+            federation_api,
+            "reaction_payloads_for_messages",
+            reaction_summaries,
+        )
+
+        result = await federation_dm_history_page(
+            conversation_id=cast(Any, 100),
+            before_id=None,
+            before_domain=None,
+            limit=2,
+            requester_id=None,
+            requester_domain=None,
+            principal=FederationPrincipal("requester.example", "ed25519:test"),
+            session=session,
+            redis=cast(Any, object()),
+            settings=configured,
+        )
+
+        assert [item["id"] for item in cast(list[dict[str, object]], result["messages"])] == [
+            "500",
+            "498",
+        ]
+        assert result["next_before"] == {
+            "id": "498",
+            "origin_domain": configured.domain,
+        }
+        assert result["complete"] is False
+        rendered_author = cast(list[dict[str, Any]], result["messages"])[0]["author"]
+        strict_author = RemoteUserProfile.model_validate(rendered_author)
+        assert strict_author.profile_version == 1
+        assert strict_author.e2ee_device_generation == 0
+        assert cast(list[dict[str, Any]], result["messages"])[0]["reaction_counts"] == {"❤": 2}
+        assert cast(list[dict[str, Any]], result["messages"])[0]["reacted_emoji"] == ["❤"]
+        reaction_summaries.assert_awaited_once()
+
+        next_page = await federation_dm_history_page(
+            conversation_id=100,
+            before_id=int(result["next_before"]["id"]),
+            before_domain=result["next_before"]["origin_domain"],
+            limit=2,
+            requester_id=None,
+            requester_domain=None,
+            principal=FederationPrincipal("requester.example", "ed25519:test"),
+            session=session,
+            redis=cast(Any, object()),
+            settings=configured,
+        )
+        assert [item["id"] for item in next_page["messages"]] == ["496"]
+        assert next_page["complete"] is True
+        assert next_page["next_before"] is None
 
 
 @pytest.mark.asyncio
-async def test_dm_open_projection_materializes_channel_before_commit(
+async def test_eager_channel_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime.now(UTC)
@@ -502,6 +551,12 @@ def test_history_completion_requires_both_sources_and_all_merged_rows_exhausted(
         local_has_more=False,
     )
     assert not dm_history_page_is_complete(
+        remote_complete=False,
+        merged_messages=[newest, older_remote],
+        remote_messages=[older_remote],
+        local_has_more=False,
+    )
+    assert not dm_history_page_is_complete(
         remote_complete=True,
         merged_messages=[newest],
         remote_messages=[older_remote],
@@ -516,63 +571,170 @@ def test_history_completion_requires_both_sources_and_all_merged_rows_exhausted(
 
 
 @pytest.mark.asyncio
-async def test_eviction_query_protects_local_authored_and_actual_newest_rows() -> None:
-    captured: list[object] = []
+async def test_eviction_query_protects_local_authored_and_actual_newest_rows(
+    postgres_schema,
+) -> None:
+    from sqlalchemy import text
 
-    async def scalars(statement: object) -> list[Message]:
-        captured.append(statement)
-        return []
+    from app.db.models import MessageProjection, Pin
 
-    session = cast(AsyncSession, SimpleNamespace(scalars=scalars))
-    configured = settings()
-    await _eligible_replica_messages(
-        session,
-        configured,
-        conversation=None,
-        authority_domain="authority.example",
-        limit=10,
-    )
-
-    sql = str(
-        captured[0].compile(  # type: ignore[union-attr]
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": False},
+    for table in (
+        "messages",
+        "channels",
+        "dm_conversations",
+        "pins",
+        "message_projections",
+        "attachments",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
         )
-    )
-    assert "messages.origin_domain !=" in sql
-    assert "EXISTS (SELECT" in sql
-    assert "newer_dm_message.id, newer_dm_message.origin_domain) >" in sql
-    assert "NOT (EXISTS" not in sql.partition("newer_dm_message")[0][-32:]
-    assert "pins" in sql
+    configured = settings()
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        conversation = DMConversation(
+            id=100,
+            origin_domain="authority.example",
+            authority_domain="authority.example",
+            type="direct",
+            pair_key="a" * 64,
+        )
+        channel = Channel(
+            id=100,
+            origin_domain="authority.example",
+            type=1,
+            last_message_id=7,
+            last_message_domain="authority.example",
+        )
+        session.add_all([conversation, channel])
+        for identifier in range(1, 10):
+            domain = configured.domain if identifier == 2 else "authority.example"
+            session.add(
+                Message(
+                    id=identifier,
+                    origin_domain=domain,
+                    channel_id=100,
+                    channel_domain="authority.example",
+                    author_id=1,
+                    author_domain=domain,
+                )
+            )
+        session.add(
+            Pin(
+                message_id=3,
+                message_domain="authority.example",
+                channel_id=100,
+                channel_domain="authority.example",
+                pinned_by_id=1,
+                pinned_by_domain=configured.domain,
+            )
+        )
+        session.add(
+            MessageProjection(message_id=4, message_domain="authority.example", processed_at=None)
+        )
+        session.add(
+            Attachment(
+                id=50,
+                origin_domain=configured.domain,
+                message_id=5,
+                message_domain="authority.example",
+            )
+        )
+        await session.flush()
+        rows = await _eligible_replica_messages(
+            session,
+            configured,
+            conversation=None,
+            authority_domain="authority.example",
+            limit=10,
+            protected_refs={(6, "authority.example")},
+        )
+        assert [(row.id, row.origin_domain) for row in rows] == [
+            (1, "authority.example"),
+            (8, "authority.example"),
+        ]
+        channel.last_message_id = channel.last_message_domain = None
+        await session.flush()
+        rows = await _eligible_replica_messages(
+            session,
+            configured,
+            conversation=conversation,
+            authority_domain="authority.example",
+            limit=2,
+        )
+        assert [row.id for row in rows] == [1, 6]
 
 
 @pytest.mark.asyncio
-async def test_sweep_selects_only_over_target_capable_replicas() -> None:
-    captured: list[object] = []
+async def test_sweep_selects_only_over_target_capable_replicas(
+    monkeypatch: pytest.MonkeyPatch, postgres_schema
+) -> None:
+    from sqlalchemy import text
 
-    class EmptyResult:
-        def tuples(self) -> list[tuple[int, str, str]]:
-            return []
+    import app.federation.dm_storage as storage
+    from app.db.models import FederatedDMRowCharge, FederatedDMStorageUsage, Instance
+    from app.federation.dm_storage import DM_HISTORY_PAGE_CAPABILITY
 
-    async def execute(statement: object) -> EmptyResult:
-        captured.append(statement)
-        return EmptyResult()
-
-    session = cast(AsyncSession, SimpleNamespace(execute=execute))
-    await sweep_federated_dm_replica_cache(session, settings())
-
-    sql = str(
-        captured[0].compile(  # type: ignore[union-attr]
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": False},
+    for table in ("instances", "dm_conversations", "federated_dm_row_charges"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    await postgres_schema.execute(
+        text(
+            "CREATE TABLE federated_dm_storage_usage (LIKE "
+            "public.federated_dm_storage_usage INCLUDING ALL)"
         )
     )
-    assert "federated_dm_row_charges.row_domain !=" in sql
-    assert "instances.capabilities" in sql
-    assert "federated_dm_max_messages_per_authority" not in sql
-    assert "anon_1.message_rows >" in sql
-    assert "anon_1.total_bytes >" in sql
-    assert "LIMIT" in sql
+    configured = settings(federation_dm_replica_cache_messages_per_conversation=100)
+    prune = AsyncMock(return_value=SimpleNamespace(evicted_messages=1))
+    monkeypatch.setattr(storage, "prune_federated_dm_replica", prune)
+    monkeypatch.setattr(storage, "lock_federated_dm_authority", AsyncMock())
+    async with AsyncSession(bind=postgres_schema) as session:
+        for identifier in range(1, 7):
+            domain = configured.domain if identifier == 2 else f"authority-{identifier}.example"
+            session.add(
+                Instance(
+                    domain=domain,
+                    is_self=identifier == 2,
+                    capabilities=[] if identifier == 1 else [DM_HISTORY_PAGE_CAPABILITY],
+                )
+            )
+            session.add(
+                DMConversation(
+                    id=identifier,
+                    origin_domain=domain,
+                    authority_domain=domain,
+                    pair_key=f"{identifier:064x}",
+                    type="direct",
+                )
+            )
+            count = 100 if identifier == 3 else 101
+            session.add(
+                FederatedDMStorageUsage(
+                    conversation_id=identifier,
+                    conversation_domain=domain,
+                    authority_domain=domain,
+                    remote_origin_domain=domain,
+                    message_rows=count,
+                    message_bytes=count * 100,
+                )
+            )
+            for offset in range(count):
+                session.add(
+                    FederatedDMRowCharge(
+                        table_name="messages",
+                        row_id=identifier * 1000 + offset,
+                        row_domain=configured.domain if identifier == 4 else domain,
+                        conversation_id=identifier,
+                        conversation_domain=domain,
+                        category="message",
+                        charge_bytes=100,
+                    )
+                )
+        await session.flush()
+        changed = await sweep_federated_dm_replica_cache(session, configured, conversation_limit=1)
+        assert changed == {(5, "authority-5.example")}
+        prune.assert_awaited_once()
+        assert prune.await_args.args[2].id == 5
 
 
 def test_history_page_rejects_oversized_or_nonadvancing_peer_rows() -> None:
@@ -706,18 +868,147 @@ def test_opaque_reply_reference_is_limited_to_capable_evicted_remote_prefix() ->
     )
 
 
-def test_rolling_cache_migration_preserves_reference_integrity_outside_opaque_prefix() -> None:
-    migration = (
-        Path(__file__).parents[1] / "migrations/versions/b72c9e4a1f63_federated_dm_rolling_cache.py"
-    ).read_text()
+async def test_rolling_cache_migration_preserves_reference_integrity_outside_opaque_prefix(
+    postgres_schema, migrate_to
+) -> None:
+    from importlib import import_module
 
-    assert "CREATE TRIGGER trg_messages_reply_reference" in migration
-    assert "CREATE TRIGGER trg_read_states_last_message_reference" in migration
-    assert "CREATE CONSTRAINT TRIGGER trg_messages_delete_reference" in migration
-    assert "CREATE CONSTRAINT TRIGGER trg_dm_conversations_history_boundary" in migration
-    assert "authority.capabilities @> '[\"dm-history-page/1\"]'::jsonb" in migration
-    assert "AND p_message_domain <>" in migration
-    assert "clear only dangling references before restoring the legacy FKs" in migration
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.base import Base
+
+    await migrate_to("b72c9e4a1f63")
+    statements = (
+        "INSERT INTO instances (domain,is_self,current_key_id,encrypted_private_key,private_k"
+        "ey_nonce,capabilities) VALUES ('local.example',true,'main',decode(repeat('ab',32),'h"
+        "ex'),decode(repeat('cd',12),'hex'),'[]'),('remote.example',false,NULL,NULL,NULL,'["
+        '"dm-history-page/1"]\')',
+        "INSERT INTO users (id,origin_domain,username,is_local,password_hash) SELECT id,'loca"
+        "l.example','local'||id,true,'hash' FROM (VALUES(1),(3)) AS ids(id)",
+        "INSERT INTO users (id,origin_domain,username,is_local,federation_introduced_by_domai"
+        "n) VALUES (2,'remote.example','remoteuser',false,'remote.example')",
+        "INSERT INTO channels (id,origin_domain,type,created_floor_id) VALUES (10,'remote.exa"
+        "mple',1,1),(11,'remote.example',1,1)",
+        "INSERT INTO dm_conversations (id,origin_domain,pair_key,authority_domain,history_tru"
+        "ncated,history_truncated_before_id,history_truncated_before_domain) VALUES (10,'remo"
+        "te.example',repeat('a',64),'remote.example',true,100,'remote.example'),(11,'remote.e"
+        "xample',repeat('b',64),'remote.example',false,NULL,NULL)",
+        "INSERT INTO dm_participants (conversation_id,conversation_domain,user_id,user_domain"
+        ") VALUES (10,'remote.example',1,'local.example'),(10,'remote.example',2,'remote.exam"
+        "ple'),(11,'remote.example',1,'local.example'),(11,'remote.example',2,'remote.example"
+        "')",
+        "INSERT INTO messages (id,origin_domain,channel_id,channel_domain,author_id,author_do"
+        "main,content) VALUES (50,'remote.example',10,'remote.example',2,'remote.example','ev"
+        "icted'),(110,'remote.example',10,'remote.example',2,'remote.example','retained'),(11"
+        "9,'remote.example',11,'remote.example',2,'remote.example','other room')",
+        "INSERT INTO messages (id,origin_domain,channel_id,channel_domain,author_id,author_do"
+        "main,content,referenced_message_id,referenced_message_domain) VALUES (120,'remote.ex"
+        "ample',10,'remote.example',2,'remote.example','opaque reply',50,'remote.example'),(1"
+        "21,'remote.example',10,'remote.example',2,'remote.example','live reply',110,'remote."
+        "example')",
+        "INSERT INTO read_states (user_id,user_domain,channel_id,channel_domain,last_message_"
+        "id,last_message_domain) VALUES (1,'local.example',10,'remote.example',50,'remote.exa"
+        "mple'),(3,'local.example',10,'remote.example',110,'remote.example')",
+        "SET CONSTRAINTS ALL IMMEDIATE",
+        "DELETE FROM messages WHERE id=50 AND origin_domain='remote.example'",
+    )
+    for statement in statements:
+        await postgres_schema.execute(text(statement))
+    assert (
+        await postgres_schema.scalar(
+            text("SELECT referenced_message_id FROM messages WHERE id=120")
+        )
+        == 50
+    )
+    assert (
+        await postgres_schema.scalar(
+            text("SELECT last_message_id FROM read_states WHERE user_id=1")
+        )
+        == 50
+    )
+    for identifier, domain in (
+        (119, "remote.example"),
+        (105, "remote.example"),
+        (50, "local.example"),
+        (50, "nonparticipant.example"),
+    ):
+        for statement in (
+            "UPDATE messages SET "
+            "referenced_message_id=:id,referenced_message_domain=:domain WHERE id=121",
+            "UPDATE read_states SET last_message_id=:id,last_message_domain=:domain WHERE "
+            "user_id=3",
+        ):
+            with pytest.raises(IntegrityError) as denied:
+                async with postgres_schema.begin_nested():
+                    await postgres_schema.execute(
+                        text(statement), dict(id=identifier, domain=domain)
+                    )
+            assert denied.value.orig.sqlstate == "23503"
+    for statement in (
+        "DELETE FROM messages WHERE id=110 AND origin_domain='remote.example'",
+        "UPDATE dm_conversations SET history_truncated_before_id=40 WHERE id=10",
+    ):
+        with pytest.raises(IntegrityError) as denied:
+            async with postgres_schema.begin_nested():
+                await postgres_schema.execute(text(statement))
+                await postgres_schema.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        assert denied.value.orig.sqlstate == "23503"
+    with pytest.raises(IntegrityError):
+        async with postgres_schema.begin_nested():
+            await postgres_schema.execute(
+                text("UPDATE instances SET capabilities='[]' WHERE domain='remote.example'")
+            )
+            await postgres_schema.execute(
+                text(
+                    "UPDATE messages SET "
+                    "referenced_message_id=50,referenced_message_domain='remote.example' "
+                    "WHERE id=121"
+                )
+            )
+    migration = import_module("migrations.versions.b72c9e4a1f63_federated_dm_rolling_cache")
+
+    def downgrade(sync):
+        with Operations.context(
+            MigrationContext.configure(sync, opts={"target_metadata": Base.metadata})
+        ):
+            migration.downgrade()
+
+    await postgres_schema.run_sync(downgrade)
+    assert (
+        await postgres_schema.execute(
+            text(
+                "SELECT id,referenced_message_id,referenced_message_domain FROM messages "
+                "WHERE id IN (120,121) ORDER BY id"
+            )
+        )
+    ).all() == [(120, None, None), (121, 110, "remote.example")]
+    assert (
+        await postgres_schema.execute(
+            text(
+                "SELECT user_id,last_message_id,last_message_domain FROM read_states ORDER "
+                "BY user_id"
+            )
+        )
+    ).all() == [(1, None, None), (3, 110, "remote.example")]
+    assert set(await postgres_schema.scalars(text("SELECT id FROM messages"))) == {
+        110,
+        119,
+        120,
+        121,
+    }
+    with pytest.raises(IntegrityError) as restored:
+        async with postgres_schema.begin_nested():
+            await postgres_schema.execute(
+                text(
+                    "UPDATE messages SET "
+                    "referenced_message_id=50,referenced_message_domain='remote.example' "
+                    "WHERE id=120"
+                )
+            )
+    assert restored.value.orig.sqlstate == "23503"
 
 
 def test_history_media_capability_is_short_lived_and_bound_to_every_reference() -> None:
@@ -742,16 +1033,28 @@ def test_history_media_capability_is_short_lived_and_bound_to_every_reference() 
         token=values["token"],
         now=now,
     )
-    assert not verify_history_media_capability(
-        configured,
-        conversation_ref=(1, "authority.example"),
-        message_ref=(2, "authority.example"),
-        attachment_ref=(4, "authority.example"),
-        variant="original",
-        expires=int(values["expires"]),
-        token=values["token"],
-        now=now,
-    )
+    valid_scope = {
+        "conversation_ref": (1, "authority.example"),
+        "message_ref": (2, "authority.example"),
+        "attachment_ref": (3, "authority.example"),
+        "variant": "original",
+    }
+    for field, wrong in (
+        ("conversation_ref", (4, "authority.example")),
+        ("conversation_ref", (1, "other.example")),
+        ("message_ref", (4, "authority.example")),
+        ("message_ref", (2, "other.example")),
+        ("attachment_ref", (4, "authority.example")),
+        ("attachment_ref", (3, "other.example")),
+        ("variant", "thumbnail_128"),
+    ):
+        assert not verify_history_media_capability(
+            configured,
+            **(valid_scope | {field: wrong}),
+            expires=int(values["expires"]),
+            token=values["token"],
+            now=now,
+        ), field
     expired_at = now + timedelta(minutes=16)
     tampered_token = f"{values['token'][:-1]}{'A' if values['token'][-1] != 'A' else 'B'}"
     assert (
@@ -1004,8 +1307,10 @@ async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
         assert raised.value.status_code == 404
 
 
+@pytest.mark.parametrize("terminal_field", ["scan_status", "deleted_at"])
 async def test_history_media_origin_rechecks_terminal_state_after_recipient_commit(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_field: str,
 ) -> None:
     configured = settings()
     attachment = Attachment(
@@ -1049,8 +1354,10 @@ async def test_history_media_origin_rechecks_terminal_state_after_recipient_comm
         return None
 
     async def commit() -> None:
-        attachment.scan_status = "quarantined"
-        attachment.deleted_at = datetime.now(UTC)
+        if terminal_field == "scan_status":
+            attachment.scan_status = "quarantined"
+        else:
+            attachment.deleted_at = datetime.now(UTC)
 
     session = cast(
         AsyncSession,
@@ -1115,11 +1422,10 @@ def test_remote_guild_message_and_pin_proxies_preserve_typed_507_errors() -> Non
         },
         request=httpx.Request("POST", "https://authority.example/proxy"),
     )
-    for handled in ({403, 404, 429, 507}, {400, 403, 404, 409, 429, 507}):
-        with pytest.raises(HTTPException) as raised:
-            raise_proxy_rejection(response, handled)
-        assert raised.value.status_code == 507
-        assert raised.value.detail["code"] == "KAED_FED_REPLICA_QUOTA_EXCEEDED"
+    with pytest.raises(HTTPException) as raised:
+        raise_proxy_rejection(response, {403, 404, 429, 507})
+    assert raised.value.status_code == 507
+    assert raised.value.detail["code"] == "KAED_FED_REPLICA_QUOTA_EXCEEDED"
 
 
 @pytest.mark.asyncio

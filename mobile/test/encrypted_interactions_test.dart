@@ -65,22 +65,26 @@ void main() {
     expect(context['epoch'], '7');
     expect(context['policy_generation'], '3');
   });
-
   test('mobile encrypted commands require a stable command identity', () {
-    expect(
-      () => mobileInteractionAuthenticatedContext(
-        channel,
-        invoker: EntityRef.parse('40@users.example'),
-        senderDeviceId: 'ked_${List.filled(43, 'a').join()}',
-        application: EntityRef.parse('30@apps.example'),
-        integrationType: 'guild_install',
-        interactionContext: 'guild',
-        interactionType: 'command',
-      ),
-      throwsFormatException,
-    );
+    Map<String, Object?> context(String? omitted) =>
+        mobileInteractionAuthenticatedContext(
+          channel,
+          invoker: EntityRef.parse('40@users.example'),
+          senderDeviceId: 'ked_${List.filled(43, 'a').join()}',
+          application: EntityRef.parse('30@apps.example'),
+          integrationType: 'guild_install',
+          interactionContext: 'guild',
+          interactionType: 'command',
+          commandId: omitted == 'id' ? null : '91',
+          commandName: omitted == 'name' ? null : 'secure',
+          commandType: omitted == 'type' ? null : 'chat_input',
+        );
+    expect(context(null), isNotEmpty);
+    expect(() => context('id'), throwsFormatException);
+    // The AAD builder requires stable ID; optional metadata stays explicitly null.
+    expect(context('name')['command_name'], isNull);
+    expect(context('type')['command_type'], isNull);
   });
-
   test('mobile encrypted bot-DM commands bind the capability integration', () {
     final context = mobileInteractionAuthenticatedContext(
       channel,
@@ -173,6 +177,13 @@ void main() {
         'application_ref': '30@apps.example',
         'command_name': 'secure',
         'options': <String, Object?>{'query': 'private'},
+        'values': <String>['secret-choice'],
+        'components': <Object?>[
+          <String, Object?>{
+            'custom_id': 'secret-field',
+            'value': 'secret-answer'
+          }
+        ],
       },
       encryptedPayload: const <String, Object?>{'ciphertext': 'opaque'},
       attachmentIds: const <String>['9223372036854775807'],
@@ -294,10 +305,6 @@ void main() {
         reason: '${vector['name']} validation',
       );
     }
-    expect(
-      Map<String, Object?>.from((vectors[0] as Map)['contract'] as Map),
-      Map<String, Object?>.from((vectors[1] as Map)['contract'] as Map),
-    );
     for (final rawInvalid in fixture['invalid_contracts']! as List) {
       final invalid = Map<String, Object?>.from(rawInvalid as Map);
       expect(
@@ -568,8 +575,14 @@ void main() {
       ),
       throwsFormatException,
     );
+    expect(
+        () => validateMobileEncryptedMessageSenderCredential(
+              credential,
+              message(EntityRef.parse('10@apps.example')),
+              'kbe_${List.filled(43, 'B').join()}',
+            ),
+        throwsFormatException);
   });
-
   test('mobile binds public webhook credentials to exact webhook and device',
       () {
     final deviceId = 'kwe_${List.filled(43, 'W').join()}';
@@ -623,26 +636,23 @@ void main() {
       ),
       throwsFormatException,
     );
+    expect(
+        () => validateMobileEncryptedMessageSenderCredential(
+              credential,
+              message(webhook: EntityRef.parse('70@hooks.example')),
+              'kwe_${List.filled(43, 'B').join()}',
+            ),
+        throwsFormatException);
   });
-
   test('mobile derives webhook MLS device from exact ref and identity key',
       () async {
     final identityKey = List<int>.generate(32, (index) => index);
-    final expected = base64Url
-        .encode((await Sha256().hash(<int>[
-          ...utf8.encode(
-            'kaede-webhook-e2ee-device-v1\u000070@hooks.example\u0000',
-          ),
-          ...identityKey,
-        ]))
-            .bytes)
-        .replaceAll('=', '');
     expect(
       await mobileWebhookE2eeDeviceId(
         EntityRef.parse('70@hooks.example'),
         identityKey,
       ),
-      'kwe_$expected',
+      'kwe_4TTowF8LpAD-8xh11BU_fuMR-feqYhVRAVfsaj3P2gk',
     );
   });
 }

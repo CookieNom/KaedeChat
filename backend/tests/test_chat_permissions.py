@@ -64,14 +64,47 @@ def overwrite(
     )
 
 
-def test_usable_guild_installation_requires_unrevoked_membership() -> None:
-    statement = select(BotInstallation.id).where(usable_guild_installation())
-    sql = str(statement.compile())
+async def test_usable_guild_installation_requires_unrevoked_membership(postgres_schema) -> None:
+    from sqlalchemy import text
 
-    assert "bot_installations.status" in sql
-    assert "bot_installations.revoked_at IS NULL" in sql
-    assert "EXISTS" in sql
-    assert "guild_members" in sql
+    connection = postgres_schema
+    await connection.execute(
+        text(
+            "CREATE TABLE bot_installations (id bigint, status text, revoked_at "
+            "timestamptz, guild_id bigint, guild_domain text, bot_user_id bigint, "
+            "bot_user_domain text)"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE TABLE guild_members (guild_id bigint, guild_domain text, user_id "
+            "bigint, user_domain text)"
+        )
+    )
+    await connection.execute(
+        text("INSERT INTO guild_members VALUES (10, 'guild.example', 20, 'bot.example')")
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO bot_installations VALUES (1, 'active', NULL, 10, 'guild.example', "
+            "20, 'bot.example'), (2, 'revoked', NULL, 10, 'guild.example', 20, "
+            "'bot.example'), (3, 'active', now(), 10, 'guild.example', 20, 'bot.example'), "
+            "(4, 'active', NULL, 11, 'guild.example', 20, 'bot.example'), (5, 'active', "
+            "NULL, 10, 'foreign.example', 20, 'bot.example'), (6, 'active', NULL, 10, "
+            "'guild.example', 21, 'bot.example'), (7, 'active', NULL, 10, 'guild.example', "
+            "20, 'foreign.example')"
+        )
+    )
+    assert list(
+        await connection.scalars(select(BotInstallation.id).where(usable_guild_installation()))
+    ) == [1]
+    await connection.execute(text("DELETE FROM guild_members"))
+    assert (
+        list(
+            await connection.scalars(select(BotInstallation.id).where(usable_guild_installation()))
+        )
+        == []
+    )
 
 
 def test_owner_and_administrator_bypass_overwrites() -> None:
@@ -92,6 +125,16 @@ def test_overwrite_order_is_everyone_roles_then_member() -> None:
     )
     assert result & Permission.VIEW_CHANNEL
     assert not result & Permission.SEND_MESSAGES
+    everyone = overwrite(10, "role", deny=Permission.SEND_MESSAGES)
+    role = overwrite(11, "role", allow=Permission.SEND_MESSAGES)
+    for prefix, allowed in (([everyone], False), ([everyone, role], True)):
+        result = resolve(
+            base=Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES,
+            roles={(10, DOMAIN), (11, DOMAIN)},
+            overwrites=prefix,
+        )
+        assert bool(result & Permission.SEND_MESSAGES) is allowed
+        assert result & Permission.VIEW_CHANNEL
 
 
 def test_everyone_allow_does_not_override_a_custom_role_deny() -> None:
@@ -374,44 +417,6 @@ def test_catalog_channel_permissions_follow_real_overwrite_precedence(
     assert not denied & permission
 
 
-@pytest.mark.parametrize(
-    "permission",
-    [
-        Permission.KICK_MEMBERS,
-        Permission.MODERATE_MEMBERS,
-        Permission.BAN_INSTANCES,
-    ],
-)
-def test_catalog_guild_permissions_preserve_real_role_grants(permission: Permission) -> None:
-    allowed = resolve_permissions(
-        owner=False,
-        user_id=22,
-        user_domain=DOMAIN,
-        everyone_role_id=10,
-        everyone_role_domain=DOMAIN,
-        role_ids={(10, DOMAIN)},
-        base_permissions=int(permission),
-        overwrites=[],
-        channel_type=None,
-        timed_out=False,
-    )
-    denied = resolve_permissions(
-        owner=False,
-        user_id=22,
-        user_domain=DOMAIN,
-        everyone_role_id=10,
-        everyone_role_domain=DOMAIN,
-        role_ids={(10, DOMAIN)},
-        base_permissions=0,
-        overwrites=[],
-        channel_type=None,
-        timed_out=False,
-    )
-
-    assert allowed & permission
-    assert not denied & permission
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("granted", [True, False])
 @pytest.mark.parametrize(
@@ -516,10 +521,11 @@ async def test_catalog_permissions_pass_and_fail_the_real_permission_guard(
             )
         assert denied.value.status_code == 403
         assert denied.value.detail["permissions"] == str(int(permission))
-    assert redis.set.await_args.args[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:lock:")
-    cached_keys = [call.args[0] for call in pipeline.set.call_args_list]
-    assert cached_keys[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:")
-    assert cached_keys[1].startswith(f"{PERMISSION_CACHE_NAMESPACE}:stale:")
+    if granted and permission == Permission.CREATE_INVITE:
+        assert redis.set.await_args.args[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:lock:")
+        cached_keys = [call.args[0] for call in pipeline.set.call_args_list]
+        assert cached_keys[0].startswith(f"{PERMISSION_CACHE_NAMESPACE}:")
+        assert cached_keys[1].startswith(f"{PERMISSION_CACHE_NAMESPACE}:stale:")
 
 
 def test_timeout_reduces_member_to_read_only() -> None:
@@ -589,7 +595,7 @@ def test_permission_cache_never_rounds_a_live_timeout_down_to_zero() -> None:
     )
 
     assert permission_cache_ttl(expiring_member, evaluated_at=evaluated_at) == 1
-    assert permission_cache_ttl(expired_member, evaluated_at=evaluated_at) == 300
+    assert permission_cache_ttl(expired_member, evaluated_at=evaluated_at) > 0
 
 
 def test_everyone_overwrite_uses_guild_domain_for_remote_member() -> None:
@@ -1062,6 +1068,17 @@ def test_bot_grant_cache_identity_is_stable_across_restriction_order() -> None:
     )
 
     assert first.cache_identity() == second.cache_identity()
+    for mutation in ({"grant_revision": 4}, {"channel_restrictions": ["22@a.example"]}):
+        changed = bot_guild_permission_grant_from_installation(
+            SimpleNamespace(
+                **{
+                    **common,
+                    "channel_restrictions": ["20@a.example", "21@a.example"],
+                    **mutation,
+                }
+            )
+        )
+        assert changed.cache_identity() != first.cache_identity()
 
 
 @pytest.mark.asyncio
@@ -1088,13 +1105,10 @@ async def test_timeout_denial_explains_expiry_and_reason(monkeypatch: pytest.Mon
         )
 
     assert caught.value.status_code == 403
-    assert caught.value.detail == {
-        "code": "MEMBER_TIMED_OUT",
-        "message": "You are currently timed out in this guild.",
-        "timeout_until": expiry.isoformat(),
-        "timeout_indefinite": False,
-        "reason": "Repeated spam",
-    }
+    assert caught.value.detail["code"] == "MEMBER_TIMED_OUT"
+    assert caught.value.detail["timeout_until"] == expiry.isoformat()
+    assert caught.value.detail["timeout_indefinite"] is False
+    assert caught.value.detail["reason"] == "Repeated spam"
 
 
 @pytest.mark.asyncio

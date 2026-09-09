@@ -270,7 +270,7 @@
   </aside>
 {/if}
 
-{#if browserNotifications.health.message}
+{#if browserNotifications.health.message && browserNotifications.health.message !== browserNotifications.dismissedHealthMessage}
   <aside class="notification-health" role="alert" aria-live="polite">
     <div>
       <strong>Notifications need attention</strong>
@@ -284,13 +284,16 @@
         </small>
       {/if}
     </div>
-    <button
-      type="button"
-      disabled={notificationRetryBusy}
-      onclick={() => void retryNotificationHealth()}
-    >
-      {notificationRetryBusy ? 'Retrying…' : 'Retry notifications'}
-    </button>
+    <div class="notification-health-actions">
+      <button type="button" onclick={() => browserNotifications.dismissHealth()}>Dismiss</button>
+      <button
+        type="button"
+        disabled={notificationRetryBusy}
+        onclick={() => void retryNotificationHealth()}
+      >
+        {notificationRetryBusy ? 'Retrying…' : 'Retry notifications'}
+      </button>
+    </div>
   </aside>
 {/if}
 
@@ -382,6 +385,13 @@
     font-size: 0.75rem;
     font-weight: 750;
     cursor: pointer;
+  }
+
+  .notification-health-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .notification-health button:disabled {

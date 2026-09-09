@@ -151,27 +151,53 @@ async def test_remote_media_capacity_rejection_is_stable(
     assert raised.value.headers == {"Retry-After": "1"}
 
 
+@pytest.mark.parametrize("exceptional", [False, True])
 async def test_remote_media_admission_releases_its_permit(
     monkeypatch: pytest.MonkeyPatch,
+    exceptional: bool,
 ) -> None:
     limiter = CapacityLimiter(1)
     monkeypatch.setattr(media_api, "remote_media_fetch_limiter", limiter)
     redis = FakeRedis([[1, 9, 0, 1_000], [1, 1024, 1024], [1]])
 
-    async with media_api.remote_media_fetch_admission(
-        cast(Any, redis),
-        Response(),
-        user_id=42,
-        user_domain="alpha.localhost",
-        origin_domain="beta.localhost",
-        settings=cast(Any, remote_media_settings()),
-    ):
-        assert limiter.borrowed_tokens == 1
+    from contextlib import nullcontext
+
+    with pytest.raises(RuntimeError, match="fetch failed") if exceptional else nullcontext():
+        async with media_api.remote_media_fetch_admission(
+            cast(Any, redis),
+            Response(),
+            user_id=42,
+            user_domain="alpha.localhost",
+            origin_domain="beta.localhost",
+            settings=cast(Any, remote_media_settings()),
+        ):
+            assert limiter.borrowed_tokens == 1
+
+            if exceptional:
+                raise RuntimeError("fetch failed")
 
     assert limiter.borrowed_tokens == 0
     assert redis.calls[0][2] == "rate:client:remote-media-fetch:alpha.localhost:42"
     assert redis.calls[1][2] == "federation:remote-media:inflight:leases"
     assert redis.calls[1][5] == "federation:remote-media:inflight:beta.localhost:leases"
+    keys = (
+        "federation:remote-media:inflight:leases",
+        "federation:remote-media:inflight:weights",
+        "federation:remote-media:inflight:bytes",
+        "federation:remote-media:inflight:beta.localhost:leases",
+        "federation:remote-media:inflight:beta.localhost:weights",
+        "federation:remote-media:inflight:beta.localhost:bytes",
+    )
+    assert redis.calls[1][2:8] == keys
+    token = redis.calls[1][8]
+    assert isinstance(token, str) and token
+    assert redis.calls[2] == (
+        media_api.REMOTE_MEDIA_RELEASE_LUA,
+        6,
+        *keys,
+        token,
+        str(media_api.REMOTE_MEDIA_RESERVATION_TTL_MS * 2),
+    )
 
 
 async def test_remote_media_distributed_byte_rejection_releases_process_permit(

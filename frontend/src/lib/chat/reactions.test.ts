@@ -65,26 +65,22 @@ describe('reaction picker identity', () => {
 });
 
 describe('reaction presentation', () => {
-  it('restores qualified color presentation without changing API identity', async () => {
-    const presentation = await reactionEmojiPresentation('❤');
-
-    expect(presentation).toBe('❤️');
-    expect(canonicalReactionEmoji(presentation)).toBe('❤');
-    expect(
-      reactionToggleState({ reaction_counts: {}, reacted_emoji: [] }, presentation)?.emoji
-    ).toBe('❤');
+  it.each([
+    ['heart', '❤', '❤️'],
+    ['ZWJ sequence', '🏳‍⚧', '🏳️‍⚧️'],
+    [
+      'custom token',
+      '<a:party:75512661369970689@emoji.example>',
+      '<a:party:75512661369970689@emoji.example>'
+    ]
+  ])('presents %s without changing API identity', async (_name, canonical, expected) => {
+    const presentation = await reactionEmojiPresentation(canonical);
+    expect(presentation).toBe(expected);
+    expect(canonicalReactionEmoji(presentation)).toBe(canonical);
   });
 
-  it('restores selectors inside a qualified ZWJ sequence', async () => {
-    const presentation = await reactionEmojiPresentation('🏳‍⚧');
-
-    expect(presentation).toBe('🏳️‍⚧️');
-    expect(canonicalReactionEmoji(presentation)).toBe('🏳‍⚧');
-  });
-
-  it('leaves canonical custom emoji tokens available for asset rendering', async () => {
-    const custom = '<a:party:75512661369970689@emoji.example>';
-    expect(await reactionEmojiPresentation(custom)).toBe(custom);
+  it('adds a canonical heart when presentation supplies its VS16 form', () => {
+    expect(reactionToggleState({ reaction_counts: {}, reacted_emoji: [] }, '❤️')?.emoji).toBe('❤');
   });
 });
 
@@ -114,14 +110,14 @@ describe('reaction recents migration', () => {
       ])
     );
 
-    expect(recentReactions('7@chat.example')).toEqual(['❤', '<:party:7@chat.example>', '😂', '👍']);
+    expect(recentReactions('7@chat.example').slice(0, 2)).toEqual(['❤', '<:party:7@chat.example>']);
     expect(JSON.parse(storage.getItem('kaede:reaction-recents:7@chat.example') ?? '[]')).toEqual([
       { value: '❤', count: 5, lastUsed: 20 },
       { value: '<:party:7@chat.example>', count: 4, lastUsed: 30 }
     ]);
   });
 
-  it('stores picker values canonically and uses a selector-free default heart', () => {
+  it('stores picker values canonically and uses selector-free defaults', () => {
     vi.spyOn(Date, 'now').mockReturnValue(50);
     rememberReaction('7@chat.example', '❤️');
     rememberReaction('7@chat.example', '❤');
@@ -130,6 +126,11 @@ describe('reaction recents migration', () => {
       { value: '❤', count: 2, lastUsed: 50 }
     ]);
     storage.clear();
-    expect(recentReactions('7@chat.example')[0]).toBe('❤');
+    const defaults = recentReactions('7@chat.example');
+    expect(defaults.length).toBeGreaterThan(0);
+    for (const value of defaults) {
+      expect(canonicalReactionEmoji(value)).toBe(value);
+      expect(value).not.toContain('\uFE0F');
+    }
   });
 });

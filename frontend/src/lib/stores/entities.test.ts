@@ -375,7 +375,9 @@ describe('normalized entity collections', () => {
     store.beginGatewaySession(user);
 
     expect(store.currentUser).toEqual(user);
-    expect(store.members.values).toHaveLength(1);
+    expect(store.members.values).toEqual([
+      { guild_id: '1', guild_domain: 'alpha.test', user, nickname: null, role_ids: [] }
+    ]);
     store.beginGatewaySession({ ...user, id: '8' });
     expect(store.members.values).toEqual([]);
   });
@@ -455,11 +457,29 @@ describe('normalized entity collections', () => {
       } satisfies Relationship
     ]);
 
+    const other = {
+      ...placeholder,
+      origin_domain: 'other.test',
+      handle: 'history_deadbeef@other.test'
+    };
+    store.messages.replace([
+      ...store.messages.values,
+      { ...store.messages.values[0], id: '10', author_domain: other.origin_domain, author: other }
+    ]);
+    store.members.replace([...store.members.values, { ...store.members.values[0], user: other }]);
+    store.channels.replace([{ ...store.channels.values[0], recipients: [placeholder, other] }]);
+    store.relationships.replace([
+      ...store.relationships.values,
+      { ...store.relationships.values[0], user: other }
+    ]);
     store.applyUserProfile(resolved);
 
-    expect(store.messages.values[0].author?.username).toBe('mio');
-    expect(store.members.values[0].user.username).toBe('mio');
-    expect(store.channels.values[0].recipients?.[0].username).toBe('mio');
-    expect(store.relationships.values[0].user.username).toBe('mio');
+    expect(store.messages.values.map((message) => message.author)).toEqual([resolved, other]);
+    expect(store.members.values.map((member) => member.user)).toEqual([resolved, other]);
+    expect(store.channels.values[0].recipients).toEqual([resolved, other]);
+    expect(store.relationships.values.map((relationship) => relationship.user)).toEqual([
+      resolved,
+      other
+    ]);
   });
 });

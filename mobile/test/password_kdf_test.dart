@@ -51,16 +51,19 @@ void main() {
         MobilePasswordKdfContext.fromJson(context.toJson()),
         isA<ModernMobilePasswordKdfContext>(),
       );
-      expect(
-        () => MobilePasswordKdfContext.fromJson(<String, Object?>{
-          'version': 0,
-          'algorithm': 'legacy',
-          'iterations': 0,
-          'auth_salt': null,
-          'vault_salt': context.vaultSalt,
-        }),
-        throwsFormatException,
-      );
+      for (final mutation in <Map<String, Object?>>[
+        {'version': 0},
+        {'algorithm': 'legacy'},
+        {'auth_salt': 'invalid'},
+        {'vault_salt': 'invalid'},
+      ]) {
+        expect(
+            () => MobilePasswordKdfContext.fromJson({
+                  ...context.toJson(),
+                  ...mutation,
+                }),
+            throwsFormatException);
+      }
       expect(
         () => MobilePasswordKdfContext.fromJson(<String, Object?>{
           ...context.toJson(),

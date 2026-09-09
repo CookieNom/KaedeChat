@@ -34,6 +34,19 @@ void main() {
 
   test('rejects an old media grant after a channel epoch rotation', () {
     expect(voiceGrantMatchesChannelPolicy(grant, channel), isTrue);
+    for (final policy in [(5, 7), (4, 8)]) {
+      final changed = KaedeChannel(
+        ref: channel.ref,
+        type: channel.type,
+        position: channel.position,
+        permissions: channel.permissions,
+        encryptionMode: 'e2ee',
+        encryptionState: 'active',
+        encryptionPolicyGeneration: policy.$1,
+        encryptionEpoch: policy.$2,
+      );
+      expect(voiceGrantMatchesChannelPolicy(grant, changed), isFalse);
+    }
     final rotated = KaedeChannel(
       ref: channel.ref,
       type: channel.type,
@@ -91,9 +104,7 @@ void main() {
       voiceGrantMatchesChannelPolicy(
         <String, Object?>{
           ...grant,
-          'media_session_id': BigInt.parse(
-            '1111111111111111111111111111111111111111111',
-          ),
+          'media_session_id': 1.25,
         },
         channel,
       ),
@@ -141,7 +152,7 @@ void main() {
     );
     expect(
       voiceGrantMatchesChannelPolicy(
-        <String, Object?>{...plaintextGrant, 'e2ee': true},
+        grant,
         plaintext,
       ),
       isFalse,

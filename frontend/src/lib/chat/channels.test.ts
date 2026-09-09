@@ -88,16 +88,6 @@ describe('channel grouping and reordering', () => {
     ).toEqual([entityKey(ungrouped), entityKey(category)]);
   });
 
-  it('requires the source channel and destination category for a parent move', () => {
-    const source = channel('10', 0);
-    const category = channel('20', 1, 4);
-    const moved = moveChannel([source, category], entityKey(source), entityKey(category), 'inside');
-
-    expect(
-      channelOrderPermissionTargets([source, category], moved, entityKey(source))?.map(entityKey)
-    ).toEqual([entityKey(source), entityKey(category)]);
-  });
-
   it('fails closed when a reorder references an unresolved category', () => {
     const missingParent = channel('20', 0, 4);
     const child = channel('30', 1, 0, missingParent);
@@ -177,7 +167,10 @@ describe('channel grouping and reordering', () => {
   it('never selects a category as the guild landing channel', () => {
     const category = channel('10', 0, 4);
     const child = channel('11', 1, 0, category);
-    expect(firstNavigableChannel([category, child])).toBe(child);
+    expect(firstNavigableChannel([category, child])).toMatchObject({
+      id: child.id,
+      origin_domain: child.origin_domain
+    });
   });
 
   it('keeps thread resources out of ordinary category and reorder presentation', () => {

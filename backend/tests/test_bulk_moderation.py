@@ -180,7 +180,19 @@ async def test_remote_bulk_ban_rejects_resolved_alias_duplicates_before_proxy(
 @pytest.mark.asyncio
 async def test_included_prune_roles_are_an_allow_list_for_the_complete_role_set(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_schema,
 ) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import GuildMember, MemberRole, User
+
+    for table in ("users", "guild_members", "roles", "member_roles"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)")
+        )
     guild = Guild(
         id=10,
         origin_domain="home.example",
@@ -188,42 +200,72 @@ async def test_included_prune_roles_are_an_allow_list_for_the_complete_role_set(
         owner_id=1,
         owner_domain="home.example",
     )
-    found_roles = Mock()
-    found_roles.tuples.return_value = [(20, "home.example")]
-    candidates = Mock()
-    candidates.tuples.return_value = []
-    session = SimpleNamespace(
-        execute=AsyncMock(side_effect=[found_roles, candidates]),
+    moderator = Role(
+        id=11,
+        origin_domain="home.example",
+        guild_id=10,
+        guild_domain="home.example",
+        name="Moderator",
+        position=5,
     )
-    monkeypatch.setattr(
-        bulk_moderation,
-        "highest_role",
-        AsyncMock(
-            return_value=Role(
-                id=11,
-                origin_domain="home.example",
-                guild_id=10,
-                guild_domain="home.example",
-                name="Moderator",
-                position=5,
+    monkeypatch.setattr(bulk_moderation, "highest_role", AsyncMock(return_value=moderator))
+    async with AsyncSession(bind=postgres_schema) as session:
+        for identifier, position in [(10, 0), (20, 1), (21, 2), (22, 6)]:
+            session.add(
+                Role(
+                    id=identifier,
+                    origin_domain="home.example",
+                    guild_id=10,
+                    guild_domain="home.example",
+                    name=f"role-{identifier}",
+                    position=position,
+                )
             )
-        ),
-    )
-
-    await _prune_candidates(
-        session,
-        SimpleNamespace(domain="home.example"),
-        guild,
-        days=7,
-        include_roles=[EntityRef("20@home.example")],
-        actor_ref=(2, "home.example"),
-    )
-
-    candidate_query = str(session.execute.await_args_list[1].args[0])
-    assert "NOT (EXISTS" in candidate_query
-    assert "member_roles.role_id NOT IN" in candidate_query
-    assert "member_roles.role_id !=" in candidate_query
-    assert "roles.position" in candidate_query
+        for identifier in range(1, 10):
+            session.add(
+                User(
+                    id=identifier,
+                    origin_domain="home.example",
+                    is_local=False,
+                    federation_introduced_by_domain="home.example",
+                    username=f"user_{identifier}",
+                )
+            )
+            session.add(
+                GuildMember(
+                    guild_id=10,
+                    guild_domain="home.example",
+                    user_id=identifier,
+                    user_domain="home.example",
+                    joined_at=datetime.now(UTC) - timedelta(days=30),
+                )
+            )
+        # 3 roleless, 4 allowed, 5 mixed, 6 forbidden, 7 higher allowed, 8 default+allowed.
+        for user_id, role_ids in [(4, [20]), (5, [20, 21]), (6, [21]), (7, [22]), (8, [10, 20])]:
+            for role_id in role_ids:
+                session.add(
+                    MemberRole(
+                        guild_id=10,
+                        guild_domain="home.example",
+                        user_id=user_id,
+                        user_domain="home.example",
+                        role_id=role_id,
+                        role_domain="home.example",
+                    )
+                )
+        await session.flush()
+        recent = await session.get(GuildMember, (10, "home.example", 9, "home.example"))
+        recent.last_guild_activity_at = datetime.now(UTC)
+        await session.flush()
+        result = await _prune_candidates(
+            session,
+            SimpleNamespace(domain="home.example"),
+            guild,
+            days=7,
+            include_roles=[EntityRef("20@home.example"), EntityRef("22@home.example")],
+            actor_ref=(2, "home.example"),
+        )
+        assert result == [(3, "home.example"), (4, "home.example"), (8, "home.example")]
 
 
 @pytest.mark.asyncio
@@ -309,16 +351,17 @@ async def test_prune_records_one_summary_audit_entry_not_manual_kicks(
     )
 
     assert result["pruned"] == 2
-    assert kick.await_count == 2
+    assert [call.args[:2] for call in kick.await_args_list] == [
+        (EntityRef("10@home.example"), EntityRef("20@home.example")),
+        (EntityRef("10@home.example"), EntityRef("21@remote.example")),
+    ]
     assert all(call.kwargs["record_kick_audit"] is False for call in kick.await_args_list)
     assert audit.await_count == 1
     assert audit.await_args.args[4] == 21
     assert audit.await_args.kwargs["reason"] == "inactive cleanup"
-    assert {change["key"] for change in audit.await_args.kwargs["changes"]} == {
-        "delete_member_days",
-        "members_removed",
-        "include_roles",
-    }
+    assert {
+        change["key"]: change["new_value"] for change in audit.await_args.kwargs["changes"]
+    } == {"delete_member_days": "14", "members_removed": "2", "include_roles": ["30@home.example"]}
     session.commit.assert_awaited_once()
     session.rollback.assert_not_awaited()
     assert session.begin_nested.call_count == 2

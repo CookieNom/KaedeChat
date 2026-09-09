@@ -44,31 +44,25 @@ def report_message(*, e2ee: dict[str, object] | None, content: str | None) -> Me
     )
 
 
-def test_e2ee_report_requires_explicit_decrypted_disclosure() -> None:
-    message = report_message(e2ee={"version": 1, "ciphertext": "opaque"}, content=None)
+@pytest.mark.parametrize(
+    "version,content,acknowledged",
+    [(1, None, False), (2, None, True), (2, "", False)],
+    ids=["no-consent", "unavailable-decryption", "empty-without-consent"],
+)
+def test_e2ee_report_requires_explicit_decrypted_disclosure(
+    version: int, content: str | None, acknowledged: bool
+) -> None:
+    message = report_message(e2ee={"version": version, "ciphertext": "opaque"}, content=None)
 
     with pytest.raises(HTTPException) as raised:
         report_message_evidence(
             message,
-            disclosed_content=None,
-            disclosure_acknowledged=False,
+            disclosed_content=content,
+            disclosure_acknowledged=acknowledged,
         )
 
     assert raised.value.status_code == 422
     assert cast(dict[str, Any], raised.value.detail)["code"] == "E2EE_REPORT_DISCLOSURE_REQUIRED"
-
-
-def test_e2ee_acknowledgement_cannot_turn_decrypt_unavailable_into_empty_text() -> None:
-    message = report_message(e2ee={"version": 2, "ciphertext": "opaque"}, content=None)
-
-    with pytest.raises(HTTPException) as raised:
-        report_message_evidence(
-            message,
-            disclosed_content=None,
-            disclosure_acknowledged=True,
-        )
-
-    assert cast(dict[str, Any], raised.value.detail)["code"] == ("E2EE_REPORT_DISCLOSURE_REQUIRED")
 
 
 def test_e2ee_report_stores_reporter_supplied_text_and_ciphertext_fingerprint() -> None:
@@ -126,39 +120,14 @@ def test_e2ee_attachment_only_report_accepts_explicit_empty_decrypted_evidence()
     assert cast(dict[str, Any], evidence["disclosure"])["reporter_acknowledged"] is True
 
 
-def test_e2ee_empty_text_is_not_a_substitute_for_explicit_consent() -> None:
-    message = report_message(e2ee={"version": 2, "ciphertext": "opaque"}, content=None)
-
-    with pytest.raises(HTTPException) as raised:
-        report_message_evidence(
-            message,
-            disclosed_content="",
-            disclosure_acknowledged=False,
-        )
-
-    assert cast(dict[str, Any], raised.value.detail)["code"] == ("E2EE_REPORT_DISCLOSURE_REQUIRED")
-
-
-def test_plaintext_report_rejects_unnecessary_disclosed_content() -> None:
+@pytest.mark.parametrize("content", ["replacement", ""], ids=["nonempty", "empty"])
+def test_plaintext_report_rejects_unnecessary_disclosed_content(content: str) -> None:
     message = report_message(e2ee=None, content="server-readable")
 
     with pytest.raises(HTTPException) as raised:
         report_message_evidence(
             message,
-            disclosed_content="replacement",
-            disclosure_acknowledged=True,
-        )
-
-    assert cast(dict[str, Any], raised.value.detail)["code"] == "REPORT_DISCLOSURE_UNEXPECTED"
-
-
-def test_plaintext_report_rejects_empty_client_disclosure_too() -> None:
-    message = report_message(e2ee=None, content="server-readable")
-
-    with pytest.raises(HTTPException) as raised:
-        report_message_evidence(
-            message,
-            disclosed_content="",
+            disclosed_content=content,
             disclosure_acknowledged=True,
         )
 
@@ -435,6 +404,30 @@ async def test_create_attachment_report_validates_message_binding_and_stores_met
     assert session.added.message_ref == "1@alpha.localhost"
     assert session.added.evidence["attachment_ref"] == "9@alpha.localhost"
     assert session.added.evidence["content_type"] == "image/jpeg"
+
+    for field, wrong in (("message_id", 2), ("message_domain", "other.example")):
+        original = getattr(attachment, field)
+        setattr(attachment, field, wrong)
+        session.added = None
+        with pytest.raises(HTTPException) as denied:
+            await admin_portal.create_report(
+                ReportCreate(
+                    target_type="attachment",
+                    target_ref="9@alpha.localhost",
+                    message_ref="1@alpha.localhost",
+                    category="illegal_content",
+                    description="This image should be reviewed",
+                ),
+                Response(),
+                cast(Any, SimpleNamespace(user=reporter)),
+                cast(Any, session),
+                cast(Any, object()),
+                cast(Any, ReportSnowflake()),
+                cast(Any, SimpleNamespace(domain="alpha.localhost")),
+            )
+        assert denied.value.detail == {"code": "ATTACHMENT_NOT_FOUND"}
+        assert session.added is None
+        setattr(attachment, field, original)
 
 
 @pytest.mark.asyncio
@@ -1048,6 +1041,8 @@ async def test_reporter_can_create_plaintext_evidence_ticket_only_with_consent(
         "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"
     )
 
+    create_ticket.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_remote_report_evidence_upload_is_prepared_by_channel_authority(
@@ -1130,6 +1125,31 @@ async def test_committing_decrypted_evidence_marks_report_as_reporter_disclosed(
     )
     wake = AsyncMock()
     monkeypatch.setattr(admin_portal, "enqueue_best_effort", wake)
+
+    evidence_attachment.report_id = 45
+    with pytest.raises(HTTPException) as denied:
+        await admin_portal.commit_report_attachment_evidence(
+            44,
+            ReportAttachmentEvidenceCommit(
+                attachment_id="81",
+                disclosure_acknowledged=True,
+            ),
+            cast(Any, SimpleNamespace(user=reporter)),
+            cast(Any, session),
+            cast(Any, SimpleNamespace(domain="alpha.localhost")),
+        )
+    assert denied.value.detail == {"code": "REPORT_EVIDENCE_NOT_FOUND"}
+    assert report.encryption_mode != "e2ee_user_disclosed"
+    assert session.committed is False
+    wake.assert_not_awaited()
+    admin_portal.finalize_attachment.assert_awaited_once_with(
+        session,
+        SimpleNamespace(domain="alpha.localhost"),
+        reporter,
+        81,
+        required_purpose="attachment",
+    )
+    evidence_attachment.report_id = 44
 
     result = await admin_portal.commit_report_attachment_evidence(
         44,
@@ -1225,7 +1245,12 @@ async def test_disclosed_evidence_safety_match_updates_original_report() -> None
 
     assert report.category == "illegal_content"
     assert report.evidence["disclosed_attachment_scan_status"] == "quarantined"
-    assert isinstance(report.evidence["photodna"], dict)
+    assert report.evidence["photodna"]["provider_tracking_id"] == "tracking"
+    assert report.evidence["photodna"]["match_flags"] == [
+        {"source": "test", "violations": ["sexual_abuse"], "match_distance": 0, "match_id": "match"}
+    ]
+    assert report.evidence["photodna"]["attachment_ref"] == "81@alpha.localhost"
+    assert report.evidence["photodna"]["content_sha256"] == "a" * 64
 
 
 @pytest.mark.parametrize(

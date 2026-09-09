@@ -68,8 +68,18 @@ describe('guild navigation', () => {
         ]
       })
     ).toEqual({ items: [{ kind: 'guild', guild: '1@home.example' }] });
+    const valid = {
+      kind: 'group',
+      id: 'group-1',
+      name: 'Friends',
+      collapsed: false,
+      guilds: ['2@home.example', '3@home.example']
+    };
+    expect(parseGuildNavigation({ items: [valid] })).toEqual({ items: [valid] });
+    for (const mutation of [{ id: 'bad id' }, { name: '' }, { guilds: ['invalid'] }]) {
+      expect(parseGuildNavigation({ items: [{ ...valid, ...mutation }] })).toEqual({ items: [] });
+    }
   });
-
   it('canonicalizes singleton folders and rejects nested folder-shaped members', () => {
     expect(
       parseGuildNavigation({

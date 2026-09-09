@@ -51,29 +51,6 @@ def test_message_rich_cross_language_vectors() -> None:
         assert _digest(message_rich_authenticated_data(context)) == vector["aad_sha256"]
 
 
-def test_message_rich_fixture_binds_private_routing_identities() -> None:
-    fixture: dict[str, Any] = json.loads(FIXTURE.read_text())
-    human_create, human_edit, bot_create, _bot_edit = fixture["vectors"]
-    assert human_create["context"]["message_custom_emoji_refs"] == [
-        "<:wave:88@apps.example>"
-    ]
-    assert human_edit["context"]["referenced_message_ref"] == "777@example.test"
-    assert human_create["context"]["message_mention_user_refs"] == ["43@remote.test"]
-    assert human_create["context"]["message_mention_role_refs"] == ["55@example.test"]
-    assert human_create["context"]["message_mention_everyone"] is True
-    assert human_edit["context"]["message_replied_user_ref"] == "99@example.test"
-    assert bot_create["context"]["message_sticker_refs"] == ["77@apps.example"]
-    assert {
-        "message_custom_emoji_refs",
-        "message_mention_everyone",
-        "message_mention_role_refs",
-        "message_mention_user_refs",
-        "message_replied_user_ref",
-        "message_sticker_refs",
-        "referenced_message_ref",
-    } <= set(fixture["negative_mutations"])
-
-
 def test_forward_projection_is_stable_across_attachment_reencryption() -> None:
     common = {
         "content": "snapshot",

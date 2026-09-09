@@ -16,9 +16,13 @@ const channel = (type: number, permissions: bigint) => ({
 describe('Stage permission predicates', () => {
   it('requires the complete moderator trio for Stage lifecycle controls', () => {
     expect(canManageStageChannel(channel(13, STAGE_MODERATOR_PERMISSIONS))).toBe(true);
-    expect(
-      canManageStageChannel(channel(13, Permission.MANAGE_CHANNELS | Permission.MUTE_MEMBERS))
-    ).toBe(false);
+    for (const bit of [
+      Permission.MANAGE_CHANNELS,
+      Permission.MUTE_MEMBERS,
+      Permission.MOVE_MEMBERS
+    ]) {
+      expect(canManageStageChannel(channel(13, STAGE_MODERATOR_PERMISSIONS & ~bit))).toBe(false);
+    }
     expect(canManageStageChannel(channel(13, Permission.ADMINISTRATOR))).toBe(true);
     expect(canManageStageChannel(channel(2, STAGE_MODERATOR_PERMISSIONS))).toBe(false);
   });
@@ -35,9 +39,12 @@ describe('Stage permission predicates', () => {
         channel(2, Permission.CREATE_EVENTS | Permission.VIEW_CHANNEL | Permission.CONNECT)
       )
     ).toBe(true);
-    expect(
-      canCreateScheduledEventInChannel(channel(2, Permission.CREATE_EVENTS | Permission.CONNECT))
-    ).toBe(false);
+    const voicePermissions =
+      Permission.CREATE_EVENTS | Permission.VIEW_CHANNEL | Permission.CONNECT;
+    for (const bit of [Permission.CREATE_EVENTS, Permission.VIEW_CHANNEL, Permission.CONNECT]) {
+      expect(canCreateScheduledEventInChannel(channel(2, voicePermissions & ~bit))).toBe(false);
+    }
+    expect(canCreateScheduledEventInChannel(channel(13, STAGE_MODERATOR_PERMISSIONS))).toBe(false);
   });
 
   it('preserves own-vs-other management while requiring Stage moderation', () => {
@@ -53,6 +60,18 @@ describe('Stage permission predicates', () => {
         false
       )
     ).toBe(true);
+    expect(
+      canManageScheduledEventInChannel(
+        channel(13, Permission.CREATE_EVENTS | STAGE_MODERATOR_PERMISSIONS),
+        false
+      )
+    ).toBe(false);
+    expect(
+      canManageScheduledEventInChannel(
+        channel(2, Permission.CREATE_EVENTS | Permission.VIEW_CHANNEL | Permission.CONNECT),
+        false
+      )
+    ).toBe(false);
     expect(canManageScheduledEventInChannel(channel(13, Permission.MANAGE_EVENTS), false)).toBe(
       false
     );

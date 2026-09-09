@@ -437,6 +437,25 @@ async def test_scheduled_event_patch_checks_stored_and_new_channels(
     )
     update.assert_awaited_once()
 
+    for guard in (current, requested):
+        update.reset_mock()
+        guard.side_effect = HTTPException(403, detail={"code": "BOT_CHANNEL_RESTRICTED"})
+        with pytest.raises(HTTPException) as denied:
+            await bots_api.bot_patch_scheduled_event(
+                EntityRef("11@chat.example"),
+                EntityRef("90@chat.example"),
+                ScheduledEventPatch(channel_id=EntityRef("14@chat.example")),
+                cast(Any, SimpleNamespace(user=SimpleNamespace())),
+                cast(Any, route_session),
+                cast(Any, SimpleNamespace()),
+                cast(Any, SimpleNamespace()),
+                cast(Any, SimpleNamespace(domain="chat.example")),
+                None,
+            )
+        assert denied.value.status_code == 403
+        update.assert_not_awaited()
+        guard.side_effect = None
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("follower", [False, True])

@@ -120,3 +120,13 @@ async def test_bot_expression_intent_has_source_audience_and_target_runtime() ->
     assert resources["target_channel_ref"] == "20@t.example"
     assert resources["operation"] == "message.create"
     assert resources["operation_id"] == "create-1"
+    assert (
+        resources["expression_projection_sha256"]
+        == "07eeda5d463ad5a0c66ade34d9b4390ccd56a6db5c4540f71f3825c424e970ca"
+    )
+    assert resources["target_message_ref"] == "none"
+    bot.fetch_channel.assert_awaited_once_with(
+        EntityRef(20, "t.example"),
+        target="https://t.example",
+        installation_id=30,
+    )

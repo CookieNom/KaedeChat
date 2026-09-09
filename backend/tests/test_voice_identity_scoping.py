@@ -214,27 +214,25 @@ async def test_bot_voice_claims_are_independent_per_authority_qualified_guild() 
     )
     second = await claim_voice_connection(
         cast(Any, redis),
-        "chat.example",
+        "other.example",
         identity,
         connection_id="b" * 43,
-        room="g.20.201",
+        room="g.10.201",
         client_kind="bot",
         takeover=False,
         bot_lineage={"bot_installation_id": 2},
     )
 
     first_key = voice_connection_key("chat.example", identity, room="g.10.101", client_kind="bot")
-    second_key = voice_connection_key("chat.example", identity, room="g.20.201", client_kind="bot")
+    second_key = voice_connection_key("other.example", identity, room="g.10.201", client_kind="bot")
     assert first == (True, 1, "", "")
     assert second == (True, 1, "", "")
     assert first_key != second_key
     assert "guild:10@chat.example" in first_key
-    assert "guild:20@chat.example" in second_key
+    assert "guild:10@other.example" in second_key
     assert set(redis.values) >= {first_key, second_key}
-    assert redis.sets[bot_voice_connection_index_key("chat.example", identity)] == {
-        first_key,
-        second_key,
-    }
+    assert redis.sets[bot_voice_connection_index_key("chat.example", identity)] == {first_key}
+    assert redis.sets[bot_voice_connection_index_key("other.example", identity)] == {second_key}
 
 
 @pytest.mark.asyncio
@@ -312,6 +310,17 @@ async def test_legacy_bot_claim_migrates_only_to_its_exact_guild_scope() -> None
         }
     )
 
+    before = dict(redis.values)
+    assert not await voice_connection_matches(
+        cast(Any, redis),
+        "chat.example",
+        identity,
+        connection_id="a" * 43,
+        room="g.20.201",
+        generation=4,
+        client_kind="bot",
+    )
+    assert redis.values == before
     assert await voice_connection_matches(
         cast(Any, redis),
         "chat.example",

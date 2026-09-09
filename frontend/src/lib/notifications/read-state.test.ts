@@ -62,7 +62,11 @@ describe('realtime read-state reduction', () => {
   it('marks messages from another user unread and increments direct mentions', () => {
     const [updated] = applyIncomingMessage(
       [initial],
-      message({ mention_user_refs: [{ id: '1', origin_domain: 'home.test' }] }),
+      message({
+        author_id: '1',
+        author_domain: 'remote.test',
+        mention_user_refs: [{ id: '1', origin_domain: 'home.test' }]
+      }),
       currentUser,
       guildChannel
     );
@@ -72,8 +76,18 @@ describe('realtime read-state reduction', () => {
       mention_count: 1,
       unread: true
     });
+    const [foreignMention] = applyIncomingMessage(
+      [initial],
+      message({
+        author_id: '1',
+        author_domain: 'remote.test',
+        mention_user_refs: [{ id: '1', origin_domain: 'remote.test' }]
+      }),
+      currentUser,
+      guildChannel
+    );
+    expect(foreignMention).toMatchObject({ unread: true, mention_count: 0 });
   });
-
   it('does not turn the sender’s own message into an unread notification', () => {
     const [unchanged] = applyIncomingMessage(
       [initial],
@@ -169,7 +183,7 @@ describe('realtime read-state reduction', () => {
     expect(directMessageUnreadCount([updated])).toBe(1);
   });
 
-  it('does not invent a read state without matching channel metadata', () => {
+  it('absent channel metadata', () => {
     expect(applyIncomingMessage([], message(), currentUser, null)).toEqual([]);
   });
 });

@@ -111,7 +111,9 @@ describe('guildModerationActions', () => {
     const configured = guild(Permission.ADMINISTRATOR);
 
     expect(guildModerationActions(configured, actor, actor, [member(actor)])).toEqual([]);
-    expect(guildModerationActions(configured, actor, owner, [member(owner)])).toEqual([]);
+    expect(
+      guildModerationActions(configured, actor, owner, [member(actor), member(owner)])
+    ).toEqual([]);
     expect(guildModerationActions(configured, actor, outsider, [member(actor)])).toEqual([]);
   });
 
