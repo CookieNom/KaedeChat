@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Reusable release CI has a different workflow name and tag ref from main CI.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
