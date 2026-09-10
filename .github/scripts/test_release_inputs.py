@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -16,6 +17,24 @@ spec.loader.exec_module(release_inputs)
 
 
 class ReleaseInputsTest(unittest.TestCase):
+    def test_ci_lockfiles_are_present_and_not_ignored(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in (
+            "backend/uv.lock",
+            "sdk/python/uv.lock",
+            "frontend/pnpm-lock.yaml",
+            "desktop/Cargo.lock",
+            "mobile/pubspec.lock",
+            "mobile/ios/Podfile.lock",
+        ):
+            with self.subTest(lockfile=name):
+                self.assertTrue((root / name).is_file(), f"Missing CI lockfile: {name}")
+                result = subprocess.run(
+                    ["git", "check-ignore", "--no-index", name],
+                    cwd=root, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 1, f"CI lockfile is ignored: {name}\n{result.stderr}")
+
     def test_stamp_release_checkout(self):
         source = Path(__file__).resolve().parents[2]
         names = (

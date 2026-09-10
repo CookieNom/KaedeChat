@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   workflow_call:
 
 permissions:
@@ -98,6 +99,16 @@ jobs:
         with:
           path: ${{ runner.temp }}/flutter/bin/cache
           key: flutter-android-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}
+      - name: Cache Dart packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.pub-cache/hosted
+            ~/.pub-cache/git
+          key: dart-pub-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: Validate mobile before installing native build dependencies
+        working-directory: ${{ github.workspace }}
+        run: make mobile-check
       - name: Install pinned Rust Android targets
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
@@ -114,13 +125,6 @@ jobs:
             ~/.cargo/git/db
           key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
           enableCrossOsArchive: true
-      - name: Cache Dart packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.pub-cache/hosted
-            ~/.pub-cache/git
-          key: dart-pub-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock') }}
       - name: Cache Android dependency downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -129,12 +133,6 @@ jobs:
             ~/.gradle/caches/modules-2/metadata-*
             ~/.gradle/wrapper/dists
           key: gradle-download-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock', 'mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
-      - run: flutter pub get --enforce-lockfile
-      - run: dart format --output=none --set-exit-if-changed lib test
-      - run: flutter analyze
-      - run: flutter test
-        env:
-          TZ: America/Los_Angeles
       - run: flutter build apk --debug
       - name: Enforce mobile cache size budgets
         if: always()

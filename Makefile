@@ -20,7 +20,7 @@ MEDIA_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-media-validation-$(V
 VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(VALIDATION_RUN_ID)
 RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
 
-.PHONY: help setup search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
+.PHONY: help setup search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit mobile-check desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
 help:
 	@echo "setup            Run the interactive deployment configuration wizard"
 	@echo "search-rebuild   Rebuild private message search online (RESET=1 recreates the index)"
@@ -34,6 +34,7 @@ help:
 	@echo "check            Run lint, type, codegen, and unit checks in containers"
 	@echo "test             Run backend and frontend tests in containers"
 	@echo "audit            Check locked Python and JavaScript dependencies for advisories"
+	@echo "mobile-check     Run locked Flutter formatting, analysis, and tests (requires Flutter)"
 	@echo "desktop-check    Format and compile the portable native desktop workspace"
 	@echo "desktop-lint     Run strict Clippy checks across all portable desktop targets"
 	@echo "desktop-test     Run desktop protocol, state, platform, auth, and media tests"
@@ -100,6 +101,12 @@ audit:
 	trap '$(AUDIT_COMPOSE) --profile validation down -v' EXIT INT TERM; \
 	$(AUDIT_COMPOSE) run --rm --no-deps --build backend-check pip-audit --skip-editable; \
 	$(AUDIT_COMPOSE) run --rm --no-deps --build frontend-check pnpm audit --audit-level=moderate
+
+mobile-check:
+	cd mobile && flutter pub get --enforce-lockfile
+	cd mobile && dart format --output=none --set-exit-if-changed lib test
+	cd mobile && flutter analyze
+	cd mobile && TZ=America/Los_Angeles flutter test
 
 desktop-check:
 	cargo +$(DESKTOP_RUST_VERSION) fmt --all --manifest-path desktop/Cargo.toml -- --check
