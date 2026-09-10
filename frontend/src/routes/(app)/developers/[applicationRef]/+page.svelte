@@ -898,7 +898,11 @@
   {#if error}<div class="notice error" role="alert">{error}</div>{/if}{#if notice}<div
       class="notice success"
     >
-      {notice}<button aria-label="Dismiss" onclick={() => (notice = '')}>×</button>
+      <span>{notice}</span><button
+        class="notice-dismiss"
+        aria-label="Dismiss"
+        onclick={() => (notice = '')}>×</button
+      >
     </div>{/if}
   {#if application && loadedRef === ref}
     {#if activePanel === 'commands'}
@@ -972,14 +976,16 @@
       </aside>
     {/if}
     {#if application.status === 'draft'}
-      <div class="notice" role="status">
+      <div class="notice activation-notice" role="status">
         <strong>Activate your application before connecting your bot.</strong>
         <p>
           New applications start as drafts. Save your permissions, then create your first invite
           link to activate this application. Until then, SDK worker enrollment and command
           publishing reject even valid control credentials. App Directory approval is not required.
         </p>
-        <button onclick={() => selectPanel('distribution')}>Go to invite links</button>
+        <button class="activation-action" onclick={() => selectPanel('distribution')}
+          >Go to invite links</button
+        >
       </div>
     {/if}
     <div class="layout">
@@ -1028,7 +1034,7 @@
               The snowflake is your bot’s numeric ID. Combine it with its home domain to form the
               full bot reference used by APIs and tools that ask for <code>bot_ref</code>.
             </p>
-            <div class="grid">
+            <div class="identity-grid">
               <div>
                 <label for="bot-snowflake">Bot ID (snowflake)</label>
                 <div class="identity-value">
@@ -1053,6 +1059,17 @@
                         `${application!.bot_user.id}@${application!.bot_user.origin_domain}`,
                         'Bot reference'
                       )}>Copy ref</button
+                  >
+                </div>
+              </div>
+              <div>
+                <label for="bot-username">Full bot username</label>
+                <div class="identity-value">
+                  <input id="bot-username" value={application.bot_user.handle} readonly />
+                  <button
+                    class="secondary"
+                    onclick={() => copy(application!.bot_user.handle, 'Bot username')}
+                    >Copy username</button
                   >
                 </div>
               </div>
@@ -1518,9 +1535,13 @@
             <div class="rows">
               {#each templates as template (template.id)}<article>
                   <div>
-                    <strong>{template.name}</strong><small
-                      >{template.e2ee_mode} · {template.active ? 'active' : 'disabled'}</small
-                    >
+                    <strong>{template.name}</strong>
+                    <small>Invite link: {template.active ? 'Active' : 'Disabled'}</small>
+                    <small>
+                      Encrypted chat participation: {template.e2ee_mode === 'participant'
+                        ? 'Enabled'
+                        : 'Disabled'}
+                    </small>
                   </div>
                   <code>{template.invite_url}</code><button
                     onclick={() => copy(template.invite_url)}>Copy</button
@@ -1946,6 +1967,17 @@
     font-weight: 400;
     line-height: 1.5;
   }
+  .identity-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+    gap: 1rem;
+  }
+  @media (max-width: 1100px) {
+    .identity-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   .identity-value {
     display: flex;
     align-items: stretch;
@@ -2161,14 +2193,42 @@
     color: var(--danger);
   }
   .notice.success {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 1rem;
     border-color: var(--success);
+    overflow-wrap: anywhere;
   }
-  .notice button {
-    float: right;
+  .notice-dismiss {
     border: 0;
     color: inherit;
     background: none;
     font-size: 1.2rem;
+    line-height: 1;
+    padding: 0.25rem;
+    cursor: pointer;
+  }
+  .activation-notice {
+    display: grid;
+    gap: 0.65rem;
+    line-height: 1.6;
+  }
+  .activation-notice p {
+    margin: 0;
+    color: var(--text-muted);
+  }
+  .activation-action {
+    justify-self: start;
+    max-width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.6rem 0.9rem;
+    color: var(--text);
+    background: var(--surface-hover);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
   }
   @media (max-width: 760px) {
     .save-card {

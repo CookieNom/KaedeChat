@@ -8,10 +8,17 @@ describe('bot invite links', () => {
     ).toEqual({ applicationRef: '123@apps.example', templateSlug: 'community' });
   });
 
-  it('rejects cross-origin identities, insecure links, credentials, ports, and suffix paths', () => {
+  it('preserves the application authority in links shared from another instance', () => {
     expect(
-      normalizeBotInvite('https://apps.example/applications/1@evil.example/install/x')
-    ).toBeNull();
+      normalizeBotInvite('https://chat.example/applications/123%40apps.example/install/community')
+    ).toEqual({ applicationRef: '123@apps.example', templateSlug: 'community' });
+    expect(normalizeBotInvite('https://apps.example/applications/123/install/community')).toEqual({
+      applicationRef: '123@apps.example',
+      templateSlug: 'community'
+    });
+  });
+
+  it('rejects insecure links, credentials, ports, and suffix paths', () => {
     expect(
       normalizeBotInvite('http://apps.example/applications/1@apps.example/install/x')
     ).toBeNull();
@@ -24,6 +31,21 @@ describe('bot invite links', () => {
     expect(
       normalizeBotInvite('https://apps.example/applications/1@apps.example/install/x/more')
     ).toBeNull();
+  });
+
+  it('validates whole message URLs instead of embedding valid-looking prefixes', () => {
+    const link = 'https://apps.example/applications/123@apps.example/install/community';
+    for (const suffix of ['/more', '?tracking=true', '#fragment']) {
+      expect(botInvitesInMessage(`${link}${suffix}`)).toEqual([]);
+    }
+    expect(botInvitesInMessage(`(${link}/).`)).toEqual([
+      { applicationRef: '123@apps.example', templateSlug: 'community' }
+    ]);
+    expect(
+      botInvitesInMessage(
+        `${link} https://chat.example/applications/123%40apps.example/install/community`
+      )
+    ).toHaveLength(1);
   });
 
   it('deduplicates embedded invitations', () => {

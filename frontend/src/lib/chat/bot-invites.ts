@@ -1,6 +1,6 @@
 const DOMAIN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
-const BOT_INVITE_URL = /https?:\/\/[^\s<>()]+\/applications\/[^\s<>()/]+\/install\/[^\s<>()/]+/gi;
+const BOT_INVITE_URL = /https?:\/\/[^\s<>()]+/gi;
 const TEMPLATE = /^[a-z0-9][a-z0-9_-]{1,63}$/;
 
 export interface BotInviteReference {
@@ -43,7 +43,9 @@ export function normalizeBotInvite(value: string): BotInviteReference | null {
   const id = separator === -1 ? rawRef : rawRef.slice(0, separator);
   const domain = separator === -1 ? url.hostname : rawRef.slice(separator + 1).toLowerCase();
   if (!/^\d{1,20}$/.test(id) || !DOMAIN.test(domain)) return null;
-  if (domain !== url.hostname.toLowerCase()) return null;
+  if (!DOMAIN.test(url.hostname)) return null;
+  // Qualified references retain the bot's authority when shared from another
+  // instance. Previews resolve through our API's signed manifest lookup.
   return { applicationRef: `${id}@${domain}`, templateSlug: slug };
 }
 

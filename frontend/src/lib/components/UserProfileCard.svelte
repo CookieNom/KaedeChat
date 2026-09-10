@@ -172,7 +172,7 @@
           }
           profileApplicationError = userErrorMessage(
             caught,
-            'Could not load this app’s Add App destination.'
+            'Could not load this bot’s installation options.'
           );
         });
     }
@@ -351,7 +351,7 @@
       <div class="user-popover-identity">
         <h2>
           {userDisplayName(user)}
-          {#if isApplicationUser(user)}<small class="app-badge">APP</small>{/if}
+          {#if isApplicationUser(user)}<small class="app-badge">BOT</small>{/if}
         </h2>
         {#if userPublicHandle(user)}
           <p>@{userPublicHandle(user)}</p>
@@ -476,7 +476,11 @@
             onclick={onClose}
           >
             <Icon name="sparkles" size={17} />
-            <span>Add App</span>
+            <span>
+              {profileApplication.install_template.install_types.includes('guild_install')
+                ? 'Add bot to a guild'
+                : 'Add App'}
+            </span>
           </a>
           {#if profileApplication.directory_listed}
             <a
