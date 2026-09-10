@@ -29,7 +29,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12.13" }
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
-      - run: python3 .github/scripts/check-release-inputs.py
+      - name: Check release inputs
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
+            python3 .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
+          else
+            python3 .github/scripts/check-release-inputs.py
+          fi
       - name: Validate workflow syntax
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color -shellcheck= -pyflakes=
 

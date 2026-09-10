@@ -317,6 +317,16 @@
     scrollbar-width: thin;
   }
 
+  .command-fields:focus-visible {
+    outline: none;
+  }
+
+  .command-fields:focus-visible .command-name {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+    border-radius: 4px;
+  }
+
   .command-name {
     flex: 0 0 auto;
     font-weight: 800;

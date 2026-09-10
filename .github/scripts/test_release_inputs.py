@@ -1,7 +1,10 @@
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
+import shutil
 import tempfile
+import tomllib
 import unittest
 
 
@@ -13,6 +16,43 @@ spec.loader.exec_module(release_inputs)
 
 
 class ReleaseInputsTest(unittest.TestCase):
+    def test_stamp_release_checkout(self):
+        source = Path(__file__).resolve().parents[2]
+        names = (
+            "desktop/tauri/src-tauri/tauri.conf.json",
+            "desktop/tauri/src-tauri/Cargo.toml",
+            "desktop/Cargo.lock",
+            "desktop/rust-toolchain.toml",
+            "frontend/package.json",
+            "mobile/ios/Podfile",
+            "mobile/ios/Podfile.lock",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in names:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source / name, root / name)
+            lock_path = root / "desktop/Cargo.lock"
+            original_lock = tomllib.loads(lock_path.read_text())
+            for tag in ("v1.2.3", "desktop-v2.0.0"):
+                release_inputs.stamp(root, tag)
+                release_inputs.check(root, tag)
+                version = tag.removeprefix("desktop-").removeprefix("v")
+                self.assertEqual(json.loads((root / "frontend/package.json").read_text())["version"], version)
+                expected_lock = original_lock.copy()
+                expected_lock["package"] = [
+                    dict(p, version=version) if p["name"] == "kaede-tauri" else p
+                    for p in original_lock["package"]
+                ]
+                self.assertEqual(tomllib.loads(lock_path.read_text()), expected_lock)
+                stamped = {name: (root / name).read_bytes() for name in names}
+                release_inputs.stamp(root, tag)
+                self.assertEqual(stamped, {name: (root / name).read_bytes() for name in names})
+            for tag in ("main", "sdk-v1.2.3", "v01.2.3", "v1.2.3-rc.1", "v1.2.3\n"):
+                with self.subTest(tag=tag), self.assertRaises(ValueError):
+                    release_inputs.stamp(root, tag)
+                self.assertEqual(stamped, {name: (root / name).read_bytes() for name in names})
+
     def test_release_drift_is_rejected(self):
         files = {
             "desktop/tauri/src-tauri/tauri.conf.json": '{"version": "0.1.42"}',

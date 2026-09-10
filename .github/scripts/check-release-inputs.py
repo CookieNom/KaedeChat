@@ -9,6 +9,32 @@ import re
 import tomllib
 
 
+def stamp(root: Path, tag: str) -> None:
+    """Stamp only shipping client metadata, preserving locked dependencies."""
+    match = re.fullmatch(r"(?:desktop-)?v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))", tag)
+    if match is None:
+        raise ValueError("release tag must be vMAJOR.MINOR.PATCH or desktop-vMAJOR.MINOR.PATCH")
+    version = match[1]
+    changes = {}
+    for name in ("desktop/tauri/src-tauri/tauri.conf.json", "frontend/package.json"):
+        path = root / name
+        data = json.loads(path.read_text())
+        data["version"] = version
+        changes[path] = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    for name, pattern in (
+        ("desktop/tauri/src-tauri/Cargo.toml", r'(\[package\]\n(?:(?!\[)[^\n]*\n)*?version = ")[^"]+(")'),
+        ("desktop/Cargo.lock", r'(\[\[package\]\]\nname = "kaede-tauri"\nversion = ")[^"]+(")'),
+    ):
+        path = root / name
+        # Match the exact package field, never dependency versions.
+        text, count = re.subn(pattern, lambda m: m[1] + version + m[2], path.read_text())
+        if count != 1:
+            raise ValueError(f"expected exactly one app version in {name}")
+        changes[path] = text
+    for path, text in changes.items():
+        path.write_text(text)
+
+
 def check(root: Path, tag: str | None = None, rust_version: str | None = None) -> None:
     desktop = root / "desktop"
     config = json.loads((desktop / "tauri/src-tauri/tauri.conf.json").read_text())
@@ -36,8 +62,13 @@ def check(root: Path, tag: str | None = None, rust_version: str | None = None) -
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", help="also require this release tag to match the app version")
+    parser.add_argument("--stamp", action="store_true", help="set client versions from --tag before checking")
     args = parser.parse_args()
     try:
+        if args.stamp:
+            if args.tag is None:
+                raise ValueError("--stamp requires --tag")
+            stamp(Path(__file__).resolve().parents[2], args.tag)
         check(Path(__file__).resolve().parents[2], args.tag, os.environ.get("RUST_VERSION"))
     except (ValueError, KeyError, OSError) as error:
         parser.exit(1, f"Release input check failed: {error}\n")

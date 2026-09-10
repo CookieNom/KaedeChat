@@ -972,13 +972,13 @@ class InteractionCreate(StrictInteractionModel):
     application_ref: EntityRef
     interaction_type: Literal["command", "component", "modal_submit", "autocomplete"] = "command"
     command_name: str | None = Field(default=None, min_length=1, max_length=32)
-    command_id: int | None = Field(default=None, gt=0, le=2**63 - 1)
+    command_id: Snowflake | None = Field(default=None, gt=0, le=2**63 - 1)
     integration_type: Literal["guild_install", "user_install", "dm_capability"] | None = None
     dm_capability_id: str | None = Field(
         default=None,
         pattern=r"^kbdg_[A-Za-z0-9_-]{43}$",
     )
-    dm_capability_revision: int | None = Field(default=None, gt=0, le=2**63 - 1)
+    dm_capability_revision: Snowflake | None = Field(default=None, gt=0, le=2**63 - 1)
     command_type: Literal["chat_input", "user", "message"] = "chat_input"
     target_ref: EntityRef | None = None
     options: dict[str, Any] = Field(default_factory=dict)
@@ -989,7 +989,7 @@ class InteractionCreate(StrictInteractionModel):
     )
     autocomplete_generation: int | None = Field(default=None, gt=0, le=2**63 - 1)
     message_ref: EntityRef | None = None
-    response_id: int | None = Field(default=None, gt=0)
+    response_id: Snowflake | None = Field(default=None, gt=0)
     view_version: int | None = Field(default=None, ge=1)
     custom_id: str | None = Field(default=None, min_length=1, max_length=100)
     values: list[str] = Field(default_factory=list, max_length=25)

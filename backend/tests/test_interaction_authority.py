@@ -3704,3 +3704,77 @@ async def test_update_original_edits_exact_private_source_and_advances_version(
         (source_parent, source, "UPDATE"),
         (interaction, stored, "UPDATE"),
     ]
+
+
+@pytest.mark.parametrize("interaction_type", ["command", "autocomplete"])
+def test_interaction_accepts_browser_command_ids(interaction_type: str) -> None:
+    command_id = "912871893315585"
+    payload = interactions.InteractionCreate.model_validate(
+        {
+            "application_ref": "912871893315584@kaede.chat",
+            "interaction_type": interaction_type,
+            "command_id": command_id,
+            "command_name": "bridge-pair",
+            "command_type": "chat_input",
+            "integration_type": "guild_install",
+            "options": {},
+            **(
+                {"focused_option": "query", "autocomplete_generation": 1}
+                if interaction_type == "autocomplete"
+                else {}
+            ),
+        }
+    )
+    assert payload.command_id == int(command_id)
+    assert interactions.InteractionCreate.model_validate_json(payload.model_dump_json()) == payload
+
+
+def test_interaction_accepts_browser_capability_and_response_ids() -> None:
+    payload = interactions.InteractionCreate.model_validate(
+        {
+            "application_ref": "1@apps.example",
+            "command_name": "help",
+            "command_id": "9223372036854775807",
+            "integration_type": "dm_capability",
+            "dm_capability_id": "kbdg_" + "a" * 43,
+            "dm_capability_revision": "2",
+        }
+    )
+    assert payload.command_id == 2**63 - 1
+    assert payload.dm_capability_revision == 2
+    response = interactions.InteractionCreate.model_validate(
+        {
+            "application_ref": "1@apps.example",
+            "interaction_type": "component",
+            "response_id": "9223372036854775807",
+            "view_version": 1,
+            "custom_id": "confirm",
+        }
+    )
+    assert response.response_id == 2**63 - 1
+
+
+@pytest.mark.parametrize("field", ["command_id", "dm_capability_revision", "response_id"])
+@pytest.mark.parametrize("value", [True, 1.5, "01", "1.0", " 1", "0", "9223372036854775808"])
+def test_interaction_rejects_invalid_decimal_ids(field: str, value: object) -> None:
+    payload: dict[str, object] = (
+        {
+            "application_ref": "1@apps.example",
+            "command_name": "help",
+            "command_id": "1",
+            "integration_type": "dm_capability",
+            "dm_capability_id": "kbdg_" + "a" * 43,
+            "dm_capability_revision": "1",
+        }
+        if field != "response_id"
+        else {
+            "application_ref": "1@apps.example",
+            "interaction_type": "component",
+            "response_id": "1",
+            "view_version": 1,
+            "custom_id": "confirm",
+        }
+    )
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        interactions.InteractionCreate.model_validate(payload)

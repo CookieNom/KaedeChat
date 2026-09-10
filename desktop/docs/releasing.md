@@ -7,9 +7,12 @@ macOS clients, and a signed Android APK. All artifacts and their SHA-256
 checksums are published to one GitHub Release. A branch push, pull request, or
 manual workflow dispatch cannot publish a release.
 
-The desktop version in `desktop/tauri/src-tauri/tauri.conf.json` and
-`desktop/tauri/src-tauri/Cargo.toml` and the `kaede-tauri` entry in
-`desktop/Cargo.lock` must match the numeric part of the tag.
+CI stamps the numeric tag version into `desktop/tauri/src-tauri/tauri.conf.json`,
+`desktop/tauri/src-tauri/Cargo.toml`, the `kaede-tauri` entry in
+`desktop/Cargo.lock`, and `frontend/package.json` before desktop builds.
+No version-bump commit is needed: choose the next version in the tag, and CI
+applies it in each release checkout without committing back or moving tags.
+Dependency versions stay locked. Retries use the same app version.
 Each desktop build also produces a Tauri updater payload and signature: an
 AppImage on Linux, an `app.tar.gz` archive on macOS, and the NSIS setup executable
 on Windows. The publish job assembles those into `latest.json` at the root of
@@ -21,10 +24,10 @@ succeeds. CI also checks the Podfile checksum and pinned Rust toolchain, lints
 workflow syntax, and compiles an unsigned iOS release using the release Xcode
 SDK. Dependency installation keeps the committed Cargo, Dart, and Pod locks.
 
-Before tagging, push the version bump to main and wait for its CI to pass. Run:
+Before tagging, push the code to main and wait for its CI to pass. Run:
 
 ```sh
-python3 .github/scripts/check-release-inputs.py --tag vMAJOR.MINOR.PATCH
+python3 .github/scripts/check-release-inputs.py
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend lint
 pnpm --dir frontend check
@@ -75,13 +78,33 @@ base64 -w0 apple-developer-id.p12
 base64 -w0 android-upload.jks
 ```
 
-On macOS, use `base64 < file | tr -d '\n'`. After the application versions and
+On macOS, use `base64 < file | tr -d '\n'`. After the code and
 release notes are ready, create and push the signed release tag:
 
 ```sh
-git tag -s v0.1.10 -m "Kaede Chat 0.1.10"
-git push origin v0.1.10
+git tag -s v0.1.43 -m "Kaede Chat 0.1.43"
+git push origin v0.1.43
 ```
+
+### Version inventory
+
+| Component | Version source and release behavior |
+| --- | --- |
+| Desktop app | Tauri JSON, Cargo manifest, and Cargo.lock; stamped from the client tag, including the window title and updater's current version. |
+| Embedded frontend | `frontend/package.json`; stamped from the client tag. The private package version does not need a pnpm lockfile change. |
+| Android and iOS | `mobile/pubspec.yaml` (`0.1.0+1`) is a development default. Release builds already override it with the tag and CI build number; iOS extensions inherit Flutter's values. |
+| Rust libraries / E2EE WASM | `desktop/Cargo.toml` workspace version and generated `frontend/src/lib/e2ee/wasm/package.json` (`0.1.0`); internal library versions, independent of client release tags. Legacy Slint crates are not released. |
+| Backend | `backend/pyproject.toml`, its `backend/uv.lock` entry, and FastAPI metadata in `backend/app/main.py` (`0.1.0`); no backend package publishing job exists in these workflows. Client releases do not bump these. |
+| Python SDK | `sdk/python/pyproject.toml` and `sdk/python/uv.lock` (`1.0.0` development default); its separate `sdk-vX.Y.Z` workflow stamps both using `uv version`. See [SDK releasing](../../sdk/python/RELEASING.md). |
+
+Protocol, database schema, and encryption format versions are compatibility
+identifiers and must only change when those formats change.
+
+For a local build with release metadata, run
+`python3 .github/scripts/check-release-inputs.py --stamp --tag v0.1.43`.
+This edits the local metadata files; CI performs the same operation in its
+temporary checkout. This automation sets versions from tags; it does not
+choose major/minor/patch increments or create tags.
 
 The workflow publishes both a signed sideload APK and a Play-ready AAB. Both
 are built in official-relay mode and contain no Firebase service-account key.
