@@ -78,7 +78,7 @@ class InteractionResponseState {
       invokerRef: string;
       channelRef: string;
       applicationRef: string;
-      responseGrantId: string;
+      responseGrantId: string | null;
       sequence: number;
       callbackType: number;
       ephemeral: boolean;
@@ -342,7 +342,9 @@ class InteractionResponseState {
       interactionRef.id !== event.interaction_id ||
       responseRef.id !== event.response_id ||
       event.operation !== expectedOperation ||
-      !isCanonicalBase64url32(event.response_grant_id) ||
+      // Local invocations have no federation admission grant.
+      (!(event.response_grant_id === null && invokerRef.ref.endsWith(`@${authority}`)) &&
+        !isCanonicalBase64url32(event.response_grant_id)) ||
       typeof event.revision !== 'string' ||
       !/^[1-9]\d{0,18}$/u.test(event.revision) ||
       BigInt(event.revision) > 9_223_372_036_854_775_807n ||

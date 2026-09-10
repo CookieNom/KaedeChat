@@ -66,6 +66,41 @@ describe('interaction response state', () => {
     });
   });
 
+  it('displays a local deferred private response with no federation grant', async () => {
+    const event = responseEvent('UPDATE', {
+      revision: '2',
+      ephemeral: true,
+      response_grant_id: null,
+      user_ref: '1@c1.example',
+      invoker_ref: '1@c1.example',
+      data: { content: 'Choose a Kaede channel', components: [] }
+    });
+    interactionResponses.apply('INTERACTION_RESPONSE_UPDATE', event);
+    await settle();
+    expect(interactionResponses.byResponse['20@c1.example']?.data?.content).toBe(
+      'Choose a Kaede channel'
+    );
+  });
+
+  it('still rejects missing federation grants for remote invokers and malformed local grants', async () => {
+    for (const overrides of [
+      { response_grant_id: null },
+      { response_grant_id: 'invalid', user_ref: '1@c1.example', invoker_ref: '1@c1.example' },
+      { response_grant_id: undefined, user_ref: '1@c1.example', invoker_ref: '1@c1.example' }
+    ]) {
+      interactionResponses.apply(
+        'INTERACTION_RESPONSE_UPDATE',
+        responseEvent('UPDATE', {
+          revision: '2',
+          ephemeral: true,
+          ...overrides
+        })
+      );
+      await settle();
+      expect(interactionResponses.byResponse['20@c1.example']).toBeUndefined();
+    }
+  });
+
   it('correlates callbacks, opens modals, and applies deletion', () => {
     interactionResponses.reset();
     interactionResponses.register('10@c1.example', {

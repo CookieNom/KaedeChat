@@ -348,7 +348,7 @@ export interface InteractionResponseEvent {
   type?: number;
   response_id?: string;
   response_ref?: string;
-  response_grant_id?: string;
+  response_grant_id?: string | null;
   message_ref?: string | null;
   revision?: string;
   operation?: 'CREATE' | 'UPDATE' | 'DELETE';

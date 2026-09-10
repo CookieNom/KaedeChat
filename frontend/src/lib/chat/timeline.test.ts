@@ -78,6 +78,7 @@ describe('buildTimeline', () => {
 it('inserts private replies inline and keeps edits in place without changing shared history', () => {
   const history = buildTimeline([message('10'), message('30')]);
   const response: InteractionResponseEvent = {
+    interaction_id: '15',
     ephemeral: true,
     callback_type: 4,
     channel_ref: '1@chat.example',
