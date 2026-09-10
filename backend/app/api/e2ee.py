@@ -3191,6 +3191,8 @@ async def _commit_room_operation(
             )
         )
         controls.append((message, _control_metadata(operation, apply=apply)))
+    # Persist the controls before the channel's immediate last-message FK points at them.
+    await session.flush()
     channel.last_message_id = controls[-1][0].id
     channel.last_message_domain = settings.domain
     await session.flush()

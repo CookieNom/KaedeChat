@@ -583,6 +583,113 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
     assert session.commit.await_count == 2
 
 
+@pytest.mark.parametrize("kind", ["activate", "rekey"])
+async def test_room_commit_saves_controls_before_last_message_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    domain = "alpha.localhost"
+    user = SimpleNamespace(id=7, origin_domain=domain)
+    channel = SimpleNamespace(
+        id=10,
+        origin_domain=domain,
+        last_message_id=None,
+        last_message_domain=None,
+        encryption_mode="plaintext" if kind == "activate" else "e2ee",
+        encryption_state="plaintext" if kind == "activate" else "rekeying",
+        encryption_policy_generation=0,
+        encryption_epoch=0,
+    )
+    access = SimpleNamespace(channel=channel, guild=SimpleNamespace(origin_domain=domain))
+    operation = SimpleNamespace(
+        id=OPERATION_ID,
+        authority_domain=domain,
+        channel_id=10,
+        channel_domain=domain,
+        actor_id=7,
+        actor_domain=domain,
+        sender_device_id=DEVICE_ID,
+        kind=kind,
+        status="prepared",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        policy_generation=1,
+        base_policy_generation=0,
+        group_id=GROUP_ID,
+        participant_refs=[{"id": "7", "domain": domain}],
+        key_packages=[],
+    )
+    payload = RoomActivationRequest(
+        operation_id=OPERATION_ID,
+        sender_device_id=DEVICE_ID,
+        policy_generation="1",
+        epoch="1",
+        group_id=GROUP_ID,
+        commit=encode_base64url(b"commit"),
+        welcome=encode_base64url(b"welcome"),
+        prepared_vault_revision="1",
+        prepared_vault_digest=VAULT_DIGEST,
+        vault_lease_token=encode_base64url(b"l" * 32),
+    )
+    pending: list[object] = []
+    saved_messages: dict[int, Message] = {}
+
+    async def flush() -> None:
+        # Channels are updated before pending message inserts. Enforce the
+        # immediate last-message foreign key at that boundary.
+        if channel.last_message_id is not None:
+            assert channel.last_message_id in saved_messages
+        for row in pending:
+            if isinstance(row, Message):
+                saved_messages[row.id] = row
+        pending.clear()
+
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=operation),
+        scalars=AsyncMock(return_value=[]),
+        add=pending.append,
+        flush=flush,
+        commit=AsyncMock(side_effect=flush),
+    )
+    for name, result in (
+        ("load_channel_access", access),
+        ("lock_local_channel_mutation", access),
+        ("require_room_policy_authority", None),
+        ("require_active_sender_device", None),
+        ("require_prepared_account_vault", None),
+        ("room_participants", [user]),
+        ("evict_channel_media_sessions", None),
+        ("apply_e2ee_control_metadata", None),
+        ("publish_policy_update", None),
+        ("queue_guild_mutation", None),
+        ("materialize_updated_at", None),
+        ("wake_queued_guild_federation", None),
+        ("publish_channel_dispatch", None),
+    ):
+        monkeypatch.setattr(e2ee_api, name, AsyncMock(return_value=result))
+    monkeypatch.setattr(e2ee_api, "message_payload", lambda *_: {})
+    monkeypatch.setattr(e2ee_api, "channel_payload", lambda *_: {})
+    monkeypatch.setattr(e2ee_api, "profile_from_user", lambda *_: {})
+
+    response = await e2ee_api._commit_room_operation(
+        kind,
+        e2ee_api.EntityRef(f"10@{domain}"),
+        payload,
+        SimpleNamespace(user=user),
+        session,
+        AsyncMock(),
+        SimpleNamespace(mint=AsyncMock(side_effect=[20, 21])),
+        SimpleNamespace(domain=domain),
+        actor_home_attested=False,
+    )
+
+    assert response["operation_status"] == "committed"
+    assert [item["operation"] for item in response["controls"]] == ["welcome", "commit"]
+    assert channel.last_message_id == 21
+    assert channel.last_message_domain == domain
+    assert set(saved_messages) == {20, 21}
+    session.commit.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_announcement_channel_rejects_e2ee_before_activation(
     monkeypatch: pytest.MonkeyPatch,
