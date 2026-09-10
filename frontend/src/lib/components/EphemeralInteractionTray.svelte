@@ -18,13 +18,14 @@
   import MessagePoll from './MessagePoll.svelte';
   import RichEmbed from './RichEmbed.svelte';
 
-  let { channelRef }: { channelRef: string } = $props();
+  let { channelRef, responseRef }: { channelRef: string; responseRef?: string } = $props();
 
   const visible = $derived(
     Object.values(interactionResponses.byResponse)
       .filter(
         (event) =>
           event.ephemeral &&
+          (!responseRef || event.response_ref === responseRef) &&
           interactionResponses.context(event.interaction_ref ?? null)?.channelRef === channelRef &&
           [4, 5].includes(event.callback_type ?? event.response_type ?? event.type ?? 0) &&
           !event.deleted_at
@@ -74,7 +75,7 @@
       {@const request = interactionResponses.context(event.interaction_ref ?? null)}
       <article>
         <header>
-          <span><strong>Only you can see this</strong> · Bot response</span>
+          <span><strong>Ephemeral · Only you can see this</strong> · Bot response</span>
           <button
             type="button"
             aria-label="Dismiss private bot response"
@@ -163,8 +164,8 @@
 <style>
   .ephemeral-tray {
     display: grid;
-    width: min(720px, calc(100% - 32px));
-    margin: 8px 16px 16px;
+    width: 100%;
+    margin: 8px 0;
     gap: 9px;
   }
   article {
@@ -172,7 +173,6 @@
     border-radius: 10px;
     padding: 12px;
     background: var(--surface);
-    box-shadow: var(--shadow-lg);
   }
   header {
     display: flex;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from './types';
-import { buildTimeline } from './timeline';
+import type { InteractionResponseEvent } from './rich-content';
+import { buildTimeline, withInteractionResponses } from './timeline';
 
 function message(id: string, author = '1', createdAt = '2026-07-20T10:00:00Z'): Message {
   return {
@@ -72,4 +73,34 @@ describe('buildTimeline', () => {
       { id: '42', origin_domain: 'remote.example' }
     ]);
   });
+});
+
+it('inserts private replies inline and keeps edits in place without changing shared history', () => {
+  const history = buildTimeline([message('10'), message('30')]);
+  const response: InteractionResponseEvent = {
+    ephemeral: true,
+    callback_type: 4,
+    channel_ref: '1@chat.example',
+    response_id: '20',
+    response_ref: '20@chat.example',
+    data: { content: 'Choose a channel' }
+  };
+  const merge = (events: InteractionResponseEvent[]) =>
+    withInteractionResponses(history, events, '1@chat.example');
+  expect(merge([response]).map((item) => item.key)).toEqual([
+    'day:2026-07-20',
+    'message:10@chat.example',
+    'ephemeral:20@chat.example',
+    'message:30@chat.example'
+  ]);
+  expect(merge([{ ...response, data: { content: 'Paired' } }])).toEqual(merge([response]));
+  expect(
+    merge([
+      { ...response, deleted_at: '2026-07-20T10:01:00Z' },
+      { ...response, ephemeral: false },
+      { ...response, channel_ref: '2@chat.example' }
+    ])
+  ).toEqual(history);
+  expect(history.some((item) => item.kind === 'ephemeral')).toBe(false);
+  expect(withInteractionResponses([], [response], '1@chat.example')).toHaveLength(1);
 });

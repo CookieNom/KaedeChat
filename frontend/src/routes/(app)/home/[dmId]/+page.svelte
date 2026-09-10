@@ -86,7 +86,8 @@
     withoutSubmittedUploads
   } from '$lib/chat/outbox';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
-  import { buildTimeline } from '$lib/chat/timeline';
+  import { interactionResponses } from '$lib/chat/interaction-responses.svelte';
+  import { buildTimeline, withInteractionResponses } from '$lib/chat/timeline';
   import { createTypingState } from '$lib/chat/typing';
   import type {
     Attachment,
@@ -356,14 +357,18 @@
   const groupOwner = $derived(Boolean(channel && ownsGroupDm(channel, currentUser)));
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
   const timeline = $derived(
-    buildTimeline(
-      messages,
-      currentReadState?.read_message_id && currentReadState.read_message_domain
-        ? {
-            id: currentReadState.read_message_id,
-            origin_domain: currentReadState.read_message_domain
-          }
-        : null
+    withInteractionResponses(
+      buildTimeline(
+        messages,
+        currentReadState?.read_message_id && currentReadState.read_message_domain
+          ? {
+              id: currentReadState.read_message_id,
+              origin_domain: currentReadState.read_message_domain
+            }
+          : null
+      ),
+      Object.values(interactionResponses.byResponse),
+      channel ? entityRef(channel) : ''
     )
   );
   const aroundMessage = $derived(page.url.searchParams.get('around'));
@@ -2751,7 +2756,12 @@
               {/if}
             {/snippet}
             {#snippet renderItem(item)}
-              {#if item.kind === 'day'}
+              {#if item.kind === 'ephemeral'}
+                <EphemeralInteractionTray
+                  channelRef={channel ? entityRef(channel) : ''}
+                  responseRef={item.responseRef}
+                />
+              {:else if item.kind === 'day'}
                 <div class="timeline-divider" role="separator"><span>{item.label}</span></div>
               {:else if item.kind === 'new'}
                 <div class="timeline-divider new" role="separator"><span>{item.label}</span></div>
@@ -2801,9 +2811,6 @@
             {/snippet}
           </VirtualMessageList>
         {/key}
-        {#if channel}
-          <EphemeralInteractionTray channelRef={entityRef(channel)} />
-        {/if}
       </div>
     </div>
     <footer class="composer-wrap">
