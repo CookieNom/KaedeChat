@@ -35,6 +35,8 @@ class Pairing:
 
     def command(self, handler):
         async def run(interaction):
+            logging.getLogger("bridge").info("Kaede bridge command received: action=%s guild=%s",
+                                              handler.__name__, interaction.guild_ref)
             if await self.allowed(interaction):
                 await interaction.defer(ephemeral=True)
                 await self.safe(handler, interaction)

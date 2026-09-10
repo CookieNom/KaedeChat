@@ -119,6 +119,7 @@ class Bridge(discord.Client):
         bot.listen("on_ready")(self.on_kaede_ready)
         bot.listen("on_gateway_error")(self.on_kaede_connection_error)
         bot.listen("on_target_discovery_error")(self.on_kaede_connection_error)
+        bot.listen("on_error")(self.on_kaede_handler_error)
 
     async def on_kaede_ready(self, event):
         log.info("Kaede gateway ready on %s (%s guild installations)",
@@ -127,6 +128,12 @@ class Bridge(discord.Client):
     async def on_kaede_connection_error(self, event):
         log.warning("Kaede %s on %s: %s", event.type, event.target,
                     event.data.get("error", "unknown error"))
+
+    async def on_kaede_handler_error(self, event):
+        error = event.data.get("error")
+        log.error("Kaede handler failed: event=%s target=%s exception=%s status=%s code=%s",
+                  event.data.get("event_type"), event.target, type(error).__name__,
+                  getattr(error, "status", None), getattr(error, "code", None))
 
     async def on_message(self, message):
         if message.guild is None or message.author.bot or message.webhook_id:

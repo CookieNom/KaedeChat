@@ -427,11 +427,16 @@ normal validation and reload commands (commonly `nginx -t` followed by
 `systemctl reload nginx`). Don't reload a configuration that failed
 validation.
 
-The example defines HTTP-context zones for the exact `/gateway`, `/livekit`
+The example defines HTTP-context zones for `/gateway`, `/api/v1/bots/gateway`, `/livekit`
 signaling, and federation-link upgrade routes, and for the separate media
 virtual host. The `/livekit` location must forward both its ordinary
 validation requests and the `/livekit/rtc` WebSocket upgrade; routing it
-through the ordinary catch-all strips the signaling upgrade. Gateway
+through the ordinary catch-all strips the signaling upgrade. Both user and bot
+gateway paths must also forward WebSocket upgrades; the ordinary catch-all causes
+bot connections to fail with HTTP 404. For existing nginx installations, replace
+`location = /gateway {` with `location ~ ^/(gateway|api/v1/bots/gateway)$ {`,
+keep its proxy settings, then validate and reload nginx. Updating containers alone
+does not update the host nginx configuration. Gateway
 admission allows at most 20 incomplete/active upgrades per source address,
 with 10 new upgrades per second and a burst of 20. If you serve unusually
 large groups behind one NAT, you can raise those values after measuring

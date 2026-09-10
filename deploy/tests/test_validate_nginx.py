@@ -16,6 +16,39 @@ def directives(block: str) -> list[list[str]]:
     ]
 
 
+class NginxGatewayRoutingTests(unittest.TestCase):
+    def test_both_gateway_paths_preserve_websocket_upgrades(self) -> None:
+        config = re.sub(r"(?m)#.*$", "", NGINX_EXAMPLE.read_text(encoding="utf-8"))
+        locations = re.findall(r"location\s+~\s+(\S+)\s*\{([^{}]*)\}", config)
+        for path in ("/gateway", "/api/v1/bots/gateway"):
+            with self.subTest(path=path):
+                matches = [
+                    (pattern, block)
+                    for pattern, block in locations
+                    if re.search(pattern, path)
+                ]
+                self.assertEqual(len(matches), 1)
+                pattern, block = matches[0]
+                policy = directives(block)
+                self.assertIn(["proxy_set_header", "Upgrade", "$http_upgrade"], policy)
+                self.assertIn(
+                    ["proxy_set_header", "Connection", "$kaede_connection_upgrade"],
+                    policy,
+                )
+                self.assertIn(["proxy_pass", "http://kaede_caddy"], policy)
+                self.assertIn(["proxy_read_timeout", "3600s"], policy)
+                self.assertIn(["proxy_buffering", "off"], policy)
+                self.assertIn(["limit_conn", "kaede_gateway_connections", "20"], policy)
+                for ordinary in (
+                    "/api/v1/bots/token",
+                    "/api/v1/bot-workers/targets",
+                    "/api/v1/bots/gateway/extra",
+                    "/gateway/extra",
+                    "/",
+                ):
+                    self.assertIsNone(re.search(pattern, ordinary))
+
+
 class NginxVoiceRoutingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

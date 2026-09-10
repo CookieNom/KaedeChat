@@ -117,3 +117,21 @@ class BridgeTest(unittest.TestCase):
                 await client.close()
                 store.engine.dispose()
         asyncio.run(check())
+
+
+    def test_handler_failures_are_logged_without_secret_exception_text(self):
+        from kaede_bot.errors import ApiError
+        with TemporaryDirectory() as directory:
+            store = bridge.Store(Path(directory) / 'bridge.sqlite3')
+            handlers = {}
+            bot = Obj(listen=lambda name: lambda handler: handlers.update({name: handler}))
+            client = bridge.Bridge(store, bot)
+            error = ApiError(403, 'BOT_SCOPE_REQUIRED', 'private diagnostic content')
+            with self.assertLogs('bridge', level='ERROR') as logs:
+                asyncio.run(handlers['on_error'](Obj(target='https://chat.example', data={
+                    'event_type': 'INTERACTION_CREATE', 'error': error,
+                })))
+            self.assertIn('BOT_SCOPE_REQUIRED', logs.output[0])
+            self.assertNotIn('private diagnostic content', logs.output[0])
+            asyncio.run(client.close())
+            store.engine.dispose()

@@ -19,7 +19,7 @@ map $uri $kaede_safe_uri {
 
 # Bound unauthenticated WebSocket upgrades before they reach Caddy. These zones
 # live in nginx's http context; the limits themselves are applied only to the
-# exact /gateway location below, so ordinary API and static requests are not
+# anchored gateway location below, so ordinary API and static requests are not
 # throttled by them. Twenty simultaneous handshakes and ten new upgrades per
 # second (with a burst of twenty) leave headroom for legitimate NATed clients.
 limit_conn_zone $binary_remote_addr zone=kaede_gateway_connections:10m;
@@ -139,9 +139,9 @@ server {
     }
 
     # Keep WebSocket upgrade behavior and long-lived timeouts scoped to the
-    # gateway. Applying these settings to every request disables upstream
-    # keepalive and buffering for ordinary API, media, and static responses.
-    location = /gateway {
+    # user and bot gateways. Applying these settings to every request disables
+    # upstream keepalive and buffering for ordinary API, media, and static responses.
+    location ~ ^/(gateway|api/v1/bots/gateway)$ {
         limit_conn kaede_gateway_connections 20;
         limit_conn_status 429;
         limit_req zone=kaede_gateway_upgrades burst=20 nodelay;
