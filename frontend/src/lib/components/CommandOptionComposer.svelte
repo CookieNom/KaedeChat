@@ -166,29 +166,32 @@
           onChange={(selected) => onValueChange(field.path, selected[0] ?? '')}
         />
       {:else if option.type === 'channel'}
-        <select
-          value={String(values[field.path] ?? '')}
+        <GuildMemberPicker
+          staticOptions={channels
+            .filter((channel) => commandOptionAllowsChannelType(option, channel.type))
+            .map((channel) => ({
+              value: entityRef(channel),
+              label: `#${channel.name ?? 'channel'}`
+            }))}
+          value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
+          optional={!option.required}
+          placeholder="Select a channel"
+          entityName="channels"
+          searchPlaceholder="Search channels"
           {disabled}
-          required={option.required}
-          onchange={(event) => onValueChange(field.path, event.currentTarget.value)}
-        >
-          <option value="">Select a channel</option>
-          {#each channels.filter( (channel) => commandOptionAllowsChannelType(option, channel.type) ) as channel (entityRef(channel))}
-            <option value={entityRef(channel)}>#{channel.name ?? 'channel'}</option>
-          {/each}
-        </select>
+          onChange={(selected) => onValueChange(field.path, selected[0] ?? '')}
+        />
       {:else if option.type === 'role'}
-        <select
-          value={String(values[field.path] ?? '')}
+        <GuildMemberPicker
+          staticOptions={roles.map((role) => ({ value: entityRef(role), label: `@${role.name}` }))}
+          value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
+          optional={!option.required}
+          placeholder="Select a role"
+          entityName="roles"
+          searchPlaceholder="Search roles"
           {disabled}
-          required={option.required}
-          onchange={(event) => onValueChange(field.path, event.currentTarget.value)}
-        >
-          <option value="">Select a role</option>
-          {#each roles as role (entityRef(role))}
-            <option value={entityRef(role)}>@{role.name}</option>
-          {/each}
-        </select>
+          onChange={(selected) => onValueChange(field.path, selected[0] ?? '')}
+        />
       {:else if option.type === 'mentionable'}
         <GuildMemberPicker
           {guildRef}

@@ -20,6 +20,8 @@
     maxValues = 1,
     optional = false,
     placeholder = 'Choose a member',
+    entityName = 'people',
+    searchPlaceholder = 'Search by name or federated username',
     disabled = false,
     filterUser = () => true,
     onChange
@@ -32,6 +34,8 @@
     maxValues?: number;
     optional?: boolean;
     placeholder?: string | null;
+    entityName?: string;
+    searchPlaceholder?: string;
     disabled?: boolean;
     filterUser?: (user: UserSummary) => boolean;
     onChange: (values: string[], users: UserSummary[]) => void;
@@ -78,7 +82,9 @@
     );
     const selectedUsers = seen.filter((member) => selected.has(entityRef(member.user)));
     const candidates = [
-      ...staticOptions,
+      ...staticOptions.filter(
+        (option) => selected.has(option.value) || option.label.toLowerCase().includes(needle)
+      ),
       ...selectedFallbackUsers.map(userOption),
       ...selectedUsers.map((item) => userOption(item.user)),
       ...users.map(userOption)
@@ -212,14 +218,17 @@
 
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
+      if (active) event.stopPropagation();
       active = false;
       return;
     }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
-      active = true;
       const direction = event.key === 'ArrowDown' ? 1 : -1;
-      highlighted = Math.max(0, Math.min(availableOptions.length - 1, highlighted + direction));
+      highlighted = active
+        ? Math.max(0, Math.min(availableOptions.length - 1, highlighted + direction))
+        : 0;
+      active = true;
       return;
     }
     if (event.key === 'Enter' && active && availableOptions[highlighted]) {
@@ -238,8 +247,8 @@
     <input
       bind:value={query}
       {disabled}
-      aria-label="Search people"
-      placeholder="Search by name or federated username"
+      aria-label={`Search ${entityName}`}
+      placeholder={searchPlaceholder}
       aria-busy={loading}
       role="combobox"
       aria-expanded={active}
@@ -253,14 +262,23 @@
         highlighted = 0;
       }}
       onkeydown={keydown}
+      oninput={() => {
+        active = true;
+        highlighted = 0;
+      }}
+      onclick={() => (active = true)}
       autocomplete="off"
     />
   </div>
   {#if selectedOptions.length}
-    <div class="selected-options" aria-label="Selected people">
+    <div class="selected-options" aria-label={`Selected ${entityName}`}>
       {#each selectedOptions as option (option.value)}
         <span
-          >{option.label}<button type="button" {disabled} onclick={() => remove(option)}>×</button
+          >{option.label}<button
+            type="button"
+            {disabled}
+            aria-label={`Remove ${option.label}`}
+            onclick={() => remove(option)}>×</button
           ></span
         >
       {/each}
@@ -287,7 +305,7 @@
           onclick={() => choose(option)}>{option.label}</button
         >
       {:else}
-        {#if !loading}<small>No matching people.</small>{/if}
+        {#if !loading}<small>No matching {entityName}.</small>{/if}
       {/each}
     </div>
   {/if}
