@@ -16,4 +16,17 @@ describe('message links', () => {
     ).toBeNull();
     expect(previewableLink('https://example.com/article')).toBe('https://example.com/article');
   });
+
+  it('skips bot invite cards, including federated links, while previewing other links', () => {
+    for (const invite of [
+      'https://kaede.chat/applications/91287871893315584@kaede.chat/install/install',
+      'https://apps.example/applications/123/install/community',
+      'https://chat.example/applications/123%40apps.example/install/community'
+    ]) {
+      expect(previewableLink(invite)).toBeNull();
+      expect(previewableLink(`${invite} https://example.com/article`)).toBe(
+        'https://example.com/article'
+      );
+    }
+  });
 });

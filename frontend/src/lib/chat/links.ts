@@ -1,4 +1,5 @@
 import { normalizeDirectoryProductLink } from './application-product-links';
+import { normalizeBotInvite } from './bot-invites';
 
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 const TRAILING_PUNCTUATION = /[),.!?:;\]}]+$/;
@@ -27,6 +28,7 @@ export function previewableLink(content: string | null): string | null {
       return (
         !['media.klipy.com', 'static.klipy.com'].includes(url.hostname) &&
         !/^\/invite\/[^/]+\/?$/i.test(url.pathname) &&
+        !normalizeBotInvite(value) &&
         !normalizeDirectoryProductLink(value)
       );
     }) ?? null
