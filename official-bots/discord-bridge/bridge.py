@@ -191,11 +191,7 @@ async def main():
     store = Store(data / "bridge.sqlite3")
     bot = kaede.Client(worker_state=kaede.WorkerState.load(worker_dir), intents=INTENTS)
     bridge = Bridge(store, bot)
-    admins = {str(kaede.EntityRef.parse(value.strip())) for value in
-              os.environ.get("KAEDE_BRIDGE_ADMIN_REFS", "").split(",") if value.strip()}
-    if not admins:
-        raise ValueError("Set KAEDE_BRIDGE_ADMIN_REFS to the Kaede user IDs allowed to manage pairs")
-    Pairing(bridge, admins)
+    Pairing(bridge)
     if os.environ.get("BRIDGE_SYNC_COMMANDS") == "1":
         try:
             await bot.sync_commands(application_home=os.environ["KAEDE_APPLICATION_HOME"],

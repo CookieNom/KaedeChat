@@ -781,7 +781,10 @@
         })
       });
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;
-      notice = 'Invite link created.';
+      notice =
+        currentApplication?.status === 'draft'
+          ? 'Invite link created. Your application is now active; you can enroll your worker and publish commands.'
+          : 'Invite link created.';
       await load(applicationRef);
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
@@ -967,6 +970,17 @@
               : 'Save changes'}
         </button>
       </aside>
+    {/if}
+    {#if application.status === 'draft'}
+      <div class="notice" role="status">
+        <strong>Activate your application before connecting your bot.</strong>
+        <p>
+          New applications start as drafts. Save your permissions, then create your first invite
+          link to activate this application. Until then, SDK worker enrollment and command
+          publishing reject even valid control credentials. App Directory approval is not required.
+        </p>
+        <button onclick={() => selectPanel('distribution')}>Go to invite links</button>
+      </div>
     {/if}
     <div class="layout">
       <nav aria-label="Application sections">

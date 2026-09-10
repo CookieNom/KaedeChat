@@ -11,7 +11,7 @@ from bridge import Store
 from pairing import Pairing
 
 
-def event(user='1@chat.example', guild='10@chat.example', permissions=32, values=()):
+def event(user='1@chat.example', guild='10@chat.example', permissions=8, values=()):
     return Obj(user=Obj(ref=k.EntityRef.parse(user)), guild_ref=k.EntityRef.parse(guild),
                member=Obj(permissions=permissions), context='guild', integration_type='guild_install',
                values=values, respond=AsyncMock(), defer=AsyncMock(), edit_original_response=AsyncMock())
@@ -26,7 +26,7 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
             return lambda handler: self.commands.update({definition['name']: (definition, handler)})
         self.kaede = Obj(command=command, fetch_channels=AsyncMock(), fetch_channel=AsyncMock())
         self.bridge = Obj(kaede=self.kaede, store=self.store, route_lock=asyncio.Lock(), is_ready=lambda: True)
-        self.pairing = Pairing(self.bridge, {'1@chat.example'})
+        self.pairing = Pairing(self.bridge)
 
     async def asyncTearDown(self):
         self.store.engine.dispose()
@@ -36,7 +36,7 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.commands), {'bridge-pair', 'bridge-list', 'bridge-unpair'})
         for definition, _ in self.commands.values():
             self.assertEqual(definition['contexts'], ['guild'])
-        for denied in (event(user='2@chat.example'), event(permissions=0)):
+        for denied in (event(permissions=32), event(permissions=0)):
             await self.commands['bridge-pair'][1](denied)
             denied.respond.assert_awaited_once()
             self.kaede.fetch_channels.assert_not_awaited()
@@ -92,3 +92,15 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.pairing.kaede_channel(channel, guild_ref))
         channel.e2ee_required = False
         self.assertFalse(self.pairing.kaede_channel(channel, k.EntityRef.parse('11@chat.example')))
+
+
+    async def test_any_guild_administrator_can_manage_pairs(self):
+        self.assertTrue(await self.pairing.allowed(event(user='2@chat.example')))
+        self.assertTrue(await self.pairing.allowed(event(user='3@other.example')))
+        self.assertFalse(await self.pairing.allowed(event(permissions=32)))
+        self.assertFalse(await self.pairing.allowed(event(), guild=k.EntityRef.parse('11@chat.example')))
+        private = event()
+        private.guild_ref = None
+        self.assertFalse(await self.pairing.allowed(private))
+        for definition, _ in self.commands.values():
+            self.assertEqual(definition['default_member_permissions'], ['ADMINISTRATOR'])

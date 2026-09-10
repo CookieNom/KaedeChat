@@ -1,4 +1,4 @@
-"""Kaede-side channel pairing controls. Only deployment-approved operators may use them."""
+"""Kaede-side channel pairing controls. Guild administrators manage their own guild's pairs."""
 import asyncio
 import logging
 import secrets
@@ -11,9 +11,8 @@ NO_MENTIONS = {"parse": [], "replied_user": False}
 
 
 class Pairing:
-    def __init__(self, bridge, admins):
+    def __init__(self, bridge):
         self.bridge = bridge
-        self.admins = admins
         for name, description, handler in (
             ("bridge-pair", "Connect a Kaede channel to a Discord channel", self.pair),
             ("bridge-list", "Browse this server's channel pairs", self.list_pairs),
@@ -21,18 +20,17 @@ class Pairing:
         ):
             bridge.kaede.command(name=name, description=description,
                                  contexts=["guild"], integration_types=["guild_install"],
-                                 default_member_permissions=["MANAGE_GUILD"])(self.command(handler))
+                                 default_member_permissions=["ADMINISTRATOR"])(self.command(handler))
 
     async def allowed(self, interaction, owner=None, guild=None):
         permissions = interaction.member.permissions if interaction.member else 0
         valid = (interaction.guild_ref is not None and interaction.context == "guild"
                  and interaction.integration_type == "guild_install"
-                 and str(interaction.user.ref) in self.admins
-                 and (permissions or 0) & (int(kaede.Permission.MANAGE_GUILD) | int(kaede.Permission.ADMINISTRATOR))
+                 and (permissions or 0) & int(kaede.Permission.ADMINISTRATOR)
                  and (owner is None or interaction.user.ref == owner)
                  and (guild is None or interaction.guild_ref == guild))
         if not valid:
-            await interaction.respond("Only an approved bridge operator with Manage Server permission can use this control.", ephemeral=True)
+            await interaction.respond("Administrator permission in this Kaede server is required. Menus can only be used by the person who opened them.", ephemeral=True)
         return bool(valid)
 
     def command(self, handler):

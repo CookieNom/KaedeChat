@@ -392,3 +392,14 @@ it('shows the exact bot snowflake and authority-qualified reference separately f
   );
   expect(document.querySelector('.identity-help')?.textContent).toContain(ref);
 });
+
+it('explains draft activation and links directly to invite creation', async () => {
+  expect(document.body.textContent).toContain(
+    'Activate your application before connecting your bot.'
+  );
+  expect(document.body.textContent).toContain('App Directory approval is not required.');
+  button('Go to invite links').click();
+  flushSync();
+  expect(document.querySelector<HTMLDivElement>('#distribution-panel')?.hidden).toBe(false);
+  expect(document.querySelector<HTMLDivElement>('#general-panel')?.hidden).toBe(true);
+});

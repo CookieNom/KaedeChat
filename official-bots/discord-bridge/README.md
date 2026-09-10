@@ -2,7 +2,7 @@
 
 This bot copies new messages between a Discord channel and a KaedeChat channel.
 Choose channel pairs with dropdowns opened by **KaedeChat slash commands**.
-You do not need to write Python or edit a JSON file. Docker installs the official `kaede-bot` SDK from PyPI using uv.
+Docker installs the official `kaede-bot` SDK from PyPI using uv.
 
 ## What do I need to create?
 
@@ -12,7 +12,7 @@ You do not need to write Python or edit a JSON file. Docker installs the officia
 | Kaede application | Create it in KaedeChat's Developer Portal. | Gives your bridge a bot identity and defines its allowed access. |
 | Kaede control credential | Create it once and paste it into the terminal prompt in step 5. | Gives the setup command permission to register this copy of the bot. |
 | Kaede worker keys | **Nothing manually.** Step 5 generates and saves them automatically. | Let this copy of the bot connect to KaedeChat after setup. |
-| Slash commands | Run the command-publishing step below once. **Do not write command JSON.** | Adds `/bridge-pair`, `/bridge-list`, and `/bridge-unpair` to KaedeChat. |
+| Slash commands | Run the command-publishing step below once. | Adds `/bridge-pair`, `/bridge-list`, and `/bridge-unpair` to KaedeChat. |
 | PyPI / uv publishing token | **Not needed to run the bridge.** | Only SDK maintainers use it when publishing releases. |
 
 “Worker” just means the running copy of this bot on your machine. The portal's
@@ -59,7 +59,7 @@ for the server installation flow.
 
 1. In KaedeChat, open **User settings → Developer Portal**, then **Create
    application**. Give it a name such as **Discord Bridge**.
-2. On its **Access** page, select these **Scopes** (things the bot may do):
+2. On its **Permissions & installs** page, select these **Scopes** (things the bot may do):
    `guilds.read`, `channels.read`, `messages.metadata`, `messages.content`,
    `messages.send`, `applications.commands`, `interactions.respond`.
 3. Select these **Gateway intents** (updates the bot should receive):
@@ -77,8 +77,9 @@ for the server installation flow.
 5. If bridging a server on another KaedeChat instance, make sure **Target
    policy** allows that instance. **Local instance only** will not allow it.
 6. Click **Save changes** before making an invite.
-7. Open **Invite links**, enter a slug such as `discord-bridge` and an invite
-   name, then click **Create invite link**. Copy and open the link to install
+7. Open **Invite links & servers**, enter a slug such as `discord-bridge` and an invite
+   name, then click **Create invite link**. **This activates the application and must
+   happen before worker enrollment.** Copy and open the link to install
    the bot in the KaedeChat server you want to bridge. Approve the requested
    access. This bridge uses plaintext channels and does not enroll an encrypted
    participant device.
@@ -109,30 +110,34 @@ Replace all example values:
   or the bot's username.
 
 The domains in these two settings must match. Your bridged channels can belong
-to other instances; you will specify those separately in step 3.
+to other instances; select those channels through the commands in step 6.
 
-## 3. Choose who may manage the bridge
+## 3. Who can manage channel pairs?
 
-In KaedeChat, enable **Developer mode** in user settings. Copy **your user ID**
-from your profile or user context menu. Add it to `.env`, keeping the full
-numeric `id@instance` value:
+Anyone with **Administrator** permission in a Kaede guild where the bot is
+installed can use `/bridge-pair`, `/bridge-list`, and `/bridge-unpair`.
+Manage Server permission alone is insufficient. No username or user-ID setting
+is required in `.env`.
 
-```dotenv
-KAEDE_BRIDGE_ADMIN_REFS=12345@chat.example
-```
+Administrators can select Kaede channels in their current guild and Discord
+channels from **any Discord server this bot has joined**, provided the bot can
+view and send messages there. There is no separate Discord administrator check
+or Discord-side approval. Install this bridge only across communities whose
+Kaede administrators you trust with that access.
 
-Use your human account ID, not the application's ID. Separate multiple approved
-user IDs with commas. These accounts can browse and pair channels in **every
-Discord server this bot has joined**, so only add people you trust to manage both
-sides. They must also have **Manage Server** or Administrator permission in the
-Kaede server where they run the commands. Other users cannot open the menus.
+Lists and removals are limited to the current Kaede guild. Each menu is bound
+to the person and guild that opened it, and Administrator permission is checked
+again on every selection. Pairs are stored in SQLite and survive restarts.
 
-You will choose the channel pairs inside KaedeChat after starting the bot. There
-is no `channels.json` file to create or mount.
+**Create the invite link before enrolling the worker.** New Kaede applications
+start in `draft` status. Creating their first invite link activates them;
+creating a control credential alone does not. Enrollment of a draft application
+returns `BOT_CONTROL_TOKEN_INVALID` even when the credential is correct.
+This activation is separate from public App Directory/discovery approval.
 
 ## 4. Create the Kaede control credential
 
-Go back to your Kaede application's **Credentials** page. Under **Control
+Go back to your Kaede application's **Credentials & workers** page. Under **Control
 credentials**, enter a label such as `Discord bridge setup`, then click
 **Create credential**. Copy the token when it appears; the portal shows it only
 once. Keep it ready for the next step.
@@ -214,10 +219,10 @@ intents. Encrypted Kaede channels are not supported.
 | Change channel pairs | Use `/bridge-pair` and `/bridge-unpair` in KaedeChat. No restart needed. |
 | Change `.env`, such as replacing the Discord token | Run `docker compose up -d --force-recreate` so the container receives the new values. |
 | Stop the bridge | Run `docker compose down`. Its saved data remains. |
-| `Worker already enrolled` | Keep the saved keys. Run the command-publishing command in step 5 if needed, then step 6. For an old JSON-based setup, follow the upgrade section below. |
+| `Worker already enrolled` | Keep the saved keys. Run the command-publishing command in step 5 if needed, then step 6. |
 | Slash commands do not appear | Run the command-publishing step, check `applications.commands` in the application and installation, and reopen KaedeChat. |
-| Operator permission denied | Check your full user ID in `KAEDE_BRIDGE_ADMIN_REFS` and your Manage Server permission. Recreate the container after changing `.env`. |
-| Missing `/data/worker/worker.json` | Step 5 has not succeeded, or you are using a different/empty Docker volume. |
+| Permission denied | You need Administrator permission in the current Kaede guild. Open your own command menu instead of using another person's menu. |
+| Missing saved worker credentials | Step 5 has not succeeded, or you are using a different/empty Docker volume. |
 | Enrollment reports an authorization error | Check that the control credential belongs to this application, is active, and the application allows all the scopes/intents in step 2. |
 | Delivery failures keep retrying | Inspect `docker compose logs --tail=100`, then check destination access and channel IDs. |
 
@@ -226,27 +231,24 @@ SDK replay positions. Keep it when updating or moving the bot and back it up
 securely. **`docker compose down -v` deletes this data**, including the keys.
 Run only one bridge process per volume.
 
-## Upgrading from the JSON-configured bridge
+## Updating an existing deployment
 
-Old JSON pairs are not imported. Recreate them with `/bridge-pair`; old queued
-messages without an active pair are discarded. Keep the SQLite volume.
+After pulling the updated code, rebuild the image and publish commands again
+so Kaede uses the Administrator permission requirement:
 
-1. Stop the bridge with `docker compose down` and update the files.
-2. Add `KAEDE_BRIDGE_ADMIN_REFS` to `.env` (step 3).
-3. Add `applications.commands` and `interactions.respond` scopes and the
-   `interactions` intent in Kaede's application settings. Update/reapprove each
-   server installation to grant them too, recreating the invite if necessary.
-4. The original worker was enrolled without those scopes. Revoke it in the
-   application's Workers section. Build the new image and move its old local
-   key directory aside (the command refuses to overwrite a previous backup):
+```sh
+docker compose build
+read -rs -p 'Kaede control credential: ' KAEDE_BOT_CONTROL_TOKEN
+printf '\n'
+export KAEDE_BOT_CONTROL_TOKEN
+docker compose run --rm -e BRIDGE_SYNC_COMMANDS=1 -e KAEDE_BOT_CONTROL_TOKEN bridge
+unset KAEDE_BOT_CONTROL_TOKEN
+docker compose up -d --force-recreate
+```
 
-   ```sh
-   docker compose build
-   docker compose run --rm bridge python -c 'from pathlib import Path; p = Path("/data/worker-before-commands"); assert not p.exists(), "Backup already exists"; Path("/data/worker").rename(p)'
-   ```
-
-5. Follow step 5 to enroll a new worker and publish commands, then step 6 to
-   start and select your pairs. The old `channels.json` file is no longer used.
+Keep the existing data volume and enrolled worker. Existing channel pairs remain.
+Remove any old `KAEDE_BRIDGE_ADMINS` or `KAEDE_BRIDGE_ADMIN_REFS` settings from
+`.env`; they are no longer used.
 
 ## Behavior and limits
 
