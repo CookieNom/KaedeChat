@@ -151,7 +151,9 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     }
     case 'MESSAGE_CREATE': {
       const message = dispatch.d as Message;
-      chatEntities.messages.upsert(message);
+      // The channel publishes encrypted messages after decryption. Inserting the
+      // raw echo here briefly displays a failure beside the readable local draft.
+      if (!message.e2ee) chatEntities.messages.upsert(message);
       const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
       if (channel?.guild_id === null) chatEntities.channels.upsert(channel, { append: false });
       chatEntities.readStates.replace(
