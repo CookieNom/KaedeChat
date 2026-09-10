@@ -7932,6 +7932,10 @@ def edit_ephemeral_message_payload(
     changes.pop("poll", None)
     merged = dict(current)
     merged.update(changes)
+    if edit.components == []:
+        # Removing controls also removes their retained lifetime settings.
+        merged.pop("view_timeout_seconds", None)
+        merged.pop("view_persistent", None)
     flags = int(merged.get("flags", 64) or 64) | 64
     validation_body, poll_projection = ephemeral_edit_validation_body(merged)
     validated = interaction_message_from_data(validation_body, reject_unknown=False)

@@ -50,7 +50,7 @@ class Pairing:
             await self.say(interaction, "Could not finish setup. Check bot permissions and try the command again.")
 
     async def say(self, interaction, content, view=None):
-        await interaction.edit_original_response(content=content, view=view or View(), allowed_mentions=NO_MENTIONS)
+        await interaction.edit_original_response(content=content, view=view if view is not None else View(timeout=None), allowed_mentions=NO_MENTIONS)
 
     async def picker(self, interaction, title, choices, selected, page=0):
         """Choices are (label, opaque value); pages respect Kaede's 25-option limit."""

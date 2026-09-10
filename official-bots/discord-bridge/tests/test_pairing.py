@@ -79,6 +79,11 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
             await view.callbacks[view.rows[0].components[0].custom_id](step)
             step.defer_update.assert_awaited_once()
             step.defer.assert_not_awaited()
+        final_view = step.edit_original_response.call_args.kwargs['view']
+        self.assertEqual(final_view.to_components(), [])
+        self.assertIsNone(final_view.timeout)
+        self.assertFalse(final_view.is_persistent)
+        self.assertIn('Channel pair saved', step.edit_original_response.call_args.kwargs['content'])
         self.assertEqual(self.store.routes()[0]['discord_channel_id'], '123')
         with self.assertRaises(IntegrityError):
             self.store.add_pair('789@chat.example', str(guild_ref), '123')
