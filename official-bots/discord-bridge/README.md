@@ -52,6 +52,12 @@ your settings. Keep this terminal open and stay in this folder for the next step
    slash commands. This version pairs ordinary text channels.
 
 The bot may appear offline until step 6. That is expected.
+
+An activated application with an enrolled worker can start before being installed
+in a Kaede server. It waits for installations through automatic discovery. Install
+it when you are ready to use the commands and relay messages; those operations
+still require server access. The Kaede backend must include the application-home
+identity fix; rebuilding only the bridge cannot update the server endpoint.
 See [Discord's bot overview](https://docs.discord.com/developers/bots/overview)
 for the server installation flow.
 

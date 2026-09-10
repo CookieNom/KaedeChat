@@ -2175,7 +2175,9 @@ async def test_disabled_bot_is_rejected_before_rest_dpop_processing() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/v1/bots/@me", "/api/v1/bots/applications/@me/assets"])
 async def test_application_home_bot_auth_does_not_require_a_local_installation(
+    path: str,
     monkeypatch: pytest.MonkeyPatch,
     postgres_schema,
 ) -> None:
@@ -2206,7 +2208,7 @@ async def test_application_home_bot_auth_does_not_require_a_local_installation(
     scope = {
         "type": "http",
         "method": "GET",
-        "path": "/api/v1/bots/applications/@me/assets",
+        "path": path,
         "query_string": b"",
         "headers": [],
         "scheme": "https",
@@ -6729,3 +6731,15 @@ def test_bot_runtime_rate_limits_are_distinct_and_documented() -> None:
     for limit in (BOT_WORKER_REQUEST_LIMIT, BOT_APPLICATION_REQUEST_LIMIT):
         assert isinstance(limit.limit, int) and limit.limit > 0
         assert isinstance(limit.period_seconds, int) and limit.period_seconds > 0
+
+
+def test_bot_identity_uses_home_auth_while_guild_access_requires_installation() -> None:
+    from fastapi.routing import APIRoute
+
+    routes = {route.path: route for route in bots_api.router.routes if isinstance(route, APIRoute)}
+    identity = routes["/api/v1/bots/@me"]
+    guilds = routes["/api/v1/bots/guilds"]
+    assert require_application_home_bot in [
+        dependency.call for dependency in identity.dependant.dependencies
+    ]
+    assert require_bot in [dependency.call for dependency in guilds.dependant.dependencies]

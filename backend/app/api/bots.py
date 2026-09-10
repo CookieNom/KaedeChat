@@ -1469,7 +1469,7 @@ def visible_presence(raw: object) -> str:
 
 @router.get("/@me")
 async def bot_identity(
-    principal: Annotated[BotPrincipal, Depends(require_bot)],
+    principal: Annotated[BotPrincipal, Depends(require_application_home_bot)],
 ) -> dict[str, object]:
     return {
         "user": user_payload(principal.user),

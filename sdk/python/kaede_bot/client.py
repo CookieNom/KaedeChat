@@ -3519,7 +3519,11 @@ class Client:
             return
         try:
             body = response.json()
-            detail = body.get("detail", {}) if isinstance(body, dict) else {}
+            # Current Kaede responses use a top-level error envelope. Keep the
+            # legacy FastAPI detail shape for older instance versions.
+            detail = (
+                body if "code" in body else body.get("detail", {})
+            ) if isinstance(body, dict) else {}
         except ValueError:
             detail = {}
         code = (

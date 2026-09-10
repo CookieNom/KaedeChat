@@ -303,3 +303,29 @@ async def test_application_media_uses_home_token_without_a_runtime_target(
         ("POST", "/api/v1/bot-workers/home-token"),
         ("GET", "/api/v1/bots/applications/@me/assets"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_without_installations_keeps_discovery_running() -> None:
+    bot = target_client()
+    polling = asyncio.Event()
+    bot.fetch_bot_identity = AsyncMock(return_value=SimpleNamespace(scopes=frozenset()))
+    bot.discover_targets = AsyncMock(return_value=([], 30))
+
+    async def discovery_loop(home: str, poll_after: int) -> None:
+        assert home == "https://apps.example"
+        assert poll_after == 30
+        polling.set()
+        await asyncio.Event().wait()
+
+    bot._target_discovery_loop = discovery_loop
+    task = asyncio.create_task(bot.start())
+    try:
+        await asyncio.wait_for(polling.wait(), timeout=2)
+        assert not task.done()
+        assert not bot._gateway_tasks
+        bot.fetch_bot_identity.assert_awaited_once_with(target="https://apps.example")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await bot.close()
