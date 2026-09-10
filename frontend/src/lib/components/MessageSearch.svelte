@@ -46,6 +46,7 @@
   } = $props();
 
   let selectedChannelRef = $state('');
+  let channelPickerOpen = $state(false);
   let searchGeneration = 0;
   const filterChannelRef = $derived(scope === 'guild' && channel ? entityRef(channel) : '');
   const channelOptions = $derived([
@@ -74,8 +75,17 @@
     }
   });
 
+  function toggleChannelPicker() {
+    channelPickerOpen = !channelPickerOpen;
+    if (channelPickerOpen)
+      queueMicrotask(() =>
+        searchRoot?.querySelector<HTMLInputElement>('[aria-label="Search channels"]')?.focus()
+      );
+  }
+
   function changeChannelFilter(reference: string) {
     selectedChannelRef = reference;
+    channelPickerOpen = false;
     searchGeneration += 1;
     loading = false;
     response = null;
@@ -251,6 +261,7 @@
   }
 
   function closeSearch() {
+    channelPickerOpen = false;
     open = false;
     advancedOpen = false;
     suggestionsOpen = false;
@@ -429,6 +440,21 @@
     window.location.assign(`${base}?${new URLSearchParams({ around: messageRef })}`);
   }
 </script>
+
+{#snippet channelPicker()}
+  <GuildMemberPicker
+    staticOptions={channelOptions.map((item) => ({
+      value: entityRef(item),
+      label: `#${item.name ?? 'Unnamed channel'}`
+    }))}
+    value={selectedChannelRef ? [selectedChannelRef] : []}
+    optional
+    entityName="channels"
+    searchPlaceholder="Search channels"
+    placeholder="All channels"
+    onChange={(values) => changeChannelFilter(values[0] ?? '')}
+  />
+{/snippet}
 
 <svelte:window onpointerdown={dismissOnOutsidePointer} />
 
@@ -613,22 +639,33 @@
             </form>
           {/if}
 
-          {#if scope === 'guild'}
-            <label class="channel-filter">
-              Channel
-              <select
-                value={selectedChannelRef}
-                onchange={(event) => changeChannelFilter(event.currentTarget.value)}
+          {#if scope === 'guild' && !advancedOpen}
+            <div class="search-scope">
+              <button
+                type="button"
+                class="scope-choice"
+                aria-label="Change search channel"
+                aria-expanded={channelPickerOpen}
+                onclick={toggleChannelPicker}
               >
-                <option value="">All channels</option>
-                {#each channelOptions as item (entityRef(item))}
-                  <option value={entityRef(item)}>#{item.name ?? 'Unnamed channel'}</option>
-                {/each}
-              </select>
-            </label>
+                <Icon name="hash" size={16} />
+                <span>{searchChannel?.name ?? 'All channels'}</span>
+                <Icon name="chevron-down" size={14} />
+              </button>
+              {#if selectedChannelRef}
+                <button type="button" class="scope-all" onclick={() => changeChannelFilter('')}
+                  >Search all channels</button
+                >
+              {/if}
+            </div>
+            {#if channelPickerOpen}
+              <div class="scope-picker">
+                {@render channelPicker()}
+              </div>
+            {/if}
           {/if}
 
-          {#if encrypted}
+          {#if encrypted && !advancedOpen}
             <div class="encrypted-notice" role="status">
               <strong>Search is unavailable for this encrypted conversation.</strong>
               <span
@@ -653,6 +690,12 @@
                 }}
               >
                 <div class="filters">
+                  {#if scope === 'guild'}
+                    <label class="person-filter"
+                      >Channel
+                      {@render channelPicker()}
+                    </label>
+                  {/if}
                   <label class="person-filter"
                     >From
                     <GuildMemberPicker
@@ -737,7 +780,7 @@
                   >
                 </div>
               </form>
-            {:else if suggestionsOpen}
+            {:else if suggestionsOpen && !channelPickerOpen}
               <section class="search-start" aria-label="Search options">
                 <h3>
                   {activeOperator === 'from'
@@ -807,7 +850,7 @@
               </section>
             {/if}
 
-            {#if history.length && suggestionsOpen && !activeOperator}
+            {#if !channelPickerOpen && history.length && suggestionsOpen && !activeOperator}
               <section class="history" aria-label="Recent searches">
                 <div>
                   <strong>Recent searches</strong><button
@@ -893,16 +936,47 @@
 </div>
 
 <style>
-  .channel-filter {
+  .search-scope {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.75rem;
-    font-size: 0.875rem;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0.75rem;
+    border-bottom: 1px solid var(--line, #34363d);
   }
-  .channel-filter select {
-    flex: 1;
+  .scope-choice {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0.25rem;
+  }
+  .scope-choice span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope-all {
+    flex-shrink: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+    padding: 0.25rem;
+  }
+  .scope-all:hover {
+    color: var(--text);
+  }
+  .scope-picker {
+    padding: 0.75rem;
   }
   .message-search {
     position: relative;
@@ -1178,7 +1252,6 @@
     gap: 0.35rem;
     font-weight: 650;
   }
-  .channel-filter select,
   .filters select,
   .filters input {
     min-width: 0;

@@ -824,6 +824,14 @@ void main() {
           scopeRef: guild,
           channel: channel,
           channels: [
+            for (var i = 0; i < 600; i++)
+              KaedeChannel(
+                  ref: EntityRef.parse('${i + 100}@home.example'),
+                  guildRef: guild,
+                  name: 'channel-$i',
+                  type: ChannelType.text,
+                  position: i,
+                  permissions: BigInt.zero),
             KaedeChannel(
                 ref: EntityRef.parse('8@home.example'),
                 guildRef: guild,
@@ -838,22 +846,24 @@ void main() {
       ));
       final unavailable =
           find.text('Search is unavailable for this encrypted conversation.');
-      expect(find.text('#general'), findsOneWidget);
+      expect(find.text('general'), findsOneWidget);
       expect(unavailable, findsOneWidget);
       Future<void> chooseChannel(String label) async {
-        await tester.tap(find.byWidgetPredicate((widget) =>
-            widget.key is ValueKey<String> &&
-            (widget.key as ValueKey<String>)
-                .value
-                .startsWith('search-channel-')));
+        await tester.tap(find.byKey(const ValueKey('search-channel-picker')));
         await tester.pumpAndSettle();
+        if (label.startsWith('#')) {
+          await tester.enterText(
+              find.byKey(const ValueKey('search-channel-query')),
+              label.substring(1));
+          await tester.pumpAndSettle();
+        }
         await tester.tap(find.text(label).last);
         await tester.pumpAndSettle();
       }
 
       await chooseChannel('#other');
       expect(unavailable, findsNothing);
-      expect(find.text('#other'), findsOneWidget);
+      expect(find.text('other'), findsOneWidget);
       expect(
           find.byKey(const ValueKey('message-search-query')), findsOneWidget);
       await chooseChannel('All channels');

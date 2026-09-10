@@ -666,6 +666,73 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
     }
   }
 
+  Future<void> _pickChannel() async {
+    var query = '';
+    final channels = _channelOptions;
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => StatefulBuilder(builder: (context, update) {
+        final matches = channels
+            .where((channel) => (channel.name ?? '')
+                .toLowerCase()
+                .contains(query.trim().toLowerCase()))
+            .toList();
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+                16, 0, 16, MediaQuery.viewInsetsOf(context).bottom + 16),
+            child: SizedBox(
+              height: (MediaQuery.sizeOf(context).height -
+                      MediaQuery.viewInsetsOf(context).bottom) *
+                  .55,
+              child: Column(children: [
+                SearchBar(
+                  key: ValueKey('search-channel-query'),
+                  hintText: 'Search channels',
+                  leading: Icon(Icons.search_rounded),
+                  onChanged: (value) => update(() => query = value),
+                ),
+                ListTile(
+                  title: Text('All channels'),
+                  leading: Icon(Icons.tag_rounded),
+                  trailing: _selectedChannelRef == null
+                      ? Icon(Icons.check_rounded)
+                      : null,
+                  onTap: () => Navigator.pop(context, ''),
+                ),
+                Divider(height: 1),
+                Expanded(
+                    child: matches.isEmpty
+                        ? Center(child: Text('No matching channels'))
+                        : ListView.builder(
+                            itemCount: matches.length,
+                            itemBuilder: (context, index) {
+                              final channel = matches[index];
+                              return ListTile(
+                                title: Text('#${channel.name}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
+                                trailing: channel.ref == _selectedChannelRef
+                                    ? Icon(Icons.check_rounded)
+                                    : null,
+                                onTap: () =>
+                                    Navigator.pop(context, channel.ref.wire),
+                              );
+                            },
+                          )),
+              ]),
+            ),
+          ),
+        );
+      }),
+    );
+    if (!mounted || selected == null) return;
+    _changeCriteria(() => _selectedChannelRef =
+        selected.isEmpty ? null : EntityRef.parse(selected));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -676,23 +743,14 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                 preferredSize: Size.fromHeight(80),
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
-                  child: DropdownButtonFormField<String>(
-                    key: ValueKey(
-                        'search-channel-${_selectedChannelRef?.wire ?? "all"}'),
-                    initialValue: _selectedChannelRef?.wire ?? '',
-                    isExpanded: true,
-                    decoration: InputDecoration(labelText: 'Channel'),
-                    items: [
-                      DropdownMenuItem(value: '', child: Text('All channels')),
-                      for (final channel in _channelOptions)
-                        DropdownMenuItem(
-                            value: channel.ref.wire,
-                            child: Text('#${channel.name}')),
-                    ],
-                    onChanged: (value) => _changeCriteria(() =>
-                        _selectedChannelRef = value == null || value.isEmpty
-                            ? null
-                            : EntityRef.parse(value)),
+                  child: ListTile(
+                    key: ValueKey('search-channel-picker'),
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.tag_rounded),
+                    title: Text(_searchChannel?.name ?? 'All channels',
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    trailing: Icon(Icons.expand_more_rounded),
+                    onTap: _pickChannel,
                   ),
                 ),
               )
