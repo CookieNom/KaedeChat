@@ -43,6 +43,36 @@
     placement?: 'dialog' | 'header';
   } = $props();
 
+  let currentChannelOnly = $state(true);
+  let searchGeneration = 0;
+  const filterChannelRef = $derived(scope === 'guild' && channel ? entityRef(channel) : null);
+  const searchScope = $derived(currentChannelOnly && filterChannelRef ? 'channel' : scope);
+  const searchScopeRef = $derived(
+    currentChannelOnly && filterChannelRef ? filterChannelRef : scopeRef
+  );
+
+  $effect(() => {
+    // Start each search session in the channel it was opened from.
+    if (open) {
+      void filterChannelRef;
+      currentChannelOnly = true;
+      searchGeneration += 1;
+      loading = false;
+      response = null;
+      cursor = null;
+    }
+  });
+
+  function changeChannelFilter(checked: boolean) {
+    currentChannelOnly = checked;
+    searchGeneration += 1;
+    loading = false;
+    response = null;
+    cursor = null;
+    error = '';
+    suggestionsOpen = true;
+  }
+
   let query = $state('');
   let authorRef = $state('');
   let mentionRef = $state('');
@@ -81,7 +111,7 @@
   const operatorNeedle = $derived(operatorMatch?.needle ?? '');
 
   const encrypted = $derived(
-    scope === 'channel' &&
+    searchScope === 'channel' &&
       (channel?.encryption_mode === 'e2ee' || channel?.search_available === false)
   );
   const disabledByInstance = $derived(featureEnabled === false);
@@ -331,6 +361,7 @@
 
   async function runSearch(next = false) {
     if (encrypted || disabledByInstance || loading || (!next && !hasCriteria)) return;
+    const generation = ++searchGeneration;
     loading = true;
     error = '';
     if (!next) {
@@ -342,8 +373,8 @@
         method: 'POST',
         body: JSON.stringify({
           query,
-          scope,
-          scope_ref: scopeRef,
+          scope: searchScope,
+          scope_ref: searchScopeRef,
           sort,
           cursor: next ? cursor : null,
           limit: 25,
@@ -358,6 +389,7 @@
           }
         })
       });
+      if (generation !== searchGeneration) return;
       response =
         next && response
           ? { ...result, results: [...response.results, ...result.results] }
@@ -365,9 +397,10 @@
       cursor = result.next_cursor;
       rememberSearch();
     } catch (caught) {
+      if (generation !== searchGeneration) return;
       error = userErrorMessage(caught, 'Could not search messages. Try again.');
     } finally {
-      loading = false;
+      if (generation === searchGeneration) loading = false;
     }
   }
 
@@ -437,7 +470,11 @@
           bind:value={query}
           maxlength="512"
           aria-label="Search messages"
-          placeholder={channel?.name ? `Search ${channel.name}` : 'Search'}
+          placeholder={searchScope === 'channel' && channel?.name
+            ? `Search ${channel.name}`
+            : scope === 'guild'
+              ? 'Search guild'
+              : 'Search'}
           onfocus={focusSearch}
           oninput={() => {
             open = true;
@@ -562,6 +599,17 @@
                 disabled={loading || !hasCriteria}><Icon name="search" size={18} /></button
               >
             </form>
+          {/if}
+
+          {#if filterChannelRef}
+            <label class="channel-filter">
+              <input
+                type="checkbox"
+                checked={currentChannelOnly}
+                onchange={(event) => changeChannelFilter(event.currentTarget.checked)}
+              />
+              In #{channel?.name ?? 'current channel'}
+            </label>
           {/if}
 
           {#if encrypted}
@@ -829,6 +877,17 @@
 </div>
 
 <style>
+  .channel-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    font-size: 0.875rem;
+  }
+  .channel-filter input {
+    width: auto;
+    accent-color: var(--accent, #ff8068);
+  }
   .message-search {
     position: relative;
     min-width: 0;

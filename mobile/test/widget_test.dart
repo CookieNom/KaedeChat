@@ -802,6 +802,46 @@ void main() {
       );
     });
 
+    testWidgets('search defaults to the channel and can expand to the guild',
+        (tester) async {
+      final guild = EntityRef.parse('1@home.example');
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('7@home.example'),
+        guildRef: guild,
+        name: 'general',
+        type: ChannelType.text,
+        position: 0,
+        permissions: BigInt.zero,
+        encryptionMode: 'e2ee',
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MessageSearchScreen(
+          repository: KaedeRepository(
+            KaedeApiClient(vault: const SessionVault()),
+          ),
+          scope: 'guild',
+          scopeRef: guild,
+          channel: channel,
+          accountRef: null,
+          onJump: (_) async {},
+        ),
+      ));
+      final filter = find.byKey(const ValueKey('search-current-channel'));
+      final unavailable =
+          find.text('Search is unavailable for this encrypted conversation.');
+      expect(tester.widget<CheckboxListTile>(filter).value, isTrue);
+      expect(unavailable, findsOneWidget);
+      await tester.tap(filter);
+      await tester.pumpAndSettle();
+      expect(tester.widget<CheckboxListTile>(filter).value, isFalse);
+      expect(unavailable, findsNothing);
+      expect(
+          find.byKey(const ValueKey('message-search-query')), findsOneWidget);
+      await tester.tap(filter);
+      await tester.pumpAndSettle();
+      expect(unavailable, findsOneWidget);
+    });
+
     testWidgets('conversation recipients populate From and Mentions pickers',
         (tester) async {
       final repository = KaedeRepository(

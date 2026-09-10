@@ -203,6 +203,10 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   final _query = TextEditingController();
   final _queryFocus = FocusNode();
   var _sort = 'relevance';
+  var _currentChannelOnly = true;
+
+  bool get _channelFiltered =>
+      widget.scope == 'guild' && widget.channel != null && _currentChannelOnly;
   final _has = <String>{};
   bool? _pinned;
   String? _authorType;
@@ -225,7 +229,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   String? _error;
 
   bool get _encrypted =>
-      widget.scope == 'channel' &&
+      (_channelFiltered || widget.scope == 'channel') &&
       (widget.channel?.encryptionMode == 'e2ee' ||
           widget.channel?.searchAvailable == false);
 
@@ -246,8 +250,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
 
   MessageSearchCriteria get _criteria => MessageSearchCriteria(
         query: _query.text,
-        scope: widget.scope,
-        scopeRef: widget.scopeRef,
+        scope: _channelFiltered ? 'channel' : widget.scope,
+        scopeRef: _channelFiltered ? widget.channel!.ref : widget.scopeRef,
         sort: _sort,
         has: _has,
         pinned: _pinned,
@@ -287,7 +291,9 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
     }
     if (!identical(oldWidget.repository, widget.repository) ||
         oldWidget.scope != widget.scope ||
-        oldWidget.scopeRef != widget.scopeRef) {
+        oldWidget.scopeRef != widget.scopeRef ||
+        oldWidget.channel?.ref != widget.channel?.ref) {
+      _currentChannelOnly = true;
       _invalidateSearch();
     }
     if (oldWidget.scope != widget.scope ||
@@ -648,7 +654,23 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Search messages')),
+      appBar: AppBar(
+        title: Text('Search messages'),
+        bottom: widget.scope == 'guild' && widget.channel != null
+            ? PreferredSize(
+                preferredSize: Size.fromHeight(80),
+                child: CheckboxListTile(
+                  key: ValueKey('search-current-channel'),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text('In #${widget.channel!.name}'),
+                  subtitle: Text('Uncheck to search the entire guild'),
+                  value: _currentChannelOnly,
+                  onChanged: (value) => _changeCriteria(
+                      () => _currentChannelOnly = value ?? true),
+                ),
+              )
+            : null,
+      ),
       body: _encrypted
           ? Center(
               child: Padding(

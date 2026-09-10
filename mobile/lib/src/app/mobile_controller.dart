@@ -3988,33 +3988,52 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> _decryptIncoming(
     KaedeMessage message, {
     bool notify = false,
+    bool update = false,
   }) async {
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (accountKey == null) return;
     final channel = _channel(message.channelRef);
-    if (channel == null || channel.encryptionMode != 'e2ee') {
-      if (notify) await _notifyFor(message);
+    var displayed = message;
+    if (channel != null && channel.encryptionMode == 'e2ee') {
+      try {
+        final application =
+            await (await e2eeClient()).decryptMessage(channel, message);
+        displayed = application?.applyTo(message) ?? message;
+      } on Object {
+        // Show a locked row only after decryption actually fails.
+      }
+    }
+    if (!_sessionIsCurrent(accountKey, generation) ||
+        _removedGuildChannels.containsKey(message.channelRef)) {
       return;
     }
-    try {
-      final application =
-          await (await e2eeClient()).decryptMessage(channel, message);
-      if (application == null) return;
-      final decrypted = application.applyTo(message);
-      _patchStoredMessage(
-        message.ref,
-        (_) => decrypted,
-      );
-      await _cacheMessage(decrypted);
-      if (notify) {
+    if (update) {
+      _patchStoredMessage(message.ref, (_) => displayed);
+      _patchThreadStarter(message.ref, (_) => displayed);
+    } else {
+      final existing = state.messageStore[message.channelRef];
+      if (existing != null || message.channelRef == state.selectedChannel) {
+        final fast = appendNewestMessage(
+          existing ?? const <KaedeMessage>[],
+          displayed,
+        );
+        _setChannelMessages(
+          message.channelRef,
+          fast ?? mergeMessages(<KaedeMessage>[...?existing, displayed]),
+        );
+      }
+    }
+    await _cacheMessage(displayed);
+    if (!_sessionIsCurrent(accountKey, generation)) return;
+    if (notify) {
+      if (displayed.e2eeVerified) {
         mobileTextToSpeech.speak(
-          decrypted,
+          displayed,
           selectedChannel: state.selectedChannel,
         );
-        await _notifyFor(decrypted);
       }
-    } on Object {
-      // Keep the encrypted row visibly locked. A Welcome or rekey received
-      // later can make subsequent messages available without exposing bytes.
-      if (notify) await _notifyFor(message);
+      await _notifyFor(displayed);
     }
   }
 
@@ -4181,7 +4200,8 @@ final class MobileController extends StateNotifier<MobileState> {
         if (_removedGuildChannels.containsKey(message.channelRef)) break;
         if (message.thread case final thread?) _upsertThreadBroadcast(thread);
         final existing = state.messageStore[message.channelRef];
-        if (existing != null || message.channelRef == state.selectedChannel) {
+        if (message.e2ee == null &&
+            (existing != null || message.channelRef == state.selectedChannel)) {
           final fast = appendNewestMessage(
             existing ?? const <KaedeMessage>[],
             message,
@@ -4192,9 +4212,11 @@ final class MobileController extends StateNotifier<MobileState> {
           );
           unawaited(_cacheMessage(message));
         }
-        if (message.e2ee != null) {
-          unawaited(_decryptIncoming(message, notify: true));
-        } else {
+        final decryption = message.e2ee != null
+            ? _decryptIncoming(message, notify: true)
+            : Future<void>.value();
+        unawaited(decryption);
+        if (message.e2ee == null) {
           mobileTextToSpeech.speak(
             message,
             selectedChannel: state.selectedChannel,
@@ -4204,7 +4226,9 @@ final class MobileController extends StateNotifier<MobileState> {
         _removeTyping(message.channelRef, message.authorRef);
         if (message.clientNonce case final nonce?) {
           unawaited(
-            database.completeOutbox(nonce).then((_) => _syncOutbox()),
+            decryption
+                .then((_) => database.completeOutbox(nonce))
+                .then((_) => _syncOutbox()),
           );
         }
         if (_isChannelVisible(message.channelRef)) {
@@ -4835,9 +4859,12 @@ final class MobileController extends StateNotifier<MobileState> {
       if (message.thread case final thread?) {
         message = message.copyWith(thread: _upsertThreadBroadcast(thread));
       }
-      _patchStoredMessage(target, (_) => message);
-      _patchThreadStarter(target, (_) => message);
-      if (message.e2ee != null) unawaited(_decryptIncoming(message));
+      if (message.e2ee != null) {
+        unawaited(_decryptIncoming(message, update: true));
+      } else {
+        _patchStoredMessage(target, (_) => message);
+        _patchThreadStarter(target, (_) => message);
+      }
       return;
     }
     KaedeChannel? attachedThread;
@@ -6528,20 +6555,20 @@ final class MobileController extends StateNotifier<MobileState> {
         await _syncOutbox();
         return;
       }
+      if (result['id'] != null) {
+        final message = KaedeMessage.fromJson(result);
+        if (message.e2ee != null) {
+          await _decryptIncoming(message);
+        } else {
+          await _acceptRichMessage(message);
+        }
+        if (!_sessionIsCurrent(activeAccount, activeGeneration)) return;
+        _markMessageRowsDirty(channel, {message.ref.wire});
+      }
+      // Keep the readable outbox draft until its server message is ready.
       await database.completeOutbox(item.nonce);
       if (!_sessionIsCurrent(activeAccount, activeGeneration)) return;
       await _syncOutbox();
-      if (result['id'] != null) {
-        final message = KaedeMessage.fromJson(result);
-        final existing = state.messageStore[channel] ?? const <KaedeMessage>[];
-        final fast = appendNewestMessage(existing, message);
-        _setChannelMessages(
-          channel,
-          fast ?? mergeMessages(<KaedeMessage>[...existing, message]),
-        );
-        _markMessageRowsDirty(channel, {message.ref.wire});
-        await _cacheMessages(channel);
-      }
     } on KaedeException catch (error) {
       if (!_sessionIsCurrent(activeAccount, activeGeneration)) return;
       final permanent = error.status >= 400 &&
