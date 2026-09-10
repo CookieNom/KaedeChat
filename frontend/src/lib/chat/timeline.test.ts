@@ -26,6 +26,24 @@ function message(id: string, author = '1', createdAt = '2026-07-20T10:00:00Z'): 
 }
 
 describe('buildTimeline', () => {
+  it('omits MLS setup records without hiding undecryptable user messages', () => {
+    const controls = ['welcome', 'commit'].map((operation, index) => ({
+      ...message(String(10 + index)),
+      message_type: 7,
+      content: null,
+      e2ee: { version: 2, protocol: 'mls10', operation }
+    }));
+    const encrypted = { ...message('12'), e2ee: { operation: 'create' }, e2ee_verified: false };
+    expect(buildTimeline(controls)).toEqual([]);
+    const items = buildTimeline([...controls, encrypted], {
+      id: '9',
+      origin_domain: 'chat.example'
+    });
+    expect(items.map((item) => item.kind)).toEqual(['day', 'new', 'message']);
+    expect(items.at(-1)).toMatchObject({ message: encrypted, compact: false });
+    expect(buildTimeline([{ ...controls[0], message_type: 0 }])).toHaveLength(2);
+  });
+
   it('groups nearby messages while separating days and unread content', () => {
     const items = buildTimeline(
       [

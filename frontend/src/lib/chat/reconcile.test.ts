@@ -34,6 +34,22 @@ function message(id: string, nonce: string | null = null, pending = false): Mess
 }
 
 describe('chat completion races', () => {
+  it('upgrades an encrypted gateway echo when local verification finishes later', () => {
+    const echo = { ...message('12', 'a'), content: null, e2ee: { ciphertext: 'sealed' } };
+    const verified = { ...echo, e2ee_verified: true, decrypted_content: 'hello' };
+    const afterGateway = reconcileMessage([message('pending-a', 'a', true)], echo);
+    const afterVerification = reconcileMessage(afterGateway, verified);
+    expect(afterVerification).toEqual([verified]);
+    expect(reconcileMessage(afterVerification, echo)).toEqual([verified]);
+    const edited = { ...echo, e2ee: { ciphertext: 'edited' } };
+    expect(reconcileMessage([edited], verified)).toEqual([edited]);
+    const deleted = { ...echo, deleted_at: '2026-07-20T01:00:00Z' };
+    expect(reconcileMessage([deleted], verified)).toEqual([deleted]);
+    expect(reconcileMessage([verified], { ...verified, decrypted_content: 'duplicate' })).toEqual([
+      verified
+    ]);
+  });
+
   it('reconciles a gateway echo with an optimistic REST send exactly once', () => {
     const optimistic = message('pending-a', 'a', true);
     const saved = message('12', 'a');

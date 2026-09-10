@@ -182,7 +182,19 @@ export function reconcileMessage(existing: Message[], incoming: Message, limit =
   );
   const next = [...existing];
   if (pending >= 0) next[pending] = incoming;
-  else if (!next.some((item) => entityKey(item) === entityKey(incoming))) next.push(incoming);
+  else {
+    const index = next.findIndex((item) => entityKey(item) === entityKey(incoming));
+    if (index < 0) next.push(incoming);
+    else if (
+      incoming.e2ee &&
+      incoming.e2ee_verified === true &&
+      next[index].e2ee_verified !== true &&
+      !next[index].deleted_at &&
+      incoming.e2ee.ciphertext === next[index].e2ee?.ciphertext
+    ) {
+      next[index] = incoming;
+    }
+  }
   return next.sort(compareMessages).slice(-limit);
 }
 

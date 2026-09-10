@@ -34,6 +34,14 @@ export function buildTimeline(
   let addedNewDivider = false;
 
   for (const message of messages) {
+    // MLS setup records remain in history for key synchronization, not chat display.
+    if (
+      message.message_type === 7 &&
+      message.e2ee?.version === 2 &&
+      message.e2ee.protocol === 'mls10' &&
+      (message.e2ee.operation === 'welcome' || message.e2ee.operation === 'commit')
+    )
+      continue;
     const currentDay = dayKey(message.created_at);
     if (currentDay !== previousDay) {
       items.push({
