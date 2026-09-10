@@ -29,6 +29,7 @@
     scopeRef,
     accountRef,
     channel,
+    channels = [],
     users = [],
     onJump,
     placement = 'dialog'
@@ -38,24 +39,34 @@
     scopeRef: string | null;
     accountRef: string | null;
     channel?: Channel | null;
+    channels?: Channel[];
     users?: UserSummary[];
     onJump?: (result: MessageSearchResult) => void | Promise<void>;
     placement?: 'dialog' | 'header';
   } = $props();
 
-  let currentChannelOnly = $state(true);
+  let selectedChannelRef = $state('');
   let searchGeneration = 0;
-  const filterChannelRef = $derived(scope === 'guild' && channel ? entityRef(channel) : null);
-  const searchScope = $derived(currentChannelOnly && filterChannelRef ? 'channel' : scope);
+  const filterChannelRef = $derived(scope === 'guild' && channel ? entityRef(channel) : '');
+  const channelOptions = $derived([
+    ...new Map(
+      [...channels, ...(channel ? [channel] : [])].map((item) => [entityRef(item), item])
+    ).values()
+  ]);
+  const searchScope = $derived(scope === 'guild' && selectedChannelRef ? 'channel' : scope);
   const searchScopeRef = $derived(
-    currentChannelOnly && filterChannelRef ? filterChannelRef : scopeRef
+    scope === 'guild' && selectedChannelRef ? selectedChannelRef : scopeRef
+  );
+  const searchChannel = $derived(
+    scope === 'guild'
+      ? channelOptions.find((item) => entityRef(item) === selectedChannelRef)
+      : channel
   );
 
   $effect(() => {
     // Start each search session in the channel it was opened from.
     if (open) {
-      void filterChannelRef;
-      currentChannelOnly = true;
+      selectedChannelRef = filterChannelRef;
       searchGeneration += 1;
       loading = false;
       response = null;
@@ -63,8 +74,8 @@
     }
   });
 
-  function changeChannelFilter(checked: boolean) {
-    currentChannelOnly = checked;
+  function changeChannelFilter(reference: string) {
+    selectedChannelRef = reference;
     searchGeneration += 1;
     loading = false;
     response = null;
@@ -112,7 +123,7 @@
 
   const encrypted = $derived(
     searchScope === 'channel' &&
-      (channel?.encryption_mode === 'e2ee' || channel?.search_available === false)
+      (searchChannel?.encryption_mode === 'e2ee' || searchChannel?.search_available === false)
   );
   const disabledByInstance = $derived(featureEnabled === false);
   const hasCriteria = $derived(
@@ -229,6 +240,7 @@
   }
 
   function clearFilters() {
+    changeChannelFilter('');
     authorRef = '';
     mentionRef = '';
     has = [];
@@ -470,8 +482,8 @@
           bind:value={query}
           maxlength="512"
           aria-label="Search messages"
-          placeholder={searchScope === 'channel' && channel?.name
-            ? `Search ${channel.name}`
+          placeholder={searchScope === 'channel' && searchChannel?.name
+            ? `Search ${searchChannel.name}`
             : scope === 'guild'
               ? 'Search guild'
               : 'Search'}
@@ -601,14 +613,18 @@
             </form>
           {/if}
 
-          {#if filterChannelRef}
+          {#if scope === 'guild'}
             <label class="channel-filter">
-              <input
-                type="checkbox"
-                checked={currentChannelOnly}
-                onchange={(event) => changeChannelFilter(event.currentTarget.checked)}
-              />
-              In #{channel?.name ?? 'current channel'}
+              Channel
+              <select
+                value={selectedChannelRef}
+                onchange={(event) => changeChannelFilter(event.currentTarget.value)}
+              >
+                <option value="">All channels</option>
+                {#each channelOptions as item (entityRef(item))}
+                  <option value={entityRef(item)}>#{item.name ?? 'Unnamed channel'}</option>
+                {/each}
+              </select>
             </label>
           {/if}
 
@@ -884,9 +900,9 @@
     padding: 0.75rem;
     font-size: 0.875rem;
   }
-  .channel-filter input {
-    width: auto;
-    accent-color: var(--accent, #ff8068);
+  .channel-filter select {
+    flex: 1;
+    min-width: 0;
   }
   .message-search {
     position: relative;
@@ -1162,6 +1178,7 @@
     gap: 0.35rem;
     font-weight: 650;
   }
+  .channel-filter select,
   .filters select,
   .filters input {
     min-width: 0;

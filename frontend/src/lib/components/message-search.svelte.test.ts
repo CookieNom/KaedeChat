@@ -13,7 +13,7 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-it('defaults to the current channel and lets the checkbox switch to guild search', async () => {
+it('defaults to the current channel and allows another channel or all channels', async () => {
   vi.mocked(api).mockResolvedValue({
     results: [],
     next_cursor: null,
@@ -28,6 +28,7 @@ it('defaults to the current channel and lets the checkbox switch to guild search
       scope: 'guild',
       scopeRef: '1@home.example',
       accountRef: null,
+      channels: [{ id: '8', origin_domain: 'home.example', name: 'other' } as Channel],
       channel: { id: '7', origin_domain: 'home.example', name: 'general' } as Channel
     }
   });
@@ -36,8 +37,7 @@ it('defaults to the current channel and lets the checkbox switch to guild search
   flushSync(() => input.dispatchEvent(new FocusEvent('focus')));
   input.value = 'hello';
   flushSync(() => input.dispatchEvent(new Event('input', { bubbles: true })));
-  const checkbox = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-  expect(checkbox.checked).toBe(true);
+  expect(document.querySelector('select')!.value).toBe('7@home.example');
   const submit = () =>
     flushSync(() =>
       document.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
@@ -49,14 +49,25 @@ it('defaults to the current channel and lets the checkbox switch to guild search
     scope_ref: '7@home.example'
   });
   flushSync();
-  const resultCheckbox = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-  flushSync(() => {
-    resultCheckbox.checked = false;
-    resultCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
-  });
+  const chooseChannel = (value: string) =>
+    flushSync(() => {
+      const selector = document.querySelector('select')!;
+      selector.value = value;
+      selector.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  chooseChannel('8@home.example');
   submit();
   await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
   expect(JSON.parse(vi.mocked(api).mock.calls[1][1]!.body as string)).toMatchObject({
+    scope: 'channel',
+    scope_ref: '8@home.example',
+    cursor: null
+  });
+  flushSync();
+  chooseChannel('');
+  submit();
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(3));
+  expect(JSON.parse(vi.mocked(api).mock.calls[2][1]!.body as string)).toMatchObject({
     scope: 'guild',
     scope_ref: '1@home.example',
     cursor: null

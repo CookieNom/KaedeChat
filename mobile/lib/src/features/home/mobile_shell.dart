@@ -923,6 +923,15 @@ final class _ConversationScreenState
               scope: widget.channel.guildRef == null ? 'channel' : 'guild',
               scopeRef: widget.channel.guildRef ?? widget.channel.ref,
               channel: widget.channel,
+              channels: state.guilds
+                      .where((guild) => guild.ref == widget.channel.guildRef)
+                      .firstOrNull
+                      ?.channels
+                      .where((channel) =>
+                          channel.type != ChannelType.category &&
+                          canReadRetainedChannelHistory(channel))
+                      .toList() ??
+                  const <KaedeChannel>[],
               historyAvailable: historyAvailable,
               accountRef: routeRef
                   .read(mobileControllerProvider.notifier)
@@ -4809,6 +4818,14 @@ final class _GuildBrowser extends ConsumerWidget {
                                 scope: 'guild',
                                 scopeRef: guild.ref,
                                 channel: null,
+                                channels: currentGuild?.channels
+                                        .where((channel) =>
+                                            channel.type !=
+                                                ChannelType.category &&
+                                            canReadRetainedChannelHistory(
+                                                channel))
+                                        .toList() ??
+                                    const <KaedeChannel>[],
                                 historyAvailable: historyAvailable,
                                 accountRef: routeRef
                                     .read(mobileControllerProvider.notifier)

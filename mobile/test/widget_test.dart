@@ -802,7 +802,8 @@ void main() {
       );
     });
 
-    testWidgets('search defaults to the channel and can expand to the guild',
+    testWidgets(
+        'search defaults to the channel and can select another channel or all channels',
         (tester) async {
       final guild = EntityRef.parse('1@home.example');
       final channel = KaedeChannel(
@@ -822,23 +823,43 @@ void main() {
           scope: 'guild',
           scopeRef: guild,
           channel: channel,
+          channels: [
+            KaedeChannel(
+                ref: EntityRef.parse('8@home.example'),
+                guildRef: guild,
+                name: 'other',
+                type: ChannelType.text,
+                position: 1,
+                permissions: BigInt.zero)
+          ],
           accountRef: null,
           onJump: (_) async {},
         ),
       ));
-      final filter = find.byKey(const ValueKey('search-current-channel'));
       final unavailable =
           find.text('Search is unavailable for this encrypted conversation.');
-      expect(tester.widget<CheckboxListTile>(filter).value, isTrue);
+      expect(find.text('#general'), findsOneWidget);
       expect(unavailable, findsOneWidget);
-      await tester.tap(filter);
-      await tester.pumpAndSettle();
-      expect(tester.widget<CheckboxListTile>(filter).value, isFalse);
+      Future<void> chooseChannel(String label) async {
+        await tester.tap(find.byWidgetPredicate((widget) =>
+            widget.key is ValueKey<String> &&
+            (widget.key as ValueKey<String>)
+                .value
+                .startsWith('search-channel-')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+      }
+
+      await chooseChannel('#other');
       expect(unavailable, findsNothing);
+      expect(find.text('#other'), findsOneWidget);
       expect(
           find.byKey(const ValueKey('message-search-query')), findsOneWidget);
-      await tester.tap(filter);
-      await tester.pumpAndSettle();
+      await chooseChannel('All channels');
+      expect(find.text('All channels'), findsOneWidget);
+      expect(unavailable, findsNothing);
+      await chooseChannel('#general');
       expect(unavailable, findsOneWidget);
     });
 

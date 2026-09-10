@@ -181,6 +181,7 @@ final class MessageSearchScreen extends StatefulWidget {
     required this.channel,
     required this.accountRef,
     this.historyAvailable = true,
+    this.channels = const <KaedeChannel>[],
     this.users = const <KaedeUser>[],
     required this.onJump,
     super.key,
@@ -190,6 +191,7 @@ final class MessageSearchScreen extends StatefulWidget {
   final String scope;
   final EntityRef? scopeRef;
   final KaedeChannel? channel;
+  final List<KaedeChannel> channels;
   final EntityRef? accountRef;
   final bool historyAvailable;
   final List<KaedeUser> users;
@@ -203,10 +205,21 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   final _query = TextEditingController();
   final _queryFocus = FocusNode();
   var _sort = 'relevance';
-  var _currentChannelOnly = true;
+  EntityRef? _selectedChannelRef;
+
+  List<KaedeChannel> get _channelOptions => {
+        for (final channel in widget.channels) channel.ref: channel,
+        if (widget.channel case final channel?) channel.ref: channel,
+      }.values.toList();
+
+  KaedeChannel? get _searchChannel => widget.scope == 'guild'
+      ? _channelOptions
+          .where((item) => item.ref == _selectedChannelRef)
+          .firstOrNull
+      : widget.channel;
 
   bool get _channelFiltered =>
-      widget.scope == 'guild' && widget.channel != null && _currentChannelOnly;
+      widget.scope == 'guild' && _selectedChannelRef != null;
   final _has = <String>{};
   bool? _pinned;
   String? _authorType;
@@ -230,8 +243,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
 
   bool get _encrypted =>
       (_channelFiltered || widget.scope == 'channel') &&
-      (widget.channel?.encryptionMode == 'e2ee' ||
-          widget.channel?.searchAvailable == false);
+      (_searchChannel?.encryptionMode == 'e2ee' ||
+          _searchChannel?.searchAvailable == false);
 
   bool get _hasCriteria =>
       _query.text.trim().isNotEmpty ||
@@ -251,7 +264,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   MessageSearchCriteria get _criteria => MessageSearchCriteria(
         query: _query.text,
         scope: _channelFiltered ? 'channel' : widget.scope,
-        scopeRef: _channelFiltered ? widget.channel!.ref : widget.scopeRef,
+        scopeRef: _channelFiltered ? _selectedChannelRef : widget.scopeRef,
         sort: _sort,
         has: _has,
         pinned: _pinned,
@@ -269,6 +282,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   @override
   void initState() {
     super.initState();
+    _selectedChannelRef = widget.channel?.ref;
     _queryFocus.addListener(_queryFocusChanged);
     _users = messageSearchUserCandidates(<KaedeUser?>[
       ...widget.users,
@@ -293,7 +307,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         oldWidget.scope != widget.scope ||
         oldWidget.scopeRef != widget.scopeRef ||
         oldWidget.channel?.ref != widget.channel?.ref) {
-      _currentChannelOnly = true;
+      _selectedChannelRef = widget.channel?.ref;
       _invalidateSearch();
     }
     if (oldWidget.scope != widget.scope ||
@@ -428,6 +442,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
 
   void _clearFilters() {
     _changeCriteria(() {
+      _selectedChannelRef = null;
       _sort = 'relevance';
       _has.clear();
       _pinned = null;
@@ -656,17 +671,29 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Search messages'),
-        bottom: widget.scope == 'guild' && widget.channel != null
+        bottom: widget.scope == 'guild'
             ? PreferredSize(
                 preferredSize: Size.fromHeight(80),
-                child: CheckboxListTile(
-                  key: ValueKey('search-current-channel'),
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: Text('In #${widget.channel!.name}'),
-                  subtitle: Text('Uncheck to search the entire guild'),
-                  value: _currentChannelOnly,
-                  onChanged: (value) => _changeCriteria(
-                      () => _currentChannelOnly = value ?? true),
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey(
+                        'search-channel-${_selectedChannelRef?.wire ?? "all"}'),
+                    initialValue: _selectedChannelRef?.wire ?? '',
+                    isExpanded: true,
+                    decoration: InputDecoration(labelText: 'Channel'),
+                    items: [
+                      DropdownMenuItem(value: '', child: Text('All channels')),
+                      for (final channel in _channelOptions)
+                        DropdownMenuItem(
+                            value: channel.ref.wire,
+                            child: Text('#${channel.name}')),
+                    ],
+                    onChanged: (value) => _changeCriteria(() =>
+                        _selectedChannelRef = value == null || value.isEmpty
+                            ? null
+                            : EntityRef.parse(value)),
+                  ),
                 ),
               )
             : null,

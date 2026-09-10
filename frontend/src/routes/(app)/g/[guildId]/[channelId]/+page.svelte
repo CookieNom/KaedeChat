@@ -6721,6 +6721,12 @@
               scopeRef={guild ? entityRef(guild) : guildId}
               accountRef={currentUser ? entityRef(currentUser) : null}
               {channel}
+              channels={(guild?.channels ?? []).filter(
+                (item) =>
+                  item.type !== 4 &&
+                  channelHasPermission(item, Permission.VIEW_CHANNEL) &&
+                  channelHasPermission(item, Permission.READ_MESSAGE_HISTORY)
+              )}
               users={messageSearchUsers}
               placement="header"
             />
