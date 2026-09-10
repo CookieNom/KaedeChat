@@ -595,28 +595,11 @@ async def publish_interaction_response_event(
         # A remote invoker has no authenticated Gateway session on the
         # interaction authority.  Its projection is carried by the durable,
         # signed federation outbox instead.
-        log.info(
-            "interaction_response_projection_skipped",
-            interaction_id=str(interaction.id),
-            operation=operation,
-            reason=(
-                "remote_invoker"
-                if interaction.user_domain != interaction.channel_domain
-                else "expired"
-            ),
-        )
         return
 
-    published = await publish_ephemeral(
+    await publish_ephemeral(
         redis,
         user_topic(interaction.user_domain, interaction.user_id),
         f"INTERACTION_RESPONSE_{operation}",
         interaction_response_event_payload(interaction, stored, operation),
-    )
-
-    log.info(
-        "interaction_response_projection",
-        interaction_id=str(interaction.id),
-        operation=operation,
-        published=published,
     )

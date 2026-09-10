@@ -76,7 +76,7 @@ class Pairing:
                         return
                     if not await self.allowed(event, owner, guild):
                         return
-                    await event.defer(ephemeral=True)
+                    await event.defer_update()
                     view.stop()
                     await self.safe(action, event)
             return run
@@ -90,7 +90,7 @@ class Pairing:
         view.set_callback(select_id, callback(choose))
         buttons = []
         navigation = []
-        for offset, label in ((-1, "Previous"), (1, "Next")):
+        for offset, label in ((-1, "Earlier choices"), (1, "More choices")):
             if 0 <= page + offset <= (len(choices) - 1) // 25:
                 custom_id = prefix + label
                 buttons.append(Button(label=label, custom_id=custom_id))
@@ -101,7 +101,9 @@ class Pairing:
             view.add_row(ActionRow(buttons))
             for key, handler in navigation:
                 view.set_callback(key, handler)
-        await self.say(interaction, f"{title}\nPage {page + 1}/{(len(choices) - 1) // 25 + 1}. Menus expire after 3 minutes.", view)
+        pages = (len(choices) - 1) // 25 + 1
+        pagination = f" Choices page {page + 1}/{pages}; buttons browse choices only." if pages > 1 else ""
+        await self.say(interaction, f"{title}\nSelect an option to continue.{pagination} This menu expires after 3 minutes.", view)
 
     def discord_channels(self, guild):
         if guild is None or guild.me is None:
@@ -148,14 +150,14 @@ class Pairing:
                     if remote is None:
                         await self.say(event, "Discord channel is no longer available.")
                         return
-                    await self.picker(event, f"Connect Kaede {ref} ↔ Discord {guild.name} / #{remote.name}? Messages will be shared in both directions.",
+                    await self.picker(event, f"Step 4 of 4 — Connect Kaede {ref} ↔ Discord {guild.name} / #{remote.name}? Messages will be shared in both directions.",
                                       [("Confirm pairing", True), ("Cancel", False)], confirm)
-                await self.picker(event, "Choose a Discord text channel", [
+                await self.picker(event, "Step 3 of 4 — Choose a Discord text channel", [
                     (f"{c.category.name + ' / ' if c.category else ''}#{c.name}", c.id)
                     for c in self.discord_channels(guild)], choose_discord)
-            await self.picker(event, "Choose a Discord server", [(g.name, g.id) for g in self.bridge.guilds
+            await self.picker(event, "Step 2 of 4 — Choose a Discord server", [(g.name, g.id) for g in self.bridge.guilds
                                                                     if self.discord_channels(g)], choose_guild)
-        await self.picker(interaction, "Choose a Kaede text channel in this server", choices, choose_kaede)
+        await self.picker(interaction, "Step 1 of 4 — Choose a Kaede text channel in this server", choices, choose_kaede)
 
     async def pairs(self, interaction, remove=False):
         rows = self.bridge.store.routes(str(interaction.guild_ref))

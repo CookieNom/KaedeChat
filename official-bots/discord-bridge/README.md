@@ -192,15 +192,20 @@ docker compose logs -f
 ```
 
 In a Kaede server where the application is installed, type **`/bridge-pair`**.
-All of the following menus appear **in KaedeChat**, visible only to you:
+Setup uses **one message in KaedeChat**, visible only to you. Each selection
+updates that message to the next step:
 
 1. Select a Kaede text channel from this server.
 2. Select a Discord server the bot has joined.
 3. Select a Discord text channel by name (its category is shown too).
 4. Select **Confirm pairing** to start sharing messages, or **Cancel**.
 
-Menus have Previous/Next buttons when there are more than 25 choices. They expire
-after three minutes; run the command again if needed. Only channels the bot can
+**Selecting an option advances immediately**; there is no separate Next-step button.
+**Earlier choices / More choices** buttons appear only when a dropdown has more
+than 25 choices. They browse the available choices without advancing setup.
+Previous menus are replaced, and controls disappear when setup finishes.
+Menus expire after three minutes; run the command again to restart or change an
+earlier selection. Only channels the bot can
 view and send to are offered. Encrypted Kaede channels are excluded.
 
 The pair is saved in SQLite and takes effect immediately, without restarting.

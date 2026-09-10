@@ -14,7 +14,7 @@ from pairing import Pairing
 def event(user='1@chat.example', guild='10@chat.example', permissions=8, values=()):
     return Obj(user=Obj(ref=k.EntityRef.parse(user)), guild_ref=k.EntityRef.parse(guild),
                member=Obj(permissions=permissions), context='guild', integration_type='guild_install',
-               values=values, respond=AsyncMock(), defer=AsyncMock(), edit_original_response=AsyncMock())
+               values=values, respond=AsyncMock(), defer=AsyncMock(), defer_update=AsyncMock(), edit_original_response=AsyncMock())
 
 
 class PairingTest(unittest.IsolatedAsyncioTestCase):
@@ -50,6 +50,9 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(view.is_finished())
         next_event = event()
         await view.callbacks[next_id](next_event)
+        next_event.defer_update.assert_awaited_once()
+        next_event.defer.assert_not_awaited()
+        self.assertEqual(view.rows[1].components[0].label, 'More choices')
         next_view = next_event.edit_original_response.call_args.kwargs['view']
         self.assertEqual(len(next_view.rows[0].components[0].options), 5)
         await next_view.callbacks[next_view.rows[0].components[0].custom_id](event(values=('0',)))
@@ -74,6 +77,8 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
             view = step.edit_original_response.call_args.kwargs['view']
             step = event(values=('0',))
             await view.callbacks[view.rows[0].components[0].custom_id](step)
+            step.defer_update.assert_awaited_once()
+            step.defer.assert_not_awaited()
         self.assertEqual(self.store.routes()[0]['discord_channel_id'], '123')
         with self.assertRaises(IntegrityError):
             self.store.add_pair('789@chat.example', str(guild_ref), '123')
