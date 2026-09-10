@@ -8,6 +8,29 @@ import bridge
 
 
 class BridgeTest(unittest.TestCase):
+    def test_gateway_readiness_and_failures_are_logged(self):
+        from unittest.mock import Mock
+
+        async def check():
+            handlers = {}
+            bot = Obj(listen=lambda name: lambda handler: handlers.update({name: handler}))
+            client = bridge.Bridge(Mock(), bot)
+            try:
+                with self.assertLogs("bridge", level="INFO") as logs:
+                    await handlers["on_ready"](Obj(target="https://guild.example", installations=[{}]))
+                    for name, kind in (("on_gateway_error", "GATEWAY_ERROR"),
+                                       ("on_target_discovery_error", "TARGET_DISCOVERY_ERROR")):
+                        await handlers[name](Obj(type=kind, target="https://guild.example",
+                                                 data={"error": "received 4401: authentication failed"}))
+                self.assertIn("gateway ready on https://guild.example (1 guild installations)", logs.output[0])
+                self.assertIn("GATEWAY_ERROR", logs.output[1])
+                self.assertIn("authentication failed", logs.output[1])
+                self.assertIn("TARGET_DISCOVERY_ERROR", logs.output[2])
+            finally:
+                await client.close()
+
+        asyncio.run(check())
+
     def test_enrollment_matches_server_contract(self):
         import ast
         import runpy

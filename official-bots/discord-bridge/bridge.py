@@ -116,6 +116,17 @@ class Bridge(discord.Client):
         self.store, self.kaede = store, bot
         self.route_lock = asyncio.Lock()
         bot.listen("on_message")(self.on_kaede_message)
+        bot.listen("on_ready")(self.on_kaede_ready)
+        bot.listen("on_gateway_error")(self.on_kaede_connection_error)
+        bot.listen("on_target_discovery_error")(self.on_kaede_connection_error)
+
+    async def on_kaede_ready(self, event):
+        log.info("Kaede gateway ready on %s (%s guild installations)",
+                 event.target, len(event.installations))
+
+    async def on_kaede_connection_error(self, event):
+        log.warning("Kaede %s on %s: %s", event.type, event.target,
+                    event.data.get("error", "unknown error"))
 
     async def on_message(self, message):
         if message.guild is None or message.author.bot or message.webhook_id:
