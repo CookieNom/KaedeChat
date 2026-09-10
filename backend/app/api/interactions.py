@@ -1171,7 +1171,7 @@ class InteractionResponseEdit(StrictInteractionModel):
     embeds: list[Embed] | None = Field(default=None, max_length=10)
     components: list[MessageLayoutComponent] | None = Field(default=None, max_length=40)
     flags: int | None = Field(default=None, ge=0, le=2_147_483_647)
-    attachment_ids: list[int] | None = Field(default=None, max_length=10)
+    attachment_ids: list[Snowflake] | None = Field(default=None, max_length=10)
     allowed_mentions: AllowedMentions | None = None
     # Discord permits a poll to be created while materializing a deferred
     # original response. Polls remain immutable after that first message edit.

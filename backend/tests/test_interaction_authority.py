@@ -3778,3 +3778,31 @@ def test_interaction_rejects_invalid_decimal_ids(field: str, value: object) -> N
     payload[field] = value
     with pytest.raises(ValidationError):
         interactions.InteractionCreate.model_validate(payload)
+
+
+def test_response_edit_preserves_sdk_attachment_ids() -> None:
+    ids = ["9007199254740993", "9223372036854775807"]
+    edit = interactions.InteractionResponseEdit.model_validate({"attachment_ids": ids})
+    assert edit.attachment_ids == [int(value) for value in ids]
+    assert edit.model_dump(mode="json")["attachment_ids"] == ids
+    followup = interactions.InteractionFollowup.model_validate(
+        {"message": {"content": "Files", "attachment_ids": ids}}
+    )
+    assert interactions.deferred_followup_edit(followup).attachment_ids == edit.attachment_ids
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        [True],
+        [1.5],
+        ["01"],
+        ["1.0"],
+        ["-1"],
+        ["9223372036854775808"],
+        ["1", "1"],
+    ],
+)
+def test_response_edit_rejects_invalid_attachment_ids(ids: list[object]) -> None:
+    with pytest.raises(ValidationError):
+        interactions.InteractionResponseEdit.model_validate({"attachment_ids": ids})

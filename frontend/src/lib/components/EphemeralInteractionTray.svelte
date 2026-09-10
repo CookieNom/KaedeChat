@@ -123,10 +123,11 @@
           />
         {/if}
         {#if Array.isArray(payload.components) && payload.components.length}
-          {@const viewVersion = Number(payload.view_version)}
+          {@const viewVersion =
+            typeof payload.view_version === 'number' ? payload.view_version : NaN}
           {@const expired = viewExpired(payload)}
           {@const guild = request ? guildForChannel(request.channelRef) : null}
-          {#if request && event.response_id && Number.isInteger(viewVersion) && viewVersion > 0}
+          {#if request && event.response_id && Number.isSafeInteger(viewVersion) && viewVersion > 0}
             <MessageComponents
               components={payload.components as MessageLayoutComponent[]}
               application={request.applicationRef}
