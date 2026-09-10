@@ -38,6 +38,25 @@ VAULT_DIGEST = encode_base64url(b"v" * 32)
 GROUP_ID = encode_base64url(b"g" * 32)
 
 
+async def test_guild_room_participant_queries_compile_with_membership_join() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    statements: list[str] = []
+
+    async def scalars(statement):
+        statements.append(str(statement.compile(dialect=postgresql.dialect())))
+        return []
+
+    session = SimpleNamespace(scalars=scalars)
+    access = SimpleNamespace(
+        guild=SimpleNamespace(id=1, origin_domain="home.example"),
+        channel=SimpleNamespace(id=2, origin_domain="home.example"),
+    )
+    assert await e2ee_api.room_participants(session, AsyncMock(), access) == []
+    assert len(statements) == 2
+    assert "EXISTS (SELECT guild_members.user_id \nFROM guild_members \nWHERE" in statements[1]
+
+
 def _actor() -> dict[str, object]:
     return {
         "id": "7",

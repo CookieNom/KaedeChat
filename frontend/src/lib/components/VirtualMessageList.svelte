@@ -136,7 +136,7 @@
     };
   });
 
-  $effect(() => {
+  $effect.pre(() => {
     const currentLastKey = items.at(-1)?.key ?? '';
     untrack(() => {
       if (!currentLastKey) {
@@ -152,6 +152,9 @@
       } else if (currentLastKey !== previousLastKey) {
         if (atBottom) void tick().then(scrollToBottom);
         else unseen += 1;
+      } else if (atBottom) {
+        // History can load before a retained ephemeral response without changing the last key.
+        void tick().then(pinViewportToBottom);
       }
       previousLastKey = currentLastKey;
     });

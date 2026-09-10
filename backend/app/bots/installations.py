@@ -203,12 +203,14 @@ def installation_has_membership() -> ColumnElement[bool]:
     """
 
     return exists(
-        select(GuildMember.user_id).where(
+        select(GuildMember.user_id)
+        .where(
             GuildMember.guild_id == BotInstallation.guild_id,
             GuildMember.guild_domain == BotInstallation.guild_domain,
             GuildMember.user_id == BotInstallation.bot_user_id,
             GuildMember.user_domain == BotInstallation.bot_user_domain,
         )
+        .correlate(BotInstallation)
     )
 
 
