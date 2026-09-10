@@ -83,6 +83,52 @@ def command_runtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["online", "idle", "dnd", "invisible", "offline"])
+async def test_bot_gateway_heartbeats_refresh_default_and_custom_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    stub = command_runtime(scopes=set(), intents=set())
+    runtime = bot_gateway.GatewayRuntime(
+        **vars(stub),
+        visibility=None,
+        encrypted_by_topic={},
+        session_key="session",
+    )
+    broadcast = AsyncMock(return_value=("online", 11))
+    monkeypatch.setattr(bot_gateway, "broadcast_presence_preference", broadcast)
+
+    # The same refresh establishes presence before READY and renews its 90-second lease.
+    await bot_gateway.refresh_bot_presence(runtime)
+    assert broadcast.await_args.args[2:] == ("online", ["guild:guild.example:42"])
+    custom = {
+        "status": status,
+        "activities": [{"name": "Bridging", "type": 0}],
+        "since": 123,
+        "afk": True,
+    }
+    await bot_gateway.handle_gateway_client_frame(runtime, {"op": 3, "d": custom}, 0)
+    for _ in range(6):
+        assert await bot_gateway.handle_gateway_client_frame(runtime, {"op": 1}, 0) > 0
+        assert broadcast.await_args.args[2] == status
+        assert broadcast.await_args.kwargs == {
+            "activities": custom["activities"],
+            "since": 123,
+            "afk": True,
+        }
+    assert broadcast.await_count == 8
+    assert len(runtime.presence_timestamps) == 1
+    runtime.websocket.send_json.assert_awaited_with({"op": 11})
+
+    # A remote DM connection has no guild presence authority.
+    runtime.guilds = []
+    runtime.topic_grants = {}
+    broadcast.reset_mock()
+    await bot_gateway.handle_gateway_client_frame(runtime, {"op": 1}, 0)
+    broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bot_gateway_presence_update_preserves_documented_activity_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -57,6 +57,9 @@ final class VoiceMessageRecorder extends StatefulWidget {
 
 final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
   final AudioRecorder _recorder = AudioRecorder();
+  final OverlayPortalController _overlay = OverlayPortalController();
+  final LayerLink _anchor = LayerLink();
+  VoiceRecording? _draft;
   final Stopwatch _elapsed = Stopwatch();
   final List<double> _amplitudes = <double>[];
   StreamSubscription<Amplitude>? _amplitudeSubscription;
@@ -70,8 +73,15 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
   bool _finishing = false;
   bool _finishAfterStart = false;
   bool _cancelAfterStart = false;
+  bool _disposeAfterStart = false;
 
-  bool get _available => widget.enabled && !widget.busy && !_finishing;
+  bool get _available =>
+      widget.enabled &&
+      !widget.busy &&
+      !_finishing &&
+      !_starting &&
+      !_recording &&
+      _draft == null;
 
   @override
   void dispose() {
@@ -79,28 +89,37 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
     _maximumTimer?.cancel();
     unawaited(_amplitudeSubscription?.cancel());
     if (_starting || _recording) unawaited(_recorder.cancel());
-    unawaited(_recorder.dispose());
+    unawaited(_draft?.delete());
+    _disposeAfterStart = _starting;
+    if (!_disposeAfterStart) unawaited(_recorder.dispose());
     super.dispose();
   }
 
-  Future<void> _start(PointerDownEvent event) async {
-    if (!_available || _starting || _recording) return;
-    _pointer = event.pointer;
-    _gestureOrigin = event.position;
+  Future<void> _start([PointerDownEvent? event]) async {
+    if (!_available) return;
+    _pointer = event?.pointer;
+    _gestureOrigin = event?.position;
+    _locked = event == null;
     _finishAfterStart = false;
     _cancelAfterStart = false;
     setState(() => _starting = true);
+    _overlay.show();
     unawaited(HapticFeedback.selectionClick());
     try {
       if (!await _recorder.hasPermission()) {
         throw StateError(
-          'Microphone access is required to record a voice message.',
+          'Microphone access was denied. Open your phone’s Settings, find Kaede, '
+          'and allow microphone access to record voice messages.',
         );
       }
       if (!await _recorder.isEncoderSupported(AudioEncoder.aacLc)) {
         throw StateError(
           'This device cannot record the supported voice-message format.',
         );
+      }
+      if (!mounted || _cancelAfterStart || (_finishAfterStart && !_locked)) {
+        await _resetRecorder(cancel: true);
+        return;
       }
       final directory = await getTemporaryDirectory();
       final path = '${directory.path}/kaede-voice-'
@@ -118,10 +137,21 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
         ),
         path: path,
       );
+      if (!mounted) {
+        await _recorder.cancel();
+        return;
+      }
       await _amplitudeSubscription?.cancel();
       _amplitudeSubscription = _recorder
           .onAmplitudeChanged(Duration(milliseconds: 100))
-          .listen((sample) => _amplitudes.add(sample.current));
+          .listen((sample) {
+        if (mounted && sample.current.isFinite) {
+          setState(() => _amplitudes.add(sample.current));
+        }
+      }, onError: (Object error) {
+        if (mounted) widget.onError(_recordingError(error));
+        unawaited(_finish(send: false));
+      });
       _elapsed
         ..reset()
         ..start();
@@ -129,7 +159,7 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
         if (mounted) setState(() {});
       });
       _maximumTimer = Timer(voiceMessageMaximumDuration, () {
-        if (_recording) unawaited(_finish(send: true));
+        if (_recording) unawaited(_finish(send: false, keep: true));
       });
       if (!mounted) {
         await _recorder.cancel();
@@ -146,7 +176,9 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
       }
     } on Object catch (error) {
       await _resetRecorder(cancel: true);
-      widget.onError(_recordingError(error));
+      if (mounted) widget.onError(_recordingError(error));
+    } finally {
+      if (_disposeAfterStart) await _recorder.dispose();
     }
   }
 
@@ -160,7 +192,7 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
     if (delta.dx <= -80) {
       _cancelAfterStart = true;
       unawaited(_finish(send: false));
-    } else if (delta.dy <= -64 && _recording) {
+    } else if (delta.dy <= -64) {
       setState(() => _locked = true);
       unawaited(HapticFeedback.mediumImpact());
     }
@@ -175,13 +207,26 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
     if (_recording) unawaited(_finish(send: true));
   }
 
-  Future<void> _finish({required bool send}) async {
+  Future<void> _finish({required bool send, bool keep = false}) async {
     if (_finishing) return;
     if (_starting && !_recording) {
       if (send) {
         _finishAfterStart = true;
       } else {
         _cancelAfterStart = true;
+      }
+      return;
+    }
+    if (_draft case final draft?) {
+      _draft = null;
+      setState(() => _finishing = true);
+      try {
+        if (send) await widget.onRecorded(draft);
+      } on Object catch (error) {
+        if (mounted) widget.onError(_recordingError(error));
+      } finally {
+        await draft.delete();
+        _resetUi();
       }
       return;
     }
@@ -194,7 +239,7 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
     await _amplitudeSubscription?.cancel();
     _amplitudeSubscription = null;
     try {
-      if (!send || duration < _voiceMessageMinimumDuration) {
+      if ((!send && !keep) || duration < _voiceMessageMinimumDuration) {
         await _recorder.cancel();
         if (send && duration < _voiceMessageMinimumDuration) {
           widget.onError('Hold the microphone a little longer to record.');
@@ -209,17 +254,33 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
           durationSecs: duration.inMilliseconds / 1000,
           waveform: encodeVoiceWaveform(_amplitudes),
         );
-        await widget.onRecorded(recording);
+        _recording = false;
+        if (!mounted) {
+          await recording.delete();
+        } else if (keep) {
+          _draft = recording;
+          _locked = true;
+        } else {
+          try {
+            await widget.onRecorded(recording);
+          } finally {
+            await recording.delete();
+          }
+        }
       }
     } on Object catch (error) {
-      widget.onError(_recordingError(error));
+      if (mounted) widget.onError(_recordingError(error));
       try {
         await _recorder.cancel();
       } on Object {
         // Preserve the original recording or upload error.
       }
     } finally {
-      _resetUi();
+      if (_draft != null && mounted) {
+        setState(() => _finishing = false);
+      } else {
+        _resetUi();
+      }
     }
   }
 
@@ -237,6 +298,8 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
   void _resetUi() {
     _ticker?.cancel();
     _maximumTimer?.cancel();
+    unawaited(_amplitudeSubscription?.cancel());
+    _amplitudeSubscription = null;
     _elapsed
       ..stop()
       ..reset();
@@ -248,75 +311,156 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
     _finishing = false;
     _finishAfterStart = false;
     _cancelAfterStart = false;
-    if (mounted) setState(() {});
+    if (mounted) {
+      _overlay.hide();
+      setState(() {});
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_locked || _finishing) {
-      return SizedBox(
-        height: 46,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              tooltip: 'Discard voice message',
-              onPressed: _finishing ? null : () => _finish(send: false),
-              icon: Icon(Icons.delete_outline_rounded),
-            ),
-            Icon(Icons.fiber_manual_record,
-                size: 10, color: context.kaede.danger),
-            SizedBox(width: 5),
-            Text(
-              _durationLabel(_elapsed.elapsed),
-              style: TextStyle(
-                color: context.kaede.textSoft,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            IconButton.filled(
-              tooltip: 'Send voice message',
-              onPressed: _finishing ? null : () => _finish(send: true),
-              icon: _finishing
-                  ? SizedBox.square(
-                      dimension: 15,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(Icons.arrow_upward_rounded),
-            ),
-          ],
+    // Keep this pointer listener mounted while the overlay changes: the held
+    // finger must still deliver moves/releases after recording starts or locks.
+    return CompositedTransformTarget(
+      link: _anchor,
+      child: OverlayPortal(
+        controller: _overlay,
+        overlayChildBuilder: (context) => Positioned(
+          width: MediaQuery.sizeOf(context).width - 16,
+          child: CompositedTransformFollower(
+            link: _anchor,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.bottomRight,
+            followerAnchor: Alignment.bottomRight,
+            child: _recordingPanel(context),
+          ),
         ),
-      );
-    }
-    return Semantics(
-      button: true,
-      enabled: _available,
-      label: _starting || _recording
-          ? 'Recording voice message. Release to send, drag left to cancel, or swipe up to lock.'
-          : 'Hold to record a voice message',
-      child: Listener(
-        behavior: HitTestBehavior.opaque,
-        onPointerDown: _available ? _start : null,
-        onPointerMove: _move,
-        onPointerUp: _release,
-        onPointerCancel: (_) => unawaited(_finish(send: false)),
-        child: Tooltip(
-          message: _recording
-              ? 'Release to send · swipe up to lock · drag left to cancel'
-              : 'Hold to record a voice message',
-          child: SizedBox.square(
-            dimension: 46,
-            child: Icon(
-              _starting
-                  ? Icons.hourglass_top_rounded
-                  : _recording
-                      ? Icons.mic_rounded
-                      : Icons.mic_none_rounded,
-              color: _recording ? context.kaede.danger : context.kaede.textSoft,
-              size: 23,
+        child: Semantics(
+          button: true,
+          enabled: _available,
+          label: 'Hold to record a voice message',
+          onTap: _available ? () => unawaited(_start()) : null,
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: _available ? _start : null,
+            onPointerMove: _move,
+            onPointerUp: _release,
+            onPointerCancel: (event) {
+              if (event.pointer == _pointer && !_locked) {
+                unawaited(_finish(send: false));
+              }
+            },
+            child: Tooltip(
+              triggerMode: TooltipTriggerMode.manual,
+              message: 'Hold to record a voice message',
+              child: SizedBox.square(
+                dimension: 46,
+                child: Icon(Icons.mic_none_rounded,
+                    color: context.kaede.textSoft, size: 23),
+              ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _recordingPanel(BuildContext context) {
+    final ready = _draft != null;
+    return Material(
+      color: Colors.transparent,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (!_locked && !_finishing)
+            Container(
+              margin: EdgeInsets.only(bottom: 8, right: 2),
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: context.kaede.raised,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Column(children: [
+                Icon(Icons.lock_open_rounded, color: context.kaede.textSoft),
+                Icon(Icons.keyboard_arrow_up_rounded,
+                    color: context.kaede.textSoft),
+              ]),
+            ),
+          Center(
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: context.kaede.raised,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                _starting
+                    ? 'Starting microphone…'
+                    : ready
+                        ? 'Ready to send'
+                        : _locked
+                            ? 'Recording locked'
+                            : 'Release to send · Swipe up to lock',
+                style: TextStyle(color: context.kaede.textSoft, fontSize: 12),
+              ),
+            ),
+          ),
+          SizedBox(height: 6),
+          Container(
+            height: 54,
+            decoration: BoxDecoration(
+              color: context.kaede.raised,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: context.kaede.border),
+            ),
+            child: Row(children: [
+              IconButton(
+                tooltip: 'Discard voice message',
+                onPressed: _finishing ? null : () => _finish(send: false),
+                icon: Icon(Icons.delete_outline_rounded),
+              ),
+              Icon(ready ? Icons.lock_rounded : Icons.fiber_manual_record,
+                  size: 10, color: context.kaede.danger),
+              SizedBox(width: 5),
+              Text(_durationLabel(_elapsed.elapsed),
+                  style: TextStyle(
+                      color: context.kaede.textSoft,
+                      fontWeight: FontWeight.w700)),
+              SizedBox(width: 12),
+              Expanded(
+                child: CustomPaint(
+                  size: Size(double.infinity, 30),
+                  painter: _LiveWaveform(
+                    _amplitudes.length > 48
+                        ? _amplitudes.sublist(_amplitudes.length - 48)
+                        : List<double>.of(_amplitudes),
+                    context.kaede.textSoft,
+                  ),
+                ),
+              ),
+              if (_locked && !ready && !_starting)
+                IconButton(
+                  tooltip: 'Stop recording',
+                  onPressed: _finishing
+                      ? null
+                      : () => _finish(send: false, keep: true),
+                  icon: Icon(Icons.stop_rounded),
+                ),
+              IconButton.filled(
+                tooltip: 'Send voice message',
+                onPressed:
+                    _finishing || _starting ? null : () => _finish(send: true),
+                icon: _finishing || _starting
+                    ? SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : Icon(Icons.send_rounded),
+              ),
+              SizedBox(width: 4),
+            ]),
+          ),
+        ],
       ),
     );
   }
@@ -328,7 +472,35 @@ String _durationLabel(Duration duration) {
 }
 
 String _recordingError(Object error) {
+  if (error is StateError) return error.message;
   final text =
       '$error'.replaceFirst(RegExp(r'^(StateError|Exception):\s*'), '');
   return text.isEmpty ? 'Could not record this voice message.' : text;
+}
+
+final class _LiveWaveform extends CustomPainter {
+  const _LiveWaveform(this.samples, this.color);
+  final List<double> samples;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    final count = (size.width / 5).floor();
+    for (var i = 0; i < count; i++) {
+      final index = samples.length - count + i;
+      final level =
+          index < 0 ? 0.0 : ((samples[index] + 60) / 60).clamp(0.0, 1.0);
+      final height = 2 + level * (size.height - 2);
+      final x = i * 5.0 + 2;
+      canvas.drawLine(Offset(x, (size.height - height) / 2),
+          Offset(x, (size.height + height) / 2), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_LiveWaveform oldDelegate) => true;
 }

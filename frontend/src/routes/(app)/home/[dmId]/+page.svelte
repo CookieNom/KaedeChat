@@ -2903,6 +2903,7 @@
                 command: selectedApplicationCommand!
               })}
             onAutocomplete={autocompleteCommandOption}
+            onSubmit={() => void send()}
             onCancel={cancelCommandComposer}
           />
         {:else}

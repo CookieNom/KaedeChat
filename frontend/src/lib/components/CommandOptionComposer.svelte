@@ -13,7 +13,7 @@
   import { entityRef } from '$lib/chat/refs';
   import { fileUploadAccept, fileUploadMatches } from '$lib/chat/rich-content';
   import type { Channel, Role, UserSummary } from '$lib/chat/types';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { preferredLocale } from '$lib/ui/locale';
   import GuildMemberPicker from './GuildMemberPicker.svelte';
 
@@ -33,6 +33,7 @@
     onValueChange,
     onAttachmentFiles,
     onAutocomplete,
+    onSubmit,
     onCancel
   }: {
     commandName: string;
@@ -55,8 +56,40 @@
       generation: number,
       path: string
     ) => Promise<ApplicationCommandAutocompleteChoice[]>;
+    onSubmit: () => void;
     onCancel: () => void;
   } = $props();
+
+  let fields: HTMLDivElement;
+
+  onMount(() => {
+    (
+      fields.querySelector<HTMLElement>('input:not(:disabled), select:not(:disabled)') ?? fields
+    ).focus();
+  });
+
+  function keydown(event: KeyboardEvent) {
+    if (disabled || event.defaultPrevented || event.isComposing) return;
+    const target = event.target;
+    if (event.key === 'Tab' && target instanceof HTMLElement) {
+      const inputs = [
+        ...fields.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled)')
+      ];
+      const index = inputs.indexOf(target);
+      const next = inputs[index + (event.shiftKey ? -1 : 1)];
+      if (index >= 0 && next) {
+        event.preventDefault();
+        next.focus();
+      }
+      return;
+    }
+    if (target instanceof HTMLButtonElement || target instanceof HTMLSelectElement) return;
+    if (target instanceof HTMLInputElement && target.type === 'file') return;
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      onSubmit();
+    }
+  }
 
   let suggestions = $state<Record<string, ApplicationCommandAutocompleteChoice[]>>({});
   let loadingOption = $state<string | null>(null);
@@ -104,7 +137,15 @@
   }
 </script>
 
-<div class="command-fields" aria-label={`Options for /${commandName}`}>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions (The focusable group handles command submission and navigation between its fields.) -->
+<div
+  bind:this={fields}
+  class="command-fields"
+  role="group"
+  tabindex="-1"
+  aria-label={`Options for /${commandName}`}
+  onkeydown={keydown}
+>
   <span class="command-name">/{commandDisplayName}</span>
   {#each model.selectors as selector (selector.path)}
     <label title={`Choose ${selector.label}`}>
@@ -270,6 +311,7 @@
     min-width: 0;
     flex: 1;
     align-items: center;
+    align-self: center;
     gap: 0.45rem;
     overflow-x: auto;
     scrollbar-width: thin;

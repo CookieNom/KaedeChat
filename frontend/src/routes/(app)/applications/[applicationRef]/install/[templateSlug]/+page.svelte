@@ -304,7 +304,6 @@
                 The bot is now a visible member of the selected guild. Its permissions can be
                 changed through guild roles.
               </p>
-              <a href={resolve(data.returnTo as '/home')}>Return to Kaede</a>
             </div>{:else}<label
               >Guild<select bind:value={selected} disabled={busy}
                 >{#each guilds as guild (`${guild.id}@${guild.origin_domain}`)}<option
@@ -432,7 +431,9 @@
             aria-disabled={!invite.application.support_url}>Support</a
           ><small>Application home: {invite.application.origin_domain}</small>
         </div>
-        {#if invite.application.supported_install_types.includes('guild_install') && !installed}<button
+        {#if installed}
+          <a class="return-link" href={resolve(data.returnTo as '/home')}>Return to Kaede</a>
+        {:else if invite.application.supported_install_types.includes('guild_install')}<button
             onclick={install}
             disabled={busy || !selected}>{busy ? 'Adding bot…' : 'Authorize and add bot'}</button
           >{/if}
@@ -590,7 +591,7 @@
   }
   footer button,
   .personal-install,
-  .success a {
+  .return-link {
     border: 0;
     border-radius: 9px;
     padding: 0.8rem 1rem;
@@ -600,6 +601,10 @@
     font-weight: 800;
     text-decoration: none;
     cursor: pointer;
+  }
+  .return-link {
+    display: inline-block;
+    text-align: center;
   }
   footer button:disabled,
   .personal-install:disabled {

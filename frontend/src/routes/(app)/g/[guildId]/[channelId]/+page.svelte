@@ -6207,6 +6207,7 @@
         command
       })}
     onAutocomplete={autocompleteCommandOption}
+    onSubmit={() => void send()}
     onCancel={cancelCommandComposer}
   />
 {/snippet}
@@ -7211,6 +7212,7 @@
                     disabled={busy}
                     onValueChange={(name, value) =>
                       (commandOptionValues = { ...commandOptionValues, [name]: value })}
+                    onSubmit={() => void send()}
                     onCancel={cancelCommandComposer}
                   />
                 {:else if selectedApplicationCommand}

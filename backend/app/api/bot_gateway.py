@@ -402,6 +402,9 @@ class GatewayRuntime:
     interaction_create_ids: set[int] = field(default_factory=set)
     command_timestamps: deque[float] = field(default_factory=deque)
     presence_timestamps: deque[float] = field(default_factory=deque)
+    presence: dict[str, Any] = field(
+        default_factory=lambda: {"status": "online", "activities": [], "since": None, "afk": False}
+    )
 
 
 def gateway_authorization_fingerprint(
@@ -3078,7 +3081,11 @@ async def _handle_bot_presence_update(runtime: GatewayRuntime, data: object) -> 
     except ValueError as exc:
         raise GatewayProtocolError(4400, "invalid presence update") from exc
     _admit_bot_gateway_command(runtime, presence=True)
+    runtime.presence = {"status": status, "activities": activities, "since": since, "afk": afk}
+    await refresh_bot_presence(runtime)
 
+
+async def refresh_bot_presence(runtime: GatewayRuntime) -> None:
     # A bot sets presence independently on each directly connected guild
     # authority. Only topics backed by a live guild installation are eligible;
     # a user-install or DM grant must never disclose presence into a guild.
@@ -3094,11 +3101,11 @@ async def _handle_bot_presence_update(runtime: GatewayRuntime, data: object) -> 
     visible_status, generation = await broadcast_presence_preference(
         runtime.redis,
         runtime.principal.user,
-        status,
+        runtime.presence["status"],
         topics,
-        activities=activities,
-        since=since,
-        afk=afk,
+        activities=runtime.presence["activities"],
+        since=runtime.presence["since"],
+        afk=runtime.presence["afk"],
     )
     if is_identity_authority:
         from app.gateway import schedule_presence_fanout
@@ -3703,6 +3710,7 @@ async def handle_gateway_client_frame(
 ) -> float:
     if isinstance(incoming, dict) and incoming.get("op") == GatewayOp.HEARTBEAT:
         _admit_bot_gateway_command(runtime)
+        await refresh_bot_presence(runtime)
         await runtime.websocket.send_json({"op": GatewayOp.HEARTBEAT_ACK})
         return time.monotonic()
     if isinstance(incoming, dict) and incoming.get("op") == GatewayOp.RESUME:
@@ -3934,6 +3942,7 @@ async def bot_gateway(websocket: WebSocket) -> None:
             raise GatewayProtocolError(4009, "bot authorization changed; reconnect")
         if runtime.topic_grants:
             await pubsub.subscribe(*(f"dispatch:{topic}" for topic in runtime.topic_grants))
+        await refresh_bot_presence(runtime)
         await websocket.send_json(gateway_ready_event(bootstrap))
         await send_initial_thread_syncs(runtime)
         await replay_gateway_topics(runtime, cursors)

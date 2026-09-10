@@ -23,6 +23,7 @@ from app.media.jobs import image_derivatives_are_current
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
     MediaValidationError,
+    detect_audio_container,
     image_derivative_sizes,
     image_derivatives,
     normalize_declared_type,
@@ -218,6 +219,31 @@ def test_declared_mime_cannot_smuggle_active_content() -> None:
         validate_detected_type("image/png", "text/html")
     with pytest.raises(MediaValidationError):
         normalize_declared_type("image/svg+xml")
+
+
+@pytest.mark.parametrize("container", ["mp4", "webm"])
+@pytest.mark.parametrize("streams", [b"audio\n", b"video\naudio\n", b"", b"video\n"])
+async def test_voice_audio_containers_preserve_audio_type(
+    monkeypatch: pytest.MonkeyPatch, container: str, streams: bytes
+) -> None:
+    declared = normalize_declared_type(f"audio/{container}; codecs=opus")
+    body = b"\0\0\0\x18ftypM4A " if container == "mp4" else b"\x1aE\xdf\xa3webm"
+    detected = sniff_content_type(body)
+    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(streams, b"")))
+    monkeypatch.setattr("asyncio.create_subprocess_exec", AsyncMock(return_value=process))
+    if streams == b"audio\n":
+        resolved = await detect_audio_container(body, declared, detected)
+        assert resolved == declared
+        validate_detected_type(declared, resolved)
+    else:
+        with pytest.raises(MediaValidationError):
+            await detect_audio_container(body, declared, detected)
+
+
+async def test_audio_container_cannot_disguise_other_file_types() -> None:
+    detected = await detect_audio_container(b"<html>", "audio/mp4", "text/html")
+    with pytest.raises(MediaValidationError):
+        validate_detected_type("audio/mp4", detected)
 
 
 def test_filename_is_reduced_to_a_safe_display_name() -> None:

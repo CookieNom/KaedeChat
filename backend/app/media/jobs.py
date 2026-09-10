@@ -36,6 +36,7 @@ from app.media.processing import (
     MediaValidationError,
     clamav_scan,
     content_digest,
+    detect_audio_container,
     image_derivative_sizes,
     image_derivatives,
     sniff_content_type,
@@ -331,6 +332,7 @@ async def process_attachment_record(
         if len(data) != attachment.size:
             raise MediaValidationError("stored object size changed after finalization")
         detected = sniff_content_type(data)
+        detected = await detect_audio_container(data, attachment.content_type, detected)
         validate_detected_type(attachment.content_type, detected)
         digest = content_digest(data)
         if reprocessing and attachment.content_sha256 != digest:

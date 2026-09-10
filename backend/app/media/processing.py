@@ -29,8 +29,10 @@ ALLOWED_CONTENT_TYPES = {
     "application/pdf",
     "application/zip",
     "audio/mpeg",
+    "audio/mp4",
     "audio/ogg",
     "audio/wav",
+    "audio/webm",
     "image/gif",
     "image/jpeg",
     "image/png",
@@ -127,6 +129,41 @@ def validate_detected_type(declared: str, detected: str) -> None:
     }
     if declared != detected and (declared, detected) not in aliases:
         raise MediaValidationError("declared content type does not match the file")
+
+
+async def detect_audio_container(data: bytes, declared: str, detected: str) -> str:
+    """MP4/WebM magic identifies the container, not whether it contains video."""
+    if (declared, detected) not in {
+        ("audio/mp4", "video/mp4"),
+        ("audio/webm", "video/webm"),
+    }:
+        return detected
+    with tempfile.TemporaryDirectory(prefix="kaede-audio-") as directory:
+        path = Path(directory) / "input"
+        path.write_bytes(data)
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,crypto",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=8)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise MediaValidationError("audio inspection timed out") from None
+    if process.returncode != 0 or set(stdout.split()) != {b"audio"}:
+        raise MediaValidationError("attachment must contain audio without video")
+    return declared
 
 
 async def _clamav_scan_chunks(chunks: AsyncIterable[bytes], settings: Settings) -> str:

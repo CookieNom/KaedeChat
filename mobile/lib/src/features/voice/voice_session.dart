@@ -834,7 +834,8 @@ final class VoiceSession extends ChangeNotifier {
           }
         } else {
           _muted = true;
-          _error = 'Joined listen-only. Allow microphone access to speak.';
+          _error = 'Microphone access was denied. You’re connected listen-only. '
+              'Open your phone’s Settings, find Kaede, and allow microphone access to speak.';
         }
       }
       if (!_canStream) {
@@ -1318,7 +1319,8 @@ final class VoiceSession extends ChangeNotifier {
             );
           } else {
             _muted = true;
-            _error = 'Joined listen-only. Allow microphone access to speak.';
+            _error = 'Microphone access was denied. You’re connected listen-only. '
+                'Open your phone’s Settings, find Kaede, and allow microphone access to speak.';
           }
         }
         if (!_canStream) {

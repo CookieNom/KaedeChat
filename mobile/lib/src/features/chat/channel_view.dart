@@ -1558,6 +1558,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     _runComposerAction(channel, ComposerAction.media),
                 idleAction: canSendVoiceMessage(channel)
                     ? VoiceMessageRecorder(
+                        key: ValueKey(channel.ref),
                         enabled: _slowModeRemaining(channel) <= Duration.zero,
                         busy: _sending,
                         onRecorded: (recording) =>

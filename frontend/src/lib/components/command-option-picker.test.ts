@@ -31,6 +31,7 @@ it('browses and searches channel and role options, preserving type restrictions 
         { id: '5', origin_domain: 'chat.example', name: 'Moderator' }
       ] as Role[],
       onValueChange,
+      onSubmit: vi.fn(),
       onCancel: vi.fn()
     }
   });
@@ -71,4 +72,71 @@ it('browses and searches channel and role options, preserving type restrictions 
   expect(labels()).toEqual(['@Moderator']);
   document.querySelector<HTMLButtonElement>('[role="option"]')!.click();
   expect(onValueChange).toHaveBeenLastCalledWith('role', '5@chat.example');
+});
+
+it('focuses a command without arguments and sends on Enter, respecting composition and modifiers', () => {
+  const onSubmit = vi.fn();
+  component = mount(CommandOptionComposer, {
+    target: document.body,
+    props: {
+      commandName: 'bridge-pair',
+      options: [],
+      values: {},
+      onValueChange: vi.fn(),
+      onSubmit,
+      onCancel: vi.fn()
+    }
+  });
+  flushSync();
+  const fields = document.querySelector<HTMLElement>('[role="group"]')!;
+  expect(document.activeElement).toBe(fields);
+  for (const extra of [{ shiftKey: true }, { isComposing: true }]) {
+    fields.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...extra })
+    );
+  }
+  expect(onSubmit).not.toHaveBeenCalled();
+  fields.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+  );
+  expect(onSubmit).toHaveBeenCalledOnce();
+});
+
+it('tabs between arguments in both directions and selects picker results before sending', () => {
+  const onSubmit = vi.fn();
+  const onValueChange = vi.fn();
+  component = mount(CommandOptionComposer, {
+    target: document.body,
+    props: {
+      commandName: 'configure',
+      options: [
+        { name: 'channel', type: 'channel' },
+        { name: 'reason', type: 'string' }
+      ],
+      channels: [{ id: '1', origin_domain: 'chat.example', name: 'general', type: 0 }] as Channel[],
+      values: {},
+      onValueChange,
+      onSubmit,
+      onCancel: vi.fn()
+    }
+  });
+  flushSync();
+  const [channel, reason] = document.querySelectorAll<HTMLInputElement>('input');
+  expect(document.activeElement).toBe(channel);
+  const key = (target: HTMLElement, key: string, shiftKey = false) => {
+    target.dispatchEvent(
+      new KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true })
+    );
+    flushSync();
+  };
+  key(channel, 'Tab');
+  expect(document.activeElement).toBe(reason);
+  key(reason, 'Tab', true);
+  expect(document.activeElement).toBe(channel);
+  key(channel, 'Enter');
+  expect(onValueChange).toHaveBeenCalledWith('channel', '1@chat.example');
+  expect(onSubmit).not.toHaveBeenCalled();
+  key(channel, 'Tab');
+  key(reason, 'Enter');
+  expect(onSubmit).toHaveBeenCalledOnce();
 });
