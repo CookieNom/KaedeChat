@@ -3,6 +3,7 @@
   import DeveloperPortalNav from '$lib/components/DeveloperPortalNav.svelte';
   import { api, userErrorMessage } from '$lib/api/client';
   import { onMount } from 'svelte';
+  import { assetUrl } from '$lib/media/assets';
 
   interface Team {
     ref: string;
@@ -13,6 +14,8 @@
 
   interface Application {
     ref: string;
+    origin_domain: string;
+    icon_hash: string | null;
     name: string;
     description: string | null;
     status: string;
@@ -171,7 +174,20 @@
               class="app-card"
               href={resolve(`/developers/${encodeURIComponent(application.ref)}`)}
             >
-              <span class="avatar">{application.name.slice(0, 1).toUpperCase()}</span>
+              <span class="avatar" aria-hidden="true">
+                {#if application.icon_hash}
+                  <img
+                    src={assetUrl(
+                      application.icon_hash,
+                      'thumbnail_128',
+                      application.origin_domain
+                    )}
+                    alt=""
+                  />
+                {:else}
+                  {application.name.slice(0, 1).toUpperCase()}
+                {/if}
+              </span>
               <span class="app-copy">
                 <span class="app-title">
                   <strong>{application.name}</strong>
@@ -364,10 +380,19 @@
     background: var(--surface-raised);
     transform: translateY(-1px);
   }
+  .avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+  }
   .avatar {
     display: grid;
     flex: 0 0 48px;
+    width: 48px;
+    min-width: 0;
     height: 48px;
+    overflow: hidden;
     place-items: center;
     border-radius: 14px;
     color: var(--on-accent, #fff);
