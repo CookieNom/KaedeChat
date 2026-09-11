@@ -110,10 +110,13 @@ The workflow publishes both a signed sideload APK and a Play-ready AAB. Both
 are built in official-relay mode and contain no Firebase service-account key.
 The workflow creates the GitHub Release only after every signed build succeeds.
 New GitHub Releases remain drafts until all assets have uploaded. Google Play
-and TestFlight uploads run as separate jobs after their signed build; a store
-rejection fails that delivery job without blocking the downloadable GitHub
-Release. Use **Re-run failed jobs** to retry delivery from the existing signed
-artifacts (retained for seven days), without recompiling successful clients.
+and TestFlight uploads run as separate jobs only after CI, every enabled client
+build (including desktop), and GitHub Release publication succeed. Disabled
+optional iOS/macOS builds are allowed; failures, cancellations, and unexpected
+skips block publication and store uploads. A store rejection fails that delivery
+job; the GitHub Release is already published. Use **Re-run failed jobs** to retry
+delivery from the existing signed artifacts (retained for seven days), without
+recompiling successful clients.
 Rerunning the workflow for the same tag replaces that tag's assets rather than
 creating a second release. Source or workflow fixes require a new tag: rerunning
 an old tag still uses its original commit.

@@ -687,7 +687,9 @@ jobs:
 
   google-play:
     name: Upload Google Play open testing
-    needs: android
+    needs: publish
+    # Explicit status check permits disabled optional builds in the dependency chain.
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -709,8 +711,12 @@ jobs:
 
   testflight:
     name: Upload TestFlight
-    needs: ios
-    if: vars.IOS_TESTFLIGHT_UPLOAD_ENABLED == 'true'
+    needs: [publish, ios]
+    if: >-
+      !cancelled() &&
+      needs.publish.result == 'success' &&
+      needs.ios.result == 'success' &&
+      vars.IOS_TESTFLIGHT_UPLOAD_ENABLED == 'true'
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -743,14 +749,17 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [desktop-linux, desktop-windows, desktop-macos, android, ios]
+    needs: [ci, desktop-linux, desktop-windows, desktop-macos, android, ios]
     if: >-
-      always() &&
+      !cancelled() &&
+      needs.ci.result == 'success' &&
       needs.desktop-linux.result == 'success' &&
       needs.desktop-windows.result == 'success' &&
       needs.android.result == 'success' &&
-      (needs.ios.result == 'success' || needs.ios.result == 'skipped') &&
-      (needs.desktop-macos.result == 'success' || needs.desktop-macos.result == 'skipped')
+      (needs.ios.result == 'success' ||
+       (vars.IOS_RELEASE_ENABLED != 'true' && needs.ios.result == 'skipped')) &&
+      (needs.desktop-macos.result == 'success' ||
+       (vars.APPLE_RELEASE_ENABLED != 'true' && needs.desktop-macos.result == 'skipped'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
