@@ -2,10 +2,37 @@
 
 Client releases use `vMAJOR.MINOR.PATCH` or the older
 `desktop-vMAJOR.MINOR.PATCH` tag format. Pushing either tag starts the only
-release workflow. It builds x86-64 Windows and Linux clients, ARM64 and Intel
-macOS clients, and a signed Android APK. All artifacts and their SHA-256
+release workflow. It selects changed clients and builds x86-64 Windows and Linux
+clients, ARM64 and Intel macOS clients, Android APK/AAB, and enabled iOS IPA
+releases as needed. Selected artifacts and their SHA-256
 checksums are published to one GitHub Release. A branch push, pull request, or
 manual workflow dispatch cannot publish a release.
+
+Preflight compares committed files against each client's highest-version prior
+published release on the current Git history that contains its required assets.
+Desktop, Android, and iOS have separate baselines: skipping an app in one tag
+does not hide its changes from the next tag. Drafts, prereleases, failed builds,
+and the current tag are excluded. Without a prior build, that client builds once.
+The Actions summary shows each baseline and decision. API or Git errors fail
+preflight rather than silently skipping builds.
+
+| Changed files | Release builds |
+| --- | --- |
+| `frontend/` or shipping `desktop/` code | All desktop platforms together |
+| `mobile/android/` | Android |
+| `mobile/ios/` | iOS, when `IOS_RELEASE_ENABLED=true` |
+| Shared `mobile/` files, including Dart, assets, pubspec, and tools | Android and enabled iOS |
+| `desktop/crates/kaede-e2ee/`, `kaede-e2ee-ffi/`, workspace Cargo manifest/lock, Rust toolchain, or Cargo configuration | Desktop and mobile |
+| Release workflow or `.github/scripts/` | Desktop and mobile |
+| Markdown/docs, retired Slint code, backend, or deployment files alone | No client release |
+
+Directory matching is conservative: shared lockfile or release-tooling changes
+rebuild all consumers. CI still runs for every tag. If no client is selected
+(after the iOS enable flag), no GitHub Release or store upload is created.
+Unchanged apps keep their existing downloads under their previous release tags.
+Mobile-only releases carry forward the previous desktop `latest.json` unchanged,
+including its original version and download URLs, so desktop update checks keep
+working without advertising an unbuilt desktop version.
 
 CI stamps the numeric tag version into `desktop/tauri/src-tauri/tauri.conf.json`,
 `desktop/tauri/src-tauri/Cargo.toml`, the `kaede-tauri` entry in
@@ -38,6 +65,9 @@ make desktop-check desktop-lint desktop-test
 
 Windows releases require the configured code-signing certificate. macOS
 releases require a Developer ID Application identity and notarization secrets.
+Both macOS architectures build whenever desktop is selected after CI succeeds; no
+`APPLE_RELEASE_ENABLED` variable is needed. Each must produce a nonempty DMG
+before the release can be published.
 Test Linux AppImage and Debian packages on a clean supported distribution.
 Release testing must cover:
 
@@ -56,8 +86,11 @@ is pushed:
 - `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` for the
   long-lived Tauri updater key;
 - `APPLE_CERTIFICATE_BASE64`, `APPLE_CERTIFICATE_PASSWORD`,
-  `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`
-  for Developer ID signing and notarization;
+  and `APPLE_SIGNING_IDENTITY` for Developer ID signing;
+- `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, and
+  `APP_STORE_CONNECT_PRIVATE_KEY_BASE64` for notarization, reusing the same
+  team API key as iOS TestFlight uploads (Developer access or higher).
+  No Apple account app-specific password is needed;
 - `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
   and `ANDROID_KEY_PASSWORD` for the long-lived Android upload key;
 - `ANDROID_GOOGLE_SERVICES_JSON_BASE64` for the official
@@ -67,8 +100,8 @@ is pushed:
 
 Encode binary certificate and keystore files with standard base64 and store only
 the encoded value in GitHub Secrets. Missing signing material fails its build
-before the GitHub Release is created. The publish job depends on every platform,
-so a partial release cannot be published accidentally.
+before the GitHub Release is created. The publish job requires every selected
+platform to succeed, so failed builds cannot produce a partial release.
 
 On Linux, produce single-line secret values with:
 
@@ -106,13 +139,13 @@ This edits the local metadata files; CI performs the same operation in its
 temporary checkout. This automation sets versions from tags; it does not
 choose major/minor/patch increments or create tags.
 
-The workflow publishes both a signed sideload APK and a Play-ready AAB. Both
+When Android is selected, the workflow publishes a signed sideload APK and a Play-ready AAB. Both
 are built in official-relay mode and contain no Firebase service-account key.
-The workflow creates the GitHub Release only after every signed build succeeds.
+The workflow creates the GitHub Release only after every selected signed build succeeds.
 New GitHub Releases remain drafts until all assets have uploaded. Google Play
-and TestFlight uploads run as separate jobs only after CI, every enabled client
-build (including desktop), and GitHub Release publication succeed. Disabled
-optional iOS/macOS builds are allowed; failures, cancellations, and unexpected
+and TestFlight uploads run only when their corresponding app was built, after
+CI, every selected client build, and GitHub Release publication succeed. Skips
+for unchanged clients or disabled iOS are allowed; failures, cancellations, and unexpected
 skips block publication and store uploads. A store rejection fails that delivery
 job; the GitHub Release is already published. Use **Re-run failed jobs** to retry
 delivery from the existing signed artifacts (retained for seven days), without
@@ -123,7 +156,7 @@ an old tag still uses its original commit.
 
 ### Google Play open testing
 
-Every release tag also uploads the signed AAB for `chat.kaede.mobile` to Google
+Every release tag that builds Android also uploads the signed AAB for `chat.kaede.mobile` to Google
 Play's open testing track (`beta`). The release uses `completed` status and is
 submitted for review automatically, rather than saved as a draft. Google's
 review and managed publishing settings still determine when testers receive

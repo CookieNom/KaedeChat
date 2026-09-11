@@ -36,8 +36,9 @@ On Linux, encode a file with `base64 -w0 FILE`. On macOS, use
 `base64 -i FILE | tr -d '\n'`.
 
 Add the Actions variable `IOS_RELEASE_ENABLED` with value `true`. Tagged GitHub
-releases will then build a signed IPA using the official `push.kaede.chat`
-relay and attach it to the release.
+releases that select iOS changes will then build a signed IPA using the official
+`push.kaede.chat` relay and attach it to the release. See
+[client release selection](../desktop/docs/releasing.md) for the shared-code rules.
 
 The iOS job explicitly selects Xcode 26.3 on `macos-15` and checks for an
 iOS 26 or newer SDK before building. App Store Connect has required this SDK
@@ -46,8 +47,8 @@ The app and extension versions come from the numeric release tag (for example,
 `v0.1.38` becomes `0.1.38`), with `GITHUB_RUN_NUMBER.GITHUB_RUN_ATTEMPT` as the
 build number so retries produce a new build number. The IPA and checksum are
 retained as Actions artifacts before TestFlight upload, even if Apple rejects
-the upload. TestFlight delivery waits for CI, every enabled client build
-(including desktop), and GitHub Release publication to succeed. A failed upload
+the upload. TestFlight delivery runs only when iOS was built and waits for CI,
+every selected client build, and GitHub Release publication to succeed. A failed upload
 is visible and retryable with **Re-run failed jobs**. The retry downloads the
 existing signed IPA instead of rebuilding it.
 
