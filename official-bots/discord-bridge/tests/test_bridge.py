@@ -8,6 +8,19 @@ import bridge
 
 
 class BridgeTest(unittest.TestCase):
+    def test_existing_queue_migration_preserves_messages(self):
+        import sqlite3
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'bridge.sqlite3'
+            with sqlite3.connect(path) as conn:
+                conn.execute("CREATE TABLE deliveries (sequence INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, platform TEXT NOT NULL, destination TEXT NOT NULL, content TEXT NOT NULL, done INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, retry_at INTEGER DEFAULT 0)")
+                conn.execute("INSERT INTO deliveries (id, platform, destination, content) VALUES ('old', 'discord', '123', 'queued')")
+            for _ in range(2):
+                store = bridge.Store(path)
+                self.assertEqual(store.pending()[0]['content'], 'queued')
+                self.assertIsNone(store.pending()[0]['author'])
+                store.engine.dispose()
+
     def test_gateway_readiness_and_failures_are_logged(self):
         from unittest.mock import Mock
 
@@ -58,7 +71,7 @@ class BridgeTest(unittest.TestCase):
             handlers = {}
             bot = Obj(listen=lambda name: lambda handler: handlers.update({name: handler}))
             client = bridge.Bridge(store, bot)
-            message = Obj(guild=True, author=Obj(bot=False, display_name='Alice'),
+            message = Obj(guild=True, author=Obj(bot=False, display_name='Alice', display_avatar=Obj(url='https://cdn.discordapp.com/avatar.png')),
                           webhook_id=None, channel=Obj(id=123), id=789,
                           clean_content='hello', attachments=[])
             asyncio.run(client.on_message(message))
@@ -68,12 +81,14 @@ class BridgeTest(unittest.TestCase):
             message.id = 790
             asyncio.run(client.on_message(message))
             self.assertEqual(len(store.pending()), 1)
-            incoming = Obj(author=Obj(bot=False, handle='bob@chat.example'),
+            incoming = Obj(author=Obj(bot=False, handle='bob@chat.example', avatar_hash='a' * 64, ref=Obj(domain='chat.example')),
                            bot_installation_id=None, application_ref=None, webhook_ref=None,
                            e2ee=None, content_unavailable=False, channel_ref='456@chat.example',
                            ref='999@chat.example', content='reply', attachments=[])
             asyncio.run(handlers['on_message'](incoming))
             self.assertEqual(len(store.pending()), 2)
+            self.assertEqual(store.pending()[0]['avatar'], 'https://cdn.discordapp.com/avatar.png')
+            self.assertEqual(store.pending()[1]['avatar'], f'https://chat.example/media/assets/{"a" * 64}/thumbnail_128')
             incoming.e2ee = {'ciphertext': 'secret'}
             incoming.ref = '1000@chat.example'
             asyncio.run(handlers['on_message'](incoming))
@@ -102,14 +117,16 @@ class BridgeTest(unittest.TestCase):
                 client = bridge.Bridge(store, bot)
                 channel = Obj(send=AsyncMock())
                 store.add_pair('456@chat.example', '10@chat.example', '123')
-                store.enqueue('discord:1', 'kaede', '456@chat.example', ['hello'])
-                store.enqueue('kaede:2@chat.example', 'discord', '123', ['@everyone'])
+                store.enqueue('discord:1', 'kaede', '456@chat.example', ['hello'], author='Discord · Alice', avatar='https://cdn.discordapp.com/avatar.png')
+                store.enqueue('kaede:2@chat.example', 'discord', '123', ['@everyone'], author='Kaede · Bob', avatar='https://chat.example/media/assets/hash/thumbnail_128')
                 with patch.object(client, 'wait_until_ready', AsyncMock()), \
                      patch.object(client, 'get_channel', return_value=channel), \
                      patch('bridge.asyncio.sleep', AsyncMock(side_effect=asyncio.CancelledError)):
                     with self.assertRaises(asyncio.CancelledError):
                         await client.deliver()
                 self.assertEqual(store.pending(), [])
+                self.assertEqual(bot.send_message.call_args.kwargs['embeds'][0].author.name, 'Discord · Alice')
+                self.assertEqual(channel.send.call_args.kwargs['embed'].author.icon_url, 'https://chat.example/media/assets/hash/thumbnail_128')
                 self.assertEqual(str(bot.send_message.call_args.args[0]), '456@chat.example')
                 self.assertEqual(bot.send_message.call_args.kwargs['allowed_mentions']['parse'], [])
                 self.assertEqual(len(bot.send_message.call_args.kwargs['client_nonce']), 64)

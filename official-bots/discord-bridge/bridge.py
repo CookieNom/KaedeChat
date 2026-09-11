@@ -3,13 +3,14 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 import signal
 import time
 
 import discord
 import kaede_bot as kaede
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, create_engine, select
+from sqlalchemy import Column, Integer, MetaData, String, Table, Text, create_engine, select, inspect, text
 from sqlalchemy.dialects.sqlite import insert
 
 from pairing import Pairing
@@ -41,6 +42,8 @@ class Store:
             Column("platform", String, nullable=False),
             Column("destination", String, nullable=False),
             Column("content", Text, nullable=False),
+            Column("author", Text),
+            Column("avatar", Text),
             Column("done", Integer, nullable=False, default=0),
             Column("attempts", Integer, nullable=False, default=0),
             Column("retry_at", Integer, nullable=False, default=0),
@@ -52,6 +55,12 @@ class Store:
             Column("discord_channel_id", String, nullable=False, unique=True),
         )
         metadata.create_all(self.engine)
+        # Upgrade existing queues without discarding pending deliveries.
+        columns = {column["name"] for column in inspect(self.engine).get_columns("deliveries")}
+        with self.engine.begin() as conn:
+            for column in ("author", "avatar"):
+                if column not in columns:
+                    conn.execute(text(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT"))
 
     def routes(self, guild=None):
         query = select(self.pairs)
@@ -76,14 +85,14 @@ class Store:
                     self.deliveries.c.done == 0,
                     ((self.deliveries.c.platform == "kaede") & (self.deliveries.c.destination == channel))
                     | ((self.deliveries.c.platform == "discord") & (self.deliveries.c.destination == discord_channel)),
-                ).values(done=1, content=""))
+                ).values(done=1, content="", author=None, avatar=None))
 
-    def enqueue(self, source, platform, destination, parts):
+    def enqueue(self, source, platform, destination, parts, author=None, avatar=None):
         with self.engine.begin() as conn:
             for index, content in enumerate(parts):
                 key = hashlib.sha256(f"{source}:{platform}:{destination}:{index}".encode()).hexdigest()
                 conn.execute(insert(self.deliveries).values(
-                    id=key, platform=platform, destination=destination, content=content,
+                    id=key, platform=platform, destination=destination, content=content, author=author, avatar=avatar,
                 ).on_conflict_do_nothing(index_elements=["id"]))
 
     def pending(self):
@@ -100,7 +109,7 @@ class Store:
             )).first() is not None
 
     def finish(self, row, success):
-        values = {"done": 1, "content": ""} if success else {
+        values = {"done": 1, "content": "", "author": None, "avatar": None} if success else {
             "attempts": row["attempts"] + 1,
             "retry_at": int(time.time()) + min(300, 2 ** min(row["attempts"] + 1, 9)),
         }
@@ -144,7 +153,9 @@ class Bridge(discord.Client):
                 if message.attachments:
                     content += "\n" + "\n".join(a.url for a in message.attachments)
                 self.store.enqueue(f"discord:{message.id}", "kaede", route["kaede_channel_ref"],
-                                   chunks(f"Discord · {message.author.display_name}", content))
+                                   chunks(f"Discord · {message.author.display_name}", content),
+                                   author=f"Discord · {message.author.display_name}"[:256],
+                                   avatar=str(message.author.display_avatar.url))
 
     async def on_kaede_message(self, message):
         if (message.author is None or message.author.bot or message.bot_installation_id
@@ -157,7 +168,11 @@ class Bridge(discord.Client):
                 if message.attachments:
                     content += "\n[Attachments available in KaedeChat]"
                 self.store.enqueue(f"kaede:{message.ref}", "discord", route["discord_channel_id"],
-                                   chunks(f"Kaede · {message.author.handle}", content))
+                                   chunks(f"Kaede · {message.author.handle}", content),
+                                   author=f"Kaede · {message.author.handle}"[:256],
+                                   avatar=(f"https://{message.author.ref.domain}/media/assets/"
+                                           f"{message.author.avatar_hash}/thumbnail_128"
+                                           if re.fullmatch(r"[0-9a-f]{64}", message.author.avatar_hash or "") else None))
 
     async def deliver(self):
         await self.wait_until_ready()
@@ -176,12 +191,14 @@ class Bridge(discord.Client):
                             channel = self.get_channel(int(row["destination"]))
                             if channel is None:
                                 channel = await self.fetch_channel(int(row["destination"]))
-                            await channel.send(row["content"], allowed_mentions=discord.AllowedMentions.none())
+                            embed = discord.Embed().set_author(name=row["author"], icon_url=row["avatar"] or None) if row["author"] else None
+                            await channel.send(row["content"], embed=embed, allowed_mentions=discord.AllowedMentions.none())
                         else:
                             await self.kaede.send_message(
                                 kaede.EntityRef.parse(row["destination"]), row["content"],
                                 allowed_mentions={"parse": [], "replied_user": False},
                                 client_nonce=row["id"],
+                                embeds=[kaede.Embed(author=kaede.EmbedAuthor(name=row["author"], icon_url=row["avatar"]))] if row["author"] else [],
                             )
                     except Exception as exc:
                         # Do not log message bodies, credentials, or signed attachment URLs.

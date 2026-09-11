@@ -265,6 +265,10 @@ Remove any old `KAEDE_BRIDGE_ADMINS` or `KAEDE_BRIDGE_ADMIN_REFS` settings from
 
 - Relays new human messages in both directions with a platform/author label.
   Bots and webhooks are ignored to prevent loops. Mentions never notify users.
+- Each relayed message includes an author embed with the sender’s profile picture
+  (when available) and source platform. Message text stays outside the embed.
+  Discord uses the sender’s server avatar or default avatar; Kaede uses their
+  public profile avatar. Existing SQLite queues upgrade automatically.
 - Long text is split into labeled messages. Discord attachments are sent as
   links (which may expire); Kaede attachments receive a notice to view them in
   KaedeChat because their downloads may require authorization.
