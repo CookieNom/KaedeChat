@@ -30,7 +30,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - run: python3 .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.12.13" }
+      - run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
 
   ci:
     name: Release CI
@@ -44,9 +46,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.12.13" }
       - name: Set client versions from release tag
         shell: bash
-        run: python3 .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
+        run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
       - name: Install Linux desktop dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
@@ -155,9 +159,11 @@ jobs:
       RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.12.13" }
       - name: Set client versions from release tag
         shell: bash
-        run: python3 .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
+        run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -296,9 +302,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.12.13" }
       - name: Set client versions from release tag
         shell: bash
-        run: python3 .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
+        run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: ${{ env.PNPM_VERSION }}

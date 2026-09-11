@@ -1,0 +1,2 @@
+# CocoaPods hashes the Podfile bytes; Windows checkouts must preserve its checksum.
+mobile/ios/Podfile text eol=lf

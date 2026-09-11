@@ -17,6 +17,30 @@ spec.loader.exec_module(release_inputs)
 
 
 class ReleaseInputsTest(unittest.TestCase):
+    def test_windows_checkout_preserves_podfile_checksum(self):
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            podfile = root / "mobile/ios/Podfile"
+            podfile.parent.mkdir(parents=True)
+            shutil.copyfile(source / ".gitattributes", root / ".gitattributes")
+            shutil.copyfile(source / "mobile/ios/Podfile", podfile)
+            for args in (
+                ("init", "--quiet"),
+                ("config", "core.autocrlf", "true"),
+                ("add", ".gitattributes", "mobile/ios/Podfile"),
+            ):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+            podfile.unlink()
+            subprocess.run(
+                ["git", "checkout-index", "--all"], cwd=root, check=True, capture_output=True
+            )
+            checksum = hashlib.sha1(podfile.read_bytes()).hexdigest()
+            self.assertIn(
+                f"PODFILE CHECKSUM: {checksum}",
+                (source / "mobile/ios/Podfile.lock").read_text().splitlines(),
+            )
+
     def test_ci_lockfiles_are_present_and_not_ignored(self):
         root = Path(__file__).resolve().parents[2]
         for name in (
@@ -51,13 +75,20 @@ class ReleaseInputsTest(unittest.TestCase):
             for name in names:
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source / name, root / name)
+            frontend = root / "frontend/package.json"
+            metadata = json.loads(frontend.read_text(encoding="utf-8"))
+            metadata["description"] = "Kaede 楓"
+            frontend.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
             lock_path = root / "desktop/Cargo.lock"
             original_lock = tomllib.loads(lock_path.read_text())
             for tag in ("v1.2.3", "desktop-v2.0.0"):
                 release_inputs.stamp(root, tag)
                 release_inputs.check(root, tag)
                 version = tag.removeprefix("desktop-").removeprefix("v")
-                self.assertEqual(json.loads((root / "frontend/package.json").read_text())["version"], version)
+                stamped_frontend = json.loads(frontend.read_text(encoding="utf-8"))
+                self.assertEqual(stamped_frontend["version"], version)
+                self.assertEqual(stamped_frontend["description"], metadata["description"])
+                self.assertNotIn(b"\r\n", frontend.read_bytes())
                 expected_lock = original_lock.copy()
                 expected_lock["package"] = [
                     dict(p, version=version) if p["name"] == "kaede-tauri" else p
@@ -87,7 +118,7 @@ class ReleaseInputsTest(unittest.TestCase):
             for name, text in files.items():
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text)
+                path.write_text(text, encoding="utf-8", newline="\n")
             for tag in (None, "v0.1.42", "desktop-v0.1.42"):
                 release_inputs.check(root, tag, "1.97.1")
             for tag in ("v0.1.41", "main", "v0.1.42-rc.1"):
@@ -103,10 +134,10 @@ class ReleaseInputsTest(unittest.TestCase):
             ):
                 with self.subTest(file=name):
                     original = files[name]
-                    (root / name).write_text(original.replace("0.1.42", "0.1.43") + "\n")
+                    (root / name).write_text(original.replace("0.1.42", "0.1.43") + "\n", encoding="utf-8", newline="\n")
                     with self.assertRaises(ValueError):
                         release_inputs.check(root)
-                    (root / name).write_text(original)
+                    (root / name).write_text(original, encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":
