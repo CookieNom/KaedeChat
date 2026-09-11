@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' show max;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
@@ -3998,7 +3999,12 @@ final class _ServerRail extends ConsumerWidget {
                 onTap: onOpenHome,
                 badge: state.dms.fold(
                   0,
-                  (total, dm) => total + (state.mentionCounts[dm.ref] ?? 0),
+                  (total, dm) =>
+                      total +
+                      max(
+                        state.unreadCounts[dm.ref] ?? 0,
+                        state.mentionCounts[dm.ref] ?? 0,
+                      ),
                 ),
                 unread: state.dms.any(
                   (dm) => (state.unreadCounts[dm.ref] ?? 0) > 0,
