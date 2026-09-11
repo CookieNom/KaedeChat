@@ -56,6 +56,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import GuildAuditLog from '$lib/components/GuildAuditLog.svelte';
   import GuildMemberPicker from '$lib/components/GuildMemberPicker.svelte';
+  import GuildMemberManagement from '$lib/components/GuildMemberManagement.svelte';
   import GuildSafetyTools from '$lib/components/GuildSafetyTools.svelte';
   import AnnouncementFollowers from '$lib/components/AnnouncementFollowers.svelte';
   import ImageUploadField from '$lib/components/ImageUploadField.svelte';
@@ -234,11 +235,6 @@
   let members = $state<MemberSummary[]>([]);
   let membersHaveMore = $state(false);
   let membersLoadingMore = $state(false);
-  let memberPage = $state(0);
-  let memberSearch = $state('');
-  let memberSearchResults = $state<MemberSummary[]>([]);
-  let memberSearchBusy = $state(false);
-  let memberSearchError = $state('');
   let roleMemberSearch = $state('');
   let roleMemberSearchResults = $state<MemberSummary[]>([]);
   let roleMemberSearchBusy = $state(false);
@@ -463,9 +459,6 @@
     guild = null;
     members = [];
     membersHaveMore = false;
-    memberSearch = '';
-    memberSearchResults = [];
-    memberSearchError = '';
     roleMemberSearch = '';
     roleMemberSearchResults = [];
     roleMemberSearchError = '';
@@ -629,7 +622,6 @@
     );
   }
   const currentMembers = $derived(liveMemberRows(members, true));
-  const currentMemberSearchResults = $derived(liveMemberRows(memberSearchResults));
   const currentRoleMemberSearchResults = $derived(liveMemberRows(roleMemberSearchResults));
   const ownershipCandidates = $derived(
     currentMembers.filter(
@@ -741,21 +733,8 @@
   const canTimeoutMembers = $derived(hasPermission(Permission.MODERATE_MEMBERS));
   const canBanInstances = $derived(hasPermission(Permission.BAN_INSTANCES));
   const canModerateMembers = $derived(canKickMembers || canBanMembers || canTimeoutMembers);
-  const visibleMembers = $derived(
-    memberSearch.trim()
-      ? currentMemberSearchResults
-      : currentMembers.slice(memberPage * MEMBER_PAGE_SIZE, (memberPage + 1) * MEMBER_PAGE_SIZE)
-  );
   const visibleRoleMembers = $derived(
     roleMemberSearch.trim() ? currentRoleMemberSearchResults : currentMembers
-  );
-  const memberPageCount = $derived(
-    Math.max(1, Math.ceil(currentMembers.length / MEMBER_PAGE_SIZE) + (membersHaveMore ? 1 : 0))
-  );
-  const memberHasPreviousPage = $derived(!memberSearch.trim() && memberPage > 0);
-  const memberHasNextPage = $derived(
-    !memberSearch.trim() &&
-      ((memberPage + 1) * MEMBER_PAGE_SIZE < currentMembers.length || membersHaveMore)
   );
   const canCreateInvites = $derived(hasPermission(Permission.CREATE_INVITE));
   const canAccessInvites = $derived(canManageGuild || canCreateInvites);
@@ -1429,7 +1408,6 @@
             if (generation === loadGeneration) {
               members = cacheMemberRows(value.slice(0, MEMBER_PAGE_SIZE));
               membersHaveMore = value.length > MEMBER_PAGE_SIZE;
-              memberPage = 0;
             }
           })
         );
@@ -3094,13 +3072,6 @@
     );
   }
 
-  function clampMemberPage() {
-    memberPage = Math.min(
-      memberPage,
-      Math.max(0, Math.ceil(currentMembers.length / MEMBER_PAGE_SIZE) - 1)
-    );
-  }
-
   async function submitMemberModeration() {
     const dialog = memberModerationDialog;
     if (!dialog || memberModerationBusy) return;
@@ -3146,7 +3117,6 @@
         if (!stillCurrent()) return;
         removeCachedMember(dialog.member);
         members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
-        clampMemberPage();
         notice = `${userDisplayName(dialog.member.user)} was kicked.`;
       } else {
         const expiresAt = expiryFor(banDuration);
@@ -3166,7 +3136,6 @@
         if (!stillCurrent()) return;
         removeCachedMember(dialog.member);
         members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
-        clampMemberPage();
         bans = [
           {
             user: dialog.member.user,
@@ -3275,13 +3244,13 @@
     membersLoadingMore = true;
     try {
       const page = await api<MemberSummary[]>(
-        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=${MEMBER_PAGE_SIZE + 1}&after=${encodeURIComponent(after)}`
+        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=101&after=${encodeURIComponent(after)}`
       );
       if (generation !== loadGeneration || targetGuild !== guildId) return false;
-      const next = cacheMemberRows(page.slice(0, MEMBER_PAGE_SIZE));
+      const next = cacheMemberRows(page.slice(0, 100));
       const existing = new Set(members.map((member) => entityKey(member.user)));
       members = [...members, ...next.filter((member) => !existing.has(entityKey(member.user)))];
-      membersHaveMore = page.length > MEMBER_PAGE_SIZE;
+      membersHaveMore = page.length > 100;
       return next.length > 0;
     } catch (caught) {
       if (generation === loadGeneration && targetGuild === guildId) {
@@ -3292,56 +3261,6 @@
       if (generation === loadGeneration && targetGuild === guildId) membersLoadingMore = false;
     }
   }
-
-  function showPreviousMemberPage() {
-    if (memberPage > 0 && !membersLoadingMore) memberPage -= 1;
-  }
-
-  async function showNextMemberPage() {
-    if (!memberHasNextPage || membersLoadingMore) return;
-    const nextStart = (memberPage + 1) * MEMBER_PAGE_SIZE;
-    if (nextStart >= currentMembers.length && !(await loadMoreMembers())) return;
-    if (nextStart < currentMembers.length) memberPage += 1;
-  }
-
-  $effect(() => {
-    const search = memberSearch.trim();
-    const targetGuild = guildId;
-    if (!search) {
-      memberSearchResults = [];
-      memberSearchBusy = false;
-      memberSearchError = '';
-      return;
-    }
-    const controller = new AbortController();
-    memberSearchBusy = true;
-    memberSearchError = '';
-    const timeout = window.setTimeout(() => {
-      void api<MemberSummary[]>(
-        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=100&query=${encodeURIComponent(search)}`,
-        { signal: controller.signal }
-      )
-        .then((results) => {
-          if (controller.signal.aborted || targetGuild !== guildId) return;
-          memberSearchResults = cacheMemberRows(results);
-        })
-        .catch((caught: unknown) => {
-          if (controller.signal.aborted || targetGuild !== guildId) return;
-          memberSearchResults = [];
-          memberSearchError = userErrorMessage(
-            caught,
-            'Could not search guild members. Try again.'
-          );
-        })
-        .finally(() => {
-          if (!controller.signal.aborted && targetGuild === guildId) memberSearchBusy = false;
-        });
-    }, 250);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  });
 
   $effect(() => {
     const search = roleMemberSearch.trim();
@@ -3394,8 +3313,6 @@
     members = [];
     membersHaveMore = false;
     membersLoadingMore = false;
-    memberPage = 0;
-    memberSearch = '';
     roleMemberSearch = '';
     bans = [];
     instanceBans = [];
@@ -5662,149 +5579,61 @@
             <span class="section-icon"><Icon name="users" /></span>
             <div>
               <h2>Members</h2>
-              <p>
-                {currentMembers.length} loaded member{currentMembers.length === 1 ? '' : 's'} in this
-                guild.
-              </p>
+              <p>Review your guild’s members, manage roles, and take moderation actions.</p>
             </div>
           </div>
-          <label class="form-field member-search-field settings-card">
-            <span>Search members</span>
-            <input
-              bind:value={memberSearch}
-              type="search"
-              placeholder="Search by name, username, nickname, or instance"
-              autocomplete="off"
-            />
-            {#if memberSearchBusy}
-              <small role="status">Searching members…</small>
-            {:else if memberSearch.trim()}
-              <small
-                >{visibleMembers.length} matching member{visibleMembers.length === 1
-                  ? ''
-                  : 's'}</small
-              >
-            {/if}
-          </label>
-          {#if memberSearchError}<p class="form-error" role="alert">{memberSearchError}</p>{/if}
-          <div class="settings-card member-management-list">
-            {#each visibleMembers as member (entityKey(member.user))}
-              <article class="member-management-row">
-                <span class="avatar avatar-medium">
-                  {#if member.user.avatar_hash}
-                    <img
-                      src={assetUrl(member.user.avatar_hash, 'thumbnail_128', member.user)}
-                      alt=""
-                    />
-                  {:else}
-                    {member.user.profile_resolved === false
-                      ? '•'
-                      : member.user.username.slice(0, 1).toUpperCase()}
+          {#key guildId}
+            <GuildMemberManagement
+              members={currentMembers}
+              roles={(guild.roles ?? []).filter((role) => role.id !== guild?.id)}
+              hasMore={membersHaveMore}
+              loading={membersLoadingMore}
+              busy={busy || memberModerationBusy}
+              loadMore={loadMoreMembers}
+              {canManageMember}
+              {canManageRole}
+              toggleRole={toggleMemberRole}
+              canPrune={canManageGuild && canKickMembers}
+            >
+              {#snippet actions(member: GuildMemberSummary, activeTimeout: boolean)}
+                {#if canModerateMembers && isModeratableMember(member)}
+                  {#if canTimeoutMembers}
+                    <button
+                      class="secondary-button small-button"
+                      type="button"
+                      disabled={busy || memberModerationBusy}
+                      onclick={(event) =>
+                        void openMemberModeration(
+                          member,
+                          activeTimeout ? 'untimeout' : 'timeout',
+                          event.currentTarget
+                        )}
+                    >
+                      {activeTimeout ? 'Remove timeout' : 'Timeout'}
+                    </button>
                   {/if}
-                </span>
-                <div class="member-management-identity">
-                  <strong>{member.nickname ?? userDisplayName(member.user)}</strong>
-                  <small>{userPublicHandle(member.user) ?? 'Profile unavailable'}</small>
-                </div>
-                <div class="member-role-tags">
-                  {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id) as role (entityKey(role))}
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={member.role_ids.includes(role.id)}
-                        disabled={!canManageRoles || busy}
-                        onchange={(event) =>
-                          void toggleMemberRole(member, role, event.currentTarget.checked)}
-                      />
-                      <span>{role.name}</span>
-                    </label>
-                  {/each}
-                </div>
-                <div class="member-management-actions">
-                  {#if member.timeout_indefinite}
-                    <span class="sanction-badge">Timed out indefinitely</span>
-                  {:else if member.timeout_until}
-                    <span class="sanction-badge"
-                      >Timed out until {formatDateTime(member.timeout_until)}</span
+                  {#if canKickMembers}
+                    <button
+                      class="secondary-button small-button"
+                      type="button"
+                      disabled={busy || memberModerationBusy}
+                      onclick={(event) =>
+                        void openMemberModeration(member, 'kick', event.currentTarget)}>Kick</button
                     >
                   {/if}
-                  {#if canModerateMembers && isModeratableMember(member)}
-                    {#if canTimeoutMembers}
-                      <button
-                        class="secondary-button small-button"
-                        type="button"
-                        disabled={busy || memberModerationBusy}
-                        onclick={(event) =>
-                          void openMemberModeration(
-                            member,
-                            member.timeout_indefinite || member.timeout_until
-                              ? 'untimeout'
-                              : 'timeout',
-                            event.currentTarget
-                          )}
-                      >
-                        {member.timeout_indefinite || member.timeout_until
-                          ? 'Remove timeout'
-                          : 'Timeout'}
-                      </button>
-                    {/if}
-                    {#if canKickMembers}
-                      <button
-                        class="secondary-button small-button"
-                        type="button"
-                        disabled={busy || memberModerationBusy}
-                        onclick={(event) =>
-                          void openMemberModeration(member, 'kick', event.currentTarget)}
-                        >Kick</button
-                      >
-                    {/if}
-                    {#if canBanMembers}
-                      <button
-                        class="danger-text-button small-button"
-                        type="button"
-                        disabled={busy || memberModerationBusy}
-                        onclick={(event) =>
-                          void openMemberModeration(member, 'ban', event.currentTarget)}>Ban</button
-                      >
-                    {/if}
+                  {#if canBanMembers}
+                    <button
+                      class="danger-text-button small-button"
+                      type="button"
+                      disabled={busy || memberModerationBusy}
+                      onclick={(event) =>
+                        void openMemberModeration(member, 'ban', event.currentTarget)}>Ban</button
+                    >
                   {/if}
-                </div>
-              </article>
-            {:else}
-              <div class="empty-state compact-empty">
-                <span><Icon name={memberSearch.trim() ? 'search' : 'users'} /></span>
-                <h3>{memberSearch.trim() ? 'No matching members' : 'No members loaded'}</h3>
-                <p>
-                  {memberSearch.trim()
-                    ? 'Try a display name, username, nickname, or instance domain.'
-                    : 'Member information may be temporarily unavailable.'}
-                </p>
-              </div>
-            {/each}
-            {#if currentMembers.length && !memberSearch.trim()}
-              <nav class="member-pagination" aria-label="Guild member pages">
-                <button
-                  class="secondary-button small-button"
-                  type="button"
-                  disabled={!memberHasPreviousPage || membersLoadingMore}
-                  onclick={showPreviousMemberPage}>Previous</button
-                >
-                <span>
-                  Page {memberPage + 1}{membersHaveMore
-                    ? ` of at least ${memberPageCount}`
-                    : ` of ${memberPageCount}`}
-                </span>
-                <button
-                  class="secondary-button small-button"
-                  type="button"
-                  disabled={!memberHasNextPage || membersLoadingMore}
-                  onclick={() => void showNextMemberPage()}
-                >
-                  {membersLoadingMore ? 'Loading…' : 'Next'}
-                </button>
-              </nav>
-            {/if}
-          </div>
+                {/if}
+              {/snippet}
+            </GuildMemberManagement>
+          {/key}
           {#if canBanMembers}
             <div class="settings-card sanction-list">
               <div class="settings-list-heading">

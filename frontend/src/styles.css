@@ -3480,7 +3480,6 @@ progress {
 }
 
 .relationship-list,
-.member-management-list,
 .invite-list {
   display: grid;
   overflow: hidden;
@@ -4963,97 +4962,6 @@ progress {
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.member-management-row {
-  display: grid;
-  grid-template-columns: auto minmax(145px, 0.45fr) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.8rem;
-  padding: 0.9rem 1rem;
-}
-
-.member-management-row + .member-management-row {
-  border-top: 1px solid var(--line-soft);
-}
-
-.member-management-identity {
-  display: grid;
-  min-width: 0;
-}
-
-.member-management-identity strong,
-.member-management-identity small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.member-management-identity strong {
-  font-size: 0.8rem;
-}
-
-.member-management-identity small {
-  color: var(--text-muted);
-  font-size: 0.66rem;
-}
-
-.member-role-tags {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.35rem;
-}
-
-.member-role-tags label {
-  display: inline-flex;
-  gap: 0;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.member-role-tags input {
-  position: absolute;
-  opacity: 0;
-}
-
-.member-role-tags span {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0.3rem 0.55rem;
-  color: var(--text-muted);
-  background: var(--surface-subtle);
-  font-size: 0.65rem;
-}
-
-.member-role-tags input:checked + span {
-  color: var(--purple);
-  border-color: color-mix(in srgb, var(--purple) 45%, var(--line));
-  background: var(--purple-soft);
-}
-
-.member-management-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.member-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  border-top: 1px solid var(--line-soft);
-  padding: 0.85rem 1rem;
-}
-
-.member-pagination span {
-  min-width: 8.5rem;
-  color: var(--text-muted);
-  font-size: 0.7rem;
-  text-align: center;
 }
 
 .moderation-dialog-member {
@@ -9586,8 +9494,7 @@ body.media-viewer-open {
   }
 
   .quick-create,
-  .invite-create,
-  .member-management-row {
+  .invite-create {
     grid-template-columns: 1fr;
   }
 
@@ -9601,14 +9508,6 @@ body.media-viewer-open {
 
   .moderation-inline-selects {
     grid-template-columns: 1fr;
-  }
-
-  .member-role-tags {
-    justify-content: flex-start;
-  }
-
-  .member-management-actions {
-    justify-content: flex-start;
   }
 
   .created-invite-card {

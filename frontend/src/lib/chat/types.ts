@@ -420,6 +420,7 @@ export interface ReadStateStatus {
 }
 
 export interface GuildMemberSummary {
+  joined_at?: string;
   guild_id: string;
   guild_domain: string;
   user: UserSummary;
