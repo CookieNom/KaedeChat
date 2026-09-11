@@ -475,13 +475,14 @@ final class PushService {
   /// objects so widget tests can exercise the controller without
   /// notification or Firebase channels.
   @visibleForTesting
-  PushService.test({bool firebaseReady = true})
+  PushService.test({bool firebaseReady = true, Future<void>? firebaseSetup})
       : _local = FlutterLocalNotificationsPlugin(),
         _destinations = StreamController<PushDestination>.broadcast(),
         _healthEvents = StreamController<String?>.broadcast(sync: true),
         _callEvents = StreamController<SystemCallEvent>.broadcast() {
     _firebaseReady = firebaseReady;
-    _firebaseResolved = true;
+    _firebaseResolved = firebaseSetup == null;
+    _firebaseResolvedFuture = firebaseSetup;
   }
 
   final FlutterLocalNotificationsPlugin _local;
@@ -550,7 +551,15 @@ final class PushService {
   /// been initialized synchronously at launch.
   Future<void> _ensureFirebaseResolved() {
     if (_firebaseResolved) return Future<void>.value();
-    return _firebaseResolvedFuture ?? Future<void>.value();
+    return (_firebaseResolvedFuture ?? Future<void>.value()).timeout(
+      const Duration(seconds: 30),
+      onTimeout: () => throw const KaedeException(
+        code: 'PUSH_PROVIDER_TIMEOUT',
+        message:
+            'The notification service did not finish starting. Restart Kaede and try again.',
+        status: 503,
+      ),
+    );
   }
 
   PushDestination? consumeInitialDestination() {
@@ -798,7 +807,15 @@ final class PushService {
     if (!allowed) return null;
     await _ensureFirebaseResolved();
     if (!_firebaseReady) return null;
-    return FirebaseMessaging.instance.getToken();
+    return FirebaseMessaging.instance.getToken().timeout(
+          const Duration(seconds: 30),
+          onTimeout: () => throw const KaedeException(
+            code: 'PUSH_TOKEN_TIMEOUT',
+            message:
+                'The phone did not return a notification token. Check your connection and Google Play services on Android, then retry.',
+            status: 503,
+          ),
+        );
   }
 
   /// Forwards token refreshes to listeners that subscribed before the

@@ -1,9 +1,12 @@
 // Layout smoke test for the Discord-style settings surfaces. The screens
 // are rendered with a real mobile controller wired to a canned Dio client,
 // so the redesigned layout is verified without a live device.
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -12,6 +15,7 @@ import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
@@ -333,7 +337,9 @@ Dio _cannedClient(
         'query': Map<String, Object?>.from(options.queryParameters),
       });
       Object? data;
-      if (path == '/api/v1/users/@me/settings') {
+      if (path == '/api/v1/users/@me/push-devices') {
+        data = <Object?>[];
+      } else if (path == '/api/v1/users/@me/settings') {
         data = _settingsPayload;
       } else if (method == 'PATCH' && path == '/api/v1/users/@me') {
         data = user.toJson();
@@ -404,6 +410,7 @@ Future<MobileController> fixtureController(
   KaedeUser user,
   List<Map<String, Object?>> requestLog, {
   List<Map<String, Object?>> applicationInstallations = const [],
+  PushService? pushService,
 }) async {
   final api = KaedeApiClient(
     vault: const SessionVault(),
@@ -420,7 +427,7 @@ Future<MobileController> fixtureController(
     socketConnector: (uri) => throw UnimplementedError(),
   );
   final database = await LocalDatabase.openWithDatabase(_TestDatabase());
-  final push = PushService.test(firebaseReady: true);
+  final push = pushService ?? PushService.test(firebaseReady: true);
   final controller = MobileController(repository, api, gateway, database, push);
   controller.state = MobileState(user: user);
   return controller;
@@ -430,6 +437,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
+    FlutterSecureStorage.setMockInitialValues(<String, String>{});
     SharedPreferences.setMockInitialValues(<String, Object>{});
     PackageInfo.setMockInitialValues(
       appName: 'Kaede Chat',
@@ -438,6 +446,147 @@ void main() {
       buildNumber: '1',
       buildSignature: 'test',
     );
+  });
+
+  testWidgets('new account can defer push onboarding without being asked again',
+      (tester) async {
+    final user = fixtureUser();
+    final controller = await fixtureController(fixtureGuild(user), user, []);
+    final tokens = SessionTokens(
+      instance: Domain('chat.example'),
+      userRef: user.ref,
+      accessToken: 'access',
+      refreshToken: 'refresh',
+    );
+    await controller.api.useTokens(tokens);
+    controller.state = controller.state.copyWith(phase: SessionPhase.ready);
+    Widget app(Key key) => ProviderScope(
+          overrides: [
+            mobileControllerProvider.overrideWith((ref) => controller)
+          ],
+          child: MaterialApp(
+              home: PushOnboarding(
+            key: key,
+            child: const Scaffold(body: Text('Chat')),
+          )),
+        );
+    await tester.pumpWidget(app(const ValueKey(1)));
+    await tester.pumpAndSettle();
+    expect(find.text('Enable notifications?'), findsOneWidget);
+    expect(await controller.api.pushOptInChoice(), isNull);
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(find.text('Enable notifications?'), findsNothing);
+    expect(await controller.api.pushOptInChoice(), isFalse);
+    // Even an explicit sign-out (which clears the active push preference)
+    // must not cause onboarding to nag the same account on the next sign-in.
+    await controller.api.clearTokens();
+    await controller.api.useTokens(tokens);
+    await tester.pumpWidget(app(const ValueKey(2)));
+    await tester.pumpAndSettle();
+    expect(find.text('Enable notifications?'), findsNothing);
+    expect(find.text('Chat'), findsOneWidget);
+  });
+
+  testWidgets(
+      'push onboarding waits for consent and keeps setup errors visible',
+      (tester) async {
+    final user = fixtureUser();
+    final controller = await fixtureController(
+      fixtureGuild(user),
+      user,
+      [],
+      pushService: PushService.test(firebaseSetup: Completer<void>().future),
+    );
+    await controller.api.useTokens(SessionTokens(
+      instance: Domain('chat.example'),
+      userRef: user.ref,
+      accessToken: 'access',
+      refreshToken: 'refresh',
+    ));
+    controller.state = controller.state.copyWith(phase: SessionPhase.ready);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+      child: const MaterialApp(home: PushOnboarding(child: Scaffold())),
+    ));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 31));
+    expect(find.textContaining('notification service did not finish starting'),
+        findsNothing);
+    await tester.tap(find.text('Enable notifications'));
+    await tester.pump();
+    expect(find.text('Please wait…'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 31));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('notification service did not finish starting'),
+        findsOneWidget);
+    expect(await controller.api.pushOptInChoice(), isNull);
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+  });
+
+  for (final enabled in [false, true]) {
+    testWidgets('push onboarding respects existing opt-in choice $enabled',
+        (tester) async {
+      final user = fixtureUser();
+      final controller = await fixtureController(
+        fixtureGuild(user),
+        user,
+        [],
+        pushService: PushService.test(firebaseReady: false),
+      );
+      await controller.api.useTokens(SessionTokens(
+        instance: Domain('chat.example'),
+        userRef: user.ref,
+        accessToken: 'access',
+        refreshToken: 'refresh',
+      ));
+      controller.state = controller.state.copyWith(phase: SessionPhase.ready);
+      await controller.api.savePushOptIn(enabled);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+        child: const MaterialApp(home: PushOnboarding(child: Scaffold())),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(await controller.api.pushOptInChoice(), enabled);
+    });
+  }
+
+  testWidgets(
+      'push setup shows progress, rejects duplicate taps, and reports a stalled provider',
+      (tester) async {
+    tester.view.physicalSize = const Size(840, 10000);
+    tester.view.devicePixelRatio = 2;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final user = fixtureUser();
+    final controller = await fixtureController(
+      fixtureGuild(user),
+      user,
+      [],
+      pushService: PushService.test(firebaseSetup: Completer<void>().future),
+    );
+    await tester.pumpWidget(ProviderScope(
+      overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+      child: MaterialApp(
+        theme: kaedeTheme(),
+        home: const Scaffold(body: SettingsScreen()),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Enable background notifications'));
+    await tester.pump();
+    expect(find.text('Enabling notifications…'), findsOneWidget);
+    final button = find.widgetWithText(FilledButton, 'Enabling notifications…');
+    expect(tester.widget<FilledButton>(button).onPressed, isNull);
+    await tester.pump(const Duration(seconds: 31));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('notification service did not finish starting'),
+        findsOneWidget);
+    expect(find.text('Enable background notifications'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('account settings renders Discord-style sections',

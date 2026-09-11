@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/domain/client_preferences.dart';
 import 'package:kaede_mobile/src/features/auth/auth_screen.dart';
 import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
+import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
@@ -222,7 +223,10 @@ final class _SessionGate extends ConsumerWidget {
       SessionPhase.locked => const _LockScreen(),
       SessionPhase.signedOut || SessionPhase.authenticating => AuthScreen(),
       SessionPhase.ready => destination == null
-          ? MobileShell()
+          ? PushOnboarding(
+              key: ValueKey(ref.read(mobileControllerProvider).user?.ref.wire),
+              child: const MobileShell(),
+            )
           : _DestinationGate(destination: destination!),
     };
   }

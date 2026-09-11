@@ -191,6 +191,13 @@ become persistent warnings when a user disabled push.
 
 ## User controls
 
+After sign-in, accounts without an existing notification choice see an
+**Enable notifications?** prompt. **Enable notifications** starts the operating
+system permission and registration flow; **Not now** leaves push disabled.
+The app remembers that it offered the prompt for that account on that device,
+including across sign-out. Setup failures stay visible in the prompt with a
+retry action, and notification settings remain available afterward.
+
 The settings screen identifies the home and relay before opt-in, explains the
 metadata boundary, and provides a per-account background-delivery control.
 Disabling it unregisters the home binding. The app remains fully usable and

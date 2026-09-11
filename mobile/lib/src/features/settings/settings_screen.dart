@@ -45,6 +45,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   List<UserApplicationInstallation> _applicationInstallations = const [];
   var _loading = true;
   var _saving = false;
+  var _enablingPush = false;
+  String? _pushSetupMessage;
   var _biometricLock = false;
   var _biometricLockTimeout = 30;
   var _opusDtx = true;
@@ -847,44 +849,71 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               subheading: usesRelay
                   ? 'Closed-app delivery runs through Kaede Push Relay ($pushRelayHost). The relay sees your home instance and an opaque device subscription, but never message text, sender names, rooms or encryption keys.'
                   : 'This community build uses its own Firebase provider for closed-app delivery. Firebase only receives an opaque wake with no message content, and your lock-screen privacy settings still apply.'),
-          SettingsRow.chevron(
-            title: 'Enable background notifications',
-            leading: _LeadingIcon(Icons.notifications_active_outlined),
-            divider: true,
-            onTap: () async {
-              try {
-                final enabled = await ref
-                    .read(mobileControllerProvider.notifier)
-                    .enablePushNotifications();
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(enabled
-                      ? 'System notifications are enabled.'
-                      : 'Android blocked notifications. Allow them in system settings, then try again.'),
-                ));
-              } on Object catch (error) {
-                _showError(
-                  error,
-                  summary: 'Could not enable system notifications',
-                );
-              }
-            },
+          FilledButton.icon(
+            icon: _enablingPush
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.notifications_active_outlined),
+            label: Text(_enablingPush
+                ? 'Enabling notifications…'
+                : 'Enable background notifications'),
+            onPressed: _enablingPush
+                ? null
+                : () async {
+                    setState(() {
+                      _enablingPush = true;
+                      _pushSetupMessage = null;
+                    });
+                    try {
+                      final enabled = await ref
+                          .read(mobileControllerProvider.notifier)
+                          .enablePushNotifications();
+                      if (!context.mounted) return;
+                      setState(() {
+                        _pushSetupMessage = enabled
+                            ? 'Background notifications are enabled.'
+                            : 'Notifications could not be enabled. Check system notification permissions and try again.';
+                      });
+                    } on Object catch (error) {
+                      if (!mounted) return;
+                      setState(() {
+                        _pushSetupMessage = userFacingError(error,
+                            summary:
+                                'Could not enable background notifications');
+                      });
+                    } finally {
+                      if (mounted) setState(() => _enablingPush = false);
+                    }
+                  },
           ),
+          if (_pushSetupMessage case final message?)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Semantics(liveRegion: true, child: Text(message)),
+            ),
           SettingsRow.chevron(
             title: 'Disable background notifications',
             leading: _LeadingIcon(Icons.notifications_off_outlined),
             divider: true,
-            onTap: () async {
-              await ref
-                  .read(mobileControllerProvider.notifier)
-                  .disablePushNotifications();
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text(
-                  'Background notifications are disabled for this account.',
-                ),
-              ));
-            },
+            onTap: _enablingPush
+                ? null
+                : () async {
+                    await ref
+                        .read(mobileControllerProvider.notifier)
+                        .disablePushNotifications();
+                    if (!context.mounted) return;
+                    setState(() {
+                      _pushSetupMessage =
+                          'Background notifications are disabled for this account.';
+                    });
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(
+                        'Background notifications are disabled for this account.',
+                      ),
+                    ));
+                  },
           ),
           if (mobile.pushWarning case final warning?) ...[
             SizedBox(height: 10),

@@ -6233,6 +6233,16 @@ final class MobileController extends StateNotifier<MobileState> {
     return pending;
   }
 
+  Future<bool> shouldOfferPushNotifications() async {
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (accountKey == null) return false;
+    // Finish restoring an existing opt-in before offering onboarding.
+    await _activateNotifications();
+    final choice = await api.pushOptInChoice();
+    return _sessionReadyIsCurrent(accountKey, generation) && choice == null;
+  }
+
   Future<void> _requestNotificationDelivery() async {
     try {
       final choice = await api.pushOptInChoice();
