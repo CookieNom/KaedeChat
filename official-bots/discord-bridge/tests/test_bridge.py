@@ -77,6 +77,7 @@ class BridgeTest(unittest.TestCase):
             asyncio.run(client.on_message(message))
             asyncio.run(client.on_message(message))
             self.assertEqual(len(store.pending()), 1)
+            self.assertEqual(store.pending()[0]['content'], 'hello')
             message.author.bot = True
             message.id = 790
             asyncio.run(client.on_message(message))
@@ -89,6 +90,7 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(len(store.pending()), 2)
             self.assertEqual(store.pending()[0]['avatar'], 'https://cdn.discordapp.com/avatar.png')
             self.assertEqual(store.pending()[1]['avatar'], f'https://chat.example/media/assets/{"a" * 64}/thumbnail_128')
+            self.assertEqual(store.pending()[1]['content'], 'reply')
             incoming.e2ee = {'ciphertext': 'secret'}
             incoming.ref = '1000@chat.example'
             asyncio.run(handlers['on_message'](incoming))
@@ -100,12 +102,12 @@ class BridgeTest(unittest.TestCase):
             store.engine.dispose()
             reopened = bridge.Store(Path(directory) / 'bridge.sqlite3')
             reopened.enqueue('discord:789', 'kaede', route['kaede_channel_ref'],
-                             bridge.chunks('Discord · Alice', 'hello'))
+                             bridge.chunks('hello'))
             self.assertEqual(len(reopened.pending()), 1)
             reopened.engine.dispose()
-            parts = bridge.chunks('😀' * 150, '😀' * 4000)
+            parts = bridge.chunks('😀' * 4000)
             self.assertTrue(all(len(p.encode('utf-16-le')) // 2 <= 2000 for p in parts))
-            self.assertEqual(''.join(p.split('] ', 1)[1] for p in parts), '😀' * 4000)
+            self.assertEqual(''.join(parts), '😀' * 4000)
 
     def test_delivery_uses_sdk_and_disables_mentions(self):
         from unittest.mock import AsyncMock, patch

@@ -23,12 +23,9 @@ INTENTS = kaede.Intents(message_content=True, direct_messages=False,
                        interactions=True)
 
 
-def chunks(author, content):
-    # Keep room for labels, including names containing non-BMP Unicode.
-    label = discord.utils.escape_markdown(author.replace("\n", " ").replace("\r", " ")[:150])
-    prefix = f"[{label}] "
-    # 750 code points also fit Discord's 2000 UTF-16-unit limit with the label.
-    return [prefix + content[i:i + 750] for i in range(0, len(content), 750)]
+def chunks(content):
+    # 750 code points fit Discord's limit even with non-BMP Unicode.
+    return [content[i:i + 750] for i in range(0, len(content), 750)]
 
 
 class Store:
@@ -153,7 +150,7 @@ class Bridge(discord.Client):
                 if message.attachments:
                     content += "\n" + "\n".join(a.url for a in message.attachments)
                 self.store.enqueue(f"discord:{message.id}", "kaede", route["kaede_channel_ref"],
-                                   chunks(f"Discord · {message.author.display_name}", content),
+                                   chunks(content),
                                    author=f"Discord · {message.author.display_name}"[:256],
                                    avatar=str(message.author.display_avatar.url))
 
@@ -168,7 +165,7 @@ class Bridge(discord.Client):
                 if message.attachments:
                     content += "\n[Attachments available in KaedeChat]"
                 self.store.enqueue(f"kaede:{message.ref}", "discord", route["discord_channel_id"],
-                                   chunks(f"Kaede · {message.author.handle}", content),
+                                   chunks(content),
                                    author=f"Kaede · {message.author.handle}"[:256],
                                    avatar=(f"https://{message.author.ref.domain}/media/assets/"
                                            f"{message.author.avatar_hash}/thumbnail_128"

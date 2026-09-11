@@ -6,6 +6,6 @@ COPY official-bots/discord-bridge/requirements.txt .
 RUN uv pip install --system --no-cache -r requirements.txt \
     && useradd --uid 10001 --create-home bridge \
     && mkdir /data && chown bridge:bridge /data && chmod 700 /data
-COPY official-bots/discord-bridge/bridge.py official-bots/discord-bridge/pairing.py ./
+COPY --chmod=644 official-bots/discord-bridge/bridge.py official-bots/discord-bridge/pairing.py ./
 USER bridge
 CMD ["python", "bridge.py"]
