@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with: { python-version: "3.12.13" }
+        with: { python-version: "3.13.15" }
       - run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
 
   ci:
@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with: { python-version: "3.12.13" }
+        with: { python-version: "3.13.15" }
       - name: Set client versions from release tag
         shell: bash
         run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
@@ -160,7 +160,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with: { python-version: "3.12.13" }
+        with: { python-version: "3.13.15" }
       - name: Set client versions from release tag
         shell: bash
         run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
@@ -303,7 +303,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with: { python-version: "3.12.13" }
+        with: { python-version: "3.13.15" }
       - name: Set client versions from release tag
         shell: bash
         run: python .github/scripts/check-release-inputs.py --stamp --tag "$GITHUB_REF_NAME"
