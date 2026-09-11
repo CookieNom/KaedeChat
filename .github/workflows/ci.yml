@@ -266,7 +266,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -299,8 +299,11 @@ jobs:
           key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
           enableCrossOsArchive: true
       - name: Check native desktop stack
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: cargo +1.97.1 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+      - name: Link macOS release
+        if: runner.os == 'macOS'
+        run: cargo +1.97.1 build --release --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
       - name: Link Windows release with the shipping CRT configuration
         if: runner.os == 'Windows'
         env:

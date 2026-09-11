@@ -26,7 +26,7 @@ copypasta = "0.10.2"
 crossbeam-queue = "0.3.12"
 futures-util = "0.3.31"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-livekit = { git = "https://github.com/CookieNom/rust-sdks", rev = "5cbee7dc3527ac1e6cefb132825fa1c57c0673bd", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
+livekit = { git = "https://github.com/CookieNom/rust-sdks", rev = "e4a29411e9e2f8061c9e1cb5a44c719cbc3f837b", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["decoding", "input-native"] }
 nnnoiseless = "=0.5.2"
 notify-rust = "4.11.7"
