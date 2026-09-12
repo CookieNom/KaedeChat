@@ -488,6 +488,7 @@ final class MobileState {
     this.gatewayProtocolWarning,
     this.pushWarning,
     this.e2eeActivationEnabled = false,
+    this.e2eeReady = false,
     this.offline = false,
     this.error,
   });
@@ -529,6 +530,7 @@ final class MobileState {
   final String? gatewayProtocolWarning;
   final String? pushWarning;
   final bool e2eeActivationEnabled;
+  final bool e2eeReady;
   final bool offline;
   final String? error;
 
@@ -620,6 +622,7 @@ final class MobileState {
     String? pushWarning,
     bool clearPushWarning = false,
     bool? e2eeActivationEnabled,
+    bool? e2eeReady,
     bool? offline,
     String? error,
     bool clearError = false,
@@ -672,6 +675,7 @@ final class MobileState {
         pushWarning: clearPushWarning ? null : pushWarning ?? this.pushWarning,
         e2eeActivationEnabled:
             e2eeActivationEnabled ?? this.e2eeActivationEnabled,
+        e2eeReady: e2eeReady ?? this.e2eeReady,
         offline: offline ?? this.offline,
         error: clearError ? null : error ?? this.error,
       );
@@ -1294,7 +1298,13 @@ final class MobileController extends StateNotifier<MobileState> {
           state.user?.ref.wire != account) {
         throw StateError('The encryption session changed during startup.');
       }
-      return MobileE2EEClient.initialize(repository, user);
+      final client = await MobileE2EEClient.initialize(repository, user);
+      if (mounted &&
+          generation == _e2eeGeneration &&
+          state.user?.ref.wire == account) {
+        state = state.copyWith(e2eeReady: true);
+      }
+      return client;
     })()
         .catchError((Object error, StackTrace stackTrace) {
       if (generation == _e2eeGeneration && identical(_e2eeFuture, candidate)) {
@@ -1311,6 +1321,9 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> _queueE2eeTeardown({
     Future<void> Function()? afterClose,
   }) {
+    if (mounted && state.e2eeReady) {
+      state = state.copyWith(e2eeReady: false);
+    }
     final previous = _e2eeFuture;
     _e2eeFuture = null;
     _e2eeAccount = null;

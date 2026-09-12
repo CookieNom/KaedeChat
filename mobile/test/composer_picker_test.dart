@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -288,7 +289,7 @@ void main() {
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
 
-    final attach = tester.widget<ListTile>(
+    final attach = tester.widget<SettingsRow>(
       find.byKey(const ValueKey('composer-action-attach')),
     );
     expect(attach.enabled, isFalse);
@@ -303,7 +304,8 @@ void main() {
     );
     expect(
       tester
-          .widget<ListTile>(find.byKey(const ValueKey('composer-action-poll')))
+          .widget<SettingsRow>(
+              find.byKey(const ValueKey('composer-action-poll')))
           .enabled,
       isFalse,
     );

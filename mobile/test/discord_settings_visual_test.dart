@@ -18,6 +18,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -448,6 +449,72 @@ void main() {
     );
   });
 
+  testWidgets(
+      'encryption setup retries errors and follows controller readiness',
+      (tester) async {
+    final user = fixtureUser();
+    final controller = await fixtureController(fixtureGuild(user), user, []);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+      child: MaterialApp(
+          theme: kaedeTheme(), home: const Scaffold(body: SettingsScreen())),
+    ));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('Set up this device'), 400,
+        scrollable: find.byType(Scrollable).first);
+    SettingsRow setup(String title) => tester.widget<SettingsRow>(find.ancestor(
+        of: find.text(title), matching: find.byType(SettingsRow)));
+    expect(setup('Set up this device').enabled, isTrue);
+    await tester.tap(find.text('Set up this device'));
+    await tester.pumpAndSettle();
+    expect(setup('Set up this device').enabled, isTrue);
+    expect(
+        find.textContaining('Could not initialize encryption'), findsOneWidget);
+    controller.state = controller.state.copyWith(e2eeReady: true);
+    await tester.pumpAndSettle();
+    expect(setup('Encryption enabled').enabled, isFalse);
+    final ink = find.descendant(
+        of: find.ancestor(
+            of: find.text('Encryption enabled'),
+            matching: find.byType(SettingsRow)),
+        matching: find.byType(InkWell));
+    expect(tester.widget<InkWell>(ink).onTap, isNull);
+    // Unrelated controller updates must preserve readiness.
+    controller.state = controller.state.copyWith(offline: true);
+    await tester.pumpAndSettle();
+    expect(setup('Encryption enabled').enabled, isFalse);
+    controller.state = controller.state.copyWith(e2eeReady: false);
+    await tester.pumpAndSettle();
+    expect(setup('Set up this device').enabled, isTrue);
+  });
+
+  for (final brightness in Brightness.values) {
+    testWidgets('settings actions have visible boundaries in $brightness',
+        (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(brightness: brightness),
+        home: Scaffold(
+            body: Column(children: [
+          SettingsRow.chevron(title: 'Open settings', onTap: () => taps++),
+          TextButton(onPressed: () {}, child: const Text('Retry')),
+        ])),
+      ));
+      expect(find.byIcon(Icons.chevron_right_rounded), findsOneWidget);
+      final material = tester.widget<Material>(find
+          .descendant(
+              of: find.byType(SettingsRow), matching: find.byType(Material))
+          .first);
+      expect((material.shape! as RoundedRectangleBorder).side.style,
+          BorderStyle.solid);
+      final theme = Theme.of(tester.element(find.byType(TextButton)));
+      expect(theme.textButtonTheme.style!.side!.resolve({})!.style,
+          BorderStyle.solid);
+      await tester.tap(find.text('Open settings'));
+      expect(taps, 1);
+    });
+  }
+
   testWidgets('new account can defer push onboarding without being asked again',
       (tester) async {
     final user = fixtureUser();
@@ -615,11 +682,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
-    // Sessions load through the repository and render as flat rows.
+    // Sessions load through the repository and expose their sign-out actions.
+    await tester.scrollUntilVisible(find.text('Kaede Desktop'), 400,
+        scrollable: find.byType(Scrollable).first);
     expect(find.text('Kaede Desktop'), findsOneWidget);
     expect(find.text('Pixel 9 (Android)'), findsOneWidget);
 
     // Tapping the direct-message toggle saves the notification preference.
+    await tester.scrollUntilVisible(find.text('Direct messages'), -400,
+        scrollable: find.byType(Scrollable).first);
     await tester.tap(find.text('Direct messages'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
@@ -863,6 +934,8 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('Audit'), 400,
+        scrollable: find.byType(Scrollable).first);
     await tester.tap(find.text('Audit'));
     await tester.pumpAndSettle();
 
@@ -1026,6 +1099,8 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('Audit'), 400,
+        scrollable: find.byType(Scrollable).first);
     await tester.tap(find.text('Audit'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('audit-actor-filter')));

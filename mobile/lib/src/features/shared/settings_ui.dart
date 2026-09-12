@@ -1,6 +1,4 @@
-// Discord-flavoured settings building blocks: flat surfaces, uppercase
-// section headers, hover rows and Discord-style toggles. The palette stays
-// Kaede's, so these read as the same product on every surface.
+// Shared settings controls with visible touch targets in both themes.
 import 'package:flutter/material.dart';
 
 /// Theme-aware layers shared by every settings surface. These deliberately use
@@ -189,9 +187,7 @@ Future<bool> showSettingsConfirmation(
     ) ??
     false;
 
-/// One flat settings row: leading glyph, title, optional subtitle and a
-/// trailing control. Pressed rows use the theme's highest container layer,
-/// Discord style, instead of sitting in a bordered card.
+/// Bordered settings action with a trailing control or navigation cue.
 class SettingsRow extends StatelessWidget {
   const SettingsRow({
     super.key,
@@ -203,6 +199,7 @@ class SettingsRow extends StatelessWidget {
     this.minHeight = 50,
     this.divider = false,
     this.danger = false,
+    this.enabled = true,
   });
 
   /// Chevron row used for settings that open a sheet or page.
@@ -215,7 +212,8 @@ class SettingsRow extends StatelessWidget {
     this.minHeight = 50,
     this.divider = false,
     this.danger = false,
-  }) : trailing = null;
+    this.enabled = true,
+  }) : trailing = const Icon(Icons.chevron_right_rounded);
 
   final String title;
   final String? subtitle;
@@ -225,18 +223,23 @@ class SettingsRow extends StatelessWidget {
   final double minHeight;
   final bool divider;
   final bool danger;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final hasSubtitle = subtitle?.isNotEmpty == true;
+    final active = enabled && onTap != null;
+    final disabled = !enabled ||
+        (onTap == null && (trailing is Icon || trailing is DiscordSwitch));
+    final actionable = onTap != null || trailing != null;
     final row = InkWell(
-      onTap: onTap,
+      onTap: active ? onTap : null,
       borderRadius: BorderRadius.circular(10),
       child: ConstrainedBox(
         constraints: BoxConstraints(minHeight: minHeight),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: [
               if (leading case final Widget icon) ...[
@@ -251,8 +254,6 @@ class SettingsRow extends StatelessWidget {
                     children: [
                       Text(
                         title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: danger ? colors.error : colors.onSurface,
                           fontSize: 15,
@@ -263,8 +264,6 @@ class SettingsRow extends StatelessWidget {
                         const SizedBox(height: 1),
                         Text(
                           subtitle!,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: colors.onSurfaceVariant,
                             fontSize: 12.5,
@@ -276,7 +275,9 @@ class SettingsRow extends StatelessWidget {
                   ),
                 ),
               ),
-              if (trailing case final Widget control) ...[
+              if (trailing ??
+                      (active ? const Icon(Icons.chevron_right_rounded) : null)
+                  case final Widget control) ...[
                 const SizedBox(width: 8),
                 control,
               ],
@@ -288,7 +289,29 @@ class SettingsRow extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        row,
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Semantics(
+            button: onTap != null ? true : null,
+            enabled: onTap != null || disabled ? !disabled : null,
+            child: Opacity(
+              opacity: disabled ? .5 : 1,
+              child: Material(
+                color: actionable
+                    ? colors.surfaceContainerLow
+                    : Colors.transparent,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  side: actionable
+                      ? BorderSide(color: colors.outlineVariant)
+                      : BorderSide.none,
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: row,
+              ),
+            ),
+          ),
+        ),
         if (divider)
           Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),

@@ -707,73 +707,12 @@ final class _SectionRow extends StatelessWidget {
   final bool divider;
 
   @override
-  Widget build(BuildContext context) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(10),
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        color: context.kaede.raised,
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child:
-                          Icon(icon, size: 18, color: context.kaede.coralText),
-                    ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            label,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 15,
-                            ),
-                          ),
-                          SizedBox(height: 1),
-                          Text(
-                            description,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: context.kaede.muted,
-                              fontSize: 12,
-                              height: 1.3,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Icon(Icons.chevron_right_rounded,
-                        size: 18, color: context.kaede.muted),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          if (divider)
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: 44),
-              child: SizedBox(
-                height: 1,
-                child: DecoratedBox(
-                  decoration:
-                      BoxDecoration(color: settingsDividerColor(context)),
-                ),
-              ),
-            ),
-        ],
+  Widget build(BuildContext context) => SettingsRow.chevron(
+        title: label,
+        subtitle: description,
+        leading: Icon(icon, color: context.kaede.coralText),
+        onTap: onTap,
+        divider: divider,
       );
 }
 

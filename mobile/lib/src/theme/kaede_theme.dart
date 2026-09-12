@@ -386,6 +386,8 @@ ThemeData kaedeTheme({Brightness brightness = Brightness.dark}) {
     ),
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
+        backgroundColor: KaedeColors.raised,
+        side: const BorderSide(color: KaedeColors.borderStrong),
         foregroundColor: KaedeColors.coralText,
         disabledForegroundColor: KaedeColors.muted,
         minimumSize: const Size(0, 44),
@@ -707,6 +709,17 @@ ThemeData _kaedeLightTheme() {
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(KaedeRadius.small),
         borderSide: const BorderSide(color: coral, width: 1.6),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        backgroundColor: raised,
+        foregroundColor: scheme.primary,
+        side: const BorderSide(color: border),
+        minimumSize: const Size(48, 48),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
+        ),
       ),
     ),
     dividerTheme: const DividerThemeData(color: border, thickness: 1),

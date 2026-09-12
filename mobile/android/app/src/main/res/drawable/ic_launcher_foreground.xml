@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- The bubble fits within the central 66dp safe circle. The launcher
+         supplies the outer mask; do not bake another rounded tile into it. -->
+    <path android:fillColor="#E65D46"
+        android:pathData="M31,31H77V62C77,70 71,76 63,76H46L36,81L38,70C33,67 31,63 31,58Z" />
+    <path android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFF8EF" android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M42,44H66M42,54H59" />
+</vector>

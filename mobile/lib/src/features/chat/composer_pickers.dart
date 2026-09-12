@@ -9,6 +9,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -689,34 +690,34 @@ Future<ComposerAction?> showComposerActionPicker(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              ListTile(
+              SettingsRow.chevron(
                 key: ValueKey('composer-action-attach'),
                 leading: Icon(Icons.attach_file_rounded),
-                title: Text('Attach files'),
-                subtitle: Text(canAttach
+                title: 'Attach files',
+                subtitle: canAttach
                     ? 'Upload images, video, audio, or documents'
-                    : 'You do not have permission to attach files'),
+                    : 'You do not have permission to attach files',
                 enabled: canAttach,
                 onTap: canAttach
                     ? () => Navigator.pop(context, ComposerAction.attach)
                     : null,
               ),
-              ListTile(
+              SettingsRow.chevron(
                 key: ValueKey('composer-action-media'),
                 leading: Icon(Icons.emoji_emotions_outlined),
-                title: Text('GIFs, stickers, and emoji'),
-                subtitle: Text(gifsAllowed
+                title: 'GIFs, stickers, and emoji',
+                subtitle: gifsAllowed
                     ? 'Open the media picker'
-                    : 'GIFs are unavailable here; stickers and emoji work'),
+                    : 'GIFs are unavailable here; stickers and emoji work',
                 onTap: () => Navigator.pop(context, ComposerAction.media),
               ),
-              ListTile(
+              SettingsRow.chevron(
                 key: ValueKey('composer-action-poll'),
                 leading: Icon(Icons.poll_outlined),
-                title: Text('Create a poll'),
-                subtitle: Text(canCreatePoll
+                title: 'Create a poll',
+                subtitle: canCreatePoll
                     ? 'Ask up to 10 choices with an optional emoji'
-                    : 'Polls are unavailable here or you lack permission'),
+                    : 'Polls are unavailable here or you lack permission',
                 enabled: canCreatePoll,
                 onTap: canCreatePoll
                     ? () => Navigator.pop(context, ComposerAction.poll)

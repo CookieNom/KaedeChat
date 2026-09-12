@@ -158,11 +158,12 @@ final class _InstanceAdministrationScreenState
               subtitle: Text(user.ref.wire),
             ),
             if (can('users.manage'))
-              ListTile(
+              SettingsRow(
                 leading: Icon(user.restricted
                     ? Icons.lock_open_outlined
                     : Icons.block_outlined),
-                title: Text(user.restricted ? 'Restore access' : 'Ban account'),
+                title: user.restricted ? 'Restore access' : 'Ban account',
+                danger: !user.restricted,
                 onTap: () => Navigator.pop(context, 'access'),
               ),
             if (can('users.manage') && user.accountType == 'human')

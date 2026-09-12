@@ -26,9 +26,7 @@ import 'package:local_auth/local_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Account settings, laid out Discord-style: one flat scrolling surface with
-/// uppercase section headers, hover rows and Discord toggles instead of a
-/// stack of bordered cards.
+/// Account settings with visible actions and persistent control states.
 final class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
@@ -46,6 +44,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   var _loading = true;
   var _saving = false;
   var _enablingPush = false;
+  var _initializingEncryption = false;
   String? _pushSetupMessage;
   var _biometricLock = false;
   var _biometricLockTimeout = 30;
@@ -85,14 +84,18 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _initializeEncryption() async {
-    setState(() => _saving = true);
+    if (_initializingEncryption ||
+        ref.read(mobileControllerProvider).e2eeReady) {
+      return;
+    }
+    setState(() => _initializingEncryption = true);
     try {
       await ref.read(mobileControllerProvider.notifier).e2eeClient();
       _showSuccess('This device is ready for end-to-end encryption.');
     } on Object catch (error) {
       _showError(error, summary: 'Could not initialize encryption');
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) setState(() => _initializingEncryption = false);
     }
   }
 
@@ -731,11 +734,26 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           SettingsSectionHeader('Security',
               subheading:
                   'Encryption keys unlock your account vault on each trusted device. Your instance stores only ciphertext.'),
-          SettingsRow.chevron(
-            title: 'Set up this device',
-            subtitle: 'Enable end-to-end encryption on this phone.',
+          SettingsRow(
+            title: mobile.e2eeReady
+                ? 'Encryption enabled'
+                : _initializingEncryption
+                    ? 'Setting up encryption…'
+                    : 'Set up this device',
+            subtitle: mobile.e2eeReady
+                ? 'This device is ready for end-to-end encryption.'
+                : 'Enable end-to-end encryption on this phone.',
             leading: _LeadingIcon(Icons.key_rounded),
-            onTap: _saving ? null : _initializeEncryption,
+            enabled: !_saving && !_initializingEncryption && !mobile.e2eeReady,
+            trailing: mobile.e2eeReady
+                ? const Icon(Icons.check_circle_outline_rounded)
+                : _initializingEncryption
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.add_moderator_outlined),
+            onTap: _initializeEncryption,
           ),
           SettingsRow.chevron(
             title: 'Encryption identity',

@@ -506,9 +506,10 @@ final class _DeveloperTeamsScreenState
                 ],
               ),
             ),
-            ListTile(
+            SettingsRow(
               leading: const Icon(Icons.person_remove_outlined),
-              title: const Text('Remove from team'),
+              title: 'Remove from team',
+              danger: true,
               onTap: () => Navigator.pop(context, 'remove'),
             ),
           ],
