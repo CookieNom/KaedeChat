@@ -21,40 +21,16 @@ list. Already-selected languages, unsupported languages, and dismissed offers
 also do not produce a pane. Accepting chooses System default. Dismissal is
 remembered on that browser/installation; it does not alter the account language.
 
-English is the fallback for missing translations. The initial Japanese catalog
-includes the language controls, suggestion, and common interface labels; it is
-**not a complete Japanese translation**. The remaining English source messages
-are available for translators in Weblate. Do not copy English strings into a
-target catalog merely to inflate its completion percentage.
+English is the fallback for missing translations. Translation progress and
+review status are tracked in Weblate.
 
-## Connect the hosted project
+## Translation workflow
 
-The hosted `kaede-chat` project now has `frontend` and linked `mobile`
-components. During implementation, the frontend tracks
-`codex/weblate-localization`; after merging that branch, change its repository
-branch to `main` in Weblate. Mobile inherits that branch.
-
-For the final GitHub connection, register an App in Manage → Code-hosting
-connections, install it for `CookieNom/KaedeChat`, and connect it to the project's
-workspace. Use Weblate's **Migrate to GitHub App** action for the existing
-frontend component; mobile retains its linked repository. This enables App
-authentication, incoming push notifications, and translation pull requests.
-Keep the existing SSH deploy key until App access has been verified, then remove
-the deploy key from GitHub if no component still uses it.
-
-The catalogs must first exist on a branch accessible to Weblate. From the
-repository root, preview the exact configuration, then apply it after pushing:
-
-```sh
-python3 scripts/configure-weblate.py --branch main
-python3 scripts/configure-weblate.py --branch main --apply
-```
-
-The apply command prompts for your Weblate administrator **API token**, found
-in your Weblate profile. Alternatively supply `WEBLATE_API_TOKEN` through your
-local environment. Do not put credentials in this repository. The script creates
-missing resources and preserves existing ones. It does not push your code or
-configure GitHub credentials.
+Translate and review messages in the
+[KaedeChat project](https://weblate.kaede.chat/projects/kaede-chat/).
+Weblate uses the KaedeChat GitHub App for repository access, source updates,
+and translation pull requests. Web and desktop share the frontend component;
+mobile has its own component linked to the same repository.
 
 | Setting | Frontend component | Mobile component |
 | --- | --- | --- |
@@ -67,17 +43,15 @@ configure GitHub credentials.
 | New-language template | Empty | Empty |
 | Repository | `https://github.com/CookieNom/KaedeChat.git` | `weblate://kaede-chat/frontend` |
 
-The linked mobile repository prevents independent working copies from creating
-conflicting translation commits. Keep English source editing in the code review
-workflow. The API bootstrap uses plain Git and the service's SSH deploy key to
-push into `weblate-translations`; grant that key write access before enabling
-delivery. It can import the public repository before App registration. Migrate
-to the GitHub App as described above for automatic pull requests and incoming
-notifications. A plain Git/SSH setup requires a separate GitHub push webhook
-pointing to `https://weblate.kaede.chat/hooks/github/` and manual PR creation.
+The linked mobile component shares the frontend component's repository and
+source branch. English source changes belong in application code reviews;
+translation changes return through Weblate pull requests. Review the translated
+text and CI results before merging. Web deployments receive new translations
+on deployment; desktop and mobile receive them in their next app release.
 
-Review and merge translation PRs after CI passes. Web deployments receive the
-new catalog on deployment; desktop/mobile receive it in their next app release.
+The repository branch configured in Weblate must contain these catalogs. When
+an integration branch is merged, update the frontend component's source branch
+to the maintained application branch; mobile inherits the change.
 
 ## Add another language
 
