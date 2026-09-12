@@ -25,13 +25,10 @@ const _trackerEvents = <String>{
   'TRACKER_TASK_DELETE',
 };
 
+// Reconnecting refreshes the board without discarding an open task or draft.
 bool trackerGatewayEventInvalidatesOpenEditors(GatewayEvent event) => const {
       'CHANNEL_ACCESS_REVOKED',
       'CHANNEL_PERMISSION_UPDATE',
-      'READY',
-      'RESUMED',
-      'INVALID_SESSION',
-      'GATEWAY_SEQUENCE_GAP',
     }.contains(event.name);
 
 bool trackerRefreshMustDiscardBoard(Object error) =>
@@ -245,7 +242,10 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         // Never leave tracker contents visible after access is revoked. For a
         // transient background failure, retain the last board but show the
         // persistent retry banner so stale data is not presented as current.
-        if (trackerRefreshMustDiscardBoard(error)) _board = null;
+        if (trackerRefreshMustDiscardBoard(error)) {
+          _board = null;
+          _dismissTrackerOverlay();
+        }
       });
     }
   }

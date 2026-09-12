@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/domain/client_preferences.dart';
 import 'package:kaede_mobile/src/features/auth/auth_screen.dart';
 import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
 import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
+import 'package:kaede_mobile/src/features/auth/session_lock.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
@@ -26,6 +27,7 @@ final class KaedeApp extends ConsumerStatefulWidget {
 final class _KaedeAppState extends ConsumerState<KaedeApp>
     with WidgetsBindingObserver {
   late final GoRouter _router;
+  final _lockObserver = SessionLockObserver();
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   bool? _networkAvailable;
 
@@ -36,6 +38,7 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen(_handleConnectivity);
     _router = GoRouter(
+      observers: [_lockObserver],
       routes: <RouteBase>[
         GoRoute(
           path: '/',
@@ -121,6 +124,7 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
       final voice = ref.read(voiceSessionProvider);
       if (next.phase == SessionPhase.signedOut &&
           previous?.phase != SessionPhase.signedOut) {
+        _lockObserver.discardTransientRoutes();
         voice.leave();
         return;
       }
@@ -155,33 +159,48 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
       routerConfig: _router,
       builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
         value: kaedeSystemOverlayFor(Theme.of(context).brightness),
-        child: child ?? SizedBox.shrink(),
+        child: SessionLock(
+          observer: _lockObserver,
+          locked: preferences.phase == SessionPhase.locked,
+          lockScreen: const _LockScreen(),
+          child: child ?? const SizedBox.shrink(),
+        ),
       ),
     );
   }
 }
 
-final class _DeepLinkGate extends ConsumerWidget {
+final class _DeepLinkGate extends ConsumerStatefulWidget {
   const _DeepLinkGate({required this.link});
   final MobileDeepLink link;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DeepLinkGate> createState() => _DeepLinkGateState();
+}
+
+final class _DeepLinkGateState extends ConsumerState<_DeepLinkGate> {
+  Widget _content = const _LaunchScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final link = widget.link;
     final phase = ref.watch(mobileControllerProvider).phase;
-    if (phase == SessionPhase.restoring) return const _LaunchScreen();
-    if (phase == SessionPhase.locked) return const _LockScreen();
+    if (phase == SessionPhase.locked) return _content;
+    if (phase == SessionPhase.restoring) {
+      return _content = const _LaunchScreen();
+    }
     if ((phase == SessionPhase.signedOut ||
             phase == SessionPhase.authenticating) &&
         link.requiresSession) {
-      return AuthScreen(
+      return _content = AuthScreen(
         initialInstance: link.instance.value,
         notice: link.signInNotice,
       );
     }
     if (link.kind == MobileLinkKind.applicationInstall) {
-      return ApplicationInstallDeepLinkScreen(link: link);
+      return _content = ApplicationInstallDeepLinkScreen(link: link);
     }
-    return DeepLinkActionScreen(link: link);
+    return _content = DeepLinkActionScreen(link: link);
   }
 }
 
@@ -211,23 +230,33 @@ final class _InvalidLinkScreen extends StatelessWidget {
       );
 }
 
-final class _SessionGate extends ConsumerWidget {
+final class _SessionGate extends ConsumerStatefulWidget {
   const _SessionGate({this.destination});
 
   final PushDestination? destination;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return switch (ref.watch(mobileControllerProvider).phase) {
+  ConsumerState<_SessionGate> createState() => _SessionGateState();
+}
+
+final class _SessionGateState extends ConsumerState<_SessionGate> {
+  Widget _content = const _LaunchScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final phase = ref.watch(mobileControllerProvider).phase;
+    // Keep the exact session subtree mounted while the root lock hides it.
+    if (phase == SessionPhase.locked) return _content;
+    return _content = switch (phase) {
       SessionPhase.restoring => const _LaunchScreen(),
-      SessionPhase.locked => const _LockScreen(),
+      SessionPhase.locked => _content,
       SessionPhase.signedOut || SessionPhase.authenticating => AuthScreen(),
-      SessionPhase.ready => destination == null
+      SessionPhase.ready => widget.destination == null
           ? PushOnboarding(
               key: ValueKey(ref.read(mobileControllerProvider).user?.ref.wire),
               child: const MobileShell(),
             )
-          : _DestinationGate(destination: destination!),
+          : _DestinationGate(destination: widget.destination!),
     };
   }
 }

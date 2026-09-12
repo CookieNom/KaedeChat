@@ -398,14 +398,10 @@ void main() {
     );
   });
 
-  test('security and resync events invalidate open tracker editors', () {
+  test('security events invalidate open tracker editors', () {
     for (final name in const <String>{
       'CHANNEL_ACCESS_REVOKED',
       'CHANNEL_PERMISSION_UPDATE',
-      'READY',
-      'RESUMED',
-      'INVALID_SESSION',
-      'GATEWAY_SEQUENCE_GAP',
     }) {
       expect(
         trackerGatewayEventInvalidatesOpenEditors(
@@ -425,6 +421,23 @@ void main() {
       ),
       isFalse,
     );
+  });
+
+  test('reconnecting preserves open tracker tasks and unsaved editors', () {
+    for (final name in const <String>{
+      'READY',
+      'RESUMED',
+      'INVALID_SESSION',
+      'GATEWAY_SEQUENCE_GAP',
+    }) {
+      expect(
+        trackerGatewayEventInvalidatesOpenEditors(
+          GatewayEvent(name, const <String, Object?>{}, 1),
+        ),
+        isFalse,
+        reason: name,
+      );
+    }
   });
 
   test('revoked or missing access discards cached tracker contents', () {
