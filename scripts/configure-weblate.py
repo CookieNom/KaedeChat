@@ -17,7 +17,8 @@ def main():
     args = parser.parse_args()
     config = json.loads((Path(__file__).resolve().parents[1] / 'docs/localization/weblate.json').read_text())
     for component in config['components']:
-        component['branch'] = args.branch
+        if not component['repo'].startswith('weblate://'):
+            component['branch'] = args.branch
     if not args.apply:
         print(json.dumps(config, indent=2))
         return

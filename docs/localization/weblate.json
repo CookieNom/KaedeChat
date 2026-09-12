@@ -18,13 +18,14 @@
       "file_format": "json",
       "source_language": "en",
       "check_flags": "icu-message-format",
-      "edit_template": false
+      "edit_template": false,
+      "push": "git@github.com:CookieNom/KaedeChat.git",
+      "push_on_commit": true
     },
     {
       "name": "Mobile",
       "slug": "mobile",
       "repo": "weblate://kaede-chat/frontend",
-      "branch": "main",
       "vcs": "git",
       "filemask": "mobile/lib/l10n/app_*.arb",
       "template": "mobile/lib/l10n/app_en.arb",

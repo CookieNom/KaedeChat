@@ -29,6 +29,19 @@ target catalog merely to inflate its completion percentage.
 
 ## Connect the hosted project
 
+The hosted `kaede-chat` project now has `frontend` and linked `mobile`
+components. During implementation, the frontend tracks
+`codex/weblate-localization`; after merging that branch, change its repository
+branch to `main` in Weblate. Mobile inherits that branch.
+
+For the final GitHub connection, register an App in Manage → Code-hosting
+connections, install it for `CookieNom/KaedeChat`, and connect it to the project's
+workspace. Use Weblate's **Migrate to GitHub App** action for the existing
+frontend component; mobile retains its linked repository. This enables App
+authentication, incoming push notifications, and translation pull requests.
+Keep the existing SSH deploy key until App access has been verified, then remove
+the deploy key from GitHub if no component still uses it.
+
 The catalogs must first exist on a branch accessible to Weblate. From the
 repository root, preview the exact configuration, then apply it after pushing:
 
@@ -56,12 +69,12 @@ configure GitHub credentials.
 
 The linked mobile repository prevents independent working copies from creating
 conflicting translation commits. Keep English source editing in the code review
-workflow. In Weblate's repository integration settings, connect GitHub with
-repository access, select pull-request delivery, and target a translation branch
-such as `weblate-translations`. Configure the integration's push notifications
-so Weblate fetches new source strings. The API bootstrap defaults to plain Git
-so repository import does not require an unconfigured GitHub App; GitHub
-credentials and PR delivery are a separate administrator setup step.
+workflow. The API bootstrap uses plain Git and the service's SSH deploy key to
+push into `weblate-translations`; grant that key write access before enabling
+delivery. It can import the public repository before App registration. Migrate
+to the GitHub App as described above for automatic pull requests and incoming
+notifications. A plain Git/SSH setup requires a separate GitHub push webhook
+pointing to `https://weblate.kaede.chat/hooks/github/` and manual PR creation.
 
 Review and merge translation PRs after CI passes. Web deployments receive the
 new catalog on deployment; desktop/mobile receive it in their next app release.

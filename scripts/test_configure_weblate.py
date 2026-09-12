@@ -24,7 +24,10 @@ class WeblateSetupTest(unittest.TestCase):
                     key = f'projects/{payload["slug"]}/'
                 else:
                     key = f'components/kaede-chat/{payload["slug"]}/'
-                    self.assertEqual(payload['branch'], 'localization')
+                    if payload['repo'].startswith('weblate://'):
+                        self.assertNotIn('branch', payload)
+                    else:
+                        self.assertEqual(payload['branch'], 'localization')
                 resources[key] = payload
                 created.append(key)
                 return io.BytesIO(json.dumps(payload).encode())
