@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/instance_administration_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/instance_administration.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
@@ -99,7 +99,8 @@ final class _AdministrationAttachmentViewerState
       setState(() {
         _error = userFacingError(
           error,
-          summary: 'Could not load this report attachment',
+          summary: L10n.of(context)
+              .ui_could_not_load_this_report_attachment_29c41078,
         );
         _loading = false;
       });
@@ -124,7 +125,8 @@ final class _AdministrationAttachmentViewerState
         SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not save or share this attachment',
+            summary: L10n.of(context)
+                .ui_could_not_save_or_share_this_attachment_f0b84af3,
           )),
         ),
       );
@@ -139,7 +141,7 @@ final class _AdministrationAttachmentViewerState
           title: Text(_filename),
           actions: [
             IconButton(
-              tooltip: 'Save or share original',
+              tooltip: L10n.of(context).ui_save_or_share_original_e4861e29,
               onPressed: _file == null || _sharing ? null : _share,
               icon: _sharing
                   ? const SizedBox.square(
@@ -168,7 +170,8 @@ final class _AdministrationAttachmentViewerState
           maxScale: 5,
           child: Image.file(
             file,
-            semanticLabel: 'Preview of $_filename',
+            semanticLabel: L10n.of(context)
+                .ui_preview_of_value0_9ed03afd((_filename).toString()),
             errorBuilder: (_, __, ___) => _GenericEvidence(
                 filename: _filename, contentType: _contentType),
           ),
@@ -190,7 +193,9 @@ final class _AdministrationAttachmentViewerState
                 ValueListenableBuilder<VideoPlayerValue>(
                   valueListenable: video,
                   builder: (_, value, __) => IconButton.filledTonal(
-                    tooltip: value.isPlaying ? 'Pause' : 'Play',
+                    tooltip: value.isPlaying
+                        ? L10n.of(context).ui_pause_44f9bf2d
+                        : L10n.of(context).ui_play_29ab6f83,
                     onPressed: value.isPlaying ? video.pause : video.play,
                     icon: Icon(value.isPlaying
                         ? Icons.pause_rounded
@@ -225,7 +230,9 @@ final class _AdministrationAttachmentViewerState
                       ),
               icon: Icon(
                   playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
-              label: Text(playing ? 'Pause audio' : 'Play audio'),
+              label: Text(playing
+                  ? L10n.of(context).ui_pause_audio_27fcc163
+                  : L10n.of(context).ui_play_audio_a9e9b30d),
             );
           },
         ),
@@ -257,8 +264,9 @@ final class _GenericEvidence extends StatelessWidget {
               Text(type, style: Theme.of(context).textTheme.bodySmall),
             ],
             const SizedBox(height: 12),
-            const Text(
-              'No inline preview is available. Use Save or share original.',
+            Text(
+              L10n.of(context)
+                  .ui_no_inline_preview_is_available_use_save_or_sh_6c07b94d,
               textAlign: TextAlign.center,
             ),
           ],
@@ -286,7 +294,7 @@ final class _EvidenceFailure extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: retry,
                 icon: const Icon(Icons.refresh_rounded),
-                label: const Text('Try again'),
+                label: Text(L10n.of(context).ui_try_again_213e90fa),
               ),
             ],
           ),

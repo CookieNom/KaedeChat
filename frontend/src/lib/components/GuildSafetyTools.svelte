@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import {
     autoModPayload,
@@ -257,7 +259,7 @@
       );
     } catch (caught) {
       if (!controller.signal.aborted)
-        automodError = userErrorMessage(caught, 'Could not load AutoMod rules.');
+        automodError = userErrorMessage(caught, $t('ui_could_not_load_automod_rules_8918d442'));
     }
   }
 
@@ -267,11 +269,11 @@
     const payload = autoModPayload(draft);
     const actions = payload.actions as unknown[];
     if (!draft.name.trim()) {
-      automodError = 'Give this AutoMod rule a name.';
+      automodError = $t('ui_give_this_automod_rule_a_name_183d4bf3');
       return;
     }
     if (!actions.length) {
-      automodError = 'Choose at least one action for this AutoMod rule.';
+      automodError = $t('ui_choose_at_least_one_action_for_this_automod_r_bd13c1f8');
       return;
     }
     if (
@@ -279,15 +281,15 @@
       !uniqueNonemptyLines(draft.keywords).length &&
       !uniqueNonemptyLines(draft.regexPatterns).length
     ) {
-      automodError = 'Add at least one keyword, wildcard pattern, or safe regular expression.';
+      automodError = $t('ui_add_at_least_one_keyword_wildcard_pattern_or__a79eaca3');
       return;
     }
     if (draft.triggerType === 'keyword_preset' && !draft.presets.length) {
-      automodError = 'Choose at least one built-in keyword filter.';
+      automodError = $t('ui_choose_at_least_one_built_in_keyword_filter_69d19a8a');
       return;
     }
     if (draft.alertMessage && !draft.alertChannelRef) {
-      automodError = 'Choose a plaintext text channel for AutoMod alerts.';
+      automodError = $t('ui_choose_a_plaintext_text_channel_for_automod_a_a61ef142');
       return;
     }
     automodBusy = true;
@@ -311,7 +313,7 @@
       automodNotice = updating ? 'AutoMod rule saved.' : 'AutoMod rule created.';
     } catch (caught) {
       if (!controller.signal.aborted)
-        automodError = userErrorMessage(caught, 'Could not save the AutoMod rule.');
+        automodError = userErrorMessage(caught, $t('ui_could_not_save_the_automod_rule_d2fbd7f2'));
     } finally {
       automodBusy = false;
     }
@@ -330,10 +332,13 @@
       );
       rules = rules.filter((item) => item.id !== rule.id);
       editRule();
-      automodNotice = 'AutoMod rule deleted.';
+      automodNotice = $t('ui_automod_rule_deleted_e2839077');
     } catch (caught) {
       if (!controller.signal.aborted)
-        automodError = userErrorMessage(caught, 'Could not delete the AutoMod rule.');
+        automodError = userErrorMessage(
+          caught,
+          $t('ui_could_not_delete_the_automod_rule_b9b6fc7a')
+        );
     } finally {
       automodBusy = false;
     }
@@ -353,7 +358,10 @@
       pruneEstimate = result.pruned;
     } catch (caught) {
       if (!controller.signal.aborted)
-        pruneError = userErrorMessage(caught, 'Could not estimate inactive members.');
+        pruneError = userErrorMessage(
+          caught,
+          $t('ui_could_not_estimate_inactive_members_0a6e509c')
+        );
     } finally {
       pruneBusy = false;
     }
@@ -382,7 +390,7 @@
       pruneEstimate = null;
     } catch (caught) {
       if (!controller.signal.aborted)
-        pruneError = userErrorMessage(caught, 'Could not prune inactive members.');
+        pruneError = userErrorMessage(caught, $t('ui_could_not_prune_inactive_members_da18a6c8'));
     } finally {
       pruneBusy = false;
     }
@@ -393,11 +401,11 @@
     if (bulkBusy) return;
     const userIds = uniqueNonemptyLines(bulkUsers);
     if (!userIds.length) {
-      bulkError = 'Enter at least one user reference, one per line.';
+      bulkError = $t('ui_enter_at_least_one_user_reference_one_per_lin_33c8a26b');
       return;
     }
     if (userIds.length > 200) {
-      bulkError = 'Bulk bans can include at most 200 users at a time.';
+      bulkError = $t('ui_bulk_bans_can_include_at_most_200_users_at_a__4e32ef30');
       return;
     }
     if (
@@ -424,7 +432,7 @@
       );
     } catch (caught) {
       if (!controller.signal.aborted)
-        bulkError = userErrorMessage(caught, 'Could not complete the bulk ban.');
+        bulkError = userErrorMessage(caught, $t('ui_could_not_complete_the_bulk_ban_bb10a7bf'));
     } finally {
       bulkBusy = false;
     }
@@ -488,7 +496,7 @@
       for (const sound of sounds) setSoundDraft(sound);
     } catch (caught) {
       if (!controller.signal.aborted)
-        soundError = userErrorMessage(caught, 'Could not load guild sounds.');
+        soundError = userErrorMessage(caught, $t('ui_could_not_load_guild_sounds_c6603443'));
     }
   }
 
@@ -496,11 +504,11 @@
     event.preventDefault();
     if (!canCreateSounds || !soundFile || soundBusy) return;
     if (!['audio/mpeg', 'audio/ogg'].includes(soundFile.type)) {
-      soundError = 'Choose an MP3 or Ogg audio file.';
+      soundError = $t('ui_choose_an_mp3_or_ogg_audio_file_c921fa52');
       return;
     }
     if (soundFile.size > 512 * 1024) {
-      soundError = 'Soundboard audio can be at most 512 KiB.';
+      soundError = $t('ui_soundboard_audio_can_be_at_most_512_kib_610d3555');
       return;
     }
     soundBusy = true;
@@ -561,7 +569,7 @@
       soundNotice = `“${result.name}” is ready to play.`;
     } catch (caught) {
       if (!controller.signal.aborted)
-        soundError = userErrorMessage(caught, 'Could not upload the sound.');
+        soundError = userErrorMessage(caught, $t('ui_could_not_upload_the_sound_d991315e'));
     } finally {
       soundBusy = false;
     }
@@ -608,7 +616,7 @@
       soundNotice = `“${updated.name}” was updated.`;
     } catch (caught) {
       if (!controller.signal.aborted)
-        soundError = userErrorMessage(caught, 'Could not update the sound.');
+        soundError = userErrorMessage(caught, $t('ui_could_not_update_the_sound_61a120de'));
     } finally {
       soundBusy = false;
     }
@@ -632,7 +640,7 @@
       soundNotice = `“${sound.name}” was deleted.`;
     } catch (caught) {
       if (!controller.signal.aborted)
-        soundError = userErrorMessage(caught, 'Could not delete the sound.');
+        soundError = userErrorMessage(caught, $t('ui_could_not_delete_the_sound_e0716052'));
     } finally {
       soundBusy = false;
     }
@@ -640,7 +648,7 @@
 
   async function playSound(sound: SoundboardSound) {
     if (!playbackChannel || soundBusy) {
-      soundError = 'Choose the voice channel you are currently connected to.';
+      soundError = $t('ui_choose_the_voice_channel_you_are_currently_co_cf79b4f1');
       return;
     }
     soundBusy = true;
@@ -658,7 +666,7 @@
       soundNotice = `Playing “${sound.name}” for everyone in the voice channel.`;
     } catch (caught) {
       if (!controller.signal.aborted)
-        soundError = userErrorMessage(caught, 'Could not play the sound in voice.');
+        soundError = userErrorMessage(caught, $t('ui_could_not_play_the_sound_in_voice_141c3d38'));
     } finally {
       soundBusy = false;
     }
@@ -675,17 +683,17 @@
   <section id="automod" class="tool-section">
     <header>
       <div>
-        <h2>AutoMod</h2>
-        <p>Block harmful content, alert moderators, and apply bounded timeouts.</p>
+        <h2>{$t('ui_automod_a3ed9717')}</h2>
+        <p>{$t('ui_block_harmful_content_alert_moderators_and_ap_de93c7cd')}</p>
       </div>
       <button type="button" class="secondary" disabled={automodBusy} onclick={() => editRule()}
-        >New rule</button
+        >{$t('ui_new_rule_99cd24ef')}</button
       >
     </header>
     {#if automodError}<p class="error" role="alert">{automodError}</p>{/if}
     {#if automodNotice}<p class="notice" role="status">{automodNotice}</p>{/if}
     <div class="split">
-      <aside class="rule-list" aria-label="AutoMod rules">
+      <aside class="rule-list" aria-label={$t('ui_automod_rules_52999507')}>
         {#each rules as rule (rule.id)}
           <button
             class:active={selectedRuleId === rule.id}
@@ -693,18 +701,18 @@
             onclick={() => editRule(rule)}
           >
             <span>{rule.name}</span><small
-              >{rule.enabled ? 'Enabled' : 'Disabled'} · {rule.trigger_type.replaceAll(
+              >{rule.enabled ? $t('ui_enabled_92c1cdfd') : $t('ui_disabled_75081b59')} · {rule.trigger_type.replaceAll(
                 '_',
                 ' '
               )}</small
             >
           </button>
-        {:else}<p>No AutoMod rules yet.</p>{/each}
+        {:else}<p>{$t('ui_no_automod_rules_yet_fd6ff20b')}</p>{/each}
       </aside>
       <form class="card editor" onsubmit={saveRule}>
         <div class="form-grid two">
           <label
-            ><span>Rule name</span><input
+            ><span>{$t('ui_rule_name_7c9de4e8')}</span><input
               bind:value={draft.name}
               minlength="1"
               maxlength="100"
@@ -713,49 +721,51 @@
             /></label
           >
           <label
-            ><span>Trigger</span>
+            ><span>{$t('ui_trigger_8b9c6437')}</span>
             <select
               value={draft.triggerType}
               disabled={automodBusy}
               onchange={(event) =>
                 normalizeDraftForTrigger(event.currentTarget.value as AutoModTrigger)}
             >
-              <option value="keyword">Keyword or regex</option><option value="spam">Spam</option
-              ><option value="keyword_preset">Keyword preset</option><option value="mention_spam"
-                >Mention spam</option
-              ><option value="member_profile">Member profile</option>
+              <option value="keyword">{$t('ui_keyword_or_regex_07c7da52')}</option><option
+                value="spam">{$t('ui_spam_94a9eac4')}</option
+              ><option value="keyword_preset">{$t('ui_keyword_preset_23173fae')}</option><option
+                value="mention_spam">{$t('ui_mention_spam_5bf48c74')}</option
+              ><option value="member_profile">{$t('ui_member_profile_4df32473')}</option>
             </select>
           </label>
         </div>
         <label class="check"
           ><input type="checkbox" bind:checked={draft.enabled} disabled={automodBusy} /><span
-            ><strong>Enabled</strong><small
-              >Evaluate new matching events immediately after saving.</small
+            ><strong>{$t('ui_enabled_92c1cdfd')}</strong><small
+              >{$t('ui_evaluate_new_matching_events_immediately_afte_88a28e01')}</small
             ></span
           ></label
         >
         {#if draft.triggerType === 'keyword' || draft.triggerType === 'member_profile'}
           <div class="form-grid two">
             <label
-              ><span>Keywords and wildcard patterns</span><small
-                >One per line; * is supported.</small
+              ><span>{$t('ui_keywords_and_wildcard_patterns_e64d2bbd')}</span><small
+                >{$t('ui_one_per_line_is_supported_3a7e6f05')}</small
               ><textarea bind:value={draft.keywords} rows="5" maxlength="61000"></textarea></label
             >
             <label
-              ><span>Safe regular expressions</span><small
-                >One per line; lookarounds and backreferences are rejected.</small
+              ><span>{$t('ui_safe_regular_expressions_1bef4879')}</span><small
+                >{$t('ui_one_per_line_lookarounds_and_backreferences_a_732f5ac1')}</small
               ><textarea bind:value={draft.regexPatterns} rows="5" maxlength="2700"
               ></textarea></label
             >
           </div>
           <label
-            ><span>Allowed terms</span><small>One per line. These bypass the keyword matches.</small
+            ><span>{$t('ui_allowed_terms_4f8e356f')}</span><small
+              >{$t('ui_one_per_line_these_bypass_the_keyword_matches_5048c175')}</small
             ><textarea bind:value={draft.allowList} rows="3"></textarea></label
           >
         {:else if draft.triggerType === 'keyword_preset'}
           <fieldset>
-            <legend>Built-in filters</legend>
-            {#each [['profanity', 'Profanity'], ['sexual_content', 'Sexual content'], ['slurs', 'Slurs']] as preset (preset[0])}
+            <legend>{$t('ui_built_in_filters_72f4cc8b')}</legend>
+            {#each [['profanity', $t('ui_profanity_ec602e94')], ['sexual_content', $t('ui_sexual_content_cedfe045')], ['slurs', $t('ui_slurs_55ee9fcd')]] as preset (preset[0])}
               <label class="check compact"
                 ><input
                   type="checkbox"
@@ -769,13 +779,15 @@
             {/each}
           </fieldset>
           <label
-            ><span>Allowed terms</span><textarea bind:value={draft.allowList} rows="3"
+            ><span>{$t('ui_allowed_terms_4f8e356f')}</span><textarea
+              bind:value={draft.allowList}
+              rows="3"
             ></textarea></label
           >
         {:else if draft.triggerType === 'mention_spam'}
           <div class="form-grid two">
             <label
-              ><span>Mention limit</span><input
+              ><span>{$t('ui_mention_limit_707d428c')}</span><input
                 type="number"
                 min="1"
                 max="50"
@@ -784,41 +796,46 @@
             >
             <label class="check"
               ><input type="checkbox" bind:checked={draft.mentionRaidProtection} /><span
-                ><strong>Raid protection</strong><small
-                  >Use coordinated-burst detection in addition to the per-message limit.</small
+                ><strong>{$t('ui_raid_protection_675bdb8c')}</strong><small
+                  >{$t('ui_use_coordinated_burst_detection_in_addition_t_da67dd53')}</small
                 ></span
               ></label
             >
           </div>
         {/if}
         <fieldset>
-          <legend>Actions</legend>
+          <legend>{$t('ui_actions_ff8059dc')}</legend>
           {#if draft.triggerType !== 'member_profile'}
             <label class="check"
               ><input type="checkbox" bind:checked={draft.blockMessage} /><span
-                ><strong>Block message</strong><small
-                  >Stop the matching message before delivery.</small
+                ><strong>{$t('ui_block_message_002c0cd3')}</strong><small
+                  >{$t('ui_stop_the_matching_message_before_delivery_a8f0599e')}</small
                 ></span
               ></label
             >
             {#if draft.blockMessage}<label
-                ><span>Message shown to the author <small>Optional</small></span><input
+                ><span
+                  >{$t('ui_message_shown_to_the_author_40588dd4')}
+                  <small>{$t('ui_optional_59be7133')}</small></span
+                ><input
                   bind:value={draft.blockMessageText}
                   maxlength="150"
-                  placeholder="Explain what needs to change"
+                  placeholder={$t('ui_explain_what_needs_to_change_0de2a4aa')}
                 /></label
               >{/if}
           {/if}
           <label class="check"
             ><input type="checkbox" bind:checked={draft.alertMessage} /><span
-              ><strong>Send moderator alert</strong><small
-                >Post a server-authored alert in a plaintext channel.</small
+              ><strong>{$t('ui_send_moderator_alert_e551fd8f')}</strong><small
+                >{$t('ui_post_a_server_authored_alert_in_a_plaintext_c_263a7832')}</small
               ></span
             ></label
           >
           {#if draft.alertMessage}<label
-              ><span>Alert channel</span><select bind:value={draft.alertChannelRef} required
-                ><option value="">Choose a channel</option
+              ><span>{$t('ui_alert_channel_9df96c4d')}</span><select
+                bind:value={draft.alertChannelRef}
+                required
+                ><option value="">{$t('ui_choose_a_channel_86306895')}</option
                 >{#each textChannels as channel (entityKey(channel))}<option
                     value={entityRef(channel)}>#{channel.name}</option
                   >{/each}</select
@@ -827,13 +844,13 @@
           {#if draft.triggerType === 'keyword' || draft.triggerType === 'mention_spam'}
             <label class="check"
               ><input type="checkbox" bind:checked={draft.timeout} /><span
-                ><strong>Timeout member</strong><small
-                  >Requires Moderate Members and supports up to 28 days.</small
+                ><strong>{$t('ui_timeout_member_794af269')}</strong><small
+                  >{$t('ui_requires_moderate_members_and_supports_up_to__86406eff')}</small
                 ></span
               ></label
             >
             {#if draft.timeout}<label
-                ><span>Timeout seconds</span><input
+                ><span>{$t('ui_timeout_seconds_e7a1bb3c')}</span><input
                   type="number"
                   min="1"
                   max="2419200"
@@ -844,8 +861,8 @@
           {#if draft.triggerType === 'member_profile'}
             <label class="check"
               ><input type="checkbox" bind:checked={draft.blockMemberInteraction} /><span
-                ><strong>Block member interaction</strong><small
-                  >Quarantine the matching member profile from guild interaction.</small
+                ><strong>{$t('ui_block_member_interaction_f678c417')}</strong><small
+                  >{$t('ui_quarantine_the_matching_member_profile_from_g_1562b0bc')}</small
                 ></span
               ></label
             >
@@ -853,7 +870,7 @@
         </fieldset>
         <div class="form-grid two">
           <label
-            ><span>Exempt roles</span><select
+            ><span>{$t('ui_exempt_roles_fbe743ef')}</span><select
               multiple
               size="5"
               value={draft.exemptRoles}
@@ -864,7 +881,7 @@
             ></label
           >
           <label
-            ><span>Exempt channels</span><select
+            ><span>{$t('ui_exempt_channels_5c9fc254')}</span><select
               multiple
               size="5"
               value={draft.exemptChannels}
@@ -877,12 +894,16 @@
         </div>
         <footer>
           <button class="primary" disabled={automodBusy}
-            >{automodBusy ? 'Saving…' : selectedRuleId ? 'Save rule' : 'Create rule'}</button
+            >{automodBusy
+              ? $t('ui_saving_23e39291')
+              : selectedRuleId
+                ? $t('ui_save_rule_4e62c225')
+                : $t('ui_create_rule_e2077a44')}</button
           >{#if selectedRuleId}<button
               type="button"
               class="danger"
               disabled={automodBusy}
-              onclick={() => void deleteRule()}>Delete rule</button
+              onclick={() => void deleteRule()}>{$t('ui_delete_rule_075d1139')}</button
             >{/if}
         </footer>
       </form>
@@ -894,33 +915,32 @@
   <section id="bulk-moderation" class="tool-section">
     <header>
       <div>
-        <h2>Bulk moderation</h2>
-        <p>Estimate destructive actions first and review every per-user failure.</p>
+        <h2>{$t('ui_bulk_moderation_7b53e29a')}</h2>
+        <p>{$t('ui_estimate_destructive_actions_first_and_review_2c4cc52a')}</p>
       </div>
     </header>
     <div class="cards">
       {#if canPrune}<article class="card">
-          <h3>Prune inactive members</h3>
-          <p>
-            By default, only roleless humans with no guild activity in the selected period are
-            eligible.
-          </p>
+          <h3>{$t('ui_prune_inactive_members_408468e5')}</h3>
+          <p>{$t('ui_by_default_only_roleless_humans_with_no_guild_3e1eafef')}</p>
           {#if pruneError}<p class="error" role="alert">{pruneError}</p>{/if}
           <div class="form-grid two">
             <label
-              ><span>Inactive for</span><select
+              ><span>{$t('ui_inactive_for_72acc89e')}</span><select
                 value={pruneDays}
                 onchange={(event) => {
                   pruneDays = Number(event.currentTarget.value);
                   pruneEstimate = null;
                   pruneResult = null;
                 }}
-                ><option value={1}>1 day</option><option value={7}>7 days</option><option value={14}
-                  >14 days</option
-                ><option value={30}>30 days</option></select
+                ><option value={1}>{$t('ui_1_day_fa665d95')}</option><option value={7}
+                  >{$t('ui_7_days_7f920bb6')}</option
+                ><option value={14}>{$t('ui_14_days_60acc36e')}</option><option value={30}
+                  >{$t('ui_30_days_ffd72805')}</option
+                ></select
               ></label
             ><label
-              ><span>Also include these roles</span><select
+              ><span>{$t('ui_also_include_these_roles_a04fd499')}</span><select
                 multiple
                 size="4"
                 value={pruneRoles}
@@ -936,9 +956,15 @@
             >
           </div>
           {#if pruneEstimate !== null}<p class="result">
-              <strong>{pruneEstimate}</strong> member{pruneEstimate === 1 ? '' : 's'} currently eligible.
+              <strong>{pruneEstimate}</strong>
+              {$t('ui_member_value0_currently_eligible_1084e175', {
+                value0: String(pruneEstimate === 1 ? '' : 's')
+              })}
             </p>{/if}
-          {#if pruneResult}<p class="result"><strong>{pruneResult.pruned ?? 0}</strong> pruned.</p>
+          {#if pruneResult}<p class="result">
+              <strong>{pruneResult.pruned ?? 0}</strong>
+              pruned.
+            </p>
             {#if pruneResult.failed_users?.length}<ul class="failures">
                 {#each pruneResult.failed_users as failure (`${failure.user_id}:${failure.code}`)}<li
                   >
@@ -950,48 +976,45 @@
               type="button"
               class="secondary"
               disabled={pruneBusy}
-              onclick={() => void estimatePrune()}>{pruneBusy ? 'Checking…' : 'Estimate'}</button
+              onclick={() => void estimatePrune()}
+              >{pruneBusy ? $t('ui_checking_ec963ffc') : $t('ui_estimate_558ecb0f')}</button
             ><button
               type="button"
               class="danger"
               disabled={pruneBusy || pruneEstimate === null || pruneEstimate === 0}
-              onclick={() => void executePrune()}>Prune eligible members</button
+              onclick={() => void executePrune()}>{$t('ui_prune_eligible_members_7090e4a1')}</button
             >
           </footer>
         </article>{/if}
       {#if canBulkBan}<form class="card" onsubmit={executeBulkBan}>
-          <h3>Bulk ban</h3>
-          <p>
-            Enter canonical user references. Role hierarchy and guild ownership are checked for
-            every user.
-          </p>
+          <h3>{$t('ui_bulk_ban_74676f94')}</h3>
+          <p>{$t('ui_enter_canonical_user_references_role_hierarch_3033b62c')}</p>
           {#if bulkError}<p class="error" role="alert">{bulkError}</p>{/if}
           <label
-            ><span>User references</span><small>One id@domain per line; up to 200.</small><textarea
-              bind:value={bulkUsers}
-              rows="6"
-              required
-              placeholder="123456789@chat.example"
+            ><span>{$t('ui_user_references_1446248f')}</span><small
+              >{$t('ui_one_id_domain_per_line_up_to_200_205f975b')}</small
+            ><textarea bind:value={bulkUsers} rows="6" required placeholder="123456789@chat.example"
             ></textarea></label
           >
           <div class="form-grid two">
             <label
-              ><span>Reason <small>Optional</small></span><input
-                bind:value={bulkReason}
-                maxlength="512"
-              /></label
+              ><span>{$t('ui_reason_f81ab834')} <small>{$t('ui_optional_59be7133')}</small></span
+              ><input bind:value={bulkReason} maxlength="512" /></label
             ><label
-              ><span>Delete recent messages</span><select bind:value={bulkDeleteSeconds}
-                ><option value={0}>Do not delete</option><option value={3600}>Previous hour</option
-                ><option value={86400}>Previous day</option><option value={604800}
-                  >Previous 7 days</option
+              ><span>{$t('ui_delete_recent_messages_e6a404bc')}</span><select
+                bind:value={bulkDeleteSeconds}
+                ><option value={0}>{$t('ui_do_not_delete_71c7190a')}</option><option value={3600}
+                  >{$t('ui_previous_hour_e680d771')}</option
+                ><option value={86400}>{$t('ui_previous_day_e4a1e89e')}</option><option
+                  value={604800}>{$t('ui_previous_7_days_c6327b7b')}</option
                 ></select
               ></label
             >
           </div>
           {#if bulkResult}<p class="result">
-              <strong>{bulkResult.banned_users.length}</strong> banned;
-              <strong>{bulkResult.failed_users.length}</strong> failed.
+              <strong>{bulkResult.banned_users.length}</strong>
+              {$t('ui_banned_a280f60d')} <strong>{bulkResult.failed_users.length}</strong>
+              failed.
             </p>
             {#if bulkResult.failed_user_details.length}<ul class="failures">
                 {#each bulkResult.failed_user_details as failure (`${failure.user_id}:${failure.code}`)}<li
@@ -1001,7 +1024,7 @@
               </ul>{/if}{/if}
           <footer>
             <button class="danger" disabled={bulkBusy}
-              >{bulkBusy ? 'Banning…' : 'Review and ban'}</button
+              >{bulkBusy ? $t('ui_banning_0a933b8e') : $t('ui_review_and_ban_cd3faa3f')}</button
             >
           </footer>
         </form>{/if}
@@ -1013,8 +1036,8 @@
   <section id="soundboard" class="tool-section">
     <header>
       <div>
-        <h2>Soundboard</h2>
-        <p>Manage short guild sounds and play them for everyone in your active voice channel.</p>
+        <h2>{$t('ui_soundboard_07ff885c')}</h2>
+        <p>{$t('ui_manage_short_guild_sounds_and_play_them_for_e_cb2a723b')}</p>
       </div>
     </header>
     {#if soundError}<p class="error" role="alert">{soundError}</p>{/if}{#if soundNotice}<p
@@ -1024,31 +1047,33 @@
         {soundNotice}
       </p>{/if}
     {#if canCreateSounds}<form class="card" onsubmit={uploadSound}>
-        <h3>Upload sound</h3>
+        <h3>{$t('ui_upload_sound_48f0b1bd')}</h3>
         <div class="form-grid four">
           <label
-            ><span>Name</span><input
+            ><span>{$t('ui_name_dcd1d522')}</span><input
               bind:value={soundName}
               minlength="2"
               maxlength="32"
               required
             /></label
           ><label
-            ><span>Emoji <small>Optional</small></span><select bind:value={soundEmojiSelection}
-              ><option value="none">No emoji</option><option value="unicode">Unicode emoji</option
+            ><span>{$t('ui_emoji_61ad8976')} <small>{$t('ui_optional_59be7133')}</small></span
+            ><select bind:value={soundEmojiSelection}
+              ><option value="none">{$t('ui_no_emoji_9130ed0c')}</option><option value="unicode"
+                >{$t('ui_unicode_emoji_3fb39976')}</option
               >{#each soundCustomEmojis as emoji (entityKey(emoji))}<option
                   value={`custom:${emoji.id}`}>:{emoji.name}:</option
                 >{/each}</select
             ></label
           >{#if soundEmojiSelection === 'unicode'}<label
-              ><span>Unicode emoji</span><input
+              ><span>{$t('ui_unicode_emoji_3fb39976')}</span><input
                 bind:value={soundEmoji}
                 maxlength="64"
                 required
               /></label
             >{/if}
           ><label
-            ><span>Default volume</span><input
+            ><span>{$t('ui_default_volume_2aed61f3')}</span><input
               type="range"
               min="0"
               max="1"
@@ -1056,7 +1081,7 @@
               bind:value={soundVolume}
             /><small>{Math.round(soundVolume * 100)}%</small></label
           ><label
-            ><span>MP3 or Ogg</span><input
+            ><span>{$t('ui_mp3_or_ogg_00fb645d')}</span><input
               type="file"
               accept="audio/mpeg,audio/ogg,.mp3,.ogg"
               required
@@ -1067,13 +1092,14 @@
         {#if soundUploadProgress}<progress max="100" value={soundUploadProgress}></progress>{/if}
         <footer>
           <button class="primary" disabled={soundBusy || sounds.length >= 48}
-            >{soundBusy ? 'Processing…' : 'Upload sound'}</button
+            >{soundBusy ? $t('ui_processing_42074396') : $t('ui_upload_sound_48f0b1bd')}</button
           >
         </footer>
       </form>{/if}
     {#if canUseSounds}<label class="playback-channel"
-        ><span>Voice channel you joined</span><select bind:value={playbackChannel}
-          ><option value="">Choose a voice channel</option
+        ><span>{$t('ui_voice_channel_you_joined_bd938267')}</span><select
+          bind:value={playbackChannel}
+          ><option value="">{$t('ui_choose_a_voice_channel_46fdbd9d')}</option
           >{#each voiceChannels as channel (entityKey(channel))}<option value={entityRef(channel)}
               >{channel.name}</option
             >{/each}</select
@@ -1091,22 +1117,23 @@
               />{:else}<span aria-hidden="true">{sound.emoji_name ?? '♫'}</span>{/if}
             <div>
               <strong>{sound.name}</strong><small
-                >{(sound.duration_ms / 1000).toFixed(1)} seconds · {sound.available
-                  ? 'Available'
-                  : 'Unavailable'}</small
+                >{$t('ui_value0_seconds_value1_b07f26dd', {
+                  value0: String((sound.duration_ms / 1000).toFixed(1)),
+                  value1: String(sound.available ? 'Available' : 'Unavailable')
+                })}</small
               >
             </div>
           </div>
           {#if canEditSound(sound) && soundDrafts[entityKey(sound)]}<div class="form-grid three">
               <label
-                ><span>Name</span><input
+                ><span>{$t('ui_name_dcd1d522')}</span><input
                   value={soundDrafts[entityKey(sound)].name}
                   minlength="2"
                   maxlength="32"
                   oninput={(event) => patchSoundDraft(sound, { name: event.currentTarget.value })}
                 /></label
               ><label
-                ><span>Emoji</span><select
+                ><span>{$t('ui_emoji_61ad8976')}</span><select
                   value={soundDrafts[entityKey(sound)].emojiSelection}
                   onchange={(event) =>
                     patchSoundDraft(sound, {
@@ -1117,16 +1144,17 @@
                           : ''
                     })}
                 >
-                  <option value="none">No emoji</option><option value="unicode"
-                    >Unicode emoji</option
+                  <option value="none">{$t('ui_no_emoji_9130ed0c')}</option><option value="unicode"
+                    >{$t('ui_unicode_emoji_3fb39976')}</option
                   >{#if sound.emoji_id && !soundCustomEmojis.some((emoji) => emoji.id === sound.emoji_id)}<option
-                      value={`custom:${sound.emoji_id}`}>Current custom emoji</option
+                      value={`custom:${sound.emoji_id}`}
+                      >{$t('ui_current_custom_emoji_b83f1e7e')}</option
                     >{/if}{#each soundCustomEmojis as emoji (entityKey(emoji))}<option
                       value={`custom:${emoji.id}`}>:{emoji.name}:</option
                     >{/each}
                 </select></label
               >{#if soundDrafts[entityKey(sound)].emojiSelection === 'unicode'}<label
-                  ><span>Unicode emoji</span><input
+                  ><span>{$t('ui_unicode_emoji_3fb39976')}</span><input
                     value={soundDrafts[entityKey(sound)].emojiName}
                     maxlength="64"
                     required
@@ -1134,7 +1162,7 @@
                       patchSoundDraft(sound, { emojiName: event.currentTarget.value })}
                   /></label
                 >{/if}<label
-                ><span>Volume</span><input
+                ><span>{$t('ui_volume_b10fb966')}</span><input
                   type="range"
                   min="0"
                   max="1"
@@ -1150,21 +1178,21 @@
                 type="button"
                 class="primary"
                 disabled={soundBusy || !sound.available}
-                onclick={() => void playSound(sound)}>Play in voice</button
+                onclick={() => void playSound(sound)}>{$t('ui_play_in_voice_2e7ae7b5')}</button
               >{/if}{#if canEditSound(sound)}<button
                 type="button"
                 class="secondary"
                 disabled={soundBusy}
-                onclick={() => void updateSound(sound)}>Save</button
+                onclick={() => void updateSound(sound)}>{$t('ui_save_1509f561')}</button
               ><button
                 type="button"
                 class="danger"
                 disabled={soundBusy}
-                onclick={() => void deleteSound(sound)}>Delete</button
+                onclick={() => void deleteSound(sound)}>{$t('ui_delete_e2d0a549')}</button
               >{/if}
           </footer>
         </article>
-      {:else}<p>No guild sounds have been uploaded.</p>{/each}
+      {:else}<p>{$t('ui_no_guild_sounds_have_been_uploaded_331929c6')}</p>{/each}
     </div>
   </section>
 {/if}

@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:kaede_mobile/l10n/generated/app_localizations.dart';
 import 'package:kaede_mobile/src/api/instance_administration_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
@@ -21,10 +21,12 @@ import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Account settings with visible actions and persistent control states.
 final class SettingsScreen extends ConsumerStatefulWidget {
@@ -69,11 +71,11 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, input.text),
-              child: Text('Continue'),
+              child: Text(L10n.of(context).ui_continue_ab43d664),
             ),
           ],
         ),
@@ -93,7 +95,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(mobileControllerProvider.notifier).e2eeClient();
       _showSuccess('This device is ready for end-to-end encryption.');
     } on Object catch (error) {
-      _showError(error, summary: 'Could not initialize encryption');
+      _showError(error,
+          summary: L10n.current.ui_could_not_initialize_encryption_a5f503e0);
     } finally {
       if (mounted) setState(() => _initializingEncryption = false);
     }
@@ -114,14 +117,16 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         context: context,
         barrierDismissible: false,
         builder: (context) => AlertDialog(
-          title: Text('Save your encrypted recovery backup'),
+          title: Text(
+              L10n.of(context).ui_save_your_encrypted_recovery_backup_4c2d4594),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Anyone with this backup and its passphrase can read your encrypted history. Store both separately. Restore it only as a recovery action; Kaede will reconcile it with the shared account vault. The portable plaintext cache retains at most 2,000 recent messages or 8 MiB, so older history may require another trusted client.',
+                  L10n.of(context)
+                      .ui_anyone_with_this_backup_and_its_passphrase_ca_164a07d9,
                 ),
                 SizedBox(height: 12),
                 SelectableText(bundle, maxLines: 8),
@@ -134,22 +139,26 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 await Clipboard.setData(ClipboardData(text: bundle));
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Recovery backup copied.')),
+                    SnackBar(
+                        content: Text(L10n.of(context)
+                            .ui_recovery_backup_copied_fcef8632)),
                   );
                 }
               },
               icon: Icon(Icons.copy_rounded),
-              label: Text('Copy'),
+              label: Text(L10n.of(context).ui_copy_658f3664),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context),
-              child: Text('I saved it'),
+              child: Text(L10n.of(context).ui_i_saved_it_f0b83580),
             ),
           ],
         ),
       );
     } on Object catch (error) {
-      _showError(error, summary: 'Could not create the recovery backup');
+      _showError(error,
+          summary:
+              L10n.current.ui_could_not_create_the_recovery_backup_59c7f841);
     }
   }
 
@@ -160,26 +169,29 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final accepted = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
-          title: Text('Restore encrypted history'),
+          title: Text(L10n.of(context).ui_restore_encrypted_history_b4785055),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Use a recovery backup when automatic account-vault recovery is unavailable. Restoring replaces this client\u2019s cached state and resumes the same portable account identity. Backups carry at most 2,000 recent decrypted messages or 8 MiB of cached plaintext.',
+                  L10n.of(context)
+                      .ui_use_a_recovery_backup_when_automatic_account__3b508c42,
                 ),
                 SizedBox(height: 12),
                 TextField(
                   controller: bundle,
                   minLines: 4,
                   maxLines: 8,
-                  decoration: InputDecoration(labelText: 'Recovery backup'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_recovery_backup_12b7e994),
                 ),
                 SizedBox(height: 12),
                 TextField(
                   controller: passphrase,
                   obscureText: true,
-                  decoration: InputDecoration(labelText: 'Passphrase'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_passphrase_191a2dc5),
                 ),
               ],
             ),
@@ -187,11 +199,11 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text('Replace and restore'),
+              child: Text(L10n.of(context).ui_replace_and_restore_6453a4d4),
             ),
           ],
         ),
@@ -204,7 +216,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           );
       _showSuccess('Encrypted history was restored on this phone.');
     } on Object catch (error) {
-      _showError(error, summary: 'Could not restore encrypted history');
+      _showError(error,
+          summary:
+              L10n.current.ui_could_not_restore_encrypted_history_639bcbd5);
     } finally {
       bundle.dispose();
       passphrase.dispose();
@@ -232,11 +246,12 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             shrinkWrap: true,
             padding: EdgeInsets.fromLTRB(16, 0, 16, 24),
             children: [
-              Text('Encryption identity',
+              Text(L10n.of(context).ui_encryption_identity_d4a088ae,
                   style: Theme.of(context).textTheme.titleLarge),
               SizedBox(height: 6),
               Text(
-                'Your signed-in clients share one portable MLS identity. Rotating it abandons unavailable encrypted history and pauses affected rooms until a member rotates their keys.',
+                L10n.of(context)
+                    .ui_your_signed_in_clients_share_one_portable_mls_43e16efa,
               ),
               SizedBox(height: 12),
               for (final device in devices)
@@ -244,33 +259,46 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   leading: Icon(device['revoked_at'] == null
                       ? Icons.verified_user_outlined
                       : Icons.phonelink_erase_rounded),
-                  title: Text('Portable account identity'),
+                  title: Text(
+                      L10n.of(context).ui_portable_account_identity_9267709d),
                   subtitle: Text(
-                    'Last enrolled from ${device['device_name'] ?? 'Kaede'} (${device['platform'] ?? 'unknown'}) \u00b7 ${device['id']}'
-                    '${device['id'] == currentDeviceId ? ' \u00b7 Loaded here' : ''}',
+                    L10n.of(context)
+                        .ui_last_enrolled_from_value0_value1_value2_value_e534a826(
+                            (device['device_name'] ?? 'Kaede').toString(),
+                            (device['platform'] ?? 'unknown').toString(),
+                            (device['id']).toString(),
+                            (device['id'] == currentDeviceId
+                                    ? ' \u00b7 Loaded here'
+                                    : '')
+                                .toString()),
                   ),
                   trailing: device['revoked_at'] != null
-                      ? Text('Revoked')
+                      ? Text(L10n.of(context).ui_revoked_e58fe295)
                       : IconButton(
-                          tooltip: 'Rotate encryption identity',
+                          tooltip: L10n.of(context)
+                              .ui_rotate_encryption_identity_4aeaf1f7,
                           onPressed: () async {
                             final accepted = await showDialog<bool>(
                               context: context,
                               builder: (dialogContext) => AlertDialog(
-                                title: Text('Start a new encryption identity?'),
+                                title: Text(L10n.of(context)
+                                    .ui_start_a_new_encryption_identity_17f1a378),
                                 content: Text(
-                                  'This abandons encrypted history that is unavailable from an enrolled client or recovery backup. Every signed-in client must load the new identity, and affected rooms pause until their keys are rotated.',
+                                  L10n.of(context)
+                                      .ui_this_abandons_encrypted_history_that_is_unava_00029ea3,
                                 ),
                                 actions: [
                                   TextButton(
                                     onPressed: () =>
                                         Navigator.pop(dialogContext, false),
-                                    child: Text('Cancel'),
+                                    child: Text(
+                                        L10n.of(context).ui_cancel_35afca3b),
                                   ),
                                   FilledButton(
                                     onPressed: () =>
                                         Navigator.pop(dialogContext, true),
-                                    child: Text('Start fresh'),
+                                    child: Text(L10n.of(context)
+                                        .ui_start_fresh_2eca7af7),
                                   ),
                                 ],
                               ),
@@ -286,8 +314,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             } on Object catch (error) {
                               _showError(
                                 error,
-                                summary:
-                                    'Could not create a new encryption identity',
+                                summary: L10n.current
+                                    .ui_could_not_create_a_new_encryption_identity_12f87665,
                               );
                             }
                           },
@@ -299,7 +327,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       );
     } on Object catch (error) {
-      _showError(error, summary: 'Could not load encryption identity');
+      _showError(error,
+          summary: L10n.current.ui_could_not_load_encryption_identity_42c0a2c8);
     }
   }
 
@@ -366,8 +395,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         setState(() {
           _loadError = userFacingError(
             error,
-            summary:
-                'Account settings could not be loaded. Some controls may show temporary defaults.',
+            summary: L10n.of(context)
+                .ui_account_settings_could_not_be_loaded_some_con_84593b02,
           );
           _loading = false;
         });
@@ -414,8 +443,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   SizedBox(height: 4),
                   Text(
                     installation.isSuspended
-                        ? 'SUSPENDED · UNAVAILABLE'
-                        : 'REVOKED · UNAVAILABLE',
+                        ? L10n.of(context).ui_suspended_unavailable_ac856ef7
+                        : L10n.of(context).ui_revoked_unavailable_19ed49ea,
                     style: TextStyle(
                       color: context.kaede.warning,
                       fontSize: 11,
@@ -452,7 +481,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Commands unavailable',
+                                L10n.of(context)
+                                    .ui_commands_unavailable_38116645,
                                 style: TextStyle(
                                   color: context.kaede.warning,
                                   fontWeight: FontWeight.w700,
@@ -478,7 +508,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
                   value: guilds,
-                  title: Text('Guild channels'),
+                  title: Text(L10n.of(context).ui_guild_channels_fcb4d8c8),
                   onChanged: grantsEditable
                       ? (value) => setSheetState(() => guilds = value ?? false)
                       : null,
@@ -486,7 +516,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
                   value: privateChannels,
-                  title: Text('Private conversations'),
+                  title:
+                      Text(L10n.of(context).ui_private_conversations_0de4d400),
                   onChanged: grantsEditable
                       ? (value) => setSheetState(
                             () => privateChannels = value ?? false,
@@ -496,7 +527,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
                   value: botDms,
-                  title: Text('Direct messages with bots'),
+                  title: Text(
+                      L10n.of(context).ui_direct_messages_with_bots_f733fcd2),
                   onChanged: grantsEditable
                       ? (value) => setSheetState(() => botDms = value ?? false)
                       : null,
@@ -507,13 +539,13 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       grantsEditable && (guilds || privateChannels || botDms)
                           ? () => Navigator.pop(sheetContext, 'save')
                           : null,
-                  child: Text('Save command access'),
+                  child: Text(L10n.of(context).ui_save_command_access_f73dfe79),
                 ),
                 TextButton(
                   style: TextButton.styleFrom(
                       foregroundColor: context.kaede.danger),
                   onPressed: () => Navigator.pop(sheetContext, 'revoke'),
-                  child: Text('Revoke app'),
+                  child: Text(L10n.of(context).ui_revoke_app_d6963c78),
                 ),
               ],
             ),
@@ -527,20 +559,22 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: Text('Revoke ${installation.applicationName}?'),
+          title: Text(L10n.of(context).ui_revoke_value0_8d1f4335(
+              (installation.applicationName).toString())),
           content: Text(
-            'Its user-installed commands will disappear. The app may retain information you previously sent it.',
+            L10n.of(context)
+                .ui_its_user_installed_commands_will_disappear_th_697aae80,
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               style:
                   FilledButton.styleFrom(backgroundColor: context.kaede.danger),
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: Text('Revoke'),
+              child: Text(L10n.of(context).ui_revoke_2219c453),
             ),
           ],
         ),
@@ -573,7 +607,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _showSuccess('${installation.applicationName} access updated.');
       }
     } on Object catch (error) {
-      _showError(error, summary: 'Could not update that authorized app');
+      _showError(error,
+          summary: L10n.of(context)
+              .ui_could_not_update_that_authorized_app_4846bf2d);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -657,33 +693,34 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       _load();
                     },
                     style: TextButton.styleFrom(minimumSize: Size(0, 34)),
-                    child: Text('Retry'),
+                    child: Text(L10n.of(context).ui_retry_8036af59),
                   ),
                 ],
               ),
             ),
           ],
-          SettingsSectionHeader('Profile',
-              subheading: 'How people see you across the federation.'),
+          SettingsSectionHeader(L10n.of(context).ui_profile_cd17328e,
+              subheading: L10n.of(context)
+                  .ui_how_people_see_you_across_the_federation_3df0bdc7),
           Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),
             child: Column(
               children: [
                 SettingsField(
-                  label: 'DISPLAY NAME',
+                  label: L10n.of(context).ui_display_name_698fa38c,
                   controller: _displayName,
                   enabled: !_saving,
                 ),
                 SizedBox(height: 16),
                 SettingsField(
-                  label: 'CUSTOM STATUS',
+                  label: L10n.of(context).ui_custom_status_91dc0394,
                   controller: _customStatus,
                   maxLength: 128,
                   enabled: !_saving,
                 ),
                 SizedBox(height: 16),
                 SettingsField(
-                  label: 'ABOUT ME',
+                  label: L10n.of(context).ui_about_me_974d6f90,
                   controller: _bio,
                   maxLines: 4,
                   maxLength: 500,
@@ -697,52 +734,60 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           dimension: 16,
                           child: CircularProgressIndicator(strokeWidth: 2))
                       : Icon(Icons.check_rounded),
-                  label: Text('Save profile'),
+                  label: Text(L10n.of(context).ui_save_profile_9bf48ffd),
                 ),
               ],
             ),
           ),
-          SettingsSectionHeader('Account',
-              subheading: 'The identity hosted by your home instance.'),
+          SettingsSectionHeader(L10n.of(context).ui_account_59f8a2fc,
+              subheading: L10n.of(context)
+                  .ui_the_identity_hosted_by_your_home_instance_a17941b7),
           SettingsRow.chevron(
             title: user?.email ?? 'No email address',
             subtitle: user?.email == null
-                ? 'This instance does not require email.'
+                ? L10n.of(context)
+                    .ui_this_instance_does_not_require_email_d20dc6bb
                 : user!.emailVerified
-                    ? 'Verified email'
-                    : 'Email verification is pending',
+                    ? L10n.of(context).ui_verified_email_51a616ad
+                    : L10n.of(context)
+                        .ui_email_verification_is_pending_e54cd06d,
             leading: _LeadingIcon(Icons.alternate_email_rounded),
             onTap: _saving ? null : _changeEmail,
           ),
           SettingsRow.chevron(
             divider: true,
-            title: 'Confirm email change',
-            subtitle: 'Enter the token from your confirmation email.',
+            title: L10n.of(context).ui_confirm_email_change_a2e3e285,
+            subtitle: L10n.of(context)
+                .ui_enter_the_token_from_your_confirmation_email_748811c1,
             leading: _LeadingIcon(Icons.mark_email_read_outlined),
             onTap: _saving ? null : _confirmEmail,
           ),
           SizedBox(height: 16),
           SettingsRow(
-            title: 'Authenticator app',
+            title: L10n.of(context).ui_authenticator_app_744f34d3,
             subtitle: user?.mfaEnabled == true
-                ? 'Two-factor authentication is enabled.'
-                : 'Require a code in addition to your password.',
+                ? L10n.of(context)
+                    .ui_two_factor_authentication_is_enabled_4de40010
+                : L10n.of(context)
+                    .ui_require_a_code_in_addition_to_your_password_81056d3c,
             leading: _LeadingIcon(Icons.password_rounded),
             divider: true,
             onTap: user?.mfaEnabled == true ? _disableMfa : _enableMfa,
           ),
-          SettingsSectionHeader('Security',
-              subheading:
-                  'Encryption keys unlock your account vault on each trusted device. Your instance stores only ciphertext.'),
+          SettingsSectionHeader(L10n.of(context).ui_security_c2fe21db,
+              subheading: L10n.of(context)
+                  .ui_encryption_keys_unlock_your_account_vault_on__2f7938f9),
           SettingsRow(
             title: mobile.e2eeReady
-                ? 'Encryption enabled'
+                ? L10n.of(context).ui_encryption_enabled_71075035
                 : _initializingEncryption
-                    ? 'Setting up encryption…'
-                    : 'Set up this device',
+                    ? L10n.of(context).ui_setting_up_encryption_dbb11da3
+                    : L10n.of(context).ui_set_up_this_device_56bd05ba,
             subtitle: mobile.e2eeReady
-                ? 'This device is ready for end-to-end encryption.'
-                : 'Enable end-to-end encryption on this phone.',
+                ? L10n.of(context)
+                    .ui_this_device_is_ready_for_end_to_end_encryptio_351bb719
+                : L10n.of(context)
+                    .ui_enable_end_to_end_encryption_on_this_phone_a50338f3,
             leading: _LeadingIcon(Icons.key_rounded),
             enabled: !_saving && !_initializingEncryption && !mobile.e2eeReady,
             trailing: mobile.e2eeReady
@@ -756,60 +801,61 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: _initializeEncryption,
           ),
           SettingsRow.chevron(
-            title: 'Encryption identity',
-            subtitle: 'Devices sharing this account\u2019s MLS identity.',
+            title: L10n.of(context).ui_encryption_identity_d4a088ae,
+            subtitle: L10n.of(context)
+                .ui_devices_sharing_this_account_s_mls_identity_c285170f,
             leading: _LeadingIcon(Icons.devices_other_rounded),
             divider: true,
             onTap: _saving ? null : _manageEncryptionDevices,
           ),
           SettingsRow.chevron(
-            title: 'Create recovery backup',
+            title: L10n.of(context).ui_create_recovery_backup_42d961da,
             leading: _LeadingIcon(Icons.download_for_offline_outlined),
             divider: true,
             onTap: _saving ? null : _exportEncryptionRecovery,
           ),
           SettingsRow.chevron(
-            title: 'Restore recovery backup',
+            title: L10n.of(context).ui_restore_recovery_backup_8f057af6,
             leading: _LeadingIcon(Icons.restore_rounded),
             onTap: _saving ? null : _importEncryptionRecovery,
           ),
-          SettingsSectionHeader('Activity status',
-              subheading:
-                  'Your availability follows you between mobile, desktop, and web.'),
+          SettingsSectionHeader(L10n.of(context).ui_activity_status_6b197d4e,
+              subheading: L10n.of(context)
+                  .ui_your_availability_follows_you_between_mobile__1aa8ef75),
           SettingsRow(
-            title: 'Online',
+            title: L10n.of(context).ui_online_bc3b88aa,
             leading: _PresenceIcon(PresenceStatus.online),
             divider: true,
             onTap: () => _saveSetting('presence_preference', 'online'),
             trailing: _presenceCheck(presence == 'online'),
           ),
           SettingsRow(
-            title: 'Idle',
+            title: L10n.of(context).ui_idle_45aa17b3,
             leading: _PresenceIcon(PresenceStatus.idle),
             divider: true,
             onTap: () => _saveSetting('presence_preference', 'idle'),
             trailing: _presenceCheck(presence == 'idle'),
           ),
           SettingsRow(
-            title: 'Do not disturb',
+            title: L10n.of(context).ui_do_not_disturb_816d809a,
             leading: _PresenceIcon(PresenceStatus.dnd),
             divider: true,
             onTap: () => _saveSetting('presence_preference', 'dnd'),
             trailing: _presenceCheck(presence == 'dnd'),
           ),
           SettingsRow(
-            title: 'Invisible',
+            title: L10n.of(context).ui_invisible_bab31830,
             leading: _PresenceIcon(PresenceStatus.invisible),
             onTap: () => _saveSetting('presence_preference', 'invisible'),
             trailing: _presenceCheck(presence == 'invisible'),
           ),
           SettingsSectionHeader(
-            'Appearance',
-            subheading:
-                'Theme and regional formatting follow your account across clients.',
+            L10n.of(context).ui_appearance_31018b9f,
+            subheading: L10n.of(context)
+                .ui_theme_and_regional_formatting_follow_your_acc_81232c35,
           ),
           SettingsChoiceRow(
-            title: 'Theme',
+            title: L10n.of(context).ui_theme_4eaf7c92,
             value: '${_settings['theme'] ?? 'system'}',
             display: switch ('${_settings['theme'] ?? 'system'}') {
               'light' => 'Light',
@@ -821,13 +867,14 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onSelected: (value) async {
               final chosen = await showSettingsChoiceSheet(
                 context,
-                title: 'Theme',
-                description:
-                    'Sync with device follows the operating system light or dark appearance.',
-                choices: const [
-                  SettingsChoice('system', 'Sync with device'),
-                  SettingsChoice('light', 'Light'),
-                  SettingsChoice('dark', 'Dark'),
+                title: L10n.of(context).ui_theme_4eaf7c92,
+                description: L10n.of(context)
+                    .ui_sync_with_device_follows_the_operating_system_d3766500,
+                choices: [
+                  SettingsChoice(
+                      'system', L10n.of(context).ui_sync_with_device_f98594c0),
+                  SettingsChoice('light', L10n.of(context).ui_light_8ad2f8cf),
+                  SettingsChoice('dark', L10n.of(context).ui_dark_45570065),
                 ],
                 selected: value,
               );
@@ -837,36 +884,45 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             },
           ),
           SettingsChoiceRow(
-            title: 'Locale and formats',
-            subtitle:
-                'Controls dates, system components and localized app-command labels. Kaede interface text is currently English.',
-            value: '${_settings['locale'] ?? 'en-US'}',
-            display: switch ('${_settings['locale'] ?? 'en-US'}') {
-              'ja-JP' => 'Japanese formats (Japan)',
-              _ => 'English (United States)',
-            },
+            title: L10n.of(context).language_settings,
+            subtitle: L10n.of(context).language_description,
+            value: appLanguage.value,
+            display: appLanguage.value == 'system'
+                ? L10n.of(context).language_system
+                : lookupAppLocalizations(preferredAppLocale(appLanguage.value)!)
+                    .language_name,
             leading: const _LeadingIcon(Icons.translate_rounded),
             onSelected: (value) async {
               final chosen = await showSettingsChoiceSheet(
                 context,
-                title: 'Locale and formats',
-                description:
-                    'This does not translate Kaede interface text, which is currently English.',
-                choices: const [
-                  SettingsChoice('en-US', 'English (United States)'),
-                  SettingsChoice('ja-JP', 'Japanese formats (Japan)'),
+                title: L10n.of(context).language_settings,
+                description: L10n.of(context).language_description,
+                choices: [
+                  SettingsChoice('system', L10n.of(context).language_system),
+                  for (final locale in AppLocalizations.supportedLocales)
+                    SettingsChoice(locale.toLanguageTag(),
+                        lookupAppLocalizations(locale).language_name),
                 ],
-                selected: value,
+                selected:
+                    value == 'system' ? value : matchLanguage(value) ?? 'en',
               );
-              if (chosen != null && chosen != value) {
+              if (chosen != null) {
                 await _saveSetting('locale', chosen);
               }
             },
           ),
-          SettingsSectionHeader('Notifications',
+          TextButton(
+            onPressed: () => launchUrl(Uri.parse('https://weblate.kaede.chat/'),
+                mode: LaunchMode.externalApplication),
+            child: Text(L10n.of(context).language_contribute),
+          ),
+          SettingsSectionHeader(L10n.of(context).ui_notifications_381d190f,
               subheading: usesRelay
-                  ? 'Closed-app delivery runs through Kaede Push Relay ($pushRelayHost). The relay sees your home instance and an opaque device subscription, but never message text, sender names, rooms or encryption keys.'
-                  : 'This community build uses its own Firebase provider for closed-app delivery. Firebase only receives an opaque wake with no message content, and your lock-screen privacy settings still apply.'),
+                  ? L10n.of(context)
+                      .ui_closed_app_delivery_runs_through_kaede_push_r_573433c8(
+                          (pushRelayHost).toString())
+                  : L10n.of(context)
+                      .ui_this_community_build_uses_its_own_firebase_pr_192d5ff4),
           FilledButton.icon(
             icon: _enablingPush
                 ? const SizedBox.square(
@@ -875,8 +931,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   )
                 : const Icon(Icons.notifications_active_outlined),
             label: Text(_enablingPush
-                ? 'Enabling notifications…'
-                : 'Enable background notifications'),
+                ? L10n.of(context).ui_enabling_notifications_59c4bd6b
+                : L10n.of(context).ui_enable_background_notifications_dfa12bd2),
             onPressed: _enablingPush
                 ? null
                 : () async {
@@ -891,15 +947,17 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       if (!context.mounted) return;
                       setState(() {
                         _pushSetupMessage = enabled
-                            ? 'Background notifications are enabled.'
-                            : 'Notifications could not be enabled. Check system notification permissions and try again.';
+                            ? L10n.of(context)
+                                .ui_background_notifications_are_enabled_697fbaac
+                            : L10n.of(context)
+                                .ui_notifications_could_not_be_enabled_check_syst_7a08d801;
                       });
                     } on Object catch (error) {
                       if (!mounted) return;
                       setState(() {
                         _pushSetupMessage = userFacingError(error,
-                            summary:
-                                'Could not enable background notifications');
+                            summary: L10n.of(context)
+                                .ui_could_not_enable_background_notifications_76cccb52);
                       });
                     } finally {
                       if (mounted) setState(() => _enablingPush = false);
@@ -912,7 +970,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               child: Semantics(liveRegion: true, child: Text(message)),
             ),
           SettingsRow.chevron(
-            title: 'Disable background notifications',
+            title:
+                L10n.of(context).ui_disable_background_notifications_c89499e5,
             leading: _LeadingIcon(Icons.notifications_off_outlined),
             divider: true,
             onTap: _enablingPush
@@ -923,12 +982,13 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         .disablePushNotifications();
                     if (!context.mounted) return;
                     setState(() {
-                      _pushSetupMessage =
-                          'Background notifications are disabled for this account.';
+                      _pushSetupMessage = L10n.of(context)
+                          .ui_background_notifications_are_disabled_for_thi_40f8fd45;
                     });
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                       content: Text(
-                        'Background notifications are disabled for this account.',
+                        L10n.of(context)
+                            .ui_background_notifications_are_disabled_for_thi_40f8fd45,
                       ),
                     ));
                   },
@@ -951,7 +1011,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'Notification delivery needs attention',
+                        L10n.of(context)
+                            .ui_notification_delivery_needs_attention_51e3d429,
                         style: TextStyle(
                           color: context.kaede.warning,
                           fontSize: 13,
@@ -977,35 +1038,35 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'This build can show alerts while Kaede is running, but it has no compatible closed-app push provider.',
             ),
           SettingsSwitchRow(
-            title: 'Direct messages',
+            title: L10n.of(context).ui_direct_messages_0db1f240,
             value: _notification('direct_messages', true),
             onChanged: (value) => _saveNotification('direct_messages', value),
             divider: true,
           ),
           SettingsSwitchRow(
-            title: 'Mentions and replies',
+            title: L10n.of(context).ui_mentions_and_replies_b5a93c57,
             value: _notification('mentions', true),
             onChanged: (value) => _saveNotification('mentions', value),
             divider: true,
           ),
           SettingsSwitchRow(
-            title: 'Friend requests',
+            title: L10n.of(context).ui_friend_requests_48c86d61,
             value: _notification('relationships', true),
             onChanged: (value) => _saveNotification('relationships', value),
             divider: true,
           ),
           SettingsSwitchRow(
-            title: 'Show message previews',
-            subtitle:
-                'Shows the sender, text and profile picture after the private wake-up. FCM never receives them.',
+            title: L10n.of(context).ui_show_message_previews_1c24a210,
+            subtitle: L10n.of(context)
+                .ui_shows_the_sender_text_and_profile_picture_aft_9bf1a906,
             value: _notification('show_notification_previews', true),
             onChanged: (value) =>
                 _saveNotification('show_notification_previews', value),
           ),
           SettingsChoiceRow(
-            title: 'Text-to-Speech',
-            subtitle:
-                'Choose which incoming TTS messages this phone reads aloud.',
+            title: L10n.of(context).ui_text_to_speech_29f0c859,
+            subtitle: L10n.of(context)
+                .ui_choose_which_incoming_tts_messages_this_phone_146aaf9a,
             value: tts.playback.name,
             display: switch (tts.playback) {
               TtsPlaybackMode.all => 'All channels',
@@ -1015,13 +1076,17 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onSelected: (value) async {
               final chosen = await showSettingsChoiceSheet(
                 context,
-                title: 'Text-to-Speech playback',
-                description:
-                    'This only affects messages marked as TTS. Ordinary messages are never spoken.',
-                choices: const <SettingsChoice>[
-                  SettingsChoice('all', 'For all channels'),
-                  SettingsChoice('current', 'For current selected channel'),
-                  SettingsChoice('never', 'Never'),
+                title: L10n.of(context).ui_text_to_speech_playback_3a07a07e,
+                description: L10n.of(context)
+                    .ui_this_only_affects_messages_marked_as_tts_ordi_ee2a809c,
+                choices: <SettingsChoice>[
+                  SettingsChoice(
+                      'all', L10n.of(context).ui_for_all_channels_205ed599),
+                  SettingsChoice(
+                      'current',
+                      L10n.of(context)
+                          .ui_for_current_selected_channel_d1ebe50d),
+                  SettingsChoice('never', L10n.of(context).ui_never_b2ff2b29),
                 ],
                 selected: value,
               );
@@ -1035,13 +1100,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             'Do Not Disturb suppresses banners and sounds on every signed-in client.',
           ),
           SettingsSectionHeader(
-            'Accessibility',
-            subheading: 'Control Text-to-Speech playback and reading speed.',
+            L10n.of(context).ui_accessibility_84b3d09f,
+            subheading: L10n.of(context)
+                .ui_control_text_to_speech_playback_and_reading_s_4a9f8831,
           ),
           SettingsSwitchRow(
-            title: 'Allow playback and usage of /tts command',
-            subtitle:
-                'When off, Kaede will not send or speak Text-to-Speech messages on this device.',
+            title: L10n.of(context)
+                .ui_allow_playback_and_usage_of_tts_command_c481110d,
+            subtitle: L10n.of(context)
+                .ui_when_off_kaede_will_not_send_or_speak_text_to_a599b70f,
             value: tts.enabled,
             onChanged: (value) =>
                 _saveTtsPreferences(tts.copyWith(enabled: value)),
@@ -1052,7 +1119,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Text-to-Speech rate · ${tts.rate.toStringAsFixed(1)}×',
+                  L10n.of(context).ui_text_to_speech_rate_value0_e3574f53(
+                      (tts.rate.toStringAsFixed(1)).toString()),
                   style: TextStyle(
                     color: context.kaede.text,
                     fontSize: 14,
@@ -1084,10 +1152,11 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ],
             ),
           ),
-          SettingsSectionHeader('Privacy'),
+          SettingsSectionHeader(L10n.of(context).ui_privacy_ebfa87e7),
           SettingsRow.chevron(
-            title: 'My reports',
-            subtitle: 'Review reports submitted to Trust & Safety.',
+            title: L10n.of(context).ui_my_reports_78d941fc,
+            subtitle: L10n.of(context)
+                .ui_review_reports_submitted_to_trust_safety_694bd7dc,
             leading: _LeadingIcon(Icons.flag_outlined),
             divider: true,
             onTap: () => Navigator.of(context).push(
@@ -1095,7 +1164,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           SettingsChoiceRow(
-            title: 'Who can message you',
+            title: L10n.of(context).ui_who_can_message_you_823607fd,
             value: '${_settings['dm_privacy'] ?? 'friends'}',
             display: _dmPrivacyLabel('${_settings['dm_privacy'] ?? 'friends'}'),
             leading: _LeadingIcon(Icons.lock_outline_rounded),
@@ -1103,13 +1172,16 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onSelected: (value) async {
               final chosen = await showSettingsChoiceSheet(
                 context,
-                title: 'Who can message you',
-                choices: const [
-                  SettingsChoice('everyone', 'Everyone',
+                title: L10n.of(context).ui_who_can_message_you_823607fd,
+                choices: [
+                  SettingsChoice(
+                      'everyone', L10n.of(context).ui_everyone_25219998,
                       hint: 'Any Kaede account can start a direct message.'),
-                  SettingsChoice('friends', 'Friends only',
+                  SettingsChoice(
+                      'friends', L10n.of(context).ui_friends_only_ca1a5d18,
                       hint: 'Only people you have added as a friend.'),
-                  SettingsChoice('shared_guild', 'Friends and shared guilds',
+                  SettingsChoice('shared_guild',
+                      L10n.of(context).ui_friends_and_shared_guilds_982b0f0c,
                       hint:
                           'Friends and members of guilds you share with them.'),
                 ],
@@ -1121,14 +1193,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             },
           ),
           SettingsRow(
-            title: 'Age-restricted commands in direct messages',
+            title: L10n.of(context)
+                .ui_age_restricted_commands_in_direct_messages_8d888b5c,
             subtitle: switch (user?.ageAssuranceState) {
-              'adult' =>
-                'Allow age-restricted application commands in DMs and group DMs.',
-              'minor' =>
-                'Unavailable because this account is age-assured as a minor.',
-              _ =>
-                'Unavailable until your instance completes age assurance for this account.',
+              'adult' => L10n.of(context)
+                  .ui_allow_age_restricted_application_commands_in__c887d5aa,
+              'minor' => L10n.of(context)
+                  .ui_unavailable_because_this_account_is_age_assur_427fc165,
+              _ => L10n.of(context)
+                  .ui_unavailable_until_your_instance_completes_age_406a4411,
             },
             trailing: DiscordSwitch(
               value: _settings['age_restricted_dm_commands_enabled'] == true,
@@ -1145,15 +1218,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 : null,
           ),
           SettingsSwitchRow(
-            title: 'Lock Kaede when you leave',
-            subtitle:
-                'Unlock with biometrics, your device passcode, or your device PIN.',
+            title: L10n.of(context).ui_lock_kaede_when_you_leave_4a987862,
+            subtitle: L10n.of(context)
+                .ui_unlock_with_biometrics_your_device_passcode_o_7d5ba4f0,
             value: _biometricLock,
             onChanged: _setBiometricLock,
           ),
           if (_biometricLock)
             SettingsChoiceRow(
-              title: 'Lock after leaving',
+              title: L10n.of(context).ui_lock_after_leaving_c08241ac,
               value: '$_biometricLockTimeout',
               display: _lockTimeoutLabel(_biometricLockTimeout),
               onSelected: (value) {
@@ -1162,9 +1235,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               },
             ),
           SettingsSectionHeader(
-            'Authorized apps',
-            subheading:
-                'Apps installed for your account and the contexts where their commands appear.',
+            L10n.of(context).ui_authorized_apps_d0c4597c,
+            subheading: L10n.of(context)
+                .ui_apps_installed_for_your_account_and_the_conte_f8363698,
           ),
           SettingsInfo(
             'Install an app from its reviewed Add App invitation. Kaede shows the app’s supported locations and requested access before authorization.',
@@ -1186,32 +1259,33 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       _manageUserApplication(_applicationInstallations[index]),
             ),
           SettingsSectionHeader(
-            'Advanced',
-            subheading: 'Optional media and troubleshooting controls.',
+            L10n.of(context).ui_advanced_60f3de7b,
+            subheading: L10n.of(context)
+                .ui_optional_media_and_troubleshooting_controls_f826ddce,
           ),
           SettingsSwitchRow(
-            title: 'Opus discontinuous transmission',
-            subtitle:
-                'Reduce outgoing bandwidth while you are not speaking. Recommended.',
+            title: L10n.of(context).ui_opus_discontinuous_transmission_d4983843,
+            subtitle: L10n.of(context)
+                .ui_reduce_outgoing_bandwidth_while_you_are_not_s_05b24382,
             value: _opusDtx,
             onChanged: _setOpusDtx,
           ),
           SettingsSectionHeader(
-            'Developer',
-            subheading:
-                'Build applications and reveal qualified technical IDs in context menus.',
+            L10n.of(context).ui_developer_34a3d9ed,
+            subheading: L10n.of(context)
+                .ui_build_applications_and_reveal_qualified_techn_7d88b2dd,
           ),
           SettingsSwitchRow(
-            title: 'Developer mode',
-            subtitle:
-                'Adds Copy ID actions for users, servers, channels, messages and applications.',
+            title: L10n.of(context).ui_developer_mode_80d8dbd0,
+            subtitle: L10n.of(context)
+                .ui_adds_copy_id_actions_for_users_servers_channe_bc7fcbd7,
             value: mobile.developerMode,
             onChanged: _saveDeveloperMode,
             divider: true,
           ),
           if (mobile.developerMode && user != null)
             SettingsRow(
-              title: 'Copy my user ID',
+              title: L10n.of(context).ui_copy_my_user_id_fc4a926a,
               subtitle: user.ref.wire,
               leading: const _LeadingIcon(Icons.badge_outlined),
               divider: true,
@@ -1221,9 +1295,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               },
             ),
           SettingsRow.chevron(
-            title: 'Developer Portal',
-            subtitle:
-                'Applications, teams, commands, credentials, workers, installs and media.',
+            title: L10n.of(context).ui_developer_portal_f5349d3d,
+            subtitle: L10n.of(context)
+                .ui_applications_teams_commands_credentials_worke_6e318370,
             leading: _LeadingIcon(Icons.developer_board_outlined),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
@@ -1233,14 +1307,14 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           if (_adminAvailable) ...[
             SettingsSectionHeader(
-              'Administration',
-              subheading:
-                  'Capability-gated instance operations and Trust & Safety.',
+              L10n.of(context).ui_administration_8fd91fef,
+              subheading: L10n.of(context)
+                  .ui_capability_gated_instance_operations_and_trus_473df8f1,
             ),
             SettingsRow.chevron(
-              title: 'Instance administration',
-              subtitle:
-                  'Users, applications, reports, federation blocks, operators and audit log.',
+              title: L10n.of(context).ui_instance_administration_9c3dd778,
+              subtitle: L10n.of(context)
+                  .ui_users_applications_reports_federation_blocks__2241f659,
               leading: const _LeadingIcon(Icons.admin_panel_settings_outlined),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -1249,17 +1323,19 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ],
-          SettingsSectionHeader('Devices',
-              subheading: 'Signed-in devices on this account.'),
+          SettingsSectionHeader(L10n.of(context).ui_devices_27acf320,
+              subheading: L10n.of(context)
+                  .ui_signed_in_devices_on_this_account_1300d8d2),
           SettingsRow(
-            title: 'This device',
-            subtitle: 'Current session',
+            title: L10n.of(context).ui_this_device_8fc5c8b9,
+            subtitle: L10n.of(context).ui_current_session_d49af382,
             leading: _LeadingIcon(Icons.check_circle_rounded,
                 color: context.kaede.mint),
           ),
           for (final session in _sessions)
             SettingsRow(
-              title: '${session['device_name'] ?? 'Kaede client'}',
+              title: L10n.of(context).ui_value0_26e9163c(
+                  (session['device_name'] ?? 'Kaede client').toString()),
               subtitle: _sessionSubtitle(session),
               leading:
                   _LeadingIcon(_deviceIcon('${session['device_name'] ?? ''}')),
@@ -1271,7 +1347,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   minimumSize: Size(0, 36),
                   padding: EdgeInsets.symmetric(horizontal: 10),
                 ),
-                child: Text('Sign out'),
+                child: Text(L10n.of(context).ui_sign_out_8b4f3c70),
               ),
             ),
           SizedBox(height: 26),
@@ -1299,7 +1375,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 foregroundColor: context.kaede.muted,
                 textStyle: TextStyle(fontSize: 12.5),
               ),
-              child: Text('Open-source licences'),
+              child: Text(L10n.of(context).ui_open_source_licences_e93031eb),
             ),
           ),
           Center(
@@ -1340,22 +1416,22 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text('Log out of Kaede?'),
+        title: Text(L10n.of(context).ui_log_out_of_kaede_3fa5e517),
         content: Text(
-          'Saved conversations on this device stay encrypted at rest and are '
-          'removed when you sign out.',
+          L10n.of(context)
+              .ui_saved_conversations_on_this_device_stay_encry_1d8e1080,
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: Text('Stay signed in'),
+            child: Text(L10n.of(context).ui_stay_signed_in_767385f7),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: context.kaede.danger,
             ),
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text('Log out'),
+            child: Text(L10n.of(context).ui_log_out_88c6d8b5),
           ),
         ],
       ),
@@ -1381,7 +1457,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(mobileControllerProvider.notifier).refreshNavigation();
       _showSuccess('Profile saved');
     } on Object catch (error) {
-      _showError(error, summary: 'Could not save the profile');
+      _showError(error,
+          summary: L10n.current.ui_could_not_save_the_profile_01ac475a);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -1394,7 +1471,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final contentType =
         imageUploadContentType(image.name, reportedType: image.mimeType);
     if (contentType == null) {
-      _showError('Choose a PNG, JPEG, GIF, or WebP image.');
+      _showError(L10n.current.ui_choose_a_png_jpeg_gif_or_webp_image_07065ce2);
       return;
     }
     setState(() => _saving = true);
@@ -1414,8 +1491,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     } on Object catch (error) {
       _showError(
         error,
-        summary:
-            'Could not update the ${kind == 'avatar' ? 'avatar' : 'banner'}',
+        summary: L10n.current.ui_could_not_update_the_value0_a2c8df24(
+            (kind == 'avatar' ? 'avatar' : 'banner').toString()),
       );
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -1427,19 +1504,22 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text('Remove your $label?'),
-        content: Text('You can upload a new $label at any time.'),
+        title: Text(L10n.of(context)
+            .ui_remove_your_value0_0cb49922((label).toString())),
+        content: Text(L10n.of(context)
+            .ui_you_can_upload_a_new_value0_at_any_time_818cafff(
+                (label).toString())),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: context.kaede.danger,
             ),
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text('Remove'),
+            child: Text(L10n.of(context).ui_remove_21a5901d),
           ),
         ],
       ),
@@ -1452,7 +1532,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       controller.applyUserProfile(updated);
       _showSuccess('${kind == 'avatar' ? 'Avatar' : 'Banner'} removed');
     } on Object catch (error) {
-      _showError(error, summary: 'Could not remove your $label');
+      _showError(error,
+          summary: L10n.current
+              .ui_could_not_remove_your_value0_cca01e29((label).toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -1460,7 +1542,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _changeEmail() async {
     final values = await _credentialsDialog(
-      title: 'Change email',
+      title: L10n.of(context).ui_change_email_d4ae86d5,
       fields: const <_DialogField>[
         _DialogField('email', 'New email',
             keyboardType: TextInputType.emailAddress),
@@ -1480,7 +1562,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _confirmEmail() async {
     final values = await _credentialsDialog(
-      title: 'Confirm email change',
+      title: L10n.of(context).ui_confirm_email_change_a2e3e285,
       fields: const <_DialogField>[
         _DialogField('token', 'Confirmation token'),
       ],
@@ -1499,7 +1581,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _enableMfa() async {
     final credentials = await _credentialsDialog(
-      title: 'Set up authenticator',
+      title: L10n.of(context).ui_set_up_authenticator_663ba1cb,
       fields: const <_DialogField>[
         _DialogField('password', 'Current password', obscure: true),
       ],
@@ -1529,7 +1611,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _disableMfa() async {
     final values = await _credentialsDialog(
-      title: 'Disable two-factor authentication',
+      title: L10n.of(context).ui_disable_two_factor_authentication_e4b58a45,
       fields: const <_DialogField>[
         _DialogField('password', 'Current password', obscure: true),
         _DialogField('code', 'Authenticator or recovery code'),
@@ -1599,7 +1681,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               style: destructive
@@ -1616,7 +1698,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 if (values.values.any((value) => value.isEmpty)) {
                   ScaffoldMessenger.of(dialogContext).showSnackBar(
                     SnackBar(
-                      content: Text('Complete every field before continuing.'),
+                      content: Text(L10n.of(context)
+                          .ui_complete_every_field_before_continuing_27efd3e0),
                     ),
                   );
                   return;
@@ -1645,15 +1728,16 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         context: context,
         barrierDismissible: false,
         builder: (dialogContext) => AlertDialog(
-          title: Text('Add Kaede to your authenticator'),
+          title: Text(
+              L10n.of(context).ui_add_kaede_to_your_authenticator_d07ff1f7),
           content: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: 480),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                    'Enter this setup key in your authenticator app, then verify the six-digit code.'),
+                Text(L10n.of(context)
+                    .ui_enter_this_setup_key_in_your_authenticator_ap_b81703ff),
                 SizedBox(height: 14),
                 SelectableText(secret,
                     style: TextStyle(
@@ -1662,7 +1746,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   SizedBox(height: 8),
                   ExpansionTile(
                     tilePadding: EdgeInsets.zero,
-                    title: Text('Advanced setup URI'),
+                    title:
+                        Text(L10n.of(context).ui_advanced_setup_uri_f9f13308),
                     children: [SelectableText(uri)],
                   ),
                 ],
@@ -1671,7 +1756,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   controller: controller,
                   keyboardType: TextInputType.number,
                   autofillHints: const [AutofillHints.oneTimeCode],
-                  decoration: InputDecoration(labelText: 'Verification code'),
+                  decoration: InputDecoration(
+                      labelText:
+                          L10n.of(context).ui_verification_code_cb8e95b7),
                 ),
               ],
             ),
@@ -1679,7 +1766,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () {
@@ -1687,14 +1774,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 if (code.length < 6) {
                   ScaffoldMessenger.of(dialogContext).showSnackBar(
                     SnackBar(
-                      content: Text('Enter the full verification code.'),
+                      content: Text(L10n.of(context)
+                          .ui_enter_the_full_verification_code_ec2d5c93),
                     ),
                   );
                   return;
                 }
                 Navigator.pop(dialogContext, code);
               },
-              child: Text('Verify and enable'),
+              child: Text(L10n.of(context).ui_verify_and_enable_eba13f60),
             ),
           ],
         ),
@@ -1708,15 +1796,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         context: context,
         barrierDismissible: false,
         builder: (dialogContext) => AlertDialog(
-          title: Text('Save your recovery codes'),
+          title: Text(L10n.of(context).ui_save_your_recovery_codes_155a83d0),
           content: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: 460),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                    'Each code can be used once if you lose your authenticator. Kaede will not show them again.'),
+                Text(L10n.of(context)
+                    .ui_each_code_can_be_used_once_if_you_lose_your_a_5e78a307),
                 SizedBox(height: 14),
                 SelectableText(codes.join('\\n'),
                     style: TextStyle(fontFamily: 'monospace')),
@@ -1726,7 +1814,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           actions: [
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('I saved them'),
+              child: Text(L10n.of(context).ui_i_saved_them_a4929513),
             ),
           ],
         ),
@@ -1745,6 +1833,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           .repository
           .updateSettings(<String, Object?>{key: value});
       ref.read(mobileControllerProvider.notifier).applySettings(updated);
+      if (key == 'locale') await setAppLanguage('$value', explicit: true);
       if (ensurePush &&
           key == 'notification_settings' &&
           value is Map<Object?, Object?>) {
@@ -1757,7 +1846,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       if (mounted) setState(() => _settings = updated);
     } on Object catch (error) {
       if (mounted) setState(() => _settings[key] = previous);
-      _showError(error, summary: 'Could not save that setting');
+      _showError(error,
+          summary: L10n.current.ui_could_not_save_that_setting_0e78d469);
     }
   }
 
@@ -1814,7 +1904,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       try {
         if (!await auth.isDeviceSupported() ||
             !await auth.authenticate(
-              localizedReason: 'Enable device lock for Kaede Chat',
+              localizedReason:
+                  L10n.current.ui_enable_device_lock_for_kaede_chat_60093c1e,
               options: AuthenticationOptions(
                 biometricOnly: false,
                 stickyAuth: true,
@@ -1823,7 +1914,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           return;
         }
       } on Object catch (error) {
-        _showError(error, summary: 'Could not enable the app lock');
+        _showError(error,
+            summary: L10n.current.ui_could_not_enable_the_app_lock_317a7765);
         return;
       }
     }
@@ -1832,7 +1924,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await preferences.setBool('biometric_lock', enabled);
       if (mounted) setState(() => _biometricLock = enabled);
     } on Object catch (error) {
-      _showError(error, summary: 'Could not save the app lock setting');
+      _showError(error,
+          summary:
+              L10n.current.ui_could_not_save_the_app_lock_setting_29561c23);
     }
   }
 
@@ -1841,7 +1935,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(voiceSessionProvider).setOpusDtx(enabled);
       if (mounted) setState(() => _opusDtx = enabled);
     } on Object catch (error) {
-      _showError(error, summary: 'Could not save the Opus DTX setting');
+      _showError(error,
+          summary:
+              L10n.current.ui_could_not_save_the_opus_dtx_setting_2a28595e);
     }
   }
 
@@ -1851,7 +1947,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await preferences.setInt('biometric_lock_timeout_seconds', seconds);
       if (mounted) setState(() => _biometricLockTimeout = seconds);
     } on Object catch (error) {
-      _showError(error, summary: 'Could not save the app lock timeout');
+      _showError(error,
+          summary:
+              L10n.current.ui_could_not_save_the_app_lock_timeout_5aa1cd90);
     }
   }
 
@@ -1864,7 +1962,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await _load();
       _showSuccess('Device signed out');
     } on Object catch (error) {
-      _showError(error, summary: 'Could not sign out that device');
+      _showError(error,
+          summary: L10n.current.ui_could_not_sign_out_that_device_47a81c51);
     }
   }
 
@@ -2000,7 +2099,7 @@ class _AccountHero extends StatelessWidget {
                       if (onRemoveBanner != null) ...[
                         _HeroEditButton(
                           icon: Icons.delete_outline_rounded,
-                          tooltip: 'Remove banner',
+                          tooltip: L10n.of(context).ui_remove_banner_74d33021,
                           onPressed: onRemoveBanner,
                           danger: true,
                         ),
@@ -2008,7 +2107,7 @@ class _AccountHero extends StatelessWidget {
                       ],
                       _HeroEditButton(
                         icon: Icons.panorama_rounded,
-                        tooltip: 'Change banner',
+                        tooltip: L10n.of(context).ui_change_banner_ae718a61,
                         onPressed: onEditBanner,
                       ),
                     ],
@@ -2055,7 +2154,8 @@ class _AccountHero extends StatelessWidget {
                           if (onRemoveAvatar != null) ...[
                             _HeroEditButton(
                               icon: Icons.delete_outline_rounded,
-                              tooltip: 'Remove avatar',
+                              tooltip:
+                                  L10n.of(context).ui_remove_avatar_d6403a8e,
                               onPressed: onRemoveAvatar,
                               danger: true,
                             ),
@@ -2063,7 +2163,7 @@ class _AccountHero extends StatelessWidget {
                           ],
                           _HeroEditButton(
                             icon: Icons.photo_camera_rounded,
-                            tooltip: 'Change avatar',
+                            tooltip: L10n.of(context).ui_change_avatar_7b892dce,
                             onPressed: onEditAvatar,
                           ),
                         ],

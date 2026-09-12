@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { guildMemberSearchPath, mergeGuildMemberPage } from '$lib/chat/members';
   import { entityRef } from '$lib/chat/refs';
@@ -19,7 +21,7 @@
     multiple = false,
     maxValues = 1,
     optional = false,
-    placeholder = 'Choose a member',
+    placeholder = $t('ui_choose_a_member_c6aaa720'),
     entityName = 'people',
     searchPlaceholder = 'Search by name or federated username',
     disabled = false,
@@ -163,7 +165,10 @@
         .catch((caught: unknown) => {
           if (controller.signal.aborted) return;
           results = [];
-          error = userErrorMessage(caught, 'Could not search guild members. Try again.');
+          error = userErrorMessage(
+            caught,
+            $t('ui_could_not_search_guild_members_try_again_0b092cee')
+          );
         })
         .finally(() => {
           if (!controller.signal.aborted) loading = false;
@@ -190,7 +195,10 @@
       await loadPage(targetGuild, search, cursor, true, generation, controller);
     } catch (caught) {
       if (!controller.signal.aborted && generation === requestGeneration) {
-        error = userErrorMessage(caught, 'Could not load more guild members. Try again.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_more_guild_members_try_again_ffbbda84')
+        );
       }
     } finally {
       if (!controller.signal.aborted && generation === requestGeneration) loadingMore = false;
@@ -284,13 +292,13 @@
       {/each}
     </div>
   {:else if !active}
-    <small>{placeholder ?? 'Choose a member'}</small>
+    <small>{placeholder ?? $t('ui_choose_a_member_c6aaa720')}</small>
   {/if}
   {#if active}
     <div id={memberResultsId} class="member-results" role="listbox" aria-multiselectable={multiple}>
       {#if optional && !multiple && value.length}
         <button type="button" role="option" aria-selected="false" onclick={() => onChange([], [])}
-          >{placeholder ?? 'Clear selection'}</button
+          >{placeholder ?? $t('ui_clear_selection_cea4d2e0')}</button
         >
       {/if}
       {#each availableOptions as option, index (option.value)}
@@ -305,19 +313,30 @@
           onclick={() => choose(option)}>{option.label}</button
         >
       {:else}
-        {#if !loading}<small>No matching {entityName}.</small>{/if}
+        {#if !loading}<small
+            >{$t('ui_no_matching_value0_f4e214bf', { value0: String(entityName) })}</small
+          >{/if}
       {/each}
     </div>
   {/if}
-  {#if guildRef && !active}<small>Search to choose any member of this guild.</small>{/if}
-  {#if loading}<small role="status">Searching members…</small>{/if}
+  {#if guildRef && !active}<small
+      >{$t('ui_search_to_choose_any_member_of_this_guild_89420641')}</small
+    >{/if}
+  {#if loading}<small role="status">{$t('ui_searching_members_4fbc9742')}</small>{/if}
   {#if hasMore}
     <button type="button" disabled={disabled || loadingMore} onclick={() => void loadMoreMembers()}
-      >{loadingMore ? 'Loading more members…' : 'Load more matching members'}</button
+      >{loadingMore
+        ? $t('ui_loading_more_members_3ce0436c')
+        : $t('ui_load_more_matching_members_16d39b4a')}</button
     >
   {/if}
   {#if error}<small class="error" role="alert">{error}</small>{/if}
-  {#if multiple}<small>{value.length} of {maxValues} selected</small>{/if}
+  {#if multiple}<small
+      >{$t('ui_value0_of_value1_selected_86733e5e', {
+        value0: String(value.length),
+        value1: String(maxValues)
+      })}</small
+    >{/if}
 </div>
 
 <style>

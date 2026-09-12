@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import type { Attachment } from '$lib/chat/types';
   import {
@@ -127,10 +129,12 @@
         <small>{attachment.content_type}</small>
       </div>
       {#if onReport}<button type="button" class="report-media" onclick={onReport}
-          >Report message</button
+          >{$t('ui_report_message_0a1e3c52')}</button
         >{/if}
-      <button type="button" onclick={() => void download()}>Download</button>
-      <button type="button" aria-label="Close media viewer" onclick={onClose}>×</button>
+      <button type="button" onclick={() => void download()}>{$t('ui_download_d6eafe82')}</button>
+      <button type="button" aria-label={$t('ui_close_media_viewer_cc533a56')} onclick={onClose}
+        >×</button
+      >
     </header>
     {#if downloadError}<p class="form-error" role="alert">{downloadError}</p>{/if}
     <div
@@ -142,7 +146,7 @@
       {#if loadError}
         <div class="attachment-load-error" role="alert">
           <span>{loadError}</span>
-          <button type="button" onclick={retryMedia}>Try again</button>
+          <button type="button" onclick={retryMedia}>{$t('ui_try_again_d8b8392e')}</button>
         </div>
       {:else}
         {#key mediaAttempt}
@@ -173,27 +177,27 @@
       {/if}
     </div>
     {#if !isVideo && !loadError}
-      <div class="media-viewer-zoom" aria-label="Image zoom controls">
+      <div class="media-viewer-zoom" aria-label={$t('ui_image_zoom_controls_a9eaa12f')}>
         <button
           type="button"
-          aria-label="Zoom out"
-          title="Zoom out (−)"
+          aria-label={$t('ui_zoom_out_bc7b631a')}
+          title={$t('ui_zoom_out_0b9aa910')}
           disabled={zoomIndex === 0}
           onclick={() => void setZoom(zoomIndex - 1)}>−</button
         >
         <button
           type="button"
           class="zoom-level"
-          aria-label="Fit image to window"
-          title="Fit image to window (0)"
+          aria-label={$t('ui_fit_image_to_window_6de2ab95')}
+          title={$t('ui_fit_image_to_window_0_d9f9f4da')}
           disabled={zoomIndex === 0}
           onclick={() => void setZoom(0)}
-          >{zoomIndex === 0 ? 'Fit' : `${ZOOM_LEVELS[zoomIndex] * 100}%`}</button
+          >{zoomIndex === 0 ? $t('ui_fit_9f872ed4') : `${ZOOM_LEVELS[zoomIndex] * 100}%`}</button
         >
         <button
           type="button"
-          aria-label="Zoom in"
-          title="Zoom in (+)"
+          aria-label={$t('ui_zoom_in_0e47f09a')}
+          title={$t('ui_zoom_in_4949ad25')}
           disabled={zoomIndex === ZOOM_LEVELS.length - 1}
           onclick={() => void setZoom(zoomIndex + 1)}>+</button
         >

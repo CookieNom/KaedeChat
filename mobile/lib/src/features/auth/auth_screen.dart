@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 final class AuthScreen extends ConsumerStatefulWidget {
@@ -99,7 +100,9 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           await _verificationDialog(domain);
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Account created. You can sign in now.')),
+            SnackBar(
+                content: Text(L10n.of(context)
+                    .ui_account_created_you_can_sign_in_now_dd70b063)),
           );
         }
         if (mounted) setState(() => register = false);
@@ -145,7 +148,8 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(userFacingError(
               error,
-              summary: 'Could not verify the authentication code',
+              summary: L10n.of(context)
+                  .ui_could_not_verify_the_authentication_code_eeb4b672,
             )),
           ));
         }
@@ -157,8 +161,9 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(userFacingError(
             error,
-            summary:
-                register ? 'Could not create the account' : 'Could not sign in',
+            summary: register
+                ? L10n.of(context).ui_could_not_create_the_account_c1e984f9
+                : L10n.of(context).ui_could_not_sign_in_273e35a3,
           )),
         ));
       }
@@ -224,18 +229,20 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: Text('Reset password and encryption vault?'),
+          title: Text(
+              L10n.of(context).ui_reset_password_and_encryption_vault_c5f58a22),
           content: Text(
-            'Resetting your password rotates the account-vault key and deletes the remote encrypted vault. Encrypted history may be recoverable only from an enrolled client that still has it or from a recovery backup.',
+            L10n.of(context)
+                .ui_resetting_your_password_rotates_the_account_v_58928b2a,
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: Text('Reset password'),
+              child: Text(L10n.of(context).ui_reset_password_679a51e9),
             ),
           ],
         ),
@@ -251,8 +258,10 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           SnackBar(
             content: Text(
               localStateRebased
-                  ? 'Password updated and the remote encryption vault was reset. This phone’s trusted encrypted state will repopulate it after you sign in.'
-                  : 'Password updated and the remote encryption vault was reset. Restore encrypted history from an enrolled client or recovery backup after signing in.',
+                  ? L10n.of(context)
+                      .ui_password_updated_and_the_remote_encryption_va_b50282d3
+                  : L10n.of(context)
+                      .ui_password_updated_and_the_remote_encryption_va_c1e3c1cd,
             ),
           ),
         );
@@ -262,7 +271,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not reset the password',
+            summary: L10n.of(context).ui_could_not_reset_the_password_120654bc,
           )),
         ));
       }
@@ -284,19 +293,22 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context), child: Text('Cancel')),
+              onPressed: () => Navigator.pop(context),
+              child: Text(L10n.of(context).ui_cancel_35afca3b)),
           FilledButton(
               onPressed: () {
                 final value = secret ? controller.text : controller.text.trim();
                 if (value.isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Enter $hint.')),
+                    SnackBar(
+                        content: Text(L10n.of(context)
+                            .ui_enter_value0_49bbb7b0((hint).toString()))),
                   );
                   return;
                 }
                 Navigator.pop(context, value);
               },
-              child: Text('Continue')),
+              child: Text(L10n.of(context).ui_continue_ab43d664)),
         ],
       ),
     );
@@ -335,7 +347,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                       ),
                       SizedBox(width: 12),
                       Text(
-                        'Kaede Chat',
+                        L10n.of(context).ui_kaede_chat_9c0fb33b,
                         style: TextStyle(
                           fontSize: 19,
                           fontWeight: FontWeight.w700,
@@ -358,9 +370,14 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     SizedBox(height: 18),
                   ],
                   SegmentedButton<bool>(
-                    segments: const [
-                      ButtonSegment(value: false, label: Text('Sign in')),
-                      ButtonSegment(value: true, label: Text('Create account')),
+                    segments: [
+                      ButtonSegment(
+                          value: false,
+                          label: Text(L10n.of(context).ui_sign_in_744be623)),
+                      ButtonSegment(
+                          value: true,
+                          label: Text(
+                              L10n.of(context).ui_create_account_50dc6622)),
                     ],
                     selected: {register},
                     showSelectedIcon: false,
@@ -371,16 +388,18 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                   ),
                   SizedBox(height: 26),
                   Text(
-                    register ? 'Create your account.' : 'Welcome back.',
+                    register
+                        ? L10n.of(context).ui_create_your_account_660a9fe7
+                        : L10n.of(context).ui_welcome_back_c27e9c98,
                     style: Theme.of(context).textTheme.displaySmall,
                   ),
                   SizedBox(height: 10),
                   Text(
                     register
-                        ? 'Choose the server that will own your identity. You '
-                            'can still join communities across the fediverse.'
-                        : 'Sign in through your home server — the server where '
-                            'your account was created.',
+                        ? L10n.of(context)
+                            .ui_choose_the_server_that_will_own_your_identity_425cf24d
+                        : L10n.of(context)
+                            .ui_sign_in_through_your_home_server_the_server_w_91ad7397,
                     style: TextStyle(
                       color: context.kaede.muted,
                       fontSize: 15,
@@ -395,8 +414,8 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     textInputAction: TextInputAction.next,
                     decoration: InputDecoration(
                       hintText: 'kaede.chat',
-                      helperText:
-                          'Not sure? kaede.chat is the recommended public server.',
+                      helperText: L10n.of(context)
+                          .ui_not_sure_kaede_chat_is_the_recommended_public_347c0eb6,
                       prefixIcon: Icon(Icons.language_rounded),
                     ),
                   ),
@@ -486,14 +505,17 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         : Icon(register
                             ? Icons.person_add_alt_1_rounded
                             : Icons.login_rounded),
-                    label: Text(register ? 'Create account' : 'Sign in'),
+                    label: Text(register
+                        ? L10n.of(context).ui_create_account_50dc6622
+                        : L10n.of(context).ui_sign_in_744be623),
                   ),
                   if (!register) ...[
                     SizedBox(height: 6),
                     Center(
                       child: TextButton(
                         onPressed: _forgotPassword,
-                        child: Text('Forgot password?'),
+                        child:
+                            Text(L10n.of(context).ui_forgot_password_e2619568),
                       ),
                     ),
                   ],
@@ -540,7 +562,8 @@ final class _EmailVerificationDialogState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not verify the email address',
+              summary: L10n.of(context)
+                  .ui_could_not_verify_the_email_address_5cb841bb,
             ));
       }
     } finally {
@@ -552,7 +575,9 @@ final class _EmailVerificationDialogState
         await widget.repository.resendVerification(widget.email);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Verification email requested.')),
+            SnackBar(
+                content: Text(
+                    L10n.of(context).ui_verification_email_requested_a75bb6b0)),
           );
         }
       });
@@ -568,19 +593,21 @@ final class _EmailVerificationDialogState
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: Text('Verify your email'),
+        title: Text(L10n.of(context).ui_verify_your_email_50ec3767),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'We sent a verification link to your email. Open it, or paste its token below.',
+              L10n.of(context)
+                  .ui_we_sent_a_verification_link_to_your_email_ope_284a8624,
             ),
             SizedBox(height: 14),
             TextField(
               controller: widget.token,
               enabled: !_busy,
-              decoration: InputDecoration(labelText: 'Verification token'),
+              decoration: InputDecoration(
+                  labelText: L10n.of(context).ui_verification_token_0c70a2ef),
               onSubmitted: (_) => _verify(),
             ),
             if (_error case final error?) ...[
@@ -597,15 +624,15 @@ final class _EmailVerificationDialogState
         actions: [
           TextButton(
             onPressed: _busy ? null : _resend,
-            child: Text('Resend'),
+            child: Text(L10n.of(context).ui_resend_121c8c1e),
           ),
           TextButton(
             onPressed: _busy ? null : () => Navigator.pop(context),
-            child: Text('Verify later'),
+            child: Text(L10n.of(context).ui_verify_later_2b8bfe56),
           ),
           FilledButton(
             onPressed: _busy ? null : _verify,
-            child: Text('Verify'),
+            child: Text(L10n.of(context).ui_verify_2d5c0c44),
           ),
         ],
       );
@@ -638,16 +665,18 @@ final class _MfaDialogState extends State<_MfaDialog> {
   final controller = TextEditingController();
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: Text('Two-factor authentication'),
+        title: Text(L10n.of(context).ui_two_factor_authentication_68cad341),
         content: TextField(
             controller: controller,
             autofocus: true,
             keyboardType: TextInputType.number,
-            decoration:
-                InputDecoration(hintText: '6-digit code or recovery code')),
+            decoration: InputDecoration(
+                hintText: L10n.of(context)
+                    .ui_6_digit_code_or_recovery_code_c66a2083)),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context), child: Text('Cancel')),
+              onPressed: () => Navigator.pop(context),
+              child: Text(L10n.of(context).ui_cancel_35afca3b)),
           FilledButton(
               onPressed: () {
                 final value = controller.text.trim();
@@ -655,7 +684,8 @@ final class _MfaDialogState extends State<_MfaDialog> {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(
-                        'Enter an authentication or recovery code.',
+                        L10n.of(context)
+                            .ui_enter_an_authentication_or_recovery_code_740e843d,
                       ),
                     ),
                   );
@@ -663,7 +693,7 @@ final class _MfaDialogState extends State<_MfaDialog> {
                 }
                 Navigator.pop(context, value);
               },
-              child: Text('Continue')),
+              child: Text(L10n.of(context).ui_continue_ab43d664)),
         ],
       );
 }

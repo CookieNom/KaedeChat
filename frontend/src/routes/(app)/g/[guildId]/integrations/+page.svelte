@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { api, userErrorMessage } from '$lib/api/client';
@@ -103,7 +105,7 @@
     busyRef = '';
     botsLoading = false;
     notice = '';
-    error = 'This guild is unavailable or you no longer have access.';
+    error = $t('ui_this_guild_is_unavailable_or_you_no_longer_ha_70ba0e65');
     window.location.assign(resolve('/home'));
   }
 
@@ -133,7 +135,10 @@
           installations = loadedInstallations;
         } catch (caught) {
           if (loadIsCurrent(targetGuildRef, controller, generation)) {
-            error = userErrorMessage(caught, 'Could not load bot integrations for this guild.');
+            error = userErrorMessage(
+              caught,
+              $t('ui_could_not_load_bot_integrations_for_this_guil_c99c5da4')
+            );
           }
         } finally {
           if (loadIsCurrent(targetGuildRef, controller, generation)) botsLoading = false;
@@ -141,7 +146,10 @@
       }
     } catch (caught) {
       if (loadIsCurrent(targetGuildRef, controller, generation)) {
-        error = userErrorMessage(caught, 'Could not load integrations for this guild.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_integrations_for_this_guild_db1bca6f')
+        );
       }
     }
   }
@@ -181,7 +189,7 @@
         guildRef === targetGuildRef &&
         guild === loadedGuild
       ) {
-        error = userErrorMessage(caught, 'Could not remove the bot.');
+        error = userErrorMessage(caught, $t('ui_could_not_remove_the_bot_2d564666'));
       }
     } finally {
       if (
@@ -254,7 +262,10 @@
         guildRef === targetGuildRef &&
         guild === loadedGuild
       ) {
-        error = userErrorMessage(caught, 'Could not update the bot’s channel access.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_update_the_bot_s_channel_access_56720b8c')
+        );
       }
     } finally {
       if (
@@ -300,16 +311,19 @@
 </script>
 
 <svelte:head
-  ><title>Integrations · {routeIsLoaded ? (guild?.name ?? 'Guild') : 'Guild'} · Kaede Chat</title
+  ><title
+    >{$t('ui_integrations_value0_kaede_chat_20fe2f45', {
+      value0: String(routeIsLoaded ? (guild?.name ?? 'Guild') : 'Guild')
+    })}</title
   ></svelte:head
 >
 <main>
   <header>
     <div>
-      <a href={resolve(`/g/${encodeURIComponent(guildRef)}/settings`)}>← Guild settings</a><span
-        >Guild integrations</span
-      >
-      <h1>Integrations</h1>
+      <a href={resolve(`/g/${encodeURIComponent(guildRef)}/settings`)}
+        >{$t('ui_guild_settings_30da895f')}</a
+      ><span>{$t('ui_guild_integrations_ce0e63b1')}</span>
+      <h1>{$t('ui_integrations_090512d9')}</h1>
       <p>{routeIsLoaded ? (guild?.name ?? guildRef) : guildRef}</p>
     </div>
   </header>
@@ -319,33 +333,29 @@
       {notice}
     </div>{/if}
   {#if !guild || !routeIsLoaded}
-    <p>Loading integrations…</p>
+    <p>{$t('ui_loading_integrations_191441df')}</p>
   {:else}
-    <nav class="integration-nav" aria-label="Integration types">
-      <a href="#bots-apps">Bots &amp; Apps</a>
-      <a href="#webhooks">Webhooks</a>
-      <a href="#channels-followed">Channels Followed</a>
+    <nav class="integration-nav" aria-label={$t('ui_integration_types_e5be4ada')}>
+      <a href="#bots-apps">{$t('ui_bots_apps_2b96a588')}</a>
+      <a href="#webhooks">{$t('ui_webhooks_45808d75')}</a>
+      <a href="#channels-followed">{$t('ui_channels_followed_23902d9d')}</a>
     </nav>
     <section id="bots-apps" class="intro">
-      <span>Bots and apps</span>
-      <h2>Installed bots and apps</h2>
-      <p>
-        Each bot keeps only the scopes, event intents, role permissions, channel access, and
-        encryption mode approved for this guild. Removing a bot revokes future API and Gateway
-        access.
-      </p>
+      <span>{$t('ui_bots_and_apps_75083834')}</span>
+      <h2>{$t('ui_installed_bots_and_apps_6f59b877')}</h2>
+      <p>{$t('ui_each_bot_keeps_only_the_scopes_event_intents__7155cc97')}</p>
     </section>
     {#if !canManageGuild}
       <section class="empty">
-        <strong>Manage Server is required</strong>
-        <p>Bot installation details are visible to members who can manage this server.</p>
+        <strong>{$t('ui_manage_server_is_required_151ee3c1')}</strong>
+        <p>{$t('ui_bot_installation_details_are_visible_to_membe_90f8d61f')}</p>
       </section>
     {:else if botsLoading}
-      <section class="empty" role="status">Loading bots and apps…</section>
+      <section class="empty" role="status">{$t('ui_loading_bots_and_apps_6ae74c6f')}</section>
     {:else if installations.length === 0}
       <section class="empty">
-        <strong>No bots or apps installed</strong>
-        <p>Open a bot invite link to add one. You will review its access before installation.</p>
+        <strong>{$t('ui_no_bots_or_apps_installed_3a39141a')}</strong>
+        <p>{$t('ui_open_a_bot_invite_link_to_add_one_you_will_re_831fa648')}</p>
       </section>
     {:else}<div class="list">
         {#each installations as installation (installation.id)}<article>
@@ -356,27 +366,36 @@
                   >{installation.application.bot_user.handle} · {installation.application
                     .origin_domain}</small
                 >
-                <p>{installation.application.description ?? 'No description provided.'}</p>
+                <p>
+                  {installation.application.description ??
+                    $t('ui_no_description_provided_2527a18a')}
+                </p>
               </div>
             </div>
             <div class="details">
               <span>{installation.status}</span><span
                 >{installation.e2ee_mode.replaceAll('_', ' ')}</span
-              ><span>{installation.scopes.length} scopes</span><span
-                >{installation.intents.length} intents</span
+              ><span
+                >{$t('ui_value0_scopes_776b226f', {
+                  value0: String(installation.scopes.length)
+                })}</span
+              ><span
+                >{$t('ui_value0_intents_650b668d', {
+                  value0: String(installation.intents.length)
+                })}</span
               >
             </div>
             <details>
-              <summary>Approved access</summary>
-              <h3>Scopes</h3>
+              <summary>{$t('ui_approved_access_cc93c1b9')}</summary>
+              <h3>{$t('ui_scopes_0d5644ff')}</h3>
               <div class="pills">
                 {#each installation.scopes as scope (scope)}<span>{scope}</span>{/each}
               </div>
-              <h3>Live events</h3>
+              <h3>{$t('ui_live_events_b7a9f551')}</h3>
               <div class="pills">
                 {#each installation.intents as intent (intent)}<span>{intent}</span>{/each}
               </div>
-              <h3>Guild permissions</h3>
+              <h3>{$t('ui_guild_permissions_325aaf39')}</h3>
               {#if selectedPermissionMetadata(installation.permissions).length}
                 <div class="pills">
                   {#each selectedPermissionMetadata(installation.permissions) as permission (permission.permission)}
@@ -384,21 +403,17 @@
                   {/each}
                 </div>
               {:else}
-                <p>No guild permissions approved.</p>
+                <p>{$t('ui_no_guild_permissions_approved_81abf779')}</p>
               {/if}
             </details>
             <details class="channel-access">
-              <summary>Channel access</summary>
-              <p>
-                This is an installation-wide ceiling in addition to the bot role and channel
-                overrides. Selecting a category includes its child channels. Leave every option
-                clear to allow all channels permitted by the role.
-              </p>
+              <summary>{$t('ui_channel_access_34e631c3')}</summary>
+              <p>{$t('ui_this_is_an_installation_wide_ceiling_in_addit_eb7a998f')}</p>
               <div class="channel-access-heading">
                 <strong
                   >{installation.channel_restrictions.length
                     ? `${installation.channel_restrictions.length} selected`
-                    : 'All role-permitted channels'}</strong
+                    : $t('ui_all_role_permitted_channels_4115543b')}</strong
                 >
                 {#if installation.channel_restrictions.length}
                   <button
@@ -408,12 +423,12 @@
                       installations = installations.map((item) =>
                         item.id === installation.id ? { ...item, channel_restrictions: [] } : item
                       );
-                    }}>Allow all</button
+                    }}>{$t('ui_allow_all_56ac845a')}</button
                   >
                 {/if}
               </div>
               <fieldset disabled={busyRef !== ''}>
-                <legend>Allowed channels and categories</legend>
+                <legend>{$t('ui_allowed_channels_and_categories_8ed2bf18')}</legend>
                 {#each restrictionChannels as channel (entityRef(channel))}
                   <label>
                     <input
@@ -426,7 +441,8 @@
                           event.currentTarget.checked
                         )}
                     />
-                    {channel.type === 4 ? 'Category' : 'Channel'} · {channel.name ?? channel.id}
+                    {channel.type === 4 ? $t('ui_category_292c06f0') : $t('ui_channel_ce4683e7')} · {channel.name ??
+                      channel.id}
                   </label>
                 {/each}
               </fieldset>
@@ -436,8 +452,8 @@
                 onclick={() => void saveChannelRestrictions(installation)}
               >
                 {busyRef === `${loadedGuildRef}:${installation.application.ref}:channels`
-                  ? 'Saving…'
-                  : 'Save channel access'}
+                  ? $t('ui_saving_23e39291')
+                  : $t('ui_save_channel_access_30bd74a5')}
               </button>
             </details>
             <ApplicationCommandPermissions
@@ -457,12 +473,16 @@
               />
             {/if}
             <footer>
-              <small>Installed {new Date(installation.installed_at).toLocaleString()}</small><button
+              <small
+                >{$t('ui_installed_value0_3d93ef12', {
+                  value0: String(new Date(installation.installed_at).toLocaleString())
+                })}</small
+              ><button
                 disabled={busyRef === `${loadedGuildRef}:${installation.application.ref}`}
                 onclick={() => remove(installation)}
                 >{busyRef === `${loadedGuildRef}:${installation.application.ref}`
-                  ? 'Removing…'
-                  : 'Remove bot'}</button
+                  ? $t('ui_removing_d4b09919')
+                  : $t('ui_remove_bot_5c58ac60')}</button
               >
             </footer>
           </article>{/each}

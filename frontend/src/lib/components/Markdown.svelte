@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { renderMessageMarkdown } from '$lib/chat/markdown';
   import type { Role, UserSummary } from '$lib/chat/types';
   import { tick } from 'svelte';
@@ -63,7 +65,7 @@
   bind:this={container}
   class="message-markdown"
   role="group"
-  aria-label="Message content"
+  aria-label={$t('ui_message_content_148103de')}
   onclick={(event) => activate(event.target)}
   onkeydown={keydown}
 >

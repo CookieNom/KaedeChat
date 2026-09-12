@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { interactionResponses } from '$lib/chat/interaction-responses.svelte';
   import {
     interactionResponseAttachments,
@@ -64,7 +66,11 @@
 </script>
 
 {#if visible.length}
-  <section class="ephemeral-tray" aria-label="Private bot responses" aria-live="polite">
+  <section
+    class="ephemeral-tray"
+    aria-label={$t('ui_private_bot_responses_c23bb11d')}
+    aria-live="polite"
+  >
     {#each visible as event (event.response_ref ?? event.interaction_ref)}
       {@const payload = data(event)}
       {@const responseType = event.callback_type ?? event.response_type ?? event.type}
@@ -75,16 +81,22 @@
       {@const request = interactionResponses.context(event.interaction_ref ?? null)}
       <article>
         <header>
-          <span><strong>Ephemeral · Only you can see this</strong> · Bot response</span>
+          <span
+            ><strong>{$t('ui_ephemeral_only_you_can_see_this_a9c7c9e7')}</strong>
+            {$t('ui_bot_response_6173bf5f')}</span
+          >
           <button
             type="button"
-            aria-label="Dismiss private bot response"
+            aria-label={$t('ui_dismiss_private_bot_response_9f0e6084')}
             onclick={() =>
               interactionResponses.clear(event.interaction_ref ?? '', event.response_ref)}>×</button
           >
         </header>
         {#if responseType === 5 && !hasMessage}
-          <p class="thinking" role="status"><span aria-hidden="true"></span> Bot is thinking…</p>
+          <p class="thinking" role="status">
+            <span aria-hidden="true"></span>
+            {$t('ui_bot_is_thinking_ca4a05e4')}
+          </p>
         {/if}
         {#if typeof payload.content === 'string' && payload.content}
           <Markdown content={payload.content} />
@@ -146,13 +158,12 @@
             />
             {#if expired}
               <p class="component-note">
-                These private bot controls expired. Run the command again.
+                {$t('ui_these_private_bot_controls_expired_run_the_co_c273979a')}
               </p>
             {/if}
           {:else}
             <p class="component-note">
-              These bot controls expired or are missing their private interaction context. Run the
-              command again.
+              {$t('ui_these_bot_controls_expired_or_are_missing_the_12d717a6')}
             </p>
           {/if}
         {/if}

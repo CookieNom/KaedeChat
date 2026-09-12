@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import Icon from './Icon.svelte';
 
   let {
@@ -42,8 +44,8 @@
     class:active={open}
     type="button"
     {disabled}
-    aria-label="Open attachment and poll menu"
-    title="Add"
+    aria-label={$t('ui_open_attachment_and_poll_menu_3899b68c')}
+    title={$t('ui_add_9fd728c6')}
     aria-haspopup="menu"
     aria-expanded={open}
     onclick={(event) => {
@@ -54,14 +56,22 @@
     <Icon name="plus" size={21} />
   </button>
   {#if open}
-    <div class="composer-action-popover" role="menu" aria-label="Add to message">
+    <div class="composer-action-popover" role="menu" aria-label={$t('ui_add_to_message_a51ec5e2')}>
       <button type="button" role="menuitem" disabled={!canAttach} onclick={() => choose(onAttach)}>
         <Icon name="upload" size={18} />
-        <span><strong>Upload a File</strong><small>Add photos, video, or documents</small></span>
+        <span
+          ><strong>{$t('ui_upload_a_file_f09bbe52')}</strong><small
+            >{$t('ui_add_photos_video_or_documents_b8623a54')}</small
+          ></span
+        >
       </button>
       <button type="button" role="menuitem" disabled={!canPoll} onclick={() => choose(onPoll)}>
         <Icon name="poll" size={18} />
-        <span><strong>Create Poll</strong><small>Ask up to 10 answer choices</small></span>
+        <span
+          ><strong>{$t('ui_create_poll_b2b9c2e8')}</strong><small
+            >{$t('ui_ask_up_to_10_answer_choices_61db7876')}</small
+          ></span
+        >
       </button>
     </div>
   {/if}

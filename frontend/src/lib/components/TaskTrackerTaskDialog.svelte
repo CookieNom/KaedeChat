@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { entityKey, entityRef } from '$lib/chat/refs';
   import type { GuildMemberSummary, UserSummary } from '$lib/chat/types';
   import type {
@@ -174,7 +176,7 @@
   <button
     class="task-dialog-backdrop"
     type="button"
-    aria-label="Close task editor"
+    aria-label={$t('ui_close_task_editor_989707d4')}
     disabled={busy}
     onclick={onClose}
   ></button>
@@ -189,18 +191,18 @@
   >
     <header>
       <div>
-        <span>{task ? task.key : 'New task'}</span>
+        <span>{task ? task.key : $t('ui_new_task_3e992276')}</span>
         <h2 id="task-dialog-title">
           {readOnly
-            ? 'Task details'
+            ? $t('ui_task_details_c13142f7')
             : assignmentOnly
-              ? 'Assign task'
+              ? $t('ui_assign_task_46af52bb')
               : task
-                ? 'Edit task'
-                : 'Create task'}
+                ? $t('ui_edit_task_cf1368a3')
+                : $t('ui_create_task_6f541e1b')}
         </h2>
       </div>
-      <button type="button" disabled={busy} aria-label="Close" onclick={onClose}>
+      <button type="button" disabled={busy} aria-label={$t('ui_close_7d9eb7ac')} onclick={onClose}>
         <Icon name="x" size={20} />
       </button>
     </header>
@@ -212,7 +214,7 @@
       }}
     >
       <label class="wide-field">
-        <span>Title</span>
+        <span>{$t('ui_title_7e8cd205')}</span>
         <input
           bind:this={titleInput}
           bind:value={title}
@@ -223,17 +225,17 @@
         />
       </label>
       <label class="wide-field">
-        <span>Description</span>
+        <span>{$t('ui_description_526e0087')}</span>
         <textarea
           bind:value={description}
           maxlength="10000"
           rows="5"
-          placeholder="Add context, acceptance criteria, or links…"
+          placeholder={$t('ui_add_context_acceptance_criteria_or_links_cfa914ec')}
           disabled={busy || readOnly || assignmentOnly}
         ></textarea>
       </label>
       <label>
-        <span>Status</span>
+        <span>{$t('ui_status_920e413c')}</span>
         <select bind:value={laneKey} disabled={busy || readOnly || assignmentOnly}>
           {#each lanes as lane (entityKey(lane))}
             <option value={entityKey(lane)}>{lane.name}</option>
@@ -241,17 +243,17 @@
         </select>
       </label>
       <label>
-        <span>Priority</span>
+        <span>{$t('ui_priority_d60dbba0')}</span>
         <select bind:value={priority} disabled={busy || readOnly || assignmentOnly}>
-          <option value="none">No priority</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-          <option value="urgent">Urgent</option>
+          <option value="none">{$t('ui_no_priority_40588e19')}</option>
+          <option value="low">{$t('ui_low_f793de20')}</option>
+          <option value="medium">{$t('ui_medium_8e588cd1')}</option>
+          <option value="high">{$t('ui_high_c4ebc6d4')}</option>
+          <option value="urgent">{$t('ui_urgent_1b015904')}</option>
         </select>
       </label>
       <label>
-        <span>Due date</span>
+        <span>{$t('ui_due_date_e1cb6d30')}</span>
         <input
           bind:value={due}
           type="datetime-local"
@@ -259,21 +261,21 @@
         />
       </label>
       <label>
-        <span>Assignee</span>
+        <span>{$t('ui_assignee_5e20d20e')}</span>
         <GuildMemberPicker
           guildRef={canAssign ? guildRef : null}
           fallbackUsers={assignableMembers.map((member) => member.user)}
           value={assigneeKey ? [assigneeKey] : []}
           optional
-          placeholder="Unassigned"
+          placeholder={$t('ui_unassigned_14d33bd0')}
           disabled={busy || readOnly || !canChangeAssignee}
           onChange={(values) => (assigneeKey = values[0] ?? '')}
         />
         {#if !readOnly && !canAssign}
           <small>
             {canChangeAssignee
-              ? 'You can assign this task to yourself; assigning others requires additional permission.'
-              : 'You do not have permission to change this assignee.'}
+              ? $t('ui_you_can_assign_this_task_to_yourself_assignin_406bf7fb')
+              : $t('ui_you_do_not_have_permission_to_change_this_ass_38aed6e3')}
           </small>
         {/if}
       </label>
@@ -284,15 +286,15 @@
         <div>
           {#if task && canDelete && !readOnly && !assignmentOnly && onDelete}
             {#if confirmDelete}
-              <span class="delete-confirm">Delete this task permanently?</span>
+              <span class="delete-confirm">{$t('ui_delete_this_task_permanently_d1773140')}</span>
               <button
                 class="danger-button"
                 type="button"
                 disabled={busy}
-                onclick={() => void onDelete?.()}>Confirm delete</button
+                onclick={() => void onDelete?.()}>{$t('ui_confirm_delete_da00fa96')}</button
               >
               <button type="button" disabled={busy} onclick={() => (confirmDelete = false)}
-                >Keep task</button
+                >{$t('ui_keep_task_c9edd2f0')}</button
               >
             {:else}
               <button
@@ -301,24 +303,24 @@
                 disabled={busy}
                 onclick={() => (confirmDelete = true)}
               >
-                <Icon name="trash" size={16} />Delete
+                <Icon name="trash" size={16} />{$t('ui_delete_e2d0a549')}
               </button>
             {/if}
           {/if}
         </div>
         <div>
           <button type="button" disabled={busy} onclick={onClose}
-            >{readOnly ? 'Close' : 'Cancel'}</button
+            >{readOnly ? $t('ui_close_7d9eb7ac') : $t('ui_cancel_19766ed6')}</button
           >
           {#if !readOnly}
             <button class="save-button" disabled={busy || (!assignmentOnly && !title.trim())}>
               {busy
-                ? 'Saving…'
+                ? $t('ui_saving_23e39291')
                 : assignmentOnly
-                  ? 'Save assignee'
+                  ? $t('ui_save_assignee_135e68ec')
                   : task
-                    ? 'Save changes'
-                    : 'Create task'}
+                    ? $t('ui_save_changes_dd0ae7a5')
+                    : $t('ui_create_task_6f541e1b')}
             </button>
           {/if}
         </div>

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -32,7 +34,7 @@
     error = '';
     busy = false;
     if (!targetCode) {
-      error = 'This invite is unavailable.';
+      error = $t('ui_this_invite_is_unavailable_e8c97148');
       return;
     }
     void api<InvitePreview>(`/invites/${encodeURIComponent(targetCode)}`, {
@@ -46,7 +48,7 @@
           return;
         error = userErrorMessage(
           caught,
-          'This invite is unavailable. Ask for a new invite and try again.'
+          $t('ui_this_invite_is_unavailable_ask_for_a_new_invi_3932878a')
         );
       });
     return () => controller.abort();
@@ -77,7 +79,7 @@
         sessionStorage.setItem('kaede.return-to', window.location.pathname);
         window.location.assign(resolve('/login'));
       } else {
-        error = userErrorMessage(caught, 'Could not accept this invite. Try again.');
+        error = userErrorMessage(caught, $t('ui_could_not_accept_this_invite_try_again_fc4d2e30'));
       }
     } finally {
       if (generation === loadGeneration && targetCode === code) busy = false;
@@ -88,7 +90,7 @@
     if (!preview) return;
     const target = federatedInviteHomeUrl(preview.code, preview.guild.origin_domain, homeDomain);
     if (!target) {
-      homeError = 'Enter a valid home instance domain, such as chat.example.';
+      homeError = $t('ui_enter_a_valid_home_instance_domain_such_as_ch_c756a84d');
       return;
     }
     homeError = '';
@@ -98,32 +100,34 @@
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- the typed guild route is resolved before parameters are inserted -->
 
-<svelte:head><title>Guild invitation · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_guild_invitation_kaede_chat_356f4cb7')}</title></svelte:head>
 
 <div class="auth-page">
   <section class="auth-card invite-card">
     <span class="invite-mark" aria-hidden="true"
       >{preview?.guild.name.slice(0, 2).toUpperCase() ?? 'K'}</span
     >
-    <p class="eyebrow">You’re invited</p>
-    <h1>{preview?.guild.name ?? 'Opening invitation…'}</h1>
+    <p class="eyebrow">{$t('ui_you_re_invited_3b3fc7fd')}</p>
+    <h1>{preview?.guild.name ?? $t('ui_opening_invitation_451845cf')}</h1>
     {#if preview?.guild.description}<p>{preview.guild.description}</p>{/if}
     {#if preview}
-      <p>
-        Hosted by <strong>{preview.guild.origin_domain}</strong>
-      </p>
+      <p>{$t('ui_hosted_by_f772bf27')} <strong>{preview.guild.origin_domain}</strong></p>
       {#if preview.expires_at}
-        <p class="field-note">Expires {formatDateTime(preview.expires_at)}</p>
+        <p class="field-note">
+          {$t('ui_expires_value0_8c3e7e71', { value0: String(formatDateTime(preview.expires_at)) })}
+        </p>
       {/if}
-      {#if destination?.name}<p class="field-note">Destination: {destination.name}</p>{/if}
+      {#if destination?.name}<p class="field-note">
+          {$t('ui_destination_value0_fdd67332', { value0: String(destination.name) })}
+        </p>{/if}
       {#each details as detail (detail)}
         <p class="field-note">{detail}</p>
       {/each}
       <button class="primary-button" disabled={busy} onclick={accept}>
-        {busy ? 'Joining…' : 'Accept invitation'}
+        {busy ? $t('ui_joining_6bbb89ee') : $t('ui_accept_invitation_7e17aadc')}
       </button>
       <details>
-        <summary>Use an account from another instance</summary>
+        <summary>{$t('ui_use_an_account_from_another_instance_b9ac912c')}</summary>
         <form
           onsubmit={(event) => {
             event.preventDefault();
@@ -131,7 +135,7 @@
           }}
         >
           <label>
-            <span>Your home instance</span>
+            <span>{$t('ui_your_home_instance_496f3dc5')}</span>
             <input
               bind:value={homeDomain}
               inputmode="url"
@@ -142,10 +146,12 @@
             />
           </label>
           <p class="field-note">
-            You’ll review this same invite on your home instance, where your account is signed in.
+            {$t('ui_you_ll_review_this_same_invite_on_your_home_i_697d544b')}
           </p>
           {#if homeError}<p class="form-error" role="alert">{homeError}</p>{/if}
-          <button class="secondary-button" type="submit">Continue to my instance</button>
+          <button class="secondary-button" type="submit"
+            >{$t('ui_continue_to_my_instance_d4434687')}</button
+          >
         </form>
       </details>
     {/if}

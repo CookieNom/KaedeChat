@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { entityKey } from '$lib/chat/refs';
   import { trackerColor } from '$lib/task-tracker/board';
   import type {
@@ -128,7 +130,7 @@
   <button
     class="tracker-settings-backdrop"
     type="button"
-    aria-label="Close tracker settings"
+    aria-label={$t('ui_close_tracker_settings_fa6f09c6')}
     disabled={busy}
     onclick={onClose}
   ></button>
@@ -142,10 +144,10 @@
   >
     <header>
       <div>
-        <span>Task tracker</span>
-        <h2 id="tracker-settings-title">Board settings</h2>
+        <span>{$t('ui_task_tracker_b7794464')}</span>
+        <h2 id="tracker-settings-title">{$t('ui_board_settings_f6275e06')}</h2>
       </div>
-      <button type="button" disabled={busy} aria-label="Close" onclick={onClose}>
+      <button type="button" disabled={busy} aria-label={$t('ui_close_7d9eb7ac')} onclick={onClose}>
         <Icon name="x" size={20} />
       </button>
     </header>
@@ -159,7 +161,7 @@
         }}
       >
         <label>
-          <span>Task key prefix</span>
+          <span>{$t('ui_task_key_prefix_f14da226')}</span>
           <input
             bind:this={prefixInput}
             bind:value={prefix}
@@ -171,21 +173,22 @@
             disabled={busy}
           />
           <small
-            >Used for task keys such as {prefix.trim().toUpperCase() || 'TASK'}-42. Changing it
-            updates existing keys, while task numbers stay the same.</small
+            >{$t('ui_used_for_task_keys_such_as_value0_42_changing_ec3a5a39', {
+              value0: String(prefix.trim().toUpperCase() || 'TASK')
+            })}</small
           >
         </label>
         <button
           disabled={busy || !prefix.trim() || prefix.trim().toUpperCase() === board.key_prefix}
-          >Save prefix</button
+          >{$t('ui_save_prefix_12fbcbdd')}</button
         >
       </form>
 
       <section class="lane-settings" aria-labelledby="lane-settings-title">
         <div class="section-heading">
           <div>
-            <h3 id="lane-settings-title">Statuses</h3>
-            <p>Statuses are ordered from the start of work to completion.</p>
+            <h3 id="lane-settings-title">{$t('ui_statuses_b5c3b907')}</h3>
+            <p>{$t('ui_statuses_are_ordered_from_the_start_of_work_t_943f7c49')}</p>
           </div>
           <span>{lanes.length}</span>
         </div>
@@ -202,39 +205,41 @@
                 disabled={busy}
               />
               <label class="lane-name">
-                <span class="visually-hidden">Status name</span>
+                <span class="visually-hidden">{$t('ui_status_name_9d1ac7a5')}</span>
                 <input bind:value={names[key]} maxlength="100" required disabled={busy} />
               </label>
               <label class="completed-toggle">
                 <input bind:checked={completed[key]} type="checkbox" disabled={busy} />
-                Completed
+                {$t('ui_completed_22a970d2')}
               </label>
               <div class="lane-actions">
                 <button
                   type="button"
                   aria-label={`Move ${lane.name} up`}
-                  title="Move up"
+                  title={$t('ui_move_up_c66feb5e')}
                   disabled={busy || index === 0}
                   onclick={() => void onMoveLane(lane, index - 1)}>↑</button
                 >
                 <button
                   type="button"
                   aria-label={`Move ${lane.name} down`}
-                  title="Move down"
+                  title={$t('ui_move_down_40bb50da')}
                   disabled={busy || index === lanes.length - 1}
                   onclick={() => void onMoveLane(lane, index + 1)}>↓</button
                 >
-                <button type="button" disabled={busy} onclick={() => saveLane(lane)}>Save</button>
+                <button type="button" disabled={busy} onclick={() => saveLane(lane)}
+                  >{$t('ui_save_1509f561')}</button
+                >
                 {#if deleteConfirmKey === key}
                   <button
                     class="danger"
                     type="button"
                     disabled={busy || Boolean(deleteBlocked)}
-                    title={deleteBlocked || 'Confirm delete'}
-                    onclick={() => void onDeleteLane(lane)}>Confirm</button
+                    title={deleteBlocked || $t('ui_confirm_delete_da00fa96')}
+                    onclick={() => void onDeleteLane(lane)}>{$t('ui_confirm_eebdd24a')}</button
                   >
                   <button type="button" disabled={busy} onclick={() => (deleteConfirmKey = '')}
-                    >Keep</button
+                    >{$t('ui_keep_183f00f4')}</button
                   >
                 {:else}
                   <button
@@ -242,7 +247,7 @@
                     type="button"
                     aria-label={`Delete ${lane.name}`}
                     disabled={busy || Boolean(deleteBlocked)}
-                    title={deleteBlocked || 'Delete status'}
+                    title={deleteBlocked || $t('ui_delete_status_bb9cdd89')}
                     onclick={() => (deleteConfirmKey = key)}
                   >
                     <Icon name="trash" size={15} />
@@ -264,25 +269,27 @@
             bind:value={laneColor}
             class="lane-color"
             type="color"
-            aria-label="New status color"
+            aria-label={$t('ui_new_status_color_c6d17406')}
             disabled={busy}
           />
           <label>
-            <span class="visually-hidden">New status name</span>
+            <span class="visually-hidden">{$t('ui_new_status_name_26814d10')}</span>
             <input
               bind:value={laneName}
               maxlength="100"
-              placeholder="New status"
+              placeholder={$t('ui_new_status_be57ae1f')}
               autocomplete="off"
               required
               disabled={busy}
             />
           </label>
           <label class="completed-toggle">
-            <input bind:checked={laneCompleted} type="checkbox" disabled={busy} />Completed
+            <input bind:checked={laneCompleted} type="checkbox" disabled={busy} />{$t(
+              'ui_completed_22a970d2'
+            )}
           </label>
           <button disabled={busy || !laneName.trim()}>
-            <Icon name="plus" size={16} />Add status
+            <Icon name="plus" size={16} />{$t('ui_add_status_6d04ba00')}
           </button>
         </form>
       </section>

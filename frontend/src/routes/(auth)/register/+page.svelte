@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
@@ -56,7 +58,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not reach that Kaede server. Check the domain and try again.'
+        $t('ui_could_not_reach_that_kaede_server_check_the_d_4a2c6f64')
       );
     } finally {
       busy = false;
@@ -81,7 +83,7 @@
   async function submit() {
     if (busy || emailRequired === null) return;
     if (password !== confirmPassword) {
-      error = 'Passwords do not match.';
+      error = $t('ui_passwords_do_not_match_6c6e178a');
       return;
     }
     busy = true;
@@ -107,7 +109,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not create your account. Check the form and try again.'
+        $t('ui_could_not_create_your_account_check_the_form__346aba6e')
       );
       if (turnstileEnabled) turnstileWidget?.reset();
     } finally {
@@ -116,7 +118,7 @@
   }
 </script>
 
-<svelte:head><title>Create account · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_create_account_kaede_chat_0d05deff')}</title></svelte:head>
 
 {#if sent}
   <div
@@ -128,22 +130,24 @@
     tabindex="-1"
   >
     {#if verificationRequired}
-      <p class="eyebrow">Almost there</p>
-      <h1 class="auth-title">Check your inbox.</h1>
-      <p class="lede">We sent a verification link to {email}. It remains valid for 48 hours.</p>
+      <p class="eyebrow">{$t('ui_almost_there_750a358a')}</p>
+      <h1 class="auth-title">{$t('ui_check_your_inbox_75a9fda6')}</h1>
+      <p class="lede">
+        {$t('ui_we_sent_a_verification_link_to_value0_it_rema_0e84b4f9', { value0: String(email) })}
+      </p>
     {:else}
-      <p class="eyebrow">Account ready</p>
-      <h1 class="auth-title">Welcome to Kaede.</h1>
-      <p class="lede">Your account was created. You can sign in with your username and password.</p>
-      <p class="form-foot"><a href={resolve('/login')}>Continue to sign in</a></p>
+      <p class="eyebrow">{$t('ui_account_ready_ff66ee6c')}</p>
+      <h1 class="auth-title">{$t('ui_welcome_to_kaede_7ed4553a')}</h1>
+      <p class="lede">{$t('ui_your_account_was_created_you_can_sign_in_with_c8ac6468')}</p>
+      <p class="form-foot">
+        <a href={resolve('/login')}>{$t('ui_continue_to_sign_in_d398cd0a')}</a>
+      </p>
     {/if}
   </div>
 {:else if nativeDesktop && registrationStep === 1}
-  <p class="eyebrow">Create account</p>
-  <h1 class="auth-title">Choose your server.</h1>
-  <p class="auth-intro">
-    Your server stores your account and connects it to communities across the Kaede network.
-  </p>
+  <p class="eyebrow">{$t('ui_create_account_798ca2ce')}</p>
+  <h1 class="auth-title">{$t('ui_choose_your_server_1830677f')}</h1>
+  <p class="auth-intro">{$t('ui_your_server_stores_your_account_and_connects__a05ec64f')}</p>
   <form
     class="registration-server-form"
     onsubmit={(event) => {
@@ -154,18 +158,18 @@
     <NativeInstanceField bind:this={instanceField} disabled={busy} suggestedInstance="kaede.chat" />
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
     <button class="primary-button" disabled={busy}>
-      {busy ? 'Checking server…' : 'Continue'}
+      {busy ? $t('ui_checking_server_7cb17add') : $t('ui_continue_31fbef16')}
     </button>
   </form>
 {:else if emailRequired === null}
-  <p class="eyebrow">Create account</p>
-  <h1 class="auth-title">Checking registration options…</h1>
+  <p class="eyebrow">{$t('ui_create_account_798ca2ce')}</p>
+  <h1 class="auth-title">{$t('ui_checking_registration_options_42d5f667')}</h1>
 {:else}
-  <p class="eyebrow">Your place, your name</p>
-  <h1 class="auth-title">Create your account.</h1>
+  <p class="eyebrow">{$t('ui_your_place_your_name_6a69c87e')}</p>
+  <h1 class="auth-title">{$t('ui_create_your_account_9bedde90')}</h1>
   {#if nativeDesktop}
     <div class="registration-server-summary">
-      <span>Account server</span>
+      <span>{$t('ui_account_server_670c81da')}</span>
       <strong>{selectedInstance}</strong>
       <button
         type="button"
@@ -174,7 +178,7 @@
         onclick={() => {
           error = '';
           registrationStep = 1;
-        }}>Change</button
+        }}>{$t('ui_change_c0bf75bd')}</button
       >
     </div>
   {/if}
@@ -187,7 +191,7 @@
   >
     <div class="registration-details-grid" class:single-email-column={!emailRequired}>
       <label
-        >Username
+        >{$t('ui_username_e3b89e9d')}
         <input
           bind:value={username}
           pattern={'[a-z0-9_.]{2,32}'}
@@ -196,11 +200,11 @@
           required
           disabled={busy}
         />
-        <small>Lowercase letters, numbers, dots, and underscores.</small></label
+        <small>{$t('ui_lowercase_letters_numbers_dots_and_underscore_239d8c4b')}</small></label
       >
       {#if emailRequired}
         <label
-          >Email
+          >{$t('ui_email_969ccbd3')}
           <input
             bind:value={email}
             type="email"
@@ -212,7 +216,7 @@
         >
       {/if}
       <label
-        >Password
+        >{$t('ui_password_e7cf3ef4')}
         <input
           bind:value={password}
           type="password"
@@ -222,10 +226,10 @@
           required
           disabled={busy}
         />
-        <small>At least 10 characters; a password manager is recommended.</small></label
+        <small>{$t('ui_at_least_10_characters_a_password_manager_is__ea3a2829')}</small></label
       >
       <label
-        >Confirm password
+        >{$t('ui_confirm_password_5ac265f3')}
         <input
           bind:value={confirmPassword}
           type="password"
@@ -247,8 +251,11 @@
     {/if}
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
     <button class="primary-button" disabled={busy || (turnstileEnabled && !turnstileToken)}
-      >{busy ? 'Creating…' : 'Create account'}</button
+      >{busy ? $t('ui_creating_c79ed949') : $t('ui_create_account_798ca2ce')}</button
     >
   </form>
-  <p class="form-foot">Already have an account? <a href={resolve('/login')}>Sign in</a></p>
+  <p class="form-foot">
+    {$t('ui_already_have_an_account_e77fea93')}
+    <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
+  </p>
 {/if}

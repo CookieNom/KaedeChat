@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -369,7 +369,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
       setState(() {
         _userLoadError = userFacingError(
           error,
-          summary: 'Could not load the member list.',
+          summary: L10n.of(context).ui_could_not_load_the_member_list_04caf38e,
         );
       });
     } finally {
@@ -540,7 +540,9 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
       isScrollControlled: true,
       showDragHandle: true,
       builder: (context) => _MessageSearchUserPicker(
-        title: mentions ? 'Mentioned member' : 'Message author',
+        title: mentions
+            ? L10n.of(context).ui_mentioned_member_95ec6306
+            : L10n.of(context).ui_message_author_9f3bab67,
         users: _users,
         remoteSearch: widget.scope == 'guild' && widget.scopeRef != null
             ? (query) async => (await widget.repository.members(
@@ -657,7 +659,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
       }
       setState(() => _error = userFacingError(
             error,
-            summary: 'Could not search messages.',
+            summary: L10n.of(context).ui_could_not_search_messages_590ccc07,
           ));
     } finally {
       if (mounted && generation == _searchRequestGeneration) {
@@ -690,12 +692,12 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
               child: Column(children: [
                 SearchBar(
                   key: ValueKey('search-channel-query'),
-                  hintText: 'Search channels',
+                  hintText: L10n.of(context).ui_search_channels_79842fc3,
                   leading: Icon(Icons.search_rounded),
                   onChanged: (value) => update(() => query = value),
                 ),
                 ListTile(
-                  title: Text('All channels'),
+                  title: Text(L10n.of(context).ui_all_channels_ada7bc14),
                   leading: Icon(Icons.tag_rounded),
                   trailing: _selectedChannelRef == null
                       ? Icon(Icons.check_rounded)
@@ -705,13 +707,17 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                 Divider(height: 1),
                 Expanded(
                     child: matches.isEmpty
-                        ? Center(child: Text('No matching channels'))
+                        ? Center(
+                            child: Text(L10n.of(context)
+                                .ui_no_matching_channels_f908cc3b))
                         : ListView.builder(
                             itemCount: matches.length,
                             itemBuilder: (context, index) {
                               final channel = matches[index];
                               return ListTile(
-                                title: Text('#${channel.name}',
+                                title: Text(
+                                    L10n.of(context).ui_value0_ea2f080f(
+                                        (channel.name).toString()),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis),
                                 trailing: channel.ref == _selectedChannelRef
@@ -737,7 +743,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Search messages'),
+        title: Text(L10n.of(context).ui_search_messages_7bf8a493),
         bottom: widget.scope == 'guild'
             ? PreferredSize(
                 preferredSize: Size.fromHeight(80),
@@ -766,13 +772,15 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                     Icon(Icons.lock_rounded, size: 44),
                     SizedBox(height: 16),
                     Text(
-                        'Search is unavailable for this encrypted conversation.',
+                        L10n.of(context)
+                            .ui_search_is_unavailable_for_this_encrypted_conv_e89fb8a5,
                         textAlign: TextAlign.center,
                         style: TextStyle(
                             fontSize: 18, fontWeight: FontWeight.w800)),
                     SizedBox(height: 8),
                     Text(
-                      'End-to-end encrypted message bodies never leave your devices and are never indexed by Kaede.',
+                      L10n.of(context)
+                          .ui_end_to_end_encrypted_message_bodies_never_lea_6f36cb3d,
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -788,13 +796,16 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                       children: [
                         Icon(Icons.history_toggle_off_rounded, size: 44),
                         SizedBox(height: 16),
-                        Text('Message history is unavailable in this channel.',
+                        Text(
+                            L10n.of(context)
+                                .ui_message_history_is_unavailable_in_this_channe_088d854e,
                             textAlign: TextAlign.center,
                             style: TextStyle(
                                 fontSize: 18, fontWeight: FontWeight.w800)),
                         SizedBox(height: 8),
                         Text(
-                          'New messages can still appear live, but retained history cannot be searched.',
+                          L10n.of(context)
+                              .ui_new_messages_can_still_appear_live_but_retain_9d23966a,
                           textAlign: TextAlign.center,
                         ),
                       ],
@@ -811,14 +822,16 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             Icon(Icons.search_off_rounded, size: 44),
                             SizedBox(height: 16),
                             Text(
-                              'Message search is disabled on this instance.',
+                              L10n.of(context)
+                                  .ui_message_search_is_disabled_on_this_instance_c04c06a8,
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                   fontSize: 18, fontWeight: FontWeight.w800),
                             ),
                             SizedBox(height: 8),
                             Text(
-                              'Your instance administrator can enable the private search service during setup.',
+                              L10n.of(context)
+                                  .ui_your_instance_administrator_can_enable_the_pr_9de0470e,
                               textAlign: TextAlign.center,
                             ),
                           ],
@@ -834,13 +847,15 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                           key: ValueKey('message-search-query'),
                           controller: _query,
                           focusNode: _queryFocus,
-                          hintText: 'Search messages or type from:',
+                          hintText: L10n.of(context)
+                              .ui_search_messages_or_type_from_2fbeaa36,
                           leading: Icon(Icons.search_rounded),
                           trailing: _query.text.isEmpty
                               ? null
                               : <Widget>[
                                   IconButton(
-                                    tooltip: 'Clear search text',
+                                    tooltip: L10n.of(context)
+                                        .ui_clear_search_text_43960e99,
                                     onPressed: () {
                                       _query.clear();
                                       _queryChanged('');
@@ -863,15 +878,22 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                 key: ValueKey('search-sort-$_sort'),
                                 initialValue: _sort,
                                 isExpanded: true,
-                                decoration: InputDecoration(labelText: 'Sort'),
-                                items: const [
+                                decoration: InputDecoration(
+                                    labelText:
+                                        L10n.of(context).ui_sort_8459a7f1),
+                                items: [
                                   DropdownMenuItem(
                                       value: 'relevance',
-                                      child: Text('Most relevant')),
+                                      child: Text(L10n.of(context)
+                                          .ui_most_relevant_2b67deb3)),
                                   DropdownMenuItem(
-                                      value: 'newest', child: Text('Newest')),
+                                      value: 'newest',
+                                      child: Text(
+                                          L10n.of(context).ui_newest_324b6d0b)),
                                   DropdownMenuItem(
-                                      value: 'oldest', child: Text('Oldest')),
+                                      value: 'oldest',
+                                      child: Text(
+                                          L10n.of(context).ui_oldest_4aa405ee)),
                                 ],
                                 onChanged: (value) => _changeCriteria(
                                     () => _sort = value ?? 'relevance'),
@@ -883,15 +905,22 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                 key: ValueKey('search-pinned-$_pinned'),
                                 initialValue: _pinned,
                                 isExpanded: true,
-                                decoration:
-                                    InputDecoration(labelText: 'Pinned'),
-                                items: const [
+                                decoration: InputDecoration(
+                                    labelText:
+                                        L10n.of(context).ui_pinned_6d0ba1af),
+                                items: [
                                   DropdownMenuItem(
-                                      value: null, child: Text('Either')),
+                                      value: null,
+                                      child: Text(
+                                          L10n.of(context).ui_either_8b582b34)),
                                   DropdownMenuItem(
-                                      value: true, child: Text('Pinned')),
+                                      value: true,
+                                      child: Text(
+                                          L10n.of(context).ui_pinned_6d0ba1af)),
                                   DropdownMenuItem(
-                                      value: false, child: Text('Not pinned')),
+                                      value: false,
+                                      child: Text(L10n.of(context)
+                                          .ui_not_pinned_ee399178)),
                                 ],
                                 onChanged: (value) =>
                                     _changeCriteria(() => _pinned = value),
@@ -904,16 +933,25 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                           key: ValueKey('search-author-type-$_authorType'),
                           initialValue: _authorType,
                           isExpanded: true,
-                          decoration: InputDecoration(labelText: 'Author type'),
-                          items: const <DropdownMenuItem<String?>>[
+                          decoration: InputDecoration(
+                              labelText:
+                                  L10n.of(context).ui_author_type_50fb73b2),
+                          items: <DropdownMenuItem<String?>>[
                             DropdownMenuItem<String?>(
-                                value: null, child: Text('Anyone')),
+                                value: null,
+                                child:
+                                    Text(L10n.of(context).ui_anyone_6202c187)),
                             DropdownMenuItem<String?>(
-                                value: 'user', child: Text('People')),
+                                value: 'user',
+                                child:
+                                    Text(L10n.of(context).ui_people_8390060e)),
                             DropdownMenuItem<String?>(
-                                value: 'bot', child: Text('Bots')),
+                                value: 'bot',
+                                child: Text(L10n.of(context).ui_bots_48630a97)),
                             DropdownMenuItem<String?>(
-                                value: 'webhook', child: Text('Webhooks')),
+                                value: 'webhook',
+                                child: Text(
+                                    L10n.of(context).ui_webhooks_b7853def)),
                           ],
                           onChanged: (value) =>
                               _changeCriteria(() => _authorType = value),
@@ -924,7 +962,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             Expanded(
                               child: _UserFilterField(
                                 key: ValueKey('search-author'),
-                                label: 'From',
+                                label: L10n.of(context).ui_from_18743595,
                                 user: _userFor(_author),
                                 loading: _loadingUsers,
                                 onTap: () => _pickUser(mentions: false),
@@ -938,7 +976,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             Expanded(
                               child: _UserFilterField(
                                 key: ValueKey('search-mention'),
-                                label: 'Mentions',
+                                label: L10n.of(context).ui_mentions_43e4fe52,
                                 user: _userFor(_mention),
                                 loading: _loadingUsers,
                                 onTap: () => _pickUser(mentions: true),
@@ -965,7 +1003,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                               child: OutlinedButton.icon(
                                 icon: Icon(Icons.date_range_rounded),
                                 label: Text(_after == null
-                                    ? 'After date'
+                                    ? L10n.of(context).ui_after_date_692015bf
                                     : MaterialLocalizations.of(context)
                                         .formatMediumDate(_after!)),
                                 onPressed: () async {
@@ -986,7 +1024,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                               child: OutlinedButton.icon(
                                 icon: Icon(Icons.event_rounded),
                                 label: Text(_before == null
-                                    ? 'Before date'
+                                    ? L10n.of(context).ui_before_date_45d5ab9e
                                     : MaterialLocalizations.of(context)
                                         .formatMediumDate(_before!)),
                                 onPressed: () async {
@@ -1027,26 +1065,32 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                           alignment: Alignment.centerLeft,
                           child: TextButton(
                             onPressed: _clearFilters,
-                            child: Text('Clear filters'),
+                            child: Text(
+                                L10n.of(context).ui_clear_filters_240d53c9),
                           ),
                         ),
                         FilledButton.icon(
                           onPressed: _loading || !_canSearch ? null : _search,
                           icon: Icon(Icons.search_rounded),
-                          label: Text(_loading ? 'Searching…' : 'Search'),
+                          label: Text(_loading
+                              ? L10n.of(context).ui_searching_c9153c41
+                              : L10n.of(context).ui_search_c646a2c9),
                         ),
                         if (_history.isNotEmpty) ...[
                           SizedBox(height: 10),
                           Row(
                             children: [
                               Expanded(
-                                child: Text('Recent searches',
+                                child: Text(
+                                    L10n.of(context)
+                                        .ui_recent_searches_e8d581b2,
                                     style:
                                         TextStyle(fontWeight: FontWeight.w700)),
                               ),
                               TextButton(
                                   onPressed: _clearHistory,
-                                  child: Text('Clear')),
+                                  child:
+                                      Text(L10n.of(context).ui_clear_04a57fc2)),
                             ],
                           ),
                           Wrap(
@@ -1078,33 +1122,34 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             case 'unavailable' || 'unsupported')
                           Padding(
                             padding: EdgeInsets.only(top: 8),
-                            child: Text(
-                                'Showing locally cached matches. The home instance could not provide complete results.'),
+                            child: Text(L10n.of(context)
+                                .ui_showing_locally_cached_matches_the_home_insta_40d98082),
                           ),
                         if (_page?.localCoverage == 'cached' &&
                             _page?.authorityCoverage == 'not_queried')
                           Padding(
                             padding: EdgeInsets.only(top: 8),
-                            child: Text(
-                                'Account-wide direct-message search uses this home’s recent federated cache. Search inside a conversation for complete results from its authority.'),
+                            child: Text(L10n.of(context)
+                                .ui_account_wide_direct_message_search_uses_this__9aca4dba),
                           ),
                         if (_page?.indexing == true)
                           Padding(
                             padding: EdgeInsets.only(top: 8),
-                            child: Text(
-                                'Search is catching up with recent messages. Results may be incomplete for a moment.'),
+                            child: Text(L10n.of(context)
+                                .ui_search_is_catching_up_with_recent_messages_re_67c656fa),
                           ),
                         if (_page?.encryptedChannelRefs.isNotEmpty == true)
                           Padding(
                             padding: EdgeInsets.only(top: 8),
-                            child: Text(
-                                'Encrypted conversations were excluded from these results.'),
+                            child: Text(L10n.of(context)
+                                .ui_encrypted_conversations_were_excluded_from_th_c0f982fb),
                           ),
                         if (_page != null && _page!.results.isEmpty)
                           Padding(
                             padding: EdgeInsets.all(24),
                             child: Text(
-                              'No messages matched those filters.',
+                              L10n.of(context)
+                                  .ui_no_messages_matched_those_filters_adfa3d9e,
                               textAlign: TextAlign.center,
                             ),
                           ),
@@ -1115,7 +1160,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                           TextButton(
                             onPressed:
                                 _loading ? null : () => _search(more: true),
-                            child: Text('Load more'),
+                            child: Text(L10n.of(context).ui_load_more_2b7b053e),
                           ),
                       ],
                     ),
@@ -1131,17 +1176,17 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         children: [
           ActionChip(
             avatar: Icon(Icons.person_search_rounded, size: 18),
-            label: Text('From'),
+            label: Text(L10n.of(context).ui_from_18743595),
             onPressed: () => _beginOperator(MessageSearchOperator.from),
           ),
           ActionChip(
             avatar: Icon(Icons.alternate_email_rounded, size: 18),
-            label: Text('Mentions'),
+            label: Text(L10n.of(context).ui_mentions_43e4fe52),
             onPressed: () => _beginOperator(MessageSearchOperator.mentions),
           ),
           ActionChip(
             avatar: Icon(Icons.attach_file_rounded, size: 18),
-            label: Text('Has'),
+            label: Text(L10n.of(context).ui_has_5049a783),
             onPressed: () => _beginOperator(MessageSearchOperator.has),
           ),
         ],
@@ -1155,13 +1200,15 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
             ListTile(
               dense: true,
               leading: Icon(Icons.attach_file_rounded),
-              title: Text('Has $kind'),
+              title: Text(
+                  L10n.of(context).ui_has_value0_f2bffd98((kind).toString())),
               onTap: () => _selectContentKind(kind),
             ),
           if (kinds.isEmpty)
             ListTile(
               dense: true,
-              title: Text('No matching attachment type'),
+              title: Text(
+                  L10n.of(context).ui_no_matching_attachment_type_b063e12a),
             ),
         ],
       );
@@ -1185,7 +1232,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         else if (users.isEmpty)
           ListTile(
             dense: true,
-            title: Text('No matching members'),
+            title: Text(L10n.of(context).ui_no_matching_members_d9decbf6),
           ),
       ],
     );
@@ -1263,8 +1310,15 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                               ),
                               SizedBox(width: 8),
                               Text(
-                                '${MaterialLocalizations.of(context).formatShortDate(localTime)} '
-                                '${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(localTime))}',
+                                L10n.of(context).ui_value0_value1_c1a3651c(
+                                    (MaterialLocalizations.of(context)
+                                            .formatShortDate(localTime))
+                                        .toString(),
+                                    (MaterialLocalizations.of(context)
+                                            .formatTimeOfDay(
+                                                TimeOfDay.fromDateTime(
+                                                    localTime)))
+                                        .toString()),
                                 style: TextStyle(
                                   color: context.kaede.muted,
                                   fontSize: 11,
@@ -1308,7 +1362,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not open that message.',
+              summary: L10n.of(context).ui_could_not_open_that_message_da9ab4c9,
             ));
       }
     } finally {
@@ -1369,7 +1423,8 @@ final class _UserFilterField extends StatelessWidget {
                       )
                     : Icon(Icons.arrow_drop_down_rounded)
                 : IconButton(
-                    tooltip: 'Clear $label filter',
+                    tooltip: L10n.of(context)
+                        .ui_clear_value0_filter_99ce9e53((label).toString()),
                     onPressed: onClear,
                     icon: Icon(Icons.close_rounded),
                   ),
@@ -1445,7 +1500,8 @@ final class _MessageSearchUserPickerState
         if (!mounted || generation != _generation) return;
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not search the member list.',
+              summary:
+                  L10n.of(context).ui_could_not_search_the_member_list_cef2694e,
             ));
       } finally {
         if (mounted && generation == _generation) {
@@ -1478,7 +1534,7 @@ final class _MessageSearchUserPickerState
                 key: ValueKey('message-search-member-query'),
                 controller: _query,
                 autoFocus: true,
-                hintText: 'Search members',
+                hintText: L10n.of(context).ui_search_members_d6e1fdce,
                 leading: Icon(Icons.search_rounded),
                 onChanged: _changed,
               ),
@@ -1495,7 +1551,9 @@ final class _MessageSearchUserPickerState
               else if (visible.isEmpty)
                 Padding(
                   padding: EdgeInsets.all(24),
-                  child: Center(child: Text('No matching members.')),
+                  child: Center(
+                      child: Text(
+                          L10n.of(context).ui_no_matching_members_d1bae508)),
                 )
               else
                 for (final user in visible)

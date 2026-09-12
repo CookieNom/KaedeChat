@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type { Snippet } from 'svelte';
   import { isAttachmentSpoiler } from '$lib/media/spoilers';
   let { filename, identity, children }: { filename: string; identity: string; children: Snippet } =
@@ -12,13 +14,15 @@
     class="spoiler-cover"
     type="button"
     onclick={() => (revealed = token)}
-    aria-label="Reveal spoiler attachment"
+    aria-label={$t('ui_reveal_spoiler_attachment_5d1fbb67')}
   >
-    <strong>SPOILER</strong><span>Click to reveal</span>
+    <strong>{$t('ui_spoiler_de665a83')}</strong><span>{$t('ui_click_to_reveal_dca25e98')}</span>
   </button>
 {:else}
   {#if isAttachmentSpoiler(filename)}
-    <button class="spoiler-hide" type="button" onclick={() => (revealed = '')}>Hide spoiler</button>
+    <button class="spoiler-hide" type="button" onclick={() => (revealed = '')}
+      >{$t('ui_hide_spoiler_52190771')}</button
+    >
   {/if}
   {@render children()}
 {/if}

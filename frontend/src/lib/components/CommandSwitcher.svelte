@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { afterNavigate, goto } from '$app/navigation';
   import { api, userErrorMessage } from '$lib/api/client';
   import type { Channel, Guild } from '$lib/chat/types';
@@ -68,13 +70,13 @@
             .filter((channel) => channel.type === 0 || channel.type === 2 || channel.type === 5)
             .map((channel) => ({
               path: guildChannelPath(guild, channel),
-              label: `${channel.type === 2 ? 'Voice' : '#'} ${channel.name ?? 'channel'}`,
+              label: `${channel.type === 2 ? $t('ui_voice_87bf2bc0') : '#'} ${channel.name ?? 'channel'}`,
               detail: guild.name
             }))
         ),
         ...dms.map((channel) => ({
           path: directMessagePath(channel),
-          label: userDisplayName(channel.recipients?.[0]) || 'Direct message',
+          label: userDisplayName(channel.recipients?.[0]) || $t('ui_direct_message_cd3e1605'),
           detail: channel.recipients?.[0]
             ? (userPublicHandle(channel.recipients[0]) ?? 'Profile unavailable')
             : 'Direct message'
@@ -87,7 +89,7 @@
         loaded = true;
         loadError = userErrorMessage(
           caught,
-          'Could not load your channels and conversations. Try again.'
+          $t('ui_could_not_load_your_channels_and_conversation_69c0ddce')
         );
       }
     } finally {
@@ -220,14 +222,14 @@
       role="dialog"
       tabindex="-1"
       aria-modal="true"
-      aria-label="Switch channel"
+      aria-label={$t('ui_switch_channel_71697097')}
       onclick={(event) => event.stopPropagation()}
       onkeydown={dialogKeydown}
     >
       <input
         bind:this={input}
         bind:value={query}
-        aria-label="Find a channel"
+        aria-label={$t('ui_find_a_channel_5b691dc2')}
         role="combobox"
         aria-autocomplete="list"
         aria-expanded="true"
@@ -236,13 +238,13 @@
         aria-describedby={loading || loadError || (loaded && !filtered.length)
           ? 'command-switcher-status'
           : undefined}
-        placeholder="Jump to a channel…"
+        placeholder={$t('ui_jump_to_a_channel_e06fd60b')}
       />
       <div
         bind:this={optionsElement}
         id="command-switcher-options"
         role="listbox"
-        aria-label="Channels"
+        aria-label={$t('ui_channels_4c8906cf')}
         aria-busy={loading}
       >
         {#each filtered as destination, index (destination.path)}
@@ -262,17 +264,19 @@
         {/each}
       </div>
       {#if loading}
-        <p id="command-switcher-status" role="status" aria-live="polite">Loading channels…</p>
+        <p id="command-switcher-status" role="status" aria-live="polite">
+          {$t('ui_loading_channels_b09d106b')}
+        </p>
       {:else if loadError}
         <div id="command-switcher-status" role="alert">
           <p>{loadError}</p>
-          <button type="button" onclick={retryLoad}>Try again</button>
+          <button type="button" onclick={retryLoad}>{$t('ui_try_again_d8b8392e')}</button>
         </div>
       {:else if loaded && !filtered.length}
         <p id="command-switcher-status" role="status">
           {destinations.length
             ? `No results for “${query}”.`
-            : 'You do not have any channels or conversations yet.'}
+            : $t('ui_you_do_not_have_any_channels_or_conversations_969f6bf9')}
         </p>
       {/if}
     </div>

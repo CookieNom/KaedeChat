@@ -1,11 +1,11 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_command_permissions.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 final class ApplicationCommandPermissionsScreen extends StatefulWidget {
@@ -78,7 +78,8 @@ final class _ApplicationCommandPermissionsScreenState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not load command permissions',
+              summary: L10n.of(context)
+                  .ui_could_not_load_command_permissions_f8962a14,
             ));
       }
     } finally {
@@ -116,8 +117,8 @@ final class _ApplicationCommandPermissionsScreenState
     if (entry == null || !mounted) return;
     if (_draft.any(
         (item) => item.type == entry.type && item.target == entry.target)) {
-      setState(() =>
-          _error = 'That role, member, or channel already has an override.');
+      setState(() => _error = L10n.of(context)
+          .ui_that_role_member_or_channel_already_has_an_ov_b42235fd);
       return;
     }
     setState(() {
@@ -137,7 +138,8 @@ final class _ApplicationCommandPermissionsScreenState
                 permission: entry.permission,
               ))
           .toList(growable: false);
-      _notice = 'Application defaults copied. Save to synchronize.';
+      _notice = L10n.of(context)
+          .ui_application_defaults_copied_save_to_synchroni_eefae67f;
     });
   }
 
@@ -163,14 +165,16 @@ final class _ApplicationCommandPermissionsScreenState
         ];
         _select(saved);
         _notice = saved.synced
-            ? 'This command now uses the app defaults.'
-            : 'Command access updated.';
+            ? L10n.of(context)
+                .ui_this_command_now_uses_the_app_defaults_54a15a14
+            : L10n.of(context).ui_command_access_updated_1c92cfb3;
       });
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not update command permissions',
+              summary: L10n.of(context)
+                  .ui_could_not_update_command_permissions_3fb16c19,
             ));
       }
     } finally {
@@ -202,7 +206,9 @@ final class _ApplicationCommandPermissionsScreenState
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text('${widget.applicationName} commands')),
+        appBar: AppBar(
+            title: Text(L10n.of(context).ui_value0_commands_d214a1ca(
+                (widget.applicationName).toString()))),
         body: _loading
             ? Center(child: CircularProgressIndicator())
             : _error != null && _scopes.isEmpty
@@ -212,7 +218,8 @@ final class _ApplicationCommandPermissionsScreenState
                         child: Padding(
                           padding: EdgeInsets.all(24),
                           child: Text(
-                            'This app has no guild commands to configure.',
+                            L10n.of(context)
+                                .ui_this_app_has_no_guild_commands_to_configure_4fa678bd,
                             textAlign: TextAlign.center,
                           ),
                         ),
@@ -223,7 +230,9 @@ final class _ApplicationCommandPermissionsScreenState
                           DropdownButtonFormField<String>(
                             key: ValueKey(_selected?.wire),
                             initialValue: _selected?.wire,
-                            decoration: InputDecoration(labelText: 'Command'),
+                            decoration: InputDecoration(
+                                labelText:
+                                    L10n.of(context).ui_command_c67c8f52),
                             items: [
                               for (final scope in _scopes)
                                 DropdownMenuItem(
@@ -240,10 +249,13 @@ final class _ApplicationCommandPermissionsScreenState
                           SizedBox(height: 12),
                           Text(
                             _scope?.command == null
-                                ? 'Default access inherited by commands without custom overrides.'
+                                ? L10n.of(context)
+                                    .ui_default_access_inherited_by_commands_without__3483bb8b
                                 : _scope!.synced
-                                    ? 'Synced with this app’s default command access.'
-                                    : 'This command has custom access.',
+                                    ? L10n.of(context)
+                                        .ui_synced_with_this_app_s_default_command_access_68b398be
+                                    : L10n.of(context)
+                                        .ui_this_command_has_custom_access_0171e18b,
                             style: TextStyle(color: context.kaede.muted),
                           ),
                           SizedBox(height: 12),
@@ -252,7 +264,8 @@ final class _ApplicationCommandPermissionsScreenState
                               child: Padding(
                                 padding: EdgeInsets.all(14),
                                 child: Text(
-                                  'No role, member, or channel overrides.',
+                                  L10n.of(context)
+                                      .ui_no_role_member_or_channel_overrides_e2f2f8b7,
                                   style: TextStyle(color: context.kaede.muted),
                                 ),
                               ),
@@ -281,19 +294,22 @@ final class _ApplicationCommandPermissionsScreenState
                                                           : item,
                                                   ]);
                                             },
-                                      items: const [
+                                      items: [
                                         DropdownMenuItem(
                                           value: true,
-                                          child: Text('Allow'),
+                                          child: Text(L10n.of(context)
+                                              .ui_allow_546d19d2),
                                         ),
                                         DropdownMenuItem(
                                           value: false,
-                                          child: Text('Deny'),
+                                          child: Text(L10n.of(context)
+                                              .ui_deny_07d5fa87),
                                         ),
                                       ],
                                     ),
                                     IconButton(
-                                      tooltip: 'Remove override',
+                                      tooltip: L10n.of(context)
+                                          .ui_remove_override_54f30797,
                                       onPressed: !widget.canManage || _saving
                                           ? null
                                           : () => setState(() => _draft = [
@@ -314,26 +330,31 @@ final class _ApplicationCommandPermissionsScreenState
                                   _saving || _draft.length >= 100 ? null : _add,
                               icon: Icon(Icons.add_rounded),
                               label: Text(_draft.length >= 100
-                                  ? '100 overrides maximum'
-                                  : 'Add role, member, or channel'),
+                                  ? L10n.of(context)
+                                      .ui_100_overrides_maximum_601a8fdf
+                                  : L10n.of(context)
+                                      .ui_add_role_member_or_channel_13e42e08),
                             ),
                             if (_scope?.command != null)
                               TextButton(
                                 onPressed:
                                     _saving ? null : _syncWithApplication,
-                                child: Text('Use app defaults'),
+                                child: Text(L10n.of(context)
+                                    .ui_use_app_defaults_2c61078f),
                               ),
                             FilledButton(
                               onPressed: _saving ? null : _save,
                               child: Text(_saving
-                                  ? 'Saving…'
-                                  : 'Save command permissions'),
+                                  ? L10n.of(context).ui_saving_bd79b37d
+                                  : L10n.of(context)
+                                      .ui_save_command_permissions_6f1ad435),
                             ),
                           ] else
                             Padding(
                               padding: EdgeInsets.only(top: 10),
                               child: Text(
-                                'Manage Server and Manage Roles are required to change command access.',
+                                L10n.of(context)
+                                    .ui_manage_server_and_manage_roles_are_required_t_cce5987f,
                                 style: TextStyle(color: context.kaede.muted),
                               ),
                             ),
@@ -413,7 +434,7 @@ final class _CommandPermissionTargetSheetState
         'channel' => [
             (
               ref: allChannelsPermissionRef(widget.guild.ref),
-              label: 'All channels'
+              label: L10n.of(context).ui_all_channels_ada7bc14
             ),
             for (final channel in widget.guild.channels)
               if (!const <ChannelType>{
@@ -422,7 +443,11 @@ final class _CommandPermissionTargetSheetState
                 ChannelType.publicThread,
                 ChannelType.privateThread,
               }.contains(channel.type))
-                (ref: channel.ref, label: '#${channel.name ?? 'channel'}'),
+                (
+                  ref: channel.ref,
+                  label: L10n.of(context).ui_value0_ea2f080f(
+                      (channel.name ?? 'channel').toString())
+                ),
           ],
         _ => [
             for (final member in _members)
@@ -446,16 +471,23 @@ final class _CommandPermissionTargetSheetState
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Add command access',
+              Text(L10n.of(context).ui_add_command_access_15cb4abd,
                   style: Theme.of(context).textTheme.titleLarge),
               SizedBox(height: 14),
               DropdownButtonFormField<String>(
                 initialValue: _type,
-                decoration: InputDecoration(labelText: 'Target type'),
-                items: const [
-                  DropdownMenuItem(value: 'role', child: Text('Role')),
-                  DropdownMenuItem(value: 'user', child: Text('Member')),
-                  DropdownMenuItem(value: 'channel', child: Text('Channel')),
+                decoration: InputDecoration(
+                    labelText: L10n.of(context).ui_target_type_163b5790),
+                items: [
+                  DropdownMenuItem(
+                      value: 'role',
+                      child: Text(L10n.of(context).ui_role_902b7e39)),
+                  DropdownMenuItem(
+                      value: 'user',
+                      child: Text(L10n.of(context).ui_member_fef5fce3)),
+                  DropdownMenuItem(
+                      value: 'channel',
+                      child: Text(L10n.of(context).ui_channel_655d8a44)),
                 ],
                 onChanged: (value) => setState(() {
                   _type = value ?? 'role';
@@ -466,7 +498,7 @@ final class _CommandPermissionTargetSheetState
                 SizedBox(height: 10),
                 TextField(
                   decoration: InputDecoration(
-                    labelText: 'Search members',
+                    labelText: L10n.of(context).ui_search_members_d6e1fdce,
                     suffixIcon: _searching
                         ? Padding(
                             padding: EdgeInsets.all(12),
@@ -481,7 +513,9 @@ final class _CommandPermissionTargetSheetState
               DropdownButtonFormField<String>(
                 key: ValueKey('$_type-${_options.length}'),
                 initialValue: _target?.wire,
-                decoration: InputDecoration(labelText: 'Choose a $_type'),
+                decoration: InputDecoration(
+                    labelText: L10n.of(context)
+                        .ui_choose_a_value0_046aff48((_type).toString())),
                 items: [
                   for (final option in _options)
                     DropdownMenuItem(
@@ -494,10 +528,10 @@ final class _CommandPermissionTargetSheetState
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: Text('Allow this command'),
+                title: Text(L10n.of(context).ui_allow_this_command_a0aa5f2b),
                 subtitle: Text(_permission
-                    ? 'Explicitly allow access.'
-                    : 'Explicitly deny access.'),
+                    ? L10n.of(context).ui_explicitly_allow_access_675d9393
+                    : L10n.of(context).ui_explicitly_deny_access_3c6ed788),
                 value: _permission,
                 onChanged: (value) => setState(() => _permission = value),
               ),
@@ -512,7 +546,7 @@ final class _CommandPermissionTargetSheetState
                             permission: _permission,
                           ),
                         ),
-                child: Text('Add override'),
+                child: Text(L10n.of(context).ui_add_override_44154e04),
               ),
             ],
           ),
@@ -540,7 +574,9 @@ final class _LoadError extends StatelessWidget {
             children: [
               Text(message, textAlign: TextAlign.center),
               SizedBox(height: 12),
-              FilledButton(onPressed: onRetry, child: Text('Retry')),
+              FilledButton(
+                  onPressed: onRetry,
+                  child: Text(L10n.of(context).ui_retry_8036af59)),
             ],
           ),
         ),

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 List<String> messageInviteReferences(String? content,
     {required bool encrypted}) {
@@ -71,10 +72,10 @@ class InviteCard extends ConsumerWidget {
               error: (error, stack) => Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Invitation unavailable'),
+                  Text(L10n.of(context).ui_invitation_unavailable_9fc21e34),
                   TextButton(
                     onPressed: () => ref.invalidate(provider),
-                    child: const Text('Retry'),
+                    child: Text(L10n.of(context).ui_retry_8036af59),
                   ),
                 ],
               ),
@@ -84,11 +85,12 @@ class InviteCard extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('Guild invitation'),
+                    Text(L10n.of(context).ui_guild_invitation_2a233707),
                     const SizedBox(height: 8),
-                    Text(guild['name'] as String,
+                    Text(guild[L10n.of(context).ui_name_8d39bde6] as String,
                         style: Theme.of(context).textTheme.titleMedium),
-                    Text(guild['origin_domain'] as String),
+                    Text(guild[L10n.of(context).ui_origin_domain_c6fbb9dc]
+                        as String),
                     if (guild['description'] case final String description
                         when description.isNotEmpty)
                       Text(description,
@@ -104,7 +106,7 @@ class InviteCard extends ConsumerWidget {
                           ),
                         ),
                       )),
-                      child: const Text('View invitation'),
+                      child: Text(L10n.of(context).ui_view_invitation_1c1c650f),
                     ),
                   ],
                 );

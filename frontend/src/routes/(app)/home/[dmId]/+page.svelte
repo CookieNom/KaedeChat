@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { createUploadQueue } from '$lib/media/upload-queue';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
@@ -525,7 +527,7 @@
       if (presencePreference !== status) return;
       error = `Presence changed for this session, but it could not sync to your other devices. ${userErrorMessage(
         caught,
-        'The server could not save the presence setting. Try again.'
+        $t('ui_the_server_could_not_save_the_presence_settin_0b553172')
       )}`;
     });
     if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
@@ -564,7 +566,7 @@
       const user = await api<UserSummary>(`/users/lookup?handle=${encodeURIComponent(handle)}`);
       profile = { user, x: window.innerWidth / 2, y: window.innerHeight / 2 };
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not load that profile. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_that_profile_try_again_829ce57b'));
     }
   }
 
@@ -844,7 +846,7 @@
       e2eeActivationEnabled = false;
       gifConfigurationError = userErrorMessage(
         caught,
-        'Could not check whether GIF search is available. Try again.'
+        $t('ui_could_not_check_whether_gif_search_is_availab_48239bb9')
       );
     } finally {
       if (featureController === controller) gifConfigurationLoading = false;
@@ -1106,8 +1108,7 @@
           loadedChannel?.history_truncated === true &&
           loadedChannel.history_remote_available === true);
       if (oldestLoaded?.history_page_error_code === 'FEDERATED_DM_HISTORY_UNAVAILABLE') {
-        error =
-          'Older messages are temporarily unavailable from this conversation’s home instance. Recent cached messages are still shown; retry in a moment.';
+        error = $t('ui_older_messages_are_temporarily_unavailable_fr_57247e24');
       }
       hasEarlier =
         (targetAround
@@ -1164,9 +1165,12 @@
       forgetConfirmedSends();
       if (dispatchBuffer === buffered) dispatchBuffer = null;
       if (!preserveMessages) {
-        error = userErrorMessage(caught, 'Could not open this conversation. Try again.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_open_this_conversation_try_again_426d4f45')
+        );
       } else if (!error) {
-        error = 'Live updates resumed, but conversation state could not be refreshed.';
+        error = $t('ui_live_updates_resumed_but_conversation_state_c_439252f1');
       }
     }
   }
@@ -1199,8 +1203,7 @@
       setMessages(combined);
       authorityHistoryComplete ||= pageCompletesAuthorityHistory;
       if (authorityHistoryError === 'FEDERATED_DM_HISTORY_UNAVAILABLE') {
-        error =
-          'Older messages are temporarily unavailable from this conversation’s home instance. Recent cached messages remain visible; retry in a moment.';
+        error = $t('ui_older_messages_are_temporarily_unavailable_fr_1936e561');
       } else if (error.startsWith('Older messages are temporarily unavailable')) {
         error = '';
       }
@@ -1211,7 +1214,7 @@
         !reachesRetainedHistoryStart(channel, combined[0]);
     } catch (caught) {
       if (generation !== loadGeneration || targetRef !== dmId) return;
-      error = userErrorMessage(caught, 'Could not load earlier messages. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_earlier_messages_try_again_7d0ea620'));
     } finally {
       if (generation === loadGeneration && targetRef === dmId) loadingEarlier = false;
     }
@@ -1238,7 +1241,7 @@
       hasLater = newer.length === 50;
     } catch (caught) {
       if (generation !== loadGeneration || targetRef !== dmId) return;
-      error = userErrorMessage(caught, 'Could not load newer messages. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_newer_messages_try_again_e1bc8d7b'));
     } finally {
       if (generation === loadGeneration && targetRef === dmId) loadingLater = false;
     }
@@ -1354,7 +1357,7 @@
               })
             : null;
         if (channel?.encryption_mode === 'e2ee' && !encrypted)
-          throw new Error('Encryption is unavailable on this device.');
+          throw new Error($t('ui_encryption_is_unavailable_on_this_device_cc08d0c6'));
         const saved = await api<Message>(
           `/channels/${encodeURIComponent(dmId)}/messages/${encodeURIComponent(entityRef(editing))}`,
           {
@@ -1377,7 +1380,7 @@
         finishEditing();
       } catch (caught) {
         if (generation === loadGeneration)
-          error = userErrorMessage(caught, 'Could not edit the message. Try again.');
+          error = userErrorMessage(caught, $t('ui_could_not_edit_the_message_try_again_ba5399d9'));
       } finally {
         if (generation === loadGeneration) busy = false;
       }
@@ -1409,7 +1412,7 @@
         composerCursor = 0;
         commandNotice = `/${selected.name} sent to ${selected.application_name}.`;
       } catch (caught) {
-        error = userErrorMessage(caught, 'The bot command could not be delivered.');
+        error = userErrorMessage(caught, $t('ui_the_bot_command_could_not_be_delivered_f00c1081'));
       } finally {
         busy = false;
       }
@@ -1418,12 +1421,12 @@
     const ttsInvocation = retry ? { matched: false, content: '' } : ttsCommand(text);
     const tts = retry?.tts ?? ttsInvocation.matched;
     if (!retry && ttsInvocation.matched && !ttsInvocation.content) {
-      error = 'Enter a message after /tts.';
+      error = $t('ui_enter_a_message_after_tts_f057a42d');
       return;
     }
     if (tts) {
       if (!currentTtsPreferences().enabled) {
-        error = 'Enable “Allow playback and usage of /tts command” in Accessibility first.';
+        error = $t('ui_enable_allow_playback_and_usage_of_tts_comman_204eb385');
         return;
       }
     }
@@ -1468,7 +1471,7 @@
         composerCursor = 0;
         commandNotice = `/${invocation.command.name} sent to ${invocation.command.application_name}.`;
       } catch (caught) {
-        error = userErrorMessage(caught, 'The bot command could not be delivered.');
+        error = userErrorMessage(caught, $t('ui_the_bot_command_could_not_be_delivered_f00c1081'));
       } finally {
         busy = false;
       }
@@ -1522,7 +1525,7 @@
         } catch (caught) {
           error = userErrorMessage(
             caught,
-            'Encrypted mentions must use a fully qualified user token.'
+            $t('ui_encrypted_mentions_must_use_a_fully_qualified_33c5c88a')
           );
           return;
         }
@@ -1553,7 +1556,7 @@
           repliedUserRef
         );
     if (!draft.content && !draft.attachmentIds.length && !draft.stickerIds.length) {
-      error = 'Reattach this message’s files before retrying.';
+      error = $t('ui_reattach_this_message_s_files_before_retrying_08c69cee');
       return;
     }
     const generation = loadGeneration;
@@ -1634,7 +1637,7 @@
             })
           : null;
       if (channel.encryption_mode === 'e2ee' && !encrypted)
-        throw new Error('Encryption is unavailable on this device.');
+        throw new Error($t('ui_encryption_is_unavailable_on_this_device_cc08d0c6'));
       const saved = await api<Message>(`/channels/${encodeURIComponent(targetRef)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
@@ -1672,10 +1675,9 @@
         if (caught instanceof ApiError && caught.code === 'ATTACHMENT_ALREADY_USED') {
           pendingSends.set(nonce, discardAttachments(draft));
           clearSubmittedUploads(draft.attachmentIds);
-          error =
-            'Those files were already used by another message. Reattach them before retrying.';
+          error = $t('ui_those_files_were_already_used_by_another_mess_12a34083');
         } else {
-          error = userErrorMessage(caught, 'Could not send the message. Try again.');
+          error = userErrorMessage(caught, $t('ui_could_not_send_the_message_try_again_86b6cd6a'));
         }
       }
     } finally {
@@ -1749,7 +1751,7 @@
         revision === callRevision &&
         !activeCall
       )
-        error = userErrorMessage(caught, 'Could not start the call. Try again.');
+        error = userErrorMessage(caught, $t('ui_could_not_start_the_call_try_again_cc9f3f64'));
     } finally {
       if (generation === loadGeneration && routeRef === dmId) callBusy = false;
     }
@@ -1787,7 +1789,7 @@
       callRevision += 1;
     } catch (caught) {
       if (generation === loadGeneration && routeRef === dmId && revision === callRevision)
-        error = userErrorMessage(caught, 'Could not update the call. Try again.');
+        error = userErrorMessage(caught, $t('ui_could_not_update_the_call_try_again_0c2733c8'));
     } finally {
       if (generation === loadGeneration && routeRef === dmId) callBusy = false;
     }
@@ -1815,7 +1817,10 @@
       );
       entities.channels.upsert(updated);
     } catch (caught) {
-      groupError = userErrorMessage(caught, 'Could not rename this group. Try again.');
+      groupError = userErrorMessage(
+        caught,
+        $t('ui_could_not_rename_this_group_try_again_38a87d9c')
+      );
     } finally {
       groupBusy = false;
     }
@@ -1843,7 +1848,7 @@
     } catch (caught) {
       groupError = userErrorMessage(
         caught,
-        'Could not add that friend. They must be friends with the inviter and able to join.'
+        $t('ui_could_not_add_that_friend_they_must_be_friend_c3ab7967')
       );
     } finally {
       groupBusy = false;
@@ -1866,7 +1871,10 @@
         entities.channels.upsert(secured);
       }
     } catch (caught) {
-      groupError = userErrorMessage(caught, 'Could not remove that member. Try again.');
+      groupError = userErrorMessage(
+        caught,
+        $t('ui_could_not_remove_that_member_try_again_084ad93a')
+      );
     } finally {
       groupBusy = false;
     }
@@ -1883,7 +1891,7 @@
       groupDialog?.close();
       window.location.assign(resolve('/home'));
     } catch (caught) {
-      groupError = userErrorMessage(caught, 'Could not leave this group. Try again.');
+      groupError = userErrorMessage(caught, $t('ui_could_not_leave_this_group_try_again_0845f089'));
       groupBusy = false;
     }
   }
@@ -1898,7 +1906,7 @@
     )
       return;
     const confirmed = window.confirm(
-      'Turn on end-to-end encryption for this conversation? This cannot be turned off and protects only new content; existing history stays readable to the server. New messages, files, and supported calls will be encrypted. Search, link and GIF previews, server-side file previews, malware and PhotoDNA scanning, call recording, and transcription will stop; unsupported clients cannot participate. Webhooks receive no access automatically; a verified webhook device can receive only future content after every person grants access and the room establishes a rekey and history floor. Participant-mode apps follow the same future-only consent rule. Notifications become generic, while participants, timing, message-size, track, and traffic metadata remain visible. Anyone can still record content on their own device. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members, apps, and webhooks keep content they already received.'
+      $t('ui_turn_on_end_to_end_encryption_for_this_conver_0f55c4d1')
     );
     if (!confirmed) return;
     groupBusy = true;
@@ -1913,7 +1921,7 @@
     } catch (caught) {
       const message = userErrorMessage(
         caught,
-        'Could not enable end-to-end encryption. Try again.'
+        $t('ui_could_not_enable_end_to_end_encryption_try_ag_c4200375')
       );
       if (groupConversation) groupError = message;
       else error = message;
@@ -1933,7 +1941,10 @@
       entities.channels.upsert(updated);
       e2eeSafetyNumber = await client.safetyNumber(updated);
     } catch (caught) {
-      groupError = userErrorMessage(caught, 'Could not secure the updated member list. Try again.');
+      groupError = userErrorMessage(
+        caught,
+        $t('ui_could_not_secure_the_updated_member_list_try__e6844fa4')
+      );
     } finally {
       groupBusy = false;
     }
@@ -1951,7 +1962,7 @@
       }
     }
     window.alert(
-      `End-to-end encryption is on, but participant identities remain unverified until this safety number is compared with the other members using a separate trusted channel. A match detects first-contact key substitution by an actively malicious instance. Compare it again after membership or identity changes:\n\n${e2eeSafetyNumber || 'Safety number unavailable on this device.'}`
+      `End-to-end encryption is on, but participant identities remain unverified until this safety number is compared with the other members using a separate trusted channel. A match detects first-contact key substitution by an actively malicious instance. Compare it again after membership or identity changes:\n\n${e2eeSafetyNumber || $t('ui_safety_number_unavailable_on_this_device_52363a69')}`
     );
   }
 
@@ -2013,7 +2024,7 @@
 
   function startEditing(message: Message) {
     if (message.e2ee && message.e2ee_verified !== true) {
-      error = 'This encrypted message is unavailable on this device and cannot be edited.';
+      error = $t('ui_this_encrypted_message_is_unavailable_on_this_019dc894');
       return;
     }
     replyingMessage = null;
@@ -2049,7 +2060,7 @@
     } catch (caught) {
       pinsError = userErrorMessage(
         caught,
-        'Could not load pinned messages. Close this panel and try again.'
+        $t('ui_could_not_load_pinned_messages_close_this_pan_7f16cd85')
       );
     } finally {
       pinsLoading = false;
@@ -2063,7 +2074,12 @@
 
   async function togglePinnedMessage(message: Message, shouldPin: boolean) {
     if (!channel || !canPinMessages) return;
-    if (!window.confirm(shouldPin ? 'Pin this message?' : 'Unpin this message?')) return;
+    if (
+      !window.confirm(
+        shouldPin ? $t('ui_pin_this_message_befe11f0') : $t('ui_unpin_this_message_27c1a290')
+      )
+    )
+      return;
     try {
       await api(messagePinPath(entityRef(channel), entityRef(message)), {
         method: shouldPin ? 'PUT' : 'DELETE'
@@ -2072,7 +2088,10 @@
         ? [message, ...pinnedMessages.filter((item) => entityKey(item) !== entityKey(message))]
         : pinnedMessages.filter((item) => entityKey(item) !== entityKey(message));
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update the pinned message. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_update_the_pinned_message_try_again_657d6df4')
+      );
     }
   }
 
@@ -2092,7 +2111,7 @@
           : { method: 'POST', body: JSON.stringify({ emoji: canonical }) }
       );
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update that reaction. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_that_reaction_try_again_9ff32cc9'));
     }
   }
 
@@ -2150,7 +2169,7 @@
       if (editingMessage && entityKey(editingMessage) === entityKey(message)) finishEditing();
     } catch (caught) {
       if (generation !== loadGeneration || routeChannel !== dmId) return;
-      error = userErrorMessage(caught, 'Could not delete the message. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_delete_the_message_try_again_82b44f9f'));
     }
   }
 
@@ -2178,7 +2197,7 @@
         content =
           message.tts && message.content ? `/tts ${message.content}` : (message.content ?? '');
         composerCursor = content.length;
-        error = 'Reattach this message’s files before retrying.';
+        error = $t('ui_reattach_this_message_s_files_before_retrying_08c69cee');
         void tick().then(() => composerInput?.focus());
         return;
       }
@@ -2223,7 +2242,7 @@
       content =
         message.tts && message.content ? `/tts ${message.content}` : (message.content ?? '');
       composerCursor = content.length;
-      if (!content) error = 'Reattach this message’s files before retrying.';
+      if (!content) error = $t('ui_reattach_this_message_s_files_before_retrying_08c69cee');
       void tick().then(() => composerInput?.focus());
       return;
     }
@@ -2271,7 +2290,7 @@
   async function createPollMessage(poll: PollCreatePayload) {
     const target = channel;
     if (!target || !canCreatePoll) {
-      throw new Error('Polls are unavailable in this conversation.');
+      throw new Error($t('ui_polls_are_unavailable_in_this_conversation_0476fd2e'));
     }
     const generation = loadGeneration;
     const client =
@@ -2282,7 +2301,7 @@
       ? await client.encryptMessage(target, '', { rich: { poll: { ...poll } } })
       : null;
     if (target.encryption_mode === 'e2ee' && !encrypted) {
-      throw new Error('Encryption is unavailable on this device.');
+      throw new Error($t('ui_encryption_is_unavailable_on_this_device_cc08d0c6'));
     }
     const saved = await api<Message>(
       `/channels/${encodeURIComponent(entityRef(target))}/messages`,
@@ -2296,7 +2315,7 @@
       ? (await decryptConversationMessages(client, target, [saved]))[0]
       : saved;
     if (!verified || (client && !verified.poll)) {
-      throw new Error('The encrypted poll could not be verified locally.');
+      throw new Error($t('ui_the_encrypted_poll_could_not_be_verified_loca_d68383d9'));
     }
     reconcile(verified);
     pollDialogOpen = false;
@@ -2317,13 +2336,13 @@
     if (!source) return;
     const sourceChannel = channel;
     if (!sourceChannel) return;
-    if (!currentUser) throw new Error('Your forwarding identity is unavailable.');
+    if (!currentUser) throw new Error($t('ui_your_forwarding_identity_is_unavailable_8571701f'));
     const requiresEncryption = targets.some((target) => target.encryption_mode === 'e2ee');
     const client = requiresEncryption
       ? (e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null))
       : e2eeClient;
     if (requiresEncryption && !client) {
-      throw new Error('Encryption is unavailable for a selected destination.');
+      throw new Error($t('ui_encryption_is_unavailable_for_a_selected_dest_e5fed7d6'));
     }
     if (client && !e2eeClient) e2eeClient = client;
     const result = await executePreparedForward({
@@ -2335,7 +2354,7 @@
       e2eeClient: client
     });
     if (!result.forwards.length) {
-      throw new Error('The message could not be forwarded to any selected destination.');
+      throw new Error($t('ui_the_message_could_not_be_forwarded_to_any_sel_93c4be17'));
     }
     const target = channel;
     if (target) {
@@ -2366,13 +2385,16 @@
       if (currentUser) rememberAppContextCommand(entityRef(currentUser), command);
       commandNotice = `${command.name} sent to ${command.application_name}.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'The context command could not be delivered.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_the_context_command_could_not_be_delivered_453eca35')
+      );
     }
   }
 
   async function componentInteractionRequest(applicationRef: string) {
     const targetChannel = channel;
-    if (!targetChannel) throw new Error('This conversation is no longer available.');
+    if (!targetChannel) throw new Error($t('ui_this_conversation_is_no_longer_available_07f8c47b'));
     if (targetChannel.encryption_mode !== 'e2ee') {
       return { channelRef: entityRef(targetChannel), applicationRef };
     }
@@ -2380,9 +2402,7 @@
       (command) => command.application_ref === applicationRef
     );
     if (!authority) {
-      throw new Error(
-        'Refresh this conversation before using this encrypted app control. Its installation authority is not available.'
-      );
+      throw new Error($t('ui_refresh_this_conversation_before_using_this_e_dbe0d5e6'));
     }
     return commandInteractionRequestContext(targetChannel, authority, currentUser, e2eeClient);
   }
@@ -2425,7 +2445,10 @@
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
 
-<svelte:head><title>{conversationTitle} · Kaede Chat</title></svelte:head>
+<svelte:head
+  ><title>{$t('ui_value0_kaede_chat_4bf52868', { value0: String(conversationTitle) })}</title
+  ></svelte:head
+>
 <svelte:window
   onkeydown={(event) => {
     if (mobileNavigationOpen) mobileNavigationKeydown(event);
@@ -2436,7 +2459,7 @@
   <button
     class="mobile-sidebar-backdrop"
     type="button"
-    aria-label="Close direct-message navigation"
+    aria-label={$t('ui_close_direct_message_navigation_d4dda6dd')}
     onclick={() => closeMobileNavigation()}
   ></button>
 {/if}
@@ -2457,44 +2480,46 @@
     id="direct-message-navigation"
     role={mobileNavigationOpen ? 'dialog' : undefined}
     aria-modal={mobileNavigationOpen ? 'true' : undefined}
-    aria-label="Home navigation"
+    aria-label={$t('ui_home_navigation_199e23a5')}
   >
     <header class="home-brand">
       <span class="brand-mark">K</span>
       <span
-        ><strong>Kaede</strong><small>{currentUser?.origin_domain ?? 'Your instance'}</small></span
+        ><strong>{$t('ui_kaede_7d8eeb35')}</strong><small
+          >{currentUser?.origin_domain ?? $t('ui_your_instance_2400b87f')}</small
+        ></span
       >
       <button
         bind:this={mobileNavigationClose}
         class="mobile-sidebar-close"
         type="button"
-        aria-label="Close home navigation"
+        aria-label={$t('ui_close_home_navigation_fe078c65')}
         onclick={() => closeMobileNavigation()}
       >
         ×
       </button>
     </header>
-    <nav class="home-nav" aria-label="Home">
+    <nav class="home-nav" aria-label={$t('ui_home_3a786953')}>
       <a href={resolve('/home')} onclick={() => closeMobileNavigation(false)}
-        ><Icon name="home" size={18} />Overview</a
+        ><Icon name="home" size={18} />{$t('ui_overview_d4b1ea57')}</a
       >
       <a href={resolve('/home/friends')} onclick={() => closeMobileNavigation(false)}
-        ><Icon name="users" size={18} />Friends & requests</a
+        ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}</a
       >
     </nav>
     <div class="home-sidebar-heading">
-      <span>Direct messages</span>
+      <span>{$t('ui_direct_messages_95e66705')}</span>
       <button
         type="button"
-        aria-label="New message"
-        title="New message"
+        aria-label={$t('ui_new_message_78f5975a')}
+        title={$t('ui_new_message_78f5975a')}
         onclick={() => {
           closeMobileNavigation(false);
           newMessageOpen = true;
         }}><Icon name="plus" size={17} /></button
       >
     </div>
-    <nav class="home-dm-list" aria-label="Direct messages">
+    <nav class="home-dm-list" aria-label={$t('ui_direct_messages_95e66705')}>
       {#each directMessages as item (entityKey(item))}
         {@const itemRecipient = item.recipients?.[0]}
         <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- dmPath calls resolve before substituting the typed parameter -->
@@ -2524,7 +2549,7 @@
             >{/if}
         </a>
       {:else}
-        <p>No conversations yet.</p>
+        <p>{$t('ui_no_conversations_yet_52a87373')}</p>
       {/each}
     </nav>
     <div class="sidebar-user-dock">
@@ -2536,10 +2561,18 @@
         {/if}
       </span>
       <div class="sidebar-user-identity">
-        <strong>{currentUser?.display_name ?? currentUser?.username ?? 'Your account'}</strong>
+        <strong
+          >{currentUser?.display_name ??
+            currentUser?.username ??
+            $t('ui_your_account_dbb5f637')}</strong
+        >
         <PresencePicker value={presencePreference} onChange={setMyPresence} />
       </div>
-      <a class="icon-button" href={resolve('/settings')} aria-label="User settings">
+      <a
+        class="icon-button"
+        href={resolve('/settings')}
+        aria-label={$t('ui_user_settings_2b363e87')}
+      >
         <Icon name="settings" size={18} />
       </a>
     </div>
@@ -2552,8 +2585,8 @@
           class="mobile-sidebar-toggle"
           type="button"
           aria-label={mobileNavigationOpen
-            ? 'Close direct-message navigation'
-            : 'Open direct-message navigation'}
+            ? $t('ui_close_direct_message_navigation_d4dda6dd')
+            : $t('ui_open_direct_message_navigation_c52e5b0d')}
           aria-controls="direct-message-navigation"
           aria-expanded={mobileNavigationOpen}
           onclick={toggleMobileNavigation}
@@ -2584,14 +2617,14 @@
                 >{userDisplayName(recipient)}</button
               >
             {:else}
-              <strong>Conversation</strong>
+              <strong>{$t('ui_conversation_ccca1817')}</strong>
             {/if}
             {#if groupConversation && channel}
               <span>{groupDmSubtitle(channel)}</span>
             {:else if recipient}
               <span
                 >{recipient.profile_resolved === false
-                  ? 'Profile unavailable'
+                  ? $t('ui_profile_unavailable_158e5a22')
                   : recipient.handle}</span
               >
             {/if}
@@ -2607,16 +2640,20 @@
             type="button"
             disabled={groupBusy}
             aria-label={channel.encryption_mode === 'e2ee'
-              ? 'End-to-end encryption is on'
-              : 'Turn on end-to-end encryption'}
+              ? $t('ui_end_to_end_encryption_is_on_3e72f343')
+              : $t('ui_turn_on_end_to_end_encryption_b2438d75')}
             title={channel.encryption_mode === 'e2ee'
-              ? 'End-to-end encrypted'
-              : 'Turn on end-to-end encryption'}
+              ? $t('ui_end_to_end_encrypted_f01afb7a')
+              : $t('ui_turn_on_end_to_end_encryption_b2438d75')}
             onclick={channel.encryption_mode === 'e2ee' ? showEncryptionInfo : enableEncryption}
           >
             <Icon name="lock" size={18} />
             {#if channel.encryption_mode === 'e2ee'}
-              <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
+              <span
+                >{channel.encryption_state === 'active'
+                  ? $t('ui_encrypted_f45aef6e')
+                  : $t('ui_rekey_needed_74d26182')}</span
+              >
             {/if}
           </button>
         {/if}
@@ -2624,8 +2661,8 @@
           <button
             class="icon-button"
             type="button"
-            aria-label="Manage apps in this encrypted conversation"
-            title="Encrypted apps"
+            aria-label={$t('ui_manage_apps_in_this_encrypted_conversation_f0f5ed22')}
+            title={$t('ui_encrypted_apps_e70c2756')}
             onclick={() => (encryptedAppsOpen = true)}
           >
             <Icon name="shield" size={18} />
@@ -2635,8 +2672,8 @@
           <button
             class="icon-button"
             type="button"
-            aria-label="Group settings"
-            title="Group settings"
+            aria-label={$t('ui_group_settings_ba4062f8')}
+            title={$t('ui_group_settings_ba4062f8')}
             onclick={openGroupSettings}
           >
             <Icon name="users" size={19} />
@@ -2646,9 +2683,11 @@
           class:active={pinsOpen}
           class="icon-button"
           type="button"
-          aria-label={pinsOpen ? 'Hide pinned messages' : 'Show pinned messages'}
+          aria-label={pinsOpen
+            ? $t('ui_hide_pinned_messages_9ee082b6')
+            : $t('ui_show_pinned_messages_26b577c8')}
           aria-pressed={pinsOpen}
-          title="Pinned messages"
+          title={$t('ui_pinned_messages_4c0dbc8c')}
           onclick={togglePins}>📌</button
         >
         <MessageSearch
@@ -2662,7 +2701,7 @@
         />
         {#if !activeCall}
           <button class="call-button" onclick={startCall} disabled={!channelReady || callBusy}
-            >Start call</button
+            >{$t('ui_start_call_99e5d804')}</button
           >
         {/if}
       </div>
@@ -2670,7 +2709,8 @@
     {#if readStateWarning}
       <div class="read-state-warning" role="status">
         <span>{readStateWarning}</span>
-        <button type="button" onclick={() => void readAcknowledgements.retryNow()}>Retry now</button
+        <button type="button" onclick={() => void readAcknowledgements.retryNow()}
+          >{$t('ui_retry_now_5148c3e2')}</button
         >
       </div>
     {/if}
@@ -2682,11 +2722,15 @@
       {#if activeCall && !callJoined}
         <div class="call-ringing dm-call-region" role="status">
           <strong
-            >{groupConversation ? 'Group call incoming' : `${conversationTitle} is calling`}</strong
+            >{groupConversation
+              ? $t('ui_group_call_incoming_0c883124')
+              : `${conversationTitle} is calling`}</strong
           >
-          <button disabled={callBusy} onclick={() => callAction('accept')}>Accept</button>
+          <button disabled={callBusy} onclick={() => callAction('accept')}
+            >{$t('ui_accept_89713b9c')}</button
+          >
           <button disabled={callBusy} class="decline" onclick={() => callAction('decline')}
-            >Decline</button
+            >{$t('ui_decline_a2d285b3')}</button
           >
         </div>
       {:else if activeCall && callJoined}
@@ -2698,28 +2742,32 @@
             />
           {/key}
           <button class="end-call" disabled={callBusy} onclick={() => callAction('end')}
-            >End call for everyone</button
+            >{$t('ui_end_call_for_everyone_1dc035bc')}</button
           >
         </div>
       {/if}
-      <div class="message-list" aria-live="polite" role="log" aria-label="Direct messages">
+      <div
+        class="message-list"
+        aria-live="polite"
+        role="log"
+        aria-label={$t('ui_direct_messages_95e66705')}
+      >
         {#if error}<p class="form-error message-error" role="alert">{error}</p>{/if}
         {#snippet emptyTimeline()}
           {#if channelReady && channel}
             {#if channel.history_truncated}
               <aside class="history-boundary" role="status">
-                <strong>No recent messages are cached</strong>
-                <span>
-                  This instance keeps a rolling cache of this remote conversation. Older messages
-                  are loaded securely from its home instance when available.
-                </span>
+                <strong>{$t('ui_no_recent_messages_are_cached_04baa15b')}</strong>
+                <span> {$t('ui_this_instance_keeps_a_rolling_cache_of_this_r_bafb903c')} </span>
               </aside>
             {:else}
               <section class="channel-welcome">
                 <span class="welcome-mark direct" aria-hidden="true">@</span>
                 <h2>{conversationTitle}</h2>
                 <p>
-                  This is the beginning of your {groupConversation ? 'group' : 'direct'} conversation.
+                  {$t('ui_this_is_the_beginning_of_your_value0_conversa_6cfa1b37', {
+                    value0: String(groupConversation ? 'group' : 'direct')
+                  })}
                 </p>
               </section>
             {/if}
@@ -2737,21 +2785,17 @@
             onLoadLater={loadLater}
             targetKey={targetTimelineKey}
             onBottomChange={timelineBottomChanged}
-            label="Direct messages"
+            label={$t('ui_direct_messages_95e66705')}
           >
             {#snippet historyStart()}
               {#if channel?.history_truncated && !authorityHistoryComplete}
                 <aside class="history-boundary" role="status">
-                  <strong>Recent history starts here</strong>
-                  <span>
-                    This instance keeps a rolling cache of this remote conversation. Older messages
-                    load on demand from its home instance; retry if that instance is temporarily
-                    unavailable.
-                  </span>
+                  <strong>{$t('ui_recent_history_starts_here_ae1d1241')}</strong>
+                  <span> {$t('ui_this_instance_keeps_a_rolling_cache_of_this_r_fea82511')} </span>
                 </aside>
               {:else if authorityHistoryComplete}
                 <aside class="history-boundary" role="status">
-                  <strong>This is the beginning of your direct conversation.</strong>
+                  <strong>{$t('ui_this_is_the_beginning_of_your_direct_conversa_293f3a61')}</strong>
                 </aside>
               {/if}
             {/snippet}
@@ -2819,18 +2863,23 @@
       {#if replyingMessage}
         <div class="reply-banner">
           <span>
-            Replying to
+            {$t('ui_replying_to_2e89f01d')}
             <strong>{userDisplayName(replyingMessage.author)}</strong>
           </span>
           <div class="reply-banner-actions">
-            <button type="button" onclick={cancelReply} aria-label="Cancel reply">×</button>
+            <button type="button" onclick={cancelReply} aria-label={$t('ui_cancel_reply_2355f731')}
+              >×</button
+            >
           </div>
         </div>
       {/if}
       {#if editingMessage}
         <div class="editing-banner">
-          <span>Editing message <small>Your draft and attachments are saved.</small></span>
-          <button type="button" onclick={finishEditing}>Cancel</button>
+          <span
+            >{$t('ui_editing_message_7dbfd44a')}
+            <small>{$t('ui_your_draft_and_attachments_are_saved_88ba9911')}</small></span
+          >
+          <button type="button" onclick={finishEditing}>{$t('ui_cancel_19766ed6')}</button>
         </div>
       {/if}
       <ComposerAutocomplete
@@ -2932,7 +2981,7 @@
             aria-activedescendant={completionOpen
               ? `dm-message-suggestions-option-${completionActive}`
               : undefined}
-            aria-label="Direct message"
+            aria-label={$t('ui_direct_message_cd3e1605')}
             placeholder={`Message ${conversationTitle}`}
             rows="1"
             maxlength="4000"
@@ -2944,13 +2993,15 @@
             class:active={gifPickerOpen}
             type="button"
             disabled={busy || !channelReady || !channel || !gifPickerEnabled}
-            aria-label={gifPickerEnabled ? 'Choose a GIF' : 'GIF availability could not be checked'}
-            title={gifPickerEnabled ? 'Choose a GIF' : gifConfigurationError}
+            aria-label={gifPickerEnabled
+              ? $t('ui_choose_a_gif_261f5249')
+              : $t('ui_gif_availability_could_not_be_checked_5290ae44')}
+            title={gifPickerEnabled ? $t('ui_choose_a_gif_261f5249') : gifConfigurationError}
             aria-expanded={gifPickerOpen}
             onclick={() => {
               gifPickerOpen = !gifPickerOpen;
               emojiPickerOpen = false;
-            }}>GIF</button
+            }}>{$t('ui_gif_76c664ef')}</button
           >
         {/if}
         {#if !editingMessage && !selectedApplicationCommand}
@@ -2959,8 +3010,8 @@
             class:active={emojiPickerOpen}
             type="button"
             disabled={busy || !channelReady || !channel}
-            aria-label="Choose an emoji or sticker"
-            title="Emoji and stickers"
+            aria-label={$t('ui_choose_an_emoji_or_sticker_b4c5df44')}
+            title={$t('ui_emoji_and_stickers_d4c7b8e2')}
             aria-expanded={emojiPickerOpen}
             onclick={() => {
               emojiPickerOpen = !emojiPickerOpen;
@@ -2982,8 +3033,8 @@
               : editingMessage
                 ? !content.trim()
                 : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
-          aria-label="Send message"
-          title="Send message"
+          aria-label={$t('ui_send_message_93a26b1e')}
+          title={$t('ui_send_message_93a26b1e')}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
@@ -2998,7 +3049,9 @@
             disabled={gifConfigurationLoading}
             onclick={() => void refreshGifConfiguration()}
           >
-            {gifConfigurationLoading ? 'Checking…' : 'Retry GIF check'}
+            {gifConfigurationLoading
+              ? $t('ui_checking_ec963ffc')
+              : $t('ui_retry_gif_check_b1062c5e')}
           </button>
         </p>
       {/if}
@@ -3074,62 +3127,61 @@
   <form method="dialog" onsubmit={(event) => event.preventDefault()}>
     <header>
       <div>
-        <p class="eyebrow">Group conversation</p>
+        <p class="eyebrow">{$t('ui_group_conversation_b6aebd28')}</p>
         <h2>{conversationTitle}</h2>
       </div>
       <button
         class="icon-button"
         type="button"
-        aria-label="Close"
+        aria-label={$t('ui_close_7d9eb7ac')}
         onclick={() => groupDialog?.close()}>×</button
       >
     </header>
 
     <section class="group-dm-setting">
       <label class="form-field">
-        <span>Group name</span>
-        <input bind:value={groupName} maxlength="100" placeholder="Optional group name" />
+        <span>{$t('ui_group_name_762ebb70')}</span>
+        <input
+          bind:value={groupName}
+          maxlength="100"
+          placeholder={$t('ui_optional_group_name_ed1f40c9')}
+        />
       </label>
       <button class="secondary-button" type="button" disabled={groupBusy} onclick={updateGroupName}>
-        Save name
+        {$t('ui_save_name_b7297226')}
       </button>
     </section>
 
     <section class="group-dm-setting">
       <label class="form-field">
-        <span>Add a friend</span>
+        <span>{$t('ui_add_a_friend_33275c37')}</span>
         <input
           bind:value={groupInviteHandle}
           placeholder="@friend@example.net"
           autocomplete="off"
         />
-        <small>Any member can invite one of their existing friends.</small>
+        <small>{$t('ui_any_member_can_invite_one_of_their_existing_f_112079d9')}</small>
       </label>
       <button
         class="secondary-button"
         type="button"
         disabled={groupBusy || !groupInviteHandle.trim()}
-        onclick={addGroupMember}>Add</button
+        onclick={addGroupMember}>{$t('ui_add_9fd728c6')}</button
       >
     </section>
 
     <section class="group-dm-setting e2ee-setting">
       <div>
-        <strong>End-to-end encryption</strong>
+        <strong>{$t('ui_end_to_end_encryption_1b3f0f02')}</strong>
         {#if channel?.encryption_mode === 'e2ee'}
           <small>
             {channel.encryption_state === 'rekeying'
-              ? 'Paused · The member list changed and requires fresh device keys.'
-              : 'On · Encrypted with participant identities unverified until the safety number is compared.'}
+              ? $t('ui_paused_the_member_list_changed_and_requires_f_53f1fd53')
+              : $t('ui_on_encrypted_with_participant_identities_unve_ff54b617')}
           </small>
           {#if e2eeSafetyNumber}<code class="e2ee-safety-number">{e2eeSafetyNumber}</code>{/if}
         {:else}
-          <small>
-            Optional and permanent. Disables server message search, previews, and file scanning.
-            Bots and webhooks receive no access automatically; verified devices require an explicit
-            future-only grant and rekey. Losing the synchronized account vault, all trusted local
-            state, and the recovery backup loses message access.
-          </small>
+          <small> {$t('ui_optional_and_permanent_disables_server_messag_7a6492df')} </small>
         {/if}
       </div>
       {#if channel?.encryption_mode !== 'e2ee' && groupOwner && e2eeActivationEnabled}
@@ -3137,14 +3189,14 @@
           class="secondary-button"
           type="button"
           disabled={groupBusy}
-          onclick={enableEncryption}>Turn on</button
+          onclick={enableEncryption}>{$t('ui_turn_on_5a1f096a')}</button
         >
       {:else if channel?.encryption_state === 'rekeying' && groupOwner}
         <button
           class="secondary-button"
           type="button"
           disabled={groupBusy}
-          onclick={rekeyEncryption}>Secure changes</button
+          onclick={rekeyEncryption}>{$t('ui_secure_changes_41e8dec7')}</button
         >
       {/if}
       {#if channel?.encryption_mode === 'e2ee'}
@@ -3154,14 +3206,14 @@
           onclick={() => {
             groupDialog?.close();
             encryptedAppsOpen = true;
-          }}>Manage apps</button
+          }}>{$t('ui_manage_apps_75f86663')}</button
         >
       {/if}
     </section>
 
     <section class="group-dm-members" aria-labelledby="group-members-heading">
       <div class="dm-friend-picker-heading">
-        <strong id="group-members-heading">Members</strong>
+        <strong id="group-members-heading">{$t('ui_members_1044a4c0')}</strong>
         <small>{channel ? (channel.recipients?.length ?? 0) + 1 : 0}</small>
       </div>
       {#if currentUser}
@@ -3171,9 +3223,12 @@
               <img src={assetUrl(currentUser.avatar_hash, 'thumbnail_128', currentUser)} alt="" />
             {:else}{currentUser.username.slice(0, 1).toUpperCase()}{/if}
           </span>
-          <span><strong>{userDisplayName(currentUser)}</strong><small>You</small></span>
+          <span
+            ><strong>{userDisplayName(currentUser)}</strong><small>{$t('ui_you_08b04193')}</small
+            ></span
+          >
           {#if channel?.owner_id === currentUser.id && channel.owner_domain === currentUser.origin_domain}
-            <small class="owner-badge">Owner</small>
+            <small class="owner-badge">{$t('ui_owner_4b1b8aa3')}</small>
           {/if}
         </div>
       {/if}
@@ -3186,7 +3241,7 @@
           </span>
           <span><strong>{userDisplayName(member)}</strong><small>{member.handle}</small></span>
           {#if channel?.owner_id === member.id && channel.owner_domain === member.origin_domain}
-            <small class="owner-badge">Owner</small>
+            <small class="owner-badge">{$t('ui_owner_4b1b8aa3')}</small>
           {:else if groupOwner}
             <button
               class="group-member-action"
@@ -3194,7 +3249,7 @@
               disabled={groupBusy}
               aria-label={`Remove ${userDisplayName(member)} from the group`}
               onclick={() => removeGroupMember(member)}
-              ><Icon name="trash" size={16} />Remove</button
+              ><Icon name="trash" size={16} />{$t('ui_remove_c3812fc4')}</button
             >
           {/if}
         </div>
@@ -3203,10 +3258,10 @@
     {#if groupError}<p class="form-error" role="alert">{groupError}</p>{/if}
     <footer>
       <button class="group-leave-button" type="button" disabled={groupBusy} onclick={leaveGroup}>
-        <Icon name="logout" size={17} />Leave group
+        <Icon name="logout" size={17} />{$t('ui_leave_group_3475393d')}
       </button>
       <button class="secondary-button" type="button" onclick={() => groupDialog?.close()}
-        >Done</button
+        >{$t('ui_done_11a6767d')}</button
       >
     </footer>
   </form>

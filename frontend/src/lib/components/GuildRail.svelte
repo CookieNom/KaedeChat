@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import type { Guild } from '$lib/chat/types';
   import { entityKey } from '$lib/chat/refs';
@@ -301,7 +303,7 @@
 <nav
   class:rail-drop-active={railDropActive}
   class="guild-spine"
-  aria-label="Guilds"
+  aria-label={$t('ui_guilds_25df5134')}
   ondragover={allowRailDrop}
   ondragleave={(event) => {
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) railDropActive = false;
@@ -312,9 +314,11 @@
     class:active={homeActive}
     class="spine-home"
     href={resolve(homeHref as '/home')}
-    aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
+    aria-label={homeUnreadCount
+      ? `Home, ${homeUnreadCount} unread direct messages`
+      : $t('ui_home_3a786953')}
     aria-current={homeActive ? 'page' : undefined}
-    title="Home"
+    title={$t('ui_home_3a786953')}
   >
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
@@ -379,7 +383,7 @@
           class="guild-folder-toggle"
           type="button"
           aria-expanded={!item.collapsed}
-          aria-label={`${item.collapsed ? 'Open' : 'Close'} ${item.name}`}
+          aria-label={`${item.collapsed ? $t('ui_open_ed077f3d') : $t('ui_close_7d9eb7ac')} ${item.name}`}
           title={`${item.name} · right-click to rename or remove`}
           onclick={() => toggleGroup(item)}
         >
@@ -439,8 +443,8 @@
   <button
     class="spine-create"
     type="button"
-    aria-label="Create a guild"
-    title="Create a guild"
+    aria-label={$t('ui_create_a_guild_be194799')}
+    title={$t('ui_create_a_guild_be194799')}
     onclick={() => (createGuildOpen = true)}
   >
     <Icon name="plus" size={23} strokeWidth={2.2} />
@@ -486,7 +490,7 @@
       }}
     >
       <Icon name="settings" size={17} />
-      <span>Server Settings</span>
+      <span>{$t('ui_server_settings_f2c21feb')}</span>
       <Icon name="chevron-right" size={15} />
     </button>
     {#if settingsSubmenuOpen}
@@ -495,7 +499,7 @@
         class="guild-settings-submenu"
         role="menu"
         tabindex="-1"
-        aria-label="Server Settings"
+        aria-label={$t('ui_server_settings_f2c21feb')}
         onkeydown={guildSettingsSubmenuKeydown}
       >
         <a
@@ -504,7 +508,7 @@
           href={guildSettingsPath(guildContextMenu.guild)}
           onclick={() => closeGuildContextMenu()}
         >
-          <Icon name="settings" size={17} />Overview
+          <Icon name="settings" size={17} />{$t('ui_overview_d4b1ea57')}
         </a>
         <a
           role="menuitem"
@@ -512,7 +516,7 @@
           href={directoryHref(guildContextMenu.guild)}
           onclick={() => closeGuildContextMenu()}
         >
-          <Icon name="sparkles" size={17} />App Directory
+          <Icon name="sparkles" size={17} />{$t('ui_app_directory_a9c3e633')}
         </a>
       </div>
     {/if}
@@ -525,15 +529,15 @@
   <dialog
     open
     class="guild-group-dialog-backdrop"
-    aria-label="Edit guild group"
+    aria-label={$t('ui_edit_guild_group_8b3fd6c5')}
     onclick={(event) => {
       if (event.target === event.currentTarget) closeGroupEditor();
     }}
   >
     <section class="guild-group-dialog" aria-labelledby="guild-group-title">
-      <h2 id="guild-group-title">Edit guild group</h2>
+      <h2 id="guild-group-title">{$t('ui_edit_guild_group_8b3fd6c5')}</h2>
       <label>
-        Group name
+        {$t('ui_group_name_762ebb70')}
         <input
           bind:value={editingName}
           maxlength="32"
@@ -543,11 +547,17 @@
           }}
         />
       </label>
-      <p>Drag guilds onto the folder to add them. Drag them outside the folder to remove them.</p>
+      <p>{$t('ui_drag_guilds_onto_the_folder_to_add_them_drag__2fae19f8')}</p>
       <div>
-        <button class="danger-button" type="button" onclick={removeGroup}>Ungroup guilds</button>
-        <button class="secondary-button" type="button" onclick={closeGroupEditor}>Cancel</button>
-        <button type="button" disabled={!editingName.trim()} onclick={saveGroupName}>Save</button>
+        <button class="danger-button" type="button" onclick={removeGroup}
+          >{$t('ui_ungroup_guilds_1e0b00b8')}</button
+        >
+        <button class="secondary-button" type="button" onclick={closeGroupEditor}
+          >{$t('ui_cancel_19766ed6')}</button
+        >
+        <button type="button" disabled={!editingName.trim()} onclick={saveGroupName}
+          >{$t('ui_save_1509f561')}</button
+        >
       </div>
     </section>
   </dialog>

@@ -18,6 +18,7 @@
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application
+        android:localeConfig="@xml/locales_config"
         android:label="Kaede Chat"
         android:name="${applicationName}"
         android:allowBackup="false"

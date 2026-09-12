@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { onMount, onDestroy, untrack, type Snippet } from 'svelte';
   import { assetUrl } from '$lib/media/assets';
   import { entityRef } from '$lib/chat/refs';
@@ -182,33 +184,39 @@
 
 <div class="member-directory" aria-busy={loading || loadingDirectory}>
   <header class="toolbar">
-    <h3>Recent Members <span>{members.length}{hasMore ? '+' : ''}</span></h3>
+    <h3>{$t('ui_recent_members_29d3c656')} <span>{members.length}{hasMore ? '+' : ''}</span></h3>
     <label class="search"
       ><Icon name="search" size={16} /><input
         type="search"
-        aria-label="Search members"
-        placeholder="Search by username or ID"
+        aria-label={$t('ui_search_members_6497fc6f')}
+        placeholder={$t('ui_search_by_username_or_id_4f2f343e')}
         bind:value={search}
       /></label
     >
-    <select aria-label="Sort members" bind:value={sort}>
-      <option value="newest">Newest members</option><option value="oldest">Oldest members</option
-      ><option value="name">Name A–Z</option>
+    <select aria-label={$t('ui_sort_members_b764ecc6')} bind:value={sort}>
+      <option value="newest">{$t('ui_newest_members_75ea8d08')}</option><option value="oldest"
+        >{$t('ui_oldest_members_c6b7cd08')}</option
+      ><option value="name">{$t('ui_name_a_z_7ed96629')}</option>
     </select>
-    {#if canPrune}<a class="prune" href="#bulk-moderation">Prune</a>{/if}
+    {#if canPrune}<a class="prune" href="#bulk-moderation">{$t('ui_prune_79403a38')}</a>{/if}
   </header>
   <div class="filters">
     <label
-      >Roles <select aria-label="Filter by role" bind:value={roleFilter}
-        ><option value="">All roles</option><option value="none">No roles</option
+      >{$t('ui_roles_c2533705')}
+      <select aria-label={$t('ui_filter_by_role_67fd9c1a')} bind:value={roleFilter}
+        ><option value="">{$t('ui_all_roles_78f133af')}</option><option value="none"
+          >{$t('ui_no_roles_1527d51f')}</option
         >{#each roles as role (role.id)}<option value={role.id}>{role.name}</option>{/each}</select
       ></label
     >
     <label
-      >Signals <select aria-label="Filter by signal" bind:value={signalFilter}
-        ><option value="">All members</option><option value="timeout">Timed out</option><option
-          value="app">Apps</option
-        ><option value="temporary">Temporary members</option></select
+      >{$t('ui_signals_88b01c8a')}
+      <select aria-label={$t('ui_filter_by_signal_437b0ffb')} bind:value={signalFilter}
+        ><option value="">{$t('ui_all_members_3d6fe3e7')}</option><option value="timeout"
+          >{$t('ui_timed_out_9718cc76')}</option
+        ><option value="app">{$t('ui_apps_89dd7484')}</option><option value="temporary"
+          >{$t('ui_temporary_members_40bd80e2')}</option
+        ></select
       ></label
     >
     {#if search || roleFilter || signalFilter}<button
@@ -216,33 +224,37 @@
           search = '';
           roleFilter = '';
           signalFilter = '';
-        }}>Clear filters</button
+        }}>{$t('ui_clear_filters_7179ea00')}</button
       >{/if}
     {#if hasMore}<span role="status"
         >{loading || loadingDirectory
           ? `Loading members… ${members.length} loaded`
-          : 'Directory incomplete. Filters apply to loaded members.'}</span
+          : $t('ui_directory_incomplete_filters_apply_to_loaded__1ec9bad9')}</span
       >
       {#if !loading && !loadingDirectory}<button onclick={() => void loadDirectory()}
-          >Retry loading</button
+          >{$t('ui_retry_loading_a0f859bc')}</button
         >{/if}
     {/if}
   </div>
   {#if selectedMembers.length}
     <div class="bulk-bar">
-      <strong>{selectedMembers.length} selected</strong>
+      <strong
+        >{$t('ui_value0_selected_975acbfe', { value0: String(selectedMembers.length) })}</strong
+      >
       <select
-        aria-label="Role to assign to selected members"
+        aria-label={$t('ui_role_to_assign_to_selected_members_8837ebd1')}
         bind:value={bulkRole}
         disabled={busy || bulkBusy}
-        ><option value="">Choose a role</option>{#each manageableRoles as role (role.id)}<option
-            value={role.id}>{role.name}</option
+        ><option value="">{$t('ui_choose_a_role_a49c49b0')}</option
+        >{#each manageableRoles as role (role.id)}<option value={role.id}>{role.name}</option
           >{/each}</select
       >
       <button disabled={!bulkRole || busy || bulkBusy} onclick={() => void applyBulkRole()}
-        >{bulkBusy ? 'Assigning…' : 'Add role'}</button
+        >{bulkBusy ? $t('ui_assigning_8157fc4e') : $t('ui_add_role_e53a9362')}</button
       >
-      <button disabled={bulkBusy} onclick={() => (selected = [])}>Clear selection</button>
+      <button disabled={bulkBusy} onclick={() => (selected = [])}
+        >{$t('ui_clear_selection_cea4d2e0')}</button
+      >
     </div>
   {/if}
   {#if bulkStatus}<p class="bulk-status" role="status">{bulkStatus}</p>{/if}
@@ -253,7 +265,7 @@
           <th class="selection"
             ><input
               type="checkbox"
-              aria-label="Select all manageable members on this page"
+              aria-label={$t('ui_select_all_manageable_members_on_this_page_613d1061')}
               checked={allSelected}
               indeterminate={someSelected && !allSelected}
               disabled={!selectable.length || !manageableRoles.length || busy || bulkBusy}
@@ -263,9 +275,11 @@
               }}
             /></th
           >
-          <th scope="col">Name</th><th scope="col">Member since</th><th scope="col">Roles</th><th
-            scope="col">Signals</th
-          ><th scope="col"><span class="sr-only">Actions</span></th>
+          <th scope="col">{$t('ui_name_dcd1d522')}</th><th scope="col"
+            >{$t('ui_member_since_9321bcc0')}</th
+          ><th scope="col">{$t('ui_roles_c2533705')}</th><th scope="col"
+            >{$t('ui_signals_88b01c8a')}</th
+          ><th scope="col"><span class="sr-only">{$t('ui_actions_ff8059dc')}</span></th>
         </tr></thead
       >
       <tbody>
@@ -301,13 +315,16 @@
               ><span
                 title={member.joined_at
                   ? formatDateTime(member.joined_at)
-                  : 'Membership date unavailable'}>{relativeDate(member.joined_at)}</span
+                  : $t('ui_membership_date_unavailable_9cdc002d')}
+                >{relativeDate(member.joined_at)}</span
               ></td
             >
             <td
               ><div class="role-chips">
                 {#each assignedRoles as role (role.id)}<span class="role-chip"
-                    ><i style:background={roleColorCss(role.color) ?? 'var(--text-muted)'}
+                    ><i
+                      style:background={roleColorCss(role.color) ??
+                        $t('ui_var_text_muted_3e9ab17d')}
                     ></i>{role.name}</span
                   >{:else}<span class="muted">—</span>{/each}
               </div></td
@@ -316,10 +333,11 @@
               ><div class="signals">
                 {#if timedOut(member)}<span
                     title={member.timeout_indefinite
-                      ? 'Timed out indefinitely'
-                      : `Timed out until ${formatDateTime(member.timeout_until!)}`}>Timed out</span
-                  >{/if}{#if isApplicationUser(member.user)}<span>APP</span
-                  >{/if}{#if member.temporary}<span>Temporary</span
+                      ? $t('ui_timed_out_indefinitely_163d1e08')
+                      : `Timed out until ${formatDateTime(member.timeout_until!)}`}
+                    >{$t('ui_timed_out_9718cc76')}</span
+                  >{/if}{#if isApplicationUser(member.user)}<span>{$t('ui_app_b7179fe7')}</span
+                  >{/if}{#if member.temporary}<span>{$t('ui_temporary_a29c13b9')}</span
                   >{/if}{#if !timedOut(member) && !isApplicationUser(member.user) && !member.temporary}<span
                     class="muted">—</span
                   >{/if}
@@ -329,14 +347,15 @@
               ><details>
                 <summary
                   aria-label={`Actions for ${memberDisplayName(member)}`}
-                  title="Member actions">⋮</summary
+                  title={$t('ui_member_actions_54cf71ae')}>⋮</summary
                 >
                 <div class="actions-panel">
                   <strong>{memberDisplayName(member)}</strong>
                   {#if manageableRoles.length && canManageMember(member)}<fieldset
                       disabled={busy || bulkBusy}
                     >
-                      <legend>Manage roles</legend>{#each manageableRoles as role (role.id)}<label
+                      <legend>{$t('ui_manage_roles_b646c8d2')}</legend
+                      >{#each manageableRoles as role (role.id)}<label
                           ><input
                             type="checkbox"
                             checked={member.role_ids.includes(role.id)}
@@ -346,7 +365,8 @@
                         >{/each}
                     </fieldset>{/if}
                   <div class="moderation-actions">{@render actions(member, timedOut(member))}</div>
-                  <small class="muted">ID: {ref}</small>
+                  <small class="muted">{$t('ui_id_value0_9b488c62', { value0: String(ref) })}</small
+                  >
                 </div>
               </details></td
             >
@@ -354,8 +374,10 @@
         {:else}<tr
             ><td colspan="6" class="empty"
               ><Icon name="users" /><strong
-                >{loading || loadingDirectory ? 'Loading members…' : 'No matching members'}</strong
-              ><span>Try a different name, user ID, or filter.</span></td
+                >{loading || loadingDirectory
+                  ? $t('ui_loading_members_027c36b0')
+                  : $t('ui_no_matching_members_a2d9d134')}</strong
+              ><span>{$t('ui_try_a_different_name_user_id_or_filter_e481d213')}</span></td
             ></tr
           >{/each}
       </tbody>
@@ -363,18 +385,21 @@
   </div>
   <footer>
     <div class="page-size">
-      Showing <select aria-label="Members per page" bind:value={pageSize}
+      {$t('ui_showing_d604310a')}
+      <select aria-label={$t('ui_members_per_page_b3198c80')} bind:value={pageSize}
         ><option value={12}>12</option><option value={25}>25</option><option value={50}>50</option
         ><option value={100}>100</option></select
       ><span
-        >per page · {filtered.length} member{filtered.length === 1 ? '' : 's'}{hasMore
-          ? ' loaded'
-          : ''}</span
+        >{$t('ui_per_page_value0_member_value1_value2_8836c7c0', {
+          value0: String(filtered.length),
+          value1: String(filtered.length === 1 ? '' : 's'),
+          value2: String(hasMore ? ' loaded' : '')
+        })}</span
       >
     </div>
-    <nav aria-label="Guild member pages">
+    <nav aria-label={$t('ui_guild_member_pages_fd76bf5f')}>
       <button disabled={currentPage === 0} onclick={() => (page = currentPage - 1)}
-        >‹ Previous</button
+        >{$t('ui_previous_5d026d14')}</button
       >{#each pageNumbers as number (number)}<button
           class:active={currentPage === number}
           aria-current={currentPage === number ? 'page' : undefined}
@@ -382,7 +407,7 @@
           onclick={() => (page = number)}>{number + 1}</button
         >{/each}<button
         disabled={currentPage >= pageCount - 1}
-        onclick={() => (page = currentPage + 1)}>Next ›</button
+        onclick={() => (page = currentPage + 1)}>{$t('ui_next_868d1670')}</button
       >
     </nav>
   </footer>

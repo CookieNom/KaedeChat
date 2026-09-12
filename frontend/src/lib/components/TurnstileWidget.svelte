@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { onDestroy, onMount } from 'svelte';
 
   interface TurnstileApi {
@@ -28,9 +30,13 @@
     return new Promise((resolve, reject) => {
       const script = existing ?? document.createElement('script');
       script.addEventListener('load', () => resolve(), { once: true });
-      script.addEventListener('error', () => reject(new Error('Turnstile failed to load')), {
-        once: true
-      });
+      script.addEventListener(
+        'error',
+        () => reject(new Error($t('ui_turnstile_failed_to_load_37b501a2'))),
+        {
+          once: true
+        }
+      );
       if (!existing) {
         script.src = SCRIPT_URL;
         script.async = true;
@@ -75,6 +81,6 @@
 <div class="turnstile-widget" bind:this={container}></div>
 {#if loadFailed}
   <p class="form-error" role="alert">
-    Verification could not load. Check your connection and reload.
+    {$t('ui_verification_could_not_load_check_your_connec_42105a14')}
   </p>
 {/if}

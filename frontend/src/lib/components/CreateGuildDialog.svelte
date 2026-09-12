@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import { firstNavigableChannel } from '$lib/chat/channels';
@@ -56,7 +58,10 @@
       window.location.assign(channel ? guildChannelPath(guild, channel) : resolve('/home'));
     } catch (caught) {
       if (generation !== submissionGeneration || !open) return;
-      error = userErrorMessage(caught, 'Could not create the guild. Check its name and try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_create_the_guild_check_its_name_and_cf8e80d2')
+      );
     } finally {
       if (generation === submissionGeneration) submitting = false;
     }
@@ -85,29 +90,29 @@
     <header>
       <span class="dialog-icon" aria-hidden="true"><Icon name="plus" size={24} /></span>
       <div>
-        <p>New community</p>
-        <h2 id="create-guild-title">Create a guild</h2>
+        <p>{$t('ui_new_community_3d86379b')}</p>
+        <h2 id="create-guild-title">{$t('ui_create_a_guild_be194799')}</h2>
       </div>
       <button
         class="close-button"
         type="button"
-        aria-label="Close"
+        aria-label={$t('ui_close_7d9eb7ac')}
         disabled={submitting}
         onclick={close}>×</button
       >
     </header>
 
     <div class="dialog-body">
-      <p>Give your community a name. You can customize its icon, channels, and roles next.</p>
+      <p>{$t('ui_give_your_community_a_name_you_can_customize__8072a149')}</p>
       <label>
-        <span>Guild name</span>
+        <span>{$t('ui_guild_name_4bffa81b')}</span>
         <input
           bind:this={nameInput}
           bind:value={name}
           minlength="2"
           maxlength="100"
           autocomplete="off"
-          placeholder="My community"
+          placeholder={$t('ui_my_community_48616141')}
           required
         />
       </label>
@@ -116,10 +121,10 @@
 
     <footer>
       <button class="secondary-button" type="button" disabled={submitting} onclick={close}
-        >Cancel</button
+        >{$t('ui_cancel_19766ed6')}</button
       >
       <button class="primary-button" disabled={submitting || name.trim().length < 2}>
-        {submitting ? 'Creating…' : 'Create guild'}
+        {submitting ? $t('ui_creating_c79ed949') : $t('ui_create_guild_7e664b35')}
       </button>
     </footer>
   </form>

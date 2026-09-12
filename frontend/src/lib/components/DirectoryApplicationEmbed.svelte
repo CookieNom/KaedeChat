@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   /* eslint-disable svelte/no-navigation-without-resolve -- the Directory helper validates and resolves this internal product route. */
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
@@ -66,7 +68,10 @@
       })
       .catch((caught) => {
         if (requestIsCurrent(targetRef, signal, request)) {
-          unavailable = userErrorMessage(caught, 'This App Directory listing is unavailable.');
+          unavailable = userErrorMessage(
+            caught,
+            $t('ui_this_app_directory_listing_is_unavailable_aa9719f3')
+          );
         }
       });
   });
@@ -86,7 +91,7 @@
             .toUpperCase()}{/if}
       </span>
       <span
-        ><small>APP DIRECTORY</small><strong>{application.name}</strong><em
+        ><small>{$t('ui_app_directory_b9932dc9')}</small><strong>{application.name}</strong><em
           >{application.origin_domain}</em
         ></span
       >
@@ -97,19 +102,22 @@
       {#each application.tags.slice(0, 3) as tag (tag)}<span>{tag}</span>{/each}
     </div>
     <div class="actions">
-      <a href={resolveApplicationDirectoryPath(productPath)}>View in Directory</a>
+      <a href={resolveApplicationDirectoryPath(productPath)}
+        >{$t('ui_view_in_directory_7c65ca90')}</a
+      >
       {#if installPath}<a
           class="add"
-          href={resolve(installPath as `/applications/${string}/install/${string}`)}>Add App</a
+          href={resolve(installPath as `/applications/${string}/install/${string}`)}
+          >{$t('ui_add_app_3de6a773')}</a
         >{/if}
     </div>
   </aside>
 {:else if unavailable}
   <aside class="directory-app unavailable">
-    <strong>App listing unavailable</strong><small>{unavailable}</small>
+    <strong>{$t('ui_app_listing_unavailable_765842bd')}</strong><small>{unavailable}</small>
   </aside>
 {:else}
-  <aside class="directory-app loading" aria-label="Loading App Directory listing">
+  <aside class="directory-app loading" aria-label={$t('ui_loading_app_directory_listing_288ff09d')}>
     <span></span>
   </aside>
 {/if}

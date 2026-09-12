@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import type { Attachment, Message } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
@@ -144,8 +146,8 @@
       error = userErrorMessage(
         caught,
         createdReportId
-          ? 'The report was submitted, but its decrypted evidence could not be attached. Keep this dialog open and try again.'
-          : 'Could not submit this report. Try again.'
+          ? $t('ui_the_report_was_submitted_but_its_decrypted_ev_b1a96ba1')
+          : $t('ui_could_not_submit_this_report_try_again_1364fabc')
       );
     } finally {
       busy = false;
@@ -162,72 +164,51 @@
   <div class="report-dialog" role="dialog" aria-modal="true" aria-labelledby="report-title">
     <header>
       <div>
-        <span>Trust &amp; Safety</span>
-        <h2 id="report-title">Report message</h2>
+        <span>{$t('ui_trust_safety_5b9c374d')}</span>
+        <h2 id="report-title">{$t('ui_report_message_0a1e3c52')}</h2>
       </div>
-      <button type="button" class="close" aria-label="Close report" onclick={onClose}>×</button>
+      <button
+        type="button"
+        class="close"
+        aria-label={$t('ui_close_report_a7d7787b')}
+        onclick={onClose}>×</button
+      >
     </header>
     {#if focusedAttachment}
       <div
         class:encrypted-disclosure={attachment?.encryption_mode === 'e2ee'}
         class="attachment-report-summary"
       >
-        <strong>{attachmentLabel ?? attachment?.filename ?? 'Attachment'}</strong>
-        <small>{attachment?.content_type ?? 'Unknown file type'}</small>
+        <strong>{attachmentLabel ?? attachment?.filename ?? $t('ui_attachment_040d2b36')}</strong>
+        <small>{attachment?.content_type ?? $t('ui_unknown_file_type_6a4ec9bd')}</small>
         {#if attachment?.encryption_mode === 'e2ee'}
           {#if attachmentDisclosureAvailable}
-            <strong>Include this decrypted attachment with the message report?</strong>
-            <p>
-              This report covers the entire message. It sends the decrypted message text and
-              decrypts this selected attachment on this device, then uploads an unencrypted evidence
-              copy and its filename to this instance's Trust &amp; Safety team. The copy is scanned
-              and stored with the report. It does not share encryption keys, other attachments, or
-              other messages.
-            </p>
+            <strong>{$t('ui_include_this_decrypted_attachment_with_the_me_2cc67680')}</strong>
+            <p>{$t('ui_this_report_covers_the_entire_message_it_send_cb7052ab')}</p>
           {:else}
-            <strong>Attachment not decrypted on this device</strong>
-            <p>
-              Kaede cannot disclose this attachment until its authenticated file manifest is
-              available here. Close this dialog, wait for the attachment to decrypt, and try again.
-            </p>
+            <strong>{$t('ui_attachment_not_decrypted_on_this_device_6e608aef')}</strong>
+            <p>{$t('ui_kaede_cannot_disclose_this_attachment_until_i_fb39fcc7')}</p>
           {/if}
         {:else}
-          <p>
-            The entire message, its text, and metadata for all of its attachments will be sent to
-            this instance's Trust &amp; Safety team. This attachment will be highlighted for review.
-            Guild moderators do not receive this report.
-          </p>
+          <p>{$t('ui_the_entire_message_its_text_and_metadata_for__45463903')}</p>
         {/if}
       </div>
     {:else if encrypted}
       <div class="encrypted-disclosure">
         {#if disclosure.available}
-          <strong>Share decrypted message evidence?</strong>
-          <p>
-            This message is end-to-end encrypted. Reporting it sends the decrypted text shown on
-            this device, encrypted attachment metadata, and basic message context to this instance's
-            Trust &amp; Safety team. For an attachment-only message, the disclosed text is empty but
-            the message can still be reported. It does not send encryption keys, decrypted file
-            contents, or other messages unless a specific attachment was selected before opening
-            this report. The server labels plaintext as reporter-supplied evidence.
-          </p>
+          <strong>{$t('ui_share_decrypted_message_evidence_3d4964b6')}</strong>
+          <p>{$t('ui_this_message_is_end_to_end_encrypted_reportin_8687e45c')}</p>
         {:else}
-          <strong>Message not decrypted on this device</strong>
-          <p>
-            Kaede cannot submit this encrypted message until its authenticated message evidence has
-            decrypted here. Close this dialog, wait for the message to decrypt, and try again.
-          </p>
+          <strong>{$t('ui_message_not_decrypted_on_this_device_eaa691ea')}</strong>
+          <p>{$t('ui_kaede_cannot_submit_this_encrypted_message_un_258b34b2')}</p>
         {/if}
       </div>
     {:else}
-      <p>
-        The message text, basic context, and metadata for all attachments will be sent to this
-        instance's Trust &amp; Safety team. Guild moderators do not receive this report.
-      </p>
+      <p>{$t('ui_the_message_text_basic_context_and_metadata_f_7c11101a')}</p>
     {/if}
     <form onsubmit={submit}>
       <label>
-        Reason
+        {$t('ui_reason_f81ab834')}
         <select bind:value={category} disabled={busy || Boolean(createdReportId)}>
           {#each categories as [value, label] (value)}
             <option {value}>{label}</option>
@@ -235,7 +216,7 @@
         </select>
       </label>
       <label>
-        Additional details <span>(optional)</span>
+        {$t('ui_additional_details_00fcfc37')} <span>{$t('ui_optional_0059798b')}</span>
         <textarea
           bind:value={description}
           maxlength="2000"
@@ -254,8 +235,8 @@
           />
           <span>
             {requiresAttachmentDisclosure
-              ? 'I understand the message text and this attachment will be decrypted, and an unencrypted copy will be shared with Trust & Safety.'
-              : 'I understand the decrypted message evidence will be shared with Trust & Safety.'}
+              ? $t('ui_i_understand_the_message_text_and_this_attach_90c49a8d')
+              : $t('ui_i_understand_the_decrypted_message_evidence_w_ac997686')}
           </span>
         </label>
       {/if}
@@ -268,7 +249,9 @@
       {/if}
       {#if error}<div class="report-error" role="alert">{error}</div>{/if}
       <footer>
-        <button type="button" class="secondary" disabled={busy} onclick={onClose}>Cancel</button>
+        <button type="button" class="secondary" disabled={busy} onclick={onClose}
+          >{$t('ui_cancel_19766ed6')}</button
+        >
         <button
           type="submit"
           class="danger"
@@ -276,7 +259,7 @@
             (requiresMessageDisclosure && (!disclosure.available || !disclosureAcknowledged)) ||
             (requiresAttachmentDisclosure &&
               (!attachmentDisclosureAvailable || !disclosureAcknowledged))}
-          >{busy ? 'Submitting…' : 'Submit report'}</button
+          >{busy ? $t('ui_submitting_49195f55') : $t('ui_submit_report_b41fd589')}</button
         >
       </footer>
     </form>

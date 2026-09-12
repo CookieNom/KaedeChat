@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
@@ -101,7 +103,7 @@
         }
       }
       if (!preparedVaultKey) {
-        throw new Error('Encryption keys could not be unlocked. Start sign-in again.');
+        throw new Error($t('ui_encryption_keys_could_not_be_unlocked_start_s_29db2800'));
       }
       await savePreparedVaultKey(preparedVaultKey);
       preparedVaultKey = null;
@@ -134,7 +136,10 @@
           if (alreadyVisible) turnstileWidget?.reset();
         }
       } else {
-        error = userErrorMessage(caught, 'Could not sign in. Check your details and try again.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_sign_in_check_your_details_and_try__5102b372')
+        );
       }
     } finally {
       busy = false;
@@ -156,7 +161,7 @@
     } catch (caught) {
       verificationResendStatus = userErrorMessage(
         caught,
-        'The verification email could not be requested. Try again shortly.'
+        $t('ui_the_verification_email_could_not_be_requested_e9581ccc')
       );
     } finally {
       verificationResendBusy = false;
@@ -164,11 +169,11 @@
   }
 </script>
 
-<svelte:head><title>Sign in · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_sign_in_kaede_chat_52b8ba2a')}</title></svelte:head>
 
-<p class="eyebrow">Welcome back</p>
-<h1 class="auth-title">Pick up the thread.</h1>
-<p class="auth-intro">Sign in with your local username, email address, or full federated handle.</p>
+<p class="eyebrow">{$t('ui_welcome_back_66212495')}</p>
+<h1 class="auth-title">{$t('ui_pick_up_the_thread_767b206c')}</h1>
+<p class="auth-intro">{$t('ui_sign_in_with_your_local_username_email_addres_2bbde8e4')}</p>
 <form
   onsubmit={(event) => {
     event.preventDefault();
@@ -177,7 +182,8 @@
 >
   {#if ticket}
     <label
-      >Authenticator or recovery code <input
+      >{$t('ui_authenticator_or_recovery_code_322eeecc')}
+      <input
         bind:this={codeInput}
         bind:value={code}
         autocomplete="one-time-code"
@@ -187,11 +193,12 @@
         disabled={busy}
       /></label
     >
-    <p class="field-note">Enter the current code from your authenticator or one recovery code.</p>
+    <p class="field-note">{$t('ui_enter_the_current_code_from_your_authenticato_6a921309')}</p>
   {:else}
     <NativeInstanceField bind:this={instanceField} disabled={busy} />
     <label
-      >Email, username, or handle <input
+      >{$t('ui_email_username_or_handle_e502b7c9')}
+      <input
         bind:value={identifier}
         autocomplete="username"
         minlength="2"
@@ -201,7 +208,8 @@
       /></label
     >
     <label
-      >Password <input
+      >{$t('ui_password_e7cf3ef4')}
+      <input
         bind:value={password}
         type="password"
         autocomplete="current-password"
@@ -212,7 +220,7 @@
     >
     {#if turnstileRequired && turnstileSiteKey}
       <div class="adaptive-challenge">
-        <p class="field-note">Please verify this sign-in attempt before trying again.</p>
+        <p class="field-note">{$t('ui_please_verify_this_sign_in_attempt_before_try_8f0e84e1')}</p>
         <TurnstileWidget
           bind:this={turnstileWidget}
           siteKey={turnstileSiteKey}
@@ -224,16 +232,19 @@
   {/if}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
   <button class="primary-button" disabled={busy || (turnstileRequired && !turnstileToken)}
-    >{busy ? 'One moment…' : ticket ? 'Verify' : 'Sign in'}</button
+    >{busy
+      ? $t('ui_one_moment_7ce83d45')
+      : ticket
+        ? $t('ui_verify_eea2745e')
+        : $t('ui_sign_in_bfd402b2')}</button
   >
 </form>
 {#if verificationResendAvailable}
   <div class="verification-resend-panel">
-    <p class="field-note">
-      Didn’t receive the message? Confirm the email address used to create this account.
-    </p>
+    <p class="field-note">{$t('ui_didn_t_receive_the_message_confirm_the_email__255653b3')}</p>
     <label
-      >Verification email <input
+      >{$t('ui_verification_email_23fac8fb')}
+      <input
         bind:this={verificationEmailInput}
         bind:value={verificationEmail}
         type="email"
@@ -248,7 +259,9 @@
       class="secondary-button"
       disabled={verificationResendBusy}
       onclick={resendVerification}
-      >{verificationResendBusy ? 'Sending…' : 'Resend verification email'}</button
+      >{verificationResendBusy
+        ? $t('ui_sending_b8ed5279')
+        : $t('ui_resend_verification_email_900852de')}</button
     >
     {#if verificationResendStatus}
       <p class="field-note" role="status" aria-live="polite">{verificationResendStatus}</p>
@@ -256,7 +269,9 @@
   </div>
 {/if}
 <p class="form-foot">
-  {#if recoveryEnabled === true}<a href={resolve('/forgot-password')}>Forgot password?</a> ·
-  {/if}New here?
-  <a href={resolve('/register')}>Create an account</a>
+  {#if recoveryEnabled === true}<a href={resolve('/forgot-password')}
+      >{$t('ui_forgot_password_30c1d8d3')}</a
+    > ·
+  {/if}{$t('ui_new_here_38c1c445')}
+  <a href={resolve('/register')}>{$t('ui_create_an_account_86033f75')}</a>
 </p>

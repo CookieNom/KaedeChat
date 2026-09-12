@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { filterDmFriends } from '$lib/chat/dm-picker';
   import { entityKey } from '$lib/chat/refs';
@@ -52,7 +54,7 @@
         );
     } catch (caught) {
       if (generation !== loadGeneration || !open) return;
-      error = userErrorMessage(caught, 'Could not load your friends. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_your_friends_try_again_5550bd91'));
     } finally {
       if (generation === loadGeneration) loading = false;
     }
@@ -90,7 +92,7 @@
       .map(userPublicHandle)
       .filter((value): value is string => Boolean(value));
     if (handles.length !== selectedKeys.length) {
-      error = 'One of the selected profiles is unavailable. Refresh the list and try again.';
+      error = $t('ui_one_of_the_selected_profiles_is_unavailable_r_7df6f7a8');
       return;
     }
 
@@ -105,7 +107,7 @@
           body: JSON.stringify({ handle: handles[0] })
         });
         if ('status' in result) {
-          error = 'That person’s instance is temporarily unavailable. Try again shortly.';
+          error = $t('ui_that_person_s_instance_is_temporarily_unavail_84cbe6e4');
           return;
         }
         window.location.assign(directMessagePath(result));
@@ -121,8 +123,8 @@
       error = userErrorMessage(
         caught,
         selectedKeys.length === 1
-          ? 'Could not open that conversation. Try again.'
-          : 'Could not create the group conversation. Try again.'
+          ? $t('ui_could_not_open_that_conversation_try_again_89297a41')
+          : $t('ui_could_not_create_the_group_conversation_try_a_8932dbb2')
       );
     } finally {
       submitting = false;
@@ -151,10 +153,15 @@
   >
     <header>
       <div>
-        <h2 id="new-message-title">New message</h2>
-        <p>Group DMs can have up to 10 members.</p>
+        <h2 id="new-message-title">{$t('ui_new_message_78f5975a')}</h2>
+        <p>{$t('ui_group_dms_can_have_up_to_10_members_cce78115')}</p>
       </div>
-      <button class="close-button" type="button" aria-label="Close" onclick={close}>×</button>
+      <button
+        class="close-button"
+        type="button"
+        aria-label={$t('ui_close_7d9eb7ac')}
+        onclick={close}>×</button
+      >
     </header>
 
     <label class="search-field">
@@ -163,26 +170,26 @@
         bind:this={searchInput}
         bind:value={query}
         type="search"
-        placeholder="Search friends"
+        placeholder={$t('ui_search_friends_9d92d9fa')}
         autocomplete="off"
       />
     </label>
-    <p class="picker-help">
-      Select one friend for a direct message, or two or more friends for a group DM.
-    </p>
+    <p class="picker-help">{$t('ui_select_one_friend_for_a_direct_message_or_two_3c80bf1e')}</p>
 
     <div class="selection-summary" aria-live="polite">
-      <strong>Friends</strong>
-      <span>{selectedKeys.length} of 9 selected</span>
+      <strong>{$t('ui_friends_bd104d1b')}</strong>
+      <span>{$t('ui_value0_of_9_selected_7a77bdff', { value0: String(selectedKeys.length) })}</span>
     </div>
 
-    <section class="friend-list" aria-label="Friends">
+    <section class="friend-list" aria-label={$t('ui_friends_bd104d1b')}>
       {#if loading}
-        <div class="picker-state"><span class="spinner"></span>Loading friends…</div>
+        <div class="picker-state">
+          <span class="spinner"></span>{$t('ui_loading_friends_f988388b')}
+        </div>
       {:else if friends.length === 0 && !error}
         <div class="picker-state">
-          <strong>No friends available</strong>
-          <span>Add someone as a friend before starting a group DM.</span>
+          <strong>{$t('ui_no_friends_available_f2c64ab0')}</strong>
+          <span>{$t('ui_add_someone_as_a_friend_before_starting_a_gro_ca4d49fb')}</span>
         </div>
       {:else}
         {#each filteredFriends as friend (entityKey(friend))}
@@ -217,8 +224,8 @@
           </button>
         {:else}
           <div class="picker-state">
-            <strong>No matching friends</strong>
-            <span>Try another name or federated username.</span>
+            <strong>{$t('ui_no_matching_friends_0f1859f1')}</strong>
+            <span>{$t('ui_try_another_name_or_federated_username_faae5509')}</span>
           </div>
         {/each}
       {/if}
@@ -227,9 +234,11 @@
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
 
     <footer>
-      <button class="secondary-button" type="button" onclick={close}>Cancel</button>
+      <button class="secondary-button" type="button" onclick={close}
+        >{$t('ui_cancel_19766ed6')}</button
+      >
       <button class="primary-button" disabled={submitting || selectedKeys.length === 0}>
-        {submitting ? 'Creating…' : 'Create message'}
+        {submitting ? $t('ui_creating_c79ed949') : $t('ui_create_message_8d834a04')}
       </button>
     </footer>
   </form>

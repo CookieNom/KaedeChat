@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { tick } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import {
@@ -175,7 +177,7 @@
   async function share() {
     if (sharing) return;
     if (native && !securePicker && !selectedSource) {
-      error = 'Choose a window or display to share.';
+      error = $t('ui_choose_a_window_or_display_to_share_4b145a46');
       return;
     }
     sharing = true;
@@ -214,24 +216,24 @@
     <header class="dialog-header">
       <span class="header-icon"><Icon name="screen" size={22} /></span>
       <span>
-        <h2 id="screen-share-title">Share your screen</h2>
+        <h2 id="screen-share-title">{$t('ui_share_your_screen_190735ff')}</h2>
         <p>
           {native
-            ? 'Choose a window or display to share with the call.'
-            : 'Your browser will ask you to choose a tab, window, or screen.'}
+            ? $t('ui_choose_a_window_or_display_to_share_with_the__0c15a2e1')
+            : $t('ui_your_browser_will_ask_you_to_choose_a_tab_win_7b0c142d')}
         </p>
       </span>
       <button
         class="close-button"
         type="button"
-        aria-label="Close"
+        aria-label={$t('ui_close_7d9eb7ac')}
         disabled={sharing}
         onclick={close}>×</button
       >
     </header>
 
     {#if native}
-      <nav class="source-tabs" aria-label="Screen-share source type">
+      <nav class="source-tabs" aria-label={$t('ui_screen_share_source_type_4736afe6')}>
         <button
           type="button"
           data-initial-focus
@@ -239,7 +241,8 @@
           aria-pressed={sourceTab === 'application'}
           onclick={() => changeSourceTab('application')}
         >
-          <Icon name="image" size={19} /> Windows
+          <Icon name="image" size={19} />
+          {$t('ui_windows_d598026a')}
         </button>
         <button
           type="button"
@@ -247,7 +250,8 @@
           aria-pressed={sourceTab === 'screen'}
           onclick={() => changeSourceTab('screen')}
         >
-          <Icon name="screen" size={19} /> Displays
+          <Icon name="screen" size={19} />
+          {$t('ui_displays_5a3452eb')}
         </button>
       </nav>
     {/if}
@@ -255,26 +259,32 @@
     <main class="source-region" aria-live="polite">
       {#if native}
         {#if loadingSources}
-          <div class="source-message"><span class="spinner"></span>Finding shareable sources…</div>
+          <div class="source-message">
+            <span class="spinner"></span>{$t('ui_finding_shareable_sources_e5d11008')}
+          </div>
         {:else if securePicker}
           <button class="system-picker-card" type="button" onclick={() => void share()}>
             <span class="picker-illustration"><Icon name="shield" size={54} /></span>
             <span class="picker-copy">
-              <strong>Open the secure system picker</strong>
+              <strong>{$t('ui_open_the_secure_system_picker_b29834b2')}</strong>
               <small>
                 {nativeOs === 'macos'
-                  ? 'macOS shows applications and displays in its privacy-protected chooser.'
-                  : 'Your Wayland session shows applications and displays through the desktop portal.'}
+                  ? $t('ui_macos_shows_applications_and_displays_in_its__bc9d4334')
+                  : $t('ui_your_wayland_session_shows_applications_and_d_51e33bfb')}
               </small>
             </span>
           </button>
         {:else if visibleSources.length === 0}
           <div class="empty-sources">
             <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={38} />
-            <strong>No {sourceTab === 'application' ? 'applications' : 'screens'} found</strong>
-            <span>Open a window or connect a display, then refresh.</span>
+            <strong
+              >{$t('ui_no_value0_found_cf7d1c6d', {
+                value0: String(sourceTab === 'application' ? 'applications' : 'screens')
+              })}</strong
+            >
+            <span>{$t('ui_open_a_window_or_connect_a_display_then_refre_638d2f51')}</span>
             <button class="secondary" type="button" onclick={() => void loadNativeSources()}
-              >Refresh</button
+              >{$t('ui_refresh_0e916101')}</button
             >
           </div>
         {:else}
@@ -309,11 +319,8 @@
       {:else}
         <div class="browser-picker-intro">
           <span class="picker-hero"><Icon name="screen" size={36} /></span>
-          <h3>Choose in your browser</h3>
-          <p>
-            Your browser keeps the source list private. Nothing is visible to the call until you
-            choose a source and approve it.
-          </p>
+          <h3>{$t('ui_choose_in_your_browser_f842cca3')}</h3>
+          <p>{$t('ui_your_browser_keeps_the_source_list_private_no_de5dd53c')}</p>
           <button
             class="open-picker-button"
             type="button"
@@ -322,16 +329,19 @@
             onclick={() => void share()}
           >
             <Icon name="screen" size={18} />
-            {sharing ? 'Opening…' : 'Open browser picker'}
+            {sharing ? $t('ui_opening_c926c2c5') : $t('ui_open_browser_picker_0ac4d5d9')}
           </button>
-          <small class="source-types-label">In the browser picker you can choose:</small>
-          <div class="browser-source-types" aria-label="Available source types">
-            <span><Icon name="globe" size={18} /> Browser tab</span>
-            <span><Icon name="image" size={18} /> Window</span>
-            <span><Icon name="screen" size={18} /> Entire screen</span>
+          <small class="source-types-label"
+            >{$t('ui_in_the_browser_picker_you_can_choose_7702351b')}</small
+          >
+          <div class="browser-source-types" aria-label={$t('ui_available_source_types_1e626370')}>
+            <span><Icon name="globe" size={18} /> {$t('ui_browser_tab_515ee487')}</span>
+            <span><Icon name="image" size={18} /> {$t('ui_window_19734a1b')}</span>
+            <span><Icon name="screen" size={18} /> {$t('ui_entire_screen_c4ca4547')}</span>
           </div>
           <p class="browser-privacy">
-            <Icon name="shield" size={16} /> The source list and previews stay private inside your browser.
+            <Icon name="shield" size={16} />
+            {$t('ui_the_source_list_and_previews_stay_private_ins_493fcf50')}
           </p>
         </div>
       {/if}
@@ -341,12 +351,13 @@
 
     <footer class="stream-footer">
       <div class="quality-summary">
-        <small>Stream quality</small>
+        <small>{$t('ui_stream_quality_9931bee6')}</small>
         <strong>
-          {selectedProfile.label} · {selectedProfile.height
-            ? `${selectedProfile.height}p`
-            : 'Source'}
-          · {selectedProfile.frameRate} FPS
+          {$t('ui_value0_value1_value2_fps_66a707ad', {
+            value0: String(selectedProfile.label),
+            value1: String(selectedProfile.height ? `${selectedProfile.height}p` : 'Source'),
+            value2: String(selectedProfile.frameRate)
+          })}
         </strong>
         <span>
           {selectedProfile.description}
@@ -354,36 +365,38 @@
       </div>
 
       <div class="footer-controls">
-        <div class="quick-quality" aria-label="Quick stream quality">
+        <div class="quick-quality" aria-label={$t('ui_quick_stream_quality_042d475a')}>
           <button
             type="button"
             class:active={preferences.screenProfile === 'data_saver' ||
               preferences.screenProfile === 'smooth'}
-            aria-label="Standard definition, 720p at 30 frames per second"
+            aria-label={$t('ui_standard_definition_720p_at_30_frames_per_sec_b385b9ab')}
             onclick={() => (preferences.screenProfile = 'smooth')}>720p</button
           >
           <button
             type="button"
             class:active={preferences.screenProfile === 'sharp'}
-            aria-label="High definition, 1080p at 30 frames per second"
+            aria-label={$t('ui_high_definition_1080p_at_30_frames_per_second_87882f9b')}
             onclick={() => (preferences.screenProfile = 'sharp')}>1080p</button
           >
         </div>
 
         <details class="quality-settings">
-          <summary aria-label="Advanced stream settings" title="More quality settings"
+          <summary
+            aria-label={$t('ui_advanced_stream_settings_c5ee30bc')}
+            title={$t('ui_more_quality_settings_3ac30d31')}
             ><Icon name="settings" size={23} /></summary
           >
           <div class="settings-card">
             <header>
               <div>
-                <strong>Stream settings</strong>
-                <span>Video quality and outgoing microphone audio</span>
+                <strong>{$t('ui_stream_settings_de8c8db1')}</strong>
+                <span>{$t('ui_video_quality_and_outgoing_microphone_audio_2b39e8b2')}</span>
               </div>
             </header>
 
             <fieldset>
-              <legend>Resolution and frame rate</legend>
+              <legend>{$t('ui_resolution_and_frame_rate_eac48aef')}</legend>
               <div class="option-grid video-options">
                 {#each SCREEN_SHARE_PROFILES as profile (profile.id)}
                   <label class:selected={preferences.screenProfile === profile.id}>
@@ -395,15 +408,19 @@
                       onchange={() =>
                         (preferences.screenProfile = profile.id as ScreenShareProfileId)}
                     />
-                    <strong>{profile.height ? `${profile.height}p` : 'Source'}</strong>
-                    <span>{profile.frameRate} FPS</span>
+                    <strong
+                      >{profile.height ? `${profile.height}p` : $t('ui_source_0e570ca6')}</strong
+                    >
+                    <span
+                      >{$t('ui_value0_fps_042f64da', { value0: String(profile.frameRate) })}</span
+                    >
                   </label>
                 {/each}
               </div>
             </fieldset>
 
             <fieldset>
-              <legend>Outgoing audio bitrate</legend>
+              <legend>{$t('ui_outgoing_audio_bitrate_3d1fae31')}</legend>
               <div class="option-grid audio-options">
                 {#each AUDIO_QUALITIES as quality (quality.id)}
                   <label class:selected={preferences.audioQuality === quality.id}>
@@ -414,21 +431,27 @@
                       checked={preferences.audioQuality === quality.id}
                       onchange={() => (preferences.audioQuality = quality.id as AudioQualityId)}
                     />
-                    <strong>{quality.maxBitrate / 1000} kbps</strong>
+                    <strong
+                      >{$t('ui_value0_kbps_a12b2db7', {
+                        value0: String(quality.maxBitrate / 1000)
+                      })}</strong
+                    >
                     <span>{quality.label}</span>
                   </label>
                 {/each}
               </div>
-              <p class="bitrate-note">Adaptive upper limit; silence and congestion use less.</p>
+              <p class="bitrate-note">
+                {$t('ui_adaptive_upper_limit_silence_and_congestion_u_e3d05beb')}
+              </p>
             </fieldset>
 
             <label class="audio-toggle">
               <span>
-                <strong>Share computer audio</strong>
+                <strong>{$t('ui_share_computer_audio_fabf3c5f')}</strong>
                 <small>
                   {native
-                    ? 'Unavailable in the native desktop capture pipeline.'
-                    : 'Availability depends on your browser and selected source.'}
+                    ? $t('ui_unavailable_in_the_native_desktop_capture_pip_5d55170a')
+                    : $t('ui_availability_depends_on_your_browser_and_sele_06836add')}
                 </small>
               </span>
               <input type="checkbox" bind:checked={preferences.shareAudio} disabled={native} />
@@ -437,7 +460,7 @@
         </details>
 
         <button class="cancel-button" type="button" disabled={sharing} onclick={close}
-          >Cancel</button
+          >{$t('ui_cancel_19766ed6')}</button
         >
         {#if native}
           <button
@@ -447,7 +470,11 @@
             onclick={() => void share()}
           >
             <Icon name="screen" size={18} />
-            {sharing ? 'Starting…' : securePicker ? 'Open system picker' : 'Go Live'}
+            {sharing
+              ? $t('ui_starting_bbe5fc3b')
+              : securePicker
+                ? $t('ui_open_system_picker_b97811a6')
+                : $t('ui_go_live_9e28dbae')}
           </button>
         {/if}
       </div>

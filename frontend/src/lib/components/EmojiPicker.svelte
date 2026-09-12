@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import {
     emojiCategories,
     groupCustomEmojis,
@@ -109,16 +111,18 @@
   class="emoji-picker"
   role="dialog"
   aria-modal="false"
-  aria-label={onStickerSelect ? 'Choose an emoji or sticker' : 'Choose an emoji'}
+  aria-label={onStickerSelect
+    ? $t('ui_choose_an_emoji_or_sticker_b4c5df44')
+    : $t('ui_choose_an_emoji_54bc3777')}
 >
   <header>
-    <div class="expression-tabs" role="tablist" aria-label="Expression type">
+    <div class="expression-tabs" role="tablist" aria-label={$t('ui_expression_type_3a6be3a1')}>
       <button
         class:active={mode === 'emoji'}
         type="button"
         role="tab"
         aria-selected={mode === 'emoji'}
-        onclick={() => selectMode('emoji')}>Emoji</button
+        onclick={() => selectMode('emoji')}>{$t('ui_emoji_61ad8976')}</button
       >
       {#if onStickerSelect}
         <button
@@ -126,32 +130,35 @@
           type="button"
           role="tab"
           aria-selected={mode === 'sticker'}
-          onclick={() => selectMode('sticker')}>Stickers</button
+          onclick={() => selectMode('sticker')}>{$t('ui_stickers_dbf9cbbe')}</button
         >
       {/if}
     </div>
-    <button class="icon-button" type="button" onclick={onClose} aria-label="Close expression picker"
-      >×</button
+    <button
+      class="icon-button"
+      type="button"
+      onclick={onClose}
+      aria-label={$t('ui_close_expression_picker_616cb474')}>×</button
     >
   </header>
   {#if mode === 'emoji'}
     <label class="emoji-search">
-      <span class="visually-hidden">Search emoji</span>
+      <span class="visually-hidden">{$t('ui_search_emoji_87fafa72')}</span>
       <input
         bind:this={searchInput}
         bind:value={query}
         oninput={() => (visibleLimit = 240)}
-        placeholder="Search emoji"
+        placeholder={$t('ui_search_emoji_87fafa72')}
       />
     </label>
-    <nav aria-label="Emoji categories">
+    <nav aria-label={$t('ui_emoji_categories_fed48f97')}>
       {#if customEmojis.length}
         <button
           class:active={!normalizedQuery && category === 'custom'}
           class="emoji-custom-tab"
           type="button"
-          title="Custom emoji"
-          aria-label="Custom emoji"
+          title={$t('ui_custom_emoji_1596e05e')}
+          aria-label={$t('ui_custom_emoji_1596e05e')}
           onclick={() => {
             category = 'custom';
             query = '';
@@ -172,7 +179,12 @@
         >
       {/each}
     </nav>
-    <div class="emoji-results" role="region" aria-label="Emoji results" aria-live="polite">
+    <div
+      class="emoji-results"
+      role="region"
+      aria-label={$t('ui_emoji_results_de396e53')}
+      aria-live="polite"
+    >
       {#each customEmojiGroups as group (group.key)}
         <section class="custom-emoji-group" aria-labelledby={`emoji-guild-${group.key}`}>
           <h3 id={`emoji-guild-${group.key}`}>{group.name}</h3>
@@ -192,16 +204,19 @@
       {#if category !== 'custom' || normalizedQuery}
         <h3>
           {normalizedQuery
-            ? 'Unicode results'
+            ? $t('ui_unicode_results_19133ce2')
             : emojiCategories.find((item) => item.id === category)?.label}
         </h3>
       {/if}
       {#if loading && category !== 'custom'}
-        <p>Loading emoji…</p>
+        <p>{$t('ui_loading_emoji_f35e9103')}</p>
       {:else if loadFailed && category !== 'custom'}
         <div role="alert">
-          <p class="form-error">Could not load emoji data. Check your connection and try again.</p>
-          <button class="show-more" type="button" onclick={() => void loadEmoji()}>Try again</button
+          <p class="form-error">
+            {$t('ui_could_not_load_emoji_data_check_your_connecti_2b4497a8')}
+          </p>
+          <button class="show-more" type="button" onclick={() => void loadEmoji()}
+            >{$t('ui_try_again_d8b8392e')}</button
           >
         </div>
       {:else if category !== 'custom' || normalizedQuery}
@@ -214,28 +229,33 @@
         </div>
         {#if matchingUnicode.length > visibleUnicode.length}
           <button class="show-more" type="button" onclick={() => (visibleLimit += 240)}>
-            Show more emoji
+            {$t('ui_show_more_emoji_b5e127ac')}
           </button>
         {/if}
       {/if}
       {#if !loading && !loadFailed && !matchingCustom.length && !matchingUnicode.length}
-        <p>No emoji found.</p>
+        <p>{$t('ui_no_emoji_found_d2cab146')}</p>
       {/if}
     </div>
     <footer>
       <span aria-hidden="true">{matchingUnicode[0]?.value ?? '😀'}</span>
-      <small>{matchingUnicode[0]?.name ?? 'Choose an emoji'}</small>
+      <small>{matchingUnicode[0]?.name ?? $t('ui_choose_an_emoji_54bc3777')}</small>
     </footer>
   {:else}
     <label class="sticker-search">
-      <span class="visually-hidden">Search stickers</span>
+      <span class="visually-hidden">{$t('ui_search_stickers_5c55ffd0')}</span>
       <input
         bind:this={stickerSearchInput}
         bind:value={stickerQuery}
-        placeholder="Search stickers"
+        placeholder={$t('ui_search_stickers_5c55ffd0')}
       />
     </label>
-    <div class="sticker-results" role="region" aria-label="Sticker results" aria-live="polite">
+    <div
+      class="sticker-results"
+      role="region"
+      aria-label={$t('ui_sticker_results_a6e7d609')}
+      aria-live="polite"
+    >
       {#each stickerGroups as group (group.key)}
         <section>
           <h3>{group.name}</h3>
@@ -253,7 +273,11 @@
           </div>
         </section>
       {:else}
-        <p>{stickers.length ? 'No stickers found.' : 'No stickers are available yet.'}</p>
+        <p>
+          {stickers.length
+            ? $t('ui_no_stickers_found_35311c55')
+            : $t('ui_no_stickers_are_available_yet_e9d0a717')}
+        </p>
       {/each}
     </div>
   {/if}

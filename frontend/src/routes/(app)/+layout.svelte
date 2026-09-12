@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { applyTtsPreferences } from '$lib/chat/tts';
+  import LanguageSuggestion from '$lib/components/LanguageSuggestion.svelte';
   import CommandSwitcher from '$lib/components/CommandSwitcher.svelte';
   import InteractionOverlay from '$lib/components/InteractionOverlay.svelte';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
@@ -74,10 +77,7 @@
         return;
       browserNotifications.reportHealthIssue(
         'settings',
-        userErrorMessage(
-          caught,
-          'Could not load notification settings. Notifications are paused until Kaede can retry.'
-        )
+        userErrorMessage(caught, $t('ui_could_not_load_notification_settings_notifica_0921d755'))
       );
     }
   }
@@ -102,10 +102,7 @@
           return;
         browserNotifications.reportHealthIssue(
           'guild-preferences',
-          userErrorMessage(
-            caught,
-            'Could not load guild notification preferences. Notifications are paused to avoid sending the wrong alerts.'
-          )
+          userErrorMessage(caught, $t('ui_could_not_load_guild_notification_preferences_f7a391ff'))
         );
       })
       .finally(() => {
@@ -150,10 +147,7 @@
       .catch((caught: unknown) => {
         if (disposed) return;
         authenticatedGateway.reportStartupFailure(
-          userErrorMessage(
-            caught,
-            'Live updates could not start because the desktop session could not be restored. Unlock the system credential store and reload Kaede.'
-          )
+          userErrorMessage(caught, $t('ui_live_updates_could_not_start_because_the_desk_8f9c9d71'))
         );
       });
     browserNotifications.refreshPromptPreference();
@@ -224,6 +218,7 @@
 
 {@render children()}
 <CommandSwitcher />
+{#if notificationSettingsLoaded}<LanguageSuggestion />{/if}
 <InteractionOverlay />
 
 {#if authenticatedGateway.status.state === 'reconnecting' || authenticatedGateway.status.state === 'offline' || authenticatedGateway.status.state === 'degraded'}
@@ -247,16 +242,17 @@
 {#if showNotificationPrompt || notificationPromptError}
   <aside class="notification-opt-in" aria-labelledby="notification-opt-in-title">
     <div>
-      <strong id="notification-opt-in-title">Stay up to date</strong>
+      <strong id="notification-opt-in-title">{$t('ui_stay_up_to_date_3fea6421')}</strong>
       <p>
-        Enable {isNativeDesktop() ? 'desktop' : 'browser'} notifications for direct messages and the guild
-        alerts you choose. Do Not Disturb silences them.
+        {$t('ui_enable_value0_notifications_for_direct_messag_1f91056f', {
+          value0: String(isNativeDesktop() ? 'desktop' : 'browser')
+        })}
       </p>
       {#if notificationPromptError}<small role="alert">{notificationPromptError}</small>{/if}
     </div>
     <div class="notification-opt-in-actions">
       <button type="button" disabled={notificationPromptBusy} onclick={dismissNotificationPrompt}
-        >Not now</button
+        >{$t('ui_not_now_a0e63d7c')}</button
       >
       <button
         class="notification-opt-in-primary"
@@ -264,7 +260,9 @@
         disabled={notificationPromptBusy}
         onclick={() => void enableBrowserNotifications()}
       >
-        {notificationPromptBusy ? 'Enabling…' : 'Enable notifications'}
+        {notificationPromptBusy
+          ? $t('ui_enabling_e22c2423')
+          : $t('ui_enable_notifications_682be64a')}
       </button>
     </div>
   </aside>
@@ -273,25 +271,27 @@
 {#if browserNotifications.health.message && browserNotifications.health.message !== browserNotifications.dismissedHealthMessage}
   <aside class="notification-health" role="alert" aria-live="polite">
     <div>
-      <strong>Notifications need attention</strong>
+      <strong>{$t('ui_notifications_need_attention_78a1240f')}</strong>
       <p>{browserNotifications.health.message}</p>
       {#if browserNotifications.health.pendingCount > 0}
         <small>
-          {browserNotifications.health.pendingCount} notification{browserNotifications.health
-            .pendingCount === 1
-            ? ''
-            : 's'} waiting to be delivered.
+          {$t('ui_value0_notification_value1_waiting_to_be_deli_bfb7771d', {
+            value0: String(browserNotifications.health.pendingCount),
+            value1: String(browserNotifications.health.pendingCount === 1 ? '' : 's')
+          })}
         </small>
       {/if}
     </div>
     <div class="notification-health-actions">
-      <button type="button" onclick={() => browserNotifications.dismissHealth()}>Dismiss</button>
+      <button type="button" onclick={() => browserNotifications.dismissHealth()}
+        >{$t('ui_dismiss_48845bff')}</button
+      >
       <button
         type="button"
         disabled={notificationRetryBusy}
         onclick={() => void retryNotificationHealth()}
       >
-        {notificationRetryBusy ? 'Retrying…' : 'Retry notifications'}
+        {notificationRetryBusy ? $t('ui_retrying_a16c8b1c') : $t('ui_retry_notifications_037b2587')}
       </button>
     </div>
   </aside>

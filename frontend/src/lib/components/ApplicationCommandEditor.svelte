@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type { ApplicationCommandOption } from '$lib/chat/application-commands';
   import {
     COMMAND_KINDS,
@@ -79,10 +81,10 @@
 
 <div class="editor-heading">
   <div>
-    <span class="eyebrow">Command builder</span>
+    <span class="eyebrow">{$t('ui_command_builder_f5da9a4d')}</span>
     <h3>
       {parsed.error
-        ? 'Command definitions'
+        ? $t('ui_command_definitions_42ac2d07')
         : `${parsed.commands.length} command${parsed.commands.length === 1 ? '' : 's'}`}
     </h3>
   </div>
@@ -91,32 +93,30 @@
     onclick={() => (advanced = !advanced)}
     disabled={advanced && !!parsed.error}
   >
-    {advanced ? 'Use form editor' : 'Advanced JSON'}
+    {advanced ? $t('ui_use_form_editor_1a5cff1a') : $t('ui_advanced_json_493a4596')}
   </button>
 </div>
 <div class="explanation">
-  <strong>Define what people can ask your app to do.</strong>
-  <p>
-    Publishing makes these commands available where your app is installed. Your bot code must handle
-    each command and send a response; this editor does not create that behavior.
-  </p>
+  <strong>{$t('ui_define_what_people_can_ask_your_app_to_do_c4121d34')}</strong>
+  <p>{$t('ui_publishing_makes_these_commands_available_whe_0dbb8ad5')}</p>
 </div>
 
 {#if removedDraft !== null}
   <div class="feedback" role="status">
-    Command removed from the draft. <button
+    {$t('ui_command_removed_from_the_draft_ddf6c3d4')}
+    <button
       {disabled}
       onclick={() => {
         if (removedDraft !== null) onChange(removedDraft);
         removedDraft = null;
-      }}>Undo</button
+      }}>{$t('ui_undo_a8283ade')}</button
     >
   </div>
 {/if}
 
 {#if advanced || parsed.error}
   <label class="json-label"
-    >Command definitions (JSON)
+    >{$t('ui_command_definitions_json_f0a28201')}
     <textarea
       {value}
       oninput={(event) => {
@@ -128,16 +128,13 @@
       {disabled}
     ></textarea>
   </label>
-  <p class="hint">
-    Use JSON for subcommands, choices, autocomplete, translations, and permission rules. Switching
-    to the form preserves additional fields.
-  </p>
+  <p class="hint">{$t('ui_use_json_for_subcommands_choices_autocomplete_79a1a7cd')}</p>
 {:else}
   {#if parsed.commands.length === 0}
     <div class="empty">
       <span class="empty-icon" aria-hidden="true">/</span>
-      <h3>Create your first command</h3>
-      <p>Choose how people will interact with your app. You can add more than one kind.</p>
+      <h3>{$t('ui_create_your_first_command_ceca2d78')}</h3>
+      <p>{$t('ui_choose_how_people_will_interact_with_your_app_60b8bc00')}</p>
     </div>
   {/if}
   <fieldset {disabled} class="command-fields">
@@ -151,53 +148,57 @@
           ><span class="command-symbol" aria-hidden="true"
             >{kind.type === 'chat_input' ? '/' : kind.type === 'user' ? '@' : '↳'}</span
           ><span
-            ><strong>{command.name || 'Untitled command'}</strong><small>{kind.label}</small></span
+            ><strong>{command.name || $t('ui_untitled_command_f9b8dd25')}</strong><small
+              >{kind.label}</small
+            ></span
           ></summary
         >
         <div class="command-body">
           <div class="field-grid">
             <label
-              >Command name<input
+              >{$t('ui_command_name_5af23acc')}<input
                 value={command.name}
                 maxlength="32"
                 placeholder={kind.type === 'chat_input' ? 'help' : kind.example}
                 oninput={(event) => change(index, { name: event.currentTarget.value })}
               /><small
                 >{kind.type === 'chat_input'
-                  ? 'Lowercase, without spaces or the leading /.'
-                  : 'The label people see in the Apps menu.'}</small
+                  ? $t('ui_lowercase_without_spaces_or_the_leading_e4668a21')
+                  : $t('ui_the_label_people_see_in_the_apps_menu_3b35874f')}</small
               ></label
             >
             {#if kind.type === 'chat_input'}<label
-                >Command description<input
+                >{$t('ui_command_description_64eaeba7')}<input
                   value={command.description ?? ''}
                   maxlength="100"
-                  placeholder="Show what this app can do"
+                  placeholder={$t('ui_show_what_this_app_can_do_acd09d91')}
                   oninput={(event) => change(index, { description: event.currentTarget.value })}
-                /><small>A short explanation shown beside the command.</small></label
+                /><small>{$t('ui_a_short_explanation_shown_beside_the_command_2638a5f0')}</small
+                ></label
               >{/if}
           </div>
-          <div class="command-preview" aria-label="Command preview">
-            <span class="eyebrow">What people see</span><strong
-              >{kind.type === 'chat_input' ? '/' : 'Apps → '}{command.name ||
+          <div class="command-preview" aria-label={$t('ui_command_preview_3fb27fc1')}>
+            <span class="eyebrow">{$t('ui_what_people_see_ddebf5ba')}</span><strong
+              >{kind.type === 'chat_input' ? '/' : $t('ui_apps_e6f98b9c')}{command.name ||
                 (kind.type === 'chat_input' ? 'command-name' : kind.example)}</strong
             ><span
               >{kind.type === 'chat_input'
-                ? command.description || 'Your description appears here'
+                ? command.description || $t('ui_your_description_appears_here_1f6d0dda')
                 : kind.description}</span
             >
           </div>
           {#if kind.type === 'chat_input'}
             <div class="input-heading">
               <div>
-                <h4>Inputs <span>{command.options?.length ?? 0}/25</span></h4>
-                <p>Ask for extra information, such as a person or a search term.</p>
+                <h4>{$t('ui_inputs_7abc49df')} <span>{command.options?.length ?? 0}/25</span></h4>
+                <p>{$t('ui_ask_for_extra_information_such_as_a_person_or_760a0bd2')}</p>
               </div>
             </div>
             {#if nested}
               <div class="feedback">
-                This command uses subcommands. <button onclick={() => (advanced = true)}
-                  >Edit subcommands in JSON</button
+                {$t('ui_this_command_uses_subcommands_2866a601')}
+                <button onclick={() => (advanced = true)}
+                  >{$t('ui_edit_subcommands_in_json_fcf8780a')}</button
                 >
               </div>
             {:else}
@@ -205,7 +206,7 @@
                 <div class="input-card">
                   <div class="input-fields">
                     <label
-                      >Input name<input
+                      >{$t('ui_input_name_71ce094a')}<input
                         value={option.name}
                         maxlength="32"
                         placeholder="query"
@@ -214,7 +215,7 @@
                       /></label
                     >
                     <label
-                      >Input type<select
+                      >{$t('ui_input_type_0f9015c3')}<select
                         value={option.type}
                         disabled={hasAdvancedInputSettings(option)}
                         onchange={(event) =>
@@ -227,10 +228,10 @@
                       ></label
                     >
                     <label class="input-description"
-                      >Input description<input
+                      >{$t('ui_input_description_196bc6fb')}<input
                         value={option.description ?? ''}
                         maxlength="100"
-                        placeholder="What would you like to search for?"
+                        placeholder={$t('ui_what_would_you_like_to_search_for_364bbb9d')}
                         oninput={(event) =>
                           changeInput(index, optionIndex, {
                             description: event.currentTarget.value
@@ -247,7 +248,7 @@
                           changeInput(index, optionIndex, {
                             required: event.currentTarget.checked
                           })}
-                      />Required</label
+                      />{$t('ui_required_4850b174')}</label
                     ><button
                       class="text-danger"
                       onclick={() =>
@@ -255,12 +256,11 @@
                           options: command.options?.filter((_, i) => i !== optionIndex)
                         })}
                       aria-label={`Remove input ${option.name || optionIndex + 1}`}
-                      >Remove input</button
+                      >{$t('ui_remove_input_95e788ac')}</button
                     >
                   </div>
                   {#if hasAdvancedInputSettings(option)}<p class="hint">
-                      Additional rules are preserved. Use Advanced JSON to change this input’s type
-                      or rules.
+                      {$t('ui_additional_rules_are_preserved_use_advanced_j_705a5074')}
                     </p>{/if}
                 </div>
               {/each}
@@ -273,19 +273,17 @@
                       ...(command.options ?? []),
                       { type: 'string', name: '', description: '', required: false }
                     ]
-                  })}>+ Add input</button
+                  })}>{$t('ui_add_input_ddb07141')}</button
               >
             {/if}
           {/if}
           <details class="availability">
-            <summary>Where can people use this command?</summary>
-            <p class="hint">
-              Install types must also be enabled and saved in Permissions & installs.
-            </p>
+            <summary>{$t('ui_where_can_people_use_this_command_ac6f090e')}</summary>
+            <p class="hint">{$t('ui_install_types_must_also_be_enabled_and_saved__716f1af7')}</p>
             <div class="availability-grid">
               <div>
-                <strong>Installed for</strong
-                >{#each [['guild_install', 'A server'], ['user_install', 'A person']] as type (type[0])}<label
+                <strong>{$t('ui_installed_for_31b5a78b')}</strong
+                >{#each [['guild_install', $t('ui_a_server_ff064f86')], ['user_install', $t('ui_a_person_94d7f303')]] as type (type[0])}<label
                     class="check"
                     ><input
                       type="checkbox"
@@ -303,8 +301,8 @@
                   >{/each}
               </div>
               <div>
-                <strong>Available in</strong
-                >{#each [['guild', 'Servers'], ['bot_dm', 'Direct messages with the app'], ['private_channel', 'Group and personal direct messages']] as context (context[0])}<label
+                <strong>{$t('ui_available_in_59e5d85f')}</strong
+                >{#each [['guild', $t('ui_servers_68d7beb6')], ['bot_dm', $t('ui_direct_messages_with_the_app_81185886')], ['private_channel', $t('ui_group_and_personal_direct_messages_60ed94f5')]] as context (context[0])}<label
                     class="check"
                     ><input
                       type="checkbox"
@@ -324,10 +322,11 @@
             </div>
           </details>
           <div class="command-footer">
-            <span>Changes take effect when you publish.</span><button
+            <span>{$t('ui_changes_take_effect_when_you_publish_8c2d1ec9')}</span><button
               class="text-danger"
               onclick={() => remove(index)}
-              aria-label={`Remove command ${command.name || index + 1}`}>Remove command</button
+              aria-label={`Remove command ${command.name || index + 1}`}
+              >{$t('ui_remove_command_068d8c54')}</button
             >
           </div>
         </div>
@@ -349,10 +348,7 @@
   </fieldset>
 {/if}
 {#if validation}<p class="validation" role="status">{validation}</p>{/if}
-<p class="publish-help">
-  Publishing updates the complete command list. Commands removed here will be removed from your app.
-  App settings are saved separately.
-</p>
+<p class="publish-help">{$t('ui_publishing_updates_the_complete_command_list__c965eac6')}</p>
 
 <style>
   .editor-heading,

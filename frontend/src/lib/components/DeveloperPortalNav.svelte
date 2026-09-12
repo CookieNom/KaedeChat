@@ -1,32 +1,42 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
 
   let { active }: { active: 'applications' | 'teams' } = $props();
 </script>
 
 <aside class="developer-nav">
-  <a class="back" href={resolve('/settings')}>← Back to Kaede</a>
+  <a class="back" href={resolve('/settings')}>{$t('ui_back_to_kaede_bfbafc02')}</a>
   <div class="brand">
     <span class="brand-mark" aria-hidden="true">K</span>
     <div>
-      <small>Kaede</small>
-      <strong>Developer Portal</strong>
+      <small>{$t('ui_kaede_7d8eeb35')}</small>
+      <strong>{$t('ui_developer_portal_1eb68022')}</strong>
     </div>
   </div>
-  <nav aria-label="Developer Portal">
+  <nav aria-label={$t('ui_developer_portal_1eb68022')}>
     <a class:active={active === 'applications'} href={resolve('/developers')}>
       <span aria-hidden="true">▦</span>
-      <span><strong>Applications</strong><small>Build and configure bots</small></span>
+      <span
+        ><strong>{$t('ui_applications_98e33b0f')}</strong><small
+          >{$t('ui_build_and_configure_bots_e8ed7c4f')}</small
+        ></span
+      >
     </a>
     <a class:active={active === 'teams'} href={resolve('/developers/teams')}>
       <span aria-hidden="true">♟</span>
-      <span><strong>Teams</strong><small>People and access</small></span>
+      <span
+        ><strong>{$t('ui_teams_1e1a1c07')}</strong><small
+          >{$t('ui_people_and_access_1e133caa')}</small
+        ></span
+      >
     </a>
   </nav>
   <div class="resources">
-    <small>Resources</small>
+    <small>{$t('ui_resources_e89b30aa')}</small>
     <a href="https://github.com/CookieNom/KaedeChat/blob/main/docs/bots-and-automations.md"
-      >Bot API guide ↗</a
+      >{$t('ui_bot_api_guide_0654c080')}</a
     >
   </div>
 </aside>

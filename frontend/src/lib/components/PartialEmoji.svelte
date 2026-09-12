@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { customEmojiUrl } from '$lib/chat/emojis';
   import type { PartialEmoji } from '$lib/chat/rich-content';
 
@@ -12,14 +14,16 @@
     decorative?: boolean;
   } = $props();
 
-  const custom = $derived.by(() => {
+  let custom = $derived.by(() => {
     if (!emoji.id) return null;
     const separator = emoji.id.lastIndexOf('@');
     if (separator <= 0 || separator === emoji.id.length - 1) return null;
     const id = emoji.id.slice(0, separator);
     const domain = emoji.id.slice(separator + 1);
     const url = customEmojiUrl(id, domain);
-    return url ? { url, label: emoji.name ? `:${emoji.name}:` : 'Custom emoji' } : null;
+    return url
+      ? { url, label: emoji.name ? `:${emoji.name}:` : $t('ui_custom_emoji_1596e05e') }
+      : null;
   });
 </script>
 

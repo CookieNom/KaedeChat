@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -165,7 +167,7 @@
       const channel = dispatch.d as Channel;
       if (channel.type === 1 && !directMessages.some((item) => sameEntity(item, channel))) {
         directMessages = promoteDirectMessage(directMessages, channel);
-        notice = 'Your direct-message request is ready.';
+        notice = $t('ui_your_direct_message_request_is_ready_6e7d0a8c');
       }
     } else if (dispatch.t === 'CHANNEL_UPDATE') {
       const channel = dispatch.d as Channel;
@@ -332,7 +334,10 @@
       if (caught instanceof ApiError && caught.status === 401) {
         window.location.replace(resolve('/login'));
       } else if (!recovering || !error) {
-        error = userErrorMessage(caught, 'Could not load your conversations. Try again.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_your_conversations_try_again_72f219e2')
+        );
       }
       loading = false;
     }
@@ -365,7 +370,10 @@
             : 'Relationship updated.';
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = userErrorMessage(caught, 'Could not update this relationship. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_update_this_relationship_try_again_6b69ab67')
+      );
     } finally {
       if (generation === loadGeneration) relationshipBusy = false;
     }
@@ -387,10 +395,13 @@
       if (generation !== loadGeneration) return;
       relationshipRevision += 1;
       friendHandle = '';
-      notice = 'Friend request sent.';
+      notice = $t('ui_friend_request_sent_e05e1bac');
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = userErrorMessage(caught, 'Could not send the friend request. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_send_the_friend_request_try_again_15d79fcb')
+      );
     } finally {
       if (generation === loadGeneration) busy = false;
     }
@@ -415,7 +426,7 @@
       if (generation !== loadGeneration) return;
       error = userErrorMessage(
         caught,
-        'Could not create the guild. Check its details and try again.'
+        $t('ui_could_not_create_the_guild_check_its_details__bfed72cf')
       );
     } finally {
       if (generation === loadGeneration) busy = false;
@@ -438,7 +449,7 @@
       });
       if (generation !== loadGeneration) return;
       if ('status' in result) {
-        notice = 'The recipient’s instance is unavailable. Your request is safely queued.';
+        notice = $t('ui_the_recipient_s_instance_is_unavailable_your__f9ccf77b');
         messageDialog?.close();
         return;
       }
@@ -450,7 +461,7 @@
         caught instanceof ApiError &&
         (caught.code === 'CANNOT_DM_USER' || caught.code === 'DM_PRIVACY_REJECTED')
           ? 'This person’s privacy settings do not allow a direct message.'
-          : userErrorMessage(caught, 'Could not open the conversation. Try again.');
+          : userErrorMessage(caught, $t('ui_could_not_open_the_conversation_try_again_6fdfb40a'));
       if (messageDialog?.open) messageDialogError = message;
       else error = message;
     } finally {
@@ -481,7 +492,7 @@
       if (generation !== loadGeneration) return;
       messageDialogError = userErrorMessage(
         caught,
-        'Could not create the group conversation. Check the selected friends and try again.'
+        $t('ui_could_not_create_the_group_conversation_check_86f631d0')
       );
     } finally {
       if (generation === loadGeneration) busy = false;
@@ -512,7 +523,7 @@
     if (busy) return;
     const inviteReference = normalizeInviteReference(invite);
     if (!inviteReference) {
-      error = 'Enter an invite code or a complete Kaede invite link.';
+      error = $t('ui_enter_an_invite_code_or_a_complete_kaede_invi_7a08e98d');
       return;
     }
     const generation = loadGeneration;
@@ -536,7 +547,7 @@
       if (generation !== loadGeneration) return;
       error = userErrorMessage(
         caught,
-        'Could not join this guild. Check the invite and try again.'
+        $t('ui_could_not_join_this_guild_check_the_invite_an_bea468bc')
       );
     } finally {
       if (generation === loadGeneration) busy = false;
@@ -566,26 +577,28 @@
       <small
         >{relationship.user.custom_status?.trim() ||
           userPublicHandle(relationship.user) ||
-          'Profile unavailable'}</small
+          $t('ui_profile_unavailable_158e5a22')}</small
       >
     </span>
     {#if relationship.type === 'pending_in'}
       <button
         class="primary-button small-button"
         disabled={relationshipBusy}
-        onclick={() => updateRelationship(relationship.user, 'accept')}>Accept</button
+        onclick={() => updateRelationship(relationship.user, 'accept')}
+        >{$t('ui_accept_89713b9c')}</button
       >
       <button
         class="secondary-button small-button"
         disabled={relationshipBusy}
-        onclick={() => updateRelationship(relationship.user, 'remove')}>Ignore</button
+        onclick={() => updateRelationship(relationship.user, 'remove')}
+        >{$t('ui_ignore_fce77c34')}</button
       >
     {:else if relationship.type === 'friend'}
       <button
         class="secondary-button small-button"
         onclick={(event) => showProfile(relationship.user, event)}
       >
-        <Icon name="user" size={15} />View profile
+        <Icon name="user" size={15} />{$t('ui_view_profile_d4788f25')}
       </button>
       <button
         class="secondary-button small-button"
@@ -595,12 +608,13 @@
           if (publicHandle) void openDirectMessage(publicHandle);
         }}
       >
-        <Icon name="message" size={15} />Message
+        <Icon name="message" size={15} />{$t('ui_message_2f77668a')}
       </button>
       <button
         class="secondary-button small-button"
         disabled={relationshipBusy}
-        onclick={() => updateRelationship(relationship.user, 'remove')}>Remove</button
+        onclick={() => updateRelationship(relationship.user, 'remove')}
+        >{$t('ui_remove_c3812fc4')}</button
       >
     {:else}
       <button
@@ -612,13 +626,21 @@
             relationship.type === 'blocked' ? 'unblock' : 'remove'
           )}
       >
-        {relationship.type === 'blocked' ? 'Unblock' : 'Cancel request'}
+        {relationship.type === 'blocked'
+          ? $t('ui_unblock_712da631')
+          : $t('ui_cancel_request_56196683')}
       </button>
     {/if}
   </article>
 {/snippet}
 
-<svelte:head><title>{friendsView ? 'Friends' : 'Home'} · Kaede Chat</title></svelte:head>
+<svelte:head
+  ><title
+    >{$t('ui_value0_kaede_chat_4bf52868', {
+      value0: String(friendsView ? 'Friends' : 'Home')
+    })}</title
+  ></svelte:head
+>
 <svelte:window onkeydown={navigationKeydown} />
 
 <main class="home-app">
@@ -634,7 +656,7 @@
   {#if navigationOpen}
     <button
       class="mobile-drawer-backdrop"
-      aria-label="Close navigation"
+      aria-label={$t('ui_close_navigation_99904db3')}
       onclick={() => closeNavigation()}
     ></button>
   {/if}
@@ -644,46 +666,49 @@
     class="home-sidebar"
     role={navigationOpen ? 'dialog' : undefined}
     aria-modal={navigationOpen ? 'true' : undefined}
-    aria-label="Home navigation"
+    aria-label={$t('ui_home_navigation_199e23a5')}
   >
     <header class="home-brand">
       <span class="brand-mark">K</span>
       <span
-        ><strong>Kaede</strong><small>{currentUser?.origin_domain ?? 'Your instance'}</small></span
+        ><strong>{$t('ui_kaede_7d8eeb35')}</strong><small
+          >{currentUser?.origin_domain ?? $t('ui_your_instance_2400b87f')}</small
+        ></span
       >
       <button
         bind:this={navigationClose}
         class="mobile-sidebar-close"
         type="button"
-        aria-label="Close navigation"
+        aria-label={$t('ui_close_navigation_99904db3')}
         onclick={() => closeNavigation()}
       >
         ×
       </button>
     </header>
-    <nav class="home-nav" aria-label="Home">
+    <nav class="home-nav" aria-label={$t('ui_home_3a786953')}>
       <a
         class:active={!friendsView}
         href={resolve('/home')}
-        aria-current={!friendsView ? 'page' : undefined}><Icon name="home" size={18} />Overview</a
+        aria-current={!friendsView ? 'page' : undefined}
+        ><Icon name="home" size={18} />{$t('ui_overview_d4b1ea57')}</a
       >
       <a
         class:active={friendsView}
         href={resolve('/home/friends')}
         aria-current={friendsView ? 'page' : undefined}
-        ><Icon name="users" size={18} />Friends & requests</a
+        ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}</a
       >
     </nav>
     <div class="home-sidebar-heading">
-      <span>Direct messages</span>
+      <span>{$t('ui_direct_messages_95e66705')}</span>
       <button
         type="button"
-        aria-label="New message"
-        title="New message"
+        aria-label={$t('ui_new_message_78f5975a')}
+        title={$t('ui_new_message_78f5975a')}
         onclick={() => (newMessageOpen = true)}><Icon name="plus" size={17} /></button
       >
     </div>
-    <nav class="home-dm-list" aria-label="Direct messages">
+    <nav class="home-dm-list" aria-label={$t('ui_direct_messages_95e66705')}>
       {#each directMessages as channel (entityKey(channel))}
         {@const recipient = channel.recipients?.[0]}
         <a href={directMessagePath(channel)} onclick={() => closeNavigation(false)}>
@@ -705,7 +730,7 @@
           {/if}
         </a>
       {:else}
-        <p>No conversations yet.</p>
+        <p>{$t('ui_no_conversations_yet_52a87373')}</p>
       {/each}
     </nav>
     <div class="sidebar-user-dock">
@@ -717,10 +742,18 @@
         {/if}
       </span>
       <span>
-        <strong>{currentUser?.display_name ?? currentUser?.username ?? 'Your account'}</strong>
-        <small>{currentUser?.handle ?? 'Loading…'}</small>
+        <strong
+          >{currentUser?.display_name ??
+            currentUser?.username ??
+            $t('ui_your_account_dbb5f637')}</strong
+        >
+        <small>{currentUser?.handle ?? $t('ui_loading_ba3bbbe1')}</small>
       </span>
-      <a class="icon-button" href={resolve('/settings')} aria-label="User settings">
+      <a
+        class="icon-button"
+        href={resolve('/settings')}
+        aria-label={$t('ui_user_settings_2b363e87')}
+      >
         <Icon name="settings" size={18} />
       </a>
     </div>
@@ -732,26 +765,26 @@
         bind:this={navigationToggle}
         class="mobile-nav-button"
         type="button"
-        aria-label="Open navigation"
+        aria-label={$t('ui_open_navigation_0ed77fd2')}
         aria-expanded={navigationOpen}
         onclick={openNavigation}
       >
         <span></span><span></span><span></span>
       </button>
       <div>
-        <strong>{friendsView ? 'Friends' : 'Home'}</strong>
+        <strong>{friendsView ? $t('ui_friends_bd104d1b') : $t('ui_home_3a786953')}</strong>
         <span
           >{friendsView
-            ? 'Friends and pending requests'
-            : 'Your conversations and communities'}</span
+            ? $t('ui_friends_and_pending_requests_3962f04a')
+            : $t('ui_your_conversations_and_communities_617b0ac5')}</span
         >
       </div>
       <div class="home-topbar-actions">
         <button
           class="icon-button"
           type="button"
-          aria-label="Search direct messages"
-          title="Search direct messages"
+          aria-label={$t('ui_search_direct_messages_e0cc8e00')}
+          title={$t('ui_search_direct_messages_e0cc8e00')}
           onclick={() => (messageSearchOpen = true)}
         >
           <Icon name="message" size={19} />
@@ -759,13 +792,13 @@
         <button
           class="icon-button"
           type="button"
-          aria-label="Jump to a channel"
-          title="Jump to a channel (Ctrl+K)"
+          aria-label={$t('ui_jump_to_a_channel_56b8a4d6')}
+          title={$t('ui_jump_to_a_channel_ctrl_k_1e57f483')}
           onclick={openCommandSwitcher}
         >
           <Icon name="search" size={19} />
         </button>
-        <a class="icon-button" href={resolve('/settings')} aria-label="Settings">
+        <a class="icon-button" href={resolve('/settings')} aria-label={$t('ui_settings_74a883a0')}>
           <Icon name="settings" size={19} />
         </a>
       </div>
@@ -786,11 +819,11 @@
       {#if friendsView}
         <section class="friends-hero">
           <div>
-            <p class="eyebrow">Your people</p>
-            <h1>Friends</h1>
-            <p>Manage connections and requests across this instance and the fediverse.</p>
+            <p class="eyebrow">{$t('ui_your_people_e252b32e')}</p>
+            <h1>{$t('ui_friends_bd104d1b')}</h1>
+            <p>{$t('ui_manage_connections_and_requests_across_this_i_6dc754ae')}</p>
           </div>
-          <div class="friend-summary" aria-label="Relationship summary">
+          <div class="friend-summary" aria-label={$t('ui_relationship_summary_a80223eb')}>
             <span><strong>{friends.length}</strong> friends</span>
             <span><strong>{incomingRequests.length}</strong> incoming</span>
             <span><strong>{outgoingRequests.length}</strong> sent</span>
@@ -799,16 +832,18 @@
       {:else}
         <section class="home-hero">
           <div>
-            <p class="eyebrow">Welcome back</p>
+            <p class="eyebrow">{$t('ui_welcome_back_66212495')}</p>
             <h1>
-              {currentUser?.display_name ?? currentUser?.username ?? 'Your place'}, all in one
-              place.
+              {$t('ui_value0_all_in_one_place_db7aee78', {
+                value0: String(currentUser?.display_name ?? currentUser?.username ?? 'Your place')
+              })}
             </h1>
-            <p>Pick up a conversation, return to a guild, or start something new.</p>
+            <p>{$t('ui_pick_up_a_conversation_return_to_a_guild_or_s_f46b9c51')}</p>
           </div>
           {#if lastVisited}
             <a class="primary-button" href={lastVisited}>
-              Continue where you left off <Icon name="chevron-right" size={17} />
+              {$t('ui_continue_where_you_left_off_dfbc51e0')}
+              <Icon name="chevron-right" size={17} />
             </a>
           {/if}
         </section>
@@ -818,7 +853,7 @@
         <div class="notice-banner error-banner home-error-banner" role="alert">
           <span>{error}</span>
           <button class="secondary-button small-button" type="button" onclick={retryOverview}>
-            Try again
+            {$t('ui_try_again_d8b8392e')}
           </button>
         </div>
       {/if}
@@ -832,8 +867,8 @@
         <section class="home-section">
           <div class="home-section-heading">
             <div>
-              <p>Guilds</p>
-              <h2>Your communities</h2>
+              <p>{$t('ui_guilds_25df5134')}</p>
+              <h2>{$t('ui_your_communities_605352da')}</h2>
             </div>
             <span>{guilds.length}</span>
           </div>
@@ -858,7 +893,7 @@
                     {#if guild.description}<p>{guild.description}</p>{/if}
                   </span>
                   {#if guild.unavailable}
-                    <small class="status-chip">Unavailable</small>
+                    <small class="status-chip">{$t('ui_unavailable_ca184496')}</small>
                   {:else if guildUnread(guild)}
                     <small class="unread-badge">{guildUnread(guild)}</small>
                   {:else}
@@ -870,8 +905,8 @@
           {:else}
             <div class="empty-state">
               <span><Icon name="server" size={26} /></span>
-              <h3>No guilds yet</h3>
-              <p>Create a home for your community or join one with an invite.</p>
+              <h3>{$t('ui_no_guilds_yet_3fb1f0e5')}</h3>
+              <p>{$t('ui_create_a_home_for_your_community_or_join_one__22148a75')}</p>
             </div>
           {/if}
         </section>
@@ -879,8 +914,8 @@
         <section class="home-section">
           <div class="home-section-heading">
             <div>
-              <p>Quick actions</p>
-              <h2>Start something</h2>
+              <p>{$t('ui_quick_actions_1810407f')}</p>
+              <h2>{$t('ui_start_something_0c4b50ca')}</h2>
             </div>
           </div>
           <div class="quick-action-grid">
@@ -888,7 +923,8 @@
               <summary>
                 <span class="quick-action-icon green"><Icon name="message" /></span>
                 <span
-                  ><strong>New message</strong><small>Reach someone by federated handle</small
+                  ><strong>{$t('ui_new_message_78f5975a')}</strong><small
+                    >{$t('ui_reach_someone_by_federated_handle_9a68d35b')}</small
                   ></span
                 >
                 <Icon name="chevron-down" size={17} />
@@ -900,10 +936,12 @@
                 }}
               >
                 <label class="form-field compact-field">
-                  <span>User handle</span>
+                  <span>{$t('ui_user_handle_bbedfb48')}</span>
                   <input bind:value={handle} placeholder="friend@example.net" required />
                 </label>
-                <button class="primary-button" disabled={busy}>Start conversation</button>
+                <button class="primary-button" disabled={busy}
+                  >{$t('ui_start_conversation_b61625d0')}</button
+                >
               </form>
             </details>
 
@@ -911,7 +949,9 @@
               <summary>
                 <span class="quick-action-icon orange"><Icon name="globe" /></span>
                 <span
-                  ><strong>Join a guild</strong><small>Use a local or federated invite</small></span
+                  ><strong>{$t('ui_join_a_guild_5c9f5333')}</strong><small
+                    >{$t('ui_use_a_local_or_federated_invite_b41d08b4')}</small
+                  ></span
                 >
                 <Icon name="chevron-down" size={17} />
               </summary>
@@ -922,10 +962,16 @@
                 }}
               >
                 <label class="form-field compact-field">
-                  <span>Invite code</span>
-                  <input bind:value={invite} placeholder="Ab12Cd34@example.net" required />
+                  <span>{$t('ui_invite_code_c6a8991e')}</span>
+                  <input
+                    bind:value={invite}
+                    placeholder={$t('ui_ab12cd34_example_net_9982aaa1')}
+                    required
+                  />
                 </label>
-                <button class="primary-button" disabled={busy}>Join guild</button>
+                <button class="primary-button" disabled={busy}
+                  >{$t('ui_join_guild_6562aa44')}</button
+                >
               </form>
             </details>
 
@@ -933,8 +979,8 @@
               <summary>
                 <span class="quick-action-icon purple"><Icon name="plus" /></span>
                 <span
-                  ><strong>Create a guild</strong><small
-                    >Make a new community on this instance</small
+                  ><strong>{$t('ui_create_a_guild_be194799')}</strong><small
+                    >{$t('ui_make_a_new_community_on_this_instance_597db0de')}</small
                   ></span
                 >
                 <Icon name="chevron-down" size={17} />
@@ -946,11 +992,11 @@
                 }}
               >
                 <label class="form-field compact-field">
-                  <span>Guild name</span>
+                  <span>{$t('ui_guild_name_4bffa81b')}</span>
                   <input bind:value={name} minlength="2" maxlength="100" required />
                 </label>
                 <button class="primary-button" disabled={busy}>
-                  {busy ? 'Creating…' : 'Create guild'}
+                  {busy ? $t('ui_creating_c79ed949') : $t('ui_create_guild_7e664b35')}
                 </button>
               </form>
             </details>
@@ -962,9 +1008,9 @@
         <section class="friend-add-panel">
           <span class="friend-add-icon"><Icon name="users" size={22} /></span>
           <div>
-            <p class="eyebrow">Add a friend</p>
-            <h2>Connect by federated username</h2>
-            <p>Use a full username such as <code>@friend@example.net</code>.</p>
+            <p class="eyebrow">{$t('ui_add_a_friend_33275c37')}</p>
+            <h2>{$t('ui_connect_by_federated_username_40da2a8f')}</h2>
+            <p>{$t('ui_use_a_full_username_such_as_19fc14e6')} <code>@friend@example.net</code>.</p>
           </div>
           <form
             class="friend-add-form"
@@ -974,7 +1020,7 @@
             }}
           >
             <label class="form-field compact-field">
-              <span>Federated username</span>
+              <span>{$t('ui_federated_username_bbdea5c4')}</span>
               <input
                 bind:value={friendHandle}
                 placeholder={`@friend@${currentUser?.origin_domain ?? 'example.net'}`}
@@ -983,7 +1029,7 @@
               />
             </label>
             <button class="primary-button" disabled={busy}>
-              {busy ? 'Sending…' : 'Send request'}
+              {busy ? $t('ui_sending_b8ed5279') : $t('ui_send_request_3a69f897')}
             </button>
           </form>
         </section>
@@ -992,8 +1038,8 @@
           <section class="home-section relationship-section">
             <div class="home-section-heading">
               <div>
-                <p>Pending</p>
-                <h2>Incoming requests</h2>
+                <p>{$t('ui_pending_331551b0')}</p>
+                <h2>{$t('ui_incoming_requests_b9bbd089')}</h2>
               </div>
               <span>{incomingRequests.length}</span>
             </div>
@@ -1009,8 +1055,8 @@
           <section class="home-section relationship-section">
             <div class="home-section-heading">
               <div>
-                <p>Pending</p>
-                <h2>Sent requests</h2>
+                <p>{$t('ui_pending_331551b0')}</p>
+                <h2>{$t('ui_sent_requests_874d69d6')}</h2>
               </div>
               <span>{outgoingRequests.length}</span>
             </div>
@@ -1025,8 +1071,8 @@
         <section class="home-section relationship-section">
           <div class="home-section-heading">
             <div>
-              <p>People</p>
-              <h2>All friends</h2>
+              <p>{$t('ui_people_7db20897')}</p>
+              <h2>{$t('ui_all_friends_c0cb9e20')}</h2>
             </div>
             <span>{friends.length}</span>
           </div>
@@ -1036,8 +1082,8 @@
             {:else}
               <div class="empty-state compact-empty">
                 <span><Icon name="users" /></span>
-                <h3>No friends yet</h3>
-                <p>Send a request using someone’s full federated username.</p>
+                <h3>{$t('ui_no_friends_yet_ebf0ef17')}</h3>
+                <p>{$t('ui_send_a_request_using_someone_s_full_federated_1b7089ee')}</p>
               </div>
             {/each}
           </div>
@@ -1046,10 +1092,8 @@
         {#if blockedUsers.length}
           <details class="blocked-relationships">
             <summary>
-              <span>Blocked users</span><small>{blockedUsers.length}</small><Icon
-                name="chevron-down"
-                size={16}
-              />
+              <span>{$t('ui_blocked_users_f8173cd6')}</span><small>{blockedUsers.length}</small
+              ><Icon name="chevron-down" size={16} />
             </summary>
             <div class="relationship-list">
               {#each blockedUsers as relationship (entityKey(relationship.user))}
@@ -1086,17 +1130,21 @@
   >
     <header>
       <div>
-        <p class="eyebrow">New conversation</p>
-        <h2>{messageMode === 'group' ? 'Create a group DM' : 'Start a conversation'}</h2>
+        <p class="eyebrow">{$t('ui_new_conversation_396c946f')}</p>
+        <h2>
+          {messageMode === 'group'
+            ? $t('ui_create_a_group_dm_acda28ac')
+            : $t('ui_start_a_conversation_258150cb')}
+        </h2>
       </div>
       <button
         class="icon-button"
         type="button"
-        aria-label="Close"
+        aria-label={$t('ui_close_7d9eb7ac')}
         onclick={() => messageDialog?.close()}>×</button
       >
     </header>
-    <div class="dm-mode-tabs" role="tablist" aria-label="Conversation type">
+    <div class="dm-mode-tabs" role="tablist" aria-label={$t('ui_conversation_type_9ca49801')}>
       <button
         type="button"
         role="tab"
@@ -1106,7 +1154,7 @@
           messageMode = 'direct';
           groupMemberKeys = [];
           messageDialogError = '';
-        }}>Direct message</button
+        }}>{$t('ui_direct_message_cd3e1605')}</button
       >
       <button
         type="button"
@@ -1117,17 +1165,25 @@
           messageMode = 'group';
           handle = '';
           messageDialogError = '';
-        }}>Group DM</button
+        }}>{$t('ui_group_dm_cbe7c5d4')}</button
       >
     </div>
     {#if messageMode === 'group'}
       <label class="form-field">
-        <span>Group name <small>Optional</small></span>
-        <input bind:value={groupName} maxlength="100" placeholder="Weekend plans" />
+        <span>{$t('ui_group_name_762ebb70')} <small>{$t('ui_optional_59be7133')}</small></span>
+        <input
+          bind:value={groupName}
+          maxlength="100"
+          placeholder={$t('ui_weekend_plans_7285cd64')}
+        />
       </label>
     {/if}
     <label class="form-field">
-      <span>{messageMode === 'group' ? 'Find friends' : 'Username or friend'}</span>
+      <span
+        >{messageMode === 'group'
+          ? $t('ui_find_friends_feb7bfd1')
+          : $t('ui_username_or_friend_fa66c0a7')}</span
+      >
       <input
         bind:value={handle}
         placeholder="@friend@example.net"
@@ -1139,13 +1195,15 @@
       <small>
         {messageMode === 'group'
           ? `Select 2–9 friends. ${groupMemberKeys.length} selected.`
-          : 'Enter a complete federated username, or select a friend below.'}
+          : $t('ui_enter_a_complete_federated_username_or_select_c604fb23')}
       </small>
     </label>
     <section class="dm-friend-picker" aria-labelledby="dm-friend-picker-heading">
       <div class="dm-friend-picker-heading">
         <strong id="dm-friend-picker-heading">
-          {messageMode === 'group' ? 'Friends' : 'Friends without a visible conversation'}
+          {messageMode === 'group'
+            ? $t('ui_friends_bd104d1b')
+            : $t('ui_friends_without_a_visible_conversation_701b04f1')}
         </strong>
         <small
           >{messageMode === 'group'
@@ -1190,7 +1248,7 @@
               <small
                 >{userPublicHandle(friend)
                   ? `@${userPublicHandle(friend)?.replace(/^@/, '')}`
-                  : 'Profile unavailable'}</small
+                  : $t('ui_profile_unavailable_158e5a22')}</small
               >
             </span>
             <Icon
@@ -1203,16 +1261,16 @@
         {:else}
           <div class="dm-friend-empty">
             {#if messageMode === 'group'}
-              <strong>No friends match that search.</strong>
-              <small>Only existing friends can be added automatically.</small>
+              <strong>{$t('ui_no_friends_match_that_search_c359d5b1')}</strong>
+              <small>{$t('ui_only_existing_friends_can_be_added_automatica_86c917ba')}</small>
             {:else if handle.trim()}
-              <strong>No friends match that search.</strong>
-              <small>You can still message the complete federated username above.</small>
+              <strong>{$t('ui_no_friends_match_that_search_c359d5b1')}</strong>
+              <small>{$t('ui_you_can_still_message_the_complete_federated__9bfcac7d')}</small>
             {:else if newDmFriends.length === 0}
-              <strong>Every friend already has a visible conversation.</strong>
-              <small>You can still enter any federated username above.</small>
+              <strong>{$t('ui_every_friend_already_has_a_visible_conversati_f23a59c9')}</strong>
+              <small>{$t('ui_you_can_still_enter_any_federated_username_ab_32086c17')}</small>
             {:else}
-              <strong>No friends available.</strong>
+              <strong>{$t('ui_no_friends_available_7af4e539')}</strong>
             {/if}
           </div>
         {/each}
@@ -1221,13 +1279,17 @@
     {#if messageDialogError}<p class="form-error" role="alert">{messageDialogError}</p>{/if}
     <footer>
       <button class="secondary-button" type="button" onclick={() => messageDialog?.close()}
-        >Cancel</button
+        >{$t('ui_cancel_19766ed6')}</button
       >
       <button
         class="primary-button"
         disabled={busy || (messageMode === 'group' && groupMemberKeys.length < 2)}
       >
-        {busy ? 'Opening…' : messageMode === 'group' ? 'Create group' : 'Message'}
+        {busy
+          ? $t('ui_opening_c926c2c5')
+          : messageMode === 'group'
+            ? $t('ui_create_group_35be9c54')
+            : $t('ui_message_2f77668a')}
       </button>
     </footer>
   </form>

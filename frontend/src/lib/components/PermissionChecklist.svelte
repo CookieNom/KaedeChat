@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { PERMISSION_METADATA } from '$lib/generated/permissions';
   import {
     permissionMask,
@@ -10,7 +12,7 @@
     value,
     onChange,
     disabled = false,
-    label = 'Default permissions'
+    label = $t('ui_default_permissions_43fc0abd')
   }: {
     value: string;
     onChange: (value: string) => void;
@@ -57,16 +59,13 @@
 
 <fieldset class="permission-checklist" {disabled}>
   <legend>{label}</legend>
-  <p>
-    Choose permissions by name. Kaede preserves the exact permission mask on the wire, including
-    future bits this client does not recognize.
-  </p>
+  <p>{$t('ui_choose_permissions_by_name_kaede_preserves_th_c926a7ea')}</p>
   <div class="permission-checklist-tools">
     <label>
-      <span class="visually-hidden">Search permissions</span>
-      <input bind:value={search} type="search" placeholder="Search permissions" />
+      <span class="visually-hidden">{$t('ui_search_permissions_0e099113')}</span>
+      <input bind:value={search} type="search" placeholder={$t('ui_search_permissions_0e099113')} />
     </label>
-    <span>{selectedCount} selected</span>
+    <span>{$t('ui_value0_selected_975acbfe', { value0: String(selectedCount) })}</span>
   </div>
   <div class="permission-checklist-groups">
     {#each groups as group (group)}
@@ -84,7 +83,11 @@
               <strong>{item.label}</strong>
               <small>{item.description}</small>
               {#if item.dependencies.length}
-                <small>Also requires: {dependencyLabels(item.dependencies)}</small>
+                <small
+                  >{$t('ui_also_requires_value0_68b47b3a', {
+                    value0: String(dependencyLabels(item.dependencies))
+                  })}</small
+                >
               {/if}
             </span>
           </label>

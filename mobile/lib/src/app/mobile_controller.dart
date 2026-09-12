@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/announcement_repository.dart';
@@ -28,6 +27,7 @@ import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/forwarding.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/platform/system_call_service.dart';
@@ -1819,8 +1819,7 @@ final class MobileController extends StateNotifier<MobileState> {
       relationships: relationships,
       presencePreference: presence,
       themePreference: parseThemePreference(settings['theme']),
-      localePreference:
-          parseLocalePreference(settings['locale']).toLanguageTag(),
+      localePreference: normalizeLanguage(settings['locale']),
       developerMode: parseDeveloperMode(rawNotifications),
       notificationSettings: notifications,
       guildNotificationLevels: guildNotificationLevels,
@@ -1834,6 +1833,7 @@ final class MobileController extends StateNotifier<MobileState> {
           authConfiguration['e2ee_activation_enabled'] == true,
       offline: false,
     );
+    unawaited(setAppLanguage(state.localePreference));
     _displayNameIndex.clear();
     push.setAppVisibility(
       active: _appActive,
@@ -2522,13 +2522,13 @@ final class MobileController extends StateNotifier<MobileState> {
       themePreference: parseThemePreference(
         settings['theme'] ?? state.themePreference.name,
       ),
-      localePreference: parseLocalePreference(
-        settings['locale'] ?? state.localePreference,
-      ).toLanguageTag(),
+      localePreference:
+          normalizeLanguage(settings['locale'] ?? state.localePreference),
       developerMode: settings.containsKey('notification_settings')
           ? parseDeveloperMode(rawNotifications)
           : state.developerMode,
     );
+    unawaited(setAppLanguage(state.localePreference));
     _setDegradedWarning(DegradedFeature.accountSettings, null);
   }
 

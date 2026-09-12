@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { trapDialogFocus } from '$lib/ui/focus';
   import { cancelableDelay } from '$lib/ui/delay';
   import { page } from '$app/state';
@@ -503,7 +505,7 @@
     webhookProjectionReady = false;
     busy = false;
     loading = false;
-    error = 'This guild is unavailable or you no longer have access.';
+    error = $t('ui_this_guild_is_unavailable_or_you_no_longer_ha_70ba0e65');
     notice = '';
   }
 
@@ -854,7 +856,10 @@
       ]);
     } catch (caught) {
       if (generation !== loadGeneration || routeController?.signal.aborted) return;
-      error = userErrorMessage(caught, 'Could not load this channel’s webhooks. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_this_channel_s_webhooks_try_ag_d9d9ecd4')
+      );
     }
   }
 
@@ -1026,7 +1031,7 @@
       return;
     }
     const confirmed = window.confirm(
-      'Require end-to-end encryption for future posts? This policy is permanent once saved and affects only posts created afterward; existing posts do not change. Titles and title search remain readable to the server, but each future post establishes its encryption keys before its starter body, files, or replies are sent. Server starter previews, message search, link and GIF previews, file previews, malware scanning, and PhotoDNA scanning will stop. Webhooks receive no access automatically; a verified webhook device can receive only future post content after a server administrator grants it and the post establishes a rekey and history floor. Verified participant-mode apps follow the same future-only admission rule. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted post history. Removed members, apps, and webhooks keep content they already received.'
+      $t('ui_require_end_to_end_encryption_for_future_post_a1d64bc1')
     );
     channelForumE2EE = confirmed;
     if (!confirmed) input.checked = false;
@@ -1069,7 +1074,10 @@
       }
     } catch (caught) {
       if (selectedChannel && entityKey(selectedChannel) === entityKey(channel))
-        error = userErrorMessage(caught, 'Could not load channel permissions. Try again.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_channel_permissions_try_again_cf8c7b32')
+        );
     }
   }
 
@@ -1143,7 +1151,7 @@
       );
       if (generation !== loadGeneration) return;
       await loadChannelOverwrites(channel);
-      notice = 'Channel permissions saved.';
+      notice = $t('ui_channel_permissions_saved_0f576307');
     });
   }
 
@@ -1171,7 +1179,7 @@
       await loadChannelOverwrites(channel);
       overwriteAllow = '0';
       overwriteDeny = '0';
-      notice = 'Channel override reset to inherited permissions.';
+      notice = $t('ui_channel_override_reset_to_inherited_permissio_faaea4fa');
     });
   }
 
@@ -1192,7 +1200,7 @@
       };
       selectChannel(updated, true);
       channelEditorPanel = 'permissions';
-      notice = 'Permissions synced with the category.';
+      notice = $t('ui_permissions_synced_with_the_category_f79f1c3f');
     });
   }
 
@@ -1209,9 +1217,7 @@
         : 'Turn on end-to-end encryption for this channel? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, file previews, malware scanning, and PhotoDNA scanning will stop. Webhooks receive no access automatically; a verified webhook device can receive only future content after a server administrator grants it and the room establishes a rekey and history floor. Verified participant-mode apps follow the same future-only admission rule. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until members compare the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members, apps, and webhooks keep content they already received.';
     if (
       !window.confirm(
-        rekey
-          ? 'Create fresh encryption keys for the current channel members? Removed members and revoked devices will not receive the new keys.'
-          : activationWarning
+        rekey ? $t('ui_create_fresh_encryption_keys_for_the_current__3f02ee10') : activationWarning
       )
     )
       return;
@@ -1248,7 +1254,7 @@
         entityKey(selectedChannel) === entityKey(channel)
       ) {
         channelSafetyNumber = safetyNumber;
-        notice = 'Compare this safety number with members through a separate trusted channel.';
+        notice = $t('ui_compare_this_safety_number_with_members_throu_0247a03c');
       }
     });
   }
@@ -1266,7 +1272,7 @@
       if (generation !== loadGeneration || !guild) return;
       guildNotificationLevel = updated.level;
       browserNotifications.setGuildPreference(guild, updated.level);
-      notice = 'Notification settings saved.';
+      notice = $t('ui_notification_settings_saved_d4b4e3ea');
     });
   }
 
@@ -1341,7 +1347,7 @@
           ? requestedPanel
           : 'overview';
       if (selectedChannel) selectChannel(selectedChannel);
-      else if (channelOnly) error = 'This channel is unavailable or you no longer have access.';
+      else if (channelOnly) error = $t('ui_this_channel_is_unavailable_or_you_no_longer__7afa473d');
       selectedRole =
         loaded.roles?.find((role) => role.id !== loaded.id) ?? loaded.roles?.[0] ?? null;
       if (selectedRole) selectRole(selectedRole);
@@ -1375,7 +1381,7 @@
               if (signal.aborted || generation !== loadGeneration) return;
               channelVoiceRegionsError = userErrorMessage(
                 caught,
-                'Region overrides are temporarily unavailable.'
+                $t('ui_region_overrides_are_temporarily_unavailable_f02e100d')
               );
             })
         );
@@ -1472,7 +1478,7 @@
       webhookProjectionReady = true;
     } catch (caught) {
       if (signal.aborted || generation !== loadGeneration || targetGuild !== guildId) return;
-      error = userErrorMessage(caught, 'Could not load guild settings. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_guild_settings_try_again_72d3e788'));
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) loading = false;
     }
@@ -1508,11 +1514,11 @@
           controller.signal
         );
         if (generation === loadGeneration && targetGuild === guildId) {
-          notice = 'These settings changed elsewhere. The latest version has been loaded.';
+          notice = $t('ui_these_settings_changed_elsewhere_the_latest_v_ee001ea9');
         }
         return false;
       }
-      error = userErrorMessage(caught, 'The change could not be saved. Try again.');
+      error = userErrorMessage(caught, $t('ui_the_change_could_not_be_saved_try_again_c2070387'));
       return false;
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) busy = false;
@@ -1589,7 +1595,7 @@
       });
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       if (guild) guild = mergeGuildState(guild, updated);
-      notice = 'Overview saved.';
+      notice = $t('ui_overview_saved_aaf90806');
     });
   }
 
@@ -1597,13 +1603,13 @@
     const controller = routeController;
     if (busy || loading || !guild || !canManageGuildAssets || !controller) return;
     if (!acceptedImageTypes.has(file.type)) {
-      guildAssetError = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      guildAssetError = $t('ui_choose_a_png_jpeg_gif_or_webp_image_4cef2205');
       error = '';
       notice = '';
       return;
     }
     if (file.size < 1) {
-      guildAssetError = 'Choose a non-empty image file.';
+      guildAssetError = $t('ui_choose_a_non_empty_image_file_b81ea05c');
       error = '';
       notice = '';
       return;
@@ -1683,7 +1689,7 @@
       }
       guildAssetError = userErrorMessage(
         caught,
-        'Could not update the guild image. Choose the file again and retry.'
+        $t('ui_could_not_update_the_guild_image_choose_the_f_4f8f9940')
       );
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) {
@@ -1732,7 +1738,7 @@
     if (!guild || !emojiFile || !canCreateExpressions || emojiBusy || !signal) return;
     const file = emojiFile;
     if (!acceptedImageTypes.has(file.type)) {
-      error = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      error = $t('ui_choose_a_png_jpeg_gif_or_webp_image_4cef2205');
       return;
     }
     if (file.size > (guild.emoji_max_bytes ?? 262144)) {
@@ -1782,7 +1788,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not create the emoji. Choose the file again and retry.'
+        $t('ui_could_not_create_the_emoji_choose_the_file_ag_9425c308')
       );
     } finally {
       emojiBusy = false;
@@ -1804,7 +1810,7 @@
       };
       notice = `:${emoji.name}: was deleted.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not delete the emoji. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_delete_the_emoji_try_again_8cec4c2e'));
     } finally {
       emojiBusy = false;
     }
@@ -1828,7 +1834,7 @@
     const draftValue = emojiDrafts[entityKey(emoji)];
     if (!guild || !draftValue || !canEditEmoji(emoji) || emojiBusy) return;
     if (!draftValue.name.trim()) {
-      error = 'Emoji names cannot be blank.';
+      error = $t('ui_emoji_names_cannot_be_blank_090b47ad');
       return;
     }
     emojiBusy = true;
@@ -1856,7 +1862,7 @@
       });
       notice = `:${updated.name}: was updated.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update the emoji. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_the_emoji_try_again_d7fc3b29'));
     } finally {
       emojiBusy = false;
     }
@@ -1963,7 +1969,7 @@
     if (!guild || !stickerFile || !canCreateExpressions || stickerBusy || !signal) return;
     const file = stickerFile;
     if (!acceptedImageTypes.has(file.type)) {
-      error = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      error = $t('ui_choose_a_png_jpeg_gif_or_webp_image_4cef2205');
       return;
     }
     if (file.size > (guild.sticker_max_bytes ?? 524288)) {
@@ -1973,11 +1979,11 @@
     const cleanedName = stickerName.trim();
     const cleanedDescription = stickerDescription.trim();
     if (!validStickerName(cleanedName)) {
-      error = 'Sticker names must contain 2–30 meaningful characters.';
+      error = $t('ui_sticker_names_must_contain_2_30_meaningful_ch_5d459eb3');
       return;
     }
     if (!validStickerDescription(cleanedDescription)) {
-      error = 'Sticker descriptions must be empty or contain 2–100 characters.';
+      error = $t('ui_sticker_descriptions_must_be_empty_or_contain_01ecbdf8');
       return;
     }
     stickerBusy = true;
@@ -2042,7 +2048,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not create the sticker. Choose the file again and retry.'
+        $t('ui_could_not_create_the_sticker_choose_the_file__ff4c7816')
       );
     } finally {
       stickerBusy = false;
@@ -2065,7 +2071,7 @@
       };
       notice = `${sticker.name} was deleted.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not delete the sticker. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_delete_the_sticker_try_again_e13d8c4e'));
     } finally {
       stickerBusy = false;
     }
@@ -2103,11 +2109,11 @@
     const cleanedName = draftValue.name.trim();
     const cleanedDescription = draftValue.description.trim();
     if (!validStickerName(cleanedName)) {
-      error = 'Sticker names must contain 2–30 meaningful characters.';
+      error = $t('ui_sticker_names_must_contain_2_30_meaningful_ch_5d459eb3');
       return;
     }
     if (!validStickerDescription(cleanedDescription)) {
-      error = 'Sticker descriptions must be empty or contain 2–100 characters.';
+      error = $t('ui_sticker_descriptions_must_be_empty_or_contain_01ecbdf8');
       return;
     }
     if (
@@ -2116,7 +2122,7 @@
       tags.some((tag) => tag.length > 100) ||
       tags.join(',').length > 200
     ) {
-      error = 'Sticker tags must contain 1–10 unique values and use at most 200 characters.';
+      error = $t('ui_sticker_tags_must_contain_1_10_unique_values__636809a5');
       return;
     }
     stickerBusy = true;
@@ -2146,7 +2152,7 @@
       });
       notice = `${updated.name} was updated.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update the sticker. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_the_sticker_try_again_4ccf1a50'));
     } finally {
       stickerBusy = false;
     }
@@ -2184,14 +2190,14 @@
     return run(async (targetGuild, generation) => {
       const current = guild?.channels?.find((channel) => entityKey(channel) === entityKey(target));
       if (!current || !channelHasPermission(current, CHANNEL_MOVE_PERMISSIONS)) {
-        error = 'You no longer have permission to edit this channel.';
+        error = $t('ui_you_no_longer_have_permission_to_edit_this_ch_27548c26');
         return;
       }
       const parent = guild?.channels?.find(
         (channel) => entityKey(channel) === channelParent && channel.type === 4
       );
       if (channelParent && !parent) {
-        error = 'That category is no longer available.';
+        error = $t('ui_that_category_is_no_longer_available_3259687c');
         return;
       }
       const currentParent =
@@ -2203,7 +2209,7 @@
         parent &&
         !channelHasPermission(parent, CHANNEL_MOVE_PERMISSIONS)
       ) {
-        error = 'You cannot move this channel to that category.';
+        error = $t('ui_you_cannot_move_this_channel_to_that_category_c8b19993');
         return;
       }
       const updated = await api<Channel>(
@@ -2264,7 +2270,7 @@
         };
       }
       selectChannel(updated, true);
-      notice = 'Channel saved.';
+      notice = $t('ui_channel_saved_2ad13379');
     });
   }
 
@@ -2343,7 +2349,7 @@
       }
       newRoleName = '';
       selectRole(role, true);
-      notice = 'Role created. Configure its permissions before assigning it.';
+      notice = $t('ui_role_created_configure_its_permissions_before_9ad7259d');
     });
   }
 
@@ -2374,7 +2380,7 @@
         );
       }
       selectRole(updated, true);
-      notice = 'Role saved.';
+      notice = $t('ui_role_saved_2ad7f1dd');
     });
   }
 
@@ -2385,7 +2391,7 @@
     roleIconError = '';
     if (!file || !target || !guild || !canManageSelectedRole || !signal) return;
     if (!acceptedImageTypes.has(file.type)) {
-      roleIconError = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      roleIconError = $t('ui_choose_a_png_jpeg_gif_or_webp_image_4cef2205');
       return;
     }
     const maxBytes = guild.emoji_max_bytes ?? 262144;
@@ -2420,9 +2426,12 @@
         );
       }
       selectRole(updated, true);
-      notice = 'Role icon updated.';
+      notice = $t('ui_role_icon_updated_dfc1eff6');
     } catch (caught) {
-      roleIconError = userErrorMessage(caught, 'Could not update the role icon. Try again.');
+      roleIconError = userErrorMessage(
+        caught,
+        $t('ui_could_not_update_the_role_icon_try_again_4f7c8eed')
+      );
     } finally {
       roleIconBusy = false;
       roleIconFile = null;
@@ -2442,9 +2451,12 @@
         (guild.roles ?? []).map((role) => (entityKey(role) === entityKey(updated) ? updated : role))
       );
       selectRole(updated, true);
-      notice = 'Role icon removed.';
+      notice = $t('ui_role_icon_removed_755aaf54');
     } catch (caught) {
-      roleIconError = userErrorMessage(caught, 'Could not remove the role icon. Try again.');
+      roleIconError = userErrorMessage(
+        caught,
+        $t('ui_could_not_remove_the_role_icon_try_again_4a97e877')
+      );
     } finally {
       roleIconBusy = false;
     }
@@ -2505,7 +2517,7 @@
     );
     if (!changed.length || changed.some((role) => !canReorderRole(role))) {
       roleDragEnd();
-      error = 'You can only reorder roles below your highest role.';
+      error = $t('ui_you_can_only_reorder_roles_below_your_highest_7b1f277f');
       return;
     }
     roleDragEnd();
@@ -2515,7 +2527,7 @@
   async function persistRoleOrder(previous: Role[], ordered: Role[]) {
     if (!guild || busy || reorderingRoles) return;
     if (ordered.some((role) => !role.version)) {
-      error = 'Role versions are unavailable. Reload settings before reordering roles.';
+      error = $t('ui_role_versions_are_unavailable_reload_settings_02ef4b23');
       return;
     }
     const targetGuild = guildId;
@@ -2525,7 +2537,7 @@
     busy = true;
     reorderingRoles = true;
     error = '';
-    notice = 'Saving role order…';
+    notice = $t('ui_saving_role_order_926d7045');
     try {
       const updated = await api<Role[]>(`/guilds/${encodeURIComponent(targetGuild)}/roles`, {
         method: 'PATCH',
@@ -2544,11 +2556,14 @@
         const selected = guild.roles?.find((role) => entityKey(role) === entityKey(selectedRole!));
         if (selected) selectRole(selected, true);
       }
-      notice = 'Role order saved.';
+      notice = $t('ui_role_order_saved_b13d4fbf');
     } catch (caught) {
       if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
       setGuildRoles(previous);
-      error = userErrorMessage(caught, 'Could not save the role order. Reload and try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_save_the_role_order_reload_and_try__f5db06ed')
+      );
       notice = '';
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) {
@@ -2564,7 +2579,7 @@
     void openDestructiveConfirmation({
       kind: 'role',
       target,
-      title: 'Delete role?',
+      title: $t('ui_delete_role_de10c0cf'),
       description: `“${target.name}” will be permanently removed. Members assigned to it will immediately lose its permissions.`,
       confirmLabel: 'Delete role'
     });
@@ -2587,7 +2602,7 @@
           role_ids: member.role_ids.filter((id) => id !== target.id)
         }))
       );
-      notice = 'Role deleted.';
+      notice = $t('ui_role_deleted_fb555aa3');
     });
   }
 
@@ -2604,7 +2619,7 @@
                 channelHasPermission(item, Permission.CREATE_INVITE)
             );
       if ((channelOnly || inviteChannel) && !channel) {
-        error = 'Choose a channel where you can create invites.';
+        error = $t('ui_choose_a_channel_where_you_can_create_invites_7ee57c3e');
         return;
       }
       const invite = await api<InviteSummary>(
@@ -2627,7 +2642,7 @@
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       invites = [invite, ...invites];
       createdInvite = invite;
-      notice = 'Invite created. Copy the link below before leaving this page.';
+      notice = $t('ui_invite_created_copy_the_link_below_before_lea_1fc85cfd');
     });
   }
 
@@ -2645,7 +2660,7 @@
       };
       newWebhookName = '';
       revealedWebhookToken = created.execution_url ?? '';
-      notice = 'Webhook created. Its URL remains available to server managers.';
+      notice = $t('ui_webhook_created_its_url_remains_available_to__15821689');
     });
   }
 
@@ -2662,7 +2677,7 @@
       if (generation !== loadGeneration) return;
       webhooks = webhooks.map((item) => (item.id === webhook.id ? updated : item));
       revealedWebhookToken = updated.execution_url ?? '';
-      notice = 'Webhook token rotated. The previous token no longer works.';
+      notice = $t('ui_webhook_token_rotated_the_previous_token_no_l_b93ec265');
     });
   }
 
@@ -2670,7 +2685,7 @@
     if (!canManageWebhook(webhook)) return;
     const nextName = (webhookNameDrafts[webhook.id] ?? webhook.name).trim();
     if (!nextName) {
-      error = 'Webhook names cannot be blank.';
+      error = $t('ui_webhook_names_cannot_be_blank_7a077d9b');
       return;
     }
     const nextChannel =
@@ -2679,7 +2694,7 @@
       (channel) => entityRef(channel) === nextChannel
     );
     if (!targetChannel) {
-      error = 'Choose a text, announcement, or forum channel for this webhook.';
+      error = $t('ui_choose_a_text_announcement_or_forum_channel_f_9671552f');
       return;
     }
     return run(async (targetGuild, generation) => {
@@ -2694,7 +2709,7 @@
         ...webhookChannelDrafts,
         [updated.id]: `${updated.channel_id}@${updated.channel_domain}`
       };
-      notice = 'Webhook saved.';
+      notice = $t('ui_webhook_saved_11589616');
     });
   }
 
@@ -2705,12 +2720,12 @@
   ) {
     if (!file || !canManageWebhook(webhook)) return;
     if (!acceptedImageTypes.has(file.type)) {
-      error = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      error = $t('ui_choose_a_png_jpeg_gif_or_webp_image_4cef2205');
       input.value = '';
       return;
     }
     if (!file.size) {
-      error = 'Choose a non-empty image file.';
+      error = $t('ui_choose_a_non_empty_image_file_b81ea05c');
       input.value = '';
       return;
     }
@@ -2737,17 +2752,17 @@
         }
         const scanStatus = result.attachment?.scan_status ?? 'pending';
         if (['infected', 'rejected', 'failed'].includes(scanStatus)) {
-          throw new Error('The webhook avatar did not pass media safety processing.');
+          throw new Error($t('ui_the_webhook_avatar_did_not_pass_media_safety__f45f1a3f'));
         }
         await cancelableDelay(1000, signal);
       }
       if (!updated) {
-        throw new Error('Webhook avatar processing is taking longer than expected. Try again.');
+        throw new Error($t('ui_webhook_avatar_processing_is_taking_longer_th_74fad3a7'));
       }
       if (generation !== loadGeneration) return;
       webhooks = webhooks.map((item) => (item.id === updated?.id ? updated : item));
       input.value = '';
-      notice = 'Webhook avatar updated.';
+      notice = $t('ui_webhook_avatar_updated_a4a0a1f5');
     });
   }
 
@@ -2758,7 +2773,7 @@
       const updated = await deleteGuildWebhookAvatar(targetGuild, webhook);
       if (generation !== loadGeneration) return;
       webhooks = webhooks.map((item) => (item.id === updated.id ? updated : item));
-      notice = 'Webhook avatar removed.';
+      notice = $t('ui_webhook_avatar_removed_607e6eae');
     });
   }
 
@@ -2776,7 +2791,7 @@
       delete remainingChannels[webhook.id];
       webhookChannelDrafts = remainingChannels;
       revealedWebhookToken = '';
-      notice = 'Webhook deleted.';
+      notice = $t('ui_webhook_deleted_425f0b97');
     });
   }
 
@@ -2785,7 +2800,7 @@
     void openDestructiveConfirmation({
       kind: 'invite',
       target: invite,
-      title: 'Revoke invite?',
+      title: $t('ui_revoke_invite_5bb1d75b'),
       description: `Invite ${invite.code} will stop working immediately. People who already joined the guild will not be affected.`,
       confirmLabel: 'Revoke invite'
     });
@@ -2814,7 +2829,7 @@
       });
       if (generation !== loadGeneration) return;
       invites = invites.filter((item) => item.code !== invite.code);
-      notice = 'Invite revoked.';
+      notice = $t('ui_invite_revoked_48fd740c');
     });
   }
 
@@ -2858,8 +2873,7 @@
     void openDestructiveConfirmation({
       kind: 'guild-leave',
       title: `Leave ${guild.name}?`,
-      description:
-        'You will lose access to this guild and its cached remote history. You need another valid invite to return.',
+      description: $t('ui_you_will_lose_access_to_this_guild_and_its_ca_7fbdc849'),
       confirmLabel: 'Leave guild'
     });
   }
@@ -2874,8 +2888,7 @@
       kind: 'guild-transfer',
       target: user,
       title: `Transfer ownership to ${targetName}?`,
-      description:
-        'They will become the guild owner immediately. You will remain a member, but only the new owner can transfer or delete the guild.',
+      description: $t('ui_they_will_become_the_guild_owner_immediately__e1478b2f'),
       confirmLabel: 'Transfer ownership'
     });
   }
@@ -2886,8 +2899,7 @@
       kind: 'guild-delete',
       verificationText: guild.name,
       title: `Delete ${guild.name}?`,
-      description:
-        'This permanently removes the guild, its channels, messages, roles, invites, and moderation records. Remote instances will receive durable access-revocation events.',
+      description: $t('ui_this_permanently_removes_the_guild_its_channe_29a4bdc2'),
       confirmLabel: 'Delete guild'
     });
   }
@@ -2901,7 +2913,7 @@
 
   function transferConfirmedGuild(user: UserSummary) {
     return run(async (targetGuild, generation) => {
-      if (!guild?.version) throw new Error('Guild version is unavailable.');
+      if (!guild?.version) throw new Error($t('ui_guild_version_is_unavailable_3653be0a'));
       const updated = await api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}/owner`, {
         method: 'PUT',
         headers: { 'If-Match': guild.version },
@@ -2917,7 +2929,7 @@
 
   function deleteConfirmedGuild() {
     return run(async (targetGuild) => {
-      if (!guild?.version) throw new Error('Guild version is unavailable.');
+      if (!guild?.version) throw new Error($t('ui_guild_version_is_unavailable_3653be0a'));
       await api(`/guilds/${encodeURIComponent(targetGuild)}`, {
         method: 'DELETE',
         headers: { 'If-Match': guild.version }
@@ -2930,9 +2942,9 @@
     error = '';
     try {
       await navigator.clipboard.writeText(inviteUrl(invite.code));
-      notice = 'Invite link copied.';
+      notice = $t('ui_invite_link_copied_d65176d6');
     } catch {
-      error = 'Browser denied clipboard access. Allow clipboard permission and try again.';
+      error = $t('ui_browser_denied_clipboard_access_allow_clipboa_1319db32');
     }
   }
 
@@ -2941,9 +2953,9 @@
     error = '';
     try {
       await navigator.clipboard.writeText(url);
-      notice = 'Webhook URL copied.';
+      notice = $t('ui_webhook_url_copied_d08595e0');
     } catch {
-      error = 'Browser denied clipboard access. Select the webhook URL and copy it manually.';
+      error = $t('ui_browser_denied_clipboard_access_select_the_we_9a5c5b57');
     }
   }
 
@@ -3150,7 +3162,10 @@
       if (stillCurrent()) closeMemberModeration();
     } catch (caught) {
       if (!stillCurrent() || controller.signal.aborted) return;
-      error = userErrorMessage(caught, 'The moderation action could not be applied. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_the_moderation_action_could_not_be_applied_tr_f65acfb2')
+      );
     } finally {
       if (requestGeneration === memberModerationGeneration) {
         memberModerationController = null;
@@ -3182,7 +3197,7 @@
       reason: instanceBanReason,
       expiresAt,
       title: `Ban everyone from ${domain}?`,
-      description: `Every current member homed on ${domain} will be removed and that instance cannot add members${expiresAt ? ` until ${formatDateTime(expiresAt)}` : ' until this ban is removed'}. Its server will be asked to erase cached guild data, but a malicious, offline, or modified server may retain copies.`,
+      description: `Every current member homed on ${domain} will be removed and that instance cannot add members${expiresAt ? ` until ${formatDateTime(expiresAt)}` : $t('ui_until_this_ban_is_removed_7c73a1a3')}. Its server will be asked to erase cached guild data, but a malicious, offline, or modified server may retain copies.`,
       confirmLabel: 'Ban instance'
     });
   }
@@ -3254,7 +3269,7 @@
       return next.length > 0;
     } catch (caught) {
       if (generation === loadGeneration && targetGuild === guildId) {
-        error = userErrorMessage(caught, 'Could not load more members. Try again.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_more_members_try_again_e2763fe0'));
       }
       return false;
     } finally {
@@ -3288,7 +3303,7 @@
           roleMemberSearchResults = [];
           roleMemberSearchError = userErrorMessage(
             caught,
-            'Could not search guild members. Try again.'
+            $t('ui_could_not_search_guild_members_try_again_0b092cee')
           );
         })
         .finally(() => {
@@ -3349,9 +3364,13 @@
 
 <svelte:head>
   <title
-    >{channelOnly
-      ? `${selectedChannel?.name ?? 'Channel'} settings`
-      : `${guild?.name ?? 'Guild'} settings`} · Kaede Chat</title
+    >{$t('ui_value0_kaede_chat_4bf52868', {
+      value0: String(
+        channelOnly
+          ? `${selectedChannel?.name ?? 'Channel'} settings`
+          : `${guild?.name ?? 'Guild'} settings`
+      )
+    })}</title
   >
 </svelte:head>
 
@@ -3360,10 +3379,14 @@
     {#if channelOnly}
       <a class="settings-back" href={donePath()}>
         <Icon name="arrow-left" size={18} />
-        <span>Back to channel</span>
+        <span>{$t('ui_back_to_channel_5f24d648')}</span>
       </a>
       <div class="channel-settings-identity">
-        <span>{selectedChannel?.type === 4 ? 'Category' : 'Channel'}</span>
+        <span
+          >{selectedChannel?.type === 4
+            ? $t('ui_category_292c06f0')
+            : $t('ui_channel_ce4683e7')}</span
+        >
         <strong>
           {#if selectedChannel?.type !== 4}<Icon
               name={selectedChannel?.type === 2
@@ -3375,36 +3398,38 @@
                     : 'hash'}
               size={16}
             />{/if}
-          {selectedChannel?.name ?? 'Loading…'}
+          {selectedChannel?.name ?? $t('ui_loading_ba3bbbe1')}
         </strong>
       </div>
-      <nav aria-label="Channel settings sections">
+      <nav aria-label={$t('ui_channel_settings_sections_e3fa6383')}>
         {#if canEditSelectedChannel}
           <button
             class:active={channelEditorPanel === 'overview'}
             type="button"
-            onclick={() => selectChannelPanel('overview')}>Overview</button
+            onclick={() => selectChannelPanel('overview')}>{$t('ui_overview_d4b1ea57')}</button
           >
         {/if}
         {#if canEditSelectedPermissions}
           <button
             class:active={channelEditorPanel === 'permissions'}
             type="button"
-            onclick={() => selectChannelPanel('permissions')}>Permissions</button
+            onclick={() => selectChannelPanel('permissions')}
+            >{$t('ui_permissions_abccc78c')}</button
           >
         {/if}
         {#if (canCreateSelectedInvite || canEditSelectedChannel) && selectedChannel?.type !== 4}
           <button
             class:active={channelEditorPanel === 'invites'}
             type="button"
-            onclick={() => selectChannelPanel('invites')}>Invites</button
+            onclick={() => selectChannelPanel('invites')}>{$t('ui_invites_f212a985')}</button
           >
         {/if}
         {#if canAccessSelectedIntegrations && [0, 5, 15].includes(selectedChannel?.type ?? -1)}
           <button
             class:active={channelEditorPanel === 'integrations'}
             type="button"
-            onclick={() => selectChannelPanel('integrations')}>Integrations</button
+            onclick={() => selectChannelPanel('integrations')}
+            >{$t('ui_integrations_090512d9')}</button
           >
         {/if}
         {#if canEditSelectedChannel}
@@ -3414,7 +3439,9 @@
             class:active={channelEditorPanel === 'delete'}
             type="button"
             onclick={() => selectChannelPanel('delete')}
-            >Delete {selectedChannel?.type === 4 ? 'Category' : 'Channel'}</button
+            >{$t('ui_delete_value0_8782b778', {
+              value0: String(selectedChannel?.type === 4 ? 'Category' : 'Channel')
+            })}</button
           >
         {/if}
       </nav>
@@ -3424,7 +3451,7 @@
     {:else}
       <a class="settings-back" href={donePath()}>
         <Icon name="arrow-left" size={18} />
-        <span>Back to guild</span>
+        <span>{$t('ui_back_to_guild_676f45d1')}</span>
       </a>
       <div class="settings-account-mini">
         <span class="avatar avatar-small guild-avatar">
@@ -3435,54 +3462,62 @@
           {/if}
         </span>
         <span>
-          <strong>{guild?.name ?? 'Loading…'}</strong>
-          <small>{guild?.origin_domain ?? 'Guild settings'}</small>
+          <strong>{guild?.name ?? $t('ui_loading_ba3bbbe1')}</strong>
+          <small>{guild?.origin_domain ?? $t('ui_guild_settings_81f6b9fc')}</small>
         </span>
       </div>
-      <nav aria-label="Guild settings sections">
-        <p>Personal</p>
-        <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
-        <p>Guild</p>
-        <a href="#overview"><Icon name="server" size={18} />Overview</a>
+      <nav aria-label={$t('ui_guild_settings_sections_7d9ac3a7')}>
+        <p>{$t('ui_personal_845f9286')}</p>
+        <a href="#notifications"><Icon name="bell" size={18} />{$t('ui_notifications_78801183')}</a>
+        <p>{$t('ui_guild_298ffc49')}</p>
+        <a href="#overview"><Icon name="server" size={18} />{$t('ui_overview_d4b1ea57')}</a>
         {#if canAccessGuildIntegrations && guild}
-          <a href={guildIntegrationsPath(guild)}><Icon name="server" size={18} />Integrations</a>
+          <a href={guildIntegrationsPath(guild)}
+            ><Icon name="server" size={18} />{$t('ui_integrations_090512d9')}</a
+          >
         {/if}
         {#if canManageGuild && !channelOnly && guild}
           <a href={guildApplicationDirectoryPath(guild)}
-            ><Icon name="sparkles" size={18} />App Directory</a
+            ><Icon name="sparkles" size={18} />{$t('ui_app_directory_a9c3e633')}</a
           >
         {/if}
         {#if canManageRoles}
-          <a href="#roles"><Icon name="shield" size={18} />Roles</a>
+          <a href="#roles"><Icon name="shield" size={18} />{$t('ui_roles_c2533705')}</a>
         {/if}
         {#if canAccessExpressions}
-          <a href="#emoji"><span aria-hidden="true">☺</span>Emoji</a>
-          <a href="#stickers"><span aria-hidden="true">▱</span>Stickers</a>
+          <a href="#emoji"><span aria-hidden="true">☺</span>{$t('ui_emoji_61ad8976')}</a>
+          <a href="#stickers"><span aria-hidden="true">▱</span>{$t('ui_stickers_dbf9cbbe')}</a>
         {/if}
         {#if hasPermission(Permission.MANAGE_AUTO_MODERATION)}
-          <a href="#automod"><Icon name="shield" size={18} />AutoMod</a>
+          <a href="#automod"><Icon name="shield" size={18} />{$t('ui_automod_a3ed9717')}</a>
         {/if}
         {#if canKickMembers || canBanMembers}
-          <a href="#bulk-moderation"><Icon name="users" size={18} />Bulk moderation</a>
+          <a href="#bulk-moderation"
+            ><Icon name="users" size={18} />{$t('ui_bulk_moderation_7b53e29a')}</a
+          >
         {/if}
         {#if canAccessExpressions}
-          <a href="#soundboard"><span aria-hidden="true">♫</span>Soundboard</a>
+          <a href="#soundboard"><span aria-hidden="true">♫</span>{$t('ui_soundboard_07ff885c')}</a>
         {/if}
         {#if canViewAuditLog}
-          <a href="#audit-log"><Icon name="clock" size={18} />Audit log</a>
+          <a href="#audit-log"><Icon name="clock" size={18} />{$t('ui_audit_log_e4d36f9a')}</a>
         {/if}
         {#if canViewMembers}
-          <p>Community</p>
-          <a href="#members"><Icon name="users" size={18} />Members</a>
+          <p>{$t('ui_community_bb501d78')}</p>
+          <a href="#members"><Icon name="users" size={18} />{$t('ui_members_1044a4c0')}</a>
         {/if}
         {#if canAccessInvites}
-          <a href="#invites"><Icon name="globe" size={18} />Invites</a>
+          <a href="#invites"><Icon name="globe" size={18} />{$t('ui_invites_f212a985')}</a>
         {/if}
-        <p>Membership</p>
-        <a href="#guild-lifecycle"><Icon name="logout" size={18} />Guild access</a>
+        <p>{$t('ui_membership_9feceb93')}</p>
+        <a href="#guild-lifecycle"
+          ><Icon name="logout" size={18} />{$t('ui_guild_access_dad929fc')}</a
+        >
       </nav>
       <span class="settings-instance-label">
-        {isLocalGuild ? 'Managed on this instance' : 'Managed by its home instance'}
+        {isLocalGuild
+          ? $t('ui_managed_on_this_instance_c5d29403')
+          : $t('ui_managed_by_its_home_instance_4dbd2cc4')}
       </span>
     {/if}
   </aside>
@@ -3491,19 +3526,27 @@
     <header class="settings-page-heading">
       <div>
         <p class="eyebrow">
-          {channelOnly ? (selectedChannel?.name ?? 'Channel') : 'Guild administration'}
+          {channelOnly
+            ? (selectedChannel?.name ?? $t('ui_channel_ce4683e7'))
+            : $t('ui_guild_administration_8f490092')}
         </p>
-        <h1>{channelOnly ? channelPanelTitle(channelEditorPanel) : (guild?.name ?? 'Settings')}</h1>
+        <h1>
+          {channelOnly
+            ? channelPanelTitle(channelEditorPanel)
+            : (guild?.name ?? $t('ui_settings_74a883a0'))}
+        </h1>
         <p>
           {channelOnly
             ? channelPanelDescription(channelEditorPanel)
-            : 'Shape the spaces, roles, and invitations that hold this community together.'}
+            : $t('ui_shape_the_spaces_roles_and_invitations_that_h_752d92c7')}
         </p>
       </div>
       <a
         class="icon-button settings-close"
         href={donePath()}
-        aria-label={channelOnly ? 'Close channel settings' : 'Close guild settings'}>×</a
+        aria-label={channelOnly
+          ? $t('ui_close_channel_settings_c4f98234')
+          : $t('ui_close_guild_settings_ca407616')}>×</a
       >
     </header>
 
@@ -3513,15 +3556,15 @@
     <Toast message={notice} onDismiss={() => (notice = '')} />
 
     {#if loading}
-      <div class="settings-loading" aria-label="Loading guild settings">
+      <div class="settings-loading" aria-label={$t('ui_loading_guild_settings_c0d32e73')}>
         <span></span><span></span><span></span>
       </div>
     {:else if !guild}
       <section class="empty-state">
         <span><Icon name="server" size={28} /></span>
-        <h2>Guild settings are unavailable</h2>
-        <p>Return to Kaede and try opening this guild again.</p>
-        <a class="primary-button" href={resolve('/home')}>Return home</a>
+        <h2>{$t('ui_guild_settings_are_unavailable_a1a7e63e')}</h2>
+        <p>{$t('ui_return_to_kaede_and_try_opening_this_guild_ag_14a2e38e')}</p>
+        <a class="primary-button" href={resolve('/home')}>{$t('ui_return_home_bbcc935e')}</a>
       </section>
     {:else}
       {#if !channelOnly}
@@ -3529,8 +3572,8 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="bell" /></span>
             <div>
-              <h2>Notifications</h2>
-              <p>Choose which messages from this guild can send you a notification.</p>
+              <h2>{$t('ui_notifications_78801183')}</h2>
+              <p>{$t('ui_choose_which_messages_from_this_guild_can_sen_b6a7ec94')}</p>
             </div>
           </div>
           <div class="settings-card">
@@ -3540,8 +3583,8 @@
                 class="toggle-row notification-level-row"
               >
                 <span>
-                  <strong>All messages</strong>
-                  <small>Notify you whenever a message is sent in a channel you can see.</small>
+                  <strong>{$t('ui_all_messages_5eb8f655')}</strong>
+                  <small>{$t('ui_notify_you_whenever_a_message_is_sent_in_a_ch_7b46fbb3')}</small>
                 </span>
                 <input
                   type="radio"
@@ -3557,8 +3600,8 @@
                 class="toggle-row notification-level-row"
               >
                 <span>
-                  <strong>Mentions only</strong>
-                  <small>Notify you only when a message directly mentions you.</small>
+                  <strong>{$t('ui_mentions_only_78732e1d')}</strong>
+                  <small>{$t('ui_notify_you_only_when_a_message_directly_menti_902bdf7e')}</small>
                 </span>
                 <input
                   type="radio"
@@ -3574,8 +3617,8 @@
                 class="toggle-row notification-level-row"
               >
                 <span>
-                  <strong>Nothing</strong>
-                  <small>Do not send notifications for messages in this guild.</small>
+                  <strong>{$t('ui_nothing_67e1bca0')}</strong>
+                  <small>{$t('ui_do_not_send_notifications_for_messages_in_thi_dd8dc386')}</small>
                 </span>
                 <input
                   type="radio"
@@ -3588,10 +3631,10 @@
               </label>
             </div>
             <p class="settings-helper">
-              Notifications must also be enabled in <a href={resolve('/settings#notifications')}
-                >User Settings</a
-              >. The preference syncs across the web, desktop, and mobile clients signed in to your
-              account.
+              {$t('ui_notifications_must_also_be_enabled_in_ea8e841d')}
+              <a href={resolve('/settings#notifications')}>{$t('ui_user_settings_818ed0c8')}</a>{$t(
+                'ui_the_preference_syncs_across_the_web_desktop_a_30f07ec6'
+              )}
             </p>
           </div>
         </section>
@@ -3600,17 +3643,17 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="server" /></span>
             <div>
-              <h2>Overview</h2>
-              <p>The public name and description people see when they discover this guild.</p>
+              <h2>{$t('ui_overview_d4b1ea57')}</h2>
+              <p>{$t('ui_the_public_name_and_description_people_see_wh_01358240')}</p>
             </div>
           </div>
 
           {#if !isLocalGuild}
             <div class="notice-banner info-banner">
               <Icon name="globe" size={18} />
-              This guild is hosted by <strong>{guild.origin_domain}</strong>. Changes are forwarded
-              there and your current membership, permissions, and resource versions are
-              re-authorized before they are applied.
+              {$t('ui_this_guild_is_hosted_by_0b1ebe89')} <strong>{guild.origin_domain}</strong>{$t(
+                'ui_changes_are_forwarded_there_and_your_current__1021c4b9'
+              )}
             </div>
           {/if}
 
@@ -3633,7 +3676,7 @@
               <div class="profile-identity">
                 <strong>{name || guild.name}</strong>
                 <span>{guild.origin_domain}</span>
-                <p>{description || 'No description yet.'}</p>
+                <p>{description || $t('ui_no_description_yet_6d962a3d')}</p>
               </div>
             </div>
           </div>
@@ -3642,12 +3685,12 @@
             <div class="settings-card">
               <div class="settings-card-row">
                 <div>
-                  <strong>Guild images</strong>
-                  <p>PNG, JPEG, GIF, or WebP. Files are scanned before they become public.</p>
+                  <strong>{$t('ui_guild_images_5f5c4a12')}</strong>
+                  <p>{$t('ui_png_jpeg_gif_or_webp_files_are_scanned_before_da72aea4')}</p>
                 </div>
                 <div class="profile-media-actions">
                   <label class="secondary-button">
-                    <Icon name="server" size={16} />Change icon
+                    <Icon name="server" size={16} />{$t('ui_change_icon_87f2c4e6')}
                     <input
                       class="visually-hidden"
                       type="file"
@@ -3667,11 +3710,11 @@
                       disabled={busy}
                       onclick={() => void removeGuildAsset('icon')}
                     >
-                      <Icon name="trash" size={16} />Remove icon
+                      <Icon name="trash" size={16} />{$t('ui_remove_icon_93d6de71')}
                     </button>
                   {/if}
                   <label class="secondary-button">
-                    <Icon name="image" size={16} />Change banner
+                    <Icon name="image" size={16} />{$t('ui_change_banner_6ca19843')}
                     <input
                       class="visually-hidden"
                       type="file"
@@ -3691,7 +3734,7 @@
                       disabled={busy}
                       onclick={() => void removeGuildAsset('banner')}
                     >
-                      <Icon name="trash" size={16} />Remove banner
+                      <Icon name="trash" size={16} />{$t('ui_remove_banner_0f667465')}
                     </button>
                   {/if}
                 </div>
@@ -3707,7 +3750,7 @@
                     <span>{guildAssetProgress}%</span>
                   {:else}
                     <progress aria-label={`Scanning guild ${guildAssetKind}`}></progress>
-                    <span>Scanning…</span>
+                    <span>{$t('ui_scanning_38d96da6')}</span>
                   {/if}
                 </div>
               {/if}
@@ -3725,8 +3768,8 @@
             }}
           >
             <label class="form-field">
-              <span>Guild name</span>
-              <small>2–100 characters</small>
+              <span>{$t('ui_guild_name_4bffa81b')}</span>
+              <small>{$t('ui_2_100_characters_aaae248a')}</small>
               <input
                 bind:value={name}
                 minlength="2"
@@ -3736,46 +3779,40 @@
               />
             </label>
             <label class="form-field">
-              <span>Description</span>
+              <span>{$t('ui_description_526e0087')}</span>
               <small>{description.length}/500</small>
               <textarea
                 bind:value={description}
                 maxlength="500"
                 rows="4"
                 disabled={!canManageGuild}
-                placeholder="What brings this community together?"
+                placeholder={$t('ui_what_brings_this_community_together_8fe5bcff')}
               ></textarea>
             </label>
             <div class="settings-card-row history-policy-row">
               <div>
-                <strong>Federated message history</strong>
-                <p>
-                  Controls the default for remote members. A member must also have View channel and
-                  Read message history permission. Channels can override this default.
-                </p>
+                <strong>{$t('ui_federated_message_history_4171dae9')}</strong>
+                <p>{$t('ui_controls_the_default_for_remote_members_a_mem_a722f6a0')}</p>
               </div>
               <label class="form-field compact-field policy-select">
-                <span>Guild default</span>
+                <span>{$t('ui_guild_default_1ef8576b')}</span>
                 <select bind:value={guildHistoryPolicy} disabled={!canManageGuild || busy}>
-                  <option value="disabled">Do not export history</option>
-                  <option value="full_retained">Export retained history</option>
+                  <option value="disabled">{$t('ui_do_not_export_history_efd17f23')}</option>
+                  <option value="full_retained">{$t('ui_export_retained_history_a4526eb4')}</option>
                 </select>
               </label>
             </div>
             {#if guildHistoryPolicy === 'full_retained'}
               <div class="notice-banner warning-banner" role="note">
                 <Icon name="globe" size={18} />
-                <span>
-                  Remote instances receive their own copy of permitted messages and attachments.
-                  Kaede asks them to purge that copy when access is revoked, but deletion cannot be
-                  guaranteed if a remote operator is malicious, offline, or has modified their
-                  server.
-                </span>
+                <span> {$t('ui_remote_instances_receive_their_own_copy_of_pe_173d38d8')} </span>
               </div>
             {/if}
             {#if canManageGuild}
               <div class="form-actions">
-                <button class="primary-button" disabled={busy}>Save overview</button>
+                <button class="primary-button" disabled={busy}
+                  >{$t('ui_save_overview_1b6df9ef')}</button
+                >
               </div>
             {/if}
           </form>
@@ -3787,17 +3824,15 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="hash" /></span>
             <div>
-              <h2>Channels</h2>
-              <p>
-                Edit channel details here. Reorder and reparent channels from the guild sidebar.
-              </p>
+              <h2>{$t('ui_channels_4c8906cf')}</h2>
+              <p>{$t('ui_edit_channel_details_here_reorder_and_reparen_c7d6a5b5')}</p>
             </div>
           </div>
           <div class="settings-split">
             <div class="settings-list-panel">
               <div class="settings-list-heading">
-                <strong>Channel list</strong>
-                <a href={donePath()}>Reorder in guild</a>
+                <strong>{$t('ui_channel_list_cc41e005')}</strong>
+                <a href={donePath()}>{$t('ui_reorder_in_guild_3217ca75')}</a>
               </div>
               {#each channelGroups as group (group.key)}
                 {#if group.category}
@@ -3844,18 +3879,27 @@
               {#if selectedChannel}
                 <div class="editor-heading">
                   <div>
-                    <span>{selectedChannel.type === 4 ? 'Category' : 'Channel'}</span>
+                    <span
+                      >{selectedChannel.type === 4
+                        ? $t('ui_category_292c06f0')
+                        : $t('ui_channel_ce4683e7')}</span
+                    >
                     <h3>{selectedChannel.name}</h3>
                   </div>
                   <code>{selectedChannel.id}</code>
                 </div>
-                <div class="editor-tabs" role="tablist" aria-label="Channel settings">
+                <div
+                  class="editor-tabs"
+                  role="tablist"
+                  aria-label={$t('ui_channel_settings_afc219f2')}
+                >
                   <button
                     class:active={channelEditorPanel === 'overview'}
                     type="button"
                     role="tab"
                     aria-selected={channelEditorPanel === 'overview'}
-                    onclick={() => selectChannelPanel('overview')}>Overview</button
+                    onclick={() => selectChannelPanel('overview')}
+                    >{$t('ui_overview_d4b1ea57')}</button
                   >
                   {#if canEditSelectedPermissions}
                     <button
@@ -3863,7 +3907,8 @@
                       type="button"
                       role="tab"
                       aria-selected={channelEditorPanel === 'permissions'}
-                      onclick={() => selectChannelPanel('permissions')}>Permissions</button
+                      onclick={() => selectChannelPanel('permissions')}
+                      >{$t('ui_permissions_abccc78c')}</button
                     >
                   {/if}
                   {#if (canCreateSelectedInvite || canEditSelectedChannel) && selectedChannel.type !== 4}
@@ -3872,7 +3917,8 @@
                       type="button"
                       role="tab"
                       aria-selected={channelEditorPanel === 'invites'}
-                      onclick={() => selectChannelPanel('invites')}>Invites</button
+                      onclick={() => selectChannelPanel('invites')}
+                      >{$t('ui_invites_f212a985')}</button
                     >
                   {/if}
                   {#if canAccessSelectedIntegrations && [0, 5, 15].includes(selectedChannel.type)}
@@ -3881,7 +3927,8 @@
                       type="button"
                       role="tab"
                       aria-selected={channelEditorPanel === 'integrations'}
-                      onclick={() => selectChannelPanel('integrations')}>Integrations</button
+                      onclick={() => selectChannelPanel('integrations')}
+                      >{$t('ui_integrations_090512d9')}</button
                     >
                   {/if}
                   {#if canDeleteSelectedChannel}
@@ -3891,7 +3938,8 @@
                       type="button"
                       role="tab"
                       aria-selected={channelEditorPanel === 'delete'}
-                      onclick={() => selectChannelPanel('delete')}>Delete</button
+                      onclick={() => selectChannelPanel('delete')}
+                      >{$t('ui_delete_e2d0a549')}</button
                     >
                   {/if}
                 </div>
@@ -3904,33 +3952,39 @@
                     }}
                   >
                     <label class="form-field compact-field">
-                      <span>Name</span>
+                      <span>{$t('ui_name_dcd1d522')}</span>
                       <input bind:value={channelName} maxlength="100" required disabled={busy} />
                     </label>
                     {#if selectedChannel.type !== 4}
                       <label class="form-field compact-field">
-                        <span>{selectedChannel.type === 15 ? 'Post Guidelines' : 'Topic'}</span>
+                        <span
+                          >{selectedChannel.type === 15
+                            ? $t('ui_post_guidelines_91bdbfbb')
+                            : $t('ui_topic_7e61847d')}</span
+                        >
                         <textarea
                           bind:value={channelTopic}
                           maxlength={selectedChannel.type === 15 ? 4096 : 1024}
                           rows="3"
                           placeholder={selectedChannel.type === 15
-                            ? 'Help members understand what to post here.'
-                            : 'What belongs in this channel?'}
+                            ? $t('ui_help_members_understand_what_to_post_here_1cdc0d9c')
+                            : $t('ui_what_belongs_in_this_channel_99732b14')}
                           disabled={busy}
                         ></textarea>
                       </label>
                       {#if selectedChannel.type === 15}
                         <fieldset class="forum-settings-group">
-                          <legend>Tags</legend>
-                          <small>Members can apply up to five tags to a post.</small>
+                          <legend>{$t('ui_tags_1331275b')}</legend>
+                          <small
+                            >{$t('ui_members_can_apply_up_to_five_tags_to_a_post_6120dd04')}</small
+                          >
                           {#each channelForumTags as tag, index (`${tag.id ?? 'new'}:${index}`)}
                             <div class="forum-tag-editor">
                               <input
                                 value={tag.emoji_name ?? ''}
                                 maxlength="64"
                                 aria-label={`Emoji for ${tag.name}`}
-                                placeholder="Emoji"
+                                placeholder={$t('ui_emoji_61ad8976')}
                                 disabled={busy}
                                 oninput={(event) =>
                                   updateForumTag(index, {
@@ -3941,7 +3995,7 @@
                               <input
                                 value={tag.name}
                                 maxlength="20"
-                                aria-label="Tag name"
+                                aria-label={$t('ui_tag_name_1ace926b')}
                                 required
                                 disabled={busy}
                                 oninput={(event) =>
@@ -3957,14 +4011,15 @@
                                       moderated: event.currentTarget.checked
                                     })}
                                 />
-                                Moderators only
+                                {$t('ui_moderators_only_100d2002')}
                               </label>
                               <button
                                 class="quiet-button"
                                 type="button"
                                 disabled={busy}
                                 aria-label={`Remove ${tag.name}`}
-                                onclick={() => removeForumTag(index)}>Remove</button
+                                onclick={() => removeForumTag(index)}
+                                >{$t('ui_remove_c3812fc4')}</button
                               >
                             </div>
                           {/each}
@@ -3973,68 +4028,74 @@
                               <input
                                 bind:value={newForumTagName}
                                 maxlength="20"
-                                placeholder="New tag"
+                                placeholder={$t('ui_new_tag_609117d5')}
                                 disabled={busy}
                               />
                               <button
                                 class="secondary-button"
                                 type="button"
                                 disabled={busy || !newForumTagName.trim()}
-                                onclick={addForumTag}>Add tag</button
+                                onclick={addForumTag}>{$t('ui_add_tag_3e10b08c')}</button
                               >
                             </div>
                           {/if}
                         </fieldset>
                         <label class="form-field compact-field">
-                          <span>Default reaction emoji</span>
+                          <span>{$t('ui_default_reaction_emoji_cfae845e')}</span>
                           <input
                             value={channelForumReaction}
                             maxlength="64"
-                            placeholder="None"
+                            placeholder={$t('ui_none_dc937b59')}
                             disabled={busy}
                             oninput={editForumDefaultReaction}
                           />
                         </label>
                         <label class="form-field compact-field">
-                          <span>Default sort order</span>
+                          <span>{$t('ui_default_sort_order_91ca6695')}</span>
                           <select bind:value={channelForumSort} disabled={busy}>
-                            <option value={0}>Recently Active</option>
-                            <option value={1}>Date Posted</option>
+                            <option value={0}>{$t('ui_recently_active_9068c1c7')}</option>
+                            <option value={1}>{$t('ui_date_posted_1772fef6')}</option>
                           </select>
                         </label>
                         <label class="form-field compact-field">
-                          <span>Default layout</span>
+                          <span>{$t('ui_default_layout_8c43d9f6')}</span>
                           <select bind:value={channelForumLayout} disabled={busy}>
-                            <option value={0}>Not set</option>
-                            <option value={1}>List View</option>
-                            <option value={2}>Gallery View</option>
+                            <option value={0}>{$t('ui_not_set_4895f731')}</option>
+                            <option value={1}>{$t('ui_list_view_48627bdf')}</option>
+                            <option value={2}>{$t('ui_gallery_view_62306a16')}</option>
                           </select>
                         </label>
                         <label class="form-field compact-field">
-                          <span>Hide posts after inactivity</span>
+                          <span>{$t('ui_hide_posts_after_inactivity_dfe364b5')}</span>
                           <select bind:value={channelForumArchive} disabled={busy}>
-                            <option value={60}>1 hour</option>
-                            <option value={1440}>24 hours</option>
-                            <option value={4320}>3 days</option>
-                            <option value={10080}>1 week</option>
+                            <option value={60}>{$t('ui_1_hour_f8b8883f')}</option>
+                            <option value={1440}>{$t('ui_24_hours_f0514e8d')}</option>
+                            <option value={4320}>{$t('ui_3_days_36071944')}</option>
+                            <option value={10080}>{$t('ui_1_week_c8cc5223')}</option>
                           </select>
                         </label>
                         <label class="form-field compact-field">
-                          <span>Default post slowmode</span>
+                          <span>{$t('ui_default_post_slowmode_2474deff')}</span>
                           <select bind:value={channelForumSlowmode} disabled={busy}>
-                            <option value={0}>Off</option>
-                            <option value={5}>5 seconds</option>
-                            <option value={10}>10 seconds</option>
-                            <option value={30}>30 seconds</option>
-                            <option value={60}>1 minute</option>
-                            <option value={300}>5 minutes</option>
-                            <option value={3600}>1 hour</option>
+                            <option value={0}>{$t('ui_off_ca7981b4')}</option>
+                            <option value={5}>{$t('ui_5_seconds_be553746')}</option>
+                            <option value={10}>{$t('ui_10_seconds_f78b958d')}</option>
+                            <option value={30}>{$t('ui_30_seconds_f3d19541')}</option>
+                            <option value={60}>{$t('ui_1_minute_e67b6f61')}</option>
+                            <option value={300}>{$t('ui_5_minutes_3170543c')}</option>
+                            <option value={3600}>{$t('ui_1_hour_f8b8883f')}</option>
                           </select>
                         </label>
                         <label class="settings-toggle-row">
                           <span>
-                            <strong>Require people to select tags before posting</strong>
-                            <small>New posts must include at least one tag.</small>
+                            <strong
+                              >{$t(
+                                'ui_require_people_to_select_tags_before_posting_578b963e'
+                              )}</strong
+                            >
+                            <small
+                              >{$t('ui_new_posts_must_include_at_least_one_tag_ae1fb202')}</small
+                            >
                           </span>
                           <input
                             type="checkbox"
@@ -4044,14 +4105,13 @@
                         </label>
                         <label class="settings-toggle-row">
                           <span>
-                            <strong>Require end-to-end encryption for post replies</strong>
+                            <strong
+                              >{$t(
+                                'ui_require_end_to_end_encryption_for_post_replie_a72e5f95'
+                              )}</strong
+                            >
                             <small>
-                              Titles, starter messages, title search, and starter previews remain
-                              plaintext. This permanent policy applies only to posts created after
-                              it is enabled. Each future post secures its own subsequent replies;
-                              webhooks, reply search and previews, and server scanning are
-                              unavailable there. Verified participant-mode apps require an explicit
-                              per-post grant.
+                              {$t('ui_titles_starter_messages_title_search_and_star_9b8d695d')}
                             </small>
                           </span>
                           <input
@@ -4066,54 +4126,56 @@
                       {/if}
                       {#if selectedChannel.type === 0 || selectedChannel.type === 5}
                         <label class="form-field compact-field">
-                          <span>Default Auto-Archive Duration</span>
+                          <span>{$t('ui_default_auto_archive_duration_f79f2cf7')}</span>
                           <select bind:value={channelForumArchive} disabled={busy}>
-                            <option value={60}>1 hour</option>
-                            <option value={1440}>24 hours</option>
-                            <option value={4320}>3 days</option>
-                            <option value={10080}>1 week</option>
+                            <option value={60}>{$t('ui_1_hour_f8b8883f')}</option>
+                            <option value={1440}>{$t('ui_24_hours_f0514e8d')}</option>
+                            <option value={4320}>{$t('ui_3_days_36071944')}</option>
+                            <option value={10080}>{$t('ui_1_week_c8cc5223')}</option>
                           </select>
                         </label>
                         {#if selectedChannel.type === 0}
                           <label class="form-field compact-field">
-                            <span>Default Thread Slowmode</span>
+                            <span>{$t('ui_default_thread_slowmode_6151d674')}</span>
                             <select bind:value={channelForumSlowmode} disabled={busy}>
-                              <option value={0}>Off</option>
-                              <option value={5}>5 seconds</option>
-                              <option value={10}>10 seconds</option>
-                              <option value={30}>30 seconds</option>
-                              <option value={60}>1 minute</option>
-                              <option value={300}>5 minutes</option>
-                              <option value={3600}>1 hour</option>
+                              <option value={0}>{$t('ui_off_ca7981b4')}</option>
+                              <option value={5}>{$t('ui_5_seconds_be553746')}</option>
+                              <option value={10}>{$t('ui_10_seconds_f78b958d')}</option>
+                              <option value={30}>{$t('ui_30_seconds_f3d19541')}</option>
+                              <option value={60}>{$t('ui_1_minute_e67b6f61')}</option>
+                              <option value={300}>{$t('ui_5_minutes_3170543c')}</option>
+                              <option value={3600}>{$t('ui_1_hour_f8b8883f')}</option>
                             </select>
                           </label>
                         {/if}
                         <label class="form-field compact-field">
-                          <span>Federated history</span>
+                          <span>{$t('ui_federated_history_5190aa44')}</span>
                           <small>
-                            Applies only after the member also passes this channel’s View channel
-                            and Read message history permissions.
+                            {$t('ui_applies_only_after_the_member_also_passes_thi_8e8d143c')}
                           </small>
                           <select bind:value={channelHistoryPolicy} disabled={busy}>
-                            <option value="inherit">Use guild default</option>
-                            <option value="disabled">Never export this channel</option>
-                            <option value="full_retained">Export retained history</option>
+                            <option value="inherit">{$t('ui_use_guild_default_64957975')}</option>
+                            <option value="disabled"
+                              >{$t('ui_never_export_this_channel_b99f29eb')}</option
+                            >
+                            <option value="full_retained"
+                              >{$t('ui_export_retained_history_a4526eb4')}</option
+                            >
                           </select>
                         </label>
                         {#if channelHistoryPolicy === 'full_retained'}
                           <div class="notice-banner warning-banner compact-warning" role="note">
                             <Icon name="globe" size={17} />
-                            Remote deletion is requested on access loss, but cannot be guaranteed.
+                            {$t('ui_remote_deletion_is_requested_on_access_loss_b_0e264b13')}
                           </div>
                         {/if}
                       {/if}
                       {#if selectedChannel.type === 0 || selectedChannel.type === 5 || selectedChannel.type === 15}
                         <label class="settings-toggle-row">
                           <span>
-                            <strong>Age-restricted channel</strong>
+                            <strong>{$t('ui_age_restricted_channel_d51f5d19')}</strong>
                             <small>
-                              Only age-assured adult members can use age-restricted application
-                              commands here. Threads inherit this setting from their parent.
+                              {$t('ui_only_age_assured_adult_members_can_use_age_re_7b778f17')}
                             </small>
                           </span>
                           <input type="checkbox" bind:checked={channelNsfw} disabled={busy} />
@@ -4121,28 +4183,27 @@
                       {/if}
                       {#if selectedChannel.type === 2 || selectedChannel.type === 13}
                         <fieldset class="forum-settings-group">
-                          <legend>Voice quality and capacity</legend>
+                          <legend>{$t('ui_voice_quality_and_capacity_75eeed61')}</legend>
                           <small>
-                            These limits apply to every Web, Desktop, Mobile, and bot connection.
-                            Stage channels use the same authority-advertised media regions.
+                            {$t('ui_these_limits_apply_to_every_web_desktop_mobil_a25d5cf0')}
                           </small>
                           <div class="forum-tag-add">
                             <label class="form-field compact-field">
-                              <span>Bitrate</span>
+                              <span>{$t('ui_bitrate_0b2b7f69')}</span>
                               <select bind:value={channelBitrate} disabled={busy}>
-                                <option value={8000}>8 kbps</option>
-                                <option value={32000}>32 kbps</option>
-                                <option value={64000}>64 kbps</option>
+                                <option value={8000}>{$t('ui_8_kbps_fa9b273b')}</option>
+                                <option value={32000}>{$t('ui_32_kbps_bcf057be')}</option>
+                                <option value={64000}>{$t('ui_64_kbps_e38d61b0')}</option>
                                 {#if selectedChannel.type === 2}
-                                  <option value={96000}>96 kbps</option>
-                                  <option value={128000}>128 kbps</option>
-                                  <option value={256000}>256 kbps</option>
-                                  <option value={384000}>384 kbps</option>
+                                  <option value={96000}>{$t('ui_96_kbps_45220020')}</option>
+                                  <option value={128000}>{$t('ui_128_kbps_a6920d5b')}</option>
+                                  <option value={256000}>{$t('ui_256_kbps_e4950395')}</option>
+                                  <option value={384000}>{$t('ui_384_kbps_728550c6')}</option>
                                 {/if}
                               </select>
                             </label>
                             <label class="form-field compact-field">
-                              <span>User limit</span>
+                              <span>{$t('ui_user_limit_93ca90db')}</span>
                               <input
                                 type="number"
                                 min="0"
@@ -4150,19 +4211,21 @@
                                 bind:value={channelUserLimit}
                                 disabled={busy}
                               />
-                              <small>0 means no explicit limit.</small>
+                              <small>{$t('ui_0_means_no_explicit_limit_25da0b40')}</small>
                             </label>
                           </div>
                           <label class="form-field compact-field">
-                            <span>Region Override</span>
+                            <span>{$t('ui_region_override_556de8e1')}</span>
                             <select
                               bind:value={channelRtcRegion}
                               disabled={busy || !canEditSelectedChannel}
                             >
-                              <option value="">Automatic</option>
+                              <option value="">{$t('ui_automatic_d461a493')}</option>
                               {#if channelRtcRegion && !channelVoiceRegions.some((region) => region.id === channelRtcRegion)}
                                 <option value={channelRtcRegion}
-                                  >{channelRtcRegion} (unavailable)</option
+                                  >{$t('ui_value0_unavailable_59cf7d87', {
+                                    value0: String(channelRtcRegion)
+                                  })}</option
                                 >
                               {/if}
                               {#each channelVoiceRegions as region (region.id)}
@@ -4171,14 +4234,13 @@
                                   disabled={region.deprecated && region.id !== channelRtcRegion}
                                 >
                                   {region.name}{region.optimal
-                                    ? ' — Recommended'
-                                    : ''}{region.deprecated ? ' — Deprecated' : ''}
+                                    ? $t('ui_recommended_d966cec0')
+                                    : ''}{region.deprecated ? $t('ui_deprecated_db5b5b88') : ''}
                                 </option>
                               {/each}
                             </select>
                             <small>
-                              Automatic chooses the lowest-latency region. The catalog comes from
-                              this server's authority, including for federated servers.
+                              {$t('ui_automatic_chooses_the_lowest_latency_region_t_7a5d9278')}
                             </small>
                             {#if channelVoiceRegionsError}
                               <small class="field-error">{channelVoiceRegionsError}</small>
@@ -4190,12 +4252,12 @@
                         <div class="notice-banner compact-warning" role="note">
                           <Icon name="lock" size={17} />
                           <div>
-                            <strong>End-to-end encryption</strong>
+                            <strong>{$t('ui_end_to_end_encryption_1b3f0f02')}</strong>
                             {#if selectedChannel.encryption_mode === 'e2ee'}
                               <p>
                                 {selectedChannel.encryption_state === 'rekeying'
-                                  ? 'Paused after a membership change. Secure the current member list before messaging resumes.'
-                                  : 'On. Participant identities remain unverified until members compare the safety number.'}
+                                  ? $t('ui_paused_after_a_membership_change_secure_the_c_9b39a5fe')
+                                  : $t('ui_on_participant_identities_remain_unverified_u_04ef8c30')}
                               </p>
                               {#if channelSafetyNumber}
                                 <code class="e2ee-safety-number">{channelSafetyNumber}</code>
@@ -4205,7 +4267,8 @@
                                   class="secondary-button"
                                   type="button"
                                   disabled={busy}
-                                  onclick={verifyChannelSafetyNumber}>Show safety number</button
+                                  onclick={verifyChannelSafetyNumber}
+                                  >{$t('ui_show_safety_number_e3744d1f')}</button
                                 >
                               {/if}
                               {#if selectedChannel.encryption_state === 'rekeying'}
@@ -4213,49 +4276,53 @@
                                   class="secondary-button"
                                   type="button"
                                   disabled={busy}
-                                  onclick={enableChannelEncryption}>Secure current members</button
+                                  onclick={enableChannelEncryption}
+                                  >{$t('ui_secure_current_members_e92c2946')}</button
                                 >
                               {/if}
                             {:else if e2eeActivationEnabled}
                               <p>
                                 {selectedChannel.type === 2
-                                  ? 'Optional and permanent. Encrypts microphone, camera, and screen-share frames. Unsupported devices cannot join, and key loss prevents access.'
-                                  : 'Optional and permanent. Disables server search, previews, and file scanning. Verified app and webhook devices receive no access automatically and require an explicit future-only grant and rekey. Key loss can make history unrecoverable.'}
+                                  ? $t('ui_optional_and_permanent_encrypts_microphone_ca_7d76cf1e')
+                                  : $t('ui_optional_and_permanent_disables_server_search_cb244c02')}
                               </p>
                               <button
                                 class="secondary-button"
                                 type="button"
                                 disabled={busy}
-                                onclick={enableChannelEncryption}>Turn on encryption</button
+                                onclick={enableChannelEncryption}
+                                >{$t('ui_turn_on_encryption_9eff34df')}</button
                               >
                             {/if}
                           </div>
                         </div>
                       {/if}
                       <label class="form-field compact-field">
-                        <span>Category</span>
+                        <span>{$t('ui_category_292c06f0')}</span>
                         <select bind:value={channelParent} disabled={busy}>
-                          <option value="">No category</option>
+                          <option value="">{$t('ui_no_category_b91b9cac')}</option>
                           {#each editableChannelParents(selectedChannel) as category (entityKey(category))}
                             <option value={entityKey(category)}>{category.name}</option>
                           {/each}
                         </select>
                       </label>
                       <label class="form-field compact-field">
-                        <span>Slowmode</span>
+                        <span>{$t('ui_slowmode_b529fb9f')}</span>
                         <select bind:value={channelSlowmode} disabled={busy}>
-                          <option value={0}>Off</option>
-                          <option value={5}>5 seconds</option>
-                          <option value={10}>10 seconds</option>
-                          <option value={30}>30 seconds</option>
-                          <option value={60}>1 minute</option>
-                          <option value={300}>5 minutes</option>
-                          <option value={3600}>1 hour</option>
+                          <option value={0}>{$t('ui_off_ca7981b4')}</option>
+                          <option value={5}>{$t('ui_5_seconds_be553746')}</option>
+                          <option value={10}>{$t('ui_10_seconds_f78b958d')}</option>
+                          <option value={30}>{$t('ui_30_seconds_f3d19541')}</option>
+                          <option value={60}>{$t('ui_1_minute_e67b6f61')}</option>
+                          <option value={300}>{$t('ui_5_minutes_3170543c')}</option>
+                          <option value={3600}>{$t('ui_1_hour_f8b8883f')}</option>
                         </select>
                       </label>
                     {/if}
                     <div class="form-actions">
-                      <button class="primary-button" disabled={busy}>Save channel</button>
+                      <button class="primary-button" disabled={busy}
+                        >{$t('ui_save_channel_694a13e9')}</button
+                      >
                     </div>
                   </form>
                 {/if}
@@ -4265,12 +4332,11 @@
                     aria-labelledby="channel-permissions-title"
                   >
                     <div>
-                      <span>Access control</span>
-                      <h4 id="channel-permissions-title">Channel permissions</h4>
-                      <p>
-                        Override a role or member for this channel. Inherit uses the guild role
-                        value.
-                      </p>
+                      <span>{$t('ui_access_control_0bf1d245')}</span>
+                      <h4 id="channel-permissions-title">
+                        {$t('ui_channel_permissions_0f2de6e0')}
+                      </h4>
+                      <p>{$t('ui_override_a_role_or_member_for_this_channel_in_74c822aa')}</p>
                     </div>
                     {#if selectedChannel.parent_id}
                       <div
@@ -4285,12 +4351,11 @@
                         <span>
                           <strong>
                             {selectedChannel.permissions_synced
-                              ? 'Synced with category'
-                              : 'Permissions not synced with category'}
+                              ? $t('ui_synced_with_category_9ebefac7')
+                              : $t('ui_permissions_not_synced_with_category_19c4a32c')}
                           </strong>
                           <small>
-                            Syncing replaces this channel’s overrides with the category’s current
-                            rules.
+                            {$t('ui_syncing_replaces_this_channel_s_overrides_wit_739df227')}
                           </small>
                         </span>
                         {#if !selectedChannel.permissions_synced}
@@ -4298,19 +4363,26 @@
                             class="secondary-button"
                             type="button"
                             disabled={busy}
-                            onclick={() => void syncChannelPermissions()}>Sync Now</button
+                            onclick={() => void syncChannelPermissions()}
+                            >{$t('ui_sync_now_b5060fd1')}</button
                           >
                         {/if}
                       </div>
                     {/if}
                     <div class="permission-workspace">
-                      <aside class="permission-target-rail" aria-label="Permission targets">
+                      <aside
+                        class="permission-target-rail"
+                        aria-label={$t('ui_permission_targets_db9a5274')}
+                      >
                         <label class="form-field compact-field">
-                          <span>Roles and members</span>
-                          <input bind:value={overwriteSearch} placeholder="Search" />
+                          <span>{$t('ui_roles_and_members_47e46135')}</span>
+                          <input
+                            bind:value={overwriteSearch}
+                            placeholder={$t('ui_search_49c266ba')}
+                          />
                         </label>
                         <div class="permission-target-list">
-                          <p>Roles</p>
+                          <p>{$t('ui_roles_c2533705')}</p>
                           {#each filteredRoles as role (entityKey(role))}
                             <button
                               class:active={overwriteTarget === `role:${entityRef(role)}`}
@@ -4327,7 +4399,7 @@
                             </button>
                           {/each}
                           {#if filteredMembers.length}
-                            <p>Members</p>
+                            <p>{$t('ui_members_1044a4c0')}</p>
                             {#each filteredMembers as member (entityKey(member.user))}
                               <button
                                 class:active={overwriteTarget ===
@@ -4368,14 +4440,16 @@
                         {#if overwriteTarget}
                           <div class="permission-detail-heading">
                             <div>
-                              <span>Permissions for</span>
+                              <span>{$t('ui_permissions_for_e474cdc4')}</span>
                               <h5>{overwriteTargetLabel()}</h5>
                             </div>
                             <label class="form-field compact-field permission-search">
-                              <span class="visually-hidden">Search permissions</span>
+                              <span class="visually-hidden"
+                                >{$t('ui_search_permissions_0e099113')}</span
+                              >
                               <input
                                 bind:value={permissionSearch}
-                                placeholder="Search permissions"
+                                placeholder={$t('ui_search_permissions_0e099113')}
                               />
                             </label>
                           </div>
@@ -4390,9 +4464,11 @@
                                       <small>{permission[1]}</small>
                                       {#if permission[3].dependencies.length}
                                         <small class="permission-dependencies">
-                                          Also requires: {permissionDependencies(
-                                            permission[3].dependencies
-                                          )}
+                                          {$t('ui_also_requires_value0_68b47b3a', {
+                                            value0: String(
+                                              permissionDependencies(permission[3].dependencies)
+                                            )
+                                          })}
                                         </small>
                                       {/if}
                                     </span>
@@ -4406,8 +4482,8 @@
                                         class:active={overwritePermission(permission[2]) === 'deny'}
                                         type="button"
                                         disabled={busy || !selectedHasPermission(permission[2])}
-                                        aria-label="Deny in this channel"
-                                        title="Deny"
+                                        aria-label={$t('ui_deny_in_this_channel_be2b5114')}
+                                        title={$t('ui_deny_05a2d733')}
                                         onclick={() =>
                                           setOverwritePermission(permission[2], 'deny')}>×</button
                                       >
@@ -4416,8 +4492,8 @@
                                           'inherit'}
                                         type="button"
                                         disabled={busy || !selectedHasPermission(permission[2])}
-                                        aria-label="Inherit guild setting"
-                                        title="Inherit"
+                                        aria-label={$t('ui_inherit_guild_setting_e42820b1')}
+                                        title={$t('ui_inherit_3f72f038')}
                                         onclick={() =>
                                           setOverwritePermission(permission[2], 'inherit')}
                                         >/</button
@@ -4428,8 +4504,8 @@
                                           'allow'}
                                         type="button"
                                         disabled={busy || !selectedHasPermission(permission[2])}
-                                        aria-label="Allow in this channel"
-                                        title="Allow"
+                                        aria-label={$t('ui_allow_in_this_channel_fbf07560')}
+                                        title={$t('ui_allow_e213c161')}
                                         onclick={() =>
                                           setOverwritePermission(permission[2], 'allow')}>✓</button
                                       >
@@ -4449,20 +4525,22 @@
                                   selectedEffectivePermissions,
                                   BigInt(overwriteAllow) | BigInt(overwriteDeny)
                                 )}
-                              onclick={() => void resetChannelOverwrite()}>Reset override</button
+                              onclick={() => void resetChannelOverwrite()}
+                              >{$t('ui_reset_override_82b7570a')}</button
                             >
                             <button
                               class="primary-button"
                               type="button"
                               disabled={busy || !canManageOverwriteTarget(overwriteTarget)}
-                              onclick={() => void saveChannelOverwrite()}>Save permissions</button
+                              onclick={() => void saveChannelOverwrite()}
+                              >{$t('ui_save_permissions_1eab372a')}</button
                             >
                           </div>
                         {:else}
                           <div class="empty-state compact-empty permission-target-empty">
                             <span><Icon name="shield" /></span>
-                            <h3>Choose a role or member</h3>
-                            <p>Select a target to review its channel-specific permissions.</p>
+                            <h3>{$t('ui_choose_a_role_or_member_54951033')}</h3>
+                            <p>{$t('ui_select_a_target_to_review_its_channel_specifi_25fcd6a2')}</p>
                           </div>
                         {/if}
                       </div>
@@ -4475,29 +4553,29 @@
                     aria-labelledby="channel-invites-title"
                   >
                     <div>
-                      <span>Channel access</span>
-                      <h4 id="channel-invites-title">Invites</h4>
-                      <p>Create links that open this channel after the person joins the guild.</p>
+                      <span>{$t('ui_channel_access_34e631c3')}</span>
+                      <h4 id="channel-invites-title">{$t('ui_invites_f212a985')}</h4>
+                      <p>{$t('ui_create_links_that_open_this_channel_after_the_36f26c96')}</p>
                     </div>
                     {#if canCreateSelectedInvite}
                       <div class="settings-form">
                         <div class="two-column-fields">
                           <label class="form-field compact-field">
-                            <span>Expires after</span>
+                            <span>{$t('ui_expires_after_a5e4b9f5')}</span>
                             <select bind:value={inviteMaxAge} disabled={busy}>
-                              <option value="3600">1 hour</option>
-                              <option value="86400">1 day</option>
-                              <option value="604800">7 days</option>
-                              <option value="">Never</option>
+                              <option value="3600">{$t('ui_1_hour_f8b8883f')}</option>
+                              <option value="86400">{$t('ui_1_day_fa665d95')}</option>
+                              <option value="604800">{$t('ui_7_days_7f920bb6')}</option>
+                              <option value="">{$t('ui_never_6300ef80')}</option>
                             </select>
                           </label>
                           <label class="form-field compact-field">
-                            <span>Maximum uses</span>
+                            <span>{$t('ui_maximum_uses_3a104290')}</span>
                             <input
                               bind:value={inviteMaxUses}
                               type="number"
                               min="1"
-                              placeholder="Unlimited"
+                              placeholder={$t('ui_unlimited_11dde17d')}
                               disabled={busy}
                             />
                           </label>
@@ -4507,7 +4585,8 @@
                             class="primary-button"
                             type="button"
                             disabled={busy}
-                            onclick={() => void createInvite()}>Create invite</button
+                            onclick={() => void createInvite()}
+                            >{$t('ui_create_invite_9f395b8f')}</button
                           >
                         </div>
                       </div>
@@ -4518,9 +4597,15 @@
                           <span>
                             <strong>{invite.code}</strong>
                             <small
-                              >{invite.uses} use{invite.uses === 1 ? '' : 's'} · {invite.expires_at
-                                ? formatDateTime(invite.expires_at)
-                                : 'No expiry'}</small
+                              >{$t('ui_value0_use_value1_value2_4740faeb', {
+                                value0: String(invite.uses),
+                                value1: String(invite.uses === 1 ? '' : 's'),
+                                value2: String(
+                                  invite.expires_at
+                                    ? formatDateTime(invite.expires_at)
+                                    : 'No expiry'
+                                )
+                              })}</small
                             >
                           </span>
                           {#if canRevokeInvite(invite)}
@@ -4528,12 +4613,15 @@
                               class="danger-text-button"
                               type="button"
                               disabled={busy}
-                              onclick={() => revokeInvite(invite)}>Revoke</button
+                              onclick={() => revokeInvite(invite)}
+                              >{$t('ui_revoke_87e6d00b')}</button
                             >
                           {/if}
                         </div>
                       {:else}
-                        <p class="muted-copy">No active invites target this channel.</p>
+                        <p class="muted-copy">
+                          {$t('ui_no_active_invites_target_this_channel_11ad1ed1')}
+                        </p>
                       {/each}
                     </div>
                   </section>
@@ -4545,12 +4633,9 @@
                       aria-labelledby="channel-integrations-title"
                     >
                       <div>
-                        <span>Integrations</span>
-                        <h4 id="channel-integrations-title">Webhooks</h4>
-                        <p>
-                          Webhooks can post into this channel. Tokens are shown only when created or
-                          rotated.
-                        </p>
+                        <span>{$t('ui_integrations_090512d9')}</span>
+                        <h4 id="channel-integrations-title">{$t('ui_webhooks_45808d75')}</h4>
+                        <p>{$t('ui_webhooks_can_post_into_this_channel_tokens_ar_fb5e1893')}</p>
                       </div>
                       <form
                         class="inline-settings-form"
@@ -4560,7 +4645,7 @@
                         }}
                       >
                         <label class="form-field compact-field">
-                          <span>Webhook name</span>
+                          <span>{$t('ui_webhook_name_d28bddc1')}</span>
                           <input
                             bind:value={newWebhookName}
                             minlength="1"
@@ -4569,18 +4654,23 @@
                             disabled={busy}
                           />
                         </label>
-                        <button class="primary-button" disabled={busy}>Create webhook</button>
+                        <button class="primary-button" disabled={busy}
+                          >{$t('ui_create_webhook_4a2b33ad')}</button
+                        >
                       </form>
                       {#if revealedWebhookToken}
                         <div class="notice-banner warning-banner" role="status">
                           <Icon name="lock" size={18} />
                           <span
-                            ><strong>Webhook URL</strong><code>{revealedWebhookToken}</code></span
+                            ><strong>{$t('ui_webhook_url_84805a75')}</strong><code
+                              >{revealedWebhookToken}</code
+                            ></span
                           >
                           <button
                             class="secondary-button"
                             type="button"
-                            onclick={() => void copyWebhookUrl()}>Copy webhook URL</button
+                            onclick={() => void copyWebhookUrl()}
+                            >{$t('ui_copy_webhook_url_69179edf')}</button
                           >
                         </div>
                       {/if}
@@ -4603,7 +4693,11 @@
                                 </span>
                               {/if}
                               <label class="secondary-button webhook-avatar-button">
-                                <span>{webhook.avatar_hash ? 'Replace avatar' : 'Add avatar'}</span>
+                                <span
+                                  >{webhook.avatar_hash
+                                    ? $t('ui_replace_avatar_ec965b00')
+                                    : $t('ui_add_avatar_97bc36ba')}</span
+                                >
                                 <input
                                   type="file"
                                   accept="image/png,image/jpeg,image/gif,image/webp"
@@ -4624,13 +4718,20 @@
                                   type="button"
                                   disabled={busy}
                                   onclick={() => void deleteWebhookAvatar(webhook)}
-                                  >Remove avatar</button
+                                  >{$t('ui_remove_avatar_5ae2a862')}</button
                                 >
                               {/if}
                             </div>
                             <div class="webhook-fields">
                               <label class="form-field compact-field webhook-name-field">
-                                <span>Name <small>ID {webhook.id}</small></span>
+                                <span
+                                  >{$t('ui_name_dcd1d522')}
+                                  <small
+                                    >{$t('ui_id_value0_19b3c40a', {
+                                      value0: String(webhook.id)
+                                    })}</small
+                                  ></span
+                                >
                                 <input
                                   value={webhookNameDrafts[webhook.id] ?? webhook.name}
                                   minlength="1"
@@ -4644,7 +4745,7 @@
                                 />
                               </label>
                               <label class="form-field compact-field">
-                                <span>Post to channel</span>
+                                <span>{$t('ui_post_to_channel_6bcc7da9')}</span>
                                 <select
                                   value={webhookChannelDrafts[webhook.id] ??
                                     `${webhook.channel_id}@${webhook.channel_domain}`}
@@ -4668,7 +4769,7 @@
                                   type="button"
                                   disabled={busy}
                                   onclick={() => void copyWebhookUrl(webhook.execution_url)}
-                                  >Copy webhook URL</button
+                                  >{$t('ui_copy_webhook_url_69179edf')}</button
                                 >
                               {/if}
                               <button
@@ -4676,24 +4777,29 @@
                                 type="button"
                                 disabled={busy ||
                                   !(webhookNameDrafts[webhook.id] ?? webhook.name).trim()}
-                                onclick={() => void updateWebhook(webhook)}>Save</button
+                                onclick={() => void updateWebhook(webhook)}
+                                >{$t('ui_save_1509f561')}</button
                               >
                               <button
                                 class="secondary-button"
                                 type="button"
                                 disabled={busy}
-                                onclick={() => void rotateWebhook(webhook)}>Rotate token</button
+                                onclick={() => void rotateWebhook(webhook)}
+                                >{$t('ui_rotate_token_4ade7882')}</button
                               >
                               <button
                                 class="danger-text-button"
                                 type="button"
                                 disabled={busy}
-                                onclick={() => void deleteWebhook(webhook)}>Delete</button
+                                onclick={() => void deleteWebhook(webhook)}
+                                >{$t('ui_delete_e2d0a549')}</button
                               >
                             </div>
                           </div>
                         {:else}
-                          <p class="muted-copy">No webhooks post to this channel.</p>
+                          <p class="muted-copy">
+                            {$t('ui_no_webhooks_post_to_this_channel_6bb10927')}
+                          </p>
                         {/each}
                       </div>
                     </section>
@@ -4712,14 +4818,16 @@
                     aria-labelledby="delete-channel-title"
                   >
                     <div>
-                      <span>Danger zone</span>
+                      <span>{$t('ui_danger_zone_fd8b8dae')}</span>
                       <h4 id="delete-channel-title">
-                        Delete {selectedChannel.type === 4 ? 'category' : 'channel'}
+                        {$t('ui_delete_value0_8782b778', {
+                          value0: String(selectedChannel.type === 4 ? 'category' : 'channel')
+                        })}
                       </h4>
                       <p>
                         {selectedChannel.type === TRACKER_CHANNEL_TYPE
-                          ? 'This is permanent. The board, its statuses, and every task will be deleted.'
-                          : 'This is permanent. Categories must be empty and channels containing retained messages cannot be deleted.'}
+                          ? $t('ui_this_is_permanent_the_board_its_statuses_and__530e8c9b')
+                          : $t('ui_this_is_permanent_categories_must_be_empty_an_58060f5a')}
                       </p>
                     </div>
                     <button
@@ -4728,17 +4836,18 @@
                       disabled={busy}
                       onclick={deleteChannel}
                     >
-                      <Icon name="trash" size={16} /> Delete {selectedChannel.type === 4
-                        ? 'category'
-                        : 'channel'}
+                      <Icon name="trash" size={16} />
+                      {$t('ui_delete_value0_8782b778', {
+                        value0: String(selectedChannel.type === 4 ? 'category' : 'channel')
+                      })}
                     </button>
                   </section>
                 {/if}
               {:else}
                 <div class="empty-state compact-empty">
                   <span><Icon name="hash" /></span>
-                  <h3>Select a channel</h3>
-                  <p>Choose an item from the list to edit its details.</p>
+                  <h3>{$t('ui_select_a_channel_364ccb65')}</h3>
+                  <p>{$t('ui_choose_an_item_from_the_list_to_edit_its_deta_9c8a3e35')}</p>
                 </div>
               {/if}
             </div>
@@ -4753,43 +4862,43 @@
               }}
             >
               <div>
-                <strong>Create a channel</strong>
-                <p>Add a text, voice, announcement, forum, task tracker, or category.</p>
+                <strong>{$t('ui_create_a_channel_10ac504b')}</strong>
+                <p>{$t('ui_add_a_text_voice_announcement_forum_task_trac_f400eb16')}</p>
               </div>
               <label class="form-field compact-field">
-                <span>Name</span>
+                <span>{$t('ui_name_dcd1d522')}</span>
                 <input bind:value={newChannelName} maxlength="100" required disabled={busy} />
               </label>
               <label class="form-field compact-field">
-                <span>Type</span>
+                <span>{$t('ui_type_baaddf70')}</span>
                 <select bind:value={newChannelType} disabled={busy}>
-                  <option value={0}>Text</option>
-                  <option value={2}>Voice</option>
-                  <option value={4}>Category</option>
-                  <option value={5}>Announcement</option>
-                  <option value={15}>Forum</option>
-                  <option value={TRACKER_CHANNEL_TYPE}>Task tracker</option>
+                  <option value={0}>{$t('ui_text_71988c4d')}</option>
+                  <option value={2}>{$t('ui_voice_87bf2bc0')}</option>
+                  <option value={4}>{$t('ui_category_292c06f0')}</option>
+                  <option value={5}>{$t('ui_announcement_028cd1c8')}</option>
+                  <option value={15}>{$t('ui_forum_4da7bd42')}</option>
+                  <option value={TRACKER_CHANNEL_TYPE}>{$t('ui_task_tracker_b7794464')}</option>
                 </select>
               </label>
               {#if newChannelType === TRACKER_CHANNEL_TYPE}
                 <label class="form-field compact-field">
-                  <span>Task key prefix</span>
-                  <small>Optional; defaults from the channel name</small>
+                  <span>{$t('ui_task_key_prefix_f14da226')}</span>
+                  <small>{$t('ui_optional_defaults_from_the_channel_name_067263d7')}</small>
                   <input
                     bind:value={newChannelTrackerPrefix}
                     minlength="2"
                     maxlength="10"
                     pattern="[A-Za-z][A-Za-z0-9]*"
-                    placeholder="e.g. RAID"
+                    placeholder={$t('ui_e_g_raid_ec75a5bf')}
                     disabled={busy}
                   />
                 </label>
               {/if}
               {#if newChannelType !== 4}
                 <label class="form-field compact-field">
-                  <span>Category</span>
+                  <span>{$t('ui_category_292c06f0')}</span>
                   <select bind:value={newChannelParent} disabled={busy}>
-                    <option value="">No category</option>
+                    <option value="">{$t('ui_no_category_b91b9cac')}</option>
                     {#each (guild.channels ?? []).filter((channel) => channel.type === 4) as category (entityKey(category))}
                       <option value={entityKey(category)}>{category.name}</option>
                     {/each}
@@ -4797,7 +4906,7 @@
                 </label>
               {/if}
               <button class="primary-button" disabled={busy}>
-                <Icon name="plus" size={16} />Create
+                <Icon name="plus" size={16} />{$t('ui_create_4759498a')}
               </button>
             </form>
           {/if}
@@ -4809,21 +4918,26 @@
           <div class="settings-section-heading">
             <span class="section-icon" aria-hidden="true">☺</span>
             <div>
-              <h2>Custom emoji</h2>
-              <p>Upload emoji that members can use here and in their other guilds.</p>
+              <h2>{$t('ui_custom_emoji_1596e05e')}</h2>
+              <p>{$t('ui_upload_emoji_that_members_can_use_here_and_in_9271d84a')}</p>
             </div>
           </div>
           <div class="settings-card">
             <div class="settings-list-heading">
               <div>
-                <strong>Guild emoji</strong>
-                <p>{guild?.emojis?.length ?? 0} of {guild?.emoji_limit ?? 100} used</p>
+                <strong>{$t('ui_guild_emoji_0b0a82c1')}</strong>
+                <p>
+                  {$t('ui_value0_of_value1_used_1e8de6e6', {
+                    value0: String(guild?.emojis?.length ?? 0),
+                    value1: String(guild?.emoji_limit ?? 100)
+                  })}
+                </p>
               </div>
             </div>
             {#if canCreateExpressions}
               <form class="inline-create-form" onsubmit={createEmoji}>
                 <label class="form-field compact-field">
-                  <span>Name</span>
+                  <span>{$t('ui_name_dcd1d522')}</span>
                   <input
                     bind:value={emojiName}
                     pattern={'[A-Za-z0-9_]{2,32}'}
@@ -4835,7 +4949,7 @@
                   />
                 </label>
                 <label class="form-field compact-field">
-                  <span>Image</span>
+                  <span>{$t('ui_image_1aa4cb0b')}</span>
                   <ImageUploadField
                     id="emoji-image"
                     file={emojiFile}
@@ -4851,7 +4965,9 @@
                   class="primary-button"
                   disabled={emojiBusy ||
                     (guild?.emojis?.length ?? 0) >= (guild?.emoji_limit ?? 100)}
-                  >{emojiBusy ? 'Uploading…' : 'Upload emoji'}</button
+                  >{emojiBusy
+                    ? $t('ui_uploading_5ce44dd7')
+                    : $t('ui_upload_emoji_84bc1823')}</button
                 >
               </form>
             {/if}
@@ -4868,7 +4984,7 @@
                   {#if emojiDrafts[entityKey(emoji)]}
                     <div class="expression-fields">
                       <label class="form-field compact-field">
-                        <span>Name</span>
+                        <span>{$t('ui_name_dcd1d522')}</span>
                         <input
                           value={emojiDrafts[entityKey(emoji)].name}
                           pattern={'[A-Za-z0-9_]{2,32}'}
@@ -4880,7 +4996,10 @@
                         />
                       </label>
                       <label class="form-field compact-field">
-                        <span>Role restrictions <small>None means everyone</small></span>
+                        <span
+                          >{$t('ui_role_restrictions_42263853')}
+                          <small>{$t('ui_none_means_everyone_9b433987')}</small></span
+                        >
                         <select
                           multiple
                           size="3"
@@ -4900,14 +5019,17 @@
                         </select>
                         {#if editable && !canEditEmojiRoleRestrictions(emoji)}
                           <small>
-                            A restriction is above your highest role. You can edit the emoji, but
-                            not its role access.
+                            {$t('ui_a_restriction_is_above_your_highest_role_you__dc49c1b4')}
                           </small>
                         {/if}
                       </label>
                       <p class="field-hint">
-                        <strong>{emoji.available === false ? 'Unavailable' : 'Available'}</strong>
-                        · Availability is controlled by the server and cannot be edited.
+                        <strong
+                          >{emoji.available === false
+                            ? $t('ui_unavailable_ca184496')
+                            : $t('ui_available_e6744473')}</strong
+                        >
+                        {$t('ui_availability_is_controlled_by_the_server_and__709ec772')}
                       </p>
                     </div>
                     {#if editable}
@@ -4916,24 +5038,24 @@
                           class="secondary-button"
                           type="button"
                           disabled={emojiBusy}
-                          onclick={() => void updateEmoji(emoji)}>Save</button
+                          onclick={() => void updateEmoji(emoji)}>{$t('ui_save_1509f561')}</button
                         >
                         <button
                           class="secondary-button danger-button"
                           type="button"
                           disabled={emojiBusy}
-                          onclick={() => void deleteEmoji(emoji)}>Delete</button
+                          onclick={() => void deleteEmoji(emoji)}>{$t('ui_delete_e2d0a549')}</button
                         >
                       </div>
                     {:else}
                       <small class="field-hint"
-                        >Only its creator or an expression manager can edit this emoji.</small
+                        >{$t('ui_only_its_creator_or_an_expression_manager_can_e0175c0c')}</small
                       >
                     {/if}
                   {/if}
                 </article>
               {:else}
-                <p class="empty-copy">This guild has no custom emoji yet.</p>
+                <p class="empty-copy">{$t('ui_this_guild_has_no_custom_emoji_yet_bed2d0ca')}</p>
               {/each}
             </div>
           </div>
@@ -4943,46 +5065,51 @@
           <div class="settings-section-heading">
             <span class="section-icon" aria-hidden="true">▱</span>
             <div>
-              <h2>Guild stickers</h2>
-              <p>
-                Create transparent static or animated stickers members can send from the sticker
-                menu.
-              </p>
+              <h2>{$t('ui_guild_stickers_b9cc433f')}</h2>
+              <p>{$t('ui_create_transparent_static_or_animated_sticker_7e61024d')}</p>
             </div>
           </div>
           <div class="settings-card">
             <div class="settings-list-heading">
               <div>
-                <strong>Sticker collection</strong>
-                <p>{guild?.stickers?.length ?? 0} of {guild?.sticker_limit ?? 60} used</p>
+                <strong>{$t('ui_sticker_collection_76fcec4f')}</strong>
+                <p>
+                  {$t('ui_value0_of_value1_used_1e8de6e6', {
+                    value0: String(guild?.stickers?.length ?? 0),
+                    value1: String(guild?.sticker_limit ?? 60)
+                  })}
+                </p>
               </div>
             </div>
             {#if canCreateExpressions}
               <form class="sticker-create-form" onsubmit={createSticker}>
                 <div class="sticker-fields">
                   <label class="form-field compact-field">
-                    <span>Name</span>
+                    <span>{$t('ui_name_dcd1d522')}</span>
                     <input
                       bind:value={stickerName}
                       minlength="2"
                       maxlength="30"
-                      placeholder="Friendly wave"
+                      placeholder={$t('ui_friendly_wave_706204c7')}
                       required
                       disabled={stickerBusy}
                     />
                   </label>
                   <label class="form-field compact-field">
-                    <span>Description <small>Optional</small></span>
+                    <span
+                      >{$t('ui_description_526e0087')}
+                      <small>{$t('ui_optional_59be7133')}</small></span
+                    >
                     <input
                       bind:value={stickerDescription}
                       minlength="2"
                       maxlength="100"
-                      placeholder="A friendly wave"
+                      placeholder={$t('ui_a_friendly_wave_cd04be35')}
                       disabled={stickerBusy}
                     />
                   </label>
                   <label class="form-field compact-field">
-                    <span>Image</span>
+                    <span>{$t('ui_image_1aa4cb0b')}</span>
                     <ImageUploadField
                       id="sticker-image"
                       file={stickerFile}
@@ -4998,7 +5125,7 @@
                       <div
                         class="sticker-crop-preview"
                         role="application"
-                        aria-label="Sticker crop editor"
+                        aria-label={$t('ui_sticker_crop_editor_a4f4b5c7')}
                         style:--sticker-image-aspect={String(stickerImageAspect)}
                         onpointermove={moveStickerCropGesture}
                         onpointerup={endStickerCropGesture}
@@ -5006,7 +5133,7 @@
                       >
                         <img
                           src={stickerPreviewUrl}
-                          alt="Sticker source"
+                          alt={$t('ui_sticker_source_c47ae468')}
                           draggable="false"
                           onload={(event) => {
                             const image = event.currentTarget as HTMLImageElement;
@@ -5016,7 +5143,9 @@
                         <div
                           class="sticker-crop-selection"
                           role="button"
-                          aria-label="Crop selection. Drag to move, or use the arrow keys."
+                          aria-label={$t(
+                            'ui_crop_selection_drag_to_move_or_use_the_arrow__b25c1380'
+                          )}
                           tabindex="0"
                           style:left={`${stickerCropX * 100}%`}
                           style:top={`${stickerCropY * 100}%`}
@@ -5044,18 +5173,19 @@
                       </div>
                     </div>
                     <div class="sticker-crop-controls">
-                      <strong>Crop your sticker</strong>
-                      <p>Drag the box to move it. Drag any corner to resize it.</p>
+                      <strong>{$t('ui_crop_your_sticker_41cf7615')}</strong>
+                      <p>{$t('ui_drag_the_box_to_move_it_drag_any_corner_to_re_5f1d6ef4')}</p>
                       <small>
-                        Selection: {Math.round(stickerCropWidth * 100)}% × {Math.round(
-                          stickerCropHeight * 100
-                        )}%
+                        {$t('ui_selection_value0_value1_87e898ca', {
+                          value0: String(Math.round(stickerCropWidth * 100)),
+                          value1: String(Math.round(stickerCropHeight * 100))
+                        })}
                       </small>
                       <button
                         class="secondary-button crop-reset-button"
                         type="button"
                         onclick={() => applyStickerCrop({ x: 0, y: 0, width: 1, height: 1 })}
-                        >Reset crop</button
+                        >{$t('ui_reset_crop_994feef6')}</button
                       >
                       <label class="toggle-row">
                         <input
@@ -5066,12 +5196,13 @@
                             !guild?.sticker_background_removal_enabled}
                         />
                         <span
-                          >Remove background <small
+                          >{$t('ui_remove_background_a8d1ab54')}
+                          <small
                             >{stickerFile?.type === 'image/gif'
-                              ? 'Static images only'
+                              ? $t('ui_static_images_only_09e32e0a')
                               : guild?.sticker_background_removal_enabled
-                                ? 'Powered by rembg'
-                                : 'Not enabled on this server'}</small
+                                ? $t('ui_powered_by_rembg_f7a3cce3')
+                                : $t('ui_not_enabled_on_this_server_419eb451')}</small
                           ></span
                         >
                       </label>
@@ -5083,7 +5214,9 @@
                   disabled={stickerBusy ||
                     !stickerFile ||
                     (guild?.stickers?.length ?? 0) >= (guild?.sticker_limit ?? 60)}
-                  >{stickerBusy ? 'Creating sticker…' : 'Create sticker'}</button
+                  >{stickerBusy
+                    ? $t('ui_creating_sticker_89db4a32')
+                    : $t('ui_create_sticker_1c59eed4')}</button
                 >
               </form>
             {/if}
@@ -5098,7 +5231,7 @@
                   {#if stickerDrafts[entityKey(sticker)]}
                     <div class="expression-fields">
                       <label class="form-field compact-field">
-                        <span>Name</span>
+                        <span>{$t('ui_name_dcd1d522')}</span>
                         <input
                           value={stickerDrafts[entityKey(sticker)].name}
                           minlength="2"
@@ -5109,7 +5242,7 @@
                         />
                       </label>
                       <label class="form-field compact-field">
-                        <span>Description</span>
+                        <span>{$t('ui_description_526e0087')}</span>
                         <input
                           value={stickerDrafts[entityKey(sticker)].description}
                           minlength="2"
@@ -5122,7 +5255,10 @@
                         />
                       </label>
                       <label class="form-field compact-field">
-                        <span>Tags <small>Comma separated</small></span>
+                        <span
+                          >{$t('ui_tags_1331275b')}
+                          <small>{$t('ui_comma_separated_f46a9874')}</small></span
+                        >
                         <input
                           value={stickerDrafts[entityKey(sticker)].tags}
                           maxlength="200"
@@ -5132,8 +5268,12 @@
                         />
                       </label>
                       <p class="field-hint">
-                        <strong>{sticker.available === false ? 'Unavailable' : 'Available'}</strong>
-                        · Availability is controlled by the server and cannot be edited.
+                        <strong
+                          >{sticker.available === false
+                            ? $t('ui_unavailable_ca184496')
+                            : $t('ui_available_e6744473')}</strong
+                        >
+                        {$t('ui_availability_is_controlled_by_the_server_and__709ec772')}
                       </p>
                     </div>
                     {#if editable}
@@ -5142,24 +5282,26 @@
                           class="secondary-button"
                           type="button"
                           disabled={stickerBusy}
-                          onclick={() => void updateSticker(sticker)}>Save</button
+                          onclick={() => void updateSticker(sticker)}
+                          >{$t('ui_save_1509f561')}</button
                         >
                         <button
                           class="secondary-button danger-button"
                           type="button"
                           disabled={stickerBusy}
-                          onclick={() => void deleteSticker(sticker)}>Delete</button
+                          onclick={() => void deleteSticker(sticker)}
+                          >{$t('ui_delete_e2d0a549')}</button
                         >
                       </div>
                     {:else}
                       <small class="field-hint"
-                        >Only its creator or an expression manager can edit this sticker.</small
+                        >{$t('ui_only_its_creator_or_an_expression_manager_can_db7c4796')}</small
                       >
                     {/if}
                   {/if}
                 </article>
               {:else}
-                <p class="empty-copy">This guild has no stickers yet.</p>
+                <p class="empty-copy">{$t('ui_this_guild_has_no_stickers_yet_dd22d2d9')}</p>
               {/each}
             </div>
           </div>
@@ -5175,13 +5317,13 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="shield" /></span>
             <div>
-              <h2>Roles</h2>
-              <p>Group permissions into roles, then assign them to members.</p>
+              <h2>{$t('ui_roles_c2533705')}</h2>
+              <p>{$t('ui_group_permissions_into_roles_then_assign_them_c4244074')}</p>
             </div>
           </div>
           <div class="settings-split role-settings-split">
             <div class="settings-list-panel">
-              <div class="settings-list-heading"><strong>Roles</strong></div>
+              <div class="settings-list-heading"><strong>{$t('ui_roles_c2533705')}</strong></div>
               {#each [...(guild.roles ?? [])].sort((a, b) => b.position - a.position) as role (entityKey(role))}
                 <button
                   class:active={selectedRole && entityKey(selectedRole) === entityKey(role)}
@@ -5203,7 +5345,7 @@
                     <circle cx="5" cy="5" r="5" fill={roleColorValue(role.color)} />
                   </svg>
                   <span>{role.name}</span>
-                  {#if role.id === guild.id}<small>Default</small>{/if}
+                  {#if role.id === guild.id}<small>{$t('ui_default_21b111cb')}</small>{/if}
                 </button>
               {/each}
               <form
@@ -5216,12 +5358,16 @@
                 <input
                   bind:value={newRoleName}
                   maxlength="100"
-                  placeholder="New role"
-                  aria-label="New role name"
+                  placeholder={$t('ui_new_role_500f2f9d')}
+                  aria-label={$t('ui_new_role_name_78e73250')}
                   required
                   disabled={busy}
                 />
-                <button class="icon-button" disabled={busy} aria-label="Create role">
+                <button
+                  class="icon-button"
+                  disabled={busy}
+                  aria-label={$t('ui_create_role_221163d6')}
+                >
                   <Icon name="plus" size={17} />
                 </button>
               </form>
@@ -5231,7 +5377,7 @@
               {#if selectedRole}
                 <div class="editor-heading">
                   <div>
-                    <span>Role</span>
+                    <span>{$t('ui_role_14736a2e')}</span>
                     <h3>{selectedRole.name}</h3>
                   </div>
                   {#if selectedRole.icon_hash}
@@ -5253,27 +5399,33 @@
                     </svg>
                   {/if}
                 </div>
-                <div class="editor-tabs role-editor-tabs" role="tablist" aria-label="Role settings">
+                <div
+                  class="editor-tabs role-editor-tabs"
+                  role="tablist"
+                  aria-label={$t('ui_role_settings_4826ab3e')}
+                >
                   <button
                     class:active={roleEditorTab === 'display'}
                     type="button"
                     role="tab"
                     aria-selected={roleEditorTab === 'display'}
-                    onclick={() => (roleEditorTab = 'display')}>Display</button
+                    onclick={() => (roleEditorTab = 'display')}>{$t('ui_display_34e108c0')}</button
                   >
                   <button
                     class:active={roleEditorTab === 'permissions'}
                     type="button"
                     role="tab"
                     aria-selected={roleEditorTab === 'permissions'}
-                    onclick={() => (roleEditorTab = 'permissions')}>Permissions</button
+                    onclick={() => (roleEditorTab = 'permissions')}
+                    >{$t('ui_permissions_abccc78c')}</button
                   >
                   <button
                     class:active={roleEditorTab === 'members'}
                     type="button"
                     role="tab"
                     aria-selected={roleEditorTab === 'members'}
-                    onclick={() => (roleEditorTab = 'members')}>Manage members</button
+                    onclick={() => (roleEditorTab = 'members')}
+                    >{$t('ui_manage_members_7ce24d68')}</button
                   >
                 </div>
                 <form
@@ -5286,16 +5438,15 @@
                   {#if roleEditorTab === 'display'}
                     <div class="role-order-controls">
                       <div>
-                        <strong>Role position</strong>
+                        <strong>{$t('ui_role_position_075ca0b7')}</strong>
                         <small
-                          >Drag roles in the list to reorder them. Changes save automatically, and
-                          you can only move roles below your highest role.</small
+                          >{$t('ui_drag_roles_in_the_list_to_reorder_them_change_61c2cf88')}</small
                         >
                       </div>
                     </div>
                     <div class="two-column-fields role-name-fields">
                       <label class="form-field compact-field">
-                        <span>Name</span>
+                        <span>{$t('ui_name_dcd1d522')}</span>
                         <input
                           bind:value={roleName}
                           maxlength="100"
@@ -5308,10 +5459,9 @@
                       class="role-icon-field"
                       disabled={busy || roleIconBusy || !canManageSelectedRole}
                     >
-                      <legend>Role icon</legend>
+                      <legend>{$t('ui_role_icon_8007f7fb')}</legend>
                       <small>
-                        Shown beside members' names in chat. When a member has several icons, their
-                        highest role icon is used.
+                        {$t('ui_shown_beside_members_names_in_chat_when_a_mem_96db6526')}
                       </small>
                       <div class="role-icon-controls">
                         {#if selectedRole.icon_hash}
@@ -5335,12 +5485,13 @@
                             class="secondary-button"
                             type="button"
                             disabled={busy || roleIconBusy || !canManageSelectedRole}
-                            onclick={() => void deleteRoleIcon()}>Remove icon</button
+                            onclick={() => void deleteRoleIcon()}
+                            >{$t('ui_remove_icon_93d6de71')}</button
                           >
                         {/if}
                       </div>
                       {#if roleIconBusy}<small role="status"
-                          >Uploading and scanning role icon…</small
+                          >{$t('ui_uploading_and_scanning_role_icon_90052e27')}</small
                         >{/if}
                       {#if roleIconError}<p class="form-error" role="alert">{roleIconError}</p>{/if}
                     </fieldset>
@@ -5348,17 +5499,19 @@
                       class="role-color-field"
                       disabled={busy || selectedRole.id === guild.id || !canManageSelectedRole}
                     >
-                      <legend>Role color</legend>
-                      <small>Members use the color of their highest displayed role.</small>
+                      <legend>{$t('ui_role_color_d33a0827')}</legend>
+                      <small
+                        >{$t('ui_members_use_the_color_of_their_highest_displa_816247c7')}</small
+                      >
                       <div class="role-color-controls">
                         <button
                           class="role-color-default"
                           class:selected={roleColor === '#000000'}
                           type="button"
-                          aria-label="Use the default role color"
+                          aria-label={$t('ui_use_the_default_role_color_6c6aecaa')}
                           aria-pressed={roleColor === '#000000'}
                           onclick={() => setRoleColor('#000000')}
-                          ><span>✓</span><small>Default</small></button
+                          ><span>✓</span><small>{$t('ui_default_21b111cb')}</small></button
                         >
                         <label
                           class="role-color-custom"
@@ -5368,10 +5521,10 @@
                           <input
                             bind:value={roleColor}
                             type="color"
-                            aria-label="Choose a custom role color"
+                            aria-label={$t('ui_choose_a_custom_role_color_fc7cd895')}
                           />
                           <span style={`--selected-role-color: ${roleColor}`}></span>
-                          <small>Custom</small>
+                          <small>{$t('ui_custom_494ca78f')}</small>
                         </label>
                         <div class="role-color-swatches">
                           {#each roleColorPalette as color (color)}
@@ -5387,7 +5540,7 @@
                         </div>
                       </div>
                       <label class="role-color-hex">
-                        <span>Hex</span>
+                        <span>{$t('ui_hex_69493e6f')}</span>
                         <input
                           value={roleColor}
                           maxlength="7"
@@ -5405,8 +5558,8 @@
                     <div class="toggle-list">
                       <label class="toggle-row">
                         <span
-                          ><strong>Display separately</strong><small
-                            >Hoist members in this role.</small
+                          ><strong>{$t('ui_display_separately_2cf34ad9')}</strong><small
+                            >{$t('ui_hoist_members_in_this_role_f6451c23')}</small
                           ></span
                         >
                         <input
@@ -5417,8 +5570,8 @@
                       </label>
                       <label class="toggle-row">
                         <span
-                          ><strong>Allow mentions</strong><small
-                            >Let anyone mention this role.</small
+                          ><strong>{$t('ui_allow_mentions_4b52561f')}</strong><small
+                            >{$t('ui_let_anyone_mention_this_role_c4e8a4d8')}</small
                           ></span
                         >
                         <input
@@ -5430,15 +5583,22 @@
                     </div>
                   {:else if roleEditorTab === 'permissions'}
                     <label class="form-field permission-search">
-                      <span>Search permissions</span>
-                      <input bind:value={permissionSearch} placeholder="Search permissions" />
+                      <span>{$t('ui_search_permissions_0e099113')}</span>
+                      <input
+                        bind:value={permissionSearch}
+                        placeholder={$t('ui_search_permissions_0e099113')}
+                      />
                     </label>
                     {#if permissionChecked(Permission.ADMINISTRATOR)}
                       <div class="notice-banner warning-banner" role="alert">
                         <Icon name="shield" size={18} />
                         <span>
-                          <strong>Administrator bypasses every channel restriction.</strong>
-                          Only grant it to people who should have unrestricted control of this guild.
+                          <strong
+                            >{$t(
+                              'ui_administrator_bypasses_every_channel_restrict_bc8d8e3f'
+                            )}</strong
+                          >
+                          {$t('ui_only_grant_it_to_people_who_should_have_unres_95a0e45f')}
                         </span>
                       </div>
                     {/if}
@@ -5453,9 +5613,11 @@
                                 <small>{permission[1]}</small>
                                 {#if permission[3].dependencies.length}
                                   <small class="permission-dependencies">
-                                    Also requires: {permissionDependencies(
-                                      permission[3].dependencies
-                                    )}
+                                    {$t('ui_also_requires_value0_68b47b3a', {
+                                      value0: String(
+                                        permissionDependencies(permission[3].dependencies)
+                                      )
+                                    })}
                                   </small>
                                 {/if}
                               </span>
@@ -5476,20 +5638,21 @@
                   {:else}
                     <div class="role-member-picker">
                       <p class="field-hint">
-                        Assign this role to guild members. Search includes members beyond the
-                        currently loaded page.
+                        {$t('ui_assign_this_role_to_guild_members_search_incl_d188ebc2')}
                       </p>
                       <label class="form-field member-search-field">
-                        <span>Search members</span>
+                        <span>{$t('ui_search_members_6497fc6f')}</span>
                         <input
                           bind:value={roleMemberSearch}
                           type="search"
-                          placeholder="Search by name, username, or instance"
+                          placeholder={$t('ui_search_by_name_username_or_instance_419b763f')}
                           autocomplete="off"
                         />
                       </label>
                       {#if roleMemberSearchBusy}
-                        <p class="field-hint" role="status">Searching members…</p>
+                        <p class="field-hint" role="status">
+                          {$t('ui_searching_members_4fbc9742')}
+                        </p>
                       {:else if roleMemberSearchError}
                         <p class="form-error" role="alert">{roleMemberSearchError}</p>
                       {/if}
@@ -5497,7 +5660,10 @@
                         <label class="permission-row role-member-row">
                           <span>
                             <strong>{member.nickname ?? userDisplayName(member.user)}</strong>
-                            <small>{userPublicHandle(member.user) ?? 'Profile unavailable'}</small>
+                            <small
+                              >{userPublicHandle(member.user) ??
+                                $t('ui_profile_unavailable_158e5a22')}</small
+                            >
                           </span>
                           <input
                             type="checkbox"
@@ -5518,8 +5684,8 @@
                       {#if roleMemberSearch.trim() && !roleMemberSearchBusy && !visibleRoleMembers.length}
                         <div class="empty-state compact-empty">
                           <span><Icon name="search" /></span>
-                          <h3>No matching members</h3>
-                          <p>Try a display name, username, nickname, or instance domain.</p>
+                          <h3>{$t('ui_no_matching_members_a2d9d134')}</h3>
+                          <p>{$t('ui_try_a_display_name_username_nickname_or_insta_0d7aa6eb')}</p>
                         </div>
                       {/if}
                       {#if membersHaveMore && !roleMemberSearch.trim()}
@@ -5529,7 +5695,9 @@
                           disabled={membersLoadingMore}
                           onclick={loadMoreMembers}
                         >
-                          {membersLoadingMore ? 'Loading…' : 'Load more members'}
+                          {membersLoadingMore
+                            ? $t('ui_loading_ba3bbbe1')
+                            : $t('ui_load_more_members_01c037a8')}
                         </button>
                       {/if}
                     </div>
@@ -5542,13 +5710,15 @@
                         disabled={busy}
                         onclick={deleteRole}
                       >
-                        <Icon name="trash" size={16} />Delete role
+                        <Icon name="trash" size={16} />{$t('ui_delete_role_ac18d11a')}
                       </button>
                     {:else}
-                      <span class="field-hint">The default role cannot be deleted.</span>
+                      <span class="field-hint"
+                        >{$t('ui_the_default_role_cannot_be_deleted_f09efff5')}</span
+                      >
                     {/if}
                     <button class="primary-button" disabled={busy || !canManageSelectedRole}
-                      >Save role</button
+                      >{$t('ui_save_role_c7523b15')}</button
                     >
                   </div>
                 </form>
@@ -5563,8 +5733,8 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="clock" /></span>
             <div>
-              <h2>Audit log</h2>
-              <p>Review administrative actions, affected resources, reasons, and field changes.</p>
+              <h2>{$t('ui_audit_log_e4d36f9a')}</h2>
+              <p>{$t('ui_review_administrative_actions_affected_resour_5b0684a3')}</p>
             </div>
           </div>
           <div class="settings-card">
@@ -5578,8 +5748,8 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="users" /></span>
             <div>
-              <h2>Members</h2>
-              <p>Review your guild’s members, manage roles, and take moderation actions.</p>
+              <h2>{$t('ui_members_1044a4c0')}</h2>
+              <p>{$t('ui_review_your_guild_s_members_manage_roles_and__d0d3faf9')}</p>
             </div>
           </div>
           {#key guildId}
@@ -5609,7 +5779,7 @@
                           event.currentTarget
                         )}
                     >
-                      {activeTimeout ? 'Remove timeout' : 'Timeout'}
+                      {activeTimeout ? $t('ui_remove_timeout_f9104d86') : $t('ui_timeout_70594d93')}
                     </button>
                   {/if}
                   {#if canKickMembers}
@@ -5618,7 +5788,8 @@
                       type="button"
                       disabled={busy || memberModerationBusy}
                       onclick={(event) =>
-                        void openMemberModeration(member, 'kick', event.currentTarget)}>Kick</button
+                        void openMemberModeration(member, 'kick', event.currentTarget)}
+                      >{$t('ui_kick_37ca3cfb')}</button
                     >
                   {/if}
                   {#if canBanMembers}
@@ -5627,7 +5798,8 @@
                       type="button"
                       disabled={busy || memberModerationBusy}
                       onclick={(event) =>
-                        void openMemberModeration(member, 'ban', event.currentTarget)}>Ban</button
+                        void openMemberModeration(member, 'ban', event.currentTarget)}
+                      >{$t('ui_ban_520ed297')}</button
                     >
                   {/if}
                 {/if}
@@ -5638,8 +5810,8 @@
             <div class="settings-card sanction-list">
               <div class="settings-list-heading">
                 <div>
-                  <strong>Active user bans</strong>
-                  <p>Expired bans disappear automatically and no longer block joining.</p>
+                  <strong>{$t('ui_active_user_bans_1c52c3ec')}</strong>
+                  <p>{$t('ui_expired_bans_disappear_automatically_and_no_l_53e64095')}</p>
                 </div>
                 <span>{bans.length}</span>
               </div>
@@ -5656,23 +5828,25 @@
                   </span>
                   <div>
                     <strong>{userDisplayName(ban.user)}</strong>
-                    <small>{userPublicHandle(ban.user) ?? 'Profile unavailable'}</small>
-                    <span>{ban.reason ?? 'No reason provided'}</span>
+                    <small
+                      >{userPublicHandle(ban.user) ?? $t('ui_profile_unavailable_158e5a22')}</small
+                    >
+                    <span>{ban.reason ?? $t('ui_no_reason_provided_d31817f1')}</span>
                   </div>
                   <span
                     >{ban.expires_at
                       ? `Until ${formatDateTime(ban.expires_at)}`
-                      : 'Permanent'}</span
+                      : $t('ui_permanent_455a9549')}</span
                   >
                   <button
                     class="secondary-button"
                     type="button"
                     disabled={busy}
-                    onclick={() => void unbanUser(ban)}>Unban</button
+                    onclick={() => void unbanUser(ban)}>{$t('ui_unban_25fb5989')}</button
                   >
                 </article>
               {:else}
-                <p class="field-hint">No active user bans.</p>
+                <p class="field-hint">{$t('ui_no_active_user_bans_af948a57')}</p>
               {/each}
             </div>
           {/if}
@@ -5681,24 +5855,20 @@
             <div class="settings-card instance-ban-card">
               <div class="settings-list-heading">
                 <div>
-                  <strong>Federated instance bans</strong>
-                  <p>Block an entire instance from participating in this guild.</p>
+                  <strong>{$t('ui_federated_instance_bans_57da45aa')}</strong>
+                  <p>{$t('ui_block_an_entire_instance_from_participating_i_83ad3283')}</p>
                 </div>
               </div>
               <div class="federation-warning" role="note">
                 <Icon name="shield" size={20} />
                 <div>
-                  <strong>This removes every current member from that instance.</strong>
-                  <p>
-                    Their home will be instructed to delete cached guild data. That deletion is best
-                    effort: a malicious or modified instance can retain data it already received.
-                    Existing messages authored by those members remain in this guild.
-                  </p>
+                  <strong>{$t('ui_this_removes_every_current_member_from_that_i_b8646108')}</strong>
+                  <p>{$t('ui_their_home_will_be_instructed_to_delete_cache_10b17cb9')}</p>
                 </div>
               </div>
               <div class="instance-ban-form">
                 <label class="form-field">
-                  <span>Exact instance domain</span>
+                  <span>{$t('ui_exact_instance_domain_7add23fa')}</span>
                   <input
                     bind:value={instanceBanDomain}
                     maxlength="253"
@@ -5707,21 +5877,21 @@
                   />
                 </label>
                 <label class="form-field">
-                  <span>Duration</span>
+                  <span>{$t('ui_duration_4fc52a3c')}</span>
                   <select bind:value={instanceBanDuration} disabled={busy}>
-                    <option value="3600">1 hour</option>
-                    <option value="86400">1 day</option>
-                    <option value="604800">7 days</option>
-                    <option value="2592000">30 days</option>
-                    <option value="permanent">Permanent</option>
+                    <option value="3600">{$t('ui_1_hour_f8b8883f')}</option>
+                    <option value="86400">{$t('ui_1_day_fa665d95')}</option>
+                    <option value="604800">{$t('ui_7_days_7f920bb6')}</option>
+                    <option value="2592000">{$t('ui_30_days_ffd72805')}</option>
+                    <option value="permanent">{$t('ui_permanent_455a9549')}</option>
                   </select>
                 </label>
                 <label class="form-field instance-ban-reason">
-                  <span>Reason <small>optional</small></span>
+                  <span>{$t('ui_reason_f81ab834')} <small>optional</small></span>
                   <input
                     bind:value={instanceBanReason}
                     maxlength="512"
-                    placeholder="Visible in the audit log"
+                    placeholder={$t('ui_visible_in_the_audit_log_78684c70')}
                     disabled={busy}
                   />
                 </label>
@@ -5729,7 +5899,8 @@
                   class="danger-button"
                   type="button"
                   disabled={busy || !instanceBanDomain.trim()}
-                  onclick={() => void banFederatedInstance()}>Ban instance</button
+                  onclick={() => void banFederatedInstance()}
+                  >{$t('ui_ban_instance_4a261781')}</button
                 >
               </div>
               <div class="sanction-list embedded-list">
@@ -5738,22 +5909,25 @@
                     <span class="section-icon"><Icon name="globe" /></span>
                     <div>
                       <strong>{ban.instance_domain}</strong>
-                      <span>{ban.reason ?? 'No reason provided'}</span>
+                      <span>{ban.reason ?? $t('ui_no_reason_provided_d31817f1')}</span>
                     </div>
                     <span
                       >{ban.expires_at
                         ? `Until ${formatDateTime(ban.expires_at)}`
-                        : 'Permanent'}</span
+                        : $t('ui_permanent_455a9549')}</span
                     >
                     <button
                       class="secondary-button"
                       type="button"
                       disabled={busy}
-                      onclick={() => void unbanFederatedInstance(ban)}>Remove ban</button
+                      onclick={() => void unbanFederatedInstance(ban)}
+                      >{$t('ui_remove_ban_a3fde3cd')}</button
                     >
                   </article>
                 {:else}
-                  <p class="field-hint">No federated instances are banned from this guild.</p>
+                  <p class="field-hint">
+                    {$t('ui_no_federated_instances_are_banned_from_this_g_c29d93d3')}
+                  </p>
                 {/each}
               </div>
             </div>
@@ -5766,8 +5940,8 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="globe" /></span>
             <div>
-              <h2>Invites</h2>
-              <p>Create bounded links and revoke them whenever you need to.</p>
+              <h2>{$t('ui_invites_f212a985')}</h2>
+              <p>{$t('ui_create_bounded_links_and_revoke_them_whenever_8155f732')}</p>
             </div>
           </div>
           {#if canCreateInvites}
@@ -5779,86 +5953,87 @@
               }}
             >
               <div>
-                <strong>Create an invite</strong>
-                <p>Choose an optional destination, lifetime, and use limit.</p>
+                <strong>{$t('ui_create_an_invite_33cb9bb7')}</strong>
+                <p>{$t('ui_choose_an_optional_destination_lifetime_and_u_90b16eeb')}</p>
               </div>
               <label class="form-field compact-field">
-                <span>Destination</span>
+                <span>{$t('ui_destination_293d404a')}</span>
                 <select bind:value={inviteChannel} disabled={busy}>
-                  <option value="">Guild landing channel</option>
+                  <option value="">{$t('ui_guild_landing_channel_58aff412')}</option>
                   {#each (guild.channels ?? []).filter((channel) => channel.type !== 4 && channelHasPermission(channel, Permission.CREATE_INVITE)) as channel (entityKey(channel))}
                     <option value={entityKey(channel)}>{channel.name}</option>
                   {/each}
                 </select>
               </label>
               <label class="form-field compact-field">
-                <span>Expires</span>
+                <span>{$t('ui_expires_f6725f3a')}</span>
                 <select bind:value={inviteMaxAge} disabled={busy}>
-                  <option value="1800">30 minutes</option>
-                  <option value="3600">1 hour</option>
-                  <option value="21600">6 hours</option>
-                  <option value="86400">1 day</option>
-                  <option value="604800">7 days</option>
-                  <option value="">Never</option>
+                  <option value="1800">{$t('ui_30_minutes_f01a042b')}</option>
+                  <option value="3600">{$t('ui_1_hour_f8b8883f')}</option>
+                  <option value="21600">{$t('ui_6_hours_4105ae3b')}</option>
+                  <option value="86400">{$t('ui_1_day_fa665d95')}</option>
+                  <option value="604800">{$t('ui_7_days_7f920bb6')}</option>
+                  <option value="">{$t('ui_never_6300ef80')}</option>
                 </select>
               </label>
               <label class="form-field compact-field">
-                <span>Maximum uses</span>
+                <span>{$t('ui_maximum_uses_3a104290')}</span>
                 <input
                   bind:value={inviteMaxUses}
                   type="number"
                   min="1"
                   max="100"
-                  placeholder="Unlimited"
+                  placeholder={$t('ui_unlimited_11dde17d')}
                   disabled={busy}
                 />
               </label>
               <details class="invite-advanced-options">
-                <summary>Advanced options</summary>
+                <summary>{$t('ui_advanced_options_9443ff69')}</summary>
                 <div class="invite-advanced-grid">
                   <label class="toggle-row">
                     <input type="checkbox" bind:checked={inviteTemporary} disabled={busy} />
                     <span
-                      ><strong>Temporary membership</strong><small
-                        >Remove members when their final voice connection ends unless a role is
-                        assigned.</small
+                      ><strong>{$t('ui_temporary_membership_baa8c83e')}</strong><small
+                        >{$t('ui_remove_members_when_their_final_voice_connect_a99a95cc')}</small
                       ></span
                     >
                   </label>
                   <label class="toggle-row">
                     <input type="checkbox" bind:checked={inviteUnique} disabled={busy} />
                     <span
-                      ><strong>Always create a new code</strong><small
-                        >When off, an equivalent reusable invite may be returned.</small
+                      ><strong>{$t('ui_always_create_a_new_code_a6cbeb3e')}</strong><small
+                        >{$t('ui_when_off_an_equivalent_reusable_invite_may_be_70e01529')}</small
                       ></span
                     >
                   </label>
                   <label class="form-field compact-field">
-                    <span>Voice invite target</span>
+                    <span>{$t('ui_voice_invite_target_418b6c06')}</span>
                     <select bind:value={inviteTargetType} disabled={busy}>
-                      <option value="">None</option>
-                      <option value="stream">Member's Go Live stream</option>
+                      <option value="">{$t('ui_none_dc937b59')}</option>
+                      <option value="stream">{$t('ui_member_s_go_live_stream_ecf509d4')}</option>
                     </select>
-                    <small>Voice targets require a voice or Stage destination.</small>
+                    <small>{$t('ui_voice_targets_require_a_voice_or_stage_destin_68719e6f')}</small>
                   </label>
                   {#if inviteTargetType === 'stream'}
                     <label class="form-field compact-field">
-                      <span>Streaming member</span>
+                      <span>{$t('ui_streaming_member_16b000f1')}</span>
                       <GuildMemberPicker
                         guildRef={entityRef(guild)}
                         fallbackUsers={currentMembers.map((member) => member.user)}
                         value={inviteTargetUser ? [inviteTargetUser] : []}
-                        placeholder="Choose a member"
+                        placeholder={$t('ui_choose_a_member_c6aaa720')}
                         disabled={busy}
                         onChange={(values) => (inviteTargetUser = values[0] ?? '')}
                       />
-                      <small>The member must currently be able to stream in the destination.</small>
+                      <small
+                        >{$t('ui_the_member_must_currently_be_able_to_stream_i_c7e43a03')}</small
+                      >
                     </label>
                   {/if}
                   <label class="form-field compact-field">
-                    <span>Scheduled event</span>
+                    <span>{$t('ui_scheduled_event_e7b77e0c')}</span>
                     <select bind:value={inviteScheduledEvent} disabled={busy}>
-                      <option value="">No event association</option>
+                      <option value="">{$t('ui_no_event_association_9961e003')}</option>
                       {#each scheduledEvents as scheduledEvent (scheduledEventRef(scheduledEvent))}
                         <option value={scheduledEventRef(scheduledEvent)}
                           >{scheduledEvent.name} · {formatDateTime(
@@ -5867,36 +6042,32 @@
                         >
                       {/each}
                     </select>
-                    <small>Event details are included independently of a voice target.</small>
+                    <small>{$t('ui_event_details_are_included_independently_of_a_35587c7a')}</small>
                   </label>
                   {#if canManageRoles}
                     <label class="form-field compact-field">
-                      <span>Roles (optional)</span>
+                      <span>{$t('ui_roles_optional_4eff2966')}</span>
                       <select multiple bind:value={inviteRoleIds} size="5" disabled={busy}>
                         {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id && canManageRole(role)) as role (entityKey(role))}
                           <option value={entityRef(role)}>{role.name}</option>
                         {/each}
                       </select>
                       <small
-                        >Members receive these roles when they accept—even if they already joined.
-                        Only roles below your highest role are available.</small
+                        >{$t('ui_members_receive_these_roles_when_they_accept__21aeadd6')}</small
                       >
                     </label>
                   {/if}
                 </div>
               </details>
               <button class="primary-button" disabled={busy}>
-                <Icon name="plus" size={16} />Create invite
+                <Icon name="plus" size={16} />{$t('ui_create_invite_9f395b8f')}
               </button>
             </form>
             {#if createdInvite}
               <div class="settings-card created-invite-card" role="status">
                 <div>
-                  <strong>Your new invite is ready</strong>
-                  <p>
-                    Anyone with this link can use it until its limits are reached. Keep it private
-                    when the guild is private.
-                  </p>
+                  <strong>{$t('ui_your_new_invite_is_ready_4d616ec7')}</strong>
+                  <p>{$t('ui_anyone_with_this_link_can_use_it_until_its_li_1e9f9a48')}</p>
                 </div>
                 <code>{inviteUrl(createdInvite.code)}</code>
                 <button
@@ -5905,7 +6076,7 @@
                   disabled={busy}
                   onclick={() => copyInvite(createdInvite!)}
                 >
-                  <Icon name="copy" size={17} />Copy invite link
+                  <Icon name="copy" size={17} />{$t('ui_copy_invite_link_5c58cd79')}
                 </button>
               </div>
             {/if}
@@ -5914,7 +6085,7 @@
           {#if canManageGuild || canViewAuditLog}
             <div class="settings-card invite-list">
               <div class="settings-list-heading">
-                <strong>Active invites</strong>
+                <strong>{$t('ui_active_invites_f84513a5')}</strong>
                 <span>{invites.length}</span>
               </div>
               {#each invites as invite (invite.code)}
@@ -5923,15 +6094,18 @@
                     <code>{invite.code}</code>
                     <span>
                       {#if invite.uses !== undefined}
-                        {invite.uses}{invite.max_uses ? ` / ${invite.max_uses}` : ''} uses ·
-                      {/if}{invite.expires_at
+                        {$t('ui_value0_value1_uses_80200e00', {
+                          value0: String(invite.uses),
+                          value1: String(invite.max_uses ? ` / ${invite.max_uses}` : '')
+                        })}{/if}{invite.expires_at
                         ? `expires ${formatDateTime(invite.expires_at)}`
-                        : 'never expires'}{invite.temporary
-                        ? ' · temporary'
+                        : $t('ui_never_expires_fd791f1a')}{invite.temporary
+                        ? $t('ui_temporary_11eb04d1')
                         : ''}{invite.target_type
                         ? ` · targets ${invite.target_type.replaceAll('_', ' ')}`
-                        : ''}{invite.scheduled_event_id ? ' · includes scheduled event' : ''}{invite
-                        .role_ids?.length
+                        : ''}{invite.scheduled_event_id
+                        ? $t('ui_includes_scheduled_event_16e4938d')
+                        : ''}{invite.role_ids?.length
                         ? ` · grants ${invite.role_ids.length} role${invite.role_ids.length === 1 ? '' : 's'}`
                         : ''}{invite.target_user_count
                         ? ` · limited to ${invite.target_user_count} user${invite.target_user_count === 1 ? '' : 's'}`
@@ -5962,8 +6136,8 @@
               {:else}
                 <div class="empty-state compact-empty">
                   <span><Icon name="globe" /></span>
-                  <h3>No active invites</h3>
-                  <p>Create one when you are ready to welcome someone new.</p>
+                  <h3>{$t('ui_no_active_invites_f07a398e')}</h3>
+                  <p>{$t('ui_create_one_when_you_are_ready_to_welcome_some_f00fac06')}</p>
                 </div>
               {/each}
             </div>
@@ -5976,26 +6150,26 @@
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="logout" /></span>
             <div>
-              <h2>Guild access</h2>
-              <p>Leave this community or manage its ownership and permanent deletion.</p>
+              <h2>{$t('ui_guild_access_dad929fc')}</h2>
+              <p>{$t('ui_leave_this_community_or_manage_its_ownership__4b81f060')}</p>
             </div>
           </div>
           {#if isGuildOwner}
             <div class="settings-card guild-ownership-card">
               <div class="settings-list-heading">
                 <div>
-                  <strong>Transfer ownership</strong>
-                  <p>Ownership can be transferred to any eligible human member of this guild.</p>
+                  <strong>{$t('ui_transfer_ownership_3667f939')}</strong>
+                  <p>{$t('ui_ownership_can_be_transferred_to_any_eligible__0e5a33d4')}</p>
                 </div>
               </div>
               <div class="inline-settings-form">
                 <label class="form-field">
-                  <span>New owner</span>
+                  <span>{$t('ui_new_owner_1cf8bc7f')}</span>
                   <GuildMemberPicker
                     guildRef={entityRef(guild)}
                     fallbackUsers={ownershipCandidates.map((member) => member.user)}
                     value={ownershipTarget ? [ownershipTarget] : []}
-                    placeholder="Choose a member"
+                    placeholder={$t('ui_choose_a_member_c6aaa720')}
                     disabled={busy}
                     filterUser={(user) =>
                       user.account_type !== 'bot' &&
@@ -6011,21 +6185,20 @@
                   class="secondary-button"
                   type="button"
                   disabled={busy || !ownershipTarget}
-                  onclick={requestOwnershipTransfer}>Transfer ownership</button
+                  onclick={requestOwnershipTransfer}>{$t('ui_transfer_ownership_3667f939')}</button
                 >
               </div>
               {#if !ownershipCandidates.length}
-                <p class="field-hint">No other eligible human member can receive ownership.</p>
+                <p class="field-hint">
+                  {$t('ui_no_other_eligible_human_member_can_receive_ow_f6df56c4')}
+                </p>
               {/if}
             </div>
             <div class="settings-card danger-zone guild-delete-card">
               <div>
-                <span>Permanent action</span>
-                <h3>Delete guild</h3>
-                <p>
-                  Deletes all guild data at its home and sends durable access revocations to remote
-                  member instances.
-                </p>
+                <span>{$t('ui_permanent_action_583317a2')}</span>
+                <h3>{$t('ui_delete_guild_48611aaa')}</h3>
+                <p>{$t('ui_deletes_all_guild_data_at_its_home_and_sends__dd1c5201')}</p>
               </div>
               <button
                 class="danger-button"
@@ -6033,15 +6206,15 @@
                 disabled={busy}
                 onclick={requestDeleteGuild}
               >
-                <Icon name="trash" size={16} />Delete guild
+                <Icon name="trash" size={16} />{$t('ui_delete_guild_48611aaa')}
               </button>
             </div>
           {:else}
             <div class="settings-card danger-zone guild-leave-card">
               <div>
-                <span>Membership</span>
-                <h3>Leave guild</h3>
-                <p>You will need a new valid invitation before you can return.</p>
+                <span>{$t('ui_membership_9feceb93')}</span>
+                <h3>{$t('ui_leave_guild_92d9a021')}</h3>
+                <p>{$t('ui_you_will_need_a_new_valid_invitation_before_y_efc60a8d')}</p>
               </div>
               <button
                 class="danger-button"
@@ -6049,7 +6222,7 @@
                 disabled={busy}
                 onclick={requestLeaveGuild}
               >
-                <Icon name="logout" size={16} />Leave guild
+                <Icon name="logout" size={16} />{$t('ui_leave_guild_92d9a021')}
               </button>
             </div>
           {/if}
@@ -6059,7 +6232,7 @@
 
     {#if !channelOnly}
       <footer class="settings-footer">
-        <span>{guild?.name ?? 'Guild'}</span>
+        <span>{guild?.name ?? $t('ui_guild_298ffc49')}</span>
         <span>{guild ? `${guild.id}@${guild.origin_domain}` : ''}</span>
       </footer>
     {/if}
@@ -6079,7 +6252,7 @@
     <button
       class="channel-dialog-backdrop"
       type="button"
-      aria-label="Cancel moderation action"
+      aria-label={$t('ui_cancel_moderation_action_1747fc6b')}
       onclick={cancelMemberModeration}
     ></button>
     <div
@@ -6095,10 +6268,12 @@
     >
       <header>
         <div>
-          <p>Member moderation</p>
+          <p>{$t('ui_member_moderation_0e542933')}</p>
           <h2 id="member-moderation-title">{memberModerationTitle(memberModerationDialog)}</h2>
         </div>
-        <button type="button" aria-label="Cancel" onclick={cancelMemberModeration}>×</button>
+        <button type="button" aria-label={$t('ui_cancel_19766ed6')} onclick={cancelMemberModeration}
+          >×</button
+        >
       </header>
       <form
         onsubmit={(event) => {
@@ -6130,7 +6305,7 @@
             >
             <small
               >{userPublicHandle(memberModerationDialog.member.user) ??
-                'Profile unavailable'}</small
+                $t('ui_profile_unavailable_158e5a22')}</small
             >
           </div>
         </div>
@@ -6139,46 +6314,47 @@
         </p>
         {#if memberModerationDialog.action === 'timeout'}
           <label class="channel-dialog-field">
-            Duration
+            {$t('ui_duration_4fc52a3c')}
             <select bind:value={timeoutDuration} disabled={memberModerationBusy}>
-              <option value="600">10 minutes</option>
-              <option value="3600">1 hour</option>
-              <option value="86400">1 day</option>
-              <option value="604800">7 days</option>
-              <option value="2419200">28 days</option>
-              <option value="permanent">Indefinite</option>
+              <option value="600">{$t('ui_10_minutes_b075b6e1')}</option>
+              <option value="3600">{$t('ui_1_hour_f8b8883f')}</option>
+              <option value="86400">{$t('ui_1_day_fa665d95')}</option>
+              <option value="604800">{$t('ui_7_days_7f920bb6')}</option>
+              <option value="2419200">{$t('ui_28_days_56a795b7')}</option>
+              <option value="permanent">{$t('ui_indefinite_674087cf')}</option>
             </select>
           </label>
         {:else if memberModerationDialog.action === 'ban'}
           <div class="moderation-inline-selects">
             <label class="channel-dialog-field">
-              Duration
+              {$t('ui_duration_4fc52a3c')}
               <select bind:value={banDuration} disabled={memberModerationBusy}>
-                <option value="3600">1 hour</option>
-                <option value="86400">1 day</option>
-                <option value="604800">7 days</option>
-                <option value="2592000">30 days</option>
-                <option value="permanent">Permanent</option>
+                <option value="3600">{$t('ui_1_hour_f8b8883f')}</option>
+                <option value="86400">{$t('ui_1_day_fa665d95')}</option>
+                <option value="604800">{$t('ui_7_days_7f920bb6')}</option>
+                <option value="2592000">{$t('ui_30_days_ffd72805')}</option>
+                <option value="permanent">{$t('ui_permanent_455a9549')}</option>
               </select>
             </label>
             <label class="channel-dialog-field">
-              Delete messages
+              {$t('ui_delete_messages_708b6094')}
               <select bind:value={banDeleteSeconds} disabled={memberModerationBusy}>
-                <option value="0">None</option>
-                <option value="3600">Previous hour</option>
-                <option value="86400">Previous day</option>
-                <option value="604800">Previous 7 days</option>
+                <option value="0">{$t('ui_none_dc937b59')}</option>
+                <option value="3600">{$t('ui_previous_hour_e680d771')}</option>
+                <option value="86400">{$t('ui_previous_day_e4a1e89e')}</option>
+                <option value="604800">{$t('ui_previous_7_days_c6327b7b')}</option>
               </select>
             </label>
           </div>
         {/if}
         <label class="channel-dialog-field">
-          Reason <span class="field-optional">Optional</span>
+          {$t('ui_reason_f81ab834')}
+          <span class="field-optional">{$t('ui_optional_59be7133')}</span>
           <textarea
             bind:value={moderationReason}
             maxlength="512"
             rows="3"
-            placeholder="Visible in the guild audit log"
+            placeholder={$t('ui_visible_in_the_guild_audit_log_5958620b')}
             disabled={memberModerationBusy}
           ></textarea>
         </label>
@@ -6188,7 +6364,7 @@
             bind:this={memberModerationCancel}
             class="secondary-button"
             type="button"
-            onclick={cancelMemberModeration}>Cancel</button
+            onclick={cancelMemberModeration}>{$t('ui_cancel_19766ed6')}</button
           >
           <button
             class={memberModerationDialog.action === 'untimeout'
@@ -6198,14 +6374,14 @@
             disabled={memberModerationBusy}
           >
             {memberModerationBusy
-              ? 'Applying…'
+              ? $t('ui_applying_3329a9bb')
               : memberModerationDialog.action === 'untimeout'
-                ? 'Remove timeout'
+                ? $t('ui_remove_timeout_f9104d86')
                 : memberModerationDialog.action === 'timeout'
-                  ? 'Apply timeout'
+                  ? $t('ui_apply_timeout_e6df7c71')
                   : memberModerationDialog.action === 'kick'
-                    ? 'Kick member'
-                    : 'Ban member'}
+                    ? $t('ui_kick_member_175f3c4c')
+                    : $t('ui_ban_member_5af6225d')}
           </button>
         </footer>
       </form>
@@ -6219,7 +6395,7 @@
       class="channel-dialog-backdrop"
       type="button"
       disabled={busy}
-      aria-label="Cancel destructive action"
+      aria-label={$t('ui_cancel_destructive_action_50a03457')}
       onclick={closeDestructiveConfirmation}
     ></button>
     <div
@@ -6235,13 +6411,13 @@
     >
       <header>
         <div>
-          <p>Destructive action</p>
+          <p>{$t('ui_destructive_action_627d4cfc')}</p>
           <h2 id="destructive-confirmation-title">{destructiveConfirmation.title}</h2>
         </div>
         <button
           type="button"
           disabled={busy}
-          aria-label="Cancel"
+          aria-label={$t('ui_cancel_19766ed6')}
           onclick={closeDestructiveConfirmation}>×</button
         >
       </header>
@@ -6256,7 +6432,8 @@
         </div>
         {#if destructiveConfirmation.kind === 'guild-delete'}
           <label class="channel-dialog-field">
-            Type <strong>{destructiveConfirmation.verificationText}</strong> to confirm
+            {$t('ui_type_baaddf70')} <strong>{destructiveConfirmation.verificationText}</strong>
+            {$t('ui_to_confirm_83918ed6')}
             <input
               bind:value={confirmationVerification}
               autocomplete="off"
@@ -6272,7 +6449,7 @@
             class="secondary-button"
             type="button"
             disabled={busy}
-            onclick={closeDestructiveConfirmation}>Cancel</button
+            onclick={closeDestructiveConfirmation}>{$t('ui_cancel_19766ed6')}</button
           >
           <button
             class="danger-button"

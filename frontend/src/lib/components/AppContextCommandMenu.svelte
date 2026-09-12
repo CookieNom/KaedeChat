@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { localizedCommandName } from '$lib/chat/application-commands';
   import {
     appContextCommandHistory,
@@ -143,7 +145,7 @@
       onkeydown={triggerKeydown}
     >
       <Icon name="sparkles" size={17} />
-      <span>Apps</span>
+      <span>{$t('ui_apps_89dd7484')}</span>
       <span class="submenu-arrow" aria-hidden="true">›</span>
     </button>
     {#if open}
@@ -153,7 +155,7 @@
         class="app-command-submenu"
         role="menu"
         tabindex="-1"
-        aria-label="Apps"
+        aria-label={$t('ui_apps_89dd7484')}
         onkeydown={submenuKeydown}
       >
         <label class="command-search">
@@ -163,8 +165,8 @@
             bind:value={query}
             type="search"
             autocomplete="off"
-            aria-label="Search app commands"
-            placeholder="Search commands"
+            aria-label={$t('ui_search_app_commands_4b039ece')}
+            placeholder={$t('ui_search_commands_00ff7398')}
           />
         </label>
         {#if menuModel.frequent.length}
@@ -173,7 +175,7 @@
             role="group"
             aria-labelledby={`${id}-frequent`}
           >
-            <h3 id={`${id}-frequent`}>Frequently Used</h3>
+            <h3 id={`${id}-frequent`}>{$t('ui_frequently_used_c2616300')}</h3>
             {#each menuModel.frequent as entry (entry.key)}
               {@render commandButton(entry)}
             {/each}
@@ -192,7 +194,9 @@
           </section>
         {/each}
         {#if !menuModel.frequent.length && !menuModel.groups.length}
-          <p class="no-command-results" role="status">No commands match “{query}”.</p>
+          <p class="no-command-results" role="status">
+            {$t('ui_no_commands_match_value0_6e36175f', { value0: String(query) })}
+          </p>
         {/if}
       </div>
     {/if}

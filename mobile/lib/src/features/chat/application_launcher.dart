@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
@@ -7,6 +6,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_commands.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 typedef MobileDirectoryLoader = Future<MobileDirectoryPage> Function({
@@ -160,7 +160,9 @@ final class _MobileApplicationLauncherSheetState
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
-        const SnackBar(content: Text('App details are unavailable.')),
+        SnackBar(
+            content:
+                Text(L10n.of(context).ui_app_details_are_unavailable_b97be5ac)),
       );
   }
 
@@ -385,12 +387,12 @@ final class _MobileApplicationLauncherSheetState
               children: [
                 Expanded(
                   child: Text(
-                    'Apps',
+                    L10n.of(context).ui_apps_53d91aad,
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
                 ),
                 IconButton(
-                  tooltip: 'Close Apps',
+                  tooltip: L10n.of(context).ui_close_apps_0b6e16a1,
                   onPressed: () => Navigator.pop(context),
                   icon: const Icon(Icons.close_rounded),
                 ),
@@ -401,8 +403,9 @@ final class _MobileApplicationLauncherSheetState
               key: const ValueKey('app-launcher-search'),
               controller: _search,
               maxLength: 100,
-              decoration: const InputDecoration(
-                labelText: 'Search apps and commands',
+              decoration: InputDecoration(
+                labelText:
+                    L10n.of(context).ui_search_apps_and_commands_0d58e860,
                 prefixIcon: Icon(Icons.search_rounded),
                 counterText: '',
               ),
@@ -416,8 +419,10 @@ final class _MobileApplicationLauncherSheetState
                 icon: const Icon(Icons.public_rounded, size: 18),
                 label: Text(
                   _directoryDomain == widget.home
-                      ? 'Directory: ${_directoryDomain.value} (Home)'
-                      : 'Directory: ${_directoryDomain.value}',
+                      ? L10n.of(context).ui_directory_value0_home_dab0fbc7(
+                          (_directoryDomain.value).toString())
+                      : L10n.of(context).ui_directory_value0_9f2ef25f(
+                          (_directoryDomain.value).toString()),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -511,8 +516,10 @@ final class _MobileApplicationLauncherSheetState
                 const SizedBox(height: 10),
                 Text(
                   _discoveryFailed
-                      ? 'App discovery is unavailable. Installed commands still work offline.'
-                      : 'No apps or commands are available here yet.',
+                      ? L10n.of(context)
+                          .ui_app_discovery_is_unavailable_installed_comman_5d2288e4
+                      : L10n.of(context)
+                          .ui_no_apps_or_commands_are_available_here_yet_e704c1c0,
                   textAlign: TextAlign.center,
                   style: TextStyle(color: context.kaede.muted),
                 ),
@@ -523,7 +530,8 @@ final class _MobileApplicationLauncherSheetState
           Padding(
             padding: const EdgeInsets.only(top: 8, bottom: 12),
             child: Text(
-              'Some app recommendations could not be loaded.',
+              L10n.of(context)
+                  .ui_some_app_recommendations_could_not_be_loaded_6e7d0996,
               style: TextStyle(color: context.kaede.muted),
             ),
           ),
@@ -589,8 +597,10 @@ final class _MobileApplicationLauncherSheetState
               padding: const EdgeInsets.symmetric(vertical: 34),
               child: Text(
                 _searchFailed
-                    ? 'App discovery is unavailable. You can still use installed commands.'
-                    : 'No apps or commands match your search.',
+                    ? L10n.of(context)
+                        .ui_app_discovery_is_unavailable_you_can_still_us_13ed30a8
+                    : L10n.of(context)
+                        .ui_no_apps_or_commands_match_your_search_16615cbb,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: context.kaede.muted),
               ),
@@ -599,7 +609,8 @@ final class _MobileApplicationLauncherSheetState
             Padding(
               padding: const EdgeInsets.only(top: 8, bottom: 12),
               child: Text(
-                'Directory search is unavailable. Installed commands are still shown.',
+                L10n.of(context)
+                    .ui_directory_search_is_unavailable_installed_com_a43053c5,
                 style: TextStyle(color: context.kaede.muted),
               ),
             ),
@@ -651,10 +662,11 @@ final class _MobileApplicationLauncherSheetState
           'app-command-${command.application.wire}-${command.id}',
         ),
         leading: const Icon(Icons.terminal_rounded),
-        title: Text('/${command.displayName(locale)}'),
+        title: Text(L10n.of(context)
+            .ui_value0_0345d263((command.displayName(locale)).toString())),
         subtitle: Text(
           command.displayDescription(locale).isEmpty
-              ? 'Run command'
+              ? L10n.of(context).ui_run_command_45581e4f
               : command.displayDescription(locale),
         ),
         onTap: () => Navigator.pop(
@@ -705,8 +717,8 @@ final class _MobileApplicationLauncherSheetState
                             ),
                             Text(
                               application.installed
-                                  ? 'Installed'
-                                  : 'Recently used',
+                                  ? L10n.of(context).ui_installed_68a76241
+                                  : L10n.of(context).ui_recently_used_14f472fe,
                               style: TextStyle(
                                 color: context.kaede.muted,
                                 fontSize: 12,
@@ -738,11 +750,11 @@ final class _MobileApplicationLauncherSheetState
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           else
-                            const Row(
+                            Row(
                               children: [
                                 Icon(Icons.open_in_new_rounded, size: 16),
                                 SizedBox(width: 5),
-                                Text('Review app'),
+                                Text(L10n.of(context).ui_review_app_8137a886),
                               ],
                             ),
                         ],
@@ -770,7 +782,8 @@ final class _MobileApplicationLauncherSheetState
                               icon:
                                   const Icon(Icons.terminal_rounded, size: 17),
                               label: Text(
-                                '/${command.displayName(locale)}',
+                                L10n.of(context).ui_value0_0345d263(
+                                    (command.displayName(locale)).toString()),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -827,11 +840,11 @@ final class _MobileApplicationLauncherSheetState
                             style: TextStyle(color: context.kaede.muted),
                           ),
                         ),
-                        const Row(
+                        Row(
                           children: [
                             Icon(Icons.add_circle_outline_rounded, size: 16),
                             SizedBox(width: 5),
-                            Text('Review app'),
+                            Text(L10n.of(context).ui_review_app_8137a886),
                           ],
                         ),
                       ],
@@ -1025,13 +1038,14 @@ final class _DirectoryInstanceDialogState
     try {
       Navigator.pop(context, Domain(_controller.text));
     } on FormatException {
-      setState(() => _error = 'Enter a valid domain.');
+      setState(
+          () => _error = L10n.of(context).ui_enter_a_valid_domain_a806f29e);
     }
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: const Text('Directory instance'),
+        title: Text(L10n.of(context).ui_directory_instance_f95ed4c3),
         content: TextField(
           key: const ValueKey('app-launcher-directory-domain-input'),
           controller: _controller,
@@ -1040,8 +1054,9 @@ final class _DirectoryInstanceDialogState
           keyboardType: TextInputType.url,
           maxLength: 253,
           decoration: InputDecoration(
-            labelText: 'Instance domain',
-            helperText: 'Apps are reviewed by this instance.',
+            labelText: L10n.of(context).ui_instance_domain_f42d351a,
+            helperText:
+                L10n.of(context).ui_apps_are_reviewed_by_this_instance_75c20ac4,
             errorText: _error,
             counterText: '',
           ),
@@ -1050,17 +1065,17 @@ final class _DirectoryInstanceDialogState
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           TextButton(
             key: const ValueKey('app-launcher-directory-use-home'),
             onPressed: () => Navigator.pop(context, widget.home),
-            child: const Text('Use home'),
+            child: Text(L10n.of(context).ui_use_home_578473eb),
           ),
           FilledButton(
             key: const ValueKey('app-launcher-directory-apply'),
             onPressed: _apply,
-            child: const Text('Apply'),
+            child: Text(L10n.of(context).ui_apply_ca77bbdb),
           ),
         ],
       );

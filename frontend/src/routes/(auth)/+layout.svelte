@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
 
@@ -8,29 +10,26 @@
 
 <main class="auth-shell">
   <header class="auth-topbar">
-    <a class="wordmark" href={resolve('/')}><span>K</span>Kaede Chat</a>
+    <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
     <a href={onLogin ? resolve('/register') : resolve('/login')}>
-      {onLogin ? 'Create account' : 'Sign in'}
+      {onLogin ? $t('ui_create_account_798ca2ce') : $t('ui_sign_in_bfd402b2')}
     </a>
   </header>
   <div class="auth-frame">
-    <aside class="auth-story" aria-label="About Kaede Chat">
-      <p class="eyebrow">Your home on the fediverse</p>
-      <h2>One account.<br />Every community.</h2>
-      <p>
-        Choose the Kaede server that stores your account, then join communities hosted anywhere on
-        the network.
-      </p>
+    <aside class="auth-story" aria-label={$t('ui_about_kaede_chat_8840db12')}>
+      <p class="eyebrow">{$t('ui_your_home_on_the_fediverse_475b11bb')}</p>
+      <h2>{$t('ui_one_account_3ca8c840')}<br />{$t('ui_every_community_8b59c50f')}</h2>
+      <p>{$t('ui_choose_the_kaede_server_that_stores_your_acco_f994b9c0')}</p>
       <ul>
-        <li><i></i>Independent and self-hosted</li>
-        <li><i></i>Federated like email</li>
-        <li><i></i>Built for real-time conversation</li>
+        <li><i></i>{$t('ui_independent_and_self_hosted_7e153df3')}</li>
+        <li><i></i>{$t('ui_federated_like_email_c629c0da')}</li>
+        <li><i></i>{$t('ui_built_for_real_time_conversation_0da33453')}</li>
       </ul>
     </aside>
     <section class="auth-paper">{@render children()}</section>
   </div>
   <footer class="auth-footer">
-    <span>Kaede Chat</span>
-    <span>Open communities, on your terms.</span>
+    <span>{$t('ui_kaede_chat_8f3c1776')}</span>
+    <span>{$t('ui_open_communities_on_your_terms_1619deaa')}</span>
   </footer>
 </main>

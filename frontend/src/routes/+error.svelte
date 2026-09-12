@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import Icon from '$lib/components/Icon.svelte';
@@ -31,22 +33,25 @@
   );
 </script>
 
-<svelte:head><title>{page.status} · Kaede Chat</title></svelte:head>
+<svelte:head
+  ><title>{$t('ui_value0_kaede_chat_4bf52868', { value0: String(page.status) })}</title
+  ></svelte:head
+>
 
 <main class="error-page">
   <section class="error-card">
     <span class="error-mark"><Icon name="message" size={28} /></span>
-    <p class="eyebrow">Error {page.status}</p>
+    <p class="eyebrow">{$t('ui_error_value0_2505a947', { value0: String(page.status) })}</p>
     <h1>{title}</h1>
     <p>{description}</p>
     <div class="welcome-actions">
       {#if page.status === 401}
-        <a class="primary-button" href={resolve('/login')}>Sign in again</a>
+        <a class="primary-button" href={resolve('/login')}>{$t('ui_sign_in_again_51fbe1dc')}</a>
       {:else}
-        <a class="primary-button" href={resolve('/home')}>Return home</a>
+        <a class="primary-button" href={resolve('/home')}>{$t('ui_return_home_bbcc935e')}</a>
       {/if}
       <button class="secondary-button" type="button" onclick={() => window.location.reload()}>
-        Try again
+        {$t('ui_try_again_d8b8392e')}
       </button>
     </div>
   </section>

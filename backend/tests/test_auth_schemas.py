@@ -122,3 +122,11 @@ def test_mfa_setup_requires_password_and_bounds_the_current_factor() -> None:
 def test_login_requires_exact_kdf_v2_without_upgrade_fields(payload: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         LoginRequest.model_validate(payload)
+
+
+def test_settings_accept_system_language_without_accepting_invalid_tags() -> None:
+    assert SettingsPatch(locale="system").locale == "system"
+    assert SettingsPatch(locale="ja-JP").locale == "ja-JP"
+    for invalid in ("systems", "en_US", "<script>", ""):
+        with pytest.raises(ValidationError):
+            SettingsPatch(locale=invalid)

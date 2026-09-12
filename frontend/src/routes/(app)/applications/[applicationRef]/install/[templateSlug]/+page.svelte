@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { resolve } from '$app/paths';
   import { Permission } from '$lib/generated/permissions';
@@ -123,7 +125,7 @@
       );
       if (!requestIsCurrent(signal, generation, applicationRef, templateSlug)) return;
       if (applicationRefFor(resolvedInvite) !== applicationRef) {
-        throw new Error('The resolved invitation did not match the requested application.');
+        throw new Error($t('ui_the_resolved_invitation_did_not_match_the_req_40abcd8b'));
       }
       invite = resolvedInvite;
       selectedUserContexts = [...resolvedInvite.application.user_install_contexts];
@@ -148,8 +150,8 @@
           guildsError = userErrorMessage(
             caught,
             resolvedInvite.application.supported_install_types.includes('user_install')
-              ? 'Your guilds could not be loaded. Account installation is still available.'
-              : 'Your guilds could not be loaded. Reload this page to try again.'
+              ? $t('ui_your_guilds_could_not_be_loaded_account_insta_cb9f43f0')
+              : $t('ui_your_guilds_could_not_be_loaded_reload_this_p_d7992ba4')
           );
         }
       } finally {
@@ -159,7 +161,7 @@
       }
     } catch (caught) {
       if (requestIsCurrent(signal, generation, applicationRef, templateSlug)) {
-        error = userErrorMessage(caught, 'This bot invitation is unavailable.');
+        error = userErrorMessage(caught, $t('ui_this_bot_invitation_is_unavailable_b2641d14'));
         loading = false;
       }
     }
@@ -191,7 +193,10 @@
       }
     } catch (caught) {
       if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
-        error = userErrorMessage(caught, 'The bot could not be added to that guild.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_the_bot_could_not_be_added_to_that_guild_fb9971c2')
+        );
       }
     } finally {
       if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
@@ -226,7 +231,7 @@
       if (loadedInviteIsCurrent(applicationRef, templateSlug, loadedInvite)) {
         error = userErrorMessage(
           caught,
-          'This app does not currently offer commands that can be installed for your account.'
+          $t('ui_this_app_does_not_currently_offer_commands_th_06ac1b41')
         );
       }
     } finally {
@@ -267,21 +272,25 @@
   });
 </script>
 
-<svelte:head><title>{invite?.application.name ?? 'Add App'} · Kaede Chat</title></svelte:head>
+<svelte:head
+  ><title
+    >{$t('ui_value0_kaede_chat_4bf52868', {
+      value0: String(invite?.application.name ?? 'Add App')
+    })}</title
+  ></svelte:head
+>
 <!-- eslint-disable svelte/no-navigation-without-resolve -- privacy and support destinations are external URLs supplied by the application -->
 <main>
-  <a class="back" href={resolve(data.returnTo as '/home')}>← Back to Kaede</a>{#if error}<div
-      class="notice error"
-      role="alert"
-    >
+  <a class="back" href={resolve(data.returnTo as '/home')}>{$t('ui_back_to_kaede_bfbafc02')}</a
+  >{#if error}<div class="notice error" role="alert">
       {error}
     </div>{/if}{#if loading || !routeIsLoaded}<div class="notice" role="status">
-      Loading app authorization…
+      {$t('ui_loading_app_authorization_547b7dfd')}
     </div>{:else if invite}<article class="invite">
       <header>
         <span class="avatar">{invite.application.name.slice(0, 1).toUpperCase()}</span>
         <div>
-          <small>APP AUTHORIZATION</small>
+          <small>{$t('ui_app_authorization_08b9aae0')}</small>
           <h1>{invite.application.name}</h1>
           <p>
             {invite.application.bot_user.handle ??
@@ -292,46 +301,39 @@
       <p class="description">
         {invite.application.description ??
           invite.template.description ??
-          'This bot has not provided a description.'}
+          $t('ui_this_bot_has_not_provided_a_description_529a7f45')}
       </p>
       {#if invite.application.supported_install_types.includes('guild_install')}<section>
-          <h2>Add to a guild</h2>
+          <h2>{$t('ui_add_to_a_guild_5b54c3b9')}</h2>
           {#if guildsError}<p class="notice error" role="alert">{guildsError}</p>{/if}
-          {#if guildsLoading}<p class="muted" role="status">Loading your guilds…</p>{/if}
+          {#if guildsLoading}<p class="muted" role="status">
+              {$t('ui_loading_your_guilds_678f2416')}
+            </p>{/if}
           {#if installed}<div class="success">
-              <strong>Bot added</strong>
-              <p>
-                The bot is now a visible member of the selected guild. Its permissions can be
-                changed through guild roles.
-              </p>
+              <strong>{$t('ui_bot_added_0e121074')}</strong>
+              <p>{$t('ui_the_bot_is_now_a_visible_member_of_the_select_b25e909a')}</p>
             </div>{:else}<label
-              >Guild<select bind:value={selected} disabled={busy}
+              >{$t('ui_guild_298ffc49')}<select bind:value={selected} disabled={busy}
                 >{#each guilds as guild (`${guild.id}@${guild.origin_domain}`)}<option
                     value={`${guild.id}@${guild.origin_domain}`}
                     >{guild.name} · {guild.origin_domain}</option
                   >{/each}</select
               ></label
             >{#if !guildsLoading && !guildsError && guilds.length === 0}<p class="muted">
-                You do not have any guilds available for installation.
+                {$t('ui_you_do_not_have_any_guilds_available_for_inst_7290a07f')}
               </p>{/if}{/if}
         </section>{/if}
       {#if invite.application.supported_install_types.includes('user_install')}<section>
-          <h2>Install for your account</h2>
+          <h2>{$t('ui_install_for_your_account_15133076')}</h2>
           {#if userInstalled}
             <div class="success">
-              <strong>Installed for your account</strong>
-              <p>
-                This app’s user-installable commands can appear in the locations you authorized. You
-                can change or revoke this in Authorized apps under Settings.
-              </p>
+              <strong>{$t('ui_installed_for_your_account_75042a0e')}</strong>
+              <p>{$t('ui_this_app_s_user_installable_commands_can_appe_f9c95fb1')}</p>
             </div>
           {:else}
-            <p class="muted">
-              Authorize this app for your account without adding it as a guild member. It receives
-              only command interactions you explicitly start.
-            </p>
+            <p class="muted">{$t('ui_authorize_this_app_for_your_account_without_a_8275e81f')}</p>
             <fieldset class="context-options">
-              <legend>Use commands in</legend>
+              <legend>{$t('ui_use_commands_in_a6990ab8')}</legend>
               {#each invite.application.user_install_contexts as context (context)}
                 <label>
                   <input
@@ -349,24 +351,26 @@
               disabled={personalBusy || selectedUserContexts.length === 0}
               onclick={() => void installForUser()}
             >
-              {personalBusy ? 'Authorizing…' : 'Authorize for my account'}
+              {personalBusy
+                ? $t('ui_authorizing_a4dfff4b')
+                : $t('ui_authorize_for_my_account_bfe5140e')}
             </button>
           {/if}
         </section>{/if}
       {#if invite.application.supported_install_types.includes('guild_install')}
         <section>
-          <h2>Guild installation access</h2>
+          <h2>{$t('ui_guild_installation_access_a1118c3d')}</h2>
           <div class="pills">
             {#each invite.template.scopes as scope (scope)}<span>{scope}</span>{/each}
           </div>
           <details>
-            <summary>Live event intents</summary>
+            <summary>{$t('ui_live_event_intents_016f4f45')}</summary>
             <div class="pills">
               {#each invite.template.intents as intent (intent)}<span>{intent}</span>{/each}
             </div>
           </details>
           <details>
-            <summary>Server permissions</summary>
+            <summary>{$t('ui_server_permissions_d2673811')}</summary>
             {#if selectedPermissionMetadata(invite.template.permissions).length}
               <div class="pills">
                 {#each selectedPermissionMetadata(invite.template.permissions) as permission (permission.permission)}
@@ -374,22 +378,22 @@
                 {/each}
               </div>
             {:else}
-              <p class="muted">No server permissions requested.</p>
+              <p class="muted">{$t('ui_no_server_permissions_requested_b58f7e3b')}</p>
             {/if}
           </details>
         </section>
       {/if}
       {#if invite.application.supported_install_types.includes('user_install')}
         <section>
-          <h2>Account installation access</h2>
-          <p class="muted">Commands and responses only; this does not add a guild member.</p>
+          <h2>{$t('ui_account_installation_access_5f48d7fe')}</h2>
+          <p class="muted">{$t('ui_commands_and_responses_only_this_does_not_add_3b9a8417')}</p>
           <div class="pills">
             {#each invite.application.user_install_scopes as scope (scope)}<span>{scope}</span
               >{/each}
             <span>interactions</span>
           </div>
           <details>
-            <summary>Supported command locations</summary>
+            <summary>{$t('ui_supported_command_locations_49519617')}</summary>
             <div class="pills">
               {#each invite.application.user_install_contexts as context (context)}
                 <span>{userContextLabels[context]}</span>
@@ -399,43 +403,43 @@
         </section>
       {/if}
       <section class="privacy">
-        <h2>Encryption and privacy</h2>
+        <h2>{$t('ui_encryption_and_privacy_63e025d3')}</h2>
         {#if invite.application.supported_install_types.includes('guild_install')}
           {#if invite.template.e2ee_mode === 'participant'}<p>
-              <strong>Guild install:</strong> this bot may become an E2EE participant. In E2EE channels
-              where it is explicitly added, the bot operator can decrypt future messages and keep anything
-              the bot receives. Installing or removing it rotates room keys. It receives no pre-install
-              history by default.
-            </p>{:else}<p>The guild install has no access to E2EE channel contents.</p>{/if}
+              <strong>{$t('ui_guild_install_97f108da')}</strong>
+              {$t('ui_this_bot_may_become_an_e2ee_participant_in_e2_cb40d44b')}
+            </p>{:else}<p>{$t('ui_the_guild_install_has_no_access_to_e2ee_chann_827450bb')}</p>{/if}
         {/if}
         {#if invite.application.supported_install_types.includes('user_install')}
           <p>
-            <strong>Account install:</strong> the app receives only interactions you explicitly start
-            in an authorized location. Encrypted interactions require a registered app device and current
-            room consent; they do not grant ordinary message or DM access.
+            <strong>{$t('ui_account_install_126dc88c')}</strong>
+            {$t('ui_the_app_receives_only_interactions_you_explic_3385a600')}
           </p>
         {/if}
-        <p>
-          For plaintext channels, the bot can access only the scopes and channel permissions shown
-          above. Revocation stops future access but cannot erase information already delivered to
-          the bot operator.
-        </p>
+        <p>{$t('ui_for_plaintext_channels_the_bot_can_access_onl_f23ea870')}</p>
       </section>
       <footer>
         <div>
           <a
             href={invite.application.privacy_url ?? '#'}
-            aria-disabled={!invite.application.privacy_url}>Privacy</a
+            aria-disabled={!invite.application.privacy_url}>{$t('ui_privacy_54a57c31')}</a
           ><a
             href={invite.application.support_url ?? '#'}
-            aria-disabled={!invite.application.support_url}>Support</a
-          ><small>Application home: {invite.application.origin_domain}</small>
+            aria-disabled={!invite.application.support_url}>{$t('ui_support_be91940b')}</a
+          ><small
+            >{$t('ui_application_home_value0_644d593c', {
+              value0: String(invite.application.origin_domain)
+            })}</small
+          >
         </div>
         {#if installed}
-          <a class="return-link" href={resolve(data.returnTo as '/home')}>Return to Kaede</a>
+          <a class="return-link" href={resolve(data.returnTo as '/home')}
+            >{$t('ui_return_to_kaede_df76c5df')}</a
+          >
         {:else if invite.application.supported_install_types.includes('guild_install')}<button
             onclick={install}
-            disabled={busy || !selected}>{busy ? 'Adding bot…' : 'Authorize and add bot'}</button
+            disabled={busy || !selected}
+            >{busy ? $t('ui_adding_bot_8d3bf9db') : $t('ui_authorize_and_add_bot_d0cae0d9')}</button
           >{/if}
       </footer>
     </article>{/if}

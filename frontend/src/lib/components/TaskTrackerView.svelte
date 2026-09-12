@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { ApiError, userErrorMessage } from '$lib/api/client';
   import { entityKey, entityRef } from '$lib/chat/refs';
   import type { Channel, GuildMemberSummary, UserSummary } from '$lib/chat/types';
@@ -240,7 +242,10 @@
       return true;
     } catch (caught) {
       if (controller.signal.aborted || generation !== loadGeneration) return false;
-      loadError = userErrorMessage(caught, 'Could not load this task tracker. Try again.');
+      loadError = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_this_task_tracker_try_again_3e33282f')
+      );
       // A transient refresh failure may retain the last projection with a
       // visible stale-state warning. Revoked/missing access must instead stop
       // rendering cached tracker contents immediately.
@@ -357,8 +362,8 @@
             ? `The changes to ${target.key} were saved, but its status changed elsewhere before it could be moved. The editor was closed and the latest task is loaded; reopen it to review and retry the move.`
             : `The changes to ${target.key} were saved, but its status changed elsewhere before it could be moved. The editor was closed, but Kaede could not reload the latest task; retry the board refresh.`
           : refreshed
-            ? `${userErrorMessage(caught, 'Could not move the task to the selected status.')} The other task changes were saved. The editor was closed; reopen the latest task to retry the move.`
-            : `${userErrorMessage(caught, 'Could not move the task to the selected status.')} The other task changes were saved, but Kaede could not reload the latest task.`;
+            ? `${userErrorMessage(caught, $t('ui_could_not_move_the_task_to_the_selected_statu_53dfe37c'))} The other task changes were saved. The editor was closed; reopen the latest task to retry the move.`
+            : `${userErrorMessage(caught, $t('ui_could_not_move_the_task_to_the_selected_statu_53dfe37c'))} The other task changes were saved, but Kaede could not reload the latest task.`;
       } else {
         actionError = await actionFailure(
           caught,
@@ -583,7 +588,7 @@
         <button
           class="tracker-mobile-navigation"
           type="button"
-          aria-label="Open guild navigation"
+          aria-label={$t('ui_open_guild_navigation_5f6c9c31')}
           aria-controls="guild-channel-navigation"
           onclick={(event) => onOpenNavigation?.(event.currentTarget)}
         >
@@ -591,21 +596,27 @@
         </button>
       {/if}
       <div>
-        <span class="tracker-eyebrow">Task tracker</span>
-        <h1 id="task-tracker-title">{channel.name ?? 'Tasks'}</h1>
+        <span class="tracker-eyebrow">{$t('ui_task_tracker_b7794464')}</span>
+        <h1 id="task-tracker-title">{channel.name ?? $t('ui_tasks_b3a60e61')}</h1>
         {#if channel.topic}<p>{channel.topic}</p>{/if}
       </div>
     </div>
     <div class="tracker-heading-actions">
-      {#if refreshing}<span class="refreshing-label" role="status">Refreshing…</span>{/if}
+      {#if refreshing}<span class="refreshing-label" role="status"
+          >{$t('ui_refreshing_1c0def7b')}</span
+        >{/if}
       {#if onToggleMembers}
         <button
           class:active={memberRosterOpen}
           class="settings-action member-action"
           type="button"
-          aria-label={memberRosterOpen ? 'Hide member list' : 'Show member list'}
+          aria-label={memberRosterOpen
+            ? $t('ui_hide_member_list_367ab366')
+            : $t('ui_show_member_list_466240e0')}
           aria-pressed={memberRosterOpen}
-          title={memberRosterOpen ? 'Hide member list' : 'Show member list'}
+          title={memberRosterOpen
+            ? $t('ui_hide_member_list_367ab366')
+            : $t('ui_show_member_list_466240e0')}
           onclick={onToggleMembers}
         >
           <Icon name="users" size={19} />
@@ -615,8 +626,8 @@
         <button
           class="settings-action"
           type="button"
-          aria-label="Manage tracker statuses and task keys"
-          title="Board settings"
+          aria-label={$t('ui_manage_tracker_statuses_and_task_keys_e24cdd85')}
+          title={$t('ui_board_settings_f6275e06')}
           onclick={(event) => openSettings(event.currentTarget)}
         >
           <Icon name="settings" size={19} />
@@ -626,8 +637,8 @@
         <button
           class="add-task"
           type="button"
-          aria-label="Create task"
-          title="Create task"
+          aria-label={$t('ui_create_task_6f541e1b')}
+          title={$t('ui_create_task_6f541e1b')}
           disabled={!lanes.length || actionBusy}
           onclick={(event) => openCreateTask(null, event.currentTarget)}
         >
@@ -640,23 +651,27 @@
   <div class="tracker-toolbar" role="search">
     <label class="tracker-search">
       <Icon name="search" size={18} />
-      <input bind:value={filters.query} aria-label="Search tasks" placeholder="Search tasks" />
+      <input
+        bind:value={filters.query}
+        aria-label={$t('ui_search_tasks_46c6f1de')}
+        placeholder={$t('ui_search_tasks_46c6f1de')}
+      />
     </label>
     <label>
-      <span class="visually-hidden">Priority</span>
-      <select bind:value={filters.priority} aria-label="Filter by priority">
-        <option value="all">All priorities</option>
-        <option value="urgent">Urgent</option>
-        <option value="high">High</option>
-        <option value="medium">Medium</option>
-        <option value="low">Low</option>
-        <option value="none">No priority</option>
+      <span class="visually-hidden">{$t('ui_priority_d60dbba0')}</span>
+      <select bind:value={filters.priority} aria-label={$t('ui_filter_by_priority_48b74b8f')}>
+        <option value="all">{$t('ui_all_priorities_423775b6')}</option>
+        <option value="urgent">{$t('ui_urgent_1b015904')}</option>
+        <option value="high">{$t('ui_high_c4ebc6d4')}</option>
+        <option value="medium">{$t('ui_medium_8e588cd1')}</option>
+        <option value="low">{$t('ui_low_f793de20')}</option>
+        <option value="none">{$t('ui_no_priority_40588e19')}</option>
       </select>
     </label>
     <label class="assignee-filter">
-      <span class="visually-hidden">Assignee</span>
-      <select bind:value={filters.assignee} aria-label="Filter by assignee">
-        <option value="">All assignees</option>
+      <span class="visually-hidden">{$t('ui_assignee_5e20d20e')}</span>
+      <select bind:value={filters.assignee} aria-label={$t('ui_filter_by_assignee_0bcf89a3')}>
+        <option value="">{$t('ui_all_assignees_c095ce22')}</option>
         {#each uniqueAssignees as assignee (entityKey(assignee))}
           <option value={entityRef(assignee)}>{userName(assignee)}</option>
         {/each}
@@ -664,17 +679,19 @@
     </label>
     <label class="completed-filter">
       <input bind:checked={filters.hideCompleted} type="checkbox" />
-      Hide completed
+      {$t('ui_hide_completed_2b5ec46e')}
     </label>
     {#if activeFilterCount}
-      <button type="button" onclick={resetFilters}>Clear {activeFilterCount}</button>
+      <button type="button" onclick={resetFilters}
+        >{$t('ui_clear_value0_9016417b', { value0: String(activeFilterCount) })}</button
+      >
     {/if}
   </div>
 
   {#if actionError && !taskDialogOpen && !settingsOpen}
     <div class="tracker-action-error" role="alert">
       <span>{actionError}</span>
-      <button type="button" onclick={() => (actionError = '')}>Dismiss</button>
+      <button type="button" onclick={() => (actionError = '')}>{$t('ui_dismiss_48845bff')}</button>
     </div>
   {/if}
 
@@ -682,17 +699,19 @@
     <div class="tracker-refresh-error" role="alert">
       <Icon name="kanban" size={18} />
       <span
-        ><strong>Board refresh failed.</strong>
-        {loadError} The tasks below may be out of date.</span
+        ><strong>{$t('ui_board_refresh_failed_42d4aff9')}</strong>
+        {$t('ui_value0_the_tasks_below_may_be_out_of_date_c078bf4b', {
+          value0: String(loadError)
+        })}</span
       >
       <button type="button" disabled={refreshing} onclick={() => void reload(false)}>
-        {refreshing ? 'Retrying…' : 'Retry'}
+        {refreshing ? $t('ui_retrying_a16c8b1c') : $t('ui_retry_942087cc')}
       </button>
     </div>
   {/if}
 
   {#if loading}
-    <div class="tracker-loading" role="status" aria-label="Loading task tracker">
+    <div class="tracker-loading" role="status" aria-label={$t('ui_loading_task_tracker_4db56a26')}>
       {#each [0, 1, 2] as skeleton (skeleton)}
         <div><span></span><span></span><span></span></div>
       {/each}
@@ -700,26 +719,27 @@
   {:else if loadError && !board}
     <div class="tracker-state tracker-state-error" role="alert">
       <Icon name="kanban" size={32} />
-      <strong>Task tracker unavailable</strong>
+      <strong>{$t('ui_task_tracker_unavailable_36d67774')}</strong>
       <p>{loadError}</p>
-      <button type="button" onclick={() => void reload(true)}>Retry</button>
+      <button type="button" onclick={() => void reload(true)}>{$t('ui_retry_942087cc')}</button>
     </div>
   {:else if board && !lanes.length}
     <div class="tracker-state">
       <Icon name="kanban" size={32} />
-      <strong>No statuses yet</strong>
+      <strong>{$t('ui_no_statuses_yet_a31681b9')}</strong>
       <p>
         {canManageTracker
-          ? 'Create a status to start organizing work.'
-          : 'A tracker manager needs to create the first status.'}
+          ? $t('ui_create_a_status_to_start_organizing_work_89ad5d55')
+          : $t('ui_a_tracker_manager_needs_to_create_the_first_s_63bc668b')}
       </p>
       {#if canManageTracker}<button
           type="button"
-          onclick={(event) => openSettings(event.currentTarget)}>Manage statuses</button
+          onclick={(event) => openSettings(event.currentTarget)}
+          >{$t('ui_manage_statuses_0094e371')}</button
         >{/if}
     </div>
   {:else if board}
-    <div class="tracker-lanes" aria-label="Task statuses">
+    <div class="tracker-lanes" aria-label={$t('ui_task_statuses_0e798df6')}>
       {#each visibleLanes as lane (entityKey(lane))}
         {@const tasks = filteredTasks(lane)}
         {@const collapsed = collapsedLanes.has(entityKey(lane))}
@@ -813,7 +833,7 @@
                       aria-hidden="true"
                       title={task.assignee
                         ? `Assigned to ${userName(task.assignee)}`
-                        : 'Unassigned'}
+                        : $t('ui_unassigned_14d33bd0')}
                     >
                       {#if task.assignee?.avatar_hash}
                         <img
@@ -827,13 +847,17 @@
                       {/if}
                     </span>
                     <span class="visually-hidden" id={`${taskId}-details`}>
-                      Open task. {priorityDescription(task.priority)}. Status {lane.name}.
-                      {#if due}
-                        Due {due.accessibleLabel}{due.overdue ? ', overdue' : ''}.
-                      {:else}
-                        No due date.
-                      {/if}
-                      {task.assignee ? `Assigned to ${userName(task.assignee)}.` : 'Unassigned.'}
+                      {$t('ui_open_task_value0_status_value1_56801c2e', {
+                        value0: String(priorityDescription(task.priority)),
+                        value1: String(lane.name)
+                      })}
+                      {#if due}{$t('ui_due_value0_value1_a1e9501a', {
+                          value0: String(due.accessibleLabel),
+                          value1: String(due.overdue ? ', overdue' : '')
+                        })}{:else}{$t('ui_no_due_date_8cb264d1')}{/if}
+                      {task.assignee
+                        ? `Assigned to ${userName(task.assignee)}.`
+                        : $t('ui_unassigned_d6ed3556')}
                     </span>
                   </button>
                   {#if movable}
@@ -841,19 +865,23 @@
                       <button
                         type="button"
                         aria-label={`Move ${task.key} up`}
-                        title="Move up"
+                        title={$t('ui_move_up_c66feb5e')}
                         disabled={actionBusy || index === 0}
                         onclick={() => void moveTask(task, lane, index - 1)}>↑</button
                       >
                       <button
                         type="button"
                         aria-label={`Move ${task.key} down`}
-                        title="Move down"
+                        title={$t('ui_move_down_40bb50da')}
                         disabled={actionBusy || index === tasks.length - 1}
                         onclick={() => void moveTask(task, lane, index + 1)}>↓</button
                       >
                       <label>
-                        <span class="visually-hidden">Move {task.key} to another status</span>
+                        <span class="visually-hidden"
+                          >{$t('ui_move_value0_to_another_status_82a591ec', {
+                            value0: String(task.key)
+                          })}</span
+                        >
                         <select
                           aria-label={`Move ${task.key} to status`}
                           value={entityKey(lane)}
@@ -885,8 +913,8 @@
               {:else}
                 <div class="lane-empty">
                   {activeFilterCount
-                    ? 'No matching tasks in this status.'
-                    : 'No tasks in this status.'}
+                    ? $t('ui_no_matching_tasks_in_this_status_80c33570')
+                    : $t('ui_no_tasks_in_this_status_d9286a08')}
                 </div>
               {/each}
             </div>
@@ -898,8 +926,8 @@
     {#if activeFilterCount && visibleTaskCount === 0}
       <div class="tracker-state compact-state">
         <Icon name="search" size={27} />
-        <strong>No tasks match these filters</strong>
-        <button type="button" onclick={resetFilters}>Clear filters</button>
+        <strong>{$t('ui_no_tasks_match_these_filters_2153a33f')}</strong>
+        <button type="button" onclick={resetFilters}>{$t('ui_clear_filters_7179ea00')}</button>
       </div>
     {/if}
   {/if}

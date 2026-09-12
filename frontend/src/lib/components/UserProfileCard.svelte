@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import type { ApplicationCommand } from '$lib/chat/application-commands';
@@ -148,7 +150,7 @@
           relationshipType = 'unavailable';
           relationshipError = userErrorMessage(
             caught,
-            'Could not load friendship status. Try reopening this profile.'
+            $t('ui_could_not_load_friendship_status_try_reopenin_777c503c')
           );
         });
     }
@@ -159,7 +161,7 @@
         .then((value) => {
           if (generation !== profileRequestGeneration || entityRef(user) !== targetRef) return;
           const application = parseDirectoryBotProfileApplication(value, targetRef);
-          if (!application) throw new Error('The app profile response is invalid.');
+          if (!application) throw new Error($t('ui_the_app_profile_response_is_invalid_fe7ac074'));
           profileApplication = application;
         })
         .catch((caught: unknown) => {
@@ -172,7 +174,7 @@
           }
           profileApplicationError = userErrorMessage(
             caught,
-            'Could not load this bot’s installation options.'
+            $t('ui_could_not_load_this_bot_s_installation_option_4cb63eca')
           );
         });
     }
@@ -211,7 +213,10 @@
       relationshipType = relationship.type;
     } catch (caught) {
       if (generation === relationshipMutationGeneration && entityRef(user) === targetRef) {
-        relationshipError = userErrorMessage(caught, 'Could not update friendship. Try again.');
+        relationshipError = userErrorMessage(
+          caught,
+          $t('ui_could_not_update_friendship_try_again_dd703ce2')
+        );
       }
     } finally {
       if (generation === relationshipMutationGeneration && entityRef(user) === targetRef) {
@@ -270,7 +275,7 @@
       await onRoleChange(user, role, enabled);
       return true;
     } catch (caught) {
-      roleError = userErrorMessage(caught, 'Could not update this role. Try again.');
+      roleError = userErrorMessage(caught, $t('ui_could_not_update_this_role_try_again_6549843d'));
       return false;
     } finally {
       roleBusy = null;
@@ -326,7 +331,7 @@
       <button
         class="user-popover-close"
         type="button"
-        aria-label="Close profile"
+        aria-label={$t('ui_close_profile_402eed09')}
         onclick={(event) => {
           event.stopPropagation();
           onClose();
@@ -351,12 +356,12 @@
       <div class="user-popover-identity">
         <h2>
           {userDisplayName(user)}
-          {#if isApplicationUser(user)}<small class="app-badge">BOT</small>{/if}
+          {#if isApplicationUser(user)}<small class="app-badge">{$t('ui_bot_fb000ced')}</small>{/if}
         </h2>
         {#if userPublicHandle(user)}
           <p>@{userPublicHandle(user)}</p>
         {:else}
-          <p>Profile unavailable; Kaede will refresh it automatically.</p>
+          <p>{$t('ui_profile_unavailable_kaede_will_refresh_it_aut_98439c44')}</p>
         {/if}
       </div>
 
@@ -367,7 +372,7 @@
 
       {#if user.bio?.trim()}
         <section class="user-popover-about" aria-labelledby="user-popover-about-heading">
-          <h3 id="user-popover-about-heading">About me</h3>
+          <h3 id="user-popover-about-heading">{$t('ui_about_me_1359ec88')}</h3>
           <p>{user.bio.trim()}</p>
         </section>
       {/if}
@@ -375,14 +380,14 @@
       {#if assignedRoles.length || manageableRoles.length}
         <section class="user-popover-roles" aria-labelledby="user-popover-roles-heading">
           <div class="user-role-heading">
-            <h3 id="user-popover-roles-heading">Roles</h3>
+            <h3 id="user-popover-roles-heading">{$t('ui_roles_c2533705')}</h3>
             {#if manageableRoles.length && onRoleChange}
               <button
                 class="user-role-add"
                 type="button"
-                aria-label="Add role"
+                aria-label={$t('ui_add_role_e53a9362')}
                 aria-expanded={rolePickerOpen}
-                title="Add role"
+                title={$t('ui_add_role_e53a9362')}
                 onclick={(event) => {
                   event.stopPropagation();
                   rolePickerOpen = !rolePickerOpen;
@@ -410,21 +415,23 @@
                 {/if}
               </span>
             {/each}
-            {#if !assignedRoles.length}<span class="user-role-empty">No assigned roles</span>{/if}
+            {#if !assignedRoles.length}<span class="user-role-empty"
+                >{$t('ui_no_assigned_roles_b6ac794d')}</span
+              >{/if}
           </div>
           {#if rolePickerOpen && onRoleChange}
             <div
               class="user-role-picker"
               role="dialog"
               tabindex="-1"
-              aria-label="Add a role"
+              aria-label={$t('ui_add_a_role_c97781fb')}
               onpointerdown={(event) => event.stopPropagation()}
             >
               <input
                 bind:value={roleSearch}
                 type="search"
-                placeholder="Search roles"
-                aria-label="Search roles"
+                placeholder={$t('ui_search_roles_848b9c5d')}
+                aria-label={$t('ui_search_roles_848b9c5d')}
               />
               <div>
                 {#each availableRoles as role (role.id + '@' + role.origin_domain)}
@@ -443,10 +450,10 @@
                   >
                     <i style={`--role-color: #${role.color.toString(16).padStart(6, '0')}`}></i>
                     <span>{role.name}</span>
-                    {#if roleBusy === role.id}<small>Saving…</small>{/if}
+                    {#if roleBusy === role.id}<small>{$t('ui_saving_23e39291')}</small>{/if}
                   </button>
                 {:else}
-                  <p>No matching roles available.</p>
+                  <p>{$t('ui_no_matching_roles_available_59ac1598')}</p>
                 {/each}
               </div>
             </div>
@@ -459,12 +466,12 @@
         {#if isSelf}
           <a class="user-popover-primary" href={resolve('/settings#profile')} onclick={onClose}>
             <Icon name="edit" size={17} />
-            <span>Edit profile</span>
+            <span>{$t('ui_edit_profile_15c4aa13')}</span>
           </a>
         {:else if onMessage && user.profile_resolved !== false}
           <button type="button" class="user-popover-primary" onclick={() => onMessage?.(user)}>
             <Icon name="message" size={17} />
-            <span>Message</span>
+            <span>{$t('ui_message_2f77668a')}</span>
           </button>
         {/if}
         {#if profileApplication}
@@ -478,8 +485,8 @@
             <Icon name="sparkles" size={17} />
             <span>
               {profileApplication.install_template.install_types.includes('guild_install')
-                ? 'Add bot to a guild'
-                : 'Add App'}
+                ? $t('ui_add_bot_to_a_guild_f3f28629')
+                : $t('ui_add_app_3de6a773')}
             </span>
           </a>
           {#if profileApplication.directory_listed}
@@ -490,7 +497,7 @@
               onclick={onClose}
             >
               <Icon name="globe" size={17} />
-              <span>View app profile</span>
+              <span>{$t('ui_view_app_profile_d6423864')}</span>
             </a>
           {/if}
         {/if}
@@ -504,7 +511,7 @@
             onclick={updateFriendship}
           >
             <Icon name={relationshipType === 'friend' ? 'check' : 'users'} size={17} />
-            <span>{relationshipBusy ? 'Updating…' : friendshipLabel()}</span>
+            <span>{relationshipBusy ? $t('ui_updating_dfe40efe') : friendshipLabel()}</span>
           </button>
         {/if}
         {#if userPublicHandle(user)}
@@ -534,7 +541,11 @@
           />
         {/if}
         {#if moderationActions.length && onModerate}
-          <div class="user-popover-moderation" role="group" aria-label="Moderation actions">
+          <div
+            class="user-popover-moderation"
+            role="group"
+            aria-label={$t('ui_moderation_actions_8e0a6085')}
+          >
             {#each moderationActions as action (action.id)}
               <button
                 type="button"

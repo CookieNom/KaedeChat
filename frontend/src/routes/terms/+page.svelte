@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { operatorLegalConfig } from '$lib/branding/landing';
   import LegalPage from '$lib/components/landing/LegalPage.svelte';
@@ -6,153 +8,110 @@
 </script>
 
 {#if operatorLegalConfig}
-  <LegalPage title="Terms of Service" updated={operatorLegalConfig.effectiveDate}>
+  <LegalPage title={$t('ui_terms_of_service_4afa55bf')} updated={operatorLegalConfig.effectiveDate}>
     <section>
-      <h2>1. About these terms</h2>
+      <h2>{$t('ui_1_about_these_terms_9c41a965')}</h2>
       <p>
-        These terms of service (the “Terms”) apply when you use {operatorLegalConfig.instanceName}
-        (the “Instance”), the chat service provided by {operatorLegalConfig.operatorName} (“we”, “us”,
-        or “our”). By creating an account or using the Instance, you agree to these Terms. If you do not
-        agree, please do not use the service.
+        {$t('ui_these_terms_of_service_the_terms_apply_when_y_2be8ec43', {
+          value0: String(operatorLegalConfig.instanceName),
+          value1: String(operatorLegalConfig.operatorName)
+        })}
       </p>
-      <p>
-        Kaede is the software that powers the Instance. These Terms govern your use of this
-        Instance, not your use of the Kaede source code or third-party components under their
-        separate terms.
-      </p>
+      <p>{$t('ui_kaede_is_the_software_that_powers_the_instanc_66d7230d')}</p>
     </section>
 
     <section>
-      <h2>2. Accounts</h2>
+      <h2>{$t('ui_2_accounts_389c59f8')}</h2>
       <ul>
+        <li>{$t('ui_you_are_responsible_for_the_accuracy_of_the_i_4c9fdda9')}</li>
         <li>
-          You are responsible for the accuracy of the information you provide and for your account.
+          {$t('ui_you_must_be_at_least_value0_years_old_to_crea_b6afa5a6', {
+            value0: String(operatorLegalConfig.minimumAge)
+          })}
         </li>
-        <li>
-          You must be at least {operatorLegalConfig.minimumAge} years old to create an account.
-        </li>
-        <li>
-          Keep your credentials private. We cannot verify every message, so never share your
-          password or codes.
-        </li>
-        <li>
-          This Instance secures your account and provides the domain used in your federated handle.
-        </li>
+        <li>{$t('ui_keep_your_credentials_private_we_cannot_verif_5e5a2e99')}</li>
+        <li>{$t('ui_this_instance_secures_your_account_and_provid_3eb7d6e0')}</li>
       </ul>
     </section>
 
     <section>
-      <h2>3. Acceptable use</h2>
-      <p>When you use the Instance, you agree not to:</p>
+      <h2>{$t('ui_3_acceptable_use_29858130')}</h2>
+      <p>{$t('ui_when_you_use_the_instance_you_agree_not_to_53238b27')}</p>
       <ul>
-        <li>Break the law, or ask someone else to break the law.</li>
-        <li>Harass, threaten, or abuse other members. See our moderation notes in Section 6.</li>
-        <li>Upload or share malware, phishing, or other harmful content.</li>
-        <li>Share someone else’s private information without their consent.</li>
-        <li>Send unsolicited bulk messages or spam.</li>
-        <li>Interfere with the Instance, including attempting to overload or disrupt it.</li>
-        <li>Impersonate another person or misrepresent your affiliation with us.</li>
+        <li>{$t('ui_break_the_law_or_ask_someone_else_to_break_th_197a0fe1')}</li>
+        <li>{$t('ui_harass_threaten_or_abuse_other_members_see_ou_b778ae14')}</li>
+        <li>{$t('ui_upload_or_share_malware_phishing_or_other_har_83fb116b')}</li>
+        <li>{$t('ui_share_someone_else_s_private_information_with_bfb936b2')}</li>
+        <li>{$t('ui_send_unsolicited_bulk_messages_or_spam_010459bb')}</li>
+        <li>{$t('ui_interfere_with_the_instance_including_attempt_7b311c7c')}</li>
+        <li>{$t('ui_impersonate_another_person_or_misrepresent_yo_d64cd67a')}</li>
       </ul>
     </section>
 
     <section>
-      <h2>4. Your content</h2>
-      <p>
-        You keep the rights to what you post. By posting, you give us a limited, non-exclusive
-        licence to store, process, display, and transmit your content as needed to operate the
-        Instance. This includes sending content and related account information to other Kaede
-        instances when you use federated communities or conversations. You also agree that the
-        content you share is something you have the right to share.
-      </p>
-      <p>
-        You are responsible for your own content. We may remove content that violates these Terms,
-        and we may act without prior notice when the law or safety requires it.
-      </p>
+      <h2>{$t('ui_4_your_content_9be94705')}</h2>
+      <p>{$t('ui_you_keep_the_rights_to_what_you_post_by_posti_f3006d58')}</p>
+      <p>{$t('ui_you_are_responsible_for_your_own_content_we_m_bb2c284c')}</p>
     </section>
 
     <section>
-      <h2>5. Storage, encryption, and third parties</h2>
+      <h2>{$t('ui_5_storage_encryption_and_third_parties_fdff690a')}</h2>
       <p>
-        The Instance stores account information, messages, media, and service metadata so Kaede can
-        work. Supported rooms may use end-to-end encryption, but account, membership, delivery, and
-        moderation metadata are not end-to-end encrypted. Optional features may use infrastructure
-        or integration providers. See our <a href={resolve('/privacy')}>privacy policy</a> for the data
-        flows and choices that apply.
+        {$t('ui_the_instance_stores_account_information_messa_40e093c9')}
+        <a href={resolve('/privacy')}>{$t('ui_privacy_policy_2b72811d')}</a>
+        {$t('ui_for_the_data_flows_and_choices_that_apply_3411e70d')}
       </p>
-      <p>
-        If you use end-to-end encryption, keep any recovery material safe. We cannot guarantee that
-        encrypted content or keys can be recovered after you lose your devices or credentials.
-      </p>
+      <p>{$t('ui_if_you_use_end_to_end_encryption_keep_any_rec_372e2f9b')}</p>
     </section>
 
     <section>
-      <h2>6. Moderation</h2>
-      <p>
-        Moderators may delete content, remove members, restrict accounts, and act on reports in line
-        with these Terms and any community-specific rules. Moderation of a federated interaction may
-        also involve the operator of another instance. We may act without advance notice.
-      </p>
+      <h2>{$t('ui_6_moderation_640c3da6')}</h2>
+      <p>{$t('ui_moderators_may_delete_content_remove_members__e186f148')}</p>
     </section>
 
     <section>
-      <h2>7. Service and changes</h2>
-      <p>
-        The Instance is provided “as is” and “as available.” We work to keep it reliable, but we do
-        not guarantee it will be uninterrupted or error-free. We may change, suspend, or discontinue
-        parts of the service, and we may update these Terms. The effective date at the top
-        identifies the published version; check it for changes.
-      </p>
+      <h2>{$t('ui_7_service_and_changes_70e16192')}</h2>
+      <p>{$t('ui_the_instance_is_provided_as_is_and_as_availab_dbeb9e90')}</p>
     </section>
 
     <section>
-      <h2>8. Termination</h2>
+      <h2>{$t('ui_8_termination_68c2c79d')}</h2>
       <p>
-        To ask us to disable your account or discuss a data request, email
+        {$t('ui_to_ask_us_to_disable_your_account_or_discuss__832a4f1e')}
         <a href={`mailto:${operatorLegalConfig.contactEmail}`}>{operatorLegalConfig.contactEmail}</a
-        >. A request does not remove copies already delivered to another instance, content retained
-        by other members, or records we must keep. We may suspend or disable an account that
-        breaches these Terms. Provisions that by their nature continue after access ends remain in
-        effect.
+        >{$t('ui_a_request_does_not_remove_copies_already_deli_fe16096b')}
       </p>
     </section>
 
     <section>
-      <h2>9. Intellectual property</h2>
+      <h2>{$t('ui_9_intellectual_property_b3bbeeea')}</h2>
+      <p>{$t('ui_the_instance_s_branding_and_content_we_own_re_81e504f4')}</p>
+    </section>
+
+    <section>
+      <h2>{$t('ui_10_disclaimers_and_limitation_of_liability_207a797b')}</h2>
+      <p>{$t('ui_to_the_maximum_extent_permitted_by_law_we_dis_edce73f3')}</p>
+    </section>
+
+    <section>
+      <h2>{$t('ui_11_governing_law_0c1f1919')}</h2>
       <p>
-        The Instance’s branding and content we own remain ours. Kaede and third-party components are
-        governed by their separate terms. You may not use our name or marks in a way that suggests
-        we endorse you without our permission.
+        {$t('ui_these_terms_are_governed_by_the_laws_of_value_1f39eaa6', {
+          value0: String(operatorLegalConfig.jurisdiction),
+          value1: String(operatorLegalConfig.jurisdiction)
+        })}
       </p>
     </section>
 
     <section>
-      <h2>10. Disclaimers and limitation of liability</h2>
+      <h2>{$t('ui_12_contact_5adadc20')}</h2>
       <p>
-        To the maximum extent permitted by law, we disclaim implied warranties and are not liable
-        for indirect, incidental, special, consequential, or punitive damages, or for lost data
-        arising from use of the Instance. Nothing in these Terms excludes or limits liability that
-        applicable law does not allow us to exclude or limit.
-      </p>
-    </section>
-
-    <section>
-      <h2>11. Governing law</h2>
-      <p>
-        These Terms are governed by the laws of {operatorLegalConfig.jurisdiction}. Any dispute will
-        be handled in the courts of {operatorLegalConfig.jurisdiction}, unless another forum is
-        required by law.
-      </p>
-    </section>
-
-    <section>
-      <h2>12. Contact</h2>
-      <p>
-        Questions about these Terms? Reach us at
+        {$t('ui_questions_about_these_terms_reach_us_at_3ea49024')}
         <a href={`mailto:${operatorLegalConfig.contactEmail}`}>{operatorLegalConfig.contactEmail}</a
         >.
       </p>
     </section>
   </LegalPage>
 {:else}
-  <UnconfiguredLegalPage title="Terms of Service" policy="terms of service" />
+  <UnconfiguredLegalPage title={$t('ui_terms_of_service_4afa55bf')} policy="terms of service" />
 {/if}

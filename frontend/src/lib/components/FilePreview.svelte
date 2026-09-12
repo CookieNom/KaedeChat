@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { onDestroy } from 'svelte';
 
   let { file }: { file: File } = $props();
@@ -23,7 +25,7 @@
   <video src={objectUrl} muted aria-label={`Preview of ${file.name}`}></video>
 {:else}
   <span class="file-glyph" aria-hidden="true"
-    >{file.name.split('.').pop()?.slice(0, 4) ?? 'FILE'}</span
+    >{file.name.split('.').pop()?.slice(0, 4) ?? $t('ui_file_9ef2faff')}</span
   >
 {/if}
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import type { UserSummary } from '$lib/chat/types';
   import { initializeE2EE, resetE2EEClient } from '$lib/e2ee/client';
@@ -62,7 +64,10 @@
       currentDeviceId = client.deviceId;
       devices = (await api<DeviceList>('/e2ee/devices')).devices;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not initialize encryption on this device.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_initialize_encryption_on_this_devic_3760c7b9')
+      );
       try {
         devices = (await api<DeviceList>('/e2ee/devices')).devices;
       } catch {
@@ -93,9 +98,12 @@
       }
       passphrase = '';
       confirmPassphrase = '';
-      notice = 'Encrypted recovery backup downloaded. Store the file and passphrase separately.';
+      notice = $t('ui_encrypted_recovery_backup_downloaded_store_th_1ca29393');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not create the encrypted recovery backup.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_create_the_encrypted_recovery_backu_d2c3cb30')
+      );
     } finally {
       busy = false;
     }
@@ -115,7 +123,7 @@
       !isCanonicalRecoveryAuthorization(result.recovery_authorization) ||
       result.recovery_authorization_expires_in !== 300
     ) {
-      throw new Error('The encryption-reset response was invalid. Local keys were not changed.');
+      throw new Error($t('ui_the_encryption_reset_response_was_invalid_loc_08c698cc'));
     }
     // A rollback checkpoint may be lowered only after this authenticated reset
     // response confirms that the remote vault and digest ledger were cleared.
@@ -129,14 +137,11 @@
     error = '';
     notice = '';
     try {
-      if (file.size > 48 * 1024 * 1024) throw new Error('Recovery backup is too large.');
+      if (file.size > 48 * 1024 * 1024)
+        throw new Error($t('ui_recovery_backup_is_too_large_20a13449'));
       const bundle = JSON.parse(await file.text()) as RecoveryBundle;
       const recovered = await importRecoveryBundle(accountRef, passphrase, bundle);
-      if (
-        !window.confirm(
-          'Restore this backup? Kaede will discard the encryption identity currently loaded here, replace the remote encrypted vault, and revoke the current portable identity record before re-enrolling the recovered identity. Rooms may pause for key rotation.'
-        )
-      ) {
+      if (!window.confirm($t('ui_restore_this_backup_kaede_will_discard_the_en_24816c8d'))) {
         return;
       }
       const client = await restoreRecoveredIdentity(user, recovered, {
@@ -150,9 +155,9 @@
       currentDeviceId = client.deviceId;
       devices = (await api<DeviceList>('/e2ee/devices')).devices;
       passphrase = '';
-      notice = 'Encryption keys restored on this device.';
+      notice = $t('ui_encryption_keys_restored_on_this_device_67a1db3f');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not restore that recovery backup.');
+      error = userErrorMessage(caught, $t('ui_could_not_restore_that_recovery_backup_e1a5f856'));
     } finally {
       busy = false;
       if (importFile) importFile.value = '';
@@ -161,12 +166,7 @@
 
   async function startFresh() {
     if (busy) return;
-    if (
-      !window.confirm(
-        'Start a new encryption identity? Any encrypted history that is not available in local storage or a recovery backup will be permanently unreadable.'
-      )
-    )
-      return;
+    if (!window.confirm($t('ui_start_a_new_encryption_identity_any_encrypted_86cc8935'))) return;
     busy = true;
     error = '';
     notice = '';
@@ -177,9 +177,9 @@
       const client = await initializeE2EE(user);
       currentDeviceId = client.deviceId;
       devices = (await api<DeviceList>('/e2ee/devices')).devices;
-      notice = 'A new encryption identity was created. Encrypted rooms must rotate their keys.';
+      notice = $t('ui_a_new_encryption_identity_was_created_encrypt_a073351d');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not reset the encryption identity.');
+      error = userErrorMessage(caught, $t('ui_could_not_reset_the_encryption_identity_777fa011'));
     } finally {
       busy = false;
     }
@@ -189,13 +189,14 @@
 <div class="settings-card security-card e2ee-card">
   <div class="security-label">
     <div>
-      <strong>End-to-end encryption identity</strong>
-      <p>
-        Your account has one portable MLS identity. Your password unlocks its encrypted keys on each
-        signed-in client; Kaede syncs only ciphertext and cannot read those keys.
-      </p>
+      <strong>{$t('ui_end_to_end_encryption_identity_3d8edec4')}</strong>
+      <p>{$t('ui_your_account_has_one_portable_mls_identity_yo_c344f4eb')}</p>
     </div>
-    <span>{devices.some((device) => !device.revoked_at) ? 'Active' : 'Not active'}</span>
+    <span
+      >{devices.some((device) => !device.revoked_at)
+        ? $t('ui_active_92340695')
+        : $t('ui_not_active_4505af92')}</span
+    >
   </div>
 
   <div class="e2ee-devices">
@@ -203,20 +204,23 @@
       <div class:revoked={Boolean(device.revoked_at)}>
         <span>
           <strong
-            >Portable account identity{device.id === currentDeviceId
-              ? ' · Loaded here'
-              : ''}</strong
+            >{$t('ui_portable_account_identity_value0_f7045daf', {
+              value0: String(device.id === currentDeviceId ? ' · Loaded here' : '')
+            })}</strong
           >
           <small
-            >Last enrolled from {device.device_name} ({device.platform}) ·
-            {device.available_key_packages ?? 0} ready key packages</small
+            >{$t('ui_last_enrolled_from_value0_value1_value2_ready_4709ae85', {
+              value0: String(device.device_name),
+              value1: String(device.platform),
+              value2: String(device.available_key_packages ?? 0)
+            })}</small
           >
         </span>
         {#if device.revoked_at}
-          <small>Revoked</small>
+          <small>{$t('ui_revoked_f6f738d0')}</small>
         {:else}
           <button class="secondary-button" type="button" disabled={busy} onclick={startFresh}
-            >Rotate identity…</button
+            >{$t('ui_rotate_identity_71f8dfd5')}</button
           >
         {/if}
       </div>
@@ -224,20 +228,14 @@
   </div>
 
   <div class="security-flow">
-    <strong>Encrypted recovery backup</strong>
-    <p>
-      The backup contains private message keys. It is encrypted locally with your passphrase; the
-      passphrase is never sent to Kaede. Keep it for password recovery or loss of the synchronized
-      vault, and store the file and passphrase separately. Automatic sync keeps the newest 2,000
-      decrypted messages or 8 MiB; older plaintext may require an existing trusted client or this
-      recovery backup.
-    </p>
+    <strong>{$t('ui_encrypted_recovery_backup_27b0ad6d')}</strong>
+    <p>{$t('ui_the_backup_contains_private_message_keys_it_i_94955a9d')}</p>
     <label>
-      Backup passphrase
+      {$t('ui_backup_passphrase_da889c4d')}
       <input type="password" bind:value={passphrase} minlength="12" autocomplete="new-password" />
     </label>
     <label>
-      Confirm passphrase
+      {$t('ui_confirm_passphrase_3cfaaed3')}
       <input
         type="password"
         bind:value={confirmPassphrase}
@@ -250,7 +248,7 @@
         class="secondary-button"
         type="button"
         disabled={busy || passphrase.length < 12 || passphrase !== confirmPassphrase}
-        onclick={exportBackup}>Download backup</button
+        onclick={exportBackup}>{$t('ui_download_backup_66921128')}</button
       >
       <button
         class="secondary-button"
@@ -258,8 +256,8 @@
         disabled={!restoreAvailability.enabled}
         onclick={() => importFile?.click()}
         >{restoreAvailability.replacesActiveIdentity
-          ? 'Replace identity from backup…'
-          : 'Restore backup'}</button
+          ? $t('ui_replace_identity_from_backup_2f13c4ea')
+          : $t('ui_restore_backup_6da1c554')}</button
       >
       <input
         class="visually-hidden"
@@ -272,24 +270,17 @@
         }}
       />
     </div>
-    <small>
-      A restore is available even when an identity is loaded. After explicit confirmation, it
-      replaces that identity and the synchronized encrypted vault with the backup.
-    </small>
+    <small> {$t('ui_a_restore_is_available_even_when_an_identity__a3316ab4')} </small>
   </div>
   <div class="security-flow danger-flow">
-    <strong>Start a new encryption identity</strong>
-    <p>
-      Use this only when neither automatic vault recovery nor a recovery backup is available. It
-      revokes the current encryption identity and permanently abandons unavailable encrypted
-      history. Encrypted rooms will pause until their keys are rotated.
-    </p>
+    <strong>{$t('ui_start_a_new_encryption_identity_14cf3971')}</strong>
+    <p>{$t('ui_use_this_only_when_neither_automatic_vault_re_6d9016fa')}</p>
     <div class="form-actions">
       <button
         class="secondary-button danger-button"
         type="button"
         disabled={busy}
-        onclick={startFresh}>Start fresh…</button
+        onclick={startFresh}>{$t('ui_start_fresh_40d0d728')}</button
       >
     </div>
   </div>

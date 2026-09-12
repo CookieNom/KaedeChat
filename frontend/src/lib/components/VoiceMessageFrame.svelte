@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type { Snippet } from 'svelte';
   import { voiceDurationLabel, voiceWaveformSamples } from '$lib/chat/voice-messages';
   let {
@@ -17,11 +19,11 @@
 
 <div
   class="voice-message"
-  aria-label={`${encrypted ? 'Encrypted voice message' : 'Voice message'} · ${voiceDurationLabel(duration)}`}
+  aria-label={`${encrypted ? $t('ui_encrypted_voice_message_5a6eafc7') : $t('ui_voice_message_f6933dae')} · ${voiceDurationLabel(duration)}`}
 >
   <div class="voice-heading">
     <span aria-hidden="true">{encrypted ? '🔒🎙️' : '🎙️'}</span>
-    <strong>Voice message</strong>
+    <strong>{$t('ui_voice_message_f6933dae')}</strong>
     <small>{voiceDurationLabel(duration)}</small>
   </div>
   {#if samples.length}

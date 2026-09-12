@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import {
     desktopLifecycle,
     NATIVE_UPDATE_POLL_INTERVAL_MS
@@ -20,8 +22,12 @@
 {#if desktopLifecycle.update?.available && desktopLifecycle.update.version !== desktopLifecycle.dismissedUpdateVersion}
   <aside class="desktop-action" aria-labelledby="desktop-update-title" role="status">
     <div>
-      <strong id="desktop-update-title">Kaede {desktopLifecycle.update.version} is ready</strong>
-      <p>A signed update was found on GitHub Releases. Kaede will restart after it installs.</p>
+      <strong id="desktop-update-title"
+        >{$t('ui_kaede_value0_is_ready_970dec99', {
+          value0: String(desktopLifecycle.update.version)
+        })}</strong
+      >
+      <p>{$t('ui_a_signed_update_was_found_on_github_releases__f2db5b16')}</p>
       {#if desktopLifecycle.updateError}<small role="alert">{desktopLifecycle.updateError}</small
         >{/if}
     </div>
@@ -29,7 +35,7 @@
       <button
         type="button"
         disabled={desktopLifecycle.installing}
-        onclick={() => desktopLifecycle.dismissUpdate()}>Later</button
+        onclick={() => desktopLifecycle.dismissUpdate()}>{$t('ui_later_73b6e48a')}</button
       >
       <button
         type="button"
@@ -37,22 +43,24 @@
         disabled={desktopLifecycle.installing}
         onclick={() => void desktopLifecycle.installUpdate()}
       >
-        {desktopLifecycle.installing ? 'Installing…' : 'Update and restart'}
+        {desktopLifecycle.installing
+          ? $t('ui_installing_530bcc35')
+          : $t('ui_update_and_restart_853c6a3c')}
       </button>
     </div>
   </aside>
 {:else if desktopLifecycle.showTaskbarPrompt}
   <aside class="desktop-action" aria-labelledby="desktop-pin-title">
     <div>
-      <strong id="desktop-pin-title">Keep Kaede close</strong>
-      <p>Would you like to ask Windows to pin Kaede to your taskbar?</p>
+      <strong id="desktop-pin-title">{$t('ui_keep_kaede_close_b0da074a')}</strong>
+      <p>{$t('ui_would_you_like_to_ask_windows_to_pin_kaede_to_1b9bc46c')}</p>
       {#if desktopLifecycle.pinError}<small role="alert">{desktopLifecycle.pinError}</small>{/if}
     </div>
     <div class="desktop-action-buttons">
       <button
         type="button"
         disabled={desktopLifecycle.pinning}
-        onclick={() => desktopLifecycle.dismissTaskbarPrompt()}>Not now</button
+        onclick={() => desktopLifecycle.dismissTaskbarPrompt()}>{$t('ui_not_now_a0e63d7c')}</button
       >
       <button
         type="button"
@@ -60,7 +68,9 @@
         disabled={desktopLifecycle.pinning}
         onclick={() => void desktopLifecycle.requestTaskbarPin()}
       >
-        {desktopLifecycle.pinning ? 'Asking Windows…' : 'Pin to taskbar'}
+        {desktopLifecycle.pinning
+          ? $t('ui_asking_windows_35238601')
+          : $t('ui_pin_to_taskbar_4ea2fc5b')}
       </button>
     </div>
   </aside>

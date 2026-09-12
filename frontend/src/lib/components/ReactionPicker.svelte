@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import {
     emojiCategories,
     groupCustomEmojis,
@@ -59,21 +61,23 @@
   });
 </script>
 
-<section class="reaction-picker" aria-label="Choose a reaction">
+<section class="reaction-picker" aria-label={$t('ui_choose_a_reaction_3eb7065d')}>
   <header>
-    <strong>Add reaction</strong>
-    <button type="button" onclick={onClose} aria-label="Close reaction picker">×</button>
+    <strong>{$t('ui_add_reaction_d97239a6')}</strong>
+    <button type="button" onclick={onClose} aria-label={$t('ui_close_reaction_picker_54022679')}
+      >×</button
+    >
   </header>
   <label>
-    <span class="visually-hidden">Search reactions</span>
-    <input bind:value={query} placeholder="Search emoji" />
+    <span class="visually-hidden">{$t('ui_search_reactions_ad899b0b')}</span>
+    <input bind:value={query} placeholder={$t('ui_search_emoji_87fafa72')} />
   </label>
-  <nav aria-label="Reaction categories">
+  <nav aria-label={$t('ui_reaction_categories_8da4df23')}>
     {#if customEmojis.length}
       <button
         class:active={!needle && category === 'custom'}
         type="button"
-        title="Custom emoji"
+        title={$t('ui_custom_emoji_1596e05e')}
         onclick={() => {
           category = 'custom';
           query = '';
@@ -110,7 +114,7 @@
       </section>
     {/each}
     {#if loading}
-      <p>Loading emoji…</p>
+      <p>{$t('ui_loading_emoji_f35e9103')}</p>
     {:else if category !== 'custom' || needle}
       <div class="grid">
         {#each unicode as emoji (emoji.value)}
@@ -120,7 +124,9 @@
         {/each}
       </div>
     {/if}
-    {#if !loading && !custom.length && !unicode.length}<p>No emoji found.</p>{/if}
+    {#if !loading && !custom.length && !unicode.length}<p>
+        {$t('ui_no_emoji_found_d2cab146')}
+      </p>{/if}
   </div>
 </section>
 

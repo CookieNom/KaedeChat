@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   /* eslint-disable svelte/no-navigation-without-resolve -- Directory route helpers validate the path and resolve the configured base path. */
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
@@ -203,7 +205,8 @@
         }
         const profile = parseDirectoryBotProfileApplication(value, installation.bot_user_ref);
         const destination = profile && launcherInstallationDestination(installation, profile);
-        if (!destination) throw new Error('The installed app destination did not match this app.');
+        if (!destination)
+          throw new Error($t('ui_the_installed_app_destination_did_not_match_t_8a5e956a'));
         destinationCache.set(key, destination);
         return destination;
       })
@@ -222,7 +225,7 @@
     const installation = recent.installation;
     const expectedAccountRef = accountRef;
     if (!installation || !expectedAccountRef || installation.user_ref !== expectedAccountRef) {
-      recentActionError = 'This installed app is no longer available for this account.';
+      recentActionError = $t('ui_this_installed_app_is_no_longer_available_for_b145619d');
       return;
     }
     const controller = destinationController;
@@ -251,7 +254,10 @@
         generation === destinationGeneration &&
         accountRef === expectedAccountRef
       ) {
-        recentActionError = userErrorMessage(caught, 'Could not open this installed app.');
+        recentActionError = userErrorMessage(
+          caught,
+          $t('ui_could_not_open_this_installed_app_2cef3b17')
+        );
       }
     } finally {
       if (generation === destinationGeneration && recentActionBusy === recent.applicationRef) {
@@ -276,7 +282,10 @@
     } catch (caught) {
       if (!controller.signal.aborted && generation === catalogGeneration && open) {
         catalogPage = null;
-        catalogError = userErrorMessage(caught, 'Could not search the App Directory.');
+        catalogError = userErrorMessage(
+          caught,
+          $t('ui_could_not_search_the_app_directory_aae49010')
+        );
       }
     } finally {
       if (!controller.signal.aborted && generation === catalogGeneration && open) {
@@ -317,7 +326,7 @@
     if (requestedDomain && !domain) {
       catalogPage = null;
       catalogLoading = false;
-      catalogError = 'Enter a valid Directory instance domain.';
+      catalogError = $t('ui_enter_a_valid_directory_instance_domain_8187f9ac');
       return;
     }
     catalogPage = null;
@@ -372,7 +381,7 @@
         ) {
           installationsError = userErrorMessage(
             caught,
-            'Could not load installed apps. Commands and Directory discovery are still available.'
+            $t('ui_could_not_load_installed_apps_commands_and_di_ed6547cc')
           );
         }
       });
@@ -418,11 +427,11 @@
     class="apps-button"
     type="button"
     {disabled}
-    aria-label="Open Apps"
+    aria-label={$t('ui_open_apps_4d95ac69')}
     aria-haspopup="dialog"
     aria-expanded={open}
-    title="Apps"
-    onclick={show}>Apps</button
+    title={$t('ui_apps_89dd7484')}
+    onclick={show}>{$t('ui_apps_89dd7484')}</button
   >
 {/if}
 
@@ -449,28 +458,34 @@
     >
       <header>
         <div>
-          <small>{compact ? 'Voice channel' : 'Choose an app'}</small>
-          <h2 id="apps-launcher-title">Apps</h2>
+          <small
+            >{compact ? $t('ui_voice_channel_52909660') : $t('ui_choose_an_app_8b9b4f57')}</small
+          >
+          <h2 id="apps-launcher-title">{$t('ui_apps_89dd7484')}</h2>
         </div>
-        <button type="button" aria-label="Close Apps" onclick={() => close()}>×</button>
+        <button type="button" aria-label={$t('ui_close_apps_05eb2b50')} onclick={() => close()}
+          >×</button
+        >
       </header>
       <div class="launcher-search-controls">
         <input
           bind:this={searchInput}
           bind:value={query}
           type="search"
-          aria-label="Search installed commands and the App Directory"
-          placeholder={compact ? 'Search app commands' : 'Search apps and commands'}
+          aria-label={$t('ui_search_installed_commands_and_the_app_directo_bf350ac7')}
+          placeholder={compact
+            ? $t('ui_search_app_commands_4b039ece')
+            : $t('ui_search_apps_and_commands_aa98989f')}
         />
         {#if !compact}
           <label class="directory-instance">
-            <span>Directory instance</span>
+            <span>{$t('ui_directory_instance_b73fd731')}</span>
             <input
               bind:value={directoryDomain}
               aria-invalid={directoryDomain.trim() !== '' &&
                 !canonicalDirectoryDomain(directoryDomain)}
               maxlength="253"
-              placeholder="Local"
+              placeholder={$t('ui_local_8c31e6e7')}
               autocapitalize="none"
               autocomplete="off"
               spellcheck="false"
@@ -482,7 +497,7 @@
       <div class="launcher-content">
         {#if !trimmedQuery && recentApplications.length}
           <section class="recents" aria-labelledby="launcher-recents-title">
-            <h3 id="launcher-recents-title">Recents</h3>
+            <h3 id="launcher-recents-title">{$t('ui_recents_41a86988')}</h3>
             <div class="recent-grid">
               {#each recentApplications as recent (recent.applicationRef)}
                 <button
@@ -496,8 +511,8 @@
                     >{recent.command
                       ? commandButton(recent.command)
                       : recentActionBusy === recent.applicationRef
-                        ? 'Opening app…'
-                        : 'Installed app'}</span
+                        ? $t('ui_opening_app_37dac119')
+                        : $t('ui_installed_app_cd2fe0bb')}</span
                   >
                 </button>
               {/each}
@@ -512,7 +527,7 @@
 
         {#if groups.length}
           <section aria-labelledby="launcher-installed-title">
-            <h3 id="launcher-installed-title">Your apps</h3>
+            <h3 id="launcher-installed-title">{$t('ui_your_apps_13b17cc7')}</h3>
             <div class="groups">
               {#each groups as group (group.applicationRef)}
                 <section class="app-group" aria-label={group.applicationName}>
@@ -538,7 +553,7 @@
 
         {#if !compact && trimmedQuery && searchedApplications.length}
           <section class="catalog" aria-labelledby="launcher-search-title">
-            <h3 id="launcher-search-title">Apps from the Directory</h3>
+            <h3 id="launcher-search-title">{$t('ui_apps_from_the_directory_4da0022b')}</h3>
             <div class="app-cards">
               {#each searchedApplications as application (application.ref)}
                 {@const icon = appIcon(application)}
@@ -560,7 +575,7 @@
             <section class="catalog" aria-labelledby={`launcher-collection-${index}`}>
               <div class="collection-heading">
                 <h3 id={`launcher-collection-${index}`}>
-                  {group.collection?.name ?? 'Explore apps'}
+                  {group.collection?.name ?? $t('ui_explore_apps_e0ab0ec1')}
                 </h3>
                 {#if group.collection}<small>{group.collection.description}</small>{/if}
               </div>
@@ -584,16 +599,20 @@
         {/if}
 
         {#if !compact && catalogLoading}<p class="catalog-state" role="status">
-            Loading Directory apps…
+            {$t('ui_loading_directory_apps_2ecd7d83')}
           </p>{/if}
         {#if !compact && catalogError}<p class="catalog-error" role="status">{catalogError}</p>{/if}
         {#if !compact && !catalogLoading && !catalogError && trimmedQuery && !groups.length && !searchedApplications.length}
-          <p class="catalog-state" role="status">No apps or commands match “{query}”.</p>
+          <p class="catalog-state" role="status">
+            {$t('ui_no_apps_or_commands_match_value0_777ede26', { value0: String(query) })}
+          </p>
         {/if}
         {#if compact && !groups.length}
-          <p class="catalog-state">No app commands are available in this voice channel.</p>
+          <p class="catalog-state">
+            {$t('ui_no_app_commands_are_available_in_this_voice_c_ccad4de8')}
+          </p>
         {:else if !compact && !catalogLoading && !catalogError && !trimmedQuery && !groups.length && !collectionGroups.length}
-          <p class="catalog-state">No apps are available yet.</p>
+          <p class="catalog-state">{$t('ui_no_apps_are_available_yet_9bc25721')}</p>
         {/if}
       </div>
     </div>

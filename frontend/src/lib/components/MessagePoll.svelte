@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import type { MessagePoll as Poll } from '$lib/chat/rich-content';
   import {
@@ -63,7 +65,7 @@
       if (onVote) await onVote(answerId, !count.me_voted);
       else await setPollVote(channelRef, messageRef, answerId, !count.me_voted);
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update your vote. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_your_vote_try_again_360560d2'));
     } finally {
       busyAnswer = null;
     }
@@ -87,7 +89,7 @@
         : await finalizePoll(channelRef, messageRef);
       if (updated) onUpdated?.(updated);
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not close this poll. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_close_this_poll_try_again_2651c554'));
     } finally {
       closing = false;
     }
@@ -105,7 +107,7 @@
       voters = append ? [...voters, ...page.users] : page.users;
       votersAfter = page.next_after;
     } catch (caught) {
-      votersError = userErrorMessage(caught, 'Could not load voters. Try again.');
+      votersError = userErrorMessage(caught, $t('ui_could_not_load_voters_try_again_d316bbdc'));
     } finally {
       votersLoading = false;
     }
@@ -121,8 +123,11 @@
   }
 </script>
 
-<section class="message-poll" aria-label={`Poll: ${poll.question.text ?? 'Question'}`}>
-  <h3>{poll.question.text ?? 'Poll'}</h3>
+<section
+  class="message-poll"
+  aria-label={`Poll: ${poll.question.text ?? $t('ui_question_289aff12')}`}
+>
+  <h3>{poll.question.text ?? $t('ui_poll_d54f7d12')}</h3>
   <div class="poll-answers">
     {#each poll.answers as answer (answer.answer_id)}
       {@const result = pollCount(poll, answer.answer_id)}
@@ -134,14 +139,14 @@
           class="poll-vote"
           disabled={disabled || readOnly || closed || busyAnswer !== null}
           aria-pressed={result.me_voted}
-          aria-label={`${answer.poll_media.text ?? partialEmojiText(answer.poll_media.emoji)}, ${result.count} vote${result.count === 1 ? '' : 's'}, ${percent} percent${result.me_voted ? ', selected' : ''}`}
+          aria-label={`${answer.poll_media.text ?? partialEmojiText(answer.poll_media.emoji)}, ${result.count} vote${result.count === 1 ? '' : 's'}, ${percent} percent${result.me_voted ? $t('ui_selected_bd44f3ef') : ''}`}
           onclick={() => void toggle(answer.answer_id)}
         >
           <span class="poll-fill" style:width={`${percent}%`} aria-hidden="true"></span>
           <span class="poll-choice">
             {#if answer.poll_media.emoji}<span>{partialEmojiText(answer.poll_media.emoji)}</span
               >{/if}
-            <strong>{answer.poll_media.text ?? 'Option'}</strong>
+            <strong>{answer.poll_media.text ?? $t('ui_option_45aaacba')}</strong>
           </span>
           <span class="poll-result">{result.count} · {percent}%</span>
         </button>
@@ -150,20 +155,29 @@
             type="button"
             class="poll-voters"
             {disabled}
-            aria-label={`View voters for ${answer.poll_media.text ?? 'this option'}`}
-            onclick={() => showVoters(answer.answer_id)}>Voters</button
+            aria-label={`View voters for ${answer.poll_media.text ?? $t('ui_this_option_9c8fff5c')}`}
+            onclick={() => showVoters(answer.answer_id)}>{$t('ui_voters_14fce270')}</button
           >
         {/if}
       </div>
     {/each}
   </div>
   <footer>
-    <span>{total} vote{total === 1 ? '' : 's'}</span>
+    <span
+      >{$t('ui_value0_vote_value1_5f6c4926', {
+        value0: String(total),
+        value1: String(total === 1 ? '' : 's')
+      })}</span
+    >
     <span aria-hidden="true">•</span>
     {#if readOnly}
-      <span>Private poll · Voting is unavailable in private bot responses</span>
+      <span>{$t('ui_private_poll_voting_is_unavailable_in_private_59ccc065')}</span>
     {:else}
-      <span>{poll.allow_multiselect ? 'Choose one or more' : 'Choose one'}</span>
+      <span
+        >{poll.allow_multiselect
+          ? $t('ui_choose_one_or_more_97169869')
+          : $t('ui_choose_one_0b24aed5')}</span
+      >
       <span aria-hidden="true">•</span>
       <span>{expiryLabel()}</span>
     {/if}
@@ -172,7 +186,8 @@
         type="button"
         class="poll-close"
         disabled={disabled || closing}
-        onclick={() => void closePoll()}>{closing ? 'Closing…' : 'Close poll'}</button
+        onclick={() => void closePoll()}
+        >{closing ? $t('ui_closing_abdb0cfd') : $t('ui_close_poll_f6740d64')}</button
       >
     {/if}
   </footer>
@@ -182,14 +197,16 @@
 <dialog bind:this={votersDialog} class="poll-voters-dialog">
   <div class="poll-voters-heading">
     <div>
-      <small>Poll voters</small>
+      <small>{$t('ui_poll_voters_876a1b78')}</small>
       <h3>
         {poll.answers.find((answer) => answer.answer_id === votersAnswer)?.poll_media.text ??
-          'Answer'}
+          $t('ui_answer_b2a3aa60')}
       </h3>
     </div>
-    <button type="button" aria-label="Close voter list" onclick={() => votersDialog?.close()}
-      >×</button
+    <button
+      type="button"
+      aria-label={$t('ui_close_voter_list_c8e4ceda')}
+      onclick={() => votersDialog?.close()}>×</button
     >
   </div>
   {#if voters.length}
@@ -199,18 +216,18 @@
       {/each}
     </ul>
   {:else if !votersLoading && !votersError}
-    <p>No voters are visible for this answer.</p>
+    <p>{$t('ui_no_voters_are_visible_for_this_answer_5b849dde')}</p>
   {/if}
   {#if votersError}<p role="alert">{votersError}</p>{/if}
   <footer>
     {#if votersAfter}
       <button type="button" disabled={votersLoading} onclick={() => void loadVoters(true)}
-        >{votersLoading ? 'Loading…' : 'Load more'}</button
+        >{votersLoading ? $t('ui_loading_ba3bbbe1') : $t('ui_load_more_ac8991ef')}</button
       >
     {:else if votersLoading}
-      <span>Loading voters…</span>
+      <span>{$t('ui_loading_voters_c7cc036f')}</span>
     {/if}
-    <button type="button" onclick={() => votersDialog?.close()}>Done</button>
+    <button type="button" onclick={() => votersDialog?.close()}>{$t('ui_done_11a6767d')}</button>
   </footer>
 </dialog>
 

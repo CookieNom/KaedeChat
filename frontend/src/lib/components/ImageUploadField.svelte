@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import Icon from './Icon.svelte';
 
   let {
@@ -31,9 +33,8 @@
   <button type="button" {disabled} onclick={() => input?.click()}>
     <span class="upload-icon"><Icon name="image" size={22} /><b>+</b></span>
     <span
-      ><strong>{file ? 'Change image' : 'Choose image'}</strong><small
-        >{file?.name ?? 'PNG, JPEG, GIF, or WebP'}</small
-      ></span
+      ><strong>{file ? $t('ui_change_image_87b8b008') : $t('ui_choose_image_f7e6f67f')}</strong
+      ><small>{file?.name ?? $t('ui_png_jpeg_gif_or_webp_f15287a9')}</small></span
     >
   </button>
 </div>

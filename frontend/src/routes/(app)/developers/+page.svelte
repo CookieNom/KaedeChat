@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import DeveloperPortalNav from '$lib/components/DeveloperPortalNav.svelte';
   import { api, userErrorMessage } from '$lib/api/client';
@@ -44,7 +46,7 @@
       }
       loaded = true;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not load your applications.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_your_applications_0d04a463'));
     }
   }
 
@@ -76,7 +78,7 @@
       });
       location.href = `/developers/${encodeURIComponent(application.ref)}`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not create the application.');
+      error = userErrorMessage(caught, $t('ui_could_not_create_the_application_42f77b80'));
     } finally {
       busy = false;
     }
@@ -85,18 +87,20 @@
   onMount(() => void refresh());
 </script>
 
-<svelte:head><title>Developer Portal · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_developer_portal_kaede_chat_8491c665')}</title></svelte:head>
 
 <main class="portal-shell">
   <DeveloperPortalNav active="applications" />
   <section class="portal-content">
     <header class="page-header">
       <div>
-        <span class="eyebrow">Applications</span>
-        <h1>Build on Kaede</h1>
-        <p>Manage bots, commands, federation access, and installations.</p>
+        <span class="eyebrow">{$t('ui_applications_98e33b0f')}</span>
+        <h1>{$t('ui_build_on_kaede_16eab5ce')}</h1>
+        <p>{$t('ui_manage_bots_commands_federation_access_and_in_bf28b0af')}</p>
       </div>
-      <button class="primary" type="button" onclick={openCreate}>＋ New application</button>
+      <button class="primary" type="button" onclick={openCreate}
+        >{$t('ui_new_application_e7f337a9')}</button
+      >
     </header>
 
     {#if error}<div class="notice error" role="alert">{error}</div>{/if}
@@ -105,43 +109,53 @@
       <form class="create-panel" onsubmit={createApplication}>
         <header>
           <div>
-            <span class="eyebrow">New application</span>
-            <h2>Create an application</h2>
-            <p>You can configure its bot identity, commands, and invite link after creation.</p>
+            <span class="eyebrow">{$t('ui_new_application_1a852572')}</span>
+            <h2>{$t('ui_create_an_application_3ed4f68a')}</h2>
+            <p>{$t('ui_you_can_configure_its_bot_identity_commands_a_ecea1ba1')}</p>
           </div>
-          <button class="icon-button" type="button" aria-label="Close" onclick={closeCreate}
-            >×</button
+          <button
+            class="icon-button"
+            type="button"
+            aria-label={$t('ui_close_7d9eb7ac')}
+            onclick={closeCreate}>×</button
           >
         </header>
         <div class="form-grid">
           <label>
-            Name
-            <input bind:value={name} maxlength="100" required placeholder="Weather bot" />
+            {$t('ui_name_dcd1d522')}
+            <input
+              bind:value={name}
+              maxlength="100"
+              required
+              placeholder={$t('ui_weather_bot_5ee95ab0')}
+            />
           </label>
           <label>
-            Owner
+            {$t('ui_owner_4b1b8aa3')}
             <select bind:value={teamRef}>
               {#each teams as team (team.ref)}
                 <option value={team.ref}>
-                  {team.personal ? 'Personal' : team.name} · {team.role}
+                  {team.personal ? $t('ui_personal_845f9286') : team.name} · {team.role}
                 </option>
               {/each}
             </select>
           </label>
           <label class="description">
-            Description <span>Optional</span>
+            {$t('ui_description_526e0087')} <span>{$t('ui_optional_59be7133')}</span>
             <textarea
               bind:value={description}
               maxlength="1000"
               rows="3"
-              placeholder="What does this application do?"
+              placeholder={$t('ui_what_does_this_application_do_868d227a')}
             ></textarea>
           </label>
         </div>
         <footer>
-          <button class="secondary" type="button" onclick={closeCreate}>Cancel</button>
+          <button class="secondary" type="button" onclick={closeCreate}
+            >{$t('ui_cancel_19766ed6')}</button
+          >
           <button class="primary" type="submit" disabled={busy || !name.trim() || !teamRef}>
-            {busy ? 'Creating…' : 'Create application'}
+            {busy ? $t('ui_creating_c79ed949') : $t('ui_create_application_b92a5b32')}
           </button>
         </footer>
       </form>
@@ -150,21 +164,21 @@
     <section class="applications" aria-labelledby="applications-heading">
       <div class="section-heading">
         <div>
-          <h2 id="applications-heading">Your applications</h2>
-          <p>Applications you own personally or through a team.</p>
+          <h2 id="applications-heading">{$t('ui_your_applications_e7bc4ab6')}</h2>
+          <p>{$t('ui_applications_you_own_personally_or_through_a__ddee6d8f')}</p>
         </div>
         <span>{applications.length}</span>
       </div>
 
       {#if !loaded}
-        <div class="empty"><strong>Loading applications…</strong></div>
+        <div class="empty"><strong>{$t('ui_loading_applications_50037e25')}</strong></div>
       {:else if applications.length === 0}
         <div class="empty">
           <span class="empty-icon" aria-hidden="true">◇</span>
-          <strong>No applications yet</strong>
-          <p>Your Personal team is ready. Create an application whenever you are.</p>
+          <strong>{$t('ui_no_applications_yet_8e8ce9c9')}</strong>
+          <p>{$t('ui_your_personal_team_is_ready_create_an_applica_7b2a6f9a')}</p>
           <button class="secondary" type="button" onclick={openCreate}
-            >Create your first application</button
+            >{$t('ui_create_your_first_application_75f1173b')}</button
           >
         </div>
       {:else}
@@ -193,7 +207,7 @@
                   <strong>{application.name}</strong>
                   <small>{application.status.replace('_', ' ')}</small>
                 </span>
-                <p>{application.description || 'No description yet.'}</p>
+                <p>{application.description || $t('ui_no_description_yet_6d962a3d')}</p>
                 <small>{application.bot_user.handle}</small>
               </span>
               <span class="arrow" aria-hidden="true">›</span>

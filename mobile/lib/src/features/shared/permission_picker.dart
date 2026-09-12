@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/domain/permission_selection.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -82,7 +83,9 @@ final class _ApplicationPermissionPickerState
                           style: Theme.of(context).textTheme.titleLarge,
                         ),
                         Text(
-                          '$selectedCount selected · exact permission mask preserved',
+                          L10n.of(context)
+                              .ui_value0_selected_exact_permission_mask_preserv_89f8dfe6(
+                                  (selectedCount).toString()),
                           style: TextStyle(color: context.kaede.muted),
                         ),
                       ],
@@ -90,7 +93,7 @@ final class _ApplicationPermissionPickerState
                   ),
                   FilledButton(
                     onPressed: () => Navigator.pop(context, _selected),
-                    child: const Text('Done'),
+                    child: Text(L10n.of(context).ui_done_8dd31791),
                   ),
                 ],
               ),
@@ -99,9 +102,9 @@ final class _ApplicationPermissionPickerState
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
                 controller: _search,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   prefixIcon: Icon(Icons.search_rounded),
-                  hintText: 'Search permissions',
+                  hintText: L10n.of(context).ui_search_permissions_6eb9399d,
                 ),
                 onChanged: (_) => setState(() {}),
               ),

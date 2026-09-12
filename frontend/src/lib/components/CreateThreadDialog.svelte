@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type { Message } from '$lib/chat/types';
   import { userDisplayName } from '$lib/chat/users';
 
@@ -20,24 +22,30 @@
 </script>
 
 <div class="thread-dialog-layer" role="presentation">
-  <button class="thread-dialog-backdrop" type="button" aria-label="Close" onclick={onClose}
+  <button
+    class="thread-dialog-backdrop"
+    type="button"
+    aria-label={$t('ui_close_7d9eb7ac')}
+    onclick={onClose}
   ></button>
   <div class="thread-dialog" role="dialog" aria-modal="true" aria-labelledby="thread-dialog-title">
     <header>
       <div>
-        <span>Start a conversation</span>
-        <h2 id="thread-dialog-title">Create Thread</h2>
+        <span>{$t('ui_start_a_conversation_258150cb')}</span>
+        <h2 id="thread-dialog-title">{$t('ui_create_thread_4ce9bbfd')}</h2>
       </div>
-      <button type="button" disabled={busy} aria-label="Close" onclick={onClose}>×</button>
+      <button type="button" disabled={busy} aria-label={$t('ui_close_7d9eb7ac')} onclick={onClose}
+        >×</button
+      >
     </header>
     <p class="starter">
       <strong>{userDisplayName(message.author)}</strong>
       <span
         >{message.e2ee
           ? message.e2ee_verified === true
-            ? (message.decrypted_content ?? 'Message')
-            : 'Encrypted message'
-          : (message.content ?? 'Message')}</span
+            ? (message.decrypted_content ?? $t('ui_message_2f77668a'))
+            : $t('ui_encrypted_message_4cc7138f')
+          : (message.content ?? $t('ui_message_2f77668a'))}</span
       >
     </p>
     <form
@@ -47,14 +55,14 @@
       }}
     >
       <label>
-        Thread Name
+        {$t('ui_thread_name_abe55ef5')}
         <input bind:value={name} maxlength="100" required disabled={busy} />
       </label>
       {#if error}<p role="alert">{error}</p>{/if}
       <footer>
-        <button type="button" disabled={busy} onclick={onClose}>Cancel</button>
+        <button type="button" disabled={busy} onclick={onClose}>{$t('ui_cancel_19766ed6')}</button>
         <button class="primary" disabled={busy || !name.trim()}>
-          {busy ? 'Creating…' : 'Create Thread'}
+          {busy ? $t('ui_creating_c79ed949') : $t('ui_create_thread_4ce9bbfd')}
         </button>
       </footer>
     </form>

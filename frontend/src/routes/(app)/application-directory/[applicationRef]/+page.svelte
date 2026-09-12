@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import {
@@ -72,13 +74,13 @@
       );
       if (!requestIsCurrent(signal, generation)) return;
       if (loadedApplication.ref !== applicationRef) {
-        throw new Error('The directory returned a different application.');
+        throw new Error($t('ui_the_directory_returned_a_different_applicatio_852733cc'));
       }
       application = loadedApplication;
     } catch (caught) {
       if (requestIsCurrent(signal, generation)) {
         application = null;
-        error = userErrorMessage(caught, 'This directory listing is unavailable.');
+        error = userErrorMessage(caught, $t('ui_this_directory_listing_is_unavailable_64457dfd'));
       }
     } finally {
       if (requestIsCurrent(signal, generation)) loading = false;
@@ -171,16 +173,24 @@
   });
 </script>
 
-<svelte:head><title>{application?.name ?? 'App Directory'} · Kaede Chat</title></svelte:head>
+<svelte:head
+  ><title
+    >{$t('ui_value0_kaede_chat_4bf52868', {
+      value0: String(application?.name ?? 'App Directory')
+    })}</title
+  ></svelte:head
+>
 <!-- eslint-disable svelte/no-navigation-without-resolve -- product-page links are validated HTTPS URLs from the strict directory contract -->
 <main>
   <nav>
-    <a href={resolveApplicationDirectoryPath(data.returnTo)}>← App Directory</a>
+    <a href={resolveApplicationDirectoryPath(data.returnTo)}>{$t('ui_app_directory_5c0147a5')}</a>
   </nav>
   {#if loading}
-    <p class="state">Loading app…</p>
+    <p class="state">{$t('ui_loading_app_cb235392')}</p>
   {:else if error || !application || loadedRef !== data.applicationRef}
-    <p class="notice" role="alert">{error || 'This directory listing is unavailable.'}</p>
+    <p class="notice" role="alert">
+      {error || $t('ui_this_directory_listing_is_unavailable_64457dfd')}
+    </p>
   {:else}
     <article>
       <div class="banner">
@@ -195,7 +205,8 @@
         <div class="identity">
           <span>{application.category}</span>
           <h1>
-            {application.name}{#if application.verified}<small aria-label="Reviewed application"
+            {application.name}{#if application.verified}<small
+                aria-label={$t('ui_reviewed_application_4105f425')}
                 ><span aria-hidden="true">✓</span></small
               >{/if}
           </h1>
@@ -203,11 +214,12 @@
         </div>
         <div class="product-actions">
           <button class="share" type="button" onclick={() => void copyProductLink()}
-            >Copy link</button
+            >{$t('ui_copy_link_dbf362d4')}</button
           >
           {#if installPath}<a
               class="add"
-              href={resolve(installPath as `/applications/${string}/install/${string}`)}>Add App</a
+              href={resolve(installPath as `/applications/${string}/install/${string}`)}
+              >{$t('ui_add_app_3de6a773')}</a
             >{/if}
         </div>
       </header>
@@ -216,11 +228,11 @@
         <div class="main-column">
           <section>
             <div class="section-heading">
-              <h2>About this app</h2>
+              <h2>{$t('ui_about_this_app_147cb283')}</h2>
               {#if application.supported_locales.length}
                 <label class="language"
-                  ><span>Language</span><select bind:value={selectedLocale}>
-                    <option value="">Default</option>
+                  ><span>{$t('ui_language_a4fe6526')}</span><select bind:value={selectedLocale}>
+                    <option value="">{$t('ui_default_21b111cb')}</option>
                     {#each application.supported_locales as locale (locale)}<option value={locale}
                         >{localeName(locale)}</option
                       >{/each}
@@ -232,7 +244,7 @@
             {#if application.media.length}
               <section
                 class="media-carousel"
-                aria-label="App media"
+                aria-label={$t('ui_app_media_c6c0b973')}
                 onmouseenter={() => (carouselHovered = true)}
                 onmouseleave={() => (carouselHovered = false)}
                 onfocusin={() => (carouselFocused = true)}
@@ -266,7 +278,9 @@
                         aria-label={`Play video for ${application.name}`}
                         onclick={() => (playingVideoId = currentMedia.video_id)}
                       >
-                        <span aria-hidden="true">▶</span><strong>Play video</strong>
+                        <span aria-hidden="true">▶</span><strong
+                          >{$t('ui_play_video_43e3c3b1')}</strong
+                        >
                       </button>
                     {/if}
                   {/if}
@@ -274,13 +288,13 @@
                     <button
                       class="carousel-arrow previous"
                       type="button"
-                      aria-label="Previous media"
+                      aria-label={$t('ui_previous_media_26b519b9')}
                       onclick={() => stepMedia(-1)}>‹</button
                     >
                     <button
                       class="carousel-arrow next"
                       type="button"
-                      aria-label="Next media"
+                      aria-label={$t('ui_next_media_e7521225')}
                       onclick={() => stepMedia(1)}>›</button
                     >
                   {/if}
@@ -292,9 +306,11 @@
                       type="button"
                       aria-pressed={carouselUserPaused}
                       onclick={() => (carouselUserPaused = !carouselUserPaused)}
-                      >{carouselUserPaused ? 'Play carousel' : 'Pause carousel'}</button
+                      >{carouselUserPaused
+                        ? $t('ui_play_carousel_ee20a892')
+                        : $t('ui_pause_carousel_6547eb15')}</button
                     >
-                    <div class="media-dots" aria-label="Choose app media">
+                    <div class="media-dots" aria-label={$t('ui_choose_app_media_b58ccb20')}>
                       {#each application.media as item, index (`${item.type}:${item.type === 'image' ? item.asset_id : item.video_id}`)}
                         <button
                           class:active={index === mediaIndex}
@@ -316,7 +332,7 @@
 
           {#if application.popular_commands.length}
             <section class="commands">
-              <h2>Popular commands</h2>
+              <h2>{$t('ui_popular_commands_0736b21a')}</h2>
               <div>
                 {#each application.popular_commands as command (command.id)}
                   <article>
@@ -330,7 +346,7 @@
 
           {#if application.similar_apps.length}
             <section class="similar">
-              <h2>Similar apps</h2>
+              <h2>{$t('ui_similar_apps_4b2135af')}</h2>
               <div class="similar-grid">
                 {#each application.similar_apps as similar (similar.ref)}
                   {@const similarIcon = similar.icon_hash
@@ -355,11 +371,11 @@
         </div>
 
         <aside>
-          <h2>Details</h2>
+          <h2>{$t('ui_details_45989de4')}</h2>
           <dl>
-            <dt>Publisher</dt>
+            <dt>{$t('ui_publisher_21378545')}</dt>
             <dd>{application.origin_domain}</dd>
-            <dt>Installation</dt>
+            <dt>{$t('ui_installation_c3fc54aa')}</dt>
             <dd>
               {application.install_template.install_types
                 .map((item) => (item === 'guild_install' ? 'Servers' : 'Your account'))
@@ -368,15 +384,15 @@
           </dl>
           <div class="links">
             <a href={application.support_url} target="_blank" rel="noopener noreferrer nofollow"
-              >Support ↗</a
+              >{$t('ui_support_82a09974')}</a
             >
             <a
               href={application.privacy_policy_url}
               target="_blank"
-              rel="noopener noreferrer nofollow">Privacy policy ↗</a
+              rel="noopener noreferrer nofollow">{$t('ui_privacy_policy_87501423')}</a
             >
             <a href={application.terms_url} target="_blank" rel="noopener noreferrer nofollow"
-              >Terms of service ↗</a
+              >{$t('ui_terms_of_service_1b4987e3')}</a
             >
             {#each application.external_links as link (link.url)}
               <a href={link.url} target="_blank" rel="noopener noreferrer nofollow">{link.name} ↗</a

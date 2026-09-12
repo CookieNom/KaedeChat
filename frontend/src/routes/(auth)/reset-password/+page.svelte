@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import { consumeUrlToken } from '$lib/auth/url-token';
@@ -37,11 +39,11 @@
   async function submit() {
     if (busy) return;
     if (!token) {
-      error = 'This reset link is invalid.';
+      error = $t('ui_this_reset_link_is_invalid_ddca8f10');
       return;
     }
     if (password !== confirmPassword) {
-      error = 'Passwords do not match.';
+      error = $t('ui_passwords_do_not_match_6c6e178a');
       return;
     }
     busy = true;
@@ -57,7 +59,7 @@
         })
       });
       if (result.status !== 'password_updated' || !canonicalAccountRef(result.account_ref)) {
-        throw new Error('The password-reset response was invalid.');
+        throw new Error($t('ui_the_password_reset_response_was_invalid_8a9e6c1b'));
       }
       // Only the authenticated, one-time reset response may lower this
       // browser's rollback checkpoint. A merely missing server vault never can.
@@ -69,16 +71,16 @@
       await tick();
       successPanel?.focus();
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not reset your password. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_reset_your_password_try_again_059288d9'));
     } finally {
       busy = false;
     }
   }
 </script>
 
-<svelte:head><title>Choose password · Kaede Chat</title></svelte:head>
-<p class="eyebrow">Account recovery</p>
-<h1 class="auth-title">Choose a new key.</h1>
+<svelte:head><title>{$t('ui_choose_password_kaede_chat_50b171c2')}</title></svelte:head>
+<p class="eyebrow">{$t('ui_account_recovery_2b291cd5')}</p>
+<h1 class="auth-title">{$t('ui_choose_a_new_key_291be8ac')}</h1>
 {#if done}<div
     bind:this={successPanel}
     class="auth-success"
@@ -88,12 +90,13 @@
     tabindex="-1"
   >
     <p class="lede">
-      Your password has been updated. <a href={resolve('/login')}>Sign in</a>.
+      {$t('ui_your_password_has_been_updated_cc244a90')}
+      <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>.
     </p>
     <p class="auth-warning">
       {localStateRebased
-        ? 'This browser kept its trusted encrypted history and will seal it under the new account-vault key after sign-in.'
-        : 'Restore an encrypted recovery backup after sign-in if you need history that is not already available on another trusted client.'}
+        ? $t('ui_this_browser_kept_its_trusted_encrypted_histo_6817ba78')
+        : $t('ui_restore_an_encrypted_recovery_backup_after_si_76da14aa')}
     </p>
   </div>
 {:else}<form
@@ -102,13 +105,10 @@
       void submit();
     }}
   >
-    <p class="auth-warning">
-      Resetting your password replaces the key that unlocks your end-to-end encrypted account vault.
-      Your encrypted history will remain available only if this browser still has its local
-      encryption state or you restore a recovery backup. Kaede cannot recover it from the server.
-    </p>
+    <p class="auth-warning">{$t('ui_resetting_your_password_replaces_the_key_that_86ed745e')}</p>
     <label
-      >New password <input
+      >{$t('ui_new_password_3dd9df44')}
+      <input
         bind:value={password}
         type="password"
         minlength="10"
@@ -119,7 +119,8 @@
       /></label
     >
     <label
-      >Confirm new password <input
+      >{$t('ui_confirm_new_password_bf000421')}
+      <input
         bind:value={confirmPassword}
         type="password"
         minlength="10"
@@ -131,6 +132,6 @@
     >
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
     <button class="primary-button" disabled={busy}>
-      {busy ? 'Updating…' : 'Update password'}
+      {busy ? $t('ui_updating_dfe40efe') : $t('ui_update_password_fe45b401')}
     </button>
   </form>{/if}

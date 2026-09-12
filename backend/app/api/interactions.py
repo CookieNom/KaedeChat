@@ -393,7 +393,11 @@ async def authoritative_interaction_invoker_policy(
     if actor.is_local and actor.origin_domain == settings.domain:
         account_settings = await session.get(UserSettings, (actor.id, actor.origin_domain))
         return InteractionInvokerPolicy(
-            locale=account_settings.locale if account_settings is not None else "en-US",
+            locale=(
+                account_settings.locale
+                if account_settings is not None and account_settings.locale != "system"
+                else "en-US"
+            ),
             age_assured_adult=(getattr(actor, "age_assurance_state", "unknown") == "adult"),
             age_restricted_dm_commands_enabled=bool(
                 account_settings is not None and account_settings.age_restricted_dm_commands_enabled

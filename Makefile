@@ -104,6 +104,7 @@ audit:
 
 mobile-check:
 	cd mobile && flutter pub get --enforce-lockfile
+	cd mobile && flutter gen-l10n
 	cd mobile && dart format --output=none --set-exit-if-changed lib test
 	cd mobile && flutter analyze
 	cd mobile && TZ=America/Los_Angeles flutter test

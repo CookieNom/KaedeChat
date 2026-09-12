@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import { entityRef } from '$lib/chat/refs';
   import type { Channel, Message } from '$lib/chat/types';
@@ -64,7 +66,7 @@
     try {
       await onForward(targets, note);
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not forward this message. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_forward_this_message_try_again_6d3e6cae'));
     } finally {
       busy = false;
     }
@@ -72,11 +74,16 @@
 </script>
 
 <div use:portal class="forward-dialog-layer" role="presentation">
-  <button class="backdrop" type="button" aria-label="Cancel forward" onclick={onClose}></button>
+  <button
+    class="backdrop"
+    type="button"
+    aria-label={$t('ui_cancel_forward_c10a0603')}
+    onclick={onClose}
+  ></button>
   <form
     bind:this={form}
     class="forward-dialog"
-    aria-label="Forward message"
+    aria-label={$t('ui_forward_message_c3922b22')}
     onsubmit={(event) => {
       event.preventDefault();
       void submit();
@@ -84,16 +91,13 @@
   >
     <header>
       <div>
-        <small>Message action</small>
-        <h2>Forward</h2>
+        <small>{$t('ui_message_action_aed12200')}</small>
+        <h2>{$t('ui_forward_f1c65e14')}</h2>
       </div>
     </header>
-    <p>
-      Forwarding creates an immutable, author-free snapshot. A source link is shown only to people
-      who still have access to the original channel.
-    </p>
+    <p>{$t('ui_forwarding_creates_an_immutable_author_free_s_db4c4415')}</p>
     <fieldset disabled={busy}>
-      <legend>Send to · {selectedRefs.length}/5</legend>
+      <legend>{$t('ui_send_to_value0_5_915ca61a', { value0: String(selectedRefs.length) })}</legend>
       <div class="destinations">
         {#each channels as channel (entityRef(channel))}
           {@const ref = entityRef(channel)}
@@ -105,7 +109,7 @@
               disabled={!selected && selectedRefs.length >= 5}
               onchange={(event) => toggle(channel, event.currentTarget.checked)}
             />
-            <span>#{channel.name ?? 'direct message'}</span>
+            <span>#{channel.name ?? $t('ui_direct_message_029adcf0')}</span>
           </label>
         {/each}
       </div>
@@ -113,28 +117,27 @@
     {#if requiresPlaintextDisclosure}
       <label class="disclosure">
         <input type="checkbox" bind:checked={plaintextDisclosureAcknowledged} disabled={busy} />
-        <span
-          >I understand that forwarding to an unencrypted destination decrypts this snapshot and its
-          files on this device before uploading them there.</span
-        >
+        <span>{$t('ui_i_understand_that_forwarding_to_an_unencrypte_1e95749c')}</span>
       </label>
     {/if}
     <label class="note">
-      Add a note <span>Optional</span>
+      {$t('ui_add_a_note_322c0e13')} <span>{$t('ui_optional_59be7133')}</span>
       <textarea
         bind:value={note}
         maxlength="4000"
         rows="3"
-        placeholder="Say something about this message"
+        placeholder={$t('ui_say_something_about_this_message_8d64d127')}
         disabled={busy}
       ></textarea>
     </label>
     <small class="source"
-      >Original: {message.content?.slice(0, 120) || 'rich message or attachment'}</small
+      >{$t('ui_original_value0_f1509acc', {
+        value0: String(message.content?.slice(0, 120) || 'rich message or attachment')
+      })}</small
     >
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <footer>
-      <button type="button" disabled={busy} onclick={onClose}>Cancel</button>
+      <button type="button" disabled={busy} onclick={onClose}>{$t('ui_cancel_19766ed6')}</button>
       <button
         class="primary"
         type="submit"
@@ -142,7 +145,7 @@
           selectedRefs.length === 0 ||
           (requiresPlaintextDisclosure && !plaintextDisclosureAcknowledged)}
         >{busy
-          ? 'Sending…'
+          ? $t('ui_sending_b8ed5279')
           : `Send${selectedRefs.length > 1 ? ` (${selectedRefs.length})` : ''}`}</button
       >
     </footer>

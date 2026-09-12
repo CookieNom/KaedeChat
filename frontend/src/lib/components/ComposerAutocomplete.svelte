@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { tick } from 'svelte';
   import type { CompletionOption } from '$lib/chat/completion';
 
@@ -84,10 +86,12 @@
     id={listboxId}
     class="composer-autocomplete"
     role="listbox"
-    aria-label="Message suggestions"
+    aria-label={$t('ui_message_suggestions_9e2cf62c')}
   >
     {#if emojiMode}
-      <p class="completion-heading">Emoji matching :{query}</p>
+      <p class="completion-heading">
+        {$t('ui_emoji_matching_value0_4d2cd372', { value0: String(query) })}
+      </p>
     {/if}
     {#each shown as option, index (option.value)}
       <button

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import type { Attachment, Role, UserSummary } from '$lib/chat/types';
   import type {
@@ -76,7 +78,11 @@
     filename={spoiler ? 'SPOILER_media' : (attachment?.filename ?? '')}
     identity={`${layoutKey}:${media.url}`}
   >
-    <figure aria-label={spoiler ? 'Spoiler media' : description || 'Media'}>
+    <figure
+      aria-label={spoiler
+        ? $t('ui_spoiler_media_50b11b4c')
+        : description || $t('ui_media_d357175c')}
+    >
       {#if attachment && attachment.scan_status === 'clean'}
         <img
           use:authenticatedMedia={{
@@ -99,10 +105,10 @@
           class="external-media-placeholder"
           href={remote}
           target="_blank"
-          rel="noopener noreferrer nofollow">Open external component media</a
+          rel="noopener noreferrer nofollow">{$t('ui_open_external_component_media_0fd8b9af')}</a
         >
       {:else}
-        <span class="unavailable">Media unavailable</span>
+        <span class="unavailable">{$t('ui_media_unavailable_3d434618')}</span>
       {/if}
       {#if description}<figcaption>{description}</figcaption>{/if}
     </figure>
@@ -151,9 +157,11 @@
         <span aria-hidden="true">📄</span>
         <span>{attachment?.filename ?? component.file.url.replace('attachment://', '')}</span>
         {#if attachment}
-          <button type="button" onclick={() => void download(attachment)}>Download</button>
+          <button type="button" onclick={() => void download(attachment)}
+            >{$t('ui_download_d6eafe82')}</button
+          >
         {:else}
-          <span class="unavailable">Unavailable</span>
+          <span class="unavailable">{$t('ui_unavailable_ca184496')}</span>
         {/if}
       </div>
     </AttachmentSpoiler>

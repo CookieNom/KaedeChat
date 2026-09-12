@@ -1,11 +1,11 @@
 import 'dart:async';
-
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:kaede_mobile/l10n/generated/app_localizations.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/domain/client_preferences.dart';
 import 'package:kaede_mobile/src/features/auth/auth_screen.dart';
@@ -14,6 +14,8 @@ import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/auth/session_lock.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
+import 'package:kaede_mobile/src/l10n/language_suggestion.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -136,35 +138,45 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
           guilds: next.guilds,
         );
         if (fresh == null) {
-          voice.leave(reason: 'This voice channel is no longer available.');
+          voice.leave(
+              reason: L10n.of(context)
+                  .ui_this_voice_channel_is_no_longer_available_5be80c93);
         } else {
           voice.reconcilePermissions(fresh);
         }
       }
     });
-    return MaterialApp.router(
-      title: 'Kaede Chat',
-      debugShowCheckedModeBanner: false,
-      theme: kaedeTheme(brightness: Brightness.light),
-      darkTheme: kaedeTheme(),
-      themeMode: materialThemeMode(preferences.themePreference),
-      locale: parseLocalePreference(preferences.localePreference),
-      supportedLocales: kaedeSupportedLocales,
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      restorationScopeId: 'kaede-mobile',
-      routerConfig: _router,
-      builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
-        value: kaedeSystemOverlayFor(Theme.of(context).brightness),
-        child: SessionLock(
-          observer: _lockObserver,
-          locked: preferences.phase == SessionPhase.locked,
-          lockScreen: const _LockScreen(),
-          child: child ?? const SizedBox.shrink(),
-        ),
+    return ValueListenableBuilder<String>(
+      valueListenable: appLanguage,
+      builder: (context, language, _) => MaterialApp.router(
+        title: L10n.of(context).ui_kaede_chat_9c0fb33b,
+        debugShowCheckedModeBanner: false,
+        theme: kaedeTheme(brightness: Brightness.light),
+        darkTheme: kaedeTheme(),
+        themeMode: materialThemeMode(preferences.themePreference),
+        locale: parseLocalePreference(language),
+        supportedLocales: kaedeSupportedLocales,
+        localizationsDelegates: const [
+          AppLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        restorationScopeId: 'kaede-mobile',
+        routerConfig: _router,
+        builder: (context, child) {
+          L10n.current = AppLocalizations.of(context);
+          return AnnotatedRegion<SystemUiOverlayStyle>(
+            value: kaedeSystemOverlayFor(Theme.of(context).brightness),
+            child: SessionLock(
+              observer: _lockObserver,
+              locked: preferences.phase == SessionPhase.locked,
+              lockScreen: const _LockScreen(),
+              child:
+                  LanguageSuggestion(child: child ?? const SizedBox.shrink()),
+            ),
+          );
+        },
       ),
     );
   }
@@ -208,7 +220,7 @@ final class _InvalidLinkScreen extends StatelessWidget {
   const _InvalidLinkScreen();
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text('Invalid link')),
+        appBar: AppBar(title: Text(L10n.of(context).ui_invalid_link_a17f6d80)),
         body: Center(
           child: Padding(
             padding: EdgeInsets.all(24),
@@ -217,11 +229,12 @@ final class _InvalidLinkScreen extends StatelessWidget {
               children: [
                 Icon(Icons.link_off_rounded, size: 42),
                 SizedBox(height: 12),
-                Text('This Kaede link is incomplete or malformed.'),
+                Text(L10n.of(context)
+                    .ui_this_kaede_link_is_incomplete_or_malformed_2386e315),
                 SizedBox(height: 16),
                 FilledButton(
                   onPressed: () => context.go('/'),
-                  child: Text('Open Kaede'),
+                  child: Text(L10n.of(context).ui_open_kaede_7ab69d15),
                 ),
               ],
             ),
@@ -319,13 +332,14 @@ final class _LockScreen extends ConsumerWidget {
                   ),
                   SizedBox(height: 22),
                   Text(
-                    'Kaede is locked',
+                    L10n.of(context).ui_kaede_is_locked_e4be9cb9,
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
                   SizedBox(height: 8),
                   Text(
-                    'Use your biometrics or device passcode to continue.',
+                    L10n.of(context)
+                        .ui_use_your_biometrics_or_device_passcode_to_con_5503db9b,
                     textAlign: TextAlign.center,
                     style: TextStyle(color: context.kaede.muted, height: 1.4),
                   ),
@@ -352,13 +366,13 @@ final class _LockScreen extends ConsumerWidget {
                     onPressed: () =>
                         ref.read(mobileControllerProvider.notifier).unlock(),
                     icon: Icon(Icons.fingerprint_rounded),
-                    label: Text('Unlock'),
+                    label: Text(L10n.of(context).ui_unlock_9c799975),
                   ),
                   SizedBox(height: 6),
                   TextButton(
                     onPressed: () =>
                         ref.read(mobileControllerProvider.notifier).logout(),
-                    child: Text('Sign out instead'),
+                    child: Text(L10n.of(context).ui_sign_out_instead_044cad9a),
                   ),
                 ],
               ),
@@ -382,7 +396,7 @@ final class _LaunchScreen extends StatelessWidget {
               _BrandMark(),
               SizedBox(height: 18),
               Text(
-                'Kaede',
+                L10n.of(context).ui_kaede_771d2cd7,
                 style: TextStyle(
                   fontSize: 26,
                   fontWeight: FontWeight.w800,

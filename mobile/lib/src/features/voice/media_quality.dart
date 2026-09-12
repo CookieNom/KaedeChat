@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -36,33 +37,33 @@ final class ScreenShareQualityProfile {
 
 extension ScreenShareQualityDetails on ScreenShareQuality {
   ScreenShareQualityProfile get profile => switch (this) {
-        ScreenShareQuality.dataSaver => const ScreenShareQualityProfile(
-            label: 'Data saver',
-            description: '720p · 15 FPS',
+        ScreenShareQuality.dataSaver => ScreenShareQualityProfile(
+            label: L10n.current.ui_data_saver_2e98ac08,
+            description: L10n.current.ui_720p_15_fps_6a315c4c,
             width: 1280,
             height: 720,
             frameRate: 15,
             maxBitrate: 1200000,
           ),
-        ScreenShareQuality.smooth => const ScreenShareQualityProfile(
-            label: 'Smooth',
-            description: '720p · 30 FPS',
+        ScreenShareQuality.smooth => ScreenShareQualityProfile(
+            label: L10n.current.ui_smooth_4a02d9cf,
+            description: L10n.current.ui_720p_30_fps_37676aed,
             width: 1280,
             height: 720,
             frameRate: 30,
             maxBitrate: 2500000,
           ),
-        ScreenShareQuality.sharp => const ScreenShareQualityProfile(
-            label: 'Sharp',
-            description: '1080p · 30 FPS',
+        ScreenShareQuality.sharp => ScreenShareQualityProfile(
+            label: L10n.current.ui_sharp_64858ee7,
+            description: L10n.current.ui_1080p_30_fps_b784c1f5,
             width: 1920,
             height: 1080,
             frameRate: 30,
             maxBitrate: 4500000,
           ),
-        ScreenShareQuality.source => const ScreenShareQualityProfile(
-            label: 'Source',
-            description: 'Up to 2160p · 30 FPS',
+        ScreenShareQuality.source => ScreenShareQualityProfile(
+            label: L10n.current.ui_source_61e2a3f8,
+            description: L10n.current.ui_up_to_2160p_30_fps_dc228b99,
             width: 3840,
             height: 2160,
             frameRate: 30,

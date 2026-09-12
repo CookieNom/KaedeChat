@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Lives inside the session gate so signing out or locking also removes it.
@@ -70,7 +71,8 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = userFacingError(error,
-            summary: 'Could not enable background notifications'));
+            summary: L10n.of(context)
+                .ui_could_not_enable_background_notifications_76cccb52));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -95,18 +97,20 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
           if (_visible) ...[
             const ModalBarrier(dismissible: false, color: Colors.black54),
             AlertDialog(
-              title: const Text('Enable notifications?'),
+              title: Text(L10n.of(context).ui_enable_notifications_aabb34b3),
               scrollable: true,
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                      'Get messages, mentions and incoming calls while Kaede is closed. You can change this later in Settings.'),
+                  Text(L10n.of(context)
+                      .ui_get_messages_mentions_and_incoming_calls_whil_b2d7822c),
                   if (controller.usesPushRelay) ...[
                     const SizedBox(height: 12),
-                    Text(
-                        'Notifications for ${controller.api.tokens?.instance.value} use Kaede Push Relay (${controller.pushRelayHost}). Message content is never sent to the relay.'),
+                    Text(L10n.of(context)
+                        .ui_notifications_for_value0_use_kaede_push_relay_d039f851(
+                            (controller.api.tokens?.instance.value).toString(),
+                            (controller.pushRelayHost).toString())),
                   ],
                   if (_error case final error?) ...[
                     const SizedBox(height: 12),
@@ -117,11 +121,13 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
               actions: [
                 TextButton(
                   onPressed: _busy ? null : () => _choose(false),
-                  child: const Text('Not now'),
+                  child: Text(L10n.of(context).ui_not_now_2c3d6fce),
                 ),
                 FilledButton(
                   onPressed: _busy ? null : () => _choose(true),
-                  child: Text(_busy ? 'Please wait…' : 'Enable notifications'),
+                  child: Text(_busy
+                      ? L10n.of(context).ui_please_wait_ad7e2c40
+                      : L10n.of(context).ui_enable_notifications_456c745e),
                 ),
               ],
             ),

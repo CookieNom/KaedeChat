@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { partialEmojiText, type MessagePollResultPresentation } from '$lib/chat/rich-content';
 
   let { result }: { result: MessagePollResultPresentation } = $props();
@@ -7,18 +9,25 @@
   );
 </script>
 
-<section class="poll-result-card" aria-label="Poll results">
+<section class="poll-result-card" aria-label={$t('ui_poll_results_ac41cda4')}>
   <span class="poll-result-icon" aria-hidden="true">✓</span>
   <div>
-    <strong>{result.question_text ?? 'Poll ended'}</strong>
+    <strong>{result.question_text ?? $t('ui_poll_ended_f5031fd1')}</strong>
     {#if result.total_votes === 0}
-      <p>No votes were cast.</p>
+      <p>{$t('ui_no_votes_were_cast_b293652a')}</p>
     {:else if result.victor_answer_id === null}
-      <p>The poll ended in a tie · {result.total_votes} votes</p>
+      <p>
+        {$t('ui_the_poll_ended_in_a_tie_value0_votes_ac571d9f', {
+          value0: String(result.total_votes)
+        })}
+      </p>
     {:else}
       <p>
-        {winnerLabel ?? `Answer ${result.victor_answer_id}`} won with
-        {result.victor_answer_votes} of {result.total_votes} votes.
+        {$t('ui_value0_won_with_value1_of_value2_votes_58ca41de', {
+          value0: String(winnerLabel ?? `Answer ${result.victor_answer_id}`),
+          value1: String(result.victor_answer_votes),
+          value2: String(result.total_votes)
+        })}
       </p>
     {/if}
   </div>

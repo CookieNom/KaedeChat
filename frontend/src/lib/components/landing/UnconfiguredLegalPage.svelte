@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import LegalPage from './LegalPage.svelte';
 
   let { title, policy }: { title: string; policy: string } = $props();
@@ -6,11 +8,12 @@
 
 <LegalPage {title} updated={null}>
   <section>
-    <h2>No operator policy is published</h2>
+    <h2>{$t('ui_no_operator_policy_is_published_2a9a7f69')}</h2>
     <p>
-      This build does not include an operator-reviewed {policy}. This notice is not a {policy} and does
-      not create terms for an instance operator. Ask the operator of the instance you use for its current
-      policies and contact details.
+      {$t('ui_this_build_does_not_include_an_operator_revie_de2c8ec8', {
+        value0: String(policy),
+        value1: String(policy)
+      })}
     </p>
   </section>
 </LegalPage>
