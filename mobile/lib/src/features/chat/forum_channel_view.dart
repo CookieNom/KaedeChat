@@ -14,6 +14,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/thread_permissions.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
+import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -1156,6 +1157,25 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.insert_drive_file_outlined),
                     title: Text(attachment.name),
+                    subtitle: Text(isAttachmentSpoiler(attachment.name)
+                        ? 'Spoiler · Tap to edit'
+                        : 'Tap to edit attachment'),
+                    onTap: _busy
+                        ? null
+                        : () async {
+                            final spoiler = await showAttachmentSpoilerEditor(
+                                context,
+                                file: attachment.file,
+                                filename: attachment.name,
+                                contentType: attachment.contentType);
+                            if (mounted &&
+                                !_busy &&
+                                spoiler != null &&
+                                _attachments.contains(attachment)) {
+                              setState(() => attachment.name =
+                                  spoilerFilename(attachment.name, spoiler));
+                            }
+                          },
                     trailing: IconButton(
                       tooltip: 'Remove attachment',
                       onPressed: _busy
@@ -1188,13 +1208,13 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
 }
 
 final class _ForumAttachment {
-  const _ForumAttachment({
+  _ForumAttachment({
     required this.name,
     required this.file,
     required this.contentType,
   });
 
-  final String name;
+  String name;
   final File file;
   final String contentType;
 }

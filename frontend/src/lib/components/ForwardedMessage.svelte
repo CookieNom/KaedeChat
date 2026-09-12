@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import { api, userErrorMessage } from '$lib/api/client';
   import { forwardedMessagePath } from '$lib/chat/interactions';
   import { stickerUrl } from '$lib/chat/stickers';
@@ -191,43 +192,50 @@
     {#if snapshot.attachments.length}
       <div class="forwarded-attachments">
         {#each snapshot.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
-          {#if allowEncryptedManifests && attachment.encrypted_manifest?.duration_millis !== undefined && attachment.encrypted_manifest.waveform !== undefined}
-            <EncryptedVoiceMessagePlayer
-              manifest={attachment.encrypted_manifest}
-              {attachment}
-              onError={(caught) =>
-                (attachmentError = userErrorMessage(
-                  caught,
-                  'Could not decrypt this forwarded voice message on this device.'
-                ))}
-            />
-          {:else if allowEncryptedManifests && attachment.encrypted_manifest}
-            <button
-              type="button"
-              class="forwarded-file"
-              onclick={() => void downloadEncryptedSnapshotAttachment(attachment)}
-            >
-              🔒 {attachment.filename}
-            </button>
-          {:else if voiceAttachment && attachment === voiceAttachment}
-            <VoiceMessagePlayer {attachment} />
-          {:else if attachment.content_type.startsWith('image/')}
-            <img
-              use:authenticatedMedia={{
-                path: attachmentMediaPath(
-                  attachment.origin_domain,
-                  attachment.id,
-                  'thumbnail_512',
-                  attachment.history_media_url
-                ),
-                contentType: attachment.content_type
-              }}
-              alt={attachment.filename}
-              loading="lazy"
-            />
-          {:else}
-            <span class="forwarded-file">{attachment.filename}</span>
-          {/if}
+          <AttachmentSpoiler
+            filename={allowEncryptedManifests
+              ? (attachment.encrypted_manifest?.filename ?? attachment.filename)
+              : attachment.filename}
+            identity={`${attachment.id}@${attachment.origin_domain}`}
+          >
+            {#if allowEncryptedManifests && attachment.encrypted_manifest?.duration_millis !== undefined && attachment.encrypted_manifest.waveform !== undefined}
+              <EncryptedVoiceMessagePlayer
+                manifest={attachment.encrypted_manifest}
+                {attachment}
+                onError={(caught) =>
+                  (attachmentError = userErrorMessage(
+                    caught,
+                    'Could not decrypt this forwarded voice message on this device.'
+                  ))}
+              />
+            {:else if allowEncryptedManifests && attachment.encrypted_manifest}
+              <button
+                type="button"
+                class="forwarded-file"
+                onclick={() => void downloadEncryptedSnapshotAttachment(attachment)}
+              >
+                🔒 {attachment.filename}
+              </button>
+            {:else if voiceAttachment && attachment === voiceAttachment}
+              <VoiceMessagePlayer {attachment} />
+            {:else if attachment.content_type.startsWith('image/')}
+              <img
+                use:authenticatedMedia={{
+                  path: attachmentMediaPath(
+                    attachment.origin_domain,
+                    attachment.id,
+                    'thumbnail_512',
+                    attachment.history_media_url
+                  ),
+                  contentType: attachment.content_type
+                }}
+                alt={attachment.filename}
+                loading="lazy"
+              />
+            {:else}
+              <span class="forwarded-file">{attachment.filename}</span>
+            {/if}
+          </AttachmentSpoiler>
         {/each}
       </div>
       {#if attachmentError}<p class="attachment-error" role="alert">{attachmentError}</p>{/if}

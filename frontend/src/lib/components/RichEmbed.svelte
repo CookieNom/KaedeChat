@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import type { Attachment, Role, UserSummary } from '$lib/chat/types';
   import type { EmbedMedia, MessageEmbed } from '$lib/chat/rich-content';
   import { embedAccent } from '$lib/chat/rich-content';
@@ -89,21 +90,26 @@
     {#if embed.image}
       {@const attachment = attachmentFor(embed.image)}
       {#if attachment}
-        <img
-          class="embed-image"
-          use:authenticatedMedia={{
-            path: attachmentMediaPath(
-              attachment.origin_domain,
-              attachment.id,
-              'thumbnail_512',
-              null,
-              attachment.private_media_url
-            ),
-            contentType: attachment.content_type
-          }}
-          alt={attachment.filename}
-          loading="lazy"
-        />
+        <AttachmentSpoiler
+          filename={attachment.filename}
+          identity={`${attachment.id}@${attachment.origin_domain}`}
+        >
+          <img
+            class="embed-image"
+            use:authenticatedMedia={{
+              path: attachmentMediaPath(
+                attachment.origin_domain,
+                attachment.id,
+                'thumbnail_512',
+                null,
+                attachment.private_media_url
+              ),
+              contentType: attachment.content_type
+            }}
+            alt={attachment.filename}
+            loading="lazy"
+          />
+        </AttachmentSpoiler>
       {:else if embed.image.url}
         {#if allowExternalMedia}
           <LinkPreview url={embed.image.url} mediaOnly />
@@ -144,20 +150,25 @@
     {@const attachment = attachmentFor(embed.thumbnail)}
     <aside>
       {#if attachment}
-        <img
-          use:authenticatedMedia={{
-            path: attachmentMediaPath(
-              attachment.origin_domain,
-              attachment.id,
-              'thumbnail_128',
-              null,
-              attachment.private_media_url
-            ),
-            contentType: attachment.content_type
-          }}
-          alt={attachment.filename}
-          loading="lazy"
-        />
+        <AttachmentSpoiler
+          filename={attachment.filename}
+          identity={`${attachment.id}@${attachment.origin_domain}`}
+        >
+          <img
+            use:authenticatedMedia={{
+              path: attachmentMediaPath(
+                attachment.origin_domain,
+                attachment.id,
+                'thumbnail_128',
+                null,
+                attachment.private_media_url
+              ),
+              contentType: attachment.content_type
+            }}
+            alt={attachment.filename}
+            loading="lazy"
+          />
+        </AttachmentSpoiler>
       {:else if allowExternalMedia}<LinkPreview url={embed.thumbnail.url} compactMedia />
       {:else}
         <a

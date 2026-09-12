@@ -21,6 +21,7 @@ export interface PendingUpload {
   progress: number;
   status: 'uploading' | 'ready' | 'failed';
   attachmentId?: string;
+  updating?: boolean;
   encryptedManifest?: EncryptedFileManifest;
   error?: string;
 }

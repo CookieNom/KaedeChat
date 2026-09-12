@@ -3015,7 +3015,12 @@
         />
       {/if}
       {#if uploads.length && !editingMessage}
-        <UploadPreviewTray {uploads} onRemove={removeUpload} />
+        <UploadPreviewTray
+          {uploads}
+          onRemove={removeUpload}
+          onSpoiler={uploadQueue.setSpoiler}
+          disabled={busy}
+        />
       {/if}
     </footer>
     {#if pinsOpen}

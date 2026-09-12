@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import type { Attachment, Role, UserSummary } from '$lib/chat/types';
   import type {
     ActionRow,
@@ -71,36 +72,41 @@
 {#snippet media(media: UnfurledMediaItem, description: string | null | undefined, spoiler = false)}
   {@const attachment = attachmentFor(media)}
   {@const remote = externalUrl(media)}
-  <figure class:spoiler aria-label={spoiler ? 'Spoiler media' : description || 'Media'}>
-    {#if attachment && attachment.scan_status === 'clean'}
-      <img
-        use:authenticatedMedia={{
-          path: attachmentMediaPath(
-            attachment.origin_domain,
-            attachment.id,
-            'thumbnail_512',
-            attachment.history_media_url,
-            attachment.private_media_url
-          ),
-          contentType: attachment.content_type
-        }}
-        alt={description ?? attachment.filename}
-        loading="lazy"
-      />
-    {:else if remote && allowExternalMedia}
-      <img src={remote} alt={description ?? ''} loading="lazy" referrerpolicy="no-referrer" />
-    {:else if remote}
-      <a
-        class="external-media-placeholder"
-        href={remote}
-        target="_blank"
-        rel="noopener noreferrer nofollow">Open external component media</a
-      >
-    {:else}
-      <span class="unavailable">Media unavailable</span>
-    {/if}
-    {#if description}<figcaption>{description}</figcaption>{/if}
-  </figure>
+  <AttachmentSpoiler
+    filename={spoiler ? 'SPOILER_media' : (attachment?.filename ?? '')}
+    identity={`${layoutKey}:${media.url}`}
+  >
+    <figure aria-label={spoiler ? 'Spoiler media' : description || 'Media'}>
+      {#if attachment && attachment.scan_status === 'clean'}
+        <img
+          use:authenticatedMedia={{
+            path: attachmentMediaPath(
+              attachment.origin_domain,
+              attachment.id,
+              'thumbnail_512',
+              attachment.history_media_url,
+              attachment.private_media_url
+            ),
+            contentType: attachment.content_type
+          }}
+          alt={description ?? attachment.filename}
+          loading="lazy"
+        />
+      {:else if remote && allowExternalMedia}
+        <img src={remote} alt={description ?? ''} loading="lazy" referrerpolicy="no-referrer" />
+      {:else if remote}
+        <a
+          class="external-media-placeholder"
+          href={remote}
+          target="_blank"
+          rel="noopener noreferrer nofollow">Open external component media</a
+        >
+      {:else}
+        <span class="unavailable">Media unavailable</span>
+      {/if}
+      {#if description}<figcaption>{description}</figcaption>{/if}
+    </figure>
+  </AttachmentSpoiler>
 {/snippet}
 
 {#snippet render(component: MessageLayoutComponent | ContainerChild, key: string)}
@@ -137,15 +143,20 @@
     </div>
   {:else if component.type === 13}
     {@const attachment = attachmentFor(component.file)}
-    <div class="file" class:spoiler={component.spoiler}>
-      <span aria-hidden="true">📄</span>
-      <span>{attachment?.filename ?? component.file.url.replace('attachment://', '')}</span>
-      {#if attachment}
-        <button type="button" onclick={() => void download(attachment)}>Download</button>
-      {:else}
-        <span class="unavailable">Unavailable</span>
-      {/if}
-    </div>
+    <AttachmentSpoiler
+      filename={component.spoiler ? 'SPOILER_file' : (attachment?.filename ?? '')}
+      identity={`${key}:${component.file.url}`}
+    >
+      <div class="file">
+        <span aria-hidden="true">📄</span>
+        <span>{attachment?.filename ?? component.file.url.replace('attachment://', '')}</span>
+        {#if attachment}
+          <button type="button" onclick={() => void download(attachment)}>Download</button>
+        {:else}
+          <span class="unavailable">Unavailable</span>
+        {/if}
+      </div>
+    </AttachmentSpoiler>
   {:else if component.type === 14}
     <div
       class="separator"

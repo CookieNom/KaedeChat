@@ -1,3 +1,4 @@
+import { isAttachmentSpoiler } from '$lib/media/spoilers';
 import { api } from '$lib/api/client';
 import { compareEntityRefs, entityKey, entityRef } from './refs';
 import { canonicalReactionEmoji } from './reactions';
@@ -197,7 +198,9 @@ export function forumPostThumbnail(
 ): Attachment | undefined {
   return channel.starter_message?.attachments?.find(
     (attachment) =>
-      attachment.scan_status === 'clean' && attachment.content_type.startsWith('image/')
+      attachment.scan_status === 'clean' &&
+      attachment.content_type.startsWith('image/') &&
+      !isAttachmentSpoiler(attachment.filename ?? '')
   );
 }
 

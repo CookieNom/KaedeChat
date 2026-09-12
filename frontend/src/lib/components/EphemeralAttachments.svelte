@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import { userErrorMessage } from '$lib/api/client';
   import type { Attachment } from '$lib/chat/types';
   import type { EncryptedFileManifest } from '$lib/e2ee/media';
@@ -151,114 +152,48 @@
 
 <div class="private-attachments" aria-label="Private response attachments">
   {#each attachments as attachment (key(attachment))}
-    <section class="private-attachment" aria-label={`Attachment ${attachment.filename}`}>
-      {#if attachment.encryption_mode === 'e2ee' && !encryptedManifests[key(attachment)]}
-        <p class="attachment-state" role="alert">
-          <span aria-hidden="true">⚠</span> This encrypted private attachment is unavailable on this device.
-        </p>
-      {:else if attachment.encryption_mode === 'e2ee' && encryptedLoading[key(attachment)]}
-        <p class="attachment-state" role="status">
-          <span class="spinner" aria-hidden="true"></span> Decrypting {attachment.filename}…
-        </p>
-      {:else if attachment.encryption_mode === 'e2ee' && failures[key(attachment)]}
-        <div class="attachment-state rejected" role="alert">
-          <span>{failures[key(attachment)]}</span>
-          <button
-            type="button"
-            onclick={() =>
-              void loadEncrypted(
-                attachment,
-                encryptedManifests[key(attachment)],
-                encryptedGeneration
-              )}>Try again</button
-          >
-        </div>
-      {:else if attachment.encryption_mode === 'e2ee' && encryptedUrls[key(attachment)]}
-        {@const encryptedUrl = encryptedUrls[key(attachment)]}
-        {#if attachment.content_type.startsWith('image/')}
-          <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- this is a local blob URL, not an application route -->
-          <a class="image-preview" href={encryptedUrl} target="_blank" rel="noopener">
-            <img
-              src={encryptedUrl}
-              alt={attachment.filename}
-              width={attachment.width ?? 512}
-              height={attachment.height ?? 320}
-            />
-          </a>
-        {:else if attachment.content_type.startsWith('video/')}
-          <video
-            src={encryptedUrl}
-            controls
-            playsinline
-            preload="metadata"
-            aria-label={attachment.filename}
-          >
-            <track kind="captions" />
-          </video>
-        {:else if attachment.content_type.startsWith('audio/')}
-          <audio src={encryptedUrl} controls preload="metadata" aria-label={attachment.filename}>
-            <track kind="captions" />
-          </audio>
-        {:else}
-          <button class="file-download" type="button" onclick={() => void download(attachment)}>
-            <span aria-hidden="true">📎</span>
-            <span
-              ><strong>{attachment.filename}</strong><small>{sizeLabel(attachment.size)}</small
-              ></span
-            >
-          </button>
-        {/if}
-        <footer>
-          <span>{attachment.filename} · {sizeLabel(attachment.size)}</span>
-          <button type="button" onclick={() => void download(attachment)}>Download</button>
-        </footer>
-      {:else if attachment.scan_status === 'pending'}
-        <p class="attachment-state" role="status">
-          <span class="spinner" aria-hidden="true"></span> Preparing {attachment.filename}…
-        </p>
-      {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
-        <p class="attachment-state rejected" role="alert">
-          <span aria-hidden="true">⚠</span>
-          {attachment.filename} was rejected during server processing.
-        </p>
-      {:else if attachment.scan_status === 'failed' || attachment.scan_status === 'encrypted'}
-        <p class="attachment-state rejected" role="alert">
-          <span aria-hidden="true">⚠</span>
-          {attachment.filename} could not be processed by the server.
-        </p>
-      {:else if failures[key(attachment)]}
-        <div class="attachment-state rejected" role="alert">
-          <span>{failures[key(attachment)]}</span>
-          <button type="button" onclick={() => retry(attachment)}>Try again</button>
-        </div>
-      {:else}
-        {#key `${key(attachment)}:${attempts[key(attachment)] ?? 0}`}
-          {#if attachment.content_type.startsWith('image/')}
+    <section class="private-attachment" aria-label="Attachment">
+      <AttachmentSpoiler
+        filename={encryptedManifests[key(attachment)]?.filename ?? attachment.filename}
+        identity={key(attachment)}
+      >
+        {#if attachment.encryption_mode === 'e2ee' && !encryptedManifests[key(attachment)]}
+          <p class="attachment-state" role="alert">
+            <span aria-hidden="true">⚠</span> This encrypted private attachment is unavailable on this
+            device.
+          </p>
+        {:else if attachment.encryption_mode === 'e2ee' && encryptedLoading[key(attachment)]}
+          <p class="attachment-state" role="status">
+            <span class="spinner" aria-hidden="true"></span> Decrypting {attachment.filename}…
+          </p>
+        {:else if attachment.encryption_mode === 'e2ee' && failures[key(attachment)]}
+          <div class="attachment-state rejected" role="alert">
+            <span>{failures[key(attachment)]}</span>
             <button
               type="button"
-              class="image-preview"
-              aria-label={`Open ${attachment.filename}`}
-              onclick={() => (viewer = attachment)}
+              onclick={() =>
+                void loadEncrypted(
+                  attachment,
+                  encryptedManifests[key(attachment)],
+                  encryptedGeneration
+                )}>Try again</button
             >
+          </div>
+        {:else if attachment.encryption_mode === 'e2ee' && encryptedUrls[key(attachment)]}
+          {@const encryptedUrl = encryptedUrls[key(attachment)]}
+          {#if attachment.content_type.startsWith('image/')}
+            <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- this is a local blob URL, not an application route -->
+            <a class="image-preview" href={encryptedUrl} target="_blank" rel="noopener">
               <img
-                use:authenticatedMedia={{
-                  path: path(attachment, 'thumbnail_512'),
-                  contentType: attachment.content_type
-                }}
-                onerror={(event) => failed(attachment, event)}
+                src={encryptedUrl}
                 alt={attachment.filename}
                 width={attachment.width ?? 512}
                 height={attachment.height ?? 320}
-                loading="lazy"
               />
-            </button>
+            </a>
           {:else if attachment.content_type.startsWith('video/')}
             <video
-              use:authenticatedMedia={{
-                path: path(attachment, 'original'),
-                contentType: attachment.content_type
-              }}
-              onerror={(event) => failed(attachment, event)}
+              src={encryptedUrl}
               controls
               playsinline
               preload="metadata"
@@ -267,16 +202,7 @@
               <track kind="captions" />
             </video>
           {:else if attachment.content_type.startsWith('audio/')}
-            <audio
-              use:authenticatedMedia={{
-                path: path(attachment, 'original'),
-                contentType: attachment.content_type
-              }}
-              onerror={(event) => failed(attachment, event)}
-              controls
-              preload="metadata"
-              aria-label={attachment.filename}
-            >
+            <audio src={encryptedUrl} controls preload="metadata" aria-label={attachment.filename}>
               <track kind="captions" />
             </audio>
           {:else}
@@ -288,14 +214,95 @@
               >
             </button>
           {/if}
-        {/key}
-        {#if attachment.content_type.startsWith('image/') || attachment.content_type.startsWith('video/') || attachment.content_type.startsWith('audio/')}
           <footer>
             <span>{attachment.filename} · {sizeLabel(attachment.size)}</span>
             <button type="button" onclick={() => void download(attachment)}>Download</button>
           </footer>
+        {:else if attachment.scan_status === 'pending'}
+          <p class="attachment-state" role="status">
+            <span class="spinner" aria-hidden="true"></span> Preparing {attachment.filename}…
+          </p>
+        {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
+          <p class="attachment-state rejected" role="alert">
+            <span aria-hidden="true">⚠</span>
+            {attachment.filename} was rejected during server processing.
+          </p>
+        {:else if attachment.scan_status === 'failed' || attachment.scan_status === 'encrypted'}
+          <p class="attachment-state rejected" role="alert">
+            <span aria-hidden="true">⚠</span>
+            {attachment.filename} could not be processed by the server.
+          </p>
+        {:else if failures[key(attachment)]}
+          <div class="attachment-state rejected" role="alert">
+            <span>{failures[key(attachment)]}</span>
+            <button type="button" onclick={() => retry(attachment)}>Try again</button>
+          </div>
+        {:else}
+          {#key `${key(attachment)}:${attempts[key(attachment)] ?? 0}`}
+            {#if attachment.content_type.startsWith('image/')}
+              <button
+                type="button"
+                class="image-preview"
+                aria-label={`Open ${attachment.filename}`}
+                onclick={() => (viewer = attachment)}
+              >
+                <img
+                  use:authenticatedMedia={{
+                    path: path(attachment, 'thumbnail_512'),
+                    contentType: attachment.content_type
+                  }}
+                  onerror={(event) => failed(attachment, event)}
+                  alt={attachment.filename}
+                  width={attachment.width ?? 512}
+                  height={attachment.height ?? 320}
+                  loading="lazy"
+                />
+              </button>
+            {:else if attachment.content_type.startsWith('video/')}
+              <video
+                use:authenticatedMedia={{
+                  path: path(attachment, 'original'),
+                  contentType: attachment.content_type
+                }}
+                onerror={(event) => failed(attachment, event)}
+                controls
+                playsinline
+                preload="metadata"
+                aria-label={attachment.filename}
+              >
+                <track kind="captions" />
+              </video>
+            {:else if attachment.content_type.startsWith('audio/')}
+              <audio
+                use:authenticatedMedia={{
+                  path: path(attachment, 'original'),
+                  contentType: attachment.content_type
+                }}
+                onerror={(event) => failed(attachment, event)}
+                controls
+                preload="metadata"
+                aria-label={attachment.filename}
+              >
+                <track kind="captions" />
+              </audio>
+            {:else}
+              <button class="file-download" type="button" onclick={() => void download(attachment)}>
+                <span aria-hidden="true">📎</span>
+                <span
+                  ><strong>{attachment.filename}</strong><small>{sizeLabel(attachment.size)}</small
+                  ></span
+                >
+              </button>
+            {/if}
+          {/key}
+          {#if attachment.content_type.startsWith('image/') || attachment.content_type.startsWith('video/') || attachment.content_type.startsWith('audio/')}
+            <footer>
+              <span>{attachment.filename} · {sizeLabel(attachment.size)}</span>
+              <button type="button" onclick={() => void download(attachment)}>Download</button>
+            </footer>
+          {/if}
         {/if}
-      {/if}
+      </AttachmentSpoiler>
     </section>
   {/each}
   {#if downloadError}<p class="download-error" role="alert">{downloadError}</p>{/if}

@@ -6821,6 +6821,7 @@
         onLoadMore={() => loadMoreForumPosts(channel)}
         onFiles={canAttachForumFiles ? (files) => queueForumFiles(channel, files) : undefined}
         onRemoveUpload={removeForumUpload}
+        onSpoilerUpload={forumUploadQueue.setSpoiler}
       />
     {:else}
       <div
@@ -6851,6 +6852,7 @@
               ? (files) => queueForumFiles(forumParent, files)
               : undefined}
             onRemoveUpload={removeForumUpload}
+            onSpoilerUpload={forumUploadQueue.setSpoiler}
           />
         {/if}
         <div
@@ -7364,7 +7366,12 @@
                 />
               {/if}
               {#if uploads.length && !editingMessage}
-                <UploadPreviewTray {uploads} onRemove={removeUpload} />
+                <UploadPreviewTray
+                  {uploads}
+                  onRemove={removeUpload}
+                  onSpoiler={uploadQueue.setSpoiler}
+                  disabled={busy}
+                />
               {/if}
             {:else}
               <div class="composer composer-disabled" role="note">
@@ -7458,7 +7465,12 @@
         }}
       >
         {@render applicationCommandFields(selectedApplicationCommand)}
-        {#if uploads.length}<UploadPreviewTray {uploads} onRemove={removeUpload} />{/if}
+        {#if uploads.length}<UploadPreviewTray
+            {uploads}
+            onRemove={removeUpload}
+            onSpoiler={uploadQueue.setSpoiler}
+            disabled={busy}
+          />{/if}
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
         <footer>
           <button class="quiet-button" type="button" disabled={busy} onclick={cancelCommandComposer}

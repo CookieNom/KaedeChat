@@ -4,7 +4,7 @@ import base64
 import binascii
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, StrictBool, field_validator, model_validator
 
 from app.core.model_validation import UnambiguousInputModel
 from app.core.types import EntityRef, WireSnowflake
@@ -12,6 +12,10 @@ from app.media.processing import normalize_declared_type, sanitize_filename
 
 DISCORD_EMOJI_MAX_BYTES = 256 * 1024
 DISCORD_STICKER_MAX_BYTES = 512 * 1024
+
+
+class AttachmentSpoilerUpdate(UnambiguousInputModel):
+    spoiler: StrictBool
 
 
 def clean_sticker_name(value: str) -> str:

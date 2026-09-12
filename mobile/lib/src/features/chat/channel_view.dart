@@ -32,6 +32,7 @@ import 'package:kaede_mobile/src/domain/voice_messages.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/application_launcher.dart';
+import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/invite_card.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
@@ -1548,6 +1549,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 onNotifyChanged: (value) =>
                     setState(() => _notifyReply = value),
                 onCancelReply: () => setState(() => _reply = null),
+                onEditUpload: _editUploadSpoiler,
                 onRemoveUpload: (item) {
                   setState(() => _uploads.remove(item));
                   unawaited(item.deleteIfTemporary());
@@ -2236,6 +2238,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     unawaited(
       ref.read(mobileControllerProvider.notifier).publishTyping(channel),
     );
+  }
+
+  Future<void> _editUploadSpoiler(_PendingUpload item) async {
+    if (_sending) return;
+    final spoiler = await showAttachmentSpoilerEditor(context,
+        file: item.file, filename: item.name, contentType: item.contentType);
+    if (!mounted || spoiler == null || _sending || !_uploads.contains(item)) {
+      return;
+    }
+    setState(() => item.setSpoiler(spoiler));
   }
 
   void _switchComposer(EntityRef channel) {
@@ -5955,10 +5967,11 @@ final class _ReplyingBar extends StatelessWidget {
 }
 
 final class _UploadChip extends StatelessWidget {
-  const _UploadChip({required this.item, required this.onRemove});
+  const _UploadChip({required this.item, required this.onRemove, this.onEdit});
 
   final _PendingUpload item;
   final VoidCallback onRemove;
+  final VoidCallback? onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -6028,6 +6041,19 @@ final class _UploadChip extends StatelessWidget {
                 ],
               ),
             ),
+          if (isAttachmentSpoiler(item.name))
+            const Positioned.fill(
+                child: ColoredBox(
+                    color: Color(0xEE25252B),
+                    child: Center(
+                        child: Text('Spoiler',
+                            style: TextStyle(
+                                color: Colors.white, fontSize: 11))))),
+          Positioned.fill(
+              child: Semantics(
+                  button: true,
+                  label: 'Edit attachment ${item.name}',
+                  child: InkWell(onTap: onEdit))),
           Positioned(
             top: 2,
             right: 2,
@@ -9557,7 +9583,7 @@ KaedeAttachment _manifestAttachment(
   );
 }
 
-final class _AttachmentCard extends ConsumerStatefulWidget {
+final class _AttachmentCard extends StatelessWidget {
   const _AttachmentCard({
     required this.attachment,
     this.encryptedManifest,
@@ -9574,7 +9600,40 @@ final class _AttachmentCard extends ConsumerStatefulWidget {
   final _OpenAttachmentActions? onActions;
 
   @override
-  ConsumerState<_AttachmentCard> createState() => _AttachmentCardState();
+  Widget build(BuildContext context) => AttachmentSpoiler(
+        filename: _manifestAttachment(attachment, encryptedManifest).filename,
+        identity: attachment.ref.wire,
+        compact: compact,
+        builder: (_) => _VisibleAttachmentCard(
+          attachment: attachment,
+          encryptedManifest: encryptedManifest,
+          onActions: onActions,
+          pollStatus: pollStatus,
+          compact: compact,
+          compactFit: compactFit,
+        ),
+      );
+}
+
+final class _VisibleAttachmentCard extends ConsumerStatefulWidget {
+  const _VisibleAttachmentCard({
+    required this.attachment,
+    this.encryptedManifest,
+    this.onActions,
+    this.pollStatus = true,
+    this.compact = false,
+    this.compactFit = BoxFit.cover,
+  });
+  final KaedeAttachment attachment;
+  final Map<String, Object?>? encryptedManifest;
+  final bool pollStatus;
+  final bool compact;
+  final BoxFit compactFit;
+  final _OpenAttachmentActions? onActions;
+
+  @override
+  ConsumerState<_VisibleAttachmentCard> createState() =>
+      _VisibleAttachmentCardState();
 }
 
 final class _AttachmentStatusCard extends StatelessWidget {
@@ -9990,7 +10049,8 @@ final class _MessageTokenBuilder extends MarkdownElementBuilder {
   }
 }
 
-final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
+final class _VisibleAttachmentCardState
+    extends ConsumerState<_VisibleAttachmentCard> {
   late Future<File> _future;
   late KaedeAttachment _displayAttachment;
   File? _file;
@@ -10012,7 +10072,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
   }
 
   @override
-  void didUpdateWidget(covariant _AttachmentCard oldWidget) {
+  void didUpdateWidget(covariant _VisibleAttachmentCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.attachment.ref != widget.attachment.ref ||
         oldWidget.attachment.scanStatus != widget.attachment.scanStatus ||
@@ -11699,6 +11759,7 @@ final class _Composer extends StatelessWidget {
       required this.onNotifyChanged,
       required this.onCancelReply,
       required this.onRemoveUpload,
+      required this.onEditUpload,
       required this.onMore,
       required this.onApps,
       required this.onMedia,
@@ -11720,6 +11781,7 @@ final class _Composer extends StatelessWidget {
   final ValueChanged<bool> onNotifyChanged;
   final VoidCallback onCancelReply;
   final ValueChanged<_PendingUpload> onRemoveUpload;
+  final ValueChanged<_PendingUpload> onEditUpload;
   final VoidCallback onMore;
   final VoidCallback onApps;
   final VoidCallback onMedia;
@@ -11764,6 +11826,7 @@ final class _Composer extends StatelessWidget {
                       final item = uploads[index];
                       return _UploadChip(
                         item: item,
+                        onEdit: sending ? null : () => onEditUpload(item),
                         onRemove: () => onRemoveUpload(item),
                       );
                     },
@@ -12087,7 +12150,7 @@ final class _PendingUpload {
     required this.temporary,
   });
   final String commandKey;
-  final String name;
+  String name;
   final File file;
   final int size;
   final String contentType;
@@ -12096,6 +12159,16 @@ final class _PendingUpload {
   EntityRef? _commandUploadChannel;
   EncryptedMobileUpload? _encryptedCommandUpload;
   EntityRef? _encryptedCommandUploadChannel;
+
+  void setSpoiler(bool spoiler) {
+    final next = spoilerFilename(name, spoiler);
+    if (next == name) return;
+    name = next;
+    // Previously submitted command attachments are immutable; a new send
+    // needs a new attachment identity when its presentation changes.
+    _commandUpload = null;
+    _encryptedCommandUpload = null;
+  }
 
   EntityRef? commandUploadFor(EntityRef channel) =>
       _commandUploadChannel == channel ? _commandUpload : null;

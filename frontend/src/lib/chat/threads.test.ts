@@ -228,6 +228,12 @@ describe('thread and forum helpers', () => {
         attachments: [
           { id: 'document', content_type: 'application/pdf', scan_status: 'clean' },
           { id: 'scanning-image', content_type: 'image/png', scan_status: 'pending' },
+          {
+            id: 'spoiler',
+            filename: 'SPOILER_photo.png',
+            content_type: 'image/png',
+            scan_status: 'clean'
+          },
           { id: 'thumbnail', content_type: 'image/webp', scan_status: 'clean' },
           { id: 'later-image', content_type: 'image/jpeg', scan_status: 'clean' }
         ]

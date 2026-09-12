@@ -104,6 +104,7 @@ from app.media.processing import (
 from app.media.schemas import (
     AssetCommitRequest,
     AssetKind,
+    AttachmentSpoilerUpdate,
     EmojiCommitRequest,
     GuildAssetKind,
     StickerCommitRequest,
@@ -1581,6 +1582,53 @@ async def get_attachment_status(
     ):
         raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
     return attachment_payload(attachment)
+
+
+@router.patch("/api/v1/attachments/{attachment_id}/spoiler")
+async def update_attachment_spoiler(
+    attachment_id: Snowflake,
+    payload: AttachmentSpoilerUpdate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    # Serialize against finalization: sent/federated attachment metadata is
+    # immutable. Encrypted filenames belong only in the private manifest.
+    attachment = await session.scalar(
+        select(Attachment)
+        .where(
+            Attachment.id == int(attachment_id),
+            Attachment.origin_domain == settings.domain,
+        )
+        .with_for_update()
+    )
+    if (
+        attachment is None
+        or attachment.deleted_at is not None
+        or (attachment.uploader_id, attachment.uploader_domain)
+        != (auth.user.id, auth.user.origin_domain)
+    ):
+        raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
+    if (
+        attachment.purpose != "attachment"
+        or attachment.encryption_mode != "plaintext"
+        or attachment.finalized_at is not None
+        or attachment.message_id is not None
+        or attachment.interaction_response_id is not None
+    ):
+        raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_IMMUTABLE"})
+    name = attachment.filename
+    while name.startswith("SPOILER_"):
+        name = name[8:]
+    name = name or "file"
+    if payload.spoiler:
+        suffix = FilePath(name).suffix
+        if len(suffix) > 16:
+            suffix = ""
+        name = "SPOILER_" + (name[: 247 - len(suffix)] + suffix if len(name) > 247 else name)
+    attachment.filename = name
+    await session.commit()
+    return {"filename": name}
 
 
 def select_variant(

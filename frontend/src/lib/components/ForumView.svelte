@@ -42,7 +42,8 @@
     onFiltersChange,
     onLoadMore,
     onFiles,
-    onRemoveUpload
+    onRemoveUpload,
+    onSpoilerUpload
   }: {
     guild: Guild;
     forum: Channel;
@@ -70,6 +71,7 @@
     onLoadMore?: () => Promise<void> | void;
     onFiles?: (files: FileList) => Promise<void> | void;
     onRemoveUpload?: (key: string) => void;
+    onSpoilerUpload?: (key: string, spoiler: boolean) => void;
   } = $props();
 
   let query = $state('');
@@ -347,7 +349,12 @@
       </div>
       {#if uploads.length && onRemoveUpload}
         <div class="composer-uploads">
-          <UploadPreviewTray {uploads} onRemove={onRemoveUpload} />
+          <UploadPreviewTray
+            {uploads}
+            onRemove={onRemoveUpload}
+            onSpoiler={onSpoilerUpload}
+            disabled={busy}
+          />
         </div>
       {/if}
       {#if tags.length}
