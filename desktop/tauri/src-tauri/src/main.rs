@@ -2799,9 +2799,64 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
 }
 
 #[tauri::command]
+async fn native_voice_video_window(app: tauri::AppHandle, mode: String) -> Result<(), NativeError> {
+    if !matches!(mode.as_str(), "pip" | "popout" | "close") {
+        return Err(NativeError::local(
+            "INVALID_WINDOW_MODE",
+            "Unknown video window mode.",
+        ));
+    }
+    if mode == "close" {
+        if let Some(window) = app.get_webview_window("voice-video") {
+            let _ = window.close();
+        }
+        return Ok(());
+    }
+    let pip = mode == "pip";
+    let window = if let Some(window) = app.get_webview_window("voice-video") {
+        window
+    } else {
+        WebviewWindowBuilder::new(&app, "voice-video", WebviewUrl::App("voice-video".into()))
+            .title("Kaede · Call video")
+            .inner_size(
+                if pip { 420.0 } else { 960.0 },
+                if pip { 280.0 } else { 640.0 },
+            )
+            .min_inner_size(240.0, 160.0)
+            .build()
+            .map_err(|_| {
+                NativeError::local("VIDEO_WINDOW_FAILED", "Could not open the video window.")
+            })?
+    };
+    window.set_always_on_top(pip).map_err(|_| {
+        NativeError::local("VIDEO_WINDOW_FAILED", "Could not change the video window.")
+    })?;
+    let _ = window.set_size(tauri::LogicalSize::new(
+        if pip { 420.0 } else { 960.0 },
+        if pip { 280.0 } else { 640.0 },
+    ));
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn native_voice_video_detached(app: tauri::AppHandle) -> bool {
+    app.get_webview_window("voice-video").is_some()
+}
+
+#[tauri::command]
 async fn native_voice_next_video(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, NativeState>,
 ) -> Result<tauri::ipc::Response, NativeError> {
+    // Exactly one presentation drains the native frame queue.
+    if (window.label() == "voice-video") != app.get_webview_window("voice-video").is_some() {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        return Ok(tauri::ipc::Response::new(Vec::<u8>::new()));
+    }
     let mut receiver = state.voice_video.lock().await;
     let Some(receiver) = receiver.as_mut() else {
         return Ok(tauri::ipc::Response::new(Vec::<u8>::new()));
@@ -3210,6 +3265,23 @@ fn main() {
                 }
             }
             let _ = window.set_title(&format!("Kaede Chat · {}", env!("CARGO_PKG_VERSION")));
+            let video_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let state = video_app.state::<NativeState>();
+                    let voice = state.voice.lock().await;
+                    if let Some(voice) = voice.as_ref() {
+                        let presentation = video_app.get_webview_window("voice-video")
+                            .or_else(|| video_app.get_webview_window("main"));
+                        let visible = presentation.is_some_and(|window|
+                            window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true));
+                        let _ = voice.commands.send(VoiceCommand::SetVideoVisible(visible));
+                    } else if let Some(window) = video_app.get_webview_window("voice-video") {
+                        let _ = window.close();
+                    }
+                }
+            });
             let show = MenuItem::with_id(app, "show", "Show Kaede Chat", true, None::<&str>)?;
             let leave_voice =
                 MenuItem::with_id(app, "leave_voice", "Leave voice", true, None::<&str>)?;
@@ -3251,7 +3323,8 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            if window.label() == "main"
+                && let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -3283,6 +3356,8 @@ fn main() {
             native_voice_leave,
             native_voice_status,
             native_voice_next_video,
+            native_voice_video_window,
+            native_voice_video_detached,
             native_preferences_get,
             native_preferences_set,
             native_hotkey_status,

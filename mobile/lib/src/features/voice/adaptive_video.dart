@@ -120,6 +120,14 @@ class AdaptiveVideo {
   bool _busy = false;
   bool _tickAgain = false;
   bool _closed = false;
+  bool _videoVisible = true;
+
+  void setVideoVisible(bool visible) {
+    if (_videoVisible == visible || _closed) return;
+    _videoVisible = visible;
+    unawaited(tick());
+  }
+
   int _ticks = 0;
 
   Future<void> start() async {
@@ -239,6 +247,10 @@ class AdaptiveVideo {
       final groups =
           <TrackSource, List<RemoteTrackPublication<RemoteVideoTrack>>>{};
       for (final publication in participant.videoTrackPublications) {
+        if (!_videoVisible) {
+          await publication.unsubscribe();
+          continue;
+        }
         (groups[publication.source] ??= []).add(publication);
       }
       for (final entry in groups.entries) {
@@ -279,6 +291,10 @@ class AdaptiveVideo {
         if (selected == null) continue;
         for (final publication in entry.value) {
           if (publication != selected) await publication.unsubscribe();
+        }
+        if (!_videoVisible) {
+          await selected.unsubscribe();
+          continue;
         }
         await selected.subscribe();
         await selected.setVideoQuality(evidence.level == 0

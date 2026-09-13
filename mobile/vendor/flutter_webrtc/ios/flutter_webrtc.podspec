@@ -22,5 +22,6 @@ A new flutter plugin project.
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++14',
     'USER_HEADER_SEARCH_PATHS' => 'Classes/**/*.h'
   }
+  s.frameworks = 'AVKit'
   s.libraries = 'c++'
 end

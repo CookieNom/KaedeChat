@@ -19,6 +19,7 @@ import 'package:kaede_mobile/src/features/voice/adaptive_video.dart';
 import 'package:kaede_mobile/src/features/voice/e2ee_policy.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
+import 'package:kaede_mobile/src/platform/video_pip.dart';
 import 'package:kaede_mobile/src/platform/voice_background_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -346,9 +347,14 @@ final class VoiceSession extends ChangeNotifier {
     VoiceBackgroundService backgroundService = const VoiceBackgroundService(),
   })  : _voiceStatePublisher = voiceStatePublisher,
         _backgroundService = backgroundService {
+    videoPip = VideoPip(onChanged: () {
+      _adaptiveVideo?.setVideoVisible(_appActive || videoPip.active);
+      _notify();
+    });
     unawaited(_loadMediaQuality());
   }
 
+  late final VideoPip videoPip;
   final KaedeRepository _repository;
   final Future<MobileE2EEClient> Function() _e2eeClient;
   final MobileVoiceStatePublisher _voiceStatePublisher;
@@ -813,6 +819,7 @@ final class VoiceSession extends ChangeNotifier {
             _videoNotice = notice;
             _notify();
           });
+      _adaptiveVideo!.setVideoVisible(_appActive || videoPip.active);
       unawaited(_adaptiveVideo!.start());
       _events = events;
       _voiceMediaPolicy = mediaPolicy;
@@ -1496,12 +1503,14 @@ final class VoiceSession extends ChangeNotifier {
   /// audio alive; transient reconnecting states continue to render as joined.
   void didEnterBackground() {
     _appActive = false;
+    _adaptiveVideo?.setVideoVisible(videoPip.active);
   }
 
   /// Reconciles native audio and, if the operating system exhausted LiveKit's
   /// reconnect attempts while suspended, obtains a fresh short-lived grant.
   Future<void> didResume() async {
     _appActive = true;
+    _adaptiveVideo?.setVideoVisible(true);
     final room = _room;
     final action = resolveVoiceResumeAction(
       connecting: _connecting,
@@ -1684,6 +1693,7 @@ final class VoiceSession extends ChangeNotifier {
     final events = _events;
     _adaptiveVideo?.close();
     _adaptiveVideo = null;
+    videoPip.configure(null);
     _videoNotice = null;
     _room = null;
     _events = null;
@@ -1752,8 +1762,21 @@ final class VoiceSession extends ChangeNotifier {
 
   void _notifyRoomChanged() => _notify();
 
+  VideoTrack? get pipTrack {
+    final tracks = participants
+        .expand((p) => p.videoTrackPublications)
+        .where((p) => !p.muted && p.track != null)
+        .map((p) => p.track!)
+        .whereType<VideoTrack>();
+    return tracks.whereType<RemoteVideoTrack>().firstOrNull ??
+        tracks.firstOrNull;
+  }
+
   void _notify() {
-    if (!_disposed) notifyListeners();
+    if (!_disposed) {
+      videoPip.configure(joined ? pipTrack : null);
+      notifyListeners();
+    }
   }
 
   Future<void> _disposeRoom({required bool notify}) async {
@@ -1765,6 +1788,7 @@ final class VoiceSession extends ChangeNotifier {
     final events = _events;
     _adaptiveVideo?.close();
     _adaptiveVideo = null;
+    videoPip.configure(null);
     _videoNotice = null;
     _room = null;
     _events = null;
@@ -1793,6 +1817,7 @@ final class VoiceSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    videoPip.dispose();
     _occupancyTimer?.cancel();
     _generation += 1;
     unawaited(_disposeRoom(notify: false));

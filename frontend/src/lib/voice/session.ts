@@ -719,7 +719,10 @@ export class VoiceSession extends EventTarget {
         try {
           const response = await nativeInvoke<ArrayBuffer | Uint8Array>('native_voice_next_video');
           const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
-          if (bytes.byteLength === 0) continue;
+          if (bytes.byteLength === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            continue;
+          }
           const frame = decodeNativeVideoFrame(bytes);
           if (!frame) continue;
           const key = `${frame.participant}:${frame.source}`;
@@ -1142,6 +1145,11 @@ export class VoiceSession extends EventTarget {
     this.camera = false;
     this.screen = false;
     this.#activeSpeakers.clear();
+    this.#changed();
+  }
+
+  clearNativeVideoView(): void {
+    this.#nativeVideo.clear();
     this.#changed();
   }
 

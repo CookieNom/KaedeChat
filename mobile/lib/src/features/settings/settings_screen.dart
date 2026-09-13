@@ -1264,6 +1264,22 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 .ui_optional_media_and_troubleshooting_controls_f826ddce,
           ),
           SettingsSwitchRow(
+            title: 'Automatic picture in picture',
+            subtitle: 'Keep call video visible when you leave the app.',
+            value: ref.watch(voiceSessionProvider).videoPip.enabled,
+            onChanged: (enabled) async {
+              try {
+                await ref
+                    .read(voiceSessionProvider)
+                    .videoPip
+                    .setEnabled(enabled);
+              } on Object catch (error) {
+                _showError(error,
+                    summary: 'Could not save picture-in-picture preference.');
+              }
+            },
+          ),
+          SettingsSwitchRow(
             title: L10n.of(context).ui_opus_discontinuous_transmission_d4983843,
             subtitle: L10n.of(context)
                 .ui_reduce_outgoing_bandwidth_while_you_are_not_s_05b24382,

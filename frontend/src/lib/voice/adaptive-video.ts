@@ -133,6 +133,11 @@ export class AdaptiveVideoController {
   private timer?: ReturnType<typeof setInterval>;
   private pending: Promise<unknown> = Promise.resolve();
   private stopped = false;
+  private videoVisible = true;
+  private visibilityChanged = () => {
+    this.videoVisible = document.visibilityState !== 'hidden';
+    this.selectSubscriptions();
+  };
   private bad = 0;
   private good = 0;
   private level = 0;
@@ -202,6 +207,10 @@ export class AdaptiveVideoController {
       capabilities.some((c) => c.mimeType.toLowerCase() === `video/${codec}`)
     );
     if (!this.message.codecs.length) this.message.codecs = ['vp8'];
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.visibilityChanged);
+      this.videoVisible = document.visibilityState !== 'hidden';
+    }
     this.event();
     this.timer = setInterval(() => {
       void this.tick();
@@ -379,6 +388,10 @@ export class AdaptiveVideoController {
           continue;
         }
         if (publication.kind !== Track.Kind.Video) continue;
+        if (!this.videoVisible) {
+          publication.setSubscribed(false);
+          continue;
+        }
         const group = groups.get(publication.source) ?? [];
         group.push(publication);
         groups.set(publication.source, group);
@@ -695,6 +708,8 @@ export class AdaptiveVideoController {
   }
 
   async stop(): Promise<void> {
+    if (typeof document !== 'undefined')
+      document.removeEventListener('visibilitychange', this.visibilityChanged);
     this.stopped = true;
     clearInterval(this.timer);
     this.timer = undefined;

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest';
 import { managedCodec, parseVideoMessage, videoBottleneck } from './adaptive-video';
 
@@ -384,4 +385,53 @@ it("accepts the publisher's compatible fallback instead of returning a strugglin
   expect(h264.setSubscribed).toHaveBeenLastCalledWith(true);
   expect(av1.setSubscribed).toHaveBeenLastCalledWith(false);
   await controller.stop();
+});
+
+it('unsubscribes hidden video, retains audio, and resumes after visibility changes', async () => {
+  const audio = { kind: Track.Kind.Audio, trackSid: 'audio', setSubscribed: vi.fn() };
+  const camera = {
+    kind: Track.Kind.Video,
+    source: Track.Source.Camera,
+    trackName: 'camera',
+    trackSid: 'camera',
+    setSubscribed: vi.fn()
+  };
+  const screen = {
+    ...camera,
+    source: Track.Source.ScreenShare,
+    trackName: 'screen',
+    trackSid: 'screen',
+    setSubscribed: vi.fn()
+  };
+  const publications = new Map([
+    ['audio', audio],
+    ['camera', camera],
+    ['screen', screen]
+  ]);
+  const room = {
+    on: vi.fn(),
+    off: vi.fn(),
+    localParticipant: { publishData: vi.fn() },
+    remoteParticipants: new Map([['alice', { identity: 'alice', trackPublications: publications }]])
+  } as unknown as Room;
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  const controller = new AdaptiveVideoController(room);
+  try {
+    controller.start();
+    expect(audio.setSubscribed).toHaveBeenLastCalledWith(true);
+    expect(camera.setSubscribed).toHaveBeenLastCalledWith(false);
+    expect(screen.setSubscribed).toHaveBeenLastCalledWith(false);
+    visibility.mockReturnValue('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(camera.setSubscribed).toHaveBeenLastCalledWith(true);
+    expect(screen.setSubscribed).toHaveBeenLastCalledWith(true);
+    visibility.mockReturnValue('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(camera.setSubscribed).toHaveBeenLastCalledWith(false);
+    expect(screen.setSubscribed).toHaveBeenLastCalledWith(false);
+    expect(audio.setSubscribed).toHaveBeenLastCalledWith(true);
+  } finally {
+    await controller.stop();
+    visibility.mockRestore();
+  }
 });

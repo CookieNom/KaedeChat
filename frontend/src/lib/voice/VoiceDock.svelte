@@ -6,7 +6,7 @@
   import { Permission } from '$lib/generated/permissions';
   import { onDestroy, onMount } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-  import { isNativeDesktop } from '$lib/platform/native';
+  import { nativeInvoke, isNativeDesktop } from '$lib/platform/native';
   import { initializeE2EE } from '$lib/e2ee/client';
   import { base64url, randomBytes } from '$lib/e2ee/encoding';
   import { entityKey, entityRef } from '$lib/chat/refs';
@@ -57,6 +57,28 @@
   let elapsedClock = $state(Date.now());
   let error = $state('');
   let videoDegraded = $state(false);
+  let videoDetached = $state(false);
+  async function openVideoWindow(mode: 'pip' | 'popout' | 'close') {
+    try {
+      await nativeInvoke('native_voice_video_window', { mode });
+      voice.clearNativeVideoView();
+      videoDetached = mode !== 'close';
+    } catch (cause) {
+      error = userErrorMessage(cause, 'Could not open the video window.');
+    }
+  }
+  onMount(() => {
+    if (!isNativeDesktop()) return;
+    const timer = setInterval(() => {
+      void nativeInvoke<boolean>('native_voice_video_detached')
+        .then((value) => {
+          if (videoDetached !== value) voice.clearNativeVideoView();
+          videoDetached = value;
+        })
+        .catch(() => {});
+    }, 500);
+    return () => clearInterval(timer);
+  });
   let takeoverPrompt = $state<string | null>(null);
   let screenShareOpen = $state(false);
   let soundboardOpen = $state(false);
@@ -1086,6 +1108,15 @@
 
   <div class="audio-host" bind:this={audioHost}></div>
 
+  {#if isNativeDesktop() && view.connected}
+    <div class="video-window-controls">
+      <button onclick={() => openVideoWindow('pip')}>Picture in picture</button>
+      <button onclick={() => openVideoWindow('popout')}>Pop out video</button>
+      {#if videoDetached}<button onclick={() => openVideoWindow('close')}
+          >Return video to channel</button
+        >{/if}
+    </div>
+  {/if}
   <main class="voice-stage">
     {#if error}<p class="voice-error" role="alert">{error}</p>{/if}
     {#if videoDegraded}<p class="voice-permission-notice" role="status">
@@ -1120,6 +1151,8 @@
             </div>
           {/if}
         </div>
+      {:else if videoDetached}
+        <p>Video is open in its own window.</p>
       {:else if view.tiles.length > 0}
         <div
           class="video-grid"
@@ -1633,6 +1666,13 @@
         transparent 32rem
       ),
       var(--paper);
+  }
+
+  .video-window-controls {
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    flex-wrap: wrap;
   }
 
   .video-grid {

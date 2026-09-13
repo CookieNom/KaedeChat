@@ -11,6 +11,7 @@
 #import "FlutterRTCFrameCryptor.h"
 #if TARGET_OS_IPHONE
 #import "FlutterRTCMediaRecorder.h"
+#import "KaedeVideoPip.h"
 #import "FlutterRTCVideoPlatformViewFactory.h"
 #import "FlutterRTCVideoPlatformViewController.h"
 #endif
@@ -245,6 +246,7 @@ void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
   AudioManager* _audioManager;
 #if TARGET_OS_IPHONE
   FLutterRTCVideoPlatformViewFactory *_platformViewFactory;
+  KaedeVideoPip* _videoPip;
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
@@ -311,6 +313,11 @@ static FlutterWebRTCPlugin *sharedSingleton;
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
     self.viewController = viewController;
+    __weak FlutterWebRTCPlugin* weakSelf = self;
+    _videoPip = [[KaedeVideoPip alloc] initWithMessenger:messenger trackResolver:^RTCVideoTrack*(NSString* trackId) {
+      RTCMediaStreamTrack* track = [weakSelf trackForId:trackId peerConnectionId:nil];
+      return [track isKindOfClass:RTCVideoTrack.class] ? (RTCVideoTrack*)track : nil;
+    }];
     _platformViewFactory  = [[FLutterRTCVideoPlatformViewFactory alloc] initWithMessenger:messenger];
     [registrar registerViewFactory:_platformViewFactory withId:FLutterRTCVideoPlatformViewFactoryID];
 #endif
@@ -345,6 +352,9 @@ static FlutterWebRTCPlugin *sharedSingleton;
 }
 
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
+#if TARGET_OS_IPHONE
+  [_videoPip dispose];
+#endif
   for (RTCPeerConnection* peerConnection in _peerConnections.allValues) {
     for (RTCDataChannel* dataChannel in peerConnection.dataChannels) {
       dataChannel.eventSink = nil;

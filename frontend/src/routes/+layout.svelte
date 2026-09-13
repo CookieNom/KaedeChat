@@ -3,6 +3,7 @@
   import '@fontsource-variable/bricolage-grotesque';
   import '@fontsource-variable/inter';
   import '@fontsource-variable/jetbrains-mono';
+  import { page } from '$app/state';
   import { afterNavigate, goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import {
@@ -21,10 +22,15 @@
   let { children } = $props();
 
   afterNavigate(({ to }) => {
-    if (to) rememberNativeRoute(`${to.url.pathname}${to.url.search}${to.url.hash}`);
+    if (to && to.url.pathname !== '/voice-video')
+      rememberNativeRoute(`${to.url.pathname}${to.url.search}${to.url.hash}`);
   });
 
   onMount(() => {
+    if (window.location.pathname === '/voice-video') {
+      applyTheme(storedTheme(), false);
+      return;
+    }
     // Begin restoring a native session before any protected child route can
     // issue work. API calls also await the same single-flight promise.
     void initializeNativeInstance()
@@ -91,4 +97,4 @@
 </script>
 
 {@render children()}
-<NativeDesktopLifecycle />
+{#if page.url.pathname !== '/voice-video'}<NativeDesktopLifecycle />{/if}

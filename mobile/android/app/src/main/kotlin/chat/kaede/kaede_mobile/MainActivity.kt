@@ -2,6 +2,11 @@ package chat.kaede.kaede_mobile
 
 import android.content.ComponentName
 import android.os.Bundle
+import android.os.Build
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
+import android.content.pm.PackageManager
+import android.util.Rational
 import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
@@ -12,9 +17,49 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterFragmentActivity() {
     private lateinit var systemCallChannel: MethodChannel
+    private lateinit var pipChannel: MethodChannel
+    private var autoPip = false
+
+    private fun pipSupported() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (autoPip && pipSupported() && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            try { enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()) }
+            catch (_: IllegalStateException) { /* System policy can deny PiP. */ }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(active: Boolean, config: Configuration) {
+        super.onPictureInPictureModeChanged(active, config)
+        if (::pipChannel.isInitialized) pipChannel.invokeMethod("state", active)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Closing PiP can leave the activity in PiP mode but no longer visible.
+        if (::pipChannel.isInitialized) pipChannel.invokeMethod("state", false)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        pipChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "chat.kaede.mobile/video_pip")
+        pipChannel.setMethodCallHandler { call, result ->
+            if (call.method == "configure") {
+                autoPip = call.argument<Boolean>("enabled") == true && pipSupported()
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && pipSupported()) {
+                        setPictureInPictureParams(PictureInPictureParams.Builder()
+                            .setAspectRatio(Rational(16, 9)).setAutoEnterEnabled(autoPip).build())
+                    }
+                    result.success(pipSupported())
+                } catch (error: Exception) {
+                    autoPip = false
+                    result.error("PIP_FAILED", error.message, null)
+                }
+            } else result.notImplemented()
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "chat.kaede.mobile/voice_lifecycle",

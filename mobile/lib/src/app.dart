@@ -18,6 +18,7 @@ import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/l10n/language_suggestion.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:livekit_client/livekit_client.dart' show VideoTrackRenderer;
 
 final class KaedeApp extends ConsumerStatefulWidget {
   const KaedeApp({super.key});
@@ -166,16 +167,27 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
         routerConfig: _router,
         builder: (context, child) {
           L10n.current = AppLocalizations.of(context);
-          return AnnotatedRegion<SystemUiOverlayStyle>(
-            value: kaedeSystemOverlayFor(Theme.of(context).brightness),
-            child: SessionLock(
-              observer: _lockObserver,
-              locked: preferences.phase == SessionPhase.locked,
-              lockScreen: const _LockScreen(),
-              child:
-                  LanguageSuggestion(child: child ?? const SizedBox.shrink()),
+          final voice = ref.watch(voiceSessionProvider);
+          final pipTrack = voice.pipTrack;
+          return Stack(children: [
+            AnnotatedRegion<SystemUiOverlayStyle>(
+              value: kaedeSystemOverlayFor(Theme.of(context).brightness),
+              child: SessionLock(
+                observer: _lockObserver,
+                locked: preferences.phase == SessionPhase.locked,
+                lockScreen: const _LockScreen(),
+                child:
+                    LanguageSuggestion(child: child ?? const SizedBox.shrink()),
+              ),
             ),
-          );
+            if (voice.videoPip.active)
+              Positioned.fill(
+                  child: ColoredBox(
+                      color: Colors.black,
+                      child: pipTrack == null
+                          ? const SizedBox.shrink()
+                          : VideoTrackRenderer(pipTrack))),
+          ]);
         },
       ),
     );

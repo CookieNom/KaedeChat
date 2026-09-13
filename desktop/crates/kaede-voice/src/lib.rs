@@ -259,6 +259,7 @@ pub struct RemoteVideoFrame {
 #[derive(Clone, Debug)]
 pub enum VoiceCommand {
     SetMuted(bool),
+    SetVideoVisible(bool),
     SetDeafened(bool),
     SetPushToTalk(bool),
     SetPriorityPushToTalk(bool),
@@ -873,6 +874,7 @@ async fn run_room(
     let mut video_tick = time::interval(Duration::from_secs(2));
     video_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut subscriptions = BTreeSet::new();
+    let mut video_visible = true;
     let mut budget = VideoBudget::default();
     let mut video_peers: BTreeMap<String, VideoPeer> = BTreeMap::new();
     let publisher_samples = Arc::new(Mutex::new(
@@ -1018,7 +1020,7 @@ async fn run_room(
                 });
             }
             _ = video_tick.tick() => {
-                reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health);
+                reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
             }
             _ = playback_tick.tick() => {
                 let frame = playback_mixer.drain((VOICE_SAMPLE_RATE / 100) as usize);
@@ -1045,6 +1047,11 @@ async fn run_room(
             }
             command = commands.recv() => {
                 match command {
+                    Some(VoiceCommand::SetVideoVisible(visible)) => {
+                        if video_visible == visible { continue; }
+                        video_visible = visible;
+                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
+                    }
                     Some(VoiceCommand::SetMuted(muted)) => {
                         explicitly_muted = muted;
                         if let Some(capture) = capture.as_ref() {
@@ -1395,7 +1402,7 @@ async fn run_room(
                     }
                     Some(RoomEvent::Reconnected) => {
                         subscriptions.clear();
-                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health);
+                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
                         let _ = status.send(VoiceStatus::Connected {
                             room: room.name(),
                             can_speak,
@@ -1818,6 +1825,7 @@ fn reconcile_video_subscriptions(
     room: &Room,
     subscribed: &mut BTreeSet<String>,
     receiver_health: &Mutex<BTreeMap<String, ReceiverHealth>>,
+    video_visible: bool,
 ) {
     let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
         .pc_factory()
@@ -1829,6 +1837,9 @@ fn reconcile_video_subscriptions(
         for publication in publications.values() {
             if publication.kind() == TrackKind::Audio {
                 next.insert(publication.sid().to_string());
+                continue;
+            }
+            if !video_visible {
                 continue;
             }
             let mime = publication.mime_type().to_ascii_lowercase();
