@@ -132,13 +132,16 @@ def test_interaction_hydrates_discord_event_metadata_and_source_message() -> Non
     assert current.message_ref == EntityRef(20, "guild.example")
 
 
-def test_private_interaction_uses_top_level_user_without_member() -> None:
+@pytest.mark.parametrize("wire_locale,expected", [("en-CA", "en-CA"), ("und", None)])
+def test_private_interaction_uses_top_level_user_without_member(
+    wire_locale: str, expected: str | None
+) -> None:
     payload = private_interaction_payload()
-    payload["locale"] = "en-CA"
+    payload["locale"] = wire_locale
     current = Interaction.from_payload(client(), TARGET, payload)
 
     assert current.guild_ref is None
-    assert current.locale == "en-CA"
+    assert current.locale == expected
     assert current.guild_locale is None
     assert current.member is None
     assert current.user.ref == EntityRef(3, "users.example")

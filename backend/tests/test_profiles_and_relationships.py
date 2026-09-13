@@ -989,3 +989,44 @@ async def test_guild_profile_relay_preserves_exact_user_home_signature(
             raw_source,
             guild_ref=(70, "guild.example"),
         )
+
+
+@pytest.mark.asyncio
+async def test_display_name_patch_queries_authoritative_guild_memberships(monkeypatch):
+    from sqlalchemy.dialects import postgresql
+
+    from app.api import users
+
+    user = SimpleNamespace(
+        id=7, origin_domain="home.test", display_name="Before", profile_version=1
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=user),
+        execute=AsyncMock(return_value=Mock(tuples=Mock(return_value=[]))),
+        commit=AsyncMock(),
+    )
+    monkeypatch.setattr(users, "queue_profile_updates", AsyncMock(return_value=[]))
+    monkeypatch.setattr(users, "publish_dispatch", AsyncMock())
+    monkeypatch.setattr(users, "user_payload", Mock(return_value={"id": "7"}))
+    monkeypatch.setattr(users, "get_me", AsyncMock(return_value={"id": "7"}))
+    await users.patch_me(
+        ProfilePatch(display_name="After"),
+        SimpleNamespace(user=user),
+        session,
+        Mock(),
+        Mock(),
+        SimpleNamespace(domain="home.test"),
+    )
+    statement = session.execute.call_args.args[0]
+    sql = str(
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "JOIN guild_members" in sql
+    assert "guild_members.guild_domain = guilds.origin_domain" in sql
+    assert "guild_members.user_id = 7" in sql
+    assert "guild_members.user_domain = 'home.test'" in sql
+    assert "guilds.origin_domain = 'home.test'" in sql
+    assert "guild_notification_settings" not in sql
+    assert user.display_name == "After"
+    assert user.profile_version == 2
+    session.commit.assert_awaited_once()

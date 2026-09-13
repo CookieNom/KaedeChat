@@ -19,6 +19,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/domain/reaction_management.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:uuid/uuid.dart';
 
 List<String> messageAttachmentIds(Iterable<EntityRef> attachments) =>
@@ -47,10 +48,11 @@ Map<String, Object?> interactionRequestData(
         'Opaque interaction attachments require an encrypted payload.',
       );
     }
-    return plaintext;
+    return {...plaintext, 'locale': preferredInteractionLocale()};
   }
   return <String, Object?>{
     ...plaintext,
+    'locale': preferredInteractionLocale(),
     'options': const <String, Object?>{},
     'values': const <String>[],
     'components': const <Map<String, Object?>>[],

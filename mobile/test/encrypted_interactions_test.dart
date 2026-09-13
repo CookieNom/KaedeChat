@@ -3,13 +3,27 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  test('interaction locale follows device changes in system language mode', () {
+    appLanguage.value = 'system';
+    addTearDown(() {
+      appLanguage.value = 'en-US';
+      binding.platformDispatcher.clearLocalesTestValue();
+    });
+    for (final locale in [const Locale('ja', 'JP'), const Locale('en', 'GB')]) {
+      binding.platformDispatcher.localesTestValue = [locale];
+      expect(interactionRequestData({})['locale'], locale.toLanguageTag());
+    }
+  });
   final channel = KaedeChannel(
     ref: EntityRef.parse('20@guild.example'),
     guildRef: EntityRef.parse('10@guild.example'),
@@ -190,6 +204,7 @@ void main() {
     );
 
     expect(wire['options'], isEmpty);
+    expect(wire['locale'], 'en-US');
     expect(wire['values'], isEmpty);
     expect(wire['components'], isEmpty);
     expect(wire['attachment_ids'], const <String>['9223372036854775807']);

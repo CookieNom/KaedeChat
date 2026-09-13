@@ -759,6 +759,7 @@ async def test_remote_public_component_omits_clicker_user_grant(
         interaction_type="component",
         message_ref="40@target.example",
         custom_id="continue",
+        locale="ja-JP",
     )
     admission = SimpleNamespace(
         application_ref=(1, "apps.example"),
@@ -771,7 +772,7 @@ async def test_remote_public_component_omits_clicker_user_grant(
             guild=None,
         ),
         invoker_policy=SimpleNamespace(
-            locale="en-US",
+            locale="und",
             age_assured_adult=False,
             age_restricted_dm_commands_enabled=False,
         ),
@@ -787,7 +788,10 @@ async def test_remote_public_component_omits_clicker_user_grant(
     )
 
     assert result["interaction_ref"] == "30@target.example"
-    assert signed.await_args.kwargs["payload"]["user_installation"] is None
+    forwarded = signed.await_args.kwargs["payload"]
+    assert forwarded["user_installation"] is None
+    assert forwarded["locale"] == "und"
+    assert "locale" not in forwarded["interaction"]
     # Only the post-ack response grant is loaded; no clicker installation query ran.
     assert session.scalar.await_count == 1
 

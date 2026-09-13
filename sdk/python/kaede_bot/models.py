@@ -5432,6 +5432,7 @@ class Interaction:
     context: str = "guild"
     integration_type: str = "guild_install"
     version: int = 1
+    # None when the user withholds their language (wire locale "und"), or on legacy events.
     locale: str | None = None
     guild_locale: str | None = None
     app_permissions: int | None = None
@@ -5687,7 +5688,7 @@ class Interaction:
             context=context,
             integration_type=integration_type,
             version=raw_version,
-            locale=locale,
+            locale=None if locale == "und" else locale,
             guild_locale=guild_locale,
             app_permissions=app_permissions,
             authorizing_integration_owners=owners,

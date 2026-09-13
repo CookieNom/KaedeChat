@@ -390,7 +390,58 @@ async def test_interaction_edit_without_visible_mentions_clears_projection_witho
 
 
 @pytest.mark.asyncio
-async def test_interaction_locale_and_age_policy_come_only_from_user_home() -> None:
+async def test_locale_privacy_setting_controls_subsequent_interactions() -> None:
+    from app.api.users import patch_user_settings
+
+    account = UserSettings(
+        locale="system",
+        theme="dark",
+        dm_privacy="friends",
+        share_locale_with_bots=True,
+        notification_settings={},
+        age_restricted_dm_commands_enabled=False,
+    )
+    actor = SimpleNamespace(id=2, origin_domain="home.example", is_local=True)
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=account),
+        get=AsyncMock(return_value=account),
+        commit=AsyncMock(),
+    )
+    for share, expected in [(False, "und"), (True, "ja-JP")]:
+        result = await patch_user_settings(
+            SettingsPatch(share_locale_with_bots=share),
+            cast(Any, SimpleNamespace(user=actor)),
+            cast(Any, session),
+            cast(Any, None),
+        )
+        assert result["share_locale_with_bots"] is share
+        assert result["locale"] == "system"
+        policy = await interactions.authoritative_interaction_invoker_policy(
+            cast(Any, session),
+            cast(Any, SimpleNamespace(domain="home.example")),
+            cast(Any, actor),
+            interactions.InteractionInvocationOptions(),
+            locale="ja-JP",
+        )
+        assert policy.locale == expected
+    assert session.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "saved_locale,device_locale,share_locale,expected",
+    [
+        ("fr", "ja-JP", True, "fr"),
+        ("system", "ja-JP", True, "ja-JP"),
+        ("system", "en-GB", True, "en-GB"),
+        ("system", None, True, "en-US"),
+        ("fr", "ja-JP", False, "und"),
+        ("system", "ja-JP", False, "und"),
+    ],
+)
+async def test_interaction_locale_and_age_policy_come_only_from_user_home(
+    saved_locale: str, device_locale: str | None, share_locale: bool, expected: str
+) -> None:
     settings = SimpleNamespace(domain="home.example")
     actor = SimpleNamespace(
         id=2,
@@ -401,7 +452,8 @@ async def test_interaction_locale_and_age_policy_come_only_from_user_home() -> N
     session = SimpleNamespace(
         get=AsyncMock(
             return_value=SimpleNamespace(
-                locale="fr",
+                locale=saved_locale,
+                share_locale_with_bots=share_locale,
                 age_restricted_dm_commands_enabled=True,
             )
         )
@@ -416,6 +468,7 @@ async def test_interaction_locale_and_age_policy_come_only_from_user_home() -> N
             federated_age_assured_adult=False,
             federated_age_restricted_dm_commands_enabled=False,
         ),
+        locale=device_locale,
     )
     remote = await interactions.authoritative_interaction_invoker_policy(
         cast(Any, SimpleNamespace()),
@@ -429,18 +482,19 @@ async def test_interaction_locale_and_age_policy_come_only_from_user_home() -> N
             ),
         ),
         interactions.InteractionInvocationOptions(
-            federated_locale="de",
+            federated_locale=expected,
             federated_age_assured_adult=True,
             federated_age_restricted_dm_commands_enabled=True,
         ),
+        locale="es",  # A remote request cannot override the home privacy decision.
     )
 
     assert (local.locale, local.age_assured_adult, local.age_restricted_dm_commands_enabled) == (
-        "fr",
+        expected,
         True,
         True,
     )
-    assert (remote.locale, remote.age_assured_adult) == ("de", True)
+    assert (remote.locale, remote.age_assured_adult) == (expected, True)
     session.get.assert_awaited_once_with(UserSettings, (2, "home.example"))
 
 
@@ -601,6 +655,18 @@ def test_interaction_names_locales_and_autocomplete_numbers_match_discord_contra
         age_restricted_dm_commands_enabled=True,
     )
     assert federated.locale == "pt-BR"
+    assert command.locale is None
+    assert (
+        interactions.InteractionCreate.model_validate(
+            command.model_dump() | {"locale": "ja-JP"}
+        ).locale
+        == "ja-JP"
+    )
+    for invalid_locale in ("system", "../../bad", "en_US", "x" * 17, 123):
+        with pytest.raises(ValidationError):
+            interactions.InteractionCreate.model_validate(
+                command.model_dump() | {"locale": invalid_locale}
+            )
     with pytest.raises(ValidationError):
         interactions.FederatedInteractionCreate.model_validate(
             federated.model_dump() | {"locale": "../../bad"}

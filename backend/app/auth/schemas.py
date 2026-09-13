@@ -227,6 +227,7 @@ class SettingsPatch(UnambiguousInputModel):
     locale: str | None = Field(default=None, min_length=2, max_length=16)
     theme: Literal["system", "light", "dark"] | None = None
     dm_privacy: Literal["everyone", "shared_guild", "friends"] | None = None
+    share_locale_with_bots: bool | None = None
     age_restricted_dm_commands_enabled: bool | None = None
     presence_preference: Literal["online", "idle", "dnd", "invisible"] | None = None
     notification_settings: dict[str, object] | None = None

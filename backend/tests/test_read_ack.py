@@ -106,7 +106,8 @@ async def test_manual_unread_rewinds_and_versions_cursor(monkeypatch, first_mess
 
 
 @pytest.mark.asyncio
-async def test_stale_ack_cannot_undo_manual_unread(monkeypatch):
+@pytest.mark.parametrize("locked", [None, SimpleNamespace(read_version=1)])
+async def test_stale_or_missing_ack_cannot_undo_manual_unread(monkeypatch, locked):
     from fastapi import HTTPException
 
     access = SimpleNamespace(channel=SimpleNamespace(id=10, origin_domain="home.test"))
@@ -116,7 +117,7 @@ async def test_stale_ack_cannot_undo_manual_unread(monkeypatch):
     monkeypatch.setattr(channels, "channel_message", AsyncMock())
     session = SimpleNamespace(
         execute=AsyncMock(),
-        scalar=AsyncMock(return_value=SimpleNamespace(read_version=1)),
+        scalar=AsyncMock(return_value=locked),
         commit=AsyncMock(),
         scalars=AsyncMock(),
     )

@@ -833,6 +833,21 @@ message; E2EE content stays inside its opaque envelope.
 Delivery uses the direct Bot Gateway. Events are at-least-once and carry a
 stable interaction ID, so handlers must be idempotent.
 
+Clients may include an optional BCP-47-style `locale` (2–16 characters) in
+interaction requests. The user's home server uses the saved account language,
+or the supplied device language when the preference is `system`; older clients
+without a device locale fall back to `en-US`. This applies to commands,
+autocomplete, buttons/selects, and modal submissions.
+
+Users can disable **Share my language with bots and apps** in Privacy settings
+(`PATCH /api/v1/users/@me/settings` with `share_locale_with_bots: false`). Sharing
+defaults to enabled. When disabled, new interactions carry `locale: "und"`
+(undetermined), including across federation; the actual language is not forwarded.
+The Python SDK exposes this as `interaction.locale is None`. Older SDK versions
+can still parse the `"und"` string. `guild_locale` describes the guild, remains
+independent of this preference, and is not the user's language. Changing the
+setting cannot recall language already delivered in earlier interactions.
+
 An interaction remains valid for fifteen minutes. A bot may respond
 immediately, or acknowledge it within the initial-response window and then
 materialize or edit the deferred original response. Callback types and response

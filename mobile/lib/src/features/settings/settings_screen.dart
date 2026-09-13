@@ -1153,6 +1153,20 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           SettingsSectionHeader(L10n.of(context).ui_privacy_ebfa87e7),
+          SettingsRow(
+            title: L10n.of(context).share_locale_with_bots,
+            subtitle: L10n.of(context).share_locale_with_bots_description,
+            trailing: DiscordSwitch(
+              value: _settings['share_locale_with_bots'] != false,
+              onChanged: _saving
+                  ? null
+                  : (value) => _saveSetting('share_locale_with_bots', value),
+            ),
+            onTap: _saving
+                ? null
+                : () => _saveSetting('share_locale_with_bots',
+                    _settings['share_locale_with_bots'] == false),
+          ),
           SettingsRow.chevron(
             title: L10n.of(context).ui_my_reports_78d941fc,
             subtitle: L10n.of(context)

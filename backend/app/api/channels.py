@@ -14205,12 +14205,13 @@ async def acknowledge_channel(
         )
         .with_for_update()
     )
-    if locked.read_version != payload.read_version:
+    if locked is None or locked.read_version != payload.read_version:
         raise HTTPException(
             status_code=409, detail="Read position changed; refresh before retrying"
         )
+    cursor: Message | None = acknowledged
     if payload.mark_unread:
-        acknowledged = await session.scalar(
+        cursor = await session.scalar(
             select(Message)
             .where(
                 Message.channel_id == channel.id,
@@ -14221,8 +14222,8 @@ async def acknowledge_channel(
             .order_by(Message.id.desc(), Message.origin_domain.desc())
             .limit(1)
         )
-    cursor_id = acknowledged.id if acknowledged is not None else None
-    cursor_domain = acknowledged.origin_domain if acknowledged is not None else None
+    cursor_id = cursor.id if cursor is not None else None
+    cursor_domain = cursor.origin_domain if cursor is not None else None
     # Pending projections increment later, provided their message is still unread.
     remaining_mentions = (
         select(func.count())
@@ -14241,7 +14242,7 @@ async def acknowledge_channel(
             tuple_(MessageProjection.message_id, MessageProjection.message_domain)
             > (cursor_id, cursor_domain)
             if cursor_id is not None
-            else True,
+            else literal(True),
             MessageProjection.mention_user_refs.contains(
                 [{"id": str(auth.user.id), "origin_domain": auth.user.origin_domain}]
             ),

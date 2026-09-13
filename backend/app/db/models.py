@@ -346,6 +346,9 @@ class UserSettings(Base, LocalUserMixin, TimestampMixin):
     locale: Mapped[str] = mapped_column(String(16), server_default="en-US")
     theme: Mapped[str] = mapped_column(String(16), server_default="system")
     dm_privacy: Mapped[str] = mapped_column(String(16), server_default="shared_guild")
+    share_locale_with_bots: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     age_restricted_dm_commands_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )

@@ -59,6 +59,16 @@ def test_settings_patch_validates_presence_preference() -> None:
         SettingsPatch(presence_preference="busy")  # type: ignore[arg-type]
 
 
+def test_settings_patch_accepts_only_boolean_locale_sharing() -> None:
+    for value in (True, False):
+        assert SettingsPatch(share_locale_with_bots=value).model_dump(exclude_unset=True) == {
+            "share_locale_with_bots": value
+        }
+    for value in (None, 0, 1, "false"):
+        with pytest.raises(ValidationError):
+            SettingsPatch.model_validate({"share_locale_with_bots": value})
+
+
 def test_auth_inputs_reject_ambiguous_boolean_and_integer_coercion() -> None:
     with pytest.raises(ValidationError):
         RegisterRequest.model_validate(

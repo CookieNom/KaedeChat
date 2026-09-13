@@ -53,6 +53,7 @@
     locale: string;
     theme: ThemePreference;
     dm_privacy: 'everyone' | 'shared_guild' | 'friends';
+    share_locale_with_bots: boolean;
     age_restricted_dm_commands_enabled: boolean;
     notification_settings: Record<string, unknown>;
   }
@@ -67,6 +68,7 @@
     locale: 'en-US',
     theme: 'system',
     dm_privacy: 'shared_guild',
+    share_locale_with_bots: true,
     age_restricted_dm_commands_enabled: false,
     notification_settings: {}
   });
@@ -214,6 +216,7 @@
           locale: settings.locale,
           theme: settings.theme,
           dm_privacy: settings.dm_privacy,
+          share_locale_with_bots: settings.share_locale_with_bots,
           age_restricted_dm_commands_enabled: settings.age_restricted_dm_commands_enabled
         })
       });
@@ -268,6 +271,7 @@
     const previousTheme = savedTheme;
     const draftLocale = settings.locale;
     const draftPrivacy = settings.dm_privacy;
+    const draftShareLocale = settings.share_locale_with_bots;
     applyTheme(theme);
     beginAction();
     try {
@@ -280,7 +284,8 @@
       settings = {
         ...updated,
         locale: draftLocale,
-        dm_privacy: draftPrivacy
+        dm_privacy: draftPrivacy,
+        share_locale_with_bots: draftShareLocale
       };
       savedTheme = updated.theme;
       applyTheme(updated.theme);
@@ -303,6 +308,7 @@
     const draftLocale = settings.locale;
     const draftTheme = settings.theme;
     const draftPrivacy = settings.dm_privacy;
+    const draftShareLocale = settings.share_locale_with_bots;
     developerModeDraft = enabled;
     beginAction();
     try {
@@ -321,7 +327,8 @@
         ...updated,
         locale: draftLocale,
         theme: draftTheme,
-        dm_privacy: draftPrivacy
+        dm_privacy: draftPrivacy,
+        share_locale_with_bots: draftShareLocale
       };
       developerModeDraft = developerModeFromSettings(updated.notification_settings);
       developerMode.apply(updated.notification_settings);
@@ -350,6 +357,7 @@
     const draftLocale = settings.locale;
     const draftTheme = settings.theme;
     const draftPrivacy = settings.dm_privacy;
+    const draftShareLocale = settings.share_locale_with_bots;
 
     if (enabled) {
       const permission = await browserNotifications.requestPermission();
@@ -385,7 +393,8 @@
         ...updated,
         locale: draftLocale,
         theme: draftTheme,
-        dm_privacy: draftPrivacy
+        dm_privacy: draftPrivacy,
+        share_locale_with_bots: draftShareLocale
       };
       browserNotificationsDraft = browserNotificationsFromSettings(updated.notification_settings);
       browserNotifications.apply(updated.notification_settings);
@@ -1175,7 +1184,7 @@
           <span class="section-icon"><Icon name="lock" /></span>
           <div>
             <h2>{$t('ui_privacy_54a57c31')}</h2>
-            <p>{$t('ui_control_who_is_allowed_to_start_a_direct_conv_e942228e')}</p>
+            <p>{$t('privacy_description')}</p>
           </div>
         </div>
         <form
@@ -1195,6 +1204,13 @@
               >
               <option value="friends">{$t('ui_friends_only_9f75521f')}</option>
             </select>
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>{$t('share_locale_with_bots')}</strong>
+              <small>{$t('share_locale_with_bots_description')}</small>
+            </span>
+            <input type="checkbox" bind:checked={settings.share_locale_with_bots} disabled={busy} />
           </label>
           <div class="form-actions">
             <button class="primary-button" disabled={busy}>

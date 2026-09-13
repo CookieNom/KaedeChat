@@ -111,3 +111,27 @@ def test_guild_navigation_rejects_nested_group_items() -> None:
                 ]
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_accessible_navigation_queries_membership_without_notification_settings():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.api.users import accessible_guild_navigation_refs
+
+    refs = [(10, "home.test"), (10, "remote.test")]
+    session = SimpleNamespace(execute=AsyncMock(return_value=Mock(all=Mock(return_value=refs))))
+    auth = SimpleNamespace(user=SimpleNamespace(id=7, origin_domain="home.test"))
+    assert await accessible_guild_navigation_refs(session, auth) == refs
+    statement = session.execute.call_args.args[0]
+    sql = str(
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "JOIN guild_members" in sql
+    assert "guild_members.guild_domain = guilds.origin_domain" in sql
+    assert "guild_members.user_id = 7" in sql
+    assert "guild_members.user_domain = 'home.test'" in sql
+    assert "guild_notification_settings" not in sql

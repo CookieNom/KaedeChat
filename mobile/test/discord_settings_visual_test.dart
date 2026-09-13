@@ -716,6 +716,16 @@ void main() {
       }),
       hasLength(1),
     );
+    await tester.tap(find.text('Share my language with bots and apps'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(requestLog.where((request) {
+      final data = request['data'];
+      return request['method'] == 'PATCH' &&
+          request['path'] == '/api/v1/users/@me/settings' &&
+          data is Map &&
+          data['share_locale_with_bots'] == false;
+    }), hasLength(1));
   });
 
   testWidgets('suspended authorized app is unavailable and remains revocable',

@@ -387,6 +387,7 @@ async def authoritative_interaction_invoker_policy(
     settings: Settings,
     actor: User,
     options: InteractionInvocationOptions,
+    locale: str | None = None,
 ) -> InteractionInvokerPolicy:
     """Resolve private invocation policy only at the user's home authority."""
 
@@ -394,9 +395,13 @@ async def authoritative_interaction_invoker_policy(
         account_settings = await session.get(UserSettings, (actor.id, actor.origin_domain))
         return InteractionInvokerPolicy(
             locale=(
-                account_settings.locale
-                if account_settings is not None and account_settings.locale != "system"
-                else "en-US"
+                "und"
+                if account_settings is not None and not account_settings.share_locale_with_bots
+                else (
+                    account_settings.locale
+                    if account_settings is not None and account_settings.locale != "system"
+                    else locale or "en-US"
+                )
             ),
             age_assured_adult=(getattr(actor, "age_assurance_state", "unknown") == "adult"),
             age_restricted_dm_commands_enabled=bool(
@@ -974,6 +979,12 @@ class StrictInteractionModel(UnambiguousInputModel):
 
 class InteractionCreate(StrictInteractionModel):
     application_ref: EntityRef
+    locale: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=16,
+        pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+    )
     interaction_type: Literal["command", "component", "modal_submit", "autocomplete"] = "command"
     command_name: str | None = Field(default=None, min_length=1, max_length=32)
     command_id: Snowflake | None = Field(default=None, gt=0, le=2**63 - 1)
@@ -4432,6 +4443,7 @@ async def prepare_interaction_admission(
             settings,
             auth.user,
             invocation_options,
+            locale=payload.locale,
         ),
         invocation_permissions=await interaction_permissions_snapshot(
             session,
@@ -4712,7 +4724,9 @@ async def proxy_remote_interaction(
         f"/_kaede/v1/channels/{admission.access.channel.id}/interactions",
         payload={
             "user_id": str(auth.user.id),
-            "interaction": payload.model_dump(mode="json"),
+            # Device locale is private input to the home authority. Only the
+            # privacy-filtered locale below may cross the federation boundary.
+            "interaction": payload.model_dump(mode="json", exclude={"locale"}),
             "response_grant_id": response_grant_id,
             "response_expires_at": response_expires_at.isoformat(),
             "attachments": [item.model_dump(mode="json") for item in attachment_projections],

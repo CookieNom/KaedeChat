@@ -830,7 +830,7 @@ async fn native_restore_session(
     })
 }
 
-/// Only non-secret account metadata crosses the WebView boundary.
+/// Only non-secret account metadata crosses the `WebView` boundary.
 #[tauri::command]
 async fn native_saved_accounts(state: State<'_, NativeState>) -> Result<Value, NativeError> {
     let registry = AccountRegistry::load(&state.paths).await.map_err(|error| {
@@ -3679,8 +3679,8 @@ mod tests {
             tokio::task::yield_now().await;
             generation.store(2, Ordering::SeqCst);
             changed.notify_waiters();
-            sender.send((1, json!({"t": "MESSAGE_CREATE"}))).unwrap();
-            sender.send((2, json!({"t": "READY"}))).unwrap();
+            assert!(sender.send((1, json!({"t": "MESSAGE_CREATE"}))).is_ok());
+            assert!(sender.send((2, json!({"t": "READY"}))).is_ok());
         };
         let (result, ()) = tokio::join!(old_poll, switch);
         assert_eq!(result, None);

@@ -8306,5 +8306,7 @@
   "ui_choose_end_time_8fb40fee": "終了日時を選択",
   "@ui_choose_end_time_8fb40fee": {
     "description": "Interface text in lib/src/features/guild/scheduled_events_tab.dart"
-  }
+  },
+  "share_locale_with_bots": "言語をボットやアプリと共有する",
+  "share_locale_with_bots_description": "操作時にボットやアプリがあなたの言語を使用できるようにします。オフにすると、すべてのデバイスで言語を非公開にします。"
 }

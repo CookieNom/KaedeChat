@@ -9092,5 +9092,7 @@
   "chat_caught_up": "You’re all caught up",
   "chat_load_more": "Load more",
   "chat_mark_server_read": "Mark server as read",
-  "chat_show_muted": "Show muted servers"
+  "chat_show_muted": "Show muted servers",
+  "share_locale_with_bots": "Share my language with bots and apps",
+  "share_locale_with_bots_description": "Let bots and apps use your language when you interact with them. Turn this off to keep your language private on all devices."
 }

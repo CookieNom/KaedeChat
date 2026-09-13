@@ -1,4 +1,5 @@
 import { api } from '$lib/api/client';
+import { preferredLocale } from '$lib/ui/locale';
 import {
   parseApplicationCommandAutocompleteChoices,
   type ApplicationCommand,
@@ -160,9 +161,11 @@ export async function createInteraction(
   encryptionIntent: InteractionEncryptionIntent = {}
 ): Promise<InteractionAcknowledgement> {
   const wireBody = await encryptedInteractionBody(context, body, encryptionIntent);
+  const preferred = new Intl.Locale(preferredLocale().replaceAll('_', '-'));
+  const locale = preferred.baseName.length <= 16 ? preferred.baseName : preferred.language;
   const acknowledged = await api<InteractionAcknowledgement>(
     `/channels/${encodeURIComponent(context.channelRef)}/interactions`,
-    { method: 'POST', body: JSON.stringify(wireBody) }
+    { method: 'POST', body: JSON.stringify({ ...wireBody, locale }) }
   );
   interactionResponses.register(acknowledged.interaction_ref, context);
   return acknowledged;

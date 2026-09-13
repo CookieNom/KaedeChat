@@ -117,7 +117,6 @@ async def patch_me(
                         select(Guild.id, Guild.origin_domain)
                         .join(
                             GuildMember,
-                            GuildNotificationSetting,
                             (GuildMember.guild_id == Guild.id)
                             & (GuildMember.guild_domain == Guild.origin_domain),
                         )
@@ -200,6 +199,7 @@ def settings_payload(settings: UserSettings) -> dict[str, object]:
         "locale": settings.locale,
         "theme": settings.theme,
         "dm_privacy": settings.dm_privacy,
+        "share_locale_with_bots": settings.share_locale_with_bots,
         "age_restricted_dm_commands_enabled": bool(
             getattr(settings, "age_restricted_dm_commands_enabled", False)
         ),
@@ -216,7 +216,6 @@ async def accessible_guild_navigation_refs(
             select(Guild.id, Guild.origin_domain)
             .join(
                 GuildMember,
-                GuildNotificationSetting,
                 (GuildMember.guild_id == Guild.id)
                 & (GuildMember.guild_domain == Guild.origin_domain),
             )

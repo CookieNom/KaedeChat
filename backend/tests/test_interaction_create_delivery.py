@@ -421,6 +421,15 @@ def _guild_queue_fixture() -> tuple[
     return settings, interaction, event, application, command, installation, row
 
 
+def test_dispatch_accepts_withheld_locale_and_rejects_substitution() -> None:
+    _, interaction, event, *_ = _interaction_fixture()
+    interaction.payload[INTERACTION_EVENT_SNAPSHOT_KEY]["locale"] = "und"
+    event["locale"] = "und"
+    assert interaction_dispatch._event_snapshot_matches(interaction, event)
+    event["locale"] = "ja-JP"
+    assert not interaction_dispatch._event_snapshot_matches(interaction, event)
+
+
 def test_sealed_create_authenticates_topic_and_exact_payload() -> None:
     settings, interaction, event, _, _, _, row = _queue_fixture()
     token = str(event["token"])

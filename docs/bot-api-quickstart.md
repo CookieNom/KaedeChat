@@ -132,6 +132,12 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+Use `interaction.locale` to choose a response language. It is `None` when the
+user keeps their language private (or a legacy event does not provide it), so
+choose your bot's default with `locale = interaction.locale or "en-US"`.
+It reflects the invoking device when the user chooses the system language;
+do not treat it as a permanent language for every device on their account.
+
 `start()` discovers approved target instances and keeps their Gateway
 connections open. This process must keep running for commands to receive replies.
 

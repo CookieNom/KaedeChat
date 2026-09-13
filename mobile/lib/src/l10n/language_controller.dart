@@ -39,6 +39,21 @@ Locale? preferredAppLocale(String value) {
   );
 }
 
+String preferredInteractionLocale() {
+  if (appLanguage.value != 'system') {
+    return preferredAppLocale(appLanguage.value)!.toLanguageTag();
+  }
+  final locales = WidgetsBinding.instance.platformDispatcher.locales;
+  final resolved =
+      basicLocaleListResolution(locales, AppLocalizations.supportedLocales);
+  return locales
+          .where((locale) =>
+              matchLanguage(locale.toLanguageTag()) == resolved.toLanguageTag())
+          .firstOrNull
+          ?.toLanguageTag() ??
+      resolved.toLanguageTag();
+}
+
 Locale? suggestedLanguage(List<Locale> system, Locale current, bool handled) {
   if (handled || system.isEmpty || system.first.languageCode == 'en') {
     return null;
