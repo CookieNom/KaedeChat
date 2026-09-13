@@ -20,7 +20,11 @@
       "check_flags": "icu-message-format",
       "edit_template": false,
       "push": "git@github.com:CookieNom/KaedeChat.git",
-      "push_on_commit": true
+      "push_on_commit": true,
+      "file_format_params": {
+        "json_indent": 2,
+        "json_indent_style": "spaces"
+      }
     },
     {
       "name": "Mobile",
@@ -32,7 +36,11 @@
       "new_base": "",
       "file_format": "arb",
       "source_language": "en",
-      "edit_template": false
+      "edit_template": false,
+      "file_format_params": {
+        "json_indent": 2,
+        "json_indent_style": "spaces"
+      }
     }
   ]
 }
