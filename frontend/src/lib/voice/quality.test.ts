@@ -9,7 +9,9 @@ import {
   webAudioPublishOptions,
   webCameraDefaults,
   webScreenShareOptions,
-  webVideoCodecOptions
+  webVideoCodecOptions,
+  webVideoCodecCapabilities,
+  isHardwareVideoEncoder
 } from './quality';
 
 class MemoryStorage {
@@ -162,30 +164,171 @@ describe('media quality preferences', () => {
 });
 
 describe('video codec defaults', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
-  it('prefers AV1 with H264 backup, falls back on limited senders, and preserves E2EE', () => {
-    const getCapabilities = vi.fn(() => ({
-      codecs: [{ mimeType: 'video/AV1' }, { mimeType: 'video/H264' }]
-    }));
+  it('keeps both call modes on a single safe codec until hardware is proven', () => {
+    vi.stubGlobal('RTCRtpSender', {
+      getCapabilities: () => ({
+        codecs: [{ mimeType: 'video/AV1' }, { mimeType: 'video/H264' }]
+      })
+    });
+    for (const encrypted of [false, true]) {
+      expect(webVideoCodecOptions(encrypted)).toEqual({ videoCodec: 'vp8', backupCodec: false });
+    }
+  });
+
+  it('admits software AV1 decoding but does not infer hardware encoding from codec support', async () => {
+    const getCapabilities = () => ({
+      codecs: [{ mimeType: 'video/AV1' }, { mimeType: 'video/VP8' }]
+    });
     vi.stubGlobal('RTCRtpSender', { getCapabilities });
-    expect(webVideoCodecOptions(false)).toEqual({
-      videoCodec: 'av1',
-      backupCodec: { codec: 'h264' }
+    vi.stubGlobal('RTCRtpReceiver', { getCapabilities });
+    vi.stubGlobal('navigator', {
+      mediaCapabilities: { encodingInfo: vi.fn().mockRejectedValue(new Error('unsupported')) }
     });
-    expect(webVideoCodecOptions(true)).toEqual({
-      videoCodec: 'av1',
-      backupCodec: { codec: 'vp8' }
+    expect(
+      await webVideoCodecCapabilities({
+        width: 3840,
+        height: 2160,
+        frameRate: 60,
+        bitrate: 8000000
+      })
+    ).toEqual({ decode: ['av1', 'vp8'], encode: ['av1', 'vp8'], hardware: [] });
+  });
+
+  it('does not block capture cleanup on an unresponsive capability query', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('RTCRtpSender', {
+      getCapabilities: () => ({ codecs: [{ mimeType: 'video/AV1' }] })
     });
-    getCapabilities.mockReturnValue({ codecs: [{ mimeType: 'video/AV1' }] });
-    expect(webVideoCodecOptions(false)).toEqual({
-      videoCodec: 'av1',
-      backupCodec: { codec: 'vp8' }
+    vi.stubGlobal('navigator', {
+      mediaCapabilities: { encodingInfo: () => new Promise(() => {}) }
     });
-    getCapabilities.mockReturnValue({ codecs: [{ mimeType: 'video/H264' }] });
-    expect(webVideoCodecOptions(false)).toEqual({ videoCodec: 'h264', backupCodec: false });
-    expect(webVideoCodecOptions(true)).toEqual({ videoCodec: 'vp8', backupCodec: false });
-    vi.stubGlobal('RTCRtpSender', undefined);
-    expect(webVideoCodecOptions(false)).toEqual({ videoCodec: 'vp8', backupCodec: false });
+    const result = webVideoCodecCapabilities({
+      width: 1920,
+      height: 1080,
+      frameRate: 30,
+      bitrate: 4500000
+    });
+    await vi.advanceTimersByTimeAsync(801);
+    expect((await result).hardware).toEqual([]);
+  });
+
+  it('checks the actual encoder at the requested dimensions and releases the loopback capture', async () => {
+    const stop = vi.fn();
+    const captureStream = vi.fn(() => ({
+      getTracks: () => [{ stop }],
+      getVideoTracks: () => [{}]
+    }));
+    vi.stubGlobal('document', {
+      createElement: () => ({ getContext: () => ({ fillRect: vi.fn() }), captureStream })
+    });
+    vi.stubGlobal('RTCRtpSender', {
+      getCapabilities: () => ({ codecs: [{ mimeType: 'video/AV1' }] })
+    });
+    const encodingInfo = vi.fn(async () => ({
+      supported: true,
+      smooth: true,
+      powerEfficient: true
+    }));
+    vi.stubGlobal('navigator', { mediaCapabilities: { encodingInfo } });
+    const close = vi.fn();
+    const setCodecPreferences = vi.fn();
+    vi.stubGlobal(
+      'RTCPeerConnection',
+      class {
+        connectionState = 'connected';
+        localDescription = {};
+        close() {
+          this.connectionState = 'closed';
+          close();
+        }
+        async createOffer() {
+          return {};
+        }
+        async createAnswer() {
+          return {};
+        }
+        async setLocalDescription() {}
+        async setRemoteDescription() {}
+        addTransceiver() {
+          return {
+            setCodecPreferences,
+            sender: {
+              getStats: async () =>
+                new Map([
+                  [
+                    'out',
+                    {
+                      type: 'outbound-rtp',
+                      framesEncoded: 3,
+                      frameWidth: 1920,
+                      frameHeight: 1080,
+                      powerEfficientEncoder: true,
+                      encoderImplementation: 'ExternalEncoder'
+                    }
+                  ]
+                ])
+            }
+          };
+        }
+      }
+    );
+    const result = await webVideoCodecCapabilities({
+      width: 1920,
+      height: 1080,
+      frameRate: 30,
+      bitrate: 4500000
+    });
+    expect(result.hardware).toEqual(['av1']);
+    expect(encodingInfo).toHaveBeenCalledWith({
+      type: 'webrtc',
+      video: {
+        contentType: 'video/av1',
+        width: 1920,
+        height: 1080,
+        framerate: 30,
+        bitrate: 4500000,
+        scalabilityMode: 'L1T1'
+      }
+    });
+    expect(setCodecPreferences).toHaveBeenCalledWith([{ mimeType: 'video/AV1' }]);
+    expect(captureStream).toHaveBeenCalledWith(30);
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('requires actual hardware evidence and rejects software and unknown implementations', () => {
+    expect(isHardwareVideoEncoder({ powerEfficientEncoder: true })).toBe(false);
+    expect(
+      isHardwareVideoEncoder({ powerEfficientEncoder: true, encoderImplementation: 'libaom' })
+    ).toBe(false);
+    expect(
+      isHardwareVideoEncoder({
+        powerEfficientEncoder: false,
+        encoderImplementation: 'ExternalEncoder'
+      })
+    ).toBe(false);
+    expect(
+      isHardwareVideoEncoder({
+        powerEfficientEncoder: true,
+        encoderImplementation: 'ExternalEncoder'
+      })
+    ).toBe(true);
+    expect(
+      isHardwareVideoEncoder({
+        powerEfficientEncoder: true,
+        encoderImplementation: 'NVIDIA AV1 Encoder'
+      })
+    ).toBe(true);
+    expect(
+      isHardwareVideoEncoder({
+        powerEfficientEncoder: true,
+        encoderImplementation: 'ExternalEncoder (fallback software)'
+      })
+    ).toBe(false);
   });
 });

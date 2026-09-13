@@ -182,6 +182,22 @@ class LocalVideoTrack extends LocalTrack with VideoTrack {
     this.currentOptions,
   ) : super(TrackType.VIDEO, source, stream, track);
 
+  /// Android native clone with a separate track ID and reference-counted source.
+  /// Disposing either publication does not stop its sibling's capture.
+  Future<LocalVideoTrack> cloneCapture() async {
+    final cloned = await rtc.cloneLocalVideoTrack(mediaStreamTrack);
+    rtc.MediaStream? stream;
+    try {
+      stream = await rtc.createLocalMediaStream('kaede-video-variant');
+      await stream.addTrack(cloned);
+      return LocalVideoTrack._(source, stream, cloned, currentOptions);
+    } catch (_) {
+      await cloned.stop();
+      await stream?.dispose();
+      rethrow;
+    }
+  }
+
   /// Creates a LocalVideoTrack from camera input.
   static Future<LocalVideoTrack> createCameraTrack([
     CameraCaptureOptions? options,

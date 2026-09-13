@@ -8,30 +8,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('video codecs prefer AV1 and H264 for plaintext and encrypted calls',
-      () {
+  test('unknown hardware keeps the same single codec in both call modes', () {
     const quality = MobileMediaQuality();
-    final av1 = quality.videoPublishOptionsForCameraMode(1,
-        supportedCodecs: ['video/AV1', 'video/H264']);
-    expect(av1.videoCodec, 'av1');
-    expect(av1.backupVideoCodec.codec, 'h264');
-    expect(av1.backupVideoCodec.enabled, isTrue);
-    final limited = quality
-        .videoPublishOptionsForCameraMode(1, supportedCodecs: ['video/AV1']);
-    expect(limited.backupVideoCodec.codec, 'vp8');
-    final h264 = quality
-        .videoPublishOptionsForCameraMode(1, supportedCodecs: ['video/H264']);
-    expect(h264.videoCodec, 'h264');
-    expect(h264.backupVideoCodec.enabled, isFalse);
-    final encrypted = quality.videoPublishOptionsForCameraMode(1,
-        encrypted: true, supportedCodecs: ['video/AV1', 'video/H264']);
-    expect(encrypted.videoCodec, 'av1');
-    expect(encrypted.backupVideoCodec.codec, 'vp8');
-    expect(encrypted.backupVideoCodec.enabled, isTrue);
-    final encryptedLimited = quality.videoPublishOptionsForCameraMode(1,
-        encrypted: true, supportedCodecs: ['video/H264']);
-    expect(encryptedLimited.videoCodec, 'vp8');
-    expect(encryptedLimited.backupVideoCodec.enabled, isFalse);
+    for (final encrypted in [false, true]) {
+      final options = quality.videoPublishOptionsForCameraMode(1,
+          encrypted: encrypted,
+          supportedCodecs: ['video/AV1', 'video/H264', 'video/VP8']);
+      expect(options.videoCodec, 'vp8');
+      expect(options.backupVideoCodec.enabled, isFalse);
+      final limited = quality.videoPublishOptionsForCameraMode(1,
+          encrypted: encrypted, supportedCodecs: ['video/H264']);
+      expect(limited.videoCodec, 'h264');
+      expect(limited.backupVideoCodec.enabled, isFalse);
+    }
     expect(quality.videoPublishOptions.videoCodec, 'vp8');
   });
 

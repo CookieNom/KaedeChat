@@ -8,6 +8,7 @@ import 'desktop_capturer_impl.dart';
 import 'frame_cryptor_impl.dart';
 import 'media_recorder_impl.dart';
 import 'media_stream_impl.dart';
+import 'media_stream_track_impl.dart';
 import 'mediadevices_impl.dart';
 import 'navigator_impl.dart';
 import 'rtc_peerconnection_impl.dart';
@@ -124,3 +125,12 @@ FrameCryptorFactory get frameCryptorFactory => FrameCryptorFactoryImpl.instance;
 
 DataPacketCryptorFactory get dataPacketCryptorFactory =>
     DataPacketCryptorFactoryImpl.instance;
+
+/// Android-only independently owned video track sharing the original capture.
+Future<MediaStreamTrack> cloneLocalVideoTrack(MediaStreamTrack track) async {
+  final response =
+      await WebRTC.invokeMethod('kaedeCloneVideoTrack', {'trackId': track.id});
+  if (response == null) throw StateError('Video capture clone unavailable');
+  return MediaStreamTrackNative.fromMap(
+      {...response, 'settings': track.getSettings()}, 'local');
+}

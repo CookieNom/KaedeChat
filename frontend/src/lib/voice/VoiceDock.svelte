@@ -56,6 +56,7 @@
   let revision = $state(0);
   let elapsedClock = $state(Date.now());
   let error = $state('');
+  let videoDegraded = $state(false);
   let takeoverPrompt = $state<string | null>(null);
   let screenShareOpen = $state(false);
   let soundboardOpen = $state(false);
@@ -379,6 +380,7 @@
   const changed = () => {
     revision += 1;
     error = voice.error;
+    videoDegraded = voice.videoDegraded;
   };
 
   function selectedChannel(reference = channelRef) {
@@ -1086,6 +1088,9 @@
 
   <main class="voice-stage">
     {#if error}<p class="voice-error" role="alert">{error}</p>{/if}
+    {#if videoDegraded}<p class="voice-permission-notice" role="status">
+        Video quality reduced to keep this call usable.
+      </p>{/if}
     {#if takeoverPrompt}
       <div class="takeover-prompt" role="alertdialog" aria-labelledby="voice-takeover-title">
         <span><Icon name="screen" size={28} /></span>

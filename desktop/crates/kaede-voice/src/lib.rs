@@ -1,11 +1,13 @@
 //! `LiveKit` transport backed exclusively by Kaede's `CPAL` audio graph.
 
+mod native_video_probe;
+
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
     time::Duration,
@@ -28,10 +30,10 @@ use livekit::{
         EncryptionType,
         key_provider::{KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions},
     },
-    options::{AudioEncoding, BackupVideoCodec, TrackPublishOptions, VideoCodec, VideoEncoding},
+    options::{AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         DataPacket, DataPacketKind, DisconnectReason, LocalAudioTrack, LocalTrack, LocalVideoTrack,
-        Participant, RemoteTrack, Room, RoomEvent, RoomOptions, TrackSource,
+        Participant, RemoteTrack, Room, RoomEvent, RoomOptions, TrackKind, TrackSource,
     },
     webrtc::{
         audio_frame::AudioFrame,
@@ -247,6 +249,7 @@ pub enum VoiceStatus {
 #[derive(Clone, Debug)]
 pub struct RemoteVideoFrame {
     pub participant: String,
+    pub screen_share: bool,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
@@ -354,6 +357,7 @@ impl Default for ScreenShareSettings {
 }
 
 pub struct VoiceHandle {
+    pub video_degraded: Arc<AtomicBool>,
     pub commands: mpsc::UnboundedSender<VoiceCommand>,
     pub status: watch::Receiver<VoiceStatus>,
     /// Becomes true when authoritative local permissions no longer match the
@@ -530,6 +534,7 @@ async fn join(
         screen_sharing: false,
         camera_enabled: false,
     });
+    let video_degraded = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(run_room(
         room,
         events,
@@ -550,8 +555,10 @@ async fn join(
         priority_speakers_tx,
         grant_stale_tx,
         processor_chain,
+        video_degraded.clone(),
     ));
     Ok(VoiceHandle {
+        video_degraded,
         commands: command_tx,
         status: status_rx,
         grant_stale: grant_stale_rx,
@@ -602,6 +609,7 @@ fn media_room_options(
     match (grant.e2ee, media_key) {
         (false, None) => {
             let mut options = RoomOptions::default();
+            options.auto_subscribe = false;
             options.dynacast = true;
             Ok(options)
         }
@@ -639,6 +647,8 @@ fn media_room_options(
                 key,
             );
             let mut options = RoomOptions::default();
+            options.auto_subscribe = false;
+            options.dynacast = true;
             options.encryption = Some(E2eeOptions {
                 encryption_type: EncryptionType::Gcm,
                 key_provider: provider,
@@ -846,6 +856,7 @@ async fn run_room(
     priority_speakers: watch::Sender<BTreeSet<String>>,
     grant_stale: watch::Sender<bool>,
     mut processor_chain: ProcessorChain,
+    video_degraded: Arc<AtomicBool>,
 ) {
     let playback_sink = playback.sink();
     let playback_mixer = playback.mixer();
@@ -859,10 +870,156 @@ async fn run_room(
     let mut playback_tick = time::interval(AUDIO_FRAME_TIME);
     let mut screen_share: Option<PublishedVideo> = None;
     let mut camera: Option<PublishedVideo> = None;
+    let mut video_tick = time::interval(Duration::from_secs(2));
+    video_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let mut subscriptions = BTreeSet::new();
+    let mut budget = VideoBudget::default();
+    let mut video_peers: BTreeMap<String, VideoPeer> = BTreeMap::new();
+    let publisher_samples = Arc::new(Mutex::new(
+        BTreeMap::<String, (u32, f64, std::time::Instant)>::new(),
+    ));
+    let receiver_health = Arc::new(Mutex::new(BTreeMap::<String, ReceiverHealth>::new()));
+    let (performance_tx, mut performance_rx) = mpsc::channel(1);
+    let mut performance_job: Option<JoinHandle<()>> = None;
+    let mut capability_tick = time::interval(Duration::from_secs(10));
+    capability_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let mut video_readers: BTreeMap<(String, bool), (String, JoinHandle<()>)> = BTreeMap::new();
     capture_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     playback_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            report = performance_rx.recv() => {
+                if let Some((cpu, bandwidth, observed)) = report {
+                    if camera.is_none() && screen_share.is_none() { budget = VideoBudget::default(); }
+                    if observed && budget.observe(cpu, bandwidth) {
+                        for video in [camera.as_mut(), screen_share.as_mut()].into_iter().flatten() {
+                            if video.adjustment.as_ref().is_some_and(|task| !task.is_finished()) { continue; }
+                            video.adjustment = Some(adjust_video_budget(&room, video, budget.level, cpu));
+                        }
+                    }
+                    if !observed { budget.bad = 0; budget.healthy = 0; }
+                    let receiver_degraded = receiver_health.lock().is_ok_and(|states| states.values().any(|state| matches!(state.health, "decode" | "download")));
+                    video_degraded.store(budget.level > 0 || receiver_degraded, Ordering::Release);
+                }
+            }
+            _ = capability_tick.tick() => {
+                for video in [camera.as_mut(), screen_share.as_mut()].into_iter().flatten() {
+                    let demand_key = format!("{}/{}", local_identity, if video.source == TrackSource::Screenshare { "screen_share" } else { "camera" });
+                    let desired = preferred_native_variant(&video_peers, room.remote_participants().len(), &demand_key, budget.level);
+                    video.variant_retry = video.variant_retry.saturating_sub(1);
+                    let h264_allowed = h264_compatible(&video_peers, room.remote_participants().len(), &demand_key);
+                    let has_h264 = video.variants.lock().is_ok_and(|tracks| tracks.iter().any(|track| track.name().ends_with(":h264")));
+                    if (desired != video.requested_variant || (has_h264 && !h264_allowed)) && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
+                        let retired = video.variants.lock().map(|mut tracks| std::mem::take(&mut *tracks)).unwrap_or_default();
+                        if !retired.is_empty() {
+                            let participant = room.local_participant();
+                            video.adjustment = Some(tokio::spawn(async move { for variant in retired { let _ = participant.unpublish_track(&variant.sid()).await; } }));
+                        }
+                        video.variant_retry = 0;
+                        video.requested_variant = desired;
+                    }
+                    let has_variant = video.variants.lock().is_ok_and(|tracks| !tracks.is_empty());
+                    if let Some(codec) = desired {
+                        if (!has_variant || (codec == VideoCodec::AV1 && has_h264)) && video.variant_retry == 0 && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
+                            video.adjustment = Some(enable_video_variant(&room, video, codec, h264_compatible(&video_peers, room.remote_participants().len(), &demand_key)));
+                            video.variant_retry = 6;
+                        }
+                    }
+                    if video.capture_level.load(Ordering::Acquire) != u32::from(budget.level)
+                        && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
+                        video.adjustment = Some(adjust_video_budget(&room, video, budget.level, false));
+                    }
+                }
+                if performance_job.as_ref().is_none_or(JoinHandle::is_finished) {
+                    let tracks: Vec<_> = [camera.as_ref(), screen_share.as_ref()].into_iter().flatten().flat_map(|video| {
+                        let mut tracks = vec![video.track.clone()];
+                        if let Ok(variants) = video.variants.lock() { tracks.extend(variants.iter().cloned()); }
+                        tracks
+                    }).collect();
+                    let receivers: Vec<_> = room.remote_participants().values().flat_map(|participant| {
+                        participant.track_publications().into_values().filter(|publication| publication.kind() == TrackKind::Video)
+                            .map(|publication| (format!("{}/{}", participant.identity(), if publication.source() == TrackSource::Screenshare { "screen_share" } else { "camera" }), publication)).collect::<Vec<_>>()
+                    }).collect();
+                    if let Ok(mut states) = receiver_health.lock() {
+                        states.retain(|key, _| receivers.iter().any(|(active_key, _)| active_key == key));
+                    }
+                    let receiver_state = receiver_health.clone();
+                    let publisher_state = publisher_samples.clone();
+                    let report_tx = performance_tx.clone();
+                    performance_job = Some(tokio::spawn(async move {
+                        use livekit::webrtc::stats::{RtcStats, QualityLimitationReason};
+                        let (mut cpu, mut bandwidth, mut observed) = (false, false, false);
+                        let (mut combined_load, mut incomplete) = (0.0, false);
+                        for track in tracks {
+                            if let Ok(Ok(stats)) = time::timeout(Duration::from_secs(2), track.get_stats()).await {
+                                for stat in stats {
+                                    if let RtcStats::OutboundRtp(stat) = stat {
+                                        let key = format!("{}/{}", track.sid(), stat.rtc.id);
+                                        let now = std::time::Instant::now();
+                                        let previous = publisher_state.lock().ok().and_then(|mut states| states.insert(key, (stat.outbound.frames_encoded, stat.outbound.total_encode_time, now)));
+                                        let Some((previous_frames, previous_time, previous_sample)) = previous else { continue; };
+                                        let frames = stat.outbound.frames_encoded.saturating_sub(previous_frames);
+                                        if frames == 0 { continue; }
+                                        observed = true;
+                                        let verified_hardware = native_video_probe::hardware_encoder(stat.outbound.power_efficient_encoder, &stat.outbound.encoder_implementation);
+                                        cpu |= (track.name().ends_with(":av1") || track.name().ends_with(":h264")) && !verified_hardware;
+                                        let elapsed = stat.outbound.total_encode_time - previous_time;
+                                        if !elapsed.is_finite() || elapsed <= 0.0 { incomplete = true; continue; }
+                                        // Hardware encode durations overlap across independent engines;
+                                        // only software work consumes this shared CPU budget.
+                                        if !verified_hardware { combined_load += elapsed / now.duration_since(previous_sample).as_secs_f64().max(0.001); }
+                                        cpu |= elapsed / f64::from(frames) > 0.8 / stat.outbound.frames_per_second.max(15.0);
+                                        cpu |= stat.outbound.quality_limitation_reason == QualityLimitationReason::Cpu;
+                                        bandwidth |= stat.outbound.quality_limitation_reason == QualityLimitationReason::Bandwidth;
+                                    }
+                                }
+                            }
+                        }
+                        for (key, publication) in receivers {
+                            let Some(RemoteTrack::Video(track)) = publication.track() else { continue; };
+                            let mut sampled = false;
+                            if let Ok(Ok(stats)) = time::timeout(Duration::from_secs(2), track.get_stats()).await {
+                                for stat in stats {
+                                    if let RtcStats::InboundRtp(stat) = stat {
+                                        sampled = true;
+                                        if let Ok(mut states) = receiver_state.lock() {
+                                            let state = states.entry(key.clone()).or_default();
+                                            let sid = publication.sid().to_string();
+                                            if state.sid != sid {
+                                                *state = ReceiverHealth { sid, health: state.health, ..ReceiverHealth::default() };
+                                            }
+                                            match state.observe(&stat) {
+                                                Some("healthy") => publication.set_video_quality(livekit::track::VideoQuality::High),
+                                                Some(_) => publication.set_video_quality(livekit::track::VideoQuality::Low),
+                                                None => {},
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !sampled {
+                                if let Ok(mut states) = receiver_state.lock() {
+                                    if let Some(state) = states.get_mut(&key) { state.unknown(); }
+                                }
+                            }
+                        }
+                        cpu |= combined_load > 0.8;
+                        let _ = report_tx.send((cpu, bandwidth, observed && (!incomplete || cpu || bandwidth))).await;
+                    }));
+                }
+
+                let local = room.local_participant();
+                let payload = native_video_capabilities(&receiver_health);
+                tokio::spawn(async move {
+                    let _ = local.publish_data(DataPacket {
+                        payload, topic: Some("kaede.video.v1".to_owned()), reliable: true,
+                        ..DataPacket::default()
+                    }).await;
+                });
+            }
+            _ = video_tick.tick() => {
+                reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health);
+            }
             _ = playback_tick.tick() => {
                 let frame = playback_mixer.drain((VOICE_SAMPLE_RATE / 100) as usize);
                 playback_sink.push_voice_frame(&frame, VOICE_SAMPLE_RATE, VOICE_CHANNELS);
@@ -1083,10 +1240,14 @@ async fn run_room(
                             }
                         });
                     }
-                    Some(RoomEvent::TrackSubscribed { track: RemoteTrack::Video(track), participant, .. }) => {
+                    Some(RoomEvent::TrackSubscribed { track: RemoteTrack::Video(track), publication, participant }) => {
+                        let screen_share = publication.source() == TrackSource::Screenshare;
                         let video_frames = video_frames.clone();
                         let participant = participant.identity().to_string();
-                        tokio::spawn(async move {
+                        let key = (participant.clone(), screen_share);
+                        if let Some((_, reader)) = video_readers.remove(&key) { reader.abort(); }
+                        let sid = publication.sid().to_string();
+                        let reader = tokio::spawn(async move {
                             let mut stream = NativeVideoStream::new(track.rtc_track());
                             while let Some(frame) = stream.next().await {
                                 let width = frame.buffer.width();
@@ -1098,22 +1259,34 @@ async fn run_room(
                                     continue;
                                 };
                                 frame.buffer.to_argb(VideoFormatType::RGBA, &mut rgba, width.saturating_mul(4), width_i32, height_i32);
-                                let _ = video_frames.try_send(RemoteVideoFrame { participant: participant.clone(), width, height, rgba, removed: false });
+                                let _ = video_frames.try_send(RemoteVideoFrame { participant: participant.clone(), screen_share, width, height, rgba, removed: false });
                             }
-                            let _ = video_frames
-                                .send(RemoteVideoFrame {
-                                    participant,
-                                    width: 0,
-                                    height: 0,
-                                    rgba: Vec::new(),
-                                    removed: true,
-                                })
-                                .await;
                         });
+                        video_readers.insert(key, (sid, reader));
+                    }
+                    Some(RoomEvent::TrackUnsubscribed { track: RemoteTrack::Video(_), publication, participant }) => {
+                        let key = (participant.identity().to_string(), publication.source() == TrackSource::Screenshare);
+                        if video_readers.get(&key).is_some_and(|(sid, _)| *sid == publication.sid().to_string()) {
+                            if let Some((_, reader)) = video_readers.remove(&key) { reader.abort(); }
+                            let _ = video_frames.try_send(RemoteVideoFrame {
+                                participant: key.0, screen_share: key.1,
+                                width: 0, height: 0, rgba: Vec::new(), removed: true,
+                            });
+                        }
                     }
                     Some(RoomEvent::DataReceived { payload, topic, kind, participant }) => {
                         let Some(participant) = participant else { continue };
                         let identity = participant.identity().to_string();
+                        if topic.as_deref() == Some("kaede.video.v1") {
+                            if payload.len() <= 8192 {
+                                if let Ok(peer) = serde_json::from_slice::<VideoPeer>(&payload) {
+                                    if peer.v == 1 && !peer.codecs.is_empty() && peer.codecs.len() <= 3 && peer.codecs.iter().all(|codec| matches!(codec.as_str(), "av1" | "vp8" | "h264")) && peer.demand.len() <= 64 {
+                                        video_peers.insert(identity, peer);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         let Some(active) = decode_priority_speaker_signal(
                             &identity,
                             &participant.metadata(),
@@ -1189,6 +1362,13 @@ async fn run_room(
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
                         let identity = participant.identity().to_string();
                         playback_mixer.remove_participant(&identity);
+                        video_peers.remove(&identity);
+                        for screen_share in [false, true] {
+                            if let Some((_, reader)) = video_readers.remove(&(identity.clone(), screen_share)) {
+                                reader.abort();
+                                let _ = video_frames.try_send(RemoteVideoFrame { participant: identity.clone(), screen_share, width: 0, height: 0, rgba: Vec::new(), removed: true });
+                            }
+                        }
                         set_priority_speaker(&priority_speakers, &identity, false);
                     }
                     Some(RoomEvent::TrackUnsubscribed { track: RemoteTrack::Audio(_), publication, participant }) => {
@@ -1202,6 +1382,9 @@ async fn run_room(
                         }
                     }
                     Some(RoomEvent::Reconnecting) => {
+                        video_degraded.store(false, Ordering::Release);
+                        video_peers.clear();
+                        if let Ok(mut states) = receiver_health.lock() { states.clear(); }
                         priority_push_to_talk_active = false;
                         playback_mixer.clear_priority_active();
                         priority_speakers.send_modify(BTreeSet::clear);
@@ -1211,6 +1394,8 @@ async fn run_room(
                         let _ = status.send(VoiceStatus::Reconnecting);
                     }
                     Some(RoomEvent::Reconnected) => {
+                        subscriptions.clear();
+                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health);
                         let _ = status.send(VoiceStatus::Connected {
                             room: room.name(),
                             can_speak,
@@ -1231,6 +1416,13 @@ async fn run_room(
                 }
             }
         }
+    }
+    video_degraded.store(false, Ordering::Release);
+    if let Some(job) = performance_job {
+        job.abort();
+    }
+    for (_, reader) in video_readers.into_values() {
+        reader.abort();
     }
     playback_mixer.clear_priority_active();
     priority_speakers.send_modify(BTreeSet::clear);
@@ -1267,43 +1459,459 @@ fn send_media_error(
     });
 }
 
+#[derive(Default)]
+struct VideoBudget {
+    level: u8,
+    bad: u8,
+    healthy: u8,
+    cooldown: u8,
+}
+
+impl VideoBudget {
+    // Ten-second samples: thirty seconds of degradation, sixty seconds of
+    // recovery, with thirty seconds between transitions across both sources.
+    fn observe(&mut self, cpu: bool, bandwidth: bool) -> bool {
+        self.cooldown = self.cooldown.saturating_sub(1);
+        if cpu || bandwidth {
+            self.bad = self.bad.saturating_add(1);
+            self.healthy = 0;
+        } else {
+            self.healthy = self.healthy.saturating_add(1);
+            self.bad = 0;
+        }
+        let next = if self.bad >= 3 {
+            (self.level + 1).min(3)
+        } else if self.healthy >= 6 {
+            self.level.saturating_sub(1)
+        } else {
+            self.level
+        };
+        if next == self.level || self.cooldown > 0 {
+            return false;
+        }
+        self.level = next;
+        self.cooldown = 3;
+        self.bad = 0;
+        self.healthy = 0;
+        true
+    }
+}
+
+fn preferred_native_variant(
+    peers: &BTreeMap<String, VideoPeer>,
+    participant_count: usize,
+    key: &str,
+    budget: u8,
+) -> Option<VideoCodec> {
+    if budget == 0
+        && peers.values().any(|peer| {
+            peer.codecs.iter().any(|codec| codec == "av1")
+                && peer.demand.get(key).is_none_or(|codec| codec == "av1")
+        })
+    {
+        return Some(VideoCodec::AV1);
+    }
+    if h264_compatible(peers, participant_count, key) {
+        return Some(VideoCodec::H264);
+    }
+    None
+}
+
+fn h264_compatible(
+    peers: &BTreeMap<String, VideoPeer>,
+    participant_count: usize,
+    key: &str,
+) -> bool {
+    participant_count > 0
+        && peers.len() == participant_count
+        && peers.values().all(|peer| {
+            peer.codecs.iter().any(|codec| codec == "h264")
+                && peer.demand.get(key).is_none_or(|codec| codec != "vp8")
+        })
+}
+
+fn enable_video_variant(
+    room: &Room,
+    video: &PublishedVideo,
+    mut codec: VideoCodec,
+    allow_h264: bool,
+) -> JoinHandle<()> {
+    let participant = room.local_participant();
+    let stop = video.stop.clone();
+    let source = video.track.rtc_source();
+    let dimensions = source.video_resolution();
+    let mut encoding = video.encoding.clone();
+    let level = video.capture_level.load(Ordering::Acquire).min(3);
+    let factor = 0.65_f64.powi(level as i32);
+    encoding.max_bitrate = ((encoding.max_bitrate as f64 * factor) as u64).max(300_000);
+    encoding.max_framerate = (encoding.max_framerate * factor.sqrt()).max(5.0);
+    let variants = video.variants.clone();
+    let track_source = video.source;
+    let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
+    tokio::spawn(async move {
+        let mut codec_name = if codec == VideoCodec::H264 {
+            "h264"
+        } else {
+            "av1"
+        };
+        if !native_video_probe::hardware_codec(
+            codec_name,
+            dimensions.width,
+            dimensions.height,
+            encoding.clone(),
+            &stop,
+        )
+        .await
+        {
+            if stop.load(Ordering::Acquire)
+                || codec != VideoCodec::AV1
+                || !allow_h264
+                || !native_video_probe::hardware_codec(
+                    "h264",
+                    dimensions.width,
+                    dimensions.height,
+                    encoding.clone(),
+                    &stop,
+                )
+                .await
+            {
+                return;
+            }
+            codec = VideoCodec::H264;
+            codec_name = "h264";
+        }
+        if variants.lock().is_ok_and(|tracks| {
+            tracks
+                .iter()
+                .any(|track| track.name().ends_with(&format!(":{codec_name}")))
+        }) {
+            return;
+        }
+        // H264 is useful here only when its actual acceleration beats VP8.
+        if codec == VideoCodec::H264
+            && native_video_probe::hardware_codec(
+                "vp8",
+                dimensions.width,
+                dimensions.height,
+                encoding.clone(),
+                &stop,
+            )
+            .await
+        {
+            return;
+        }
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let source_name = if track_source == TrackSource::Screenshare {
+            "screen_share"
+        } else {
+            "camera"
+        };
+        let name = format!("kaede.video.v1:{source_name}:{codec_name}");
+        let track = LocalVideoTrack::create_video_track(&name, source);
+        let options = TrackPublishOptions {
+            source: track_source,
+            video_codec: codec,
+            video_encoder: livekit::webrtc::rtp_sender::VideoEncoderBackend::Hardware,
+            simulcast: false,
+            scalability_mode: (codec == VideoCodec::AV1).then(|| "L1T1".to_owned()),
+            ..video_publish_options(encrypted, encoding)
+        };
+        let retired = variants
+            .lock()
+            .map(|mut tracks| std::mem::take(&mut *tracks))
+            .unwrap_or_default();
+        for retired in retired {
+            let _ = participant.unpublish_track(&retired.sid()).await;
+        }
+        if participant
+            .publish_track(LocalTrack::Video(track.clone()), options)
+            .await
+            .is_ok()
+        {
+            if let Ok(mut variants) = variants.lock() {
+                variants.push(track);
+            }
+        }
+    })
+}
+
+fn adjust_video_budget(
+    room: &Room,
+    video: &PublishedVideo,
+    level: u8,
+    cpu: bool,
+) -> JoinHandle<()> {
+    video
+        .capture_level
+        .store(u32::from(level), Ordering::Release);
+    let participant = room.local_participant();
+    let track = video.track.clone();
+    let source = video.source;
+    let mut encoding = video.encoding.clone();
+    let factor = 0.65_f64.powi(i32::from(level));
+    encoding.max_bitrate = ((encoding.max_bitrate as f64 * factor) as u64).max(300_000);
+    // Low-motion screen content keeps pixels legible by surrendering frames
+    // first. Motion-oriented shares and cameras retain at least 15 fps.
+    let floor = if source == TrackSource::Screenshare && encoding.max_framerate <= 15.0 {
+        5.0
+    } else {
+        15.0
+    };
+    encoding.max_framerate = (encoding.max_framerate * factor.sqrt())
+        .max(floor)
+        .min(video.encoding.max_framerate);
+    let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
+    let options = TrackPublishOptions {
+        source,
+        simulcast: !(cpu && level > 0),
+        ..video_publish_options(encrypted, encoding)
+    };
+    let variants = video.variants.clone();
+    let original = TrackPublishOptions {
+        source,
+        ..video_publish_options(encrypted, video.encoding.clone())
+    };
+    tokio::spawn(async move {
+        // Shared sustained pressure retires the second encoder before reducing
+        // the universally supported track. Audio remains untouched.
+        let retired = variants
+            .lock()
+            .map(|mut tracks| std::mem::take(&mut *tracks))
+            .unwrap_or_default();
+        for variant in retired {
+            let _ = participant.unpublish_track(&variant.sid()).await;
+        }
+        // The public SDK has no sender handle. Re-publish the SAME source;
+        // room E2EE/key provider and capture ownership survive unchanged.
+        if participant.unpublish_track(&track.sid()).await.is_err() {
+            return;
+        }
+        if let Err(error) = participant
+            .publish_track(LocalTrack::Video(track.clone()), options)
+            .await
+        {
+            tracing::warn!(%error, "video adaptation failed; restoring fallback publication");
+            if let Err(error) = participant
+                .publish_track(LocalTrack::Video(track), original)
+                .await
+            {
+                tracing::warn!(%error, "video fallback restoration failed");
+            }
+        }
+    })
+}
+
+#[derive(Deserialize)]
+struct VideoPeer {
+    v: u8,
+    codecs: Vec<String>,
+    #[serde(default)]
+    demand: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct ReceiverHealth {
+    sid: String,
+    frames: u32,
+    frames_received: u64,
+    initialized: bool,
+    decode_time: f64,
+    lost: i64,
+    received: u64,
+    bad: u8,
+    healthy: u8,
+    health: &'static str,
+}
+
+impl ReceiverHealth {
+    fn unknown(&mut self) {
+        self.bad = 0;
+        self.healthy = 0;
+        self.initialized = false;
+    }
+
+    fn observe(&mut self, stat: &livekit::webrtc::stats::InboundRtpStats) -> Option<&'static str> {
+        let frames = stat.inbound.frames_decoded.saturating_sub(self.frames);
+        let complete = stat
+            .inbound
+            .frames_received
+            .saturating_sub(self.frames_received);
+        let decode_time = stat.inbound.total_decode_time - self.decode_time;
+        let lost = stat.received.packets_lost.saturating_sub(self.lost);
+        let received = stat.received.packets_received.saturating_sub(self.received);
+        let download = lost > 0 && lost as f64 / (received as f64 + lost as f64).max(1.0) > 0.05;
+        let stalled = frames == 0 && complete > 0;
+        let known_decode = frames > 0 && decode_time.is_finite() && decode_time > 0.0;
+        let decode = stalled
+            || (known_decode
+                && decode_time / f64::from(frames)
+                    > 0.8 / stat.inbound.frames_per_second.max(15.0));
+        let known = self.initialized && (download || stalled || known_decode);
+        self.frames = stat.inbound.frames_decoded;
+        self.frames_received = stat.inbound.frames_received;
+        self.decode_time = stat.inbound.total_decode_time;
+        self.lost = stat.received.packets_lost;
+        self.received = stat.received.packets_received;
+        self.initialized = true;
+        if !known {
+            self.bad = 0;
+            self.healthy = 0;
+            return None;
+        }
+        self.bad = if decode || download {
+            self.bad.saturating_add(1)
+        } else {
+            0
+        };
+        self.healthy = if decode || download {
+            0
+        } else {
+            self.healthy.saturating_add(1)
+        };
+        if self.bad >= 3 {
+            self.health = if download { "download" } else { "decode" };
+        } else if self.healthy >= 6 {
+            self.health = "healthy";
+        } else {
+            return None;
+        }
+        Some(self.health)
+    }
+}
+
+fn native_video_capabilities(receiver_health: &Mutex<BTreeMap<String, ReceiverHealth>>) -> Vec<u8> {
+    let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
+        .pc_factory()
+        .get_rtp_receiver_capabilities(livekit::webrtc::MediaType::Video);
+    let codecs: Vec<_> = ["av1", "vp8", "h264"]
+        .into_iter()
+        .filter(|codec| {
+            capabilities.codecs.iter().any(|entry| {
+                entry
+                    .mime_type
+                    .eq_ignore_ascii_case(&format!("video/{codec}"))
+            })
+        })
+        .collect();
+    let mut health = BTreeMap::new();
+    let mut demand = BTreeMap::new();
+    if let Ok(states) = receiver_health.lock() {
+        for (key, state) in states.iter() {
+            if !state.health.is_empty() {
+                health.insert(key.clone(), state.health);
+            }
+            if matches!(state.health, "decode" | "download") {
+                demand.insert(key.clone(), "vp8");
+            }
+        }
+    }
+    serde_json::json!({"v": 1, "codecs": codecs, "demand": demand, "health": health})
+        .to_string()
+        .into_bytes()
+}
+
+// Select one publication per logical source. Audio is explicitly retained when
+// automatic subscriptions are disabled, including independent share audio.
+fn reconcile_video_subscriptions(
+    room: &Room,
+    subscribed: &mut BTreeSet<String>,
+    receiver_health: &Mutex<BTreeMap<String, ReceiverHealth>>,
+) {
+    let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
+        .pc_factory()
+        .get_rtp_receiver_capabilities(livekit::webrtc::MediaType::Video);
+    let mut next = BTreeSet::new();
+    for participant in room.remote_participants().values() {
+        let publications = participant.track_publications();
+        let mut selected = BTreeMap::new();
+        for publication in publications.values() {
+            if publication.kind() == TrackKind::Audio {
+                next.insert(publication.sid().to_string());
+                continue;
+            }
+            let mime = publication.mime_type().to_ascii_lowercase();
+            if !mime.is_empty()
+                && !capabilities
+                    .codecs
+                    .iter()
+                    .any(|codec| codec.mime_type.eq_ignore_ascii_case(&mime))
+            {
+                continue;
+            }
+            let source = format!("{:?}", publication.source());
+            // Software AV1 decoding is allowed; MIME support never authorizes
+            // hardware AV1 publishing. Prefer AV1 only over an equivalent source.
+            let key = format!(
+                "{}/{}",
+                participant.identity(),
+                if publication.source() == TrackSource::Screenshare {
+                    "screen_share"
+                } else {
+                    "camera"
+                }
+            );
+            let decode_overload = receiver_health
+                .lock()
+                .ok()
+                .and_then(|states| {
+                    states
+                        .get(&key)
+                        .map(|state| matches!(state.health, "decode" | "download"))
+                })
+                .unwrap_or(false);
+            let rank = (
+                if mime == "video/av1" {
+                    if decode_overload { 0 } else { 3 }
+                } else if mime == "video/h264" && publication.name().starts_with("kaede.video.v1:")
+                {
+                    2
+                } else {
+                    1
+                },
+                publication.sid().to_string(),
+            );
+            let entry = selected.entry(source).or_insert_with(|| rank.clone());
+            if rank > *entry {
+                *entry = rank;
+            }
+        }
+        next.extend(selected.into_values().map(|(_, sid)| sid));
+        for publication in publications.values() {
+            let sid = publication.sid().to_string();
+            if next.contains(&sid) != subscribed.contains(&sid) {
+                publication.set_subscribed(next.contains(&sid));
+            }
+        }
+    }
+    *subscribed = next;
+}
+
 struct PublishedVideo {
     track: LocalVideoTrack,
+    source: TrackSource,
+    encoding: VideoEncoding,
+    adjustment: Option<JoinHandle<()>>,
+    capture_level: Arc<AtomicU32>,
+    variants: Arc<Mutex<Vec<LocalVideoTrack>>>,
+    requested_variant: Option<VideoCodec>,
+    variant_retry: u8,
     stop: Arc<AtomicBool>,
     capture_thread: Option<thread::JoinHandle<()>>,
 }
 
-// Coordinated clients ship the AV1 cryptor; VP8 remains the encrypted backup.
-fn video_publish_options(encrypted: bool, encoding: VideoEncoding) -> TrackPublishOptions {
-    let mut options = TrackPublishOptions {
-        video_encoding: Some(encoding.clone()),
+// The pinned native SDK reports codec MIME support and backend availability,
+// not hardware support for a codec at the requested dimensions/framerate.
+// Unknown AV1 acceleration must therefore use the interoperable single encode.
+// Encryption belongs to the Room and never participates in codec selection.
+fn video_publish_options(_encrypted: bool, encoding: VideoEncoding) -> TrackPublishOptions {
+    TrackPublishOptions {
+        video_encoding: Some(encoding),
+        video_codec: VideoCodec::VP8,
+        backup_codec: None,
         ..Default::default()
-    };
-    let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
-        .pc_factory()
-        .get_rtp_sender_capabilities(livekit::webrtc::MediaType::Video);
-    let supports = |mime: &str| {
-        capabilities
-            .codecs
-            .iter()
-            .any(|c| c.mime_type.eq_ignore_ascii_case(mime))
-    };
-    let fallback = if !encrypted && supports("video/h264") {
-        VideoCodec::H264
-    } else {
-        VideoCodec::VP8
-    };
-    options.video_codec = fallback;
-    if supports("video/av1") {
-        options.video_codec = VideoCodec::AV1;
-        options.scalability_mode = Some("L3T3_KEY".into());
-        options.backup_codec = Some(BackupVideoCodec {
-            codec: fallback,
-            encoding: Some(encoding),
-            ..Default::default()
-        });
     }
-    options
 }
 
 async fn publish_screen_share(
@@ -1324,9 +1932,13 @@ async fn publish_screen_share(
         },
         true,
     );
-    let track =
-        LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
+    let track = LocalVideoTrack::create_video_track(
+        "kaede.video.v1:screen_share:vp8",
+        RtcVideoSource::Native(source.clone()),
+    );
     let stop = Arc::new(AtomicBool::new(false));
+    let capture_level = Arc::new(AtomicU32::new(0));
+    let thread_level = capture_level.clone();
     let thread_stop = stop.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let capture_thread = thread::Builder::new()
@@ -1337,6 +1949,7 @@ async fn publish_screen_share(
                 run_screen_capture(
                     source,
                     thread_stop,
+                    thread_level,
                     source_id.as_deref(),
                     settings,
                     ready_tx,
@@ -1385,11 +1998,22 @@ async fn publish_screen_share(
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
         return Err(error.into());
     }
-    Ok(PublishedVideo {
+    let video = PublishedVideo {
+        source: TrackSource::Screenshare,
+        encoding: VideoEncoding {
+            max_bitrate: settings.max_bitrate,
+            max_framerate: f64::from(settings.frame_rate),
+        },
+        adjustment: None,
+        capture_level,
+        variants: Arc::new(Mutex::new(Vec::new())),
+        requested_variant: None,
+        variant_retry: 0,
         track,
         stop,
         capture_thread: Some(capture_thread),
-    })
+    };
+    Ok(video)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1581,15 +2205,27 @@ async fn publish_camera(
         },
         false,
     );
-    let track =
-        LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source.clone()));
+    let track = LocalVideoTrack::create_video_track(
+        "kaede.video.v1:camera:vp8",
+        RtcVideoSource::Native(source.clone()),
+    );
     let stop = Arc::new(AtomicBool::new(false));
+    let capture_level = Arc::new(AtomicU32::new(0));
+    let thread_level = capture_level.clone();
     let thread_stop = stop.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let capture_thread = match thread::Builder::new()
         .name("kaede-camera-capture".to_owned())
-        .spawn(move || run_camera_capture(source, thread_stop, camera_id, settings, ready_tx))
-    {
+        .spawn(move || {
+            run_camera_capture(
+                source,
+                thread_stop,
+                thread_level,
+                camera_id,
+                settings,
+                ready_tx,
+            )
+        }) {
         Ok(thread) => thread,
         Err(error) => return Err(VoiceError::CaptureThread(error)),
     };
@@ -1627,11 +2263,22 @@ async fn publish_camera(
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
         return Err(error.into());
     }
-    Ok(PublishedVideo {
+    let video = PublishedVideo {
+        source: TrackSource::Camera,
+        encoding: VideoEncoding {
+            max_bitrate: settings.max_bitrate,
+            max_framerate: f64::from(settings.frame_rate),
+        },
+        adjustment: None,
+        capture_level,
+        variants: Arc::new(Mutex::new(Vec::new())),
+        requested_variant: None,
+        variant_retry: 0,
         track,
         stop,
         capture_thread: Some(capture_thread),
-    })
+    };
+    Ok(video)
 }
 
 fn open_camera(
@@ -1665,6 +2312,7 @@ fn open_camera(
 fn run_camera_capture(
     source: NativeVideoSource,
     stop: Arc<AtomicBool>,
+    capture_level: Arc<AtomicU32>,
     device_id: Option<String>,
     settings: CameraSettings,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -1716,6 +2364,18 @@ fn run_camera_capture(
                 y.copy_from_slice(&converted.y);
                 u.copy_from_slice(&converted.u);
                 v.copy_from_slice(&converted.v);
+                let shift = capture_level.load(Ordering::Acquire).min(3);
+                let (width, height) = bounded_dimensions(
+                    converted.width,
+                    converted.height,
+                    (settings.width >> shift).max(320),
+                    (settings.height >> shift).max(180),
+                );
+                let buffer = if width != converted.width || height != converted.height {
+                    buffer.scale(width as i32, height as i32)
+                } else {
+                    buffer
+                };
                 source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
             }
             Err(error) => {
@@ -1734,6 +2394,21 @@ async fn stop_published_video(
         return Ok(());
     };
     publication.stop.store(true, Ordering::Release);
+    if let Some(adjustment) = publication.adjustment.take() {
+        let _ = adjustment.await;
+    }
+    let variants = publication
+        .variants
+        .lock()
+        .map(|mut tracks| std::mem::take(&mut *tracks))
+        .unwrap_or_default();
+    for variant in variants {
+        let _ = room
+            .local_participant()
+            .unpublish_track(&variant.sid())
+            .await;
+    }
+    publication.stop.store(true, Ordering::Release);
     if let Some(capture_thread) = publication.capture_thread.take() {
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
     }
@@ -1747,6 +2422,7 @@ async fn stop_published_video(
 fn run_screen_capture(
     source: NativeVideoSource,
     stop: Arc<AtomicBool>,
+    capture_level: Arc<AtomicU32>,
     requested: Option<&str>,
     settings: ScreenShareSettings,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -1804,9 +2480,23 @@ fn run_screen_capture(
     };
 
     let mut ready = Some(ready);
+    let frame_level = capture_level.clone();
     capturer.start_capture(selected, move |result| match result {
         Ok(frame) => {
-            let Some(buffer) = prepare_screen_frame(&frame, settings) else {
+            let level = frame_level.load(Ordering::Acquire).min(3);
+            // Text shares retain resolution until the lowest budget; motion
+            // shares trade pixels before dropping below smooth playback.
+            let shift = if settings.frame_rate <= 15 {
+                u32::from(level == 3)
+            } else {
+                level
+            };
+            let adapted = ScreenShareSettings {
+                width: (settings.width >> shift).max(640),
+                height: (settings.height >> shift).max(360),
+                ..settings
+            };
+            let Some(buffer) = prepare_screen_frame(&frame, adapted) else {
                 return;
             };
             source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
@@ -1829,7 +2519,10 @@ fn run_screen_capture(
     while !stop.load(Ordering::Acquire) {
         capturer.capture_frame();
         thread::sleep(Duration::from_millis(
-            1000_u64 / u64::from(settings.frame_rate.max(1)),
+            1000_u64
+                / u64::from(
+                    (settings.frame_rate >> capture_level.load(Ordering::Acquire).min(2)).max(5),
+                ),
         ));
     }
 }
@@ -2024,48 +2717,100 @@ mod tests {
     };
 
     #[test]
-    fn video_codec_defaults_preserve_encryption_and_offer_backup()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn receiver_detects_decode_stall_and_resets_evidence_across_gaps() {
+        let mut health = super::ReceiverHealth::default();
+        let mut stat = livekit::webrtc::stats::InboundRtpStats::default();
+        assert_eq!(health.observe(&stat), None);
+        for _ in 0..2 {
+            stat.inbound.frames_received += 30;
+            stat.received.packets_received += 100;
+            assert_eq!(health.observe(&stat), None);
+        }
+        // No complete frames or decoded frames means unknown, never recovery.
+        assert_eq!(health.observe(&stat), None);
+        assert_eq!(health.bad, 0);
+        for _ in 0..3 {
+            stat.inbound.frames_received += 30;
+            stat.received.packets_received += 100;
+            health.observe(&stat);
+        }
+        assert_eq!(health.health, "decode");
+        stat.inbound.frames_received += 30;
+        stat.received.packets_lost += 50;
+        assert_eq!(health.observe(&stat), Some("download"));
+        health.unknown();
+        assert_eq!((health.bad, health.healthy), (0, 0));
+        assert_eq!(health.health, "download");
+    }
+
+    #[test]
+    fn native_h264_requires_every_viewer_and_respects_explicit_demand() {
+        let key = "publisher/camera";
+        let mut peers = std::collections::BTreeMap::new();
+        peers.insert(
+            "viewer".to_owned(),
+            super::VideoPeer {
+                v: 1,
+                codecs: vec!["vp8".to_owned(), "h264".to_owned()],
+                demand: Default::default(),
+            },
+        );
+        assert_eq!(
+            super::preferred_native_variant(&peers, 1, key, 0),
+            Some(VideoCodec::H264)
+        );
+        assert_eq!(super::preferred_native_variant(&peers, 2, key, 0), None);
+        peers
+            .get_mut("viewer")
+            .unwrap()
+            .demand
+            .insert(key.to_owned(), "vp8".to_owned());
+        assert_eq!(super::preferred_native_variant(&peers, 1, key, 0), None);
+        peers.get_mut("viewer").unwrap().demand.clear();
+        peers
+            .get_mut("viewer")
+            .unwrap()
+            .codecs
+            .push("av1".to_owned());
+        assert_eq!(
+            super::preferred_native_variant(&peers, 1, key, 0),
+            Some(VideoCodec::AV1)
+        );
+        assert_eq!(
+            super::preferred_native_variant(&peers, 1, key, 1),
+            Some(VideoCodec::H264)
+        );
+    }
+
+    #[test]
+    fn combined_video_budget_requires_sustained_evidence_and_slow_recovery() {
+        let mut budget = super::VideoBudget::default();
+        assert!(!budget.observe(true, false));
+        assert!(!budget.observe(false, false));
+        assert!(!budget.observe(false, true));
+        assert!(!budget.observe(false, true));
+        assert!(budget.observe(false, true));
+        assert_eq!(budget.level, 1);
+        for _ in 0..5 {
+            assert!(!budget.observe(false, false));
+        }
+        assert!(budget.observe(false, false));
+        assert_eq!(budget.level, 0);
+    }
+
+    #[test]
+    fn video_codec_defaults_are_conservative_and_independent_of_encryption() {
         let encoding = VideoEncoding {
             max_bitrate: 2_500_000,
             max_framerate: 30.0,
         };
-        let encrypted = video_publish_options(true, encoding.clone());
-        let plain = video_publish_options(false, encoding);
-        let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
-            .pc_factory()
-            .get_rtp_sender_capabilities(livekit::webrtc::MediaType::Video);
-        let supports = |mime: &str| {
-            capabilities
-                .codecs
-                .iter()
-                .any(|codec| codec.mime_type.eq_ignore_ascii_case(mime))
-        };
-        let fallback = if supports("video/h264") {
-            VideoCodec::H264
-        } else {
-            VideoCodec::VP8
-        };
-        if supports("video/av1") {
-            assert_eq!(encrypted.video_codec, VideoCodec::AV1);
-            assert_eq!(
-                encrypted.backup_codec.as_ref().map(|c| c.codec),
-                Some(VideoCodec::VP8)
-            );
-            assert_eq!(plain.video_codec, VideoCodec::AV1);
-            let backup = plain.backup_codec.ok_or("missing compatibility backup")?;
-            assert_eq!(backup.codec, fallback);
-            assert_eq!(
-                backup.encoding.map(|value| value.max_bitrate),
-                Some(2_500_000)
-            );
-        } else {
-            assert_eq!(encrypted.video_codec, VideoCodec::VP8);
-            assert!(encrypted.backup_codec.is_none());
-            assert_eq!(plain.video_codec, fallback);
-            assert!(plain.backup_codec.is_none());
+        for encrypted in [false, true] {
+            let options = video_publish_options(encrypted, encoding.clone());
+            assert_eq!(options.video_codec, VideoCodec::VP8);
+            assert!(options.backup_codec.is_none());
+            assert!(options.scalability_mode.is_none());
+            assert_eq!(options.video_encoding.unwrap().max_bitrate, 2_500_000);
         }
-        Ok(())
     }
 
     fn grant(e2ee: bool) -> VoiceGrant {

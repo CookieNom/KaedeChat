@@ -15,6 +15,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/features/voice/adaptive_video.dart';
 import 'package:kaede_mobile/src/features/voice/e2ee_policy.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -381,6 +382,9 @@ final class VoiceSession extends ChangeNotifier {
   var _retryJoinOnResume = false;
   var _disposed = false;
   Timer? _occupancyTimer;
+  AdaptiveVideo? _adaptiveVideo;
+  String? _videoNotice;
+  String? get videoNotice => _videoNotice;
   final Map<String, Map<String, Object?>> _occupants =
       <String, Map<String, Object?>>{};
   final Map<String, double> _participantVolumes = <String, double>{};
@@ -703,7 +707,7 @@ final class VoiceSession extends ChangeNotifier {
             typingNoiseDetection: true,
             stopAudioCaptureOnMute: false,
           ),
-          adaptiveStream: true,
+          adaptiveStream: false,
           dynacast: true,
         ),
       );
@@ -771,12 +775,15 @@ final class VoiceSession extends ChangeNotifier {
               event.publication.source != TrackSource.screenShareVideo) {
             return;
           }
-          _screen = false;
-          unawaited(_activateBackgroundService(room, screenShare: false));
+          _screen = room.localParticipant?.videoTrackPublications.any((p) =>
+                  p.source == TrackSource.screenShareVideo && !p.muted) ??
+              false;
+          unawaited(_activateBackgroundService(room, screenShare: _screen));
           notifyListeners();
         });
 
-      await room.connect(url, token);
+      await room.connect(url, token,
+          connectOptions: const ConnectOptions(autoSubscribe: false));
       if (generation != _generation) return;
       final capabilities = callRef != null
           ? (
@@ -799,6 +806,14 @@ final class VoiceSession extends ChangeNotifier {
       // passed.
       if (generation != _generation) return;
       _room = room;
+      _adaptiveVideo = AdaptiveVideo(room,
+          quality: () => _mediaQuality,
+          onNotice: (notice) {
+            if (_room != room) return;
+            _videoNotice = notice;
+            _notify();
+          });
+      unawaited(_adaptiveVideo!.start());
       _events = events;
       _voiceMediaPolicy = mediaPolicy;
       candidate = null;
@@ -1034,6 +1049,10 @@ final class VoiceSession extends ChangeNotifier {
     }
     await _room?.localParticipant?.setCameraEnabled(
       next,
+      videoPublishOptions: _room == null
+          ? null
+          : AdaptiveVideo.publishOptions(
+              _room!, TrackSource.camera, _mediaQuality),
       cameraCaptureOptions:
           cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
     );
@@ -1092,6 +1111,8 @@ final class VoiceSession extends ChangeNotifier {
     try {
       await participant.setScreenShareEnabled(
         true,
+        videoPublishOptions: AdaptiveVideo.publishOptions(
+            room, TrackSource.screenShareVideo, quality),
         captureScreenAudio: false,
         screenShareCaptureOptions: quality.screenCaptureOptions(
           useIosBroadcastExtension:
@@ -1590,6 +1611,8 @@ final class VoiceSession extends ChangeNotifier {
         }
         await participant.setCameraEnabled(
           true,
+          videoPublishOptions: AdaptiveVideo.publishOptions(
+              room, TrackSource.camera, _mediaQuality),
           cameraCaptureOptions:
               cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
         );
@@ -1601,6 +1624,8 @@ final class VoiceSession extends ChangeNotifier {
         }
         await participant.setScreenShareEnabled(
           true,
+          videoPublishOptions: AdaptiveVideo.publishOptions(
+              room, TrackSource.screenShareVideo, _mediaQuality),
           captureScreenAudio: false,
           screenShareCaptureOptions: _mediaQuality.screenCaptureOptions(
             useIosBroadcastExtension:
@@ -1657,6 +1682,9 @@ final class VoiceSession extends ChangeNotifier {
     if (_room != room) return;
     _generation += 1;
     final events = _events;
+    _adaptiveVideo?.close();
+    _adaptiveVideo = null;
+    _videoNotice = null;
     _room = null;
     _events = null;
     room.removeListener(_notifyRoomChanged);
@@ -1735,6 +1763,9 @@ final class VoiceSession extends ChangeNotifier {
     _occupants.clear();
     final room = _room;
     final events = _events;
+    _adaptiveVideo?.close();
+    _adaptiveVideo = null;
+    _videoNotice = null;
     _room = null;
     _events = null;
     _voiceMediaPolicy = VoiceMediaPolicy.defaults;

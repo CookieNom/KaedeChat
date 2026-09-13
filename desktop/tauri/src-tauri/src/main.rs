@@ -2769,6 +2769,14 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
     };
     let ui = state.voice_ui.read().await;
     if let Value::Object(map) = &mut value {
+        map.insert(
+            "video_degraded".to_owned(),
+            Value::Bool(
+                voice
+                    .video_degraded
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
+        );
         map.insert("muted".to_owned(), Value::Bool(ui.muted));
         map.insert("deafened".to_owned(), Value::Bool(ui.deafened));
         map.insert(
@@ -2812,12 +2820,13 @@ async fn native_voice_next_video(
             "An incoming video stream could not be displayed. Leave voice and join again; update Kaede if it keeps happening.",
         )
     })?;
-    let mut packet = Vec::with_capacity(15 + participant.len() + frame.rgba.len());
-    packet.extend_from_slice(b"KVD1");
+    let mut packet = Vec::with_capacity(16 + participant.len() + frame.rgba.len());
+    packet.extend_from_slice(b"KVD2");
     packet.extend_from_slice(&frame.width.to_le_bytes());
     packet.extend_from_slice(&frame.height.to_le_bytes());
     packet.extend_from_slice(&participant_length.to_le_bytes());
     packet.push(u8::from(frame.removed));
+    packet.push(u8::from(frame.screen_share));
     packet.extend_from_slice(participant);
     packet.extend_from_slice(&frame.rgba);
     Ok(tauri::ipc::Response::new(packet))

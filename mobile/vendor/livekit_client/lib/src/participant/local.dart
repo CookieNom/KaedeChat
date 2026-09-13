@@ -252,8 +252,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         );
       }
 
-      // vp9 svc with screenshare has problem to encode, always use L1T3 here
-      if (track.source == TrackSource.screenShareVideo) {
+      // VP9 screenshare needs L1T3; AV1 hardware may support L1T1 only.
+      if (track.source == TrackSource.screenShareVideo && publishOptions.videoCodec == 'vp9') {
         publishOptions = publishOptions.copyWith(
           scalabilityMode: 'L1T3',
         );
@@ -668,9 +668,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   }
 
   /// Shortcut for publishing a [TrackSource.camera]
-  Future<LocalTrackPublication?> setCameraEnabled(bool enabled, {CameraCaptureOptions? cameraCaptureOptions}) async {
+  Future<LocalTrackPublication?> setCameraEnabled(bool enabled,
+      {CameraCaptureOptions? cameraCaptureOptions, VideoPublishOptions? videoPublishOptions}) async {
     cameraCaptureOptions ??= room.roomOptions.defaultCameraCaptureOptions;
-    return setSourceEnabled(TrackSource.camera, enabled, cameraCaptureOptions: cameraCaptureOptions);
+    return setSourceEnabled(TrackSource.camera, enabled,
+        cameraCaptureOptions: cameraCaptureOptions, videoPublishOptions: videoPublishOptions);
   }
 
   /// Shortcut for publishing a [TrackSource.microphone]
@@ -681,10 +683,14 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
   /// Shortcut for publishing a [TrackSource.screenShareVideo]
   Future<LocalTrackPublication?> setScreenShareEnabled(bool enabled,
-      {bool? captureScreenAudio, ScreenShareCaptureOptions? screenShareCaptureOptions}) async {
+      {bool? captureScreenAudio,
+      ScreenShareCaptureOptions? screenShareCaptureOptions,
+      VideoPublishOptions? videoPublishOptions}) async {
     screenShareCaptureOptions ??= room.roomOptions.defaultScreenShareCaptureOptions;
     return setSourceEnabled(TrackSource.screenShareVideo, enabled,
-        captureScreenAudio: captureScreenAudio, screenShareCaptureOptions: screenShareCaptureOptions);
+        captureScreenAudio: captureScreenAudio,
+        screenShareCaptureOptions: screenShareCaptureOptions,
+        videoPublishOptions: videoPublishOptions);
   }
 
   /// A convenience method to publish a track for a specific [TrackSource].
@@ -693,7 +699,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       {bool? captureScreenAudio,
       AudioCaptureOptions? audioCaptureOptions,
       CameraCaptureOptions? cameraCaptureOptions,
-      ScreenShareCaptureOptions? screenShareCaptureOptions}) async {
+      ScreenShareCaptureOptions? screenShareCaptureOptions,
+      VideoPublishOptions? videoPublishOptions}) async {
     logger.fine('setSourceEnabled(source: $source, enabled: $enabled)');
 
     if (TrackSource.screenShareVideo == source && lkPlatformIsWebMobile()) {
@@ -701,6 +708,13 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     }
 
     final publication = getTrackPublicationBySource(source);
+    if (!enabled && (source == TrackSource.camera || source == TrackSource.screenShareVideo)) {
+      // Explicit codec variants are one logical source. Stop all siblings before
+      // stopping/muting the original so no variant can keep capturing secretly.
+      for (final sibling in videoTrackPublications.where((p) => p.source == source && p != publication).toList()) {
+        await removePublishedTrack(sibling.sid);
+      }
+    }
     if (publication != null) {
       final stopOnMute = switch (publication.source) {
         TrackSource.camera => cameraCaptureOptions?.stopCameraCaptureOnMute ?? true,
@@ -726,7 +740,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         final CameraCaptureOptions captureOptions =
             cameraCaptureOptions ?? room.roomOptions.defaultCameraCaptureOptions;
         final track = await LocalVideoTrack.createCameraTrack(captureOptions);
-        return await publishVideoTrack(track);
+        return await publishVideoTrack(track, publishOptions: videoPublishOptions);
       } else if (source == TrackSource.microphone) {
         final AudioCaptureOptions captureOptions = audioCaptureOptions ?? room.roomOptions.defaultAudioCaptureOptions;
         final track = await LocalAudioTrack.create(captureOptions);
@@ -750,7 +764,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           LocalTrackPublication<LocalVideoTrack>? publication;
           for (final track in tracks) {
             if (track is LocalVideoTrack) {
-              publication = await publishVideoTrack(track);
+              publication = await publishVideoTrack(track, publishOptions: videoPublishOptions);
             } else if (track is LocalAudioTrack) {
               await publishAudioTrack(track);
             }
@@ -760,7 +774,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           return publication;
         }
         final track = await LocalVideoTrack.createScreenShareTrack(captureOptions);
-        return await publishVideoTrack(track);
+        return await publishVideoTrack(track, publishOptions: videoPublishOptions);
       }
     }
     return null;
@@ -873,7 +887,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
     // Kaede: backup senders must encrypt before any RTP can be negotiated.
     final cryptor = await room.e2eeManager?.addRtpSender(
-      sender: simulcastTrack.sender!, identity: identity, sid: publication.sid,
+      sender: simulcastTrack.sender!,
+      identity: identity,
+      sid: publication.sid,
     );
     if (kIsWeb) await cryptor?.updateCodec(backupCodec);
 

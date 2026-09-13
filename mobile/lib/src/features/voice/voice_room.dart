@@ -24,6 +24,21 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:livekit_client/livekit_client.dart';
 
+// One presentation per source, regardless of the number of codec variants.
+List<({Participant participant, TrackSource source})> _voiceVideoTiles(
+  List<Participant> participants,
+) =>
+    [
+      for (final participant in participants) ...[
+        (participant: participant, source: TrackSource.camera),
+        if (participant.videoTrackPublications.any((p) =>
+            p.source == TrackSource.screenShareVideo &&
+            !p.muted &&
+            p.track != null))
+          (participant: participant, source: TrackSource.screenShareVideo),
+      ],
+    ];
+
 String voiceParticipantLabel({
   required String liveName,
   required String identity,
@@ -267,6 +282,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         canSetVoiceChannelStatusNow(channel, joined: joined);
     final reconnecting = thisRoom && session.reconnecting;
     final participants = joined ? session.participants : const <Participant>[];
+    final videoTiles = _voiceVideoTiles(participants);
     final voiceElapsed = voiceElapsedLabel(_voiceStartedAt);
     final roomSummary = channel.type == ChannelType.stage && !_stageLoaded
         ? 'Loading Stage…'
@@ -382,6 +398,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
               )
             else if (session.error case final error?)
               _VoiceNotice(icon: Icons.error_outline_rounded, text: error),
+          if (thisRoom && session.videoNotice != null)
+            _VoiceNotice(
+                icon: Icons.videocam_outlined, text: session.videoNotice!),
           Expanded(
             child: !joined
                 ? _VoiceEmpty(canConnect: canConnect)
@@ -414,12 +433,13 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                               crossAxisSpacing: 10,
                               mainAxisSpacing: 10,
                             ),
-                            itemCount: participants.length,
+                            itemCount: videoTiles.length,
                             itemBuilder: (context, index) => _ParticipantTile(
-                              participant: participants[index],
+                              participant: videoTiles[index].participant,
+                              source: videoTiles[index].source,
                               knownName: _knownVoiceParticipantName(
                                 mobile,
-                                participants[index].identity,
+                                videoTiles[index].participant.identity,
                               ),
                               session: session,
                               guild: guild,
@@ -429,7 +449,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                                   : guildMemberByIdentity(
                                       mobile.guildMembers[guild.ref] ??
                                           const <GuildMember>[],
-                                      participants[index].identity,
+                                      videoTiles[index].participant.identity,
                                     ),
                               channel: channel,
                             ),
@@ -1593,6 +1613,7 @@ final class _StageParticipantRoster extends StatelessWidget {
     List<Participant> items,
   ) {
     if (items.isEmpty) return SizedBox.shrink();
+    final videoTiles = _voiceVideoTiles(items);
     return Padding(
       padding: EdgeInsets.only(bottom: 16),
       child: Column(
@@ -1615,12 +1636,13 @@ final class _StageParticipantRoster extends StatelessWidget {
               crossAxisSpacing: 10,
               mainAxisSpacing: 10,
             ),
-            itemCount: items.length,
+            itemCount: videoTiles.length,
             itemBuilder: (context, index) => _ParticipantTile(
-              participant: items[index],
+              participant: videoTiles[index].participant,
+              source: videoTiles[index].source,
               knownName: _knownVoiceParticipantName(
                 mobile,
-                items[index].identity,
+                videoTiles[index].participant.identity,
               ),
               session: session,
               guild: guild,
@@ -1629,7 +1651,7 @@ final class _StageParticipantRoster extends StatelessWidget {
                   ? null
                   : guildMemberByIdentity(
                       mobile.guildMembers[guild!.ref] ?? const <GuildMember>[],
-                      items[index].identity,
+                      videoTiles[index].participant.identity,
                     ),
               channel: channel,
             ),
@@ -1643,6 +1665,7 @@ final class _StageParticipantRoster extends StatelessWidget {
 final class _ParticipantTile extends StatefulWidget {
   const _ParticipantTile({
     required this.participant,
+    required this.source,
     required this.knownName,
     required this.session,
     required this.channel,
@@ -1652,6 +1675,7 @@ final class _ParticipantTile extends StatefulWidget {
   });
 
   final Participant participant;
+  final TrackSource source;
   final String? knownName;
   final VoiceSession session;
   final KaedeGuild? guild;
@@ -1690,7 +1714,10 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
   @override
   Widget build(BuildContext context) {
     final publication = widget.participant.videoTrackPublications
-        .where((publication) => !publication.muted && publication.track != null)
+        .where((publication) =>
+            publication.source == widget.source &&
+            !publication.muted &&
+            publication.track != null)
         .firstOrNull;
     final track = publication?.track;
     final identity = widget.participant.identity;
@@ -1743,6 +1770,11 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (widget.source == TrackSource.screenShareVideo) ...[
+                      Icon(Icons.screen_share_outlined,
+                          color: Colors.white, size: 16),
+                      SizedBox(width: 6),
+                    ],
                     Text(name, style: TextStyle(color: Colors.white)),
                     if (widget.participant is RemoteParticipant) ...[
                       SizedBox(width: 6),

@@ -1,6 +1,5 @@
 import {
   VideoPresets,
-  supportsAV1,
   type ScreenShareCaptureOptions,
   type TrackPublishOptions,
   type VideoCaptureOptions
@@ -231,16 +230,166 @@ export function webCameraDefaults(videoQualityMode: 1 | 2): {
   };
 }
 
-/** Prefer AV1 with encrypted VP8 backup for the coordinated client rollout. */
+/** Safe initial publication until the asynchronous, settings-specific probe finishes. */
 export function webVideoCodecOptions(encrypted: boolean): TrackPublishOptions {
-  const codecs = globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? [];
-  const fallback =
-    !encrypted && codecs.some((codec) => codec.mimeType.toLowerCase() === 'video/h264')
-      ? 'h264'
-      : 'vp8';
-  const av1 = typeof RTCRtpSender !== 'undefined' && supportsAV1();
-  return {
-    videoCodec: av1 ? 'av1' : fallback,
-    backupCodec: av1 ? { codec: fallback } : false
-  };
+  // Encryption belongs to the room and never selects a different codec policy.
+  void encrypted;
+  return { videoCodec: 'vp8', backupCodec: false };
+}
+
+export interface VideoCapabilitySettings {
+  width: number;
+  height: number;
+  frameRate: number;
+  bitrate: number;
+}
+
+/** Power efficiency alone may also describe software; require an actual hardware implementation. */
+export function isHardwareVideoEncoder(stats: {
+  powerEfficientEncoder?: boolean;
+  encoderImplementation?: string;
+}): boolean {
+  return (
+    stats.powerEfficientEncoder === true &&
+    /(?:ExternalEncoder|VideoToolbox|MediaCodec|NVENC|NVIDIA|VAAPI|VA-API|QuickSync|QSV|AMF|D3D11|MediaFoundation)/i.test(
+      stats.encoderImplementation ?? ''
+    ) &&
+    !/(?:libaom|libvpx|openh264|software|fallback)/i.test(stats.encoderImplementation ?? '')
+  );
+}
+
+export async function webVideoCodecCapabilities(settings: VideoCapabilitySettings): Promise<{
+  decode: string[];
+  encode: string[];
+  hardware: string[];
+}> {
+  const supported = (codecs: RTCRtpCodec[]) =>
+    [...new Set(codecs.map((codec) => codec.mimeType.toLowerCase().replace('video/', '')))].filter(
+      (codec) => ['av1', 'vp8', 'h264'].includes(codec)
+    );
+  const senderCodecs = globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? [];
+  const encode = supported(senderCodecs);
+  // Software decoders are admitted; the receiver controller judges actual playback.
+  const decode = supported(globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs ?? []);
+  const hardware: string[] = [];
+  if (!Object.values(settings).every((value) => Number.isFinite(value) && value > 0)) {
+    return { decode, encode, hardware };
+  }
+  for (const codec of encode) {
+    let queryTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const query = globalThis.navigator?.mediaCapabilities?.encodingInfo({
+        type: 'webrtc',
+        video: {
+          contentType: `video/${codec}`,
+          width: settings.width,
+          height: settings.height,
+          bitrate: settings.bitrate,
+          framerate: settings.frameRate,
+          ...(codec === 'av1' ? { scalabilityMode: 'L1T1' } : {})
+        }
+      });
+      const info = await Promise.race([
+        query,
+        new Promise<undefined>((resolve) => {
+          queryTimeout = setTimeout(() => resolve(undefined), 800);
+        })
+      ]);
+      clearTimeout(queryTimeout);
+      if (
+        info?.supported &&
+        info.smooth &&
+        info.powerEfficient &&
+        (await probeHardwareEncoder(codec, senderCodecs, settings))
+      )
+        hardware.push(codec);
+    } catch {
+      // Missing, rejected, or privacy-redacted information remains unknown.
+    } finally {
+      clearTimeout(queryTimeout);
+    }
+  }
+  return { decode, encode, hardware };
+}
+
+/** Bounded local loopback verifies the encoder actually chosen at the requested settings.
+ * No room, key material, microphone, camera, STUN, or TURN is involved.
+ */
+async function probeHardwareEncoder(
+  codec: string,
+  codecs: RTCRtpCodec[],
+  settings: VideoCapabilitySettings
+): Promise<boolean> {
+  if (typeof document === 'undefined' || typeof RTCPeerConnection === 'undefined') return false;
+  const canvas = document.createElement('canvas');
+  canvas.width = settings.width;
+  canvas.height = settings.height;
+  const context = canvas.getContext('2d');
+  if (!context || !canvas.captureStream) return false;
+  const stream = canvas.captureStream(settings.frameRate);
+  const sender = new RTCPeerConnection({ iceServers: [] });
+  const receiver = new RTCPeerConnection({ iceServers: [] });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let frame = 0;
+  const draw = setInterval(() => {
+    context.fillStyle = `rgb(${frame++ % 255},64,128)`;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }, 1000 / settings.frameRate);
+  try {
+    const transceiver = sender.addTransceiver(stream.getVideoTracks()[0], {
+      direction: 'sendonly',
+      streams: [stream],
+      sendEncodings: [
+        {
+          maxBitrate: settings.bitrate,
+          maxFramerate: settings.frameRate,
+          ...(codec === 'av1' ? { scalabilityMode: 'L1T1' } : {})
+        }
+      ]
+    });
+    transceiver.setCodecPreferences(
+      codecs.filter((value) => value.mimeType.toLowerCase() === `video/${codec}`)
+    );
+    sender.onicecandidate = (event) => {
+      if (event.candidate) void receiver.addIceCandidate(event.candidate).catch(() => undefined);
+    };
+    receiver.onicecandidate = (event) => {
+      if (event.candidate) void sender.addIceCandidate(event.candidate).catch(() => undefined);
+    };
+    const probe = async () => {
+      await sender.setLocalDescription(await sender.createOffer());
+      await receiver.setRemoteDescription(sender.localDescription!);
+      await receiver.setLocalDescription(await receiver.createAnswer());
+      await sender.setRemoteDescription(receiver.localDescription!);
+      while (sender.connectionState !== 'closed') {
+        const stats = await transceiver.sender.getStats();
+        let confirmed = false;
+        stats.forEach((report) => {
+          if (
+            report.type === 'outbound-rtp' &&
+            report.framesEncoded >= 3 &&
+            report.frameWidth === settings.width &&
+            report.frameHeight === settings.height &&
+            isHardwareVideoEncoder(report)
+          )
+            confirmed = true;
+        });
+        if (confirmed) return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return false;
+    };
+    return await Promise.race([
+      probe().catch(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 1800);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+    clearInterval(draw);
+    sender.close();
+    receiver.close();
+    stream.getTracks().forEach((track) => track.stop());
+  }
 }

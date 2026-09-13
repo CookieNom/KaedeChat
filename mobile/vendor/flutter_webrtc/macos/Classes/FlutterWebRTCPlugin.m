@@ -17,6 +17,9 @@
 #import "AudioManager.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <objc/runtime.h>
+@import VideoToolbox;
+#import <stdatomic.h>
 #import <WebRTC/RTCFieldTrials.h>
 #import <WebRTC/WebRTC.h>
 
@@ -26,6 +29,37 @@
 #import "LocalTrack.h"
 #import "LocalAudioTrack.h"
 #import "LocalVideoTrack.h"
+
+// Capture lifetime is shared, while each variant keeps its own RTCVideoTrack.
+@interface KaedeSharedVideoCapture : NSObject
+@property(nonatomic, strong) NSMutableSet<NSString*>* tracks;
+@property(nonatomic, copy) CapturerStopHandler stop;
+@property(nonatomic, strong) RTCCameraVideoCapturer* camera;
+@property(nonatomic, weak) FlutterWebRTCPlugin* owner;
+@end
+@implementation KaedeSharedVideoCapture
+@end
+
+static char kaedeSharedCaptureKey;
+static CapturerStopHandler KaedeReleaseCapture(KaedeSharedVideoCapture* capture, NSString* trackId) {
+  return [^(CompletionHandler complete) {
+    if (![capture.tracks containsObject:trackId]) { complete(); return; }
+    [capture.tracks removeObject:trackId];
+    if (capture.tracks.count != 0) { complete(); return; }
+    CapturerStopHandler stop = capture.stop;
+    capture.stop = nil;
+    if (stop) {
+      stop(^{
+        if (capture.camera && capture.owner.videoCapturer == capture.camera) capture.owner.videoCapturer = nil;
+        capture.camera = nil;
+        complete();
+      });
+    } else {
+      capture.camera = nil;
+      complete();
+    }
+  } copy];
+}
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wprotocol"
@@ -90,6 +124,106 @@ NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>* motifyH264ProfileLevelId(
   return motifyH264ProfileLevelId(codecs);
 }
 @end
+
+typedef struct {
+  atomic_uint frames;
+  atomic_bool failed;
+  int32_t width;
+  int32_t height;
+} KaedeProbeOutput;
+
+static void KaedeProbeFrame(void* context, void* frameContext, OSStatus status,
+                            VTEncodeInfoFlags flags, CMSampleBufferRef sample) {
+  KaedeProbeOutput* output = context;
+  if (status != noErr || (flags & kVTEncodeInfo_FrameDropped) || !sample || !CMSampleBufferDataIsReady(sample)) {
+    atomic_store(&output->failed, true);
+    return;
+  }
+  CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(CMSampleBufferGetFormatDescription(sample));
+  if (dimensions.width != output->width || dimensions.height != output->height) {
+    atomic_store(&output->failed, true);
+    return;
+  }
+  atomic_fetch_add(&output->frames, 1);
+}
+
+// The same factory used for publishing must select VideoToolbox. A separate
+// hardware-required session then verifies this configuration and synthetic
+// output; a MIME advertisement or an OS encoder list is not enough.
+static NSDictionary* KaedeHardwareVideoSettings(NSDictionary* args) {
+  NSDictionary* unknown = @{@"hardware": @NO, @"implementation": @"unknown"};
+  if (![args[@"codec"] isKindOfClass:[NSString class]] ||
+      ![args[@"codec"] isEqualToString:@"h264"]) return unknown;
+  for (NSString* key in @[@"width", @"height", @"fps", @"bitrate"])
+    if (![args[key] isKindOfClass:[NSNumber class]]) return unknown;
+  int width = [args[@"width"] intValue], height = [args[@"height"] intValue];
+  int fps = [args[@"fps"] intValue], bitrate = [args[@"bitrate"] intValue];
+  if (width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+      fps <= 0 || fps > 120 || bitrate <= 0 || bitrate > 100000000) return unknown;
+  VideoEncoderFactory* factory = [[VideoEncoderFactory alloc] init];
+  BOOL selectedVideoToolbox = NO;
+  CFStringRef profile = kVTProfileLevel_H264_Baseline_AutoLevel;
+  for (RTCVideoCodecInfo* info in factory.supportedCodecs) {
+    if (![info.name isEqualToString:kRTCVideoCodecH264Name]) continue;
+    NSString* profileId = [info.parameters[@"profile-level-id"] lowercaseString];
+    if ([profileId hasPrefix:@"64"]) profile = kVTProfileLevel_H264_High_AutoLevel;
+    else if ([profileId hasPrefix:@"4d"]) profile = kVTProfileLevel_H264_Main_AutoLevel;
+    else if (![profileId hasPrefix:@"42"]) return unknown;
+    id<RTCVideoEncoder> encoder = [factory createEncoder:info];
+    selectedVideoToolbox = [[encoder implementationName] isEqualToString:@"VideoToolbox"];
+    [encoder releaseEncoder];
+    break;
+  }
+  if (!selectedVideoToolbox) return unknown;
+  VTCompressionSessionRef session = NULL;
+  CVPixelBufferRef pixels = NULL;
+  CFTypeRef hardware = NULL;
+  KaedeProbeOutput output;
+  atomic_init(&output.frames, 0);
+  atomic_init(&output.failed, false);
+  output.width = width; output.height = height;
+  NSDictionary* specification = @{(__bridge NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES};
+  OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault, width, height,
+      kCMVideoCodecType_H264, (__bridge CFDictionaryRef)specification, NULL, NULL,
+      KaedeProbeFrame, &output, &session);
+  if (status != noErr || !session) return unknown;
+  NSDictionary* properties = @{
+    (__bridge NSString*)kVTCompressionPropertyKey_RealTime: @YES,
+    (__bridge NSString*)kVTCompressionPropertyKey_AllowFrameReordering: @NO,
+    (__bridge NSString*)kVTCompressionPropertyKey_ExpectedFrameRate: @(fps),
+    (__bridge NSString*)kVTCompressionPropertyKey_AverageBitRate: @(bitrate),
+    (__bridge NSString*)kVTCompressionPropertyKey_ProfileLevel: (__bridge NSString*)profile
+  };
+  status = VTSessionSetProperties(session, (__bridge CFDictionaryRef)properties);
+  if (status == noErr) status = VTCompressionSessionPrepareToEncodeFrames(session);
+  if (status == noErr) status = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+      kCVPixelFormatType_32BGRA, NULL, &pixels);
+  if (status == noErr) {
+    status = CVPixelBufferLockBaseAddress(pixels, 0);
+    if (status == noErr) {
+      memset(CVPixelBufferGetBaseAddress(pixels), 64, CVPixelBufferGetBytesPerRow(pixels) * height);
+      CVPixelBufferUnlockBaseAddress(pixels, 0);
+    }
+  }
+  const int frameCount = MAX(1, fps / 2);
+  CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+  for (int i = 0; i < frameCount && status == noErr; ++i)
+    status = VTCompressionSessionEncodeFrame(session, pixels, CMTimeMake(i, fps),
+        CMTimeMake(1, fps), NULL, NULL, NULL);
+  OSStatus completed = VTCompressionSessionCompleteFrames(session, kCMTimeInvalid);
+  if (status == noErr) status = completed;
+  if (status == noErr) status = VTSessionCopyProperty(session,
+      kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kCFAllocatorDefault, &hardware);
+  BOOL confirmed = status == noErr && hardware == kCFBooleanTrue &&
+      !atomic_load(&output.failed) && atomic_load(&output.frames) == frameCount &&
+      CFAbsoluteTimeGetCurrent() - started <= (double)frameCount / fps * 1.25;
+  // Drain and invalidate before releasing the callback context and pixel buffer.
+  VTCompressionSessionInvalidate(session);
+  CFRelease(session);
+  if (pixels) CVPixelBufferRelease(pixels);
+  if (hardware) CFRelease(hardware);
+  return @{@"hardware": @(confirmed), @"implementation": confirmed ? @"VideoToolbox" : @"unknown"};
+}
 
 void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -637,6 +771,9 @@ static FlutterWebRTCPlugin *sharedSingleton;
     BOOL shouldCallResult = YES;
     if (stream) {
       for (RTCVideoTrack* track in stream.videoTracks) {
+        LocalVideoTrack* local = (LocalVideoTrack*)self.localTracks[track.trackId];
+        KaedeSharedVideoCapture* shared = objc_getAssociatedObject(local, &kaedeSharedCaptureKey);
+        RTCCameraVideoCapturer* camera = self.videoCapturer.delegate == local.processing ? self.videoCapturer : nil;
         [_localTracks removeObjectForKey:track.trackId];
         RTCVideoTrack* videoTrack = (RTCVideoTrack*)track;
         FlutterRTCVideoRenderer *renderer = [self findRendererByTrackId:videoTrack.trackId];
@@ -648,7 +785,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
           shouldCallResult = NO;
           stopHandler(^{
             NSLog(@"video capturer stopped, trackID = %@", videoTrack.trackId);
-            self.videoCapturer = nil;
+            if ((!shared || shared.tracks.count == 0) && camera && self.videoCapturer == camera) self.videoCapturer = nil;
             result(nil);
           });
           [self.videoCapturerStopHandlers removeObjectForKey:videoTrack.trackId];
@@ -664,6 +801,53 @@ static FlutterWebRTCPlugin *sharedSingleton;
       // do not call if will be called in stopCapturer above.
       result(nil);
     }
+  } else if ([@"kaedeCloneVideoTrack" isEqualToString:call.method]) {
+    NSString* trackId = call.arguments[@"trackId"];
+    id<LocalTrack> local = [trackId isKindOfClass:[NSString class]] ? self.localTracks[trackId] : nil;
+    if (![local isKindOfClass:[LocalVideoTrack class]]) {
+      result([FlutterError errorWithCode:@"kaedeCloneVideoTrack"
+                                message:@"Only live local video tracks can share capture"
+                                details:nil]);
+      return;
+    }
+    LocalVideoTrack* original = (LocalVideoTrack*)local;
+    KaedeSharedVideoCapture* shared = objc_getAssociatedObject(original, &kaedeSharedCaptureKey);
+    if (!shared) {
+      CapturerStopHandler stop = self.videoCapturerStopHandlers[trackId];
+      if (!stop) {
+        result([FlutterError errorWithCode:@"kaedeCloneVideoTrack"
+                                  message:@"Capture ownership is unavailable"
+                                  details:nil]);
+        return;
+      }
+      shared = [KaedeSharedVideoCapture new];
+      shared.tracks = [NSMutableSet setWithObject:trackId];
+      shared.stop = stop;
+      // Camera's existing stop handler holds only a weak reference. A clone
+      // must keep capture alive even after the original stream is disposed.
+      shared.owner = self;
+      if (self.videoCapturer.delegate == original.processing) shared.camera = self.videoCapturer;
+      objc_setAssociatedObject(original, &kaedeSharedCaptureKey, shared, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+      self.videoCapturerStopHandlers[trackId] = KaedeReleaseCapture(shared, trackId);
+    }
+    NSString* cloneId = [[NSUUID UUID] UUIDString];
+    RTCVideoTrack* track = [self.peerConnectionFactory videoTrackWithSource:original.videoTrack.source
+                                                                   trackId:cloneId];
+    track.isEnabled = original.videoTrack.isEnabled;
+    track.settings = original.videoTrack.settings;
+    LocalVideoTrack* clone = [[LocalVideoTrack alloc] initWithTrack:track videoProcessing:original.processing];
+    [shared.tracks addObject:cloneId];
+    objc_setAssociatedObject(clone, &kaedeSharedCaptureKey, shared, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    self.videoCapturerStopHandlers[cloneId] = KaedeReleaseCapture(shared, cloneId);
+    self.localTracks[cloneId] = clone;
+    result(@{@"id": cloneId, @"label": cloneId, @"kind": @"video",
+             @"enabled": @(track.isEnabled), @"settings": track.settings ?: @{}});
+  } else if ([@"kaedeVideoHardwareSettings" isEqualToString:call.method]) {
+    NSDictionary* args = [call.arguments isKindOfClass:[NSDictionary class]] ? call.arguments : @{};
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      NSDictionary* capability = KaedeHardwareVideoSettings(args);
+      dispatch_async(dispatch_get_main_queue(), ^{ result(capability); });
+    });
   } else if ([@"mediaStreamTrackSetEnable" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* trackId = argsMap[@"trackId"];
@@ -743,16 +927,12 @@ static FlutterWebRTCPlugin *sharedSingleton;
       for (RTCVideoTrack* track in stream.videoTracks) {
         if ([trackId isEqualToString:track.trackId]) {
           [stream removeVideoTrack:track];
-          CapturerStopHandler stopHandler = self.videoCapturerStopHandlers[track.trackId];
-          if (stopHandler) {
-            stopHandler(^{
-              NSLog(@"video capturer stopped, trackID = %@", track.trackId);
-            });
-            [self.videoCapturerStopHandlers removeObjectForKey:track.trackId];
-          }
         }
       }
     }
+    CapturerStopHandler stopHandler = self.videoCapturerStopHandlers[trackId];
+    [self.videoCapturerStopHandlers removeObjectForKey:trackId];
+    if (stopHandler) stopHandler(^{ });
     [_localTracks removeObjectForKey:trackId];
     if (audioTrack) {
       [self ensureAudioSession];

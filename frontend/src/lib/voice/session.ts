@@ -7,6 +7,7 @@ import {
   type Participant
 } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
+import { AdaptiveVideoController } from './adaptive-video';
 import { userErrorMessage } from '$lib/api/client';
 import type { Channel } from '$lib/chat/types';
 import {
@@ -366,9 +367,14 @@ export class VoiceSession extends EventTarget {
   pushToTalkRequired = false;
   moveSessionId: string | null = null;
   error = '';
+  videoDegraded = false;
+  #adaptiveVideo: AdaptiveVideoController | null = null;
   #nativePoll: ReturnType<typeof setInterval> | null = null;
   #nativeVideoGeneration = 0;
-  #nativeVideo = new Map<string, NativeVideoFrame>();
+  #nativeVideo = new Map<
+    string,
+    { identity: string; source: Track.Source; image: NativeVideoFrame }
+  >();
   #nativeMuted = false;
   #nativeDeafened = false;
   #nativeSpeakingUntil = 0;
@@ -433,6 +439,9 @@ export class VoiceSession extends EventTarget {
     });
     room.on(RoomEvent.Disconnected, (reason) => {
       if (this.room !== room) return;
+      void this.#adaptiveVideo?.stop();
+      this.#adaptiveVideo = null;
+      this.videoDegraded = false;
       this.connected = false;
       this.encrypted = null;
       this.moveSessionId = null;
@@ -473,6 +482,10 @@ export class VoiceSession extends EventTarget {
       throw new Error('A plaintext voice grant cannot use an encrypted-room key.');
     }
 
+    const previousAdaptiveVideo = this.#adaptiveVideo;
+    this.#adaptiveVideo = null;
+    this.videoDegraded = false;
+    const stoppingPreviousVideo = previousAdaptiveVideo?.stop();
     const previousRoom = this.room;
     const previousCandidate = this.#candidateRoom;
     const previousWorker = this.#e2eeWorker;
@@ -502,13 +515,14 @@ export class VoiceSession extends EventTarget {
     let candidateWorker: Worker | null = null;
     let promoted = false;
     try {
-      await Promise.allSettled(
-        [
+      await Promise.allSettled([
+        stoppingPreviousVideo,
+        ...[
           ...new Set(
             [previousRoom, previousCandidate].filter((room): room is Room => room !== null)
           )
         ].map((room) => room.disconnect(true))
-      );
+      ]);
       if (generation !== this.#connectGeneration) return;
 
       if (grant.e2ee) {
@@ -529,7 +543,7 @@ export class VoiceSession extends EventTarget {
       this.#candidateWorker = candidateWorker;
 
       await withVoiceConnectTimeout(
-        candidate.connect(grant.url, grant.token, { autoSubscribe: true })
+        candidate.connect(grant.url, grant.token, { autoSubscribe: false })
       );
       if (generation !== this.#connectGeneration) return;
 
@@ -550,6 +564,21 @@ export class VoiceSession extends EventTarget {
       promoted = true;
       this.connected = true;
       this.encrypted = expected.e2ee;
+      this.#adaptiveVideo = new AdaptiveVideoController(
+        candidate,
+        (degraded) => {
+          if (this.room !== candidate) return;
+          this.videoDegraded = degraded;
+          this.#changed();
+        },
+        (source) => {
+          if (this.room !== candidate) return;
+          if (source === Track.Source.ScreenShare) this.screen = false;
+          if (source === Track.Source.Camera) this.camera = false;
+          this.#changed();
+        }
+      );
+      this.#adaptiveVideo.start();
       this.#voiceMediaPolicy = {
         bitrate: expected.bitrate,
         user_limit: expected.user_limit,
@@ -643,6 +672,7 @@ export class VoiceSession extends EventTarget {
       this.canStream = status.can_stream ?? false;
       this.camera = status.camera ?? false;
       this.screen = status.screen ?? false;
+      this.videoDegraded = status.video_degraded ?? false;
       this.#nativeMuted = status.muted ?? this.#nativeMuted;
       this.#nativeDeafened = status.deafened ?? this.#nativeDeafened;
       this.#nativePrioritySpeakers = nativePrioritySpeakerIdentities(status.priority_speakers);
@@ -692,8 +722,14 @@ export class VoiceSession extends EventTarget {
           if (bytes.byteLength === 0) continue;
           const frame = decodeNativeVideoFrame(bytes);
           if (!frame) continue;
-          if (frame.removed) this.#nativeVideo.delete(frame.participant);
-          else this.#nativeVideo.set(frame.participant, frame.image);
+          const key = `${frame.participant}:${frame.source}`;
+          if (frame.removed) this.#nativeVideo.delete(key);
+          else
+            this.#nativeVideo.set(key, {
+              identity: frame.participant,
+              source: frame.source,
+              image: frame.image
+            });
           this.#changed();
         } catch {
           if (generation === this.#nativeVideoGeneration) {
@@ -876,7 +912,14 @@ export class VoiceSession extends EventTarget {
       return;
     }
     const camera = webCameraDefaults(this.#voiceMediaPolicy.video_quality_mode);
-    await this.room.localParticipant.setCameraEnabled(enabled, camera.capture, camera.publish);
+    if (!enabled) await this.#adaptiveVideo?.stopSource(Track.Source.Camera);
+    const publication = await this.room.localParticipant.setCameraEnabled(
+      enabled,
+      camera.capture,
+      camera.publish
+    );
+    if (enabled && publication)
+      await this.#adaptiveVideo?.managePublished(publication, camera.publish);
     this.camera = enabled;
     this.#changed();
   }
@@ -922,10 +965,11 @@ export class VoiceSession extends EventTarget {
             ? 'monitor'
             : undefined;
     const { capture, publish } = webScreenShareOptions(preferences, preferredSurface);
-    await this.room.localParticipant.setScreenShareEnabled(true, capture, {
+    const publication = await this.room.localParticipant.setScreenShareEnabled(true, capture, {
       ...publish,
       ...webAudioPublishOptions(preferences)
     });
+    if (publication) await this.#adaptiveVideo?.managePublished(publication, publish);
     this.screen = true;
     this.#changed();
   }
@@ -935,6 +979,7 @@ export class VoiceSession extends EventTarget {
     if (isNativeDesktop()) {
       await nativeInvoke('native_voice_control', { control: 'screen_off' });
     } else {
+      await this.#adaptiveVideo?.stopSource(Track.Source.ScreenShare);
       await this.room.localParticipant.setScreenShareEnabled(false);
     }
     this.screen = false;
@@ -973,10 +1018,12 @@ export class VoiceSession extends EventTarget {
     try {
       if (revokeSpeak || requirePushToTalk) await this.#queuePushToTalkTransition();
       if (revokeStream && this.screen) {
+        await this.#adaptiveVideo?.stopSource(Track.Source.ScreenShare);
         await this.room.localParticipant.setScreenShareEnabled(false);
         this.screen = false;
       }
       if (revokeStream && this.camera) {
+        await this.#adaptiveVideo?.stopSource(Track.Source.Camera);
         await this.room.localParticipant.setCameraEnabled(false);
         this.camera = false;
       }
@@ -1036,6 +1083,10 @@ export class VoiceSession extends EventTarget {
   }
 
   async disconnect(): Promise<void> {
+    const adaptiveVideo = this.#adaptiveVideo;
+    this.#adaptiveVideo = null;
+    this.videoDegraded = false;
+    const stoppingVideo = adaptiveVideo?.stop();
     if (this.pushToTalkRequired) await this.stopPushToTalk().catch(() => undefined);
     this.#pushToTalkDesired = false;
     if (isNativeDesktop()) {
@@ -1071,11 +1122,14 @@ export class VoiceSession extends EventTarget {
     this.#e2eeWorker = null;
     activeWorker?.terminate();
     if (candidateWorker !== activeWorker) candidateWorker?.terminate();
-    await Promise.allSettled(
-      [...new Set([activeRoom, candidateRoom].filter((room): room is Room => room !== null))].map(
-        (room) => room.disconnect(true)
-      )
-    );
+    // Disconnect audio immediately; an in-flight video capability probe may
+    // still be unwinding its bounded local loopback.
+    await Promise.allSettled([
+      stoppingVideo,
+      ...[
+        ...new Set([activeRoom, candidateRoom].filter((room): room is Room => room !== null))
+      ].map((room) => room.disconnect(true))
+    ]);
     if (generation !== this.#connectGeneration) return;
     this.connected = false;
     this.encrypted = null;
@@ -1093,12 +1147,12 @@ export class VoiceSession extends EventTarget {
 
   tiles(): VoiceTile[] {
     if (isNativeDesktop()) {
-      return [...this.#nativeVideo.entries()].map(([identity, nativeFrame]) => ({
-        key: `native:${identity}`,
-        identity,
-        name: identity.split('@', 1)[0] || identity,
-        source: 'native_camera',
-        nativeFrame,
+      return [...this.#nativeVideo.entries()].map(([key, frame]) => ({
+        key: `native:${key}`,
+        identity: frame.identity,
+        name: frame.identity.split('@', 1)[0] || frame.identity,
+        source: frame.source,
+        nativeFrame: frame.image,
         local: false
       }));
     }
@@ -1107,6 +1161,7 @@ export class VoiceSession extends EventTarget {
       for (const publication of participant.trackPublications.values()) {
         const track = publication.track;
         if (!track || track.kind !== Track.Kind.Video) continue;
+        if (this.#adaptiveVideo && !this.#adaptiveVideo.isVisible(publication, local)) continue;
         tiles.push({
           key: `${participant.identity}:${publication.trackSid}`,
           identity: participant.identity,
@@ -1264,27 +1319,33 @@ export function attachVideo(
   };
 }
 
-function decodeNativeVideoFrame(
+export function decodeNativeVideoFrame(
   bytes: Uint8Array
 ):
-  | { participant: string; removed: true; image: NativeVideoFrame }
-  | { participant: string; removed: false; image: NativeVideoFrame }
+  | { participant: string; source: Track.Source; removed: true; image: NativeVideoFrame }
+  | { participant: string; source: Track.Source; removed: false; image: NativeVideoFrame }
   | null {
-  if (bytes.byteLength < 15 || new TextDecoder().decode(bytes.subarray(0, 4)) !== 'KVD1') {
-    return null;
-  }
+  if (bytes.byteLength < 15) return null;
+  const format = new TextDecoder().decode(bytes.subarray(0, 4));
+  if (format !== 'KVD1' && format !== 'KVD2') return null;
+  const headerSize = format === 'KVD2' ? 16 : 15;
+  if (bytes.byteLength < headerSize) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = view.getUint32(4, true);
   const height = view.getUint32(8, true);
   const identityLength = view.getUint16(12, true);
   const removed = view.getUint8(14) === 1;
-  const imageOffset = 15 + identityLength;
+  const sourceByte = format === 'KVD2' ? view.getUint8(15) : 0;
+  if (sourceByte > 1) return null;
+  const source = sourceByte === 1 ? Track.Source.ScreenShare : Track.Source.Camera;
+  const imageOffset = headerSize + identityLength;
   if (imageOffset > bytes.byteLength) return null;
-  const participant = new TextDecoder().decode(bytes.subarray(15, imageOffset));
+  const participant = new TextDecoder().decode(bytes.subarray(headerSize, imageOffset));
   const expected = width * height * 4;
   if (!removed && (expected === 0 || bytes.byteLength - imageOffset !== expected)) return null;
   return {
     participant,
+    source,
     removed,
     image: {
       width,

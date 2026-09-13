@@ -68,6 +68,7 @@ export interface NativeScreenSource {
 export interface NativeVoiceStatus {
   state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'media_error' | 'failed';
   message?: string;
+  video_degraded?: boolean;
   room?: string;
   can_speak?: boolean;
   can_stream?: boolean;

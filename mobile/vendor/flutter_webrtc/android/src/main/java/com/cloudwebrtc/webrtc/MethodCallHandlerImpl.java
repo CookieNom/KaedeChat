@@ -581,6 +581,24 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         removeStreamForRendererById(streamId);
         break;
       }
+      case "kaedeVideoHardwareSettings": {
+        String codec = call.argument("codec");
+        Integer width = call.argument("width"), height = call.argument("height");
+        Integer fps = call.argument("fps"), bitrate = call.argument("bitrate");
+        try {
+          String implementation = codec != null && width != null && height != null && fps != null && bitrate != null
+              ? videoEncoderFactory.hardwareEncoderForSettings(codec, width, height, fps, bitrate) : null;
+          Map<String, Object> response = new HashMap<>();
+          response.put("hardware", implementation != null);
+          if (implementation != null) response.put("implementation", implementation);
+          result.success(response);
+        } catch (Exception ignored) { result.success(false); }
+        break;
+      }
+      case "kaedeCloneVideoTrack": {
+        getUserMediaImpl.cloneVideoTrack(call.argument("trackId"), result);
+        break;
+      }
       case "trackDispose": {
         String trackId = call.argument("trackId");
         trackDispose(trackId);

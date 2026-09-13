@@ -103,6 +103,13 @@ public class GetUserMediaImpl {
 
     static final String TAG = FlutterWebRTCPlugin.TAG;
 
+    private static final class SharedVideoCapture {
+        final VideoSource source;
+        final String owner;
+        final SharedCaptureReferences references;
+        SharedVideoCapture(VideoSource source, String owner) { this.source = source; this.owner = owner; this.references = new SharedCaptureReferences(owner); }
+    }
+    private final Map<String, SharedVideoCapture> sharedVideoCaptures = new HashMap<>();
     private final Map<String, VideoCapturerInfoEx> mVideoCapturers = new HashMap<>();
     private final Map<String, SurfaceTextureHelper> mSurfaceTextureHelpers = new HashMap<>();
     private final StateProvider stateProvider;
@@ -552,7 +559,9 @@ public class GetUserMediaImpl {
 
         String trackId = stateProvider.getNextTrackUUID();
         mVideoCapturers.put(trackId, info);
+        mSurfaceTextureHelpers.put(trackId, surfaceTextureHelper);
 
+        sharedVideoCaptures.put(trackId, new SharedVideoCapture(videoSource, trackId));
         displayTrack = pcFactory.createVideoTrack(trackId, videoSource);
 
         ConstraintsArray audioTracks = new ConstraintsArray();
@@ -809,6 +818,7 @@ public class GetUserMediaImpl {
 
         Log.d(TAG, "Target: " + targetWidth + "x" + targetHeight + "@" + targetFps + ", Actual: " + info.width + "x" + info.height + "@" + info.fps);
 
+        sharedVideoCaptures.put(trackId, new SharedVideoCapture(videoSource, trackId));
         VideoTrack track = pcFactory.createVideoTrack(trackId, videoSource);
         mediaStream.addTrack(track);
 
@@ -838,7 +848,33 @@ public class GetUserMediaImpl {
         return trackParams;
     }
 
+    void cloneVideoTrack(String id, Result result) {
+        SharedVideoCapture capture = sharedVideoCaptures.get(id);
+        if (capture == null || !capture.references.contains(id)) { result.error("cloneVideoTrack", "Local capture is no longer available", null); return; }
+        String cloneId = stateProvider.getNextTrackUUID();
+        VideoTrack clone = stateProvider.getPeerConnectionFactory().createVideoTrack(cloneId, capture.source);
+        // Keep the existing source processor; installing another would replace
+        // camera processing for every sibling sharing this capture.
+        stateProvider.putLocalTrack(cloneId, new LocalVideoTrack(clone));
+        capture.references.retain(cloneId);
+        sharedVideoCaptures.put(cloneId, capture);
+        Map<String, Object> response = new HashMap<>();
+        response.put("id", cloneId); response.put("label", cloneId);
+        response.put("kind", "video"); response.put("enabled", true);
+        result.success(response);
+    }
+
     void removeVideoCapturer(String id) {
+        SharedVideoCapture capture = sharedVideoCaptures.get(id);
+        if (capture != null) {
+            if (!capture.references.releaseLast(id)) return;
+            // Retain released IDs until final release so trackDispose followed
+            // by streamDispose cannot stop a capturer still used by siblings.
+            for (Map.Entry<String, SharedVideoCapture> entry : new HashMap<>(sharedVideoCaptures).entrySet()) {
+                if (entry.getValue() == capture) sharedVideoCaptures.remove(entry.getKey());
+            }
+            id = capture.owner;
+        }
         VideoCapturerInfoEx info = mVideoCapturers.get(id);
         if (info != null) {
             try {
@@ -859,6 +895,7 @@ public class GetUserMediaImpl {
                 }
             }
         }
+        if (capture != null) capture.source.dispose();
     }
 
     @RequiresApi(api = VERSION_CODES.M)

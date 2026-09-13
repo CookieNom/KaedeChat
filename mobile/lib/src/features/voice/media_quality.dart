@@ -173,12 +173,18 @@ final class MobileMediaQuality {
     Iterable<String> supportedCodecs = const [],
   }) {
     final codecs = supportedCodecs.map((codec) => codec.toLowerCase()).toSet();
-    final fallback =
-        !encrypted && codecs.contains('video/h264') ? 'h264' : 'vp8';
-    final av1 = codecs.contains('video/av1');
+    // RTP capabilities prove compatibility, not hardware acceleration at the
+    // requested capture settings. Native SDKs currently expose no such query;
+    // keep the common codec until that evidence and safe capture cloning exist.
+    final fallback = codecs.isNotEmpty &&
+            !codecs.contains('video/vp8') &&
+            !codecs.contains('video/av1') &&
+            codecs.contains('video/h264')
+        ? 'h264'
+        : 'vp8';
     return VideoPublishOptions(
-      videoCodec: av1 ? 'av1' : fallback,
-      backupVideoCodec: BackupVideoCodec(enabled: av1, codec: fallback),
+      videoCodec: fallback,
+      backupVideoCodec: const BackupVideoCodec(enabled: false),
       videoEncoding:
           cameraCaptureOptionsForMode(videoQualityMode).params.encoding,
       screenShareEncoding: screen.profile.parameters.encoding,

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Channel } from '$lib/chat/types';
 
 import {
+  decodeNativeVideoFrame,
   expectedVoicePolicy,
   isUsableVoiceToken,
   VoiceConnectionFence,
@@ -29,7 +30,12 @@ class FakeVoiceRoom {
   readonly connect;
   readonly disconnect = vi.fn(async () => undefined);
   readonly on = vi.fn(() => this);
+  readonly off = vi.fn(() => this);
+  readonly remoteParticipants = new Map();
   readonly localParticipant = {
+    identity: 'local',
+    publishData: vi.fn(async () => undefined),
+    trackPublications: new Map(),
     setMicrophoneEnabled: vi.fn(async () => undefined),
     setCameraEnabled: vi.fn(async () => undefined),
     setScreenShareEnabled: vi.fn(async () => undefined),
@@ -659,5 +665,38 @@ describe('voice media key rotation', () => {
         screenShareEncoding: { maxBitrate: 4_500_000, maxFramerate: 30 }
       })
     );
+  });
+});
+
+describe('native camera and share frame identity', () => {
+  function packet(format: 'KVD1' | 'KVD2', source = 0) {
+    const identity = new TextEncoder().encode('alice');
+    const header = format === 'KVD2' ? 16 : 15;
+    const bytes = new Uint8Array(header + identity.length + 4);
+    bytes.set(new TextEncoder().encode(format));
+    const view = new DataView(bytes.buffer);
+    view.setUint32(4, 1, true);
+    view.setUint32(8, 1, true);
+    view.setUint16(12, identity.length, true);
+    if (format === 'KVD2') bytes[15] = source;
+    bytes.set(identity, header);
+    return bytes;
+  }
+
+  it('distinguishes camera and share while accepting the previous native frame format', () => {
+    expect(decodeNativeVideoFrame(packet('KVD1'))).toMatchObject({
+      participant: 'alice',
+      source: Track.Source.Camera
+    });
+    expect(decodeNativeVideoFrame(packet('KVD2', 0))).toMatchObject({
+      participant: 'alice',
+      source: Track.Source.Camera
+    });
+    expect(decodeNativeVideoFrame(packet('KVD2', 1))).toMatchObject({
+      participant: 'alice',
+      source: Track.Source.ScreenShare
+    });
+    expect(decodeNativeVideoFrame(packet('KVD2', 2))).toBeNull();
+    expect(decodeNativeVideoFrame(packet('KVD2').slice(0, 15))).toBeNull();
   });
 });
