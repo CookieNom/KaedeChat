@@ -501,6 +501,7 @@ struct NativeMenuLabels {
 }
 
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects state and deserializes command arguments by value.
 fn native_set_menu_language(
     menu: tauri::State<'_, NativeLanguageMenu>,
     labels: NativeMenuLabels,
