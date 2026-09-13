@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { canReadAnnouncementChannel } from '$lib/chat/announcements';
   import { entityRef } from '$lib/chat/refs';
   import type { Guild } from '$lib/chat/types';
@@ -37,23 +39,20 @@
   <header>
     <span class="section-icon" aria-hidden="true"><Icon name="bell" size={19} /></span>
     <div>
-      <span>Integrations</span>
-      <h2 id="channels-followed-title">Announcement distribution</h2>
-      <p>
-        Choose where published announcement posts are delivered. Qualified channel identities keep
-        destinations on other federated instances unambiguous.
-      </p>
+      <span>{$t('ui_integrations_090512d9')}</span>
+      <h2 id="channels-followed-title">{$t('ui_announcement_distribution_21b34f29')}</h2>
+      <p>{$t('ui_choose_where_published_announcement_posts_are_3b902e67')}</p>
     </div>
   </header>
 
   {#if sources.length === 0}
     <div class="empty-state">
-      <strong>No readable announcement channels</strong>
-      <p>View Channel is required to manage follower destinations.</p>
+      <strong>{$t('ui_no_readable_announcement_channels_0b785bd7')}</strong>
+      <p>{$t('ui_view_channel_is_required_to_manage_follower_d_e650ff8c')}</p>
     </div>
   {:else}
     <label class="source-picker">
-      <span>Announcement channel</span>
+      <span>{$t('ui_announcement_channel_c75895c9')}</span>
       <select bind:value={selectedSourceRef}>
         {#each sources as source (entityRef(source))}
           <option value={entityRef(source)}>#{source.name ?? 'announcement'}</option>

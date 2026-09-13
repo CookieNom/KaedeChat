@@ -1,11 +1,11 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/bot_e2ee_participation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 /// Participant-app consent for an encrypted DM or group conversation.
@@ -67,7 +67,8 @@ final class _DmBotE2eeParticipationScreenState
         _loading = false;
         _error = userFacingError(
           error,
-          summary: 'Could not load participant-capable apps',
+          summary: L10n.of(context)
+              .ui_could_not_load_participant_capable_apps_23099607,
         );
       });
     }
@@ -108,7 +109,8 @@ final class _DmBotE2eeParticipationScreenState
           _loading = false;
           _error = userFacingError(
             error,
-            summary: 'Could not load encrypted app consent',
+            summary: L10n.of(context)
+                .ui_could_not_load_encrypted_app_consent_a2fb8234,
           );
         });
       }
@@ -118,7 +120,8 @@ final class _DmBotE2eeParticipationScreenState
         _loading = false;
         _error = userFacingError(
           error,
-          summary: 'Could not load encrypted app consent',
+          summary:
+              L10n.of(context).ui_could_not_load_encrypted_app_consent_a2fb8234,
         );
       });
     }
@@ -139,16 +142,22 @@ final class _DmBotE2eeParticipationScreenState
     return await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            title: Text(revoke ? 'Remove app?' : 'Consent to add app?'),
+            title: Text(revoke
+                ? L10n.of(context).ui_remove_app_9544ee87
+                : L10n.of(context).ui_consent_to_add_app_3fed44cf),
             content: Text(
               revoke
-                  ? 'Kaede will rekey this conversation. ${selected.applicationName} loses future access, but its operator may retain content already delivered.'
-                  : 'Every person in this conversation must separately consent. Once everyone agrees, verified ${selected.applicationName} devices can decrypt future messages after the history floor. The app operator may retain anything it receives.',
+                  ? L10n.of(context)
+                      .ui_kaede_will_rekey_this_conversation_value0_los_35a6dafc(
+                          (selected.applicationName).toString())
+                  : L10n.of(context)
+                      .ui_every_person_in_this_conversation_must_separa_2e783b07(
+                          (selected.applicationName).toString()),
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(dialogContext, false),
-                child: const Text('Cancel'),
+                child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
               FilledButton(
                 style: revoke
@@ -158,7 +167,9 @@ final class _DmBotE2eeParticipationScreenState
                       )
                     : null,
                 onPressed: () => Navigator.pop(dialogContext, true),
-                child: Text(revoke ? 'Remove app' : 'Consent'),
+                child: Text(revoke
+                    ? L10n.of(context).ui_remove_app_fd5c4782
+                    : L10n.of(context).ui_consent_fddd385d),
               ),
             ],
           ),
@@ -184,15 +195,18 @@ final class _DmBotE2eeParticipationScreenState
         setState(() {
           _participation = participation;
           _notice = participation.active
-              ? 'Everyone consented. App devices will join after the room rekeys.'
-              : 'Your consent was recorded. The app remains blocked until everyone consents.';
+              ? L10n.of(context)
+                  .ui_everyone_consented_app_devices_will_join_afte_e81be7d8
+              : L10n.of(context)
+                  .ui_your_consent_was_recorded_the_app_remains_blo_1736b614;
         });
       }
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not record encrypted app consent',
+              summary: L10n.of(context)
+                  .ui_could_not_record_encrypted_app_consent_2ee98a85,
             ));
       }
     } finally {
@@ -217,14 +231,16 @@ final class _DmBotE2eeParticipationScreenState
       if (mounted) {
         setState(() {
           _participation = participation;
-          _notice = 'App access was revoked and a room rekey was staged.';
+          _notice = L10n.of(context)
+              .ui_app_access_was_revoked_and_a_room_rekey_was_s_8aefb0a7;
         });
       }
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not revoke encrypted app access',
+              summary: L10n.of(context)
+                  .ui_could_not_revoke_encrypted_app_access_01125b9e,
             ));
       }
     } finally {
@@ -236,7 +252,8 @@ final class _DmBotE2eeParticipationScreenState
   Widget build(BuildContext context) {
     final participation = _participation;
     return Scaffold(
-      appBar: AppBar(title: const Text('Apps in this conversation')),
+      appBar: AppBar(
+          title: Text(L10n.of(context).ui_apps_in_this_conversation_9f084fd7)),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(16),
@@ -250,9 +267,10 @@ final class _DmBotE2eeParticipationScreenState
                     Icon(Icons.enhanced_encryption_outlined,
                         color: context.kaede.warning),
                     const SizedBox(width: 10),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        'An app becomes another cryptographic participant. Account authorization alone grants no room access. Revocation rotates keys, but cannot recall data the app already decrypted.',
+                        L10n.of(context)
+                            .ui_an_app_becomes_another_cryptographic_particip_c845b147,
                       ),
                     ),
                   ],
@@ -263,7 +281,8 @@ final class _DmBotE2eeParticipationScreenState
             if (_installations.isNotEmpty)
               DropdownButtonFormField<String>(
                 initialValue: _selected?.id,
-                decoration: const InputDecoration(labelText: 'Authorized app'),
+                decoration: InputDecoration(
+                    labelText: L10n.of(context).ui_authorized_app_c2371e67),
                 items: [
                   for (final installation in _installations)
                     DropdownMenuItem(
@@ -274,12 +293,14 @@ final class _DmBotE2eeParticipationScreenState
                 onChanged: _loading || _busy ? null : _select,
               )
             else if (!_loading)
-              const Card(
+              Card(
                 child: ListTile(
                   leading: Icon(Icons.apps_outlined),
-                  title: Text('No participant-capable app'),
+                  title: Text(
+                      L10n.of(context).ui_no_participant_capable_app_6281f549),
                   subtitle: Text(
-                    'Authorize one for private conversations through its reviewed Add App flow, then return here.',
+                    L10n.of(context)
+                        .ui_authorize_one_for_private_conversations_throu_cce245e7,
                   ),
                 ),
               ),
@@ -301,11 +322,16 @@ final class _DmBotE2eeParticipationScreenState
                             ? context.kaede.danger
                             : context.kaede.warning,
                   ),
-                  title: Text('Consent ${participation.consentState}'),
+                  title: Text(L10n.of(context).ui_consent_value0_937d13ae(
+                      (participation.consentState).toString())),
                   subtitle: Text(
                     participation.historyFloorMessageRef == null
-                        ? 'No access to messages sent before full consent'
-                        : 'No app history before ${participation.historyFloorMessageRef!.wire}',
+                        ? L10n.of(context)
+                            .ui_no_access_to_messages_sent_before_full_consen_f6c7f545
+                        : L10n.of(context)
+                            .ui_no_app_history_before_value0_f14a0781(
+                                (participation.historyFloorMessageRef!.wire)
+                                    .toString()),
                   ),
                 ),
               ),
@@ -321,19 +347,21 @@ final class _DmBotE2eeParticipationScreenState
                   ),
                   title: Text(participant.userRef.wire),
                   subtitle: Text(participant.consented
-                      ? 'Consented'
-                      : 'Waiting for consent'),
+                      ? L10n.of(context).ui_consented_70f6f7a4
+                      : L10n.of(context).ui_waiting_for_consent_d94d101d),
                 ),
               if (participation.devices.isNotEmpty) ...[
                 const SizedBox(height: 8),
-                Text('VERIFIED APP DEVICES',
+                Text(L10n.of(context).ui_verified_app_devices_6f81ff49,
                     style: Theme.of(context).textTheme.labelSmall),
                 for (final device in participation.devices)
                   ListTile(
                     leading: const Icon(Icons.key_rounded),
                     title: Text(device.deviceId),
-                    subtitle:
-                        Text('${device.status} · epoch ${device.joinedEpoch}'),
+                    subtitle: Text(L10n.of(context)
+                        .ui_value0_epoch_value1_36844dba(
+                            (device.status).toString(),
+                            (device.joinedEpoch).toString())),
                   ),
               ],
             ],
@@ -351,12 +379,16 @@ final class _DmBotE2eeParticipationScreenState
                   ? FilledButton.tonalIcon(
                       onPressed: _busy ? null : _revoke,
                       icon: const Icon(Icons.person_remove_outlined),
-                      label: Text(_busy ? 'Removing…' : 'Remove app and rekey'),
+                      label: Text(_busy
+                          ? L10n.of(context).ui_removing_be3af276
+                          : L10n.of(context).ui_remove_app_and_rekey_a691fe77),
                     )
                   : FilledButton.icon(
                       onPressed: _busy ? null : _consent,
                       icon: const Icon(Icons.person_add_alt_1_rounded),
-                      label: Text(_busy ? 'Recording…' : 'Consent to add'),
+                      label: Text(_busy
+                          ? L10n.of(context).ui_recording_44af53a8
+                          : L10n.of(context).ui_consent_to_add_684f79a5),
                     ),
           ],
         ),

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -14,6 +13,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/scheduled_events.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -152,7 +152,8 @@ final class _GuildScheduledEventsTabState
         return;
       }
       setState(() => _loading = false);
-      _showError('Could not load scheduled events', error);
+      _showError(
+          L10n.of(context).ui_could_not_load_scheduled_events_99abfad3, error);
     }
   }
 
@@ -205,7 +206,9 @@ final class _GuildScheduledEventsTabState
 
   @override
   Widget build(BuildContext context) => _guild == null
-      ? Center(child: Text('This guild is no longer available.'))
+      ? Center(
+          child: Text(
+              L10n.of(context).ui_this_guild_is_no_longer_available_d15ae27d))
       : Scaffold(
           backgroundColor: settingsSurface(context),
           body: RefreshIndicator(
@@ -224,7 +227,7 @@ final class _GuildScheduledEventsTabState
                           ),
                           SizedBox(height: 14),
                           Text(
-                            'No upcoming events',
+                            L10n.of(context).ui_no_upcoming_events_42e68679,
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               fontSize: 18,
@@ -234,8 +237,10 @@ final class _GuildScheduledEventsTabState
                           SizedBox(height: 6),
                           Text(
                             _canCreate
-                                ? 'Create one when your community has something planned.'
-                                : 'Nothing is scheduled yet.',
+                                ? L10n.of(context)
+                                    .ui_create_one_when_your_community_has_something__e8ca7f59
+                                : L10n.of(context)
+                                    .ui_nothing_is_scheduled_yet_a16eab07,
                             textAlign: TextAlign.center,
                             style: TextStyle(color: context.kaede.muted),
                           ),
@@ -253,7 +258,7 @@ final class _GuildScheduledEventsTabState
               ? FloatingActionButton.extended(
                   onPressed: _busy == null ? () => _openEditor() : null,
                   icon: Icon(Icons.add_rounded),
-                  label: Text('Create event'),
+                  label: Text(L10n.of(context).ui_create_event_d0c67bc5),
                 )
               : null,
         );
@@ -319,7 +324,8 @@ final class _GuildScheduledEventsTabState
                         ),
                       ),
                       Text(
-                        '${event.startTime.day}',
+                        L10n.of(context).ui_value0_26e9163c(
+                            (event.startTime.day).toString()),
                         style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
@@ -362,10 +368,16 @@ final class _GuildScheduledEventsTabState
                       SizedBox(height: 3),
                       Text(
                         event.entityType == ScheduledEventEntityType.stage
-                            ? 'Stage · ${channel?.name ?? 'Unavailable channel'}'
+                            ? L10n.of(context).ui_stage_value0_8c82c30d(
+                                (channel?.name ?? 'Unavailable channel')
+                                    .toString())
                             : event.entityType == ScheduledEventEntityType.voice
-                                ? 'Voice · ${channel?.name ?? 'Unavailable channel'}'
-                                : 'External · ${event.location ?? 'Location unavailable'}',
+                                ? L10n.of(context).ui_voice_value0_1a9aab79(
+                                    (channel?.name ?? 'Unavailable channel')
+                                        .toString())
+                                : L10n.of(context).ui_external_value0_4ec4fb6a(
+                                    (event.location ?? 'Location unavailable')
+                                        .toString()),
                         style: TextStyle(color: context.kaede.muted),
                       ),
                       if (event.description?.trim().isNotEmpty == true) ...[
@@ -388,15 +400,17 @@ final class _GuildScheduledEventsTabState
                             ),
                             label: Text(
                               _subscriptions[event.ref] == true
-                                  ? 'Following'
-                                  : 'Notify me',
+                                  ? L10n.of(context).ui_following_9fa2c938
+                                  : L10n.of(context).ui_notify_me_33a8c85a,
                             ),
                           ),
                           TextButton.icon(
                             onPressed:
                                 busy ? null : () => _showSubscribers(event),
                             icon: Icon(Icons.people_outline_rounded, size: 17),
-                            label: Text('${event.userCount} interested'),
+                            label: Text(L10n.of(context)
+                                .ui_value0_interested_33671f07(
+                                    (event.userCount).toString())),
                           ),
                         ],
                       ),
@@ -406,27 +420,34 @@ final class _GuildScheduledEventsTabState
                 if (_canManageEvent(event))
                   PopupMenuButton<String>(
                     enabled: !busy,
-                    tooltip: 'Event actions',
+                    tooltip: L10n.of(context).ui_event_actions_802fbccc,
                     onSelected: (action) => _eventAction(event, action),
                     itemBuilder: (_) => [
-                      PopupMenuItem(value: 'edit', child: Text('Edit')),
+                      PopupMenuItem(
+                          value: 'edit',
+                          child: Text(L10n.of(context).ui_edit_c2c76cb1)),
                       if (event.status == ScheduledEventStatus.scheduled) ...[
-                        PopupMenuItem(value: 'start', child: Text('Start now')),
+                        PopupMenuItem(
+                            value: 'start',
+                            child:
+                                Text(L10n.of(context).ui_start_now_8235342f)),
                         PopupMenuItem(
                           value: 'cancel',
-                          child: Text('Cancel event'),
+                          child:
+                              Text(L10n.of(context).ui_cancel_event_5413821b),
                         ),
                       ],
                       if (event.status == ScheduledEventStatus.active)
                         PopupMenuItem(
                           value: 'complete',
-                          child: Text('Complete event'),
+                          child:
+                              Text(L10n.of(context).ui_complete_event_4468bef2),
                         ),
                       PopupMenuDivider(),
                       PopupMenuItem(
                         value: 'delete',
                         child: Text(
-                          'Delete permanently',
+                          L10n.of(context).ui_delete_permanently_d8100383,
                           style: TextStyle(color: context.kaede.danger),
                         ),
                       ),
@@ -448,10 +469,13 @@ final class _GuildScheduledEventsTabState
         ),
         child: Text(
           switch (status) {
-            ScheduledEventStatus.active => 'LIVE',
-            ScheduledEventStatus.completed => 'COMPLETED',
-            ScheduledEventStatus.canceled => 'CANCELED',
-            ScheduledEventStatus.scheduled => 'SCHEDULED',
+            ScheduledEventStatus.active => L10n.of(context).ui_live_45424caf,
+            ScheduledEventStatus.completed =>
+              L10n.of(context).ui_completed_61fa0f72,
+            ScheduledEventStatus.canceled =>
+              L10n.of(context).ui_canceled_b57caada,
+            ScheduledEventStatus.scheduled =>
+              L10n.of(context).ui_scheduled_993163d8,
           },
           style: TextStyle(
             color: Theme.of(context).colorScheme.primary,
@@ -519,7 +543,7 @@ final class _GuildScheduledEventsTabState
         !targetAllowed ||
         (event != null && !_canManageEvent(event))) {
       _showError(
-        'Could not save the scheduled event',
+        L10n.of(context).ui_could_not_save_the_scheduled_event_dd7ef894,
         UserInputException('Event permissions changed. Try again.'),
       );
       return;
@@ -562,12 +586,15 @@ final class _GuildScheduledEventsTabState
           saved,
         ]);
       });
-      _showNotice(event == null ? 'Event created.' : 'Event updated.');
+      _showNotice(event == null
+          ? L10n.of(context).ui_event_created_af2b8d87
+          : L10n.of(context).ui_event_updated_06a28672);
     } on Object catch (error) {
       _showError(
         detailsSaved
-            ? 'The event was saved, but its cover could not be updated'
-            : 'Could not save the scheduled event',
+            ? L10n.of(context)
+                .ui_the_event_was_saved_but_its_cover_could_not_b_a6bb3e92
+            : L10n.of(context).ui_could_not_save_the_scheduled_event_dd7ef894,
         error,
       );
     } finally {
@@ -600,13 +627,18 @@ final class _GuildScheduledEventsTabState
               ]);
       });
       _showNotice(switch (status) {
-        ScheduledEventStatus.active => 'Event started.',
-        ScheduledEventStatus.completed => 'Event completed.',
-        ScheduledEventStatus.canceled => 'Event canceled.',
-        ScheduledEventStatus.scheduled => 'Event updated.',
+        ScheduledEventStatus.active =>
+          L10n.of(context).ui_event_started_be79e1a8,
+        ScheduledEventStatus.completed =>
+          L10n.of(context).ui_event_completed_9f1611fc,
+        ScheduledEventStatus.canceled =>
+          L10n.of(context).ui_event_canceled_d1a5a2c4,
+        ScheduledEventStatus.scheduled =>
+          L10n.of(context).ui_event_updated_06a28672,
       });
     } on Object catch (error) {
-      _showError('Could not update the event status', error);
+      _showError(L10n.of(context).ui_could_not_update_the_event_status_2b5833ff,
+          error);
     } finally {
       if (mounted) setState(() => _busy = null);
     }
@@ -622,9 +654,11 @@ final class _GuildScheduledEventsTabState
       if (!mounted) return;
       setState(() => _events =
           _events.where((candidate) => candidate.ref != event.ref).toList());
-      _showNotice('Scheduled event deleted.');
+      _showNotice(L10n.of(context).ui_scheduled_event_deleted_db644ba9);
     } on Object catch (error) {
-      _showError('Could not delete the scheduled event', error);
+      _showError(
+          L10n.of(context).ui_could_not_delete_the_scheduled_event_6b996da6,
+          error);
     } finally {
       if (mounted) setState(() => _busy = null);
     }
@@ -658,11 +692,13 @@ final class _GuildScheduledEventsTabState
       });
       _showNotice(
         next
-            ? 'You will be notified about this event.'
-            : 'Event notifications turned off.',
+            ? L10n.of(context).ui_you_will_be_notified_about_this_event_9a9b8144
+            : L10n.of(context).ui_event_notifications_turned_off_09c23258,
       );
     } on Object catch (error) {
-      _showError('Could not update event notifications', error);
+      _showError(
+          L10n.of(context).ui_could_not_update_event_notifications_487032b0,
+          error);
     } finally {
       if (mounted) setState(() => _busy = null);
     }
@@ -724,8 +760,10 @@ final class _GuildScheduledEventsTabState
               child: Column(
                 children: [
                   ListTile(
-                    title: Text('Interested members'),
-                    subtitle: Text('${event.userCount} total'),
+                    title:
+                        Text(L10n.of(context).ui_interested_members_3674e2e9),
+                    subtitle: Text(L10n.of(context).ui_value0_total_7e2f23b6(
+                        (event.userCount).toString())),
                   ),
                   Expanded(
                     child: failure != null && subscribers.isEmpty
@@ -738,7 +776,8 @@ final class _GuildScheduledEventsTabState
                                   Text(
                                     userFacingError(
                                       failure!,
-                                      summary: 'Could not load subscribers',
+                                      summary: L10n.of(context)
+                                          .ui_could_not_load_subscribers_947f38b2,
                                     ),
                                     textAlign: TextAlign.center,
                                   ),
@@ -746,7 +785,8 @@ final class _GuildScheduledEventsTabState
                                   FilledButton(
                                     onPressed:
                                         loading ? null : () => loadMore(update),
-                                    child: Text('Try again'),
+                                    child: Text(
+                                        L10n.of(context).ui_try_again_213e90fa),
                                   ),
                                 ],
                               ),
@@ -769,7 +809,8 @@ final class _GuildScheduledEventsTabState
                                 Padding(
                                   padding: EdgeInsets.all(28),
                                   child: Text(
-                                    'No one has followed this event yet.',
+                                    L10n.of(context)
+                                        .ui_no_one_has_followed_this_event_yet_d98f29ba,
                                     textAlign: TextAlign.center,
                                     style:
                                         TextStyle(color: context.kaede.muted),
@@ -782,7 +823,10 @@ final class _GuildScheduledEventsTabState
                                     onPressed:
                                         loading ? null : () => loadMore(update),
                                     child: Text(
-                                      loading ? 'Loading…' : 'Load more',
+                                      loading
+                                          ? L10n.of(context).ui_loading_c4e2f181
+                                          : L10n.of(context)
+                                              .ui_load_more_2b7b053e,
                                     ),
                                   ),
                                 ),
@@ -812,7 +856,7 @@ final class _GuildScheduledEventsTabState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: Text('Keep event'),
+              child: Text(L10n.of(context).ui_keep_event_fcbe4da0),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, true),
@@ -935,7 +979,7 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
           } on Object catch (error) {
             update(() => validation = userFacingError(
                   error,
-                  summary: 'Check the event details',
+                  summary: L10n.of(context).ui_check_the_event_details_0a3aa752,
                 ));
           }
         }
@@ -953,19 +997,23 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    event == null ? 'Create event' : 'Edit event',
+                    event == null
+                        ? L10n.of(context).ui_create_event_d0c67bc5
+                        : L10n.of(context).ui_edit_event_041c41b1,
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
                   SizedBox(height: 4),
                   Text(
-                    'Choose a Stage, voice channel, or external location.',
+                    L10n.of(context)
+                        .ui_choose_a_stage_voice_channel_or_external_loca_539c15cd,
                     style: TextStyle(color: context.kaede.muted),
                   ),
                   SizedBox(height: 16),
                   TextField(
                     controller: name,
                     maxLength: 100,
-                    decoration: InputDecoration(labelText: 'Name'),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_name_0fe07306),
                   ),
                   SizedBox(height: 10),
                   if (coverFile != null ||
@@ -1007,8 +1055,8 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                         icon: Icon(Icons.image_outlined),
                         label: Text(
                           coverFile == null && existingCover == null
-                              ? 'Add cover image'
-                              : 'Change cover image',
+                              ? L10n.of(context).ui_add_cover_image_7de4d79a
+                              : L10n.of(context).ui_change_cover_image_b8e5c25f,
                         ),
                       ),
                       if (coverFile != null ||
@@ -1018,12 +1066,14 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                             coverFile = null;
                             removeCover = event?.imageHash != null;
                           }),
-                          child: Text('Remove cover'),
+                          child:
+                              Text(L10n.of(context).ui_remove_cover_4c8c602e),
                         ),
                     ],
                   ),
                   Text(
-                    'PNG, JPEG, GIF, or WebP · up to 10 MiB',
+                    L10n.of(context)
+                        .ui_png_jpeg_gif_or_webp_up_to_10_mib_98f2b31b,
                     style: TextStyle(color: context.kaede.muted, fontSize: 12),
                   ),
                   SizedBox(height: 10),
@@ -1033,26 +1083,28 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                     minLines: 2,
                     maxLines: 4,
                     decoration: InputDecoration(
-                      labelText: 'Description (optional)',
+                      labelText:
+                          L10n.of(context).ui_description_optional_31e71764,
                     ),
                   ),
                   SizedBox(height: 10),
                   DropdownButtonFormField<ScheduledEventEntityType>(
                     initialValue: entityType,
-                    decoration: InputDecoration(labelText: 'Event type'),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_event_type_015adcc5),
                     items: [
                       DropdownMenuItem(
                         value: ScheduledEventEntityType.stage,
-                        child: Text('Stage channel'),
+                        child: Text(L10n.of(context).ui_stage_channel_8ff46126),
                       ),
                       DropdownMenuItem(
                         value: ScheduledEventEntityType.voice,
-                        child: Text('Voice channel'),
+                        child: Text(L10n.of(context).ui_voice_channel_d243a4f2),
                       ),
                       if (allowExternal)
                         DropdownMenuItem(
                           value: ScheduledEventEntityType.external,
-                          child: Text('External'),
+                          child: Text(L10n.of(context).ui_external_29951daa),
                         ),
                     ],
                     onChanged: event?.status == ScheduledEventStatus.active
@@ -1079,10 +1131,11 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                           : null,
                       decoration: InputDecoration(
                         labelText: entityType == ScheduledEventEntityType.stage
-                            ? 'Stage channel'
-                            : 'Voice channel',
+                            ? L10n.of(context).ui_stage_channel_8ff46126
+                            : L10n.of(context).ui_voice_channel_d243a4f2,
                         helperText: matchingChannels.isEmpty
-                            ? 'You need Create/Manage Events, View Channel, and Connect.'
+                            ? L10n.of(context)
+                                .ui_you_need_create_manage_events_view_channel_an_fddba802
                             : null,
                       ),
                       items: [
@@ -1099,13 +1152,14 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                       controller: location,
                       maxLength: 100,
                       decoration: InputDecoration(
-                        labelText: 'Location or link',
+                        labelText:
+                            L10n.of(context).ui_location_or_link_8ad43dc1,
                       ),
                     ),
                   SizedBox(height: 10),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: Text('Starts'),
+                    title: Text(L10n.of(context).ui_starts_37463de4),
                     subtitle:
                         Text(DateFormat.yMMMd().add_jm().format(startTime)),
                     trailing: Icon(Icons.edit_calendar_outlined),
@@ -1115,31 +1169,33 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                   ),
                   DropdownButtonFormField<ScheduledEventRecurrencePreset>(
                     initialValue: recurrence,
-                    decoration: InputDecoration(labelText: 'Repeat'),
-                    items: const [
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_repeat_06626d4a),
+                    items: [
                       DropdownMenuItem(
                         value: ScheduledEventRecurrencePreset.none,
-                        child: Text('Does not repeat'),
+                        child:
+                            Text(L10n.of(context).ui_does_not_repeat_9cd5f984),
                       ),
                       DropdownMenuItem(
                         value: ScheduledEventRecurrencePreset.daily,
-                        child: Text('Daily'),
+                        child: Text(L10n.of(context).ui_daily_bc3889be),
                       ),
                       DropdownMenuItem(
                         value: ScheduledEventRecurrencePreset.weekly,
-                        child: Text('Weekly'),
+                        child: Text(L10n.of(context).ui_weekly_417cc4ce),
                       ),
                       DropdownMenuItem(
                         value: ScheduledEventRecurrencePreset.biweekly,
-                        child: Text('Every 2 weeks'),
+                        child: Text(L10n.of(context).ui_every_2_weeks_500cd833),
                       ),
                       DropdownMenuItem(
                         value: ScheduledEventRecurrencePreset.monthly,
-                        child: Text('Monthly'),
+                        child: Text(L10n.of(context).ui_monthly_1640a356),
                       ),
                       DropdownMenuItem(
                         value: ScheduledEventRecurrencePreset.yearly,
-                        child: Text('Yearly'),
+                        child: Text(L10n.of(context).ui_yearly_3e5922ab),
                       ),
                     ],
                     onChanged: event?.status == ScheduledEventStatus.active
@@ -1153,12 +1209,12 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                     contentPadding: EdgeInsets.zero,
                     title: Text(
                       entityType != ScheduledEventEntityType.external
-                          ? 'Ends (optional)'
-                          : 'Ends',
+                          ? L10n.of(context).ui_ends_optional_a76279e6
+                          : L10n.of(context).ui_ends_fe231bbb,
                     ),
                     subtitle: Text(
                       endTime == null
-                          ? 'No end time'
+                          ? L10n.of(context).ui_no_end_time_8247d188
                           : DateFormat.yMMMd().add_jm().format(endTime!),
                     ),
                     trailing: Wrap(
@@ -1166,12 +1222,13 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                         if (endTime != null &&
                             entityType != ScheduledEventEntityType.external)
                           IconButton(
-                            tooltip: 'Clear end time',
+                            tooltip:
+                                L10n.of(context).ui_clear_end_time_053f4070,
                             onPressed: () => update(() => endTime = null),
                             icon: Icon(Icons.clear_rounded),
                           ),
                         IconButton(
-                          tooltip: 'Choose end time',
+                          tooltip: L10n.of(context).ui_choose_end_time_8fb40fee,
                           onPressed: pickEnd,
                           icon: Icon(Icons.edit_calendar_outlined),
                         ),
@@ -1191,12 +1248,14 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                     children: [
                       TextButton(
                         onPressed: () => Navigator.pop(sheetContext),
-                        child: Text('Cancel'),
+                        child: Text(L10n.of(context).ui_cancel_35afca3b),
                       ),
                       SizedBox(width: 8),
                       FilledButton(
                         onPressed: submit,
-                        child: Text(event == null ? 'Create event' : 'Save'),
+                        child: Text(event == null
+                            ? L10n.of(context).ui_create_event_d0c67bc5
+                            : L10n.of(context).ui_save_4d2d5d68),
                       ),
                     ],
                   ),

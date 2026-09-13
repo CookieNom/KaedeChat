@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { ApiError, api, userErrorMessage } from '$lib/api/client';
   import { entityRef } from '$lib/chat/refs';
   import type { Channel } from '$lib/chat/types';
@@ -51,7 +53,10 @@
       if (caught instanceof ApiError && caught.code === 'BOT_E2EE_PARTICIPATION_NOT_FOUND') {
         participation = null;
       } else {
-        error = userErrorMessage(caught, 'Could not load encrypted app access for this channel.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_encrypted_app_access_for_this__f15b15b7')
+        );
       }
     } finally {
       loading = false;
@@ -83,9 +88,9 @@
         method: 'PUT',
         headers: reason.trim() ? { 'X-Audit-Log-Reason': reason.trim() } : undefined
       });
-      notice = 'Access is staged. Pending devices become active after the encrypted room rekeys.';
+      notice = $t('ui_access_is_staged_pending_devices_become_activ_f3af9b4e');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not grant encrypted channel access.');
+      error = userErrorMessage(caught, $t('ui_could_not_grant_encrypted_channel_access_52744544'));
     } finally {
       busy = false;
     }
@@ -111,9 +116,9 @@
         headers: reason.trim() ? { 'X-Audit-Log-Reason': reason.trim() } : undefined
       });
       participation = null;
-      notice = 'Encrypted channel access was revoked and the room rekey was staged.';
+      notice = $t('ui_encrypted_channel_access_was_revoked_and_the__71b57ff4');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not revoke encrypted channel access.');
+      error = userErrorMessage(caught, $t('ui_could_not_revoke_encrypted_channel_access_f3372ade'));
     } finally {
       busy = false;
     }
@@ -126,16 +131,13 @@
 </script>
 
 <section class="bot-e2ee" aria-labelledby={`bot-e2ee-${applicationRef}`}>
-  <h3 id={`bot-e2ee-${applicationRef}`}>Encrypted channel access</h3>
-  <p>
-    Participant mode lets verified app devices join a channel's MLS room. Consent is per channel,
-    auditable, and always triggers a room rekey.
-  </p>
+  <h3 id={`bot-e2ee-${applicationRef}`}>{$t('ui_encrypted_channel_access_7013fcf4')}</h3>
+  <p>{$t('ui_participant_mode_lets_verified_app_devices_jo_02f81dc7')}</p>
   {#if encryptedChannels.length === 0}
-    <small>This server has no end-to-end encrypted channels.</small>
+    <small>{$t('ui_this_server_has_no_end_to_end_encrypted_chann_a5513693')}</small>
   {:else}
     <label>
-      <span>Channel</span>
+      <span>{$t('ui_channel_ce4683e7')}</span>
       <select
         value={selectedChannelRef}
         disabled={loading || busy}
@@ -147,7 +149,7 @@
       </select>
     </label>
     {#if loading}
-      <small role="status">Checking participant devices…</small>
+      <small role="status">{$t('ui_checking_participant_devices_128aadb8')}</small>
     {:else if participation?.devices.length}
       <div class="devices">
         {#each participation.devices as device (device.device_id)}
@@ -155,14 +157,17 @@
             <strong>{device.status}</strong>
             <code>{device.device_id}</code>
             <small>
-              {botE2eeHistoryNotice(device)} · consent generation {device.consent_generation} · joined
-              epoch {device.joined_epoch}
+              {$t('ui_value0_consent_generation_value1_joined_epoch_43c8dc59', {
+                value0: String(botE2eeHistoryNotice(device)),
+                value1: String(device.consent_generation),
+                value2: String(device.joined_epoch)
+              })}
             </small>
           </div>
         {/each}
       </div>
     {:else}
-      <small>The app is not a participant in this channel.</small>
+      <small>{$t('ui_the_app_is_not_a_participant_in_this_channel_807a398e')}</small>
     {/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if notice}<p class="notice" role="status">{notice}</p>{/if}
@@ -170,20 +175,16 @@
       <div class="actions">
         {#if participation?.devices.some((device) => device.status !== 'revoked')}
           <button class="danger" type="button" disabled={busy || loading} onclick={revoke}>
-            {busy ? 'Revoking…' : 'Revoke access'}
+            {busy ? $t('ui_revoking_1a36f21b') : $t('ui_revoke_access_ab292ddb')}
           </button>
         {:else}
           <button type="button" disabled={busy || loading} onclick={grant}>
-            {busy ? 'Granting…' : 'Allow in channel'}
+            {busy ? $t('ui_granting_c0668408') : $t('ui_allow_in_channel_07df133d')}
           </button>
         {/if}
       </div>
     {/if}
-    <p class="warning">
-      The app receives plaintext only on its verified participant devices. Revocation prevents new
-      decryptions; it cannot recall content already delivered or override the displayed history
-      floor.
-    </p>
+    <p class="warning">{$t('ui_the_app_receives_plaintext_only_on_its_verifi_d56e599b')}</p>
   {/if}
 </section>
 

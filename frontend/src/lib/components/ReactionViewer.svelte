@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { mergeReactionUsers } from '$lib/chat/reaction-viewer';
   import { entityRef } from '$lib/chat/refs';
@@ -63,7 +65,10 @@
       nextAfter = response.next_after;
     } catch (caught) {
       if (generation !== requestGeneration) return;
-      error = userErrorMessage(caught, 'Could not load the people who reacted. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_the_people_who_reacted_try_aga_7a827326')
+      );
     } finally {
       if (generation === requestGeneration) loading = false;
     }
@@ -115,7 +120,7 @@
         caught,
         emoji
           ? `Could not clear the ${emoji} reactions. Check your permissions and try again.`
-          : 'Could not clear reactions from this message. Check your permissions and try again.'
+          : $t('ui_could_not_clear_reactions_from_this_message_c_b4cfe973')
       );
     } finally {
       clearing = false;
@@ -179,23 +184,26 @@
     tabindex="-1"
   >
     <header>
-      <h2 id="reaction-viewer-title">Reactions</h2>
+      <h2 id="reaction-viewer-title">{$t('ui_reactions_8a7ede6b')}</h2>
       <div class="reaction-header-actions">
         {#if canManage && onClearReactions && reactions.length}
           <button
             class="clear-all-trigger"
             type="button"
             disabled={clearing}
-            onclick={() => requestClear('all')}>Clear all</button
+            onclick={() => requestClear('all')}>{$t('ui_clear_all_29a390f9')}</button
           >
         {/if}
-        <button class="close-trigger" type="button" aria-label="Close reactions" onclick={onClose}
-          >×</button
+        <button
+          class="close-trigger"
+          type="button"
+          aria-label={$t('ui_close_reactions_286be8ef')}
+          onclick={onClose}>×</button
         >
       </div>
     </header>
     <div class="reaction-viewer-body">
-      <nav aria-label="Reaction types">
+      <nav aria-label={$t('ui_reaction_types_8da3cfdf')}>
         {#each reactions as [emoji, count] (emoji)}
           <button
             type="button"
@@ -211,18 +219,19 @@
       </nav>
       <div class="reaction-user-panel">
         <p class="visually-hidden" aria-live="polite">
-          {loading ? 'Loading reactions' : `${total} people reacted`}
+          {loading ? $t('ui_loading_reactions_04d3de0f') : `${total} people reacted`}
         </p>
         {#if error}
           <div class="reaction-viewer-state" role="alert">
             <p>{error}</p>
-            <button type="button" onclick={() => void loadUsers(users.length > 0)}>Try again</button
+            <button type="button" onclick={() => void loadUsers(users.length > 0)}
+              >{$t('ui_try_again_d8b8392e')}</button
             >
           </div>
         {:else if !users.length && loading}
-          <div class="reaction-viewer-state"><p>Loading…</p></div>
+          <div class="reaction-viewer-state"><p>{$t('ui_loading_ba3bbbe1')}</p></div>
         {:else if !users.length}
-          <div class="reaction-viewer-state"><p>No reactions to show.</p></div>
+          <div class="reaction-viewer-state"><p>{$t('ui_no_reactions_to_show_eec51fc2')}</p></div>
         {:else}
           <ul>
             {#each users as user (entityRef(user))}
@@ -250,14 +259,16 @@
               disabled={loading}
               onclick={() => void loadUsers(true)}
             >
-              {loading ? 'Loading…' : 'Load more'}
+              {loading ? $t('ui_loading_ba3bbbe1') : $t('ui_load_more_ac8991ef')}
             </button>
           {/if}
         {/if}
         {#if canManage && onClearReactions && selectedEmoji}
           <div class="reaction-management">
             <button type="button" disabled={clearing} onclick={() => requestClear('emoji')}>
-              Clear <ReactionEmoji value={selectedEmoji} /> reactions
+              {$t('ui_clear_83b12c22')}
+              <ReactionEmoji value={selectedEmoji} />
+              reactions
             </button>
           </div>
         {/if}
@@ -271,18 +282,18 @@
         <div>
           <strong>
             {clearConfirmation === 'all'
-              ? 'Clear every reaction?'
+              ? $t('ui_clear_every_reaction_4401463f')
               : `Clear all ${selectedEmoji} reactions?`}
           </strong>
           <p>
             {clearConfirmation === 'all'
-              ? 'Every reaction will be removed from this message. This cannot be undone.'
+              ? $t('ui_every_reaction_will_be_removed_from_this_mess_6644ad78')
               : `${reactionCount(selectedEmoji)} reaction${reactionCount(selectedEmoji) === 1 ? '' : 's'} will be removed from this message. This cannot be undone.`}
           </p>
         </div>
         <div class="reaction-confirmation-actions">
           <button type="button" disabled={clearing} onclick={() => (clearConfirmation = null)}
-            >Cancel</button
+            >{$t('ui_cancel_19766ed6')}</button
           >
           <button
             class="danger"
@@ -291,9 +302,9 @@
             onclick={() => void confirmClear()}
           >
             {clearing
-              ? 'Clearing…'
+              ? $t('ui_clearing_9a81378b')
               : clearConfirmation === 'all'
-                ? 'Clear all reactions'
+                ? $t('ui_clear_all_reactions_c380746b')
                 : `Clear ${selectedEmoji}`}
           </button>
         </div>

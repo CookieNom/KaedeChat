@@ -212,6 +212,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm check
+      - run: pnpm check:locales
+      - run: python3 -m unittest discover -s ../scripts -p 'test_*.py'
+      - name: Check native language metadata
+        run: python3 ../scripts/sync-native-locales.py --check
       - run: pnpm test
       - run: pnpm test:livekit-crypto
       - run: pnpm check:e2ee-wasm

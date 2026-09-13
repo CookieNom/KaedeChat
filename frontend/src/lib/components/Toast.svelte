@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   let {
     message,
     onDismiss,
@@ -24,7 +26,9 @@
       </svg>
     </span>
     <span>{message}</span>
-    <button type="button" aria-label="Dismiss notification" onclick={onDismiss}>×</button>
+    <button type="button" aria-label={$t('ui_dismiss_notification_b7bb3f34')} onclick={onDismiss}
+      >×</button
+    >
   </div>
 {/if}
 

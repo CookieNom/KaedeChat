@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -10,6 +9,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
 
@@ -238,7 +238,8 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       if (!mounted || generation != _requestGeneration) return;
       setState(() {
         _loading = false;
-        _error = userFacingError(error, summary: 'Could not load this tracker');
+        _error = userFacingError(error,
+            summary: L10n.of(context).ui_could_not_load_this_tracker_14b8eb07);
         // Never leave tracker contents visible after access is revoked. For a
         // transient background failure, retain the last board but show the
         // persistent retry banner so stale data is not presented as current.
@@ -273,13 +274,14 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(conflict
-              ? 'This tracker changed on another client. It has been refreshed; try again.'
+              ? L10n.of(context)
+                  .ui_this_tracker_changed_on_another_client_it_has_0672e03b
               : userFacingError(error, summary: failureSummary)),
           backgroundColor: context.kaede.dangerSoft,
           action: retry == null
               ? null
               : SnackBarAction(
-                  label: 'Retry',
+                  label: L10n.of(context).ui_retry_8036af59,
                   onPressed: () => unawaited(retry()),
                 ),
         ));
@@ -401,7 +403,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       await _load(background: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Task saved')),
+          SnackBar(content: Text(L10n.of(context).ui_task_saved_1330065f)),
         );
       }
     } on Object catch (error) {
@@ -413,7 +415,9 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
             ? 'Task details were saved, but its lane could not be changed. The tracker has been refreshed.'
             : conflict
                 ? 'This task changed on another client. It has been refreshed; review it before trying again.'
-                : userFacingError(error, summary: 'Could not save the task');
+                : userFacingError(error,
+                    summary:
+                        L10n.of(context).ui_could_not_save_the_task_d23de4e8);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(message),
           backgroundColor: context.kaede.dangerSoft,
@@ -496,8 +500,8 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         .firstOrNull;
     if (target == null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(
-            'Add both an active lane and a completed lane to use this shortcut.'),
+        content: Text(L10n.of(context)
+            .ui_add_both_an_active_lane_and_a_completed_lane__3b09a703),
       ));
       return;
     }
@@ -592,8 +596,9 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
     if (!trackerLaneCanDelete(board, lane)) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(board.lanes.length <= 1
-            ? 'A tracker must keep at least one lane.'
-            : 'Move or delete all tasks in this lane first.'),
+            ? L10n.of(context).ui_a_tracker_must_keep_at_least_one_lane_94cc0f7a
+            : L10n.of(context)
+                .ui_move_or_delete_all_tasks_in_this_lane_first_71b3d442),
       ));
       return;
     }
@@ -623,7 +628,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         builder: builder,
       ),
       builder: (dialogContext) => AlertDialog(
-        title: Text('Tracker settings'),
+        title: Text(L10n.of(context).ui_tracker_settings_1b415d9c),
         content: Form(
           key: formKey,
           child: TextFormField(
@@ -633,8 +638,9 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
             maxLength: 10,
             textCapitalization: TextCapitalization.characters,
             decoration: InputDecoration(
-              labelText: 'Task key prefix',
-              helperText: '2–10 letters or digits; starts with a letter.',
+              labelText: L10n.of(context).ui_task_key_prefix_37585bcd,
+              helperText: L10n.of(context)
+                  .ui_2_10_letters_or_digits_starts_with_a_letter_953e54d4,
               prefixIcon: Icon(Icons.tag_rounded),
             ),
             validator: (value) => RegExp(r'^[A-Za-z][A-Za-z0-9]{1,9}$')
@@ -646,7 +652,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () {
@@ -655,7 +661,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                     dialogContext, controller.text.trim().toUpperCase());
               }
             },
-            child: Text('Save'),
+            child: Text(L10n.of(context).ui_save_4d2d5d68),
           ),
         ],
       ),
@@ -687,7 +693,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               style: destructive
@@ -695,7 +701,9 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                       backgroundColor: context.kaede.danger)
                   : null,
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: Text(destructive ? 'Delete' : 'Continue'),
+              child: Text(destructive
+                  ? L10n.of(context).ui_delete_5797ea6a
+                  : L10n.of(context).ui_continue_ab43d664),
             ),
           ],
         ),
@@ -709,7 +717,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
       return Center(
         child: Semantics(
           liveRegion: true,
-          label: 'Loading task tracker',
+          label: L10n.of(context).ui_loading_task_tracker_36db6b48,
           child: CircularProgressIndicator(),
         ),
       );
@@ -731,7 +739,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
           _TrackerToolbar(
             title: widget.channel.name?.trim().isNotEmpty == true
                 ? widget.channel.name!.trim()
-                : 'Task tracker',
+                : L10n.of(context).ui_task_tracker_869b2138,
             taskCount: board.tasks.length,
             busy: _mutating,
             canCreate: canCreate,
@@ -745,7 +753,9 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
             MaterialBanner(
               content: Text(_error!),
               actions: [
-                TextButton(onPressed: _load, child: Text('Retry')),
+                TextButton(
+                    onPressed: _load,
+                    child: Text(L10n.of(context).ui_retry_8036af59)),
               ],
             ),
           Expanded(
@@ -757,10 +767,12 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                       children: [
                         _TrackerEmpty(
                           icon: Icons.view_kanban_outlined,
-                          title: 'No lanes yet',
+                          title: L10n.of(context).ui_no_lanes_yet_b8f2b1bb,
                           message: canManage
-                              ? 'Create a lane to start organizing tasks.'
-                              : 'A tracker manager needs to create the first lane.',
+                              ? L10n.of(context)
+                                  .ui_create_a_lane_to_start_organizing_tasks_7e0c31ab
+                              : L10n.of(context)
+                                  .ui_a_tracker_manager_needs_to_create_the_first_l_4aee01c4,
                           action: canManage ? () => _editLane() : null,
                           actionLabel: 'Create lane',
                         ),
@@ -865,7 +877,9 @@ final class _TrackerToolbar extends StatelessWidget {
                             ?.copyWith(fontWeight: FontWeight.w900),
                       ),
                       Text(
-                        '$taskCount task${taskCount == 1 ? '' : 's'}',
+                        L10n.of(context).ui_value0_task_value1_20ef6df5(
+                            (taskCount).toString(),
+                            (taskCount == 1 ? '' : 's').toString()),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -876,10 +890,10 @@ final class _TrackerToolbar extends StatelessWidget {
                     key: ValueKey('tracker-create-task'),
                     onPressed: busy ? null : createTask,
                     icon: Icon(Icons.add_task_rounded, size: 19),
-                    label: Text('Task'),
+                    label: Text(L10n.of(context).ui_task_76ef3d8c),
                   ),
                 PopupMenuButton<String>(
-                  tooltip: 'Tracker actions',
+                  tooltip: L10n.of(context).ui_tracker_actions_4821a7b0,
                   enabled: !busy,
                   onSelected: (action) => switch (action) {
                     'lane' => createLane(),
@@ -893,7 +907,7 @@ final class _TrackerToolbar extends StatelessWidget {
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(Icons.refresh_rounded),
-                        title: Text('Refresh'),
+                        title: Text(L10n.of(context).ui_refresh_0815aad4),
                       ),
                     ),
                     if (canManage)
@@ -903,7 +917,7 @@ final class _TrackerToolbar extends StatelessWidget {
                           dense: true,
                           contentPadding: EdgeInsets.zero,
                           leading: Icon(Icons.view_week_outlined),
-                          title: Text('Create lane'),
+                          title: Text(L10n.of(context).ui_create_lane_250265ad),
                         ),
                       ),
                     if (canManage)
@@ -913,7 +927,8 @@ final class _TrackerToolbar extends StatelessWidget {
                           dense: true,
                           contentPadding: EdgeInsets.zero,
                           leading: Icon(Icons.settings_outlined),
-                          title: Text('Tracker settings'),
+                          title: Text(
+                              L10n.of(context).ui_tracker_settings_1b415d9c),
                         ),
                       ),
                   ],
@@ -975,8 +990,10 @@ final class _TrackerLaneSection extends StatelessWidget {
     final color = Color(0xFF000000 | lane.color);
     return Semantics(
       container: true,
-      label:
-          '${lane.name}, ${tasks.length} tasks, ${collapsed ? 'collapsed' : 'expanded'}',
+      label: L10n.of(context).ui_value0_value1_tasks_value2_d427bbcd(
+          (lane.name).toString(),
+          (tasks.length).toString(),
+          (collapsed ? 'collapsed' : 'expanded').toString()),
       child: Padding(
         padding: EdgeInsets.only(bottom: 14),
         child: Column(
@@ -1024,11 +1041,13 @@ final class _TrackerLaneSection extends StatelessWidget {
                           borderRadius:
                               BorderRadius.circular(KaedeRadius.small),
                         ),
-                        child: Text('${tasks.length}'),
+                        child: Text(L10n.of(context)
+                            .ui_value0_26e9163c((tasks.length).toString())),
                       ),
                       if (canManage)
                         PopupMenuButton<String>(
-                          tooltip: 'Manage ${lane.name}',
+                          tooltip: L10n.of(context).ui_manage_value0_8f73091f(
+                              (lane.name).toString()),
                           enabled: !busy,
                           onSelected: (action) => switch (action) {
                             'edit' => editLane(),
@@ -1039,22 +1058,26 @@ final class _TrackerLaneSection extends StatelessWidget {
                           },
                           itemBuilder: (_) => [
                             PopupMenuItem(
-                                value: 'edit', child: Text('Edit lane')),
+                                value: 'edit',
+                                child: Text(
+                                    L10n.of(context).ui_edit_lane_8eb964f1)),
                             PopupMenuItem(
                               value: 'up',
                               enabled: moveLaneUp != null,
-                              child: Text('Move up'),
+                              child: Text(L10n.of(context).ui_move_up_e6379e41),
                             ),
                             PopupMenuItem(
                               value: 'down',
                               enabled: moveLaneDown != null,
-                              child: Text('Move down'),
+                              child:
+                                  Text(L10n.of(context).ui_move_down_2b87faa8),
                             ),
                             PopupMenuDivider(),
                             PopupMenuItem(
                               value: 'delete',
                               enabled: canDeleteLane,
-                              child: Text('Delete lane',
+                              child: Text(
+                                  L10n.of(context).ui_delete_lane_c45aa80c,
                                   style:
                                       TextStyle(color: context.kaede.danger)),
                             ),
@@ -1077,14 +1100,15 @@ final class _TrackerLaneSection extends StatelessWidget {
                           size: 18, color: context.kaede.muted),
                       SizedBox(width: 8),
                       Expanded(
-                        child: Text('No tasks in this lane.',
+                        child: Text(
+                            L10n.of(context).ui_no_tasks_in_this_lane_089aecf5,
                             style: TextStyle(color: context.kaede.muted)),
                       ),
                       if (canCreate)
                         TextButton.icon(
                           onPressed: busy ? null : createTask,
                           icon: Icon(Icons.add_rounded),
-                          label: Text('Add task'),
+                          label: Text(L10n.of(context).ui_add_task_1812b769),
                         ),
                     ],
                   ),
@@ -1109,7 +1133,8 @@ final class _TrackerLaneSection extends StatelessWidget {
                   child: TextButton.icon(
                     onPressed: busy ? null : createTask,
                     icon: Icon(Icons.add_rounded),
-                    label: Text('Add task to ${lane.name}'),
+                    label: Text(L10n.of(context).ui_add_task_to_value0_dc3610cf(
+                        (lane.name).toString())),
                   ),
                 ),
             ],
@@ -1157,11 +1182,17 @@ final class _TrackerTaskRow extends StatelessWidget {
             '${overdue ? ', overdue' : ''}';
     return Semantics(
       button: true,
-      label:
-          '${task.key}, ${task.title}, ${trackerPriorityLabel(task.priority)}'
-          ', status ${lane.name}, $dueLabel'
-          '${task.assignee == null ? ', unassigned' : ', assigned to ${task.assignee!.name}'}'
-          ', open task details',
+      label: L10n.of(context)
+          .ui_value0_value1_value2_status_value3_value4_val_08a02dfb(
+              (task.key).toString(),
+              (task.title).toString(),
+              (trackerPriorityLabel(task.priority)).toString(),
+              (lane.name).toString(),
+              (dueLabel).toString(),
+              (task.assignee == null
+                      ? ', unassigned'
+                      : ', assigned to ${task.assignee!.name}')
+                  .toString()),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
@@ -1173,7 +1204,9 @@ final class _TrackerTaskRow extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 IconButton(
-                  tooltip: task.completed ? 'Reopen task' : 'Complete task',
+                  tooltip: task.completed
+                      ? L10n.of(context).ui_reopen_task_a4749ecd
+                      : L10n.of(context).ui_complete_task_12ce39bb,
                   onPressed: canEdit && !busy ? toggle : null,
                   icon: Icon(
                     task.completed
@@ -1248,7 +1281,8 @@ final class _TrackerTaskRow extends StatelessWidget {
                 _AssigneeAvatar(user: task.assignee),
                 if (canEdit || canAssign)
                   PopupMenuButton<String>(
-                    tooltip: 'Actions for ${task.key}',
+                    tooltip: L10n.of(context)
+                        .ui_actions_for_value0_8ee73038((task.key).toString()),
                     enabled: !busy,
                     onSelected: (action) => switch (action) {
                       'edit' => edit(),
@@ -1260,20 +1294,25 @@ final class _TrackerTaskRow extends StatelessWidget {
                     itemBuilder: (_) => [
                       PopupMenuItem(
                         value: 'edit',
-                        child: Text(canEdit ? 'Edit task' : 'Assign task'),
+                        child: Text(canEdit
+                            ? L10n.of(context).ui_edit_task_26f254e2
+                            : L10n.of(context).ui_assign_task_aec97f21),
                       ),
                       if (canEdit) ...[
                         PopupMenuItem(
-                            value: 'move', child: Text('Move or reorder')),
+                            value: 'move',
+                            child: Text(
+                                L10n.of(context).ui_move_or_reorder_3c03397a)),
                         PopupMenuItem(
                           value: 'toggle',
-                          child: Text(
-                              task.completed ? 'Reopen task' : 'Mark complete'),
+                          child: Text(task.completed
+                              ? L10n.of(context).ui_reopen_task_a4749ecd
+                              : L10n.of(context).ui_mark_complete_c5006637),
                         ),
                         PopupMenuDivider(),
                         PopupMenuItem(
                           value: 'delete',
-                          child: Text('Delete task',
+                          child: Text(L10n.of(context).ui_delete_task_52c04d23,
                               style: TextStyle(color: context.kaede.danger)),
                         ),
                       ],
@@ -1330,7 +1369,9 @@ final class _AssigneeAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     final name = user?.name.trim() ?? '';
     return Tooltip(
-      message: user == null ? 'Unassigned' : 'Assigned to $name',
+      message: user == null
+          ? L10n.of(context).ui_unassigned_36c5f782
+          : L10n.of(context).ui_assigned_to_value0_630c5c0b((name).toString()),
       child: user == null
           ? CircleAvatar(
               radius: 15,
@@ -1415,7 +1456,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                     ),
                   ),
                   IconButton(
-                    tooltip: 'Close task details',
+                    tooltip: L10n.of(context).ui_close_task_details_19abd22e,
                     onPressed: () => Navigator.pop(context, false),
                     icon: Icon(Icons.close_rounded),
                   ),
@@ -1429,13 +1470,14 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text('Description',
+                    Text(L10n.of(context).ui_description_66de7a09,
                         style: Theme.of(context).textTheme.titleSmall),
                     SizedBox(height: 7),
                     SelectableText(
                       description?.isNotEmpty == true
                           ? description!
-                          : 'No description provided.',
+                          : L10n.of(context)
+                              .ui_no_description_provided_cc0e36df,
                       style: TextStyle(
                         color: description?.isNotEmpty == true
                             ? context.kaede.text
@@ -1445,31 +1487,31 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                     SizedBox(height: 20),
                     _TaskDetailRow(
                       icon: _laneIcon(lane),
-                      label: 'Lane',
+                      label: L10n.of(context).ui_lane_ef16844f,
                       value: lane.name,
                       color: Color(0xFF000000 | lane.color),
                     ),
                     _TaskDetailRow(
                       icon: Icons.flag_outlined,
-                      label: 'Priority',
+                      label: L10n.of(context).ui_priority_e68d9f29,
                       value: trackerPriorityLabel(task.priority),
                       color: _priorityColor(context, task.priority),
                     ),
                     _TaskDetailRow(
                       icon: Icons.event_outlined,
-                      label: 'Due',
+                      label: L10n.of(context).ui_due_4d37a6d5,
                       value: due == null
                           ? 'No due date'
                           : DateFormat.yMMMd().add_jm().format(due.toLocal()),
                     ),
                     _TaskDetailRow(
                       icon: Icons.person_outline_rounded,
-                      label: 'Assignee',
+                      label: L10n.of(context).ui_assignee_2a64a64a,
                       value: task.assignee?.name ?? 'Unassigned',
                     ),
                     _TaskDetailRow(
                       icon: Icons.edit_outlined,
-                      label: 'Created by',
+                      label: L10n.of(context).ui_created_by_09843980,
                       value: task.creator.name,
                     ),
                   ],
@@ -1483,7 +1525,9 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                   key: ValueKey('tracker-task-details-edit'),
                   onPressed: () => Navigator.pop(context, true),
                   icon: Icon(Icons.edit_outlined),
-                  label: Text(assignmentOnly ? 'Assign task' : 'Edit task'),
+                  label: Text(assignmentOnly
+                      ? L10n.of(context).ui_assign_task_aec97f21
+                      : L10n.of(context).ui_edit_task_26f254e2),
                 ),
               ),
           ],
@@ -1583,11 +1627,13 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
             Row(
               children: [
                 Expanded(
-                  child: Text('Move ${widget.task.key}',
+                  child: Text(
+                      L10n.of(context).ui_move_value0_ab622449(
+                          (widget.task.key).toString()),
                       style: Theme.of(context).textTheme.headlineSmall),
                 ),
                 IconButton(
-                  tooltip: 'Close',
+                  tooltip: L10n.of(context).ui_close_cd86acc3,
                   onPressed: () => Navigator.pop(context),
                   icon: Icon(Icons.close_rounded),
                 ),
@@ -1598,7 +1644,7 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
               key: ValueKey('tracker-task-move-lane'),
               initialValue: _lane,
               decoration: InputDecoration(
-                labelText: 'Lane',
+                labelText: L10n.of(context).ui_lane_ef16844f,
                 prefixIcon: Icon(Icons.view_week_outlined),
               ),
               items: [
@@ -1618,7 +1664,7 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
               key: ValueKey('tracker-task-move-position-${_lane.wire}'),
               initialValue: _position,
               decoration: InputDecoration(
-                labelText: 'Position',
+                labelText: L10n.of(context).ui_position_e27f342a,
                 prefixIcon: Icon(Icons.vertical_align_center_rounded),
               ),
               items: [
@@ -1647,7 +1693,7 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
                         ),
                       ),
               icon: Icon(Icons.drive_file_move_outline),
-              label: Text('Move task'),
+              label: Text(L10n.of(context).ui_move_task_d29c8709),
             ),
           ],
         ),
@@ -1784,15 +1830,17 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                     Expanded(
                       child: Text(
                         widget.task == null
-                            ? 'Create task'
+                            ? L10n.of(context).ui_create_task_ae7443ee
                             : !widget.canEditDetails
-                                ? 'Assign ${widget.task!.key}'
-                                : 'Edit ${widget.task!.key}',
+                                ? L10n.of(context).ui_assign_value0_b2ffa1c1(
+                                    (widget.task!.key).toString())
+                                : L10n.of(context).ui_edit_value0_8e92dac2(
+                                    (widget.task!.key).toString()),
                         style: Theme.of(context).textTheme.headlineSmall,
                       ),
                     ),
                     IconButton(
-                      tooltip: 'Close',
+                      tooltip: L10n.of(context).ui_close_cd86acc3,
                       onPressed: () => Navigator.pop(context),
                       icon: Icon(Icons.close_rounded),
                     ),
@@ -1815,7 +1863,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         maxLength: 200,
                         textCapitalization: TextCapitalization.sentences,
                         decoration: InputDecoration(
-                          labelText: 'Title',
+                          labelText: L10n.of(context).ui_title_24d471a9,
                           prefixIcon: Icon(Icons.task_alt_rounded),
                         ),
                         validator: (value) => value?.trim().isEmpty == true
@@ -1831,7 +1879,8 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         maxLength: 10000,
                         textCapitalization: TextCapitalization.sentences,
                         decoration: InputDecoration(
-                          labelText: 'Description (optional)',
+                          labelText:
+                              L10n.of(context).ui_description_optional_31e71764,
                           alignLabelWithHint: true,
                         ),
                       ),
@@ -1840,7 +1889,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         key: ValueKey('tracker-task-lane'),
                         initialValue: _lane,
                         decoration: InputDecoration(
-                          labelText: 'Lane',
+                          labelText: L10n.of(context).ui_lane_ef16844f,
                           prefixIcon: Icon(Icons.view_week_outlined),
                         ),
                         items: [
@@ -1856,7 +1905,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                       DropdownButtonFormField<TrackerPriority>(
                         initialValue: _priority,
                         decoration: InputDecoration(
-                          labelText: 'Priority',
+                          labelText: L10n.of(context).ui_priority_e68d9f29,
                           prefixIcon: Icon(Icons.flag_outlined),
                         ),
                         items: [
@@ -1876,15 +1925,19 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         key: ValueKey('tracker-task-assignee'),
                         initialValue: _assignee?.wire ?? '',
                         decoration: InputDecoration(
-                          labelText: 'Assignee',
+                          labelText: L10n.of(context).ui_assignee_2a64a64a,
                           helperText: assigneeEditable
-                              ? 'One member can own a task.'
-                              : 'You do not have permission to reassign this task.',
+                              ? L10n.of(context)
+                                  .ui_one_member_can_own_a_task_cbbdd467
+                              : L10n.of(context)
+                                  .ui_you_do_not_have_permission_to_reassign_this_t_0a1a97ab,
                           prefixIcon: Icon(Icons.person_outline_rounded),
                         ),
                         items: [
                           DropdownMenuItem(
-                              value: '', child: Text('Unassigned')),
+                              value: '',
+                              child: Text(
+                                  L10n.of(context).ui_unassigned_36c5f782)),
                           for (final user in users)
                             DropdownMenuItem(
                                 value: user.ref.wire, child: Text(user.name)),
@@ -1902,15 +1955,17 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(Icons.event_outlined),
                         title: Text(_dueAt == null
-                            ? 'No due date'
+                            ? L10n.of(context).ui_no_due_date_744e7e70
                             : DateFormat.yMMMd().format(_dueAt!.toLocal())),
-                        subtitle: Text('Due at 5:00 PM local time'),
+                        subtitle: Text(L10n.of(context)
+                            .ui_due_at_5_00_pm_local_time_27b20294),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             if (_dueAt != null)
                               IconButton(
-                                tooltip: 'Clear due date',
+                                tooltip:
+                                    L10n.of(context).ui_clear_due_date_2d797d28,
                                 onPressed: !widget.canEditDetails
                                     ? null
                                     : () => setState(() => _dueAt = null),
@@ -1918,8 +1973,9 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                               ),
                             IconButton(
                               tooltip: _dueAt == null
-                                  ? 'Set due date'
-                                  : 'Change due date',
+                                  ? L10n.of(context).ui_set_due_date_3951051f
+                                  : L10n.of(context)
+                                      .ui_change_due_date_ca8ae385,
                               onPressed:
                                   widget.canEditDetails ? _pickDate : null,
                               icon: Icon(Icons.edit_calendar_outlined),
@@ -1944,10 +2000,10 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                             ? Icons.person_add_alt_1_rounded
                             : Icons.save_outlined),
                     label: Text(widget.task == null
-                        ? 'Create task'
+                        ? L10n.of(context).ui_create_task_ae7443ee
                         : !widget.canEditDetails
-                            ? 'Save assignment'
-                            : 'Save task'),
+                            ? L10n.of(context).ui_save_assignment_e9d5e291
+                            : L10n.of(context).ui_save_task_9bfaf3dd),
                   ),
                 ),
               ),
@@ -2040,7 +2096,9 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  widget.lane == null ? 'Create lane' : 'Edit lane',
+                  widget.lane == null
+                      ? L10n.of(context).ui_create_lane_250265ad
+                      : L10n.of(context).ui_edit_lane_8eb964f1,
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
                 SizedBox(height: 18),
@@ -2050,7 +2108,7 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   autofocus: widget.lane == null,
                   maxLength: 100,
                   decoration: InputDecoration(
-                    labelText: 'Lane name',
+                    labelText: L10n.of(context).ui_lane_name_05b06fbe,
                     prefixIcon: Icon(Icons.view_week_outlined),
                   ),
                   validator: (value) => value?.trim().isEmpty == true
@@ -2060,7 +2118,8 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                 SizedBox(height: 10),
                 DropdownButtonFormField<TrackerLaneKind>(
                   initialValue: _kind,
-                  decoration: InputDecoration(labelText: 'Lane type'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_lane_type_c3b22b15),
                   items: [
                     for (final kind in TrackerLaneKind.values)
                       DropdownMenuItem(
@@ -2069,7 +2128,8 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   onChanged: (value) => setState(() => _kind = value ?? _kind),
                 ),
                 SizedBox(height: 14),
-                Text('Color', style: Theme.of(context).textTheme.titleSmall),
+                Text(L10n.of(context).ui_color_e5b43cf8,
+                    style: Theme.of(context).textTheme.titleSmall),
                 SizedBox(height: 8),
                 Wrap(
                   spacing: 10,
@@ -2079,8 +2139,9 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                       Semantics(
                         button: true,
                         selected: _color == color,
-                        label:
-                            'Lane color ${color.toRadixString(16).padLeft(6, '0')}',
+                        label: L10n.of(context).ui_lane_color_value0_2d116f55(
+                            (color.toRadixString(16).padLeft(6, '0'))
+                                .toString()),
                         child: InkWell(
                           onTap: () => setState(() => _color = color),
                           borderRadius: BorderRadius.circular(30),
@@ -2117,9 +2178,10 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   contentPadding: EdgeInsets.zero,
                   value: _completed,
                   onChanged: (value) => setState(() => _completed = value),
-                  title: Text('Completed lane'),
+                  title: Text(L10n.of(context).ui_completed_lane_c7d88d64),
                   subtitle: Text(
-                    'Tasks moved here are marked complete automatically.',
+                    L10n.of(context)
+                        .ui_tasks_moved_here_are_marked_complete_automati_90ff7982,
                   ),
                 ),
                 SizedBox(height: 10),
@@ -2129,8 +2191,9 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   icon: Icon(widget.lane == null
                       ? Icons.add_rounded
                       : Icons.save_outlined),
-                  label:
-                      Text(widget.lane == null ? 'Create lane' : 'Save lane'),
+                  label: Text(widget.lane == null
+                      ? L10n.of(context).ui_create_lane_250265ad
+                      : L10n.of(context).ui_save_lane_742f1fea),
                 ),
               ],
             ),
@@ -2200,7 +2263,7 @@ final class _TrackerFailure extends StatelessWidget {
               FilledButton.icon(
                 onPressed: () => retry(),
                 icon: Icon(Icons.refresh_rounded),
-                label: Text('Try again'),
+                label: Text(L10n.of(context).ui_try_again_213e90fa),
               ),
             ],
           ),

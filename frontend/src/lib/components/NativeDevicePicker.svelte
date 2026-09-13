@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
   import { onMount } from 'svelte';
 
@@ -102,16 +104,19 @@
   >
     <span class="device-picker-icon"><Icon name={icon} size={20} /></span>
     <span class="device-picker-value">
-      <strong>{selected?.label ?? (unavailable ? 'Device unavailable' : defaultLabel)}</strong>
+      <strong
+        >{selected?.label ??
+          (unavailable ? $t('ui_device_unavailable_d915241a') : defaultLabel)}</strong
+      >
       <small>
-        {#if unavailable}
-          Using the system default until this device returns
-        {:else if selected}
+        {#if unavailable}{$t(
+            'ui_using_the_system_default_until_this_device_re_79789790'
+          )}{:else if selected}
           {deviceDetail(selected) ||
-            (selected.is_default ? 'Current system default' : 'Selected device')}
-        {:else}
-          Automatically follows your operating system
-        {/if}
+            (selected.is_default
+              ? $t('ui_current_system_default_23f83b39')
+              : $t('ui_selected_device_b776a112'))}
+        {:else}{$t('ui_automatically_follows_your_operating_system_85c5e432')}{/if}
       </small>
     </span>
     <Icon name="chevron-down" size={18} />
@@ -122,7 +127,11 @@
       {#if options.length > 5}
         <label class="device-picker-search">
           <Icon name="search" size={17} />
-          <input bind:this={searchInput} bind:value={query} placeholder="Search devices" />
+          <input
+            bind:this={searchInput}
+            bind:value={query}
+            placeholder={$t('ui_search_devices_3aebaefc')}
+          />
         </label>
       {/if}
       <div class="device-picker-options" role="listbox" aria-label={label}>
@@ -134,7 +143,7 @@
           onclick={() => choose('')}
         >
           <span class="device-option-icon"><Icon name={icon} size={18} /></span>
-          <span><strong>{defaultLabel}</strong><small>Recommended</small></span>
+          <span><strong>{defaultLabel}</strong><small>{$t('ui_recommended_d70604e8')}</small></span>
           {#if !selectedId}<Icon name="check" size={18} />{/if}
         </button>
         {#each filtered as option (option.id)}
@@ -150,14 +159,16 @@
               <strong>{option.label}</strong>
               <small
                 >{deviceDetail(option) ||
-                  (option.is_default ? 'System default' : 'Available')}</small
+                  (option.is_default
+                    ? $t('ui_system_default_b0459211')
+                    : $t('ui_available_e6744473'))}</small
               >
             </span>
             {#if option.id === selectedId}<Icon name="check" size={18} />{/if}
           </button>
         {/each}
         {#if filtered.length === 0}
-          <p>No matching devices.</p>
+          <p>{$t('ui_no_matching_devices_8d58a1c4')}</p>
         {/if}
       </div>
     </div>

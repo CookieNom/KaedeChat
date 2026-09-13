@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { entityKey } from '$lib/chat/refs';
   import {
     filterForumPosts,
@@ -232,42 +234,62 @@
 <section
   class:compact
   class="forum-view"
-  aria-label={`${forum.name ?? 'Forum'} posts`}
+  aria-label={`${forum.name ?? $t('ui_forum_4da7bd42')} posts`}
   onscroll={forumScrolled}
 >
   {#if !composerOpen}
     <div class="forum-toolbar">
       <label class="forum-search">
         <Icon name="search" size={19} />
-        <input bind:value={query} aria-label="Search post titles" placeholder="Search" />
+        <input
+          bind:value={query}
+          aria-label={$t('ui_search_post_titles_08daa4d6')}
+          placeholder={$t('ui_search_49c266ba')}
+        />
       </label>
       <details bind:this={sortViewMenu} class="sort-view-menu">
-        <summary>↕ Sort &amp; View <Icon name="chevron-down" size={15} /></summary>
+        <summary>{$t('ui_sort_view_c1fac341')} <Icon name="chevron-down" size={15} /></summary>
         <div class="sort-view-popover">
           <fieldset>
-            <legend>Sort By</legend>
+            <legend>{$t('ui_sort_by_6d222755')}</legend>
             <label
-              ><input type="radio" bind:group={sort} value="recent_activity" />Recently Active</label
+              ><input type="radio" bind:group={sort} value="recent_activity" />{$t(
+                'ui_recently_active_9068c1c7'
+              )}</label
             >
-            <label><input type="radio" bind:group={sort} value="creation_date" />Date Posted</label>
+            <label
+              ><input type="radio" bind:group={sort} value="creation_date" />{$t(
+                'ui_date_posted_1772fef6'
+              )}</label
+            >
           </fieldset>
           <fieldset>
-            <legend>View As</legend>
-            <label><input type="radio" bind:group={layout} value="list" />List</label>
-            <label><input type="radio" bind:group={layout} value="gallery" />Gallery</label>
+            <legend>{$t('ui_view_as_a220a479')}</legend>
+            <label
+              ><input type="radio" bind:group={layout} value="list" />{$t(
+                'ui_list_6f202f54'
+              )}</label
+            >
+            <label
+              ><input type="radio" bind:group={layout} value="gallery" />{$t(
+                'ui_gallery_352cfc74'
+              )}</label
+            >
           </fieldset>
-          <button type="button" onclick={resetSortAndView}>Reset to default</button>
+          <button type="button" onclick={resetSortAndView}
+            >{$t('ui_reset_to_default_bc5b45ae')}</button
+          >
         </div>
       </details>
       {#if canCreate}
         <button class="new-post" type="button" onclick={() => (composerOpen = true)}>
-          <Icon name="message" size={17} />New Post
+          <Icon name="message" size={17} />{$t('ui_new_post_22072462')}
         </button>
       {/if}
     </div>
 
     {#if tags.length}
-      <div class="tag-filters" aria-label="Filter by tags">
+      <div class="tag-filters" aria-label={$t('ui_filter_by_tags_a0a56c45')}>
         {#each tags as tag (tag.id)}
           <button
             class:active={selectedTags.includes(tag.id)}
@@ -301,7 +323,7 @@
           class="close-composer"
           type="button"
           disabled={busy}
-          aria-label="Close new post"
+          aria-label={$t('ui_close_new_post_d4514de8')}
           onclick={() => {
             emojiPickerOpen = false;
             composerOpen = false;
@@ -314,16 +336,16 @@
             bind:value={title}
             maxlength="100"
             required
-            placeholder="Title"
-            aria-label="Post title"
+            placeholder={$t('ui_title_7e8cd205')}
+            aria-label={$t('ui_post_title_c45dcb7f')}
           />
           <textarea
             bind:this={messageInput}
             bind:value={message}
             maxlength={FORUM_POST_CONTENT_MAX_LENGTH}
             rows="5"
-            placeholder="Enter a message…"
-            aria-label="Post message"
+            placeholder={$t('ui_enter_a_message_4d0244c7')}
+            aria-label={$t('ui_post_message_f5290c63')}
           ></textarea>
         </div>
         <input
@@ -340,8 +362,8 @@
           class="attach-post"
           type="button"
           disabled={!onFiles || busy}
-          aria-label="Add images or files"
-          title="Add images or files"
+          aria-label={$t('ui_add_images_or_files_6c7ad764')}
+          title={$t('ui_add_images_or_files_6c7ad764')}
           onclick={() => fileInput?.click()}
         >
           <Icon name="image-plus" size={34} />
@@ -358,7 +380,7 @@
         </div>
       {/if}
       {#if tags.length}
-        <div class="post-tags" aria-label="Post tags">
+        <div class="post-tags" aria-label={$t('ui_post_tags_cfa09b7e')}>
           {#each tags as tag (tag.id)}
             <label
               class:active={postTags.includes(tag.id)}
@@ -377,10 +399,12 @@
                 guildDomain={forum.guild_domain}
                 {customEmojis}
               />
-              {tag.name}{tag.moderated ? ' · Moderators' : ''}
+              {tag.name}{tag.moderated ? $t('ui_moderators_ba2d1612') : ''}
             </label>
           {/each}
-          {#if requireTag && !postTags.length}<small>Select at least one tag.</small>{/if}
+          {#if requireTag && !postTags.length}<small
+              >{$t('ui_select_at_least_one_tag_f3c7e0be')}</small
+            >{/if}
         </div>
       {/if}
       <footer>
@@ -389,7 +413,7 @@
             class:active={emojiPickerOpen}
             type="button"
             disabled={busy}
-            aria-label="Choose an emoji"
+            aria-label={$t('ui_choose_an_emoji_54bc3777')}
             aria-expanded={emojiPickerOpen}
             onclick={() => (emojiPickerOpen = !emojiPickerOpen)}>☺</button
           >
@@ -407,7 +431,9 @@
             class:active={guidelinesVisible}
             class="guidelines-toggle"
             type="button"
-            aria-label={guidelinesVisible ? 'Hide post guidelines' : 'Show post guidelines'}
+            aria-label={guidelinesVisible
+              ? $t('ui_hide_post_guidelines_511241eb')
+              : $t('ui_show_post_guidelines_40c0c167')}
             aria-pressed={guidelinesVisible}
             onclick={() => (guidelinesVisible = !guidelinesVisible)}
           >
@@ -422,17 +448,20 @@
             (requireTag && !postTags.length) ||
             !uploadReady}
         >
-          {busy ? 'Posting…' : 'Post'}
+          {busy ? $t('ui_posting_648a2ef4') : $t('ui_post_a5554622')}
         </button>
       </footer>
     </form>
     {#if forum.topic && guidelinesVisible}
       <aside class="post-guidelines">
         <div>
-          <span><Icon name="check" size={18} /><strong>Post Guidelines</strong></span>
+          <span
+            ><Icon name="check" size={18} /><strong>{$t('ui_post_guidelines_91bdbfbb')}</strong
+            ></span
+          >
           <button
             type="button"
-            aria-label="Hide post guidelines"
+            aria-label={$t('ui_hide_post_guidelines_511241eb')}
             onclick={() => (guidelinesVisible = false)}
           >
             <Icon name="x" size={17} />
@@ -445,12 +474,18 @@
 
   {#if error}<p class="forum-error" role="alert">{error}</p>{/if}
   {#if loading}
-    <div class="forum-empty" role="status">Loading posts…</div>
+    <div class="forum-empty" role="status">{$t('ui_loading_posts_df28a613')}</div>
   {:else if !visiblePosts.length}
     <div class="forum-empty">
       <Icon name="message" size={30} />
-      <strong>{posts.length ? 'No posts match those filters' : 'There are no posts yet'}</strong>
-      {#if canCreate && !posts.length}<span>Be the first to start a conversation.</span>{/if}
+      <strong
+        >{posts.length
+          ? $t('ui_no_posts_match_those_filters_4ec1e268')
+          : $t('ui_there_are_no_posts_yet_2aa697ba')}</strong
+      >
+      {#if canCreate && !posts.length}<span
+          >{$t('ui_be_the_first_to_start_a_conversation_00691376')}</span
+        >{/if}
     </div>
   {:else}
     <div class:gallery={layout === 'gallery'} class="forum-posts">
@@ -459,7 +494,8 @@
         <a class:pinned={isPinnedForumPost(post)} href={guildChannelPath(guild, post)}>
           <div class="post-copy">
             <div class="post-title">
-              {#if isPinnedForumPost(post)}<span title="Pinned post">📌</span>{/if}
+              {#if isPinnedForumPost(post)}<span title={$t('ui_pinned_post_79175cb0')}>📌</span
+                >{/if}
               <strong>{post.name}</strong>
             </div>
             {#if post.starter_message?.author || preview(post)}
@@ -511,7 +547,9 @@
       {/each}
     </div>
   {/if}
-  {#if loadingMore}<div class="forum-loading-more" role="status">Loading posts…</div>{/if}
+  {#if loadingMore}<div class="forum-loading-more" role="status">
+      {$t('ui_loading_posts_df28a613')}
+    </div>{/if}
 </section>
 
 <style>

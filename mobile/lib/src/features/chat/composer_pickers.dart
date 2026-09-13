@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -10,6 +9,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -349,7 +349,7 @@ final class ForumTagLabel extends StatelessWidget {
         if (customRef != null) ...[
           CustomEmojiImage(
             ref: customRef,
-            label: ':${tag.name}:',
+            label: L10n.of(context).ui_value0_2397634a((tag.name).toString()),
             size: emojiSize,
           ),
           SizedBox(width: 4),
@@ -421,9 +421,14 @@ final class ComposerSticker {
         ),
         guildName: guildName.isEmpty ? '${json['guild_domain']}' : guildName,
         name: name,
-        description: '${json['description'] ?? ''}'.trim().isEmpty
+        description: L10n.current
+                .ui_value0_26e9163c((json['description'] ?? '').toString())
+                .trim()
+                .isEmpty
             ? null
-            : '${json['description']}'.trim(),
+            : L10n.current
+                .ui_value0_26e9163c((json['description']).toString())
+                .trim(),
         animated: json['animated'] == true,
         mediaHash: mediaHash,
       );
@@ -491,7 +496,8 @@ final class StickerImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Semantics(
         image: true,
-        label: 'Sticker: ${sticker.name}',
+        label: L10n.of(context)
+            .ui_sticker_value0_af3f912b((sticker.name).toString()),
         child: CachedNetworkImage(
           imageUrl: sticker.uri().toString(),
           width: size,
@@ -505,7 +511,7 @@ final class StickerImage extends StatelessWidget {
             dimension: size,
             child: Center(
               child: Text(
-                ':${sticker.name}:',
+                L10n.of(context).ui_value0_2397634a((sticker.name).toString()),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
@@ -539,7 +545,7 @@ final class ComposerGif {
     final rawTitle = '${json['title'] ?? ''}'.trim();
     return ComposerGif(
       id: id,
-      title: rawTitle.isEmpty ? 'GIF' : rawTitle,
+      title: rawTitle.isEmpty ? L10n.current.ui_gif_e90554a1 : rawTitle,
       url: url,
       previewUrl: previewUrl,
       width: _positiveInt(json['width']),
@@ -693,10 +699,12 @@ Future<ComposerAction?> showComposerActionPicker(
               SettingsRow.chevron(
                 key: ValueKey('composer-action-attach'),
                 leading: Icon(Icons.attach_file_rounded),
-                title: 'Attach files',
+                title: L10n.of(context).ui_attach_files_01ac02eb,
                 subtitle: canAttach
-                    ? 'Upload images, video, audio, or documents'
-                    : 'You do not have permission to attach files',
+                    ? L10n.of(context)
+                        .ui_upload_images_video_audio_or_documents_33ffb7b2
+                    : L10n.of(context)
+                        .ui_you_do_not_have_permission_to_attach_files_765a3568,
                 enabled: canAttach,
                 onTap: canAttach
                     ? () => Navigator.pop(context, ComposerAction.attach)
@@ -705,19 +713,22 @@ Future<ComposerAction?> showComposerActionPicker(
               SettingsRow.chevron(
                 key: ValueKey('composer-action-media'),
                 leading: Icon(Icons.emoji_emotions_outlined),
-                title: 'GIFs, stickers, and emoji',
+                title: L10n.of(context).ui_gifs_stickers_and_emoji_eba59fbd,
                 subtitle: gifsAllowed
-                    ? 'Open the media picker'
-                    : 'GIFs are unavailable here; stickers and emoji work',
+                    ? L10n.of(context).ui_open_the_media_picker_07e97f64
+                    : L10n.of(context)
+                        .ui_gifs_are_unavailable_here_stickers_and_emoji__c0d9c245,
                 onTap: () => Navigator.pop(context, ComposerAction.media),
               ),
               SettingsRow.chevron(
                 key: ValueKey('composer-action-poll'),
                 leading: Icon(Icons.poll_outlined),
-                title: 'Create a poll',
+                title: L10n.of(context).ui_create_a_poll_b010ece7,
                 subtitle: canCreatePoll
-                    ? 'Ask up to 10 choices with an optional emoji'
-                    : 'Polls are unavailable here or you lack permission',
+                    ? L10n.of(context)
+                        .ui_ask_up_to_10_choices_with_an_optional_emoji_6397a884
+                    : L10n.of(context)
+                        .ui_polls_are_unavailable_here_or_you_lack_permis_4a9b6859,
                 enabled: canCreatePoll,
                 onTap: canCreatePoll
                     ? () => Navigator.pop(context, ComposerAction.poll)
@@ -886,21 +897,21 @@ final class _ComposerMediaPickerState extends State<ComposerMediaPicker> {
               child: SegmentedButton<_ComposerMediaMode>(
                 key: ValueKey('composer-media-tabs'),
                 showSelectedIcon: false,
-                segments: const [
+                segments: [
                   ButtonSegment(
                     value: _ComposerMediaMode.gifs,
                     icon: Icon(Icons.gif_box_outlined),
-                    label: Text('GIFs'),
+                    label: Text(L10n.of(context).ui_gifs_a5648696),
                   ),
                   ButtonSegment(
                     value: _ComposerMediaMode.stickers,
                     icon: Icon(Icons.sticky_note_2_outlined),
-                    label: Text('Stickers'),
+                    label: Text(L10n.of(context).ui_stickers_1609e2dd),
                   ),
                   ButtonSegment(
                     value: _ComposerMediaMode.emoji,
                     icon: Icon(Icons.emoji_emotions_outlined),
-                    label: Text('Emoji'),
+                    label: Text(L10n.of(context).ui_emoji_033ebcdd),
                   ),
                 ],
                 selected: {_mode},
@@ -923,10 +934,10 @@ final class _ComposerMediaPickerState extends State<ComposerMediaPicker> {
                       ),
                     )
                   else
-                    const _PickerStatus(
+                    _PickerStatus(
                       icon: Icon(Icons.gif_box_outlined),
-                      message: 'GIF search is unavailable in end-to-end '
-                          'encrypted conversations.',
+                      message: L10n.of(context)
+                          .ui_gif_search_is_unavailable_in_end_to_end_encry_c8976737,
                     ),
                   ComposerStickerPicker(
                     loader: widget.stickerLoader,
@@ -1036,7 +1047,7 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
             controller: _search,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: 'Search stickers',
+              hintText: L10n.of(context).ui_search_stickers_31f53fff,
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),
@@ -1045,20 +1056,22 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
           SizedBox(height: 8),
           Expanded(
             child: _loading
-                ? const _PickerStatus(
+                ? _PickerStatus(
                     icon: CircularProgressIndicator(strokeWidth: 2),
-                    message: 'Loading stickers…',
+                    message: L10n.of(context).ui_loading_stickers_40fd7933,
                   )
                 : _error != null
                     ? _PickerError(
                         message: userFacingError(_error!,
-                            summary: 'Could not load stickers'),
+                            summary: L10n.of(context)
+                                .ui_could_not_load_stickers_e1d4703f),
                         onRetry: _load,
                       )
                     : groups.isEmpty
-                        ? const _PickerStatus(
+                        ? _PickerStatus(
                             icon: Icon(Icons.sticky_note_2_outlined),
-                            message: 'No stickers found.',
+                            message:
+                                L10n.of(context).ui_no_stickers_found_a06b0400,
                           )
                         : ListView.builder(
                             key: ValueKey('composer-sticker-groups'),
@@ -1229,7 +1242,7 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
             controller: _search,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: 'Search emoji',
+              hintText: L10n.of(context).ui_search_emoji_e0cd28ef,
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),
@@ -1270,14 +1283,15 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
     final query = _search.text.trim().toLowerCase();
     if (query.isEmpty && _category == 'Custom') {
       if (_loading) {
-        return const _PickerStatus(
+        return _PickerStatus(
           icon: CircularProgressIndicator(strokeWidth: 2),
-          message: 'Loading custom emoji…',
+          message: L10n.of(context).ui_loading_custom_emoji_fc000580,
         );
       }
       if (_error case final error?) {
         return _PickerError(
-          message: userFacingError(error, summary: 'Could not load emoji'),
+          message: userFacingError(error,
+              summary: L10n.of(context).ui_could_not_load_emoji_a6afbb2f),
           onRetry: _loadCustom,
         );
       }
@@ -1339,8 +1353,8 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
       return _PickerStatus(
         icon: Icon(Icons.emoji_emotions_outlined),
         message: query.isEmpty && _category == 'Recent'
-            ? 'Recently used emoji will appear here.'
-            : 'No emoji found.',
+            ? L10n.of(context).ui_recently_used_emoji_will_appear_here_102e1351
+            : L10n.of(context).ui_no_emoji_found_eb9b8066,
       );
     }
     return LayoutBuilder(builder: (context, constraints) {
@@ -1358,7 +1372,8 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
           final choice = choices[index];
           return Semantics(
             button: true,
-            label: '${widget.semanticAction} ${choice.label}',
+            label: L10n.of(context).ui_value0_value1_c1a3651c(
+                (widget.semanticAction).toString(), (choice.label).toString()),
             child: ExcludeSemantics(
               child: Tooltip(
                 message: choice.label,
@@ -1397,7 +1412,7 @@ final class _ComposerEmojiChoice {
   factory _ComposerEmojiChoice.custom(ComposerCustomEmoji emoji) =>
       _ComposerEmojiChoice._(
         value: emoji.token,
-        label: ':${emoji.name}:',
+        label: L10n.current.ui_value0_2397634a((emoji.name).toString()),
         customEmoji: emoji,
       );
 
@@ -1573,7 +1588,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
             controller: _search,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: 'Search KLIPY',
+              hintText: L10n.of(context).ui_search_klipy_76a0ca14,
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),
@@ -1591,7 +1606,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
         footer: [
           SizedBox(height: 5),
           Text(
-            'Powered by KLIPY',
+            L10n.of(context).ui_powered_by_klipy_90677a11,
             textAlign: TextAlign.center,
             style: TextStyle(color: context.kaede.muted, fontSize: 11),
           ),
@@ -1604,22 +1619,23 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
 
   Widget _buildResults() {
     if (_loading && _items.isEmpty && _favorites.isEmpty) {
-      return const _PickerStatus(
+      return _PickerStatus(
         icon: CircularProgressIndicator(strokeWidth: 2),
-        message: 'Loading GIFs…',
+        message: L10n.of(context).ui_loading_gifs_4743aa06,
       );
     }
     if (_error case final error? when _items.isEmpty && _favorites.isEmpty) {
       return _PickerError(
-        message: userFacingError(error, summary: 'Could not load GIFs'),
+        message: userFacingError(error,
+            summary: L10n.of(context).ui_could_not_load_gifs_455c0ad0),
         onRetry: () => _load(page: 1, append: false),
       );
     }
     final visible = _visibleItems;
     if (visible.isEmpty) {
-      return const _PickerStatus(
+      return _PickerStatus(
         icon: Icon(Icons.gif_box_outlined),
-        message: 'No GIFs found. Try another search.',
+        message: L10n.of(context).ui_no_gifs_found_try_another_search_ad99352d,
       );
     }
     return Column(
@@ -1642,7 +1658,8 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
                 final gif = visible[index];
                 return Semantics(
                   button: true,
-                  label: 'Send GIF: ${gif.title}',
+                  label: L10n.of(context)
+                      .ui_send_gif_value0_34380e6a((gif.title).toString()),
                   child: ExcludeSemantics(
                     child: Tooltip(
                       message: gif.title,
@@ -1678,8 +1695,10 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
                                   top: 5,
                                   child: IconButton.filledTonal(
                                     tooltip: _favorite(gif)
-                                        ? 'Remove from favorites'
-                                        : 'Add to favorites',
+                                        ? L10n.of(context)
+                                            .ui_remove_from_favorites_c23fbb86
+                                        : L10n.of(context)
+                                            .ui_add_to_favorites_09c13814,
                                     onPressed: () => _toggleFavorite(gif),
                                     icon: Icon(_favorite(gif)
                                         ? Icons.star_rounded
@@ -1701,7 +1720,8 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
         if (_error case final error?) ...[
           SizedBox(height: 6),
           Text(
-            userFacingError(error, summary: 'Could not load more GIFs'),
+            userFacingError(error,
+                summary: L10n.of(context).ui_could_not_load_more_gifs_af329f75),
             textAlign: TextAlign.center,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
@@ -1722,7 +1742,7 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
             onPressed: () =>
                 _load(page: _nextPage ?? 1, append: _nextPage != null),
             icon: Icon(Icons.expand_more_rounded),
-            label: Text('Try again'),
+            label: Text(L10n.of(context).ui_try_again_213e90fa),
           ),
       ],
     );
@@ -1848,7 +1868,7 @@ final class _PickerError extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: () => unawaited(onRetry()),
                 icon: Icon(Icons.refresh_rounded),
-                label: Text('Retry'),
+                label: Text(L10n.of(context).ui_retry_8036af59),
               ),
             ],
           ),

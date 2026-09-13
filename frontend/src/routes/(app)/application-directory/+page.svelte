@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   /* eslint-disable svelte/no-navigation-without-resolve -- App Directory helpers validate internal path prefixes and resolve the configured base path. */
   import { replaceState } from '$app/navigation';
   import { resolve } from '$app/paths';
@@ -141,7 +143,7 @@
       updateLocation(appliedFilters, loadedPages);
     } catch (caught) {
       if (requestIsCurrent(controller, generation)) {
-        error = userErrorMessage(caught, 'Could not load the App Directory.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_the_app_directory_75ce6639'));
       }
     } finally {
       finishRequest(controller, generation);
@@ -169,7 +171,7 @@
       updateLocation(filters, loadedPages);
     } catch (caught) {
       if (requestIsCurrent(controller, generation)) {
-        error = userErrorMessage(caught, 'Could not load more applications.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_more_applications_632b2512'));
       }
     } finally {
       finishRequest(controller, generation);
@@ -188,45 +190,43 @@
   });
 </script>
 
-<svelte:head><title>App Directory · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_app_directory_kaede_chat_a46ee351')}</title></svelte:head>
 
 <main aria-busy={loading || loadingMore}>
-  <nav><a href={resolve(backPath as '/home')}>← Back to Kaede</a></nav>
+  <nav><a href={resolve(backPath as '/home')}>{$t('ui_back_to_kaede_bfbafc02')}</a></nav>
   <header class="hero">
-    <span>APP DIRECTORY</span>
-    <h1>Find apps for your community</h1>
-    <p>
-      Discover reviewed apps, then inspect their access before adding them to a server or account.
-    </p>
+    <span>{$t('ui_app_directory_b9932dc9')}</span>
+    <h1>{$t('ui_find_apps_for_your_community_6360a471')}</h1>
+    <p>{$t('ui_discover_reviewed_apps_then_inspect_their_acc_4fda4553')}</p>
     <form onsubmit={submit}>
       <input
         bind:value={query}
-        aria-label="Search apps"
+        aria-label={$t('ui_search_apps_a10a36fa')}
         maxlength="100"
-        placeholder="Search apps"
+        placeholder={$t('ui_search_apps_a10a36fa')}
       />
-      <select bind:value={category} aria-label="Category">
+      <select bind:value={category} aria-label={$t('ui_category_292c06f0')}>
         {#each categories as option (option[0])}<option value={option[0]}>{option[1]}</option
           >{/each}
       </select>
       <input
         bind:value={domain}
-        aria-label="Instance"
+        aria-label={$t('ui_instance_425f2336')}
         maxlength="253"
-        placeholder="Instance (optional)"
+        placeholder={$t('ui_instance_optional_bfab5a12')}
       />
-      <button>Search</button>
+      <button>{$t('ui_search_49c266ba')}</button>
     </form>
   </header>
   {#if collections.length}
-    <nav class="collections" aria-label="Curated app collections">
+    <nav class="collections" aria-label={$t('ui_curated_app_collections_ba10bf77')}>
       <button
         class:active={!collection}
         aria-pressed={!collection}
         onclick={() => {
           collection = '';
           void search();
-        }}>All apps</button
+        }}>{$t('ui_all_apps_01bed311')}</button
       >
       {#each collections as item (item.slug)}
         <button
@@ -246,11 +246,11 @@
   </p>
   {#if error}<p class="notice" role="alert">{error}</p>{/if}
   {#if loading}
-    <p class="state" role="status">Loading apps…</p>
+    <p class="state" role="status">{$t('ui_loading_apps_f8bcca38')}</p>
   {:else if !error && applications.length === 0}
-    <p class="state">No apps match this search.</p>
+    <p class="state">{$t('ui_no_apps_match_this_search_3027a623')}</p>
   {:else}
-    <section class="grid" aria-label="Applications">
+    <section class="grid" aria-label={$t('ui_applications_98e33b0f')}>
       {#each applications as application (application.ref)}
         {@const bannerUrl = application.banner_hash
           ? assetUrl(application.banner_hash, 'thumbnail_512', application.origin_domain)
@@ -275,7 +275,8 @@
             </span>
             <div>
               <h2>
-                {application.name}{#if application.verified}<small aria-label="Reviewed application"
+                {application.name}{#if application.verified}<small
+                    aria-label={$t('ui_reviewed_application_4105f425')}
                     ><span aria-hidden="true">✓</span></small
                   >{/if}
               </h2>
@@ -290,7 +291,7 @@
       {/each}
     </section>
     {#if nextCursor}<button class="more" disabled={loadingMore} onclick={() => void loadMore()}
-        >{loadingMore ? 'Loading…' : 'Load more'}</button
+        >{loadingMore ? $t('ui_loading_ba3bbbe1') : $t('ui_load_more_ac8991ef')}</button
       >{/if}
   {/if}
 </main>

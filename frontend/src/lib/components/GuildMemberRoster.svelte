@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { assetUrl } from '$lib/media/assets';
   import {
     groupGuildMembers,
@@ -50,7 +52,7 @@
     <span class="roster-member-copy">
       <span class="roster-name" style:color={nameColor}
         ><strong>{displayName}</strong>{#if isApplicationUser(member.user)}<small class="app-badge"
-            >APP</small
+            >{$t('ui_app_b7179fe7')}</small
           >{/if}</span
       >
       {#if member.user.custom_status?.trim()}
@@ -60,14 +62,17 @@
   </button>
 {/snippet}
 
-<aside class="member-roster" aria-label="Guild members">
+<aside class="member-roster" aria-label={$t('ui_guild_members_191e5cfa')}>
   <header>
     <div>
       <Icon name="users" size={18} />
-      <h2>Members</h2>
+      <h2>{$t('ui_members_1044a4c0')}</h2>
     </div>
-    <button type="button" aria-label="Hide member list" title="Hide member list" onclick={onClose}
-      >×</button
+    <button
+      type="button"
+      aria-label={$t('ui_hide_member_list_367ab366')}
+      title={$t('ui_hide_member_list_367ab366')}
+      onclick={onClose}>×</button
     >
   </header>
   <div class="member-roster-scroll">
@@ -87,7 +92,9 @@
 
     {#if groups.online.length}
       <section class="roster-group" aria-labelledby="online-members-heading">
-        <h3 id="online-members-heading">Online — {groups.online.length}</h3>
+        <h3 id="online-members-heading">
+          {$t('ui_online_value0_e20063d0', { value0: String(groups.online.length) })}
+        </h3>
         {#each groups.online as member (member.user.id + '@' + member.user.origin_domain)}
           {@render memberRow(member, false)}
         {/each}
@@ -96,7 +103,9 @@
 
     {#if groups.offline.length}
       <section class="roster-group offline-group" aria-labelledby="offline-members-heading">
-        <h3 id="offline-members-heading">Offline — {groups.offline.length}</h3>
+        <h3 id="offline-members-heading">
+          {$t('ui_offline_value0_6798c064', { value0: String(groups.offline.length) })}
+        </h3>
         {#each groups.offline as member (member.user.id + '@' + member.user.origin_domain)}
           {@render memberRow(member, true)}
         {/each}
@@ -104,7 +113,7 @@
     {/if}
 
     {#if !members.length}
-      <p class="roster-empty">No members are available.</p>
+      <p class="roster-empty">{$t('ui_no_members_are_available_6d8369d7')}</p>
     {/if}
   </div>
 </aside>

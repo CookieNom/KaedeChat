@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
-
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
@@ -41,6 +40,7 @@ import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/tracker/tracker_channel_view.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -958,7 +958,8 @@ final class _StickerMessage extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Semantics(
         image: true,
-        label: 'Sticker: ${sticker.name}',
+        label: L10n.of(context)
+            .ui_sticker_value0_af3f912b((sticker.name).toString()),
         child: CachedNetworkImage(
           key: ValueKey('message-sticker-${sticker.ref.wire}'),
           imageUrl: Uri.https(
@@ -981,7 +982,8 @@ final class _StickerMessage extends StatelessWidget {
             height: 80,
             child: Align(
               alignment: Alignment.centerLeft,
-              child: Text(':${sticker.name}:'),
+              child: Text(L10n.of(context)
+                  .ui_value0_2397634a((sticker.name).toString())),
             ),
           ),
         ),
@@ -1099,7 +1101,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _scheduleInteractionResponses(state);
     final channel = state.activeChannel;
     if (channel == null) {
-      return Center(child: Text('Choose a conversation.'));
+      return Center(
+          child: Text(L10n.of(context).ui_choose_a_conversation_c864a504));
     }
     if (channel.type == ChannelType.tracker) {
       return TrackerChannelView(channel: channel);
@@ -1219,14 +1222,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         children: [
           if (state.activeGuild?.syncStatus == 'quota_paused')
             _FederationStatusStrip(
-              title: 'Guild updates are paused on this instance.',
+              title: L10n.of(context)
+                  .ui_guild_updates_are_paused_on_this_instance_972443be,
               message: switch (state.activeGuild?.syncErrorCode) {
-                'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' =>
-                  'This instance cannot cache another remote account needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
-                'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' =>
-                  'This instance cannot cache another remote server needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
-                _ =>
-                  'Its remote-guild cache is full, so recent messages or changes may be missing. Contact your instance administrator; you do not need to delete your own messages.',
+                'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' => L10n.of(context)
+                    .ui_this_instance_cannot_cache_another_remote_acc_92af2fdd,
+                'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' => L10n.of(context)
+                    .ui_this_instance_cannot_cache_another_remote_ser_64038111,
+                _ => L10n.of(context)
+                    .ui_its_remote_guild_cache_is_full_so_recent_mess_86aad479,
               },
             ),
           if (historySyncWarning != null &&
@@ -1236,20 +1240,27 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               message: historySyncWarning.$2,
             ),
           if (!canReadHistory)
-            const _FederationStatusStrip(
-              title: 'Message history is unavailable.',
-              message: 'New messages will appear here while you are connected.',
+            _FederationStatusStrip(
+              title:
+                  L10n.of(context).ui_message_history_is_unavailable_c0d9de88,
+              message: L10n.of(context)
+                  .ui_new_messages_will_appear_here_while_you_are_c_ef353033,
             ),
           if (moderationStatus != null)
             _FederationStatusStrip(
               title: moderationStatus.timeoutIndefinite
-                  ? 'You are timed out in this guild.'
-                  : 'You are timed out until ${_formatTimeout(context, moderationStatus.timeoutUntil!)}.',
+                  ? L10n.of(context).ui_you_are_timed_out_in_this_guild_f627dacb
+                  : L10n.of(context).ui_you_are_timed_out_until_value0_692480e8(
+                      (_formatTimeout(context, moderationStatus.timeoutUntil!))
+                          .toString()),
               message: moderationStatus.reason?.isNotEmpty == true
-                  ? 'Reason: ${moderationStatus.reason}'
+                  ? L10n.of(context).ui_reason_value0_f78e586a(
+                      (moderationStatus.reason).toString())
                   : moderationStatus.detailsAvailable
-                      ? 'The guild’s home instance did not provide a reason.'
-                      : 'Kaede is retrieving the reason from the guild’s home instance.',
+                      ? L10n.of(context)
+                          .ui_the_guild_s_home_instance_did_not_provide_a_r_7f1d8403
+                      : L10n.of(context)
+                          .ui_kaede_is_retrieving_the_reason_from_the_guild_7a5e6727,
             ),
           if (state.error case final error?)
             _ChatErrorStrip(
@@ -1347,8 +1358,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                               strokeWidth: 2))
                                       : Icon(Icons.history_rounded, size: 17),
                                   label: Text(state.loadingMessages
-                                      ? 'Loading earlier messages…'
-                                      : 'Load earlier messages'),
+                                      ? L10n.of(context)
+                                          .ui_loading_earlier_messages_1afc1067
+                                      : L10n.of(context)
+                                          .ui_load_earlier_messages_1d3e3ff7),
                                 ),
                               );
                             }
@@ -1519,12 +1532,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           if (!canSend)
             _PermissionNotice(
               message: encryptedPaused
-                  ? 'Encrypted messaging is paused while participant device keys are secured. No plaintext will be sent.'
+                  ? L10n.of(context)
+                      .ui_encrypted_messaging_is_paused_while_participa_812e00c5
                   : channel.locked && !canManageThreads(channel)
-                      ? 'This thread is locked. Only moderators can send messages.'
+                      ? L10n.of(context)
+                          .ui_this_thread_is_locked_only_moderators_can_sen_723dfceb
                       : moderationStatus == null
-                          ? 'You do not have permission to send messages here.'
-                          : 'You cannot send messages while timed out.',
+                          ? L10n.of(context)
+                              .ui_you_do_not_have_permission_to_send_messages_h_af698d70
+                          : L10n.of(context)
+                              .ui_you_cannot_send_messages_while_timed_out_481f2aaf,
               onApps: state.user == null
                   ? null
                   : () => _showApplicationCommandLauncher(channel),
@@ -1776,7 +1793,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final userChoices = users.values
         .map((user) => (
               value: user.ref.wire,
-              label: '${user.name} · ${user.handle}',
+              label: L10n.of(context).ui_value0_value1_947523d9(
+                  (user.name).toString(), (user.handle).toString()),
             ))
         .toList()
       ..sort((left, right) => left.label.compareTo(right.label));
@@ -1790,13 +1808,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         .values
         .map((item) => (
               value: item.ref.wire,
-              label: '#${item.name ?? 'channel'}',
+              label: L10n.of(context)
+                  .ui_value0_ea2f080f((item.name ?? 'channel').toString()),
               type: _channelTypeWireValue(item.type),
             ))
         .toList()
       ..sort((left, right) => left.label.compareTo(right.label));
     final roles = (state.activeGuild?.roles ?? const <KaedeRole>[])
-        .map((role) => (value: role.ref.wire, label: '@${role.name}'))
+        .map((role) => (
+              value: role.ref.wire,
+              label: L10n.of(context).ui_value0_1b34e556((role.name).toString())
+            ))
         .toList()
       ..sort((left, right) => left.label.compareTo(right.label));
 
@@ -1836,7 +1858,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   List<_CommandAttachmentChoice> _commandAttachmentChoices() => _uploads
       .map((upload) => (
             key: upload.commandKey,
-            label: '${upload.name} · ${formatAttachmentSize(upload.size)}',
+            label: L10n.of(context).ui_value0_value1_947523d9(
+                (upload.name).toString(),
+                (formatAttachmentSize(upload.size)).toString()),
           ))
       .toList(growable: false);
 
@@ -2168,7 +2192,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('/${command.name} sent to ${command.applicationName}.'),
+          content: Text(L10n.of(context).ui_value0_sent_to_value1_bbbfabaa(
+              (command.name).toString(), (command.applicationName).toString())),
         ));
       }
     } finally {
@@ -2493,7 +2518,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             channel.type != ChannelType.groupDm &&
             !channel.allows(Permission.attachFiles)) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('You cannot attach files in this channel.'),
+            content: Text(L10n.of(context)
+                .ui_you_cannot_attach_files_in_this_channel_8ac6abc5),
           ));
           return;
         }
@@ -2542,7 +2568,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         _reply != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
-          'Send or clear the current draft, attachments, and reply before creating a poll.',
+          L10n.of(context)
+              .ui_send_or_clear_the_current_draft_attachments_a_a37b62fb,
         ),
       ));
       return;
@@ -2575,14 +2602,14 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Poll created.')),
+          SnackBar(content: Text(L10n.of(context).ui_poll_created_7db54462)),
         );
       }
     } on Object catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              userFacingError(error, summary: 'Could not create the poll')),
+          content: Text(userFacingError(error,
+              summary: L10n.of(context).ui_could_not_create_the_poll_57023a37)),
         ));
       }
     } finally {
@@ -2594,7 +2621,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final next = insertComposerText(_composer.value, insertion);
     if (next == null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Messages can contain at most 4,000 characters.'),
+        content: Text(L10n.of(context)
+            .ui_messages_can_contain_at_most_4_000_characters_779f2f0d),
       ));
       return;
     }
@@ -2607,7 +2635,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   void _showGifUnavailable() {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(
-        'GIF search is unavailable in end-to-end encrypted conversations.',
+        L10n.of(context)
+            .ui_gif_search_is_unavailable_in_end_to_end_encry_c8976737,
       ),
     ));
   }
@@ -2621,7 +2650,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     if (remaining > Duration.zero) {
       final seconds = (remaining.inMilliseconds / 1000).ceil();
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Slow mode is active. Try again in $seconds seconds.'),
+        content: Text(L10n.of(context)
+            .ui_slow_mode_is_active_try_again_in_value0_secon_07ff2f45(
+                (seconds).toString())),
       ));
       return;
     }
@@ -2863,7 +2894,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       }
       _showVoiceMessageError(userFacingError(
         error,
-        summary: 'Could not send this voice message',
+        summary: L10n.current.ui_could_not_send_this_voice_message_3f28f87c,
       ));
     } finally {
       await recording.delete();
@@ -3023,7 +3054,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         if (raw.isNotEmpty && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
-              'Choose command options in the typed fields. Free-form arguments are not sent.',
+              L10n.of(context)
+                  .ui_choose_command_options_in_the_typed_fields_fr_39830bbc,
             ),
           ));
         }
@@ -3092,7 +3124,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not send the message',
+            summary: L10n.of(context).ui_could_not_send_the_message_8cf961bb,
           )),
         ));
       }
@@ -3243,8 +3275,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     } on Object catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(
-            userFacingError(error, summary: 'Could not update that reaction')),
+        content: Text(userFacingError(error,
+            summary:
+                L10n.of(context).ui_could_not_update_that_reaction_793f9cec)),
       ));
     }
   }
@@ -3268,7 +3301,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     if (application == null || customId == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('This control is no longer connected to its app.'),
+          content: Text(L10n.of(context)
+              .ui_this_control_is_no_longer_connected_to_its_ap_f0347339),
         ));
       }
       return;
@@ -3331,7 +3365,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'The bot did not receive that interaction',
+          summary: L10n.of(context)
+              .ui_the_bot_did_not_receive_that_interaction_7b2b55a9,
         )),
       ));
     }
@@ -3520,7 +3555,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             child: CircularProgressIndicator(strokeWidth: 2),
           ),
           SizedBox(width: 10),
-          Text('Bot is thinking…'),
+          Text(L10n.of(context).ui_bot_is_thinking_f8062c5a),
         ]),
         duration: Duration(seconds: 10),
       ));
@@ -3701,7 +3736,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'The bot did not receive that private interaction',
+          summary: L10n.of(context)
+              .ui_the_bot_did_not_receive_that_private_interact_cb10783a,
         )),
       ));
     }
@@ -3722,8 +3758,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     } on Object catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content:
-            Text(userFacingError(error, summary: 'Could not update your vote')),
+        content: Text(userFacingError(error,
+            summary: L10n.of(context).ui_could_not_update_your_vote_918e29a5)),
       ));
     }
   }
@@ -3768,7 +3804,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not update your private poll vote',
+          summary: L10n.of(context)
+              .ui_could_not_update_your_private_poll_vote_c43dfc83,
         )),
       ));
     }
@@ -3823,12 +3860,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               children: [
                 ListTile(
                   title: Text(
-                    'Forward message',
+                    L10n.of(context).ui_forward_message_b328e70d,
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
                   subtitle: Text(
-                    'Choose up to 5 destinations · ${selected.length}/5. '
-                    'The snapshot does not include the original author.',
+                    L10n.of(context)
+                        .ui_choose_up_to_5_destinations_value0_5_the_snap_42f7b8f0(
+                            (selected.length).toString()),
                   ),
                 ),
                 Flexible(
@@ -3849,9 +3887,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                 : Icons.tag_rounded),
                         title: Text(_forwardDestinationLabel(destination)),
                         subtitle: destination.ref == source.ref
-                            ? Text('Current conversation')
+                            ? Text(L10n.of(context)
+                                .ui_current_conversation_85ea25c5)
                             : destination.isThread
-                                ? Text('Thread')
+                                ? Text(L10n.of(context).ui_thread_ea904991)
                                 : null,
                         onChanged: !checked && selected.length >= 5
                             ? null
@@ -3882,7 +3921,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                         minLines: 1,
                         maxLines: 3,
                         decoration: InputDecoration(
-                          labelText: 'Add a note (optional)',
+                          labelText:
+                              L10n.of(context).ui_add_a_note_optional_7cca8138,
                         ),
                       ),
                       SizedBox(height: 8),
@@ -3900,8 +3940,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                   ),
                                 ),
                         child: Text(selected.length > 1
-                            ? 'Send (${selected.length})'
-                            : 'Send'),
+                            ? L10n.of(context).ui_send_value0_6ed7a9dd(
+                                (selected.length).toString())
+                            : L10n.of(context).ui_send_f28e14cf),
                       ),
                     ],
                   ),
@@ -3976,7 +4017,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         if (channel != null && commands.isNotEmpty)
           OutlinedButton.icon(
             icon: Icon(Icons.apps_rounded),
-            label: Text('Apps'),
+            label: Text(L10n.of(context).ui_apps_53d91aad),
             onPressed: () {
               Navigator.of(context).pop();
               unawaited(Future<void>.delayed(Duration.zero, () async {
@@ -4078,7 +4119,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(
-            '${command.displayName(Localizations.localeOf(context).toLanguageTag())} sent to ${command.applicationName}.',
+            L10n.of(context).ui_value0_sent_to_value1_8c0321c9(
+                (command.displayName(
+                        Localizations.localeOf(context).toLanguageTag()))
+                    .toString(),
+                (command.applicationName).toString()),
           ),
         ));
       }
@@ -4087,7 +4132,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'The app command could not be delivered',
+          summary: L10n.of(context)
+              .ui_the_app_command_could_not_be_delivered_35789e23,
         )),
       ));
     }
@@ -4200,7 +4246,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                       Padding(
                         padding: EdgeInsets.symmetric(horizontal: 3),
                         child: IconButton(
-                          tooltip: 'More emoji',
+                          tooltip: L10n.of(context).ui_more_emoji_6fa68e3e,
                           onPressed: () =>
                               Navigator.pop(context, 'react-picker'),
                           icon: Icon(Icons.add_reaction_outlined),
@@ -4216,58 +4262,62 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               if (displayedAttachment != null) ...[
                 ListTile(
                   leading: Icon(Icons.link_rounded),
-                  title: Text('Copy media link'),
+                  title: Text(L10n.of(context).ui_copy_media_link_39bd84b0),
                   onTap: () => Navigator.pop(context, 'copy-media-link'),
                 ),
                 ListTile(
                   leading: Icon(Icons.info_outline_rounded),
                   title: Text(displayedAttachment.filename),
                   subtitle: Text(
-                    '${displayedAttachment.contentType} · '
-                    '${formatAttachmentSize(displayedAttachment.size)}',
+                    L10n.of(context).ui_value0_value1_947523d9(
+                        (displayedAttachment.contentType).toString(),
+                        (formatAttachmentSize(displayedAttachment.size))
+                            .toString()),
                   ),
                 ),
               ],
               if (!channelFollowNotice)
                 ListTile(
                     leading: Icon(Icons.reply_rounded),
-                    title: Text('Reply'),
+                    title: Text(L10n.of(context).ui_reply_d1ca83c7),
                     onTap: () => Navigator.pop(context, 'reply')),
               if (canStartThread)
                 ListTile(
                   leading: Icon(Icons.forum_outlined),
-                  title: Text('Create Thread'),
+                  title: Text(L10n.of(context).ui_create_thread_e32ec947),
                   onTap: () => Navigator.pop(context, 'create-thread'),
                 ),
               if (!channelFollowNotice && message.content?.isNotEmpty == true)
                 ListTile(
                     leading: Icon(Icons.copy_rounded),
-                    title: Text('Copy text'),
+                    title: Text(L10n.of(context).ui_copy_text_6426ce4b),
                     onTap: () => Navigator.pop(context, 'copy')),
               ListTile(
                   leading: Icon(Icons.link_rounded),
-                  title: Text('Copy message link'),
+                  title: Text(L10n.of(context).ui_copy_message_link_09495605),
                   onTap: () => Navigator.pop(context, 'copy-link')),
               if (forwardDestinations.isNotEmpty)
                 ListTile(
                   leading: Icon(Icons.forward_rounded),
-                  title: Text('Forward'),
-                  subtitle: Text('Share an author-free snapshot copy'),
+                  title: Text(L10n.of(context).ui_forward_e50883ba),
+                  subtitle: Text(L10n.of(context)
+                      .ui_share_an_author_free_snapshot_copy_534647d6),
                   onTap: () => Navigator.pop(context, 'forward'),
                 ),
               if (!channelFollowNotice && forwardUnavailable != null)
                 ListTile(
                   enabled: false,
                   leading: Icon(Icons.forward_rounded),
-                  title: Text('Forward'),
+                  title: Text(L10n.of(context).ui_forward_e50883ba),
                   subtitle: Text(forwardUnavailable),
                 ),
               if (canPublish)
                 ListTile(
                   leading: Icon(Icons.campaign_outlined),
-                  title: Text('Publish message'),
+                  title: Text(L10n.of(context).ui_publish_message_f3a6022f),
                   subtitle: Text(
-                    'Send to this announcement channel’s followers',
+                    L10n.of(context)
+                        .ui_send_to_this_announcement_channel_s_followers_b0a9ca11,
                   ),
                   onTap: () => Navigator.pop(context, 'publish'),
                 ),
@@ -4277,39 +4327,39 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                       ? Icons.star_rounded
                       : Icons.star_border_rounded),
                   title: Text(gifFavorite
-                      ? 'Remove from GIF favorites'
-                      : 'Add to GIF favorites'),
+                      ? L10n.of(context).ui_remove_from_gif_favorites_31005464
+                      : L10n.of(context).ui_add_to_gif_favorites_fc8eb732),
                   onTap: () => Navigator.pop(context, 'gif-favorite'),
                 ),
               if (canReact)
                 ListTile(
                     leading: Icon(Icons.add_reaction_outlined),
-                    title: Text('Add reaction'),
+                    title: Text(L10n.of(context).ui_add_reaction_7583c0e7),
                     trailing: Icon(Icons.chevron_right_rounded),
                     onTap: () => Navigator.pop(context, 'react-picker')),
               if (!channelFollowNotice && message.reactionCounts.isNotEmpty)
                 ListTile(
                     leading: Icon(Icons.people_outline_rounded),
-                    title: Text('View reactions'),
+                    title: Text(L10n.of(context).ui_view_reactions_fa9f26b0),
                     trailing: Icon(Icons.chevron_right_rounded),
                     onTap: () => Navigator.pop(context, 'view-reactions')),
               if (poll != null && poll.totalVotes > 0)
                 ListTile(
                   leading: Icon(Icons.how_to_vote_outlined),
-                  title: Text('View poll voters'),
+                  title: Text(L10n.of(context).ui_view_poll_voters_e312aa04),
                   trailing: Icon(Icons.chevron_right_rounded),
                   onTap: () => Navigator.pop(context, 'poll-voters'),
                 ),
               if (canEndPoll)
                 ListTile(
                   leading: Icon(Icons.stop_circle_outlined),
-                  title: Text('End poll'),
+                  title: Text(L10n.of(context).ui_end_poll_b892c63f),
                   onTap: () => Navigator.pop(context, 'end-poll'),
                 ),
               if (contextCommands.isNotEmpty && !channel.archived)
                 ListTile(
                   leading: Icon(Icons.apps_rounded),
-                  title: Text('Apps'),
+                  title: Text(L10n.of(context).ui_apps_53d91aad),
                   trailing: Icon(Icons.chevron_right_rounded),
                   onTap: () => Navigator.pop(context, 'app-command'),
                 ),
@@ -4318,8 +4368,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     leading: Icon(message.pinned
                         ? Icons.push_pin_rounded
                         : Icons.push_pin_outlined),
-                    title:
-                        Text(message.pinned ? 'Unpin message' : 'Pin message'),
+                    title: Text(message.pinned
+                        ? L10n.of(context).ui_unpin_message_122b93fa
+                        : L10n.of(context).ui_pin_message_6e68281b),
                     onTap: () => Navigator.pop(context, 'pin')),
               if (!channel.archived &&
                   (!channel.locked || canManageThreads(channel)) &&
@@ -4328,30 +4379,32 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   message.clientContentAvailable)
                 ListTile(
                     leading: Icon(Icons.edit_outlined),
-                    title: Text('Edit message'),
+                    title: Text(L10n.of(context).ui_edit_message_bfeb2eea),
                     onTap: () => Navigator.pop(context, 'edit')),
               if (!channelFollowNotice && message.authorRef != me)
                 ListTile(
                   leading: Icon(Icons.flag_outlined),
-                  title: Text('Report message'),
+                  title: Text(L10n.of(context).ui_report_message_52f7cf88),
                   subtitle: displayedAttachment == null
                       ? null
                       : Text(
-                          'Include ${displayedAttachment.filename} as context',
+                          L10n.of(context)
+                              .ui_include_value0_as_context_c3633c5f(
+                                  (displayedAttachment.filename).toString()),
                         ),
                   onTap: () => Navigator.pop(context, 'report'),
                 ),
               if (mobileState.developerMode)
                 ListTile(
                   leading: Icon(Icons.badge_outlined),
-                  title: Text('Copy message ID'),
+                  title: Text(L10n.of(context).ui_copy_message_id_2d579ac4),
                   onTap: () => Navigator.pop(context, 'copy-id'),
                 ),
               if (canDelete)
                 ListTile(
                   leading: Icon(Icons.delete_outline_rounded,
                       color: context.kaede.danger),
-                  title: Text('Delete message',
+                  title: Text(L10n.of(context).ui_delete_message_595ff4fd,
                       style: TextStyle(color: context.kaede.danger)),
                   onTap: () => Navigator.pop(context, 'delete'),
                 ),
@@ -4401,7 +4454,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             ));
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Message link copied.')),
+                SnackBar(
+                    content:
+                        Text(L10n.of(context).ui_message_link_copied_43be494a)),
               );
             }
           }
@@ -4421,7 +4476,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           await copyDeveloperId(
             context,
             value: message.ref.wire,
-            label: 'Message',
+            label: L10n.of(context).ui_message_ae0ed984,
           );
           break;
         case 'forward':
@@ -4438,20 +4493,20 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             final confirmed = await showDialog<bool>(
               context: context,
               builder: (context) => AlertDialog(
-                title: Text('Share decrypted snapshot?'),
+                title:
+                    Text(L10n.of(context).ui_share_decrypted_snapshot_d5d82a91),
                 content: Text(
-                  'At least one destination is not end-to-end encrypted. '
-                  'Kaede will disclose an author-free copy of this message '
-                  'and its files to those conversations.',
+                  L10n.of(context)
+                      .ui_at_least_one_destination_is_not_end_to_end_en_ec79fe19,
                 ),
                 actions: [
                   TextButton(
                     onPressed: () => Navigator.pop(context, false),
-                    child: Text('Cancel'),
+                    child: Text(L10n.of(context).ui_cancel_35afca3b),
                   ),
                   FilledButton(
                     onPressed: () => Navigator.pop(context, true),
-                    child: Text('Share snapshot'),
+                    child: Text(L10n.of(context).ui_share_snapshot_5a5c8a0c),
                   ),
                 ],
               ),
@@ -4468,11 +4523,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content: Text(
                 result.failures.isEmpty
-                    ? 'Forwarded to ${result.forwards.length} '
-                        'destination${result.forwards.length == 1 ? '' : 's'}.'
-                    : 'Forwarded to ${result.forwards.length}; '
-                        '${result.failures.length} destination'
-                        '${result.failures.length == 1 ? '' : 's'} failed.',
+                    ? L10n.of(context)
+                        .ui_forwarded_to_value0_destination_value1_5db9ce6d(
+                            (result.forwards.length).toString(),
+                            (result.forwards.length == 1 ? '' : 's').toString())
+                    : L10n.of(context)
+                        .ui_forwarded_to_value0_value1_destination_value2_9471c0ac(
+                            (result.forwards.length).toString(),
+                            (result.failures.length).toString(),
+                            (result.failures.length == 1 ? '' : 's')
+                                .toString()),
               ),
             ));
           }
@@ -4486,7 +4546,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
-                      'Message published to this announcement channel’s followers.',
+                      L10n.of(context)
+                          .ui_message_published_to_this_announcement_channe_b400bae0,
                     ),
                   ),
                 );
@@ -4507,8 +4568,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                 content: Text(gifFavorite
-                    ? 'GIF removed from favorites.'
-                    : 'GIF added to favorites.'),
+                    ? L10n.of(context).ui_gif_removed_from_favorites_66b66be4
+                    : L10n.of(context).ui_gif_added_to_favorites_aaff0fb5),
               ));
             }
           }
@@ -4546,18 +4607,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           final confirmed = await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
-              title: Text('End this poll?'),
+              title: Text(L10n.of(context).ui_end_this_poll_4bce305c),
               content: Text(
-                'Voting will close immediately and the final results will remain visible.',
+                L10n.of(context)
+                    .ui_voting_will_close_immediately_and_the_final_r_15bbf55c,
               ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context, false),
-                  child: Text('Keep open'),
+                  child: Text(L10n.of(context).ui_keep_open_74cbd680),
                 ),
                 FilledButton(
                   onPressed: () => Navigator.pop(context, true),
-                  child: Text('End poll'),
+                  child: Text(L10n.of(context).ui_end_poll_b892c63f),
                 ),
               ],
             ),
@@ -4566,7 +4628,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             await controller.finalizePoll(message);
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Poll ended.')),
+                SnackBar(
+                    content: Text(L10n.of(context).ui_poll_ended_c1f4f22e)),
               );
             }
           }
@@ -4576,18 +4639,24 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           final confirmed = await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
-              title: Text(pinning ? 'Pin this message?' : 'Remove this pin?'),
+              title: Text(pinning
+                  ? L10n.of(context).ui_pin_this_message_bdd6c5a0
+                  : L10n.of(context).ui_remove_this_pin_09a4d331),
               content: Text(pinning
-                  ? 'Everyone in this conversation will be able to find it in Pins.'
-                  : 'The message will remain in the conversation.'),
+                  ? L10n.of(context)
+                      .ui_everyone_in_this_conversation_will_be_able_to_43233c79
+                  : L10n.of(context)
+                      .ui_the_message_will_remain_in_the_conversation_59e103da),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context, false),
-                  child: Text('Cancel'),
+                  child: Text(L10n.of(context).ui_cancel_35afca3b),
                 ),
                 FilledButton(
                   onPressed: () => Navigator.pop(context, true),
-                  child: Text(pinning ? 'Pin' : 'Remove pin'),
+                  child: Text(pinning
+                      ? L10n.of(context).ui_pin_d4479a34
+                      : L10n.of(context).ui_remove_pin_49a985ee),
                 ),
               ],
             ),
@@ -4618,7 +4687,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not complete that message action',
+            summary: L10n.of(context)
+                .ui_could_not_complete_that_message_action_5031d556,
           )),
         ),
       );
@@ -4630,15 +4700,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     return showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Edit message'),
+        title: Text(L10n.of(context).ui_edit_message_bfeb2eea),
         content: TextField(
             controller: input, autofocus: true, minLines: 2, maxLines: 8),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context), child: Text('Cancel')),
+              onPressed: () => Navigator.pop(context),
+              child: Text(L10n.of(context).ui_cancel_35afca3b)),
           FilledButton(
               onPressed: () => Navigator.pop(context, input.text.trim()),
-              child: Text('Save')),
+              child: Text(L10n.of(context).ui_save_4d2d5d68)),
         ],
       ),
     );
@@ -4649,20 +4720,20 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     return showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Create Thread'),
+        title: Text(L10n.of(context).ui_create_thread_e32ec947),
         content: TextField(
           controller: input,
           autofocus: true,
           maxLength: 100,
           decoration: InputDecoration(
-            labelText: 'Thread name',
+            labelText: L10n.of(context).ui_thread_name_f63426e8,
             counterText: '',
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: input,
@@ -4670,7 +4741,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               onPressed: value.text.trim().isEmpty
                   ? null
                   : () => Navigator.pop(context, value.text.trim()),
-              child: Text('Create'),
+              child: Text(L10n.of(context).ui_create_990de47d),
             ),
           ),
         ],
@@ -4726,7 +4797,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         barrierDismissible: false,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
-            title: Text('Report message'),
+            title: Text(L10n.of(context).ui_report_message_52f7cf88),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -4744,8 +4815,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                       ),
                       title: Text(attachmentLabel),
                       subtitle: Text(
-                        '${attachmentManifest?['content_type'] ?? attachment.contentType} · '
-                        '${formatAttachmentSize((attachmentManifest?['plaintext_size'] as num?)?.toInt() ?? attachment.size)}',
+                        L10n.of(context).ui_value0_value1_947523d9(
+                            (attachmentManifest?['content_type'] ??
+                                    attachment.contentType)
+                                .toString(),
+                            (formatAttachmentSize(
+                                    (attachmentManifest?['plaintext_size']
+                                                as num?)
+                                            ?.toInt() ??
+                                        attachment.size))
+                                .toString()),
                       ),
                     ),
                     SizedBox(height: 4),
@@ -4753,24 +4832,32 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   if (requiresAttachmentDisclosure) ...[
                     Text(
                       !attachmentDisclosureAvailable
-                          ? 'This encrypted attachment is not available on this device yet. Wait for it to decrypt, then try again.'
+                          ? L10n.of(context)
+                              .ui_this_encrypted_attachment_is_not_available_on_2212b096
                           : message.e2ee != null && !encryptedEvidenceAvailable
-                              ? 'The selected attachment is available, but the encrypted message text has not decrypted on this device. Wait for it to decrypt, then try again.'
-                              : 'Reporting shares the complete message and uploads an unencrypted copy of $attachmentLabel to the channel’s moderation authority. Encryption keys and other messages are never sent.',
+                              ? L10n.of(context)
+                                  .ui_the_selected_attachment_is_available_but_the__d3388cc2
+                              : L10n.of(context)
+                                  .ui_reporting_shares_the_complete_message_and_upl_062868f8(
+                                      (attachmentLabel).toString()),
                     ),
                   ] else if (message.e2ee != null) ...[
                     Text(
                       encryptedEvidenceAvailable
-                          ? 'This message is end-to-end encrypted. Reporting shares the decrypted message text shown on this device and metadata for all of its attachments with the channel’s moderation authority. Attachment-only messages have empty disclosed text and can still be reported. Encryption keys and decrypted file contents are not sent unless an attachment is selected directly.'
-                          : 'This encrypted message has not decrypted on this device. Wait for its authenticated message evidence to decrypt, then try again.',
+                          ? L10n.of(context)
+                              .ui_this_message_is_end_to_end_encrypted_reportin_f9388951
+                          : L10n.of(context)
+                              .ui_this_encrypted_message_has_not_decrypted_on_t_7d960381,
                     ),
                   ] else if (focusedAttachment)
                     Text(
-                      'This reports the complete message and all of its attachments. The selected attachment will be highlighted for moderators.',
+                      L10n.of(context)
+                          .ui_this_reports_the_complete_message_and_all_of__2495a870,
                     )
                   else
                     Text(
-                      'The message text and metadata for all of its attachments will be sent to the channel’s moderation authority.',
+                      L10n.of(context)
+                          .ui_the_message_text_and_metadata_for_all_of_its__b26d976c,
                     ),
                   if (requiresDisclosure) ...[
                     SizedBox(height: 12),
@@ -4786,15 +4873,18 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                               setDialogState(() => disclose = value == true),
                       title: Text(
                         requiresAttachmentDisclosure
-                            ? 'I understand the decrypted message and selected file will be disclosed unencrypted.'
-                            : 'I understand the decrypted message text will be disclosed.',
+                            ? L10n.of(context)
+                                .ui_i_understand_the_decrypted_message_and_select_2bc2b10c
+                            : L10n.of(context)
+                                .ui_i_understand_the_decrypted_message_text_will__10ce50ee,
                       ),
                     ),
                   ],
                   SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     initialValue: category,
-                    decoration: InputDecoration(labelText: 'Reason'),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_reason_41314139),
                     items: categories.entries
                         .map((entry) => DropdownMenuItem(
                               value: entry.key,
@@ -4814,7 +4904,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     maxLength: 2000,
                     maxLines: 4,
                     decoration: InputDecoration(
-                      labelText: 'Additional details (optional)',
+                      labelText: L10n.of(context)
+                          .ui_additional_details_optional_3fd8fff1,
                     ),
                   ),
                   if (submitting) ...[
@@ -4840,7 +4931,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               TextButton(
                 onPressed:
                     submitting ? null : () => Navigator.pop(dialogContext),
-                child: Text('Cancel'),
+                child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
               FilledButton(
                 onPressed: submitting ||
@@ -4931,7 +5022,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                           }
                           if (mounted) {
                             ScaffoldMessenger.of(this.context).showSnackBar(
-                              SnackBar(content: Text('Report submitted.')),
+                              SnackBar(
+                                  content: Text(L10n
+                                      .current.ui_report_submitted_7c567658)),
                             );
                           }
                         } on Object catch (error) {
@@ -4945,15 +5038,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                 content: Text(userFacingError(
                                   error,
                                   summary: createdReportId == null
-                                      ? 'Could not submit the report'
-                                      : 'The report was submitted, but its decrypted attachment evidence could not be added',
+                                      ? L10n.of(context)
+                                          .ui_could_not_submit_the_report_b7c750dc
+                                      : L10n.of(context)
+                                          .ui_the_report_was_submitted_but_its_decrypted_at_a6a196dc,
                                 )),
                               ),
                             );
                           }
                         }
                       },
-                child: Text(submitting ? 'Submitting…' : 'Submit report'),
+                child: Text(submitting
+                    ? L10n.of(context).ui_submitting_d14d93eb
+                    : L10n.of(context).ui_submit_report_6912cf41),
               ),
             ],
           ),
@@ -5165,8 +5262,11 @@ final class _JumpToPresentButton extends StatelessWidget {
                       SizedBox(width: 7),
                       Text(
                         unread > 0
-                            ? '$unread new message${unread == 1 ? '' : 's'}'
-                            : 'Jump to present',
+                            ? L10n.of(context)
+                                .ui_value0_new_message_value1_0d55cd61(
+                                    (unread).toString(),
+                                    (unread == 1 ? '' : 's').toString())
+                            : L10n.of(context).ui_jump_to_present_7f4a86d9,
                         style: TextStyle(
                           fontSize: 12.5,
                           fontWeight: FontWeight.w700,
@@ -5254,8 +5354,8 @@ final class _HistoryBoundary extends StatelessWidget {
             SizedBox(height: 8),
             Text(
               complete
-                  ? 'Beginning of conversation'
-                  : 'Recent history starts here',
+                  ? L10n.of(context).ui_beginning_of_conversation_22f2ea44
+                  : L10n.of(context).ui_recent_history_starts_here_d0d289cb,
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontWeight: FontWeight.w700,
@@ -5265,12 +5365,10 @@ final class _HistoryBoundary extends StatelessWidget {
             SizedBox(height: 4),
             Text(
               complete
-                  ? 'You have reached the oldest message available from the '
-                      'conversation home.'
-                  : 'This instance keeps a rolling cache of this remote '
-                      'conversation. Older messages load on demand from its '
-                      'home instance; retry if that instance is temporarily '
-                      'unavailable.',
+                  ? L10n.of(context)
+                      .ui_you_have_reached_the_oldest_message_available_7008908b
+                  : L10n.of(context)
+                      .ui_this_instance_keeps_a_rolling_cache_of_this_r_5cc01f36,
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: context.kaede.muted,
@@ -5330,7 +5428,7 @@ final class _PendingMessageTile extends StatelessWidget {
                         ? userFacingError(
                             item.lastError ?? 'Message could not be sent.',
                           )
-                        : 'Sending…',
+                        : L10n.of(context).ui_sending_e946e7bf,
                     style: TextStyle(
                       color:
                           failed ? context.kaede.danger : context.kaede.muted,
@@ -5346,11 +5444,11 @@ final class _PendingMessageTile extends StatelessWidget {
                       minimumSize: Size(0, 32),
                       padding: EdgeInsets.symmetric(horizontal: 10),
                     ),
-                    child: Text('Retry'),
+                    child: Text(L10n.of(context).ui_retry_8036af59),
                   ),
                   IconButton(
                     onPressed: onDiscard,
-                    tooltip: 'Discard message',
+                    tooltip: L10n.of(context).ui_discard_message_d502239a,
                     visualDensity: VisualDensity.compact,
                     icon: Icon(Icons.close_rounded, size: 17),
                   ),
@@ -5402,7 +5500,7 @@ final class _ChatErrorStrip extends StatelessWidget {
                   minimumSize: Size(0, 34),
                   padding: EdgeInsets.symmetric(horizontal: 12),
                 ),
-                child: Text('Retry'),
+                child: Text(L10n.of(context).ui_retry_8036af59),
               ),
             ],
           ),
@@ -5480,7 +5578,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
       setState(() {
         errors[emoji] = userFacingError(
           error,
-          summary: 'Could not load the people who reacted',
+          summary: L10n.of(context)
+              .ui_could_not_load_the_people_who_reacted_78c558cf,
         );
       });
     } finally {
@@ -5507,18 +5606,24 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
       builder: (dialogContext) => AlertDialog(
         title: Text(
           emoji == null
-              ? 'Clear every reaction?'
-              : 'Clear all $emojiLabel reactions?',
+              ? L10n.of(context).ui_clear_every_reaction_836c9b29
+              : L10n.of(context).ui_clear_all_value0_reactions_4f4029b7(
+                  (emojiLabel).toString()),
         ),
         content: Text(
           emoji == null
-              ? 'All $count reactions will be removed from this message. This cannot be undone.'
-              : '$count ${count == 1 ? 'reaction' : 'reactions'} will be removed from this message. This cannot be undone.',
+              ? L10n.of(context)
+                  .ui_all_value0_reactions_will_be_removed_from_thi_4a8c8e72(
+                      (count).toString())
+              : L10n.of(context)
+                  .ui_value0_value1_will_be_removed_from_this_messa_b72f4443(
+                      (count).toString(),
+                      (count == 1 ? 'reaction' : 'reactions').toString()),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
@@ -5526,7 +5631,10 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
             ),
             onPressed: () => Navigator.pop(dialogContext, true),
             child: Text(
-              emoji == null ? 'Clear all reactions' : 'Clear $emojiLabel',
+              emoji == null
+                  ? L10n.of(context).ui_clear_all_reactions_af2e8add
+                  : L10n.of(context)
+                      .ui_clear_value0_0996e7fb((emojiLabel).toString()),
             ),
           ),
         ],
@@ -5547,7 +5655,9 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
       );
       if (emoji == null) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('All reactions cleared.')),
+          SnackBar(
+              content:
+                  Text(L10n.of(context).ui_all_reactions_cleared_c1073f7a)),
         );
         Navigator.pop(context);
         return;
@@ -5561,14 +5671,18 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
       });
       if (selectedEmoji.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Reaction group cleared.')),
+          SnackBar(
+              content:
+                  Text(L10n.of(context).ui_reaction_group_cleared_eb58adc9)),
         );
         Navigator.pop(context);
         return;
       }
       if (!users.containsKey(selectedEmoji)) _load(selectedEmoji);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$emojiLabel reactions cleared.')),
+        SnackBar(
+            content: Text(L10n.of(context).ui_value0_reactions_cleared_a481d1d2(
+                (emojiLabel).toString()))),
       );
     } on Object catch (error) {
       if (!mounted) return;
@@ -5576,8 +5690,11 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
         managementError = userFacingError(
           error,
           summary: emoji == null
-              ? 'Could not clear reactions from this message'
-              : 'Could not clear the $emojiLabel reactions',
+              ? L10n.of(context)
+                  .ui_could_not_clear_reactions_from_this_message_8f6f4c5d
+              : L10n.of(context)
+                  .ui_could_not_clear_the_value0_reactions_8ae61f4a(
+                      (emojiLabel).toString()),
         );
       });
     } finally {
@@ -5602,13 +5719,13 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                 children: [
                   Expanded(
                     child: Text(
-                      'Reactions',
+                      L10n.of(context).ui_reactions_2aa367bb,
                       style:
                           TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
                     ),
                   ),
                   IconButton(
-                    tooltip: 'Close reactions',
+                    tooltip: L10n.of(context).ui_close_reactions_12be55a7,
                     onPressed: () => Navigator.pop(context),
                     icon: Icon(Icons.close_rounded),
                   ),
@@ -5632,7 +5749,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                             size: 20,
                           ),
                           SizedBox(width: 6),
-                          Text('${reaction.value}'),
+                          Text(L10n.of(context)
+                              .ui_value0_26e9163c((reaction.value).toString())),
                         ],
                       ),
                       onSelected: (_) => _select(reaction.key),
@@ -5653,7 +5771,10 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                           : () => _requestClear(emoji: selectedEmoji),
                       icon: Icon(Icons.remove_circle_outline_rounded),
                       label: Text(
-                        'Clear ${tryParseReactionEmoji(selectedEmoji)?.label ?? 'reaction'}',
+                        L10n.of(context).ui_clear_value0_0996e7fb(
+                            (tryParseReactionEmoji(selectedEmoji)?.label ??
+                                    'reaction')
+                                .toString()),
                       ),
                     ),
                     TextButton.icon(
@@ -5662,7 +5783,7 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                       ),
                       onPressed: clearing ? null : _requestClear,
                       icon: Icon(Icons.delete_sweep_outlined),
-                      label: Text('Clear all'),
+                      label: Text(L10n.of(context).ui_clear_all_797a9445),
                     ),
                   ],
                 ),
@@ -5687,7 +5808,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                             SizedBox(height: 8),
                             TextButton(
                               onPressed: () => _load(selectedEmoji),
-                              child: Text('Try again'),
+                              child:
+                                  Text(L10n.of(context).ui_try_again_213e90fa),
                             ),
                           ],
                         ),
@@ -5696,7 +5818,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                         ? Center(child: CircularProgressIndicator())
                         : selectedUsers.isEmpty
                             ? Center(
-                                child: Text('No reactions to show.'),
+                                child: Text(L10n.of(context)
+                                    .ui_no_reactions_to_show_771ed656),
                               )
                             : ListView.builder(
                                 itemCount: selectedUsers.length +
@@ -5713,8 +5836,10 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                                                   append: true,
                                                 ),
                                         child: Text(isLoading
-                                            ? 'Loading…'
-                                            : 'Load more'),
+                                            ? L10n.of(context)
+                                                .ui_loading_c4e2f181
+                                            : L10n.of(context)
+                                                .ui_load_more_2b7b053e),
                                       ),
                                     );
                                   }
@@ -5726,8 +5851,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                                     title: Text(user.name),
                                     subtitle: user.profileResolved
                                         ? Text(user.handle)
-                                        : Text(
-                                            'Profile unavailable · refreshes automatically'),
+                                        : Text(L10n.of(context)
+                                            .ui_profile_unavailable_refreshes_automatically_9ef31289),
                                   );
                                 },
                               ),
@@ -5774,7 +5899,7 @@ final class _ReactionChip extends StatelessWidget {
                 ReactionEmojiGlyph(emoji: emoji, size: 16),
                 SizedBox(width: 5),
                 Text(
-                  '$count',
+                  L10n.of(context).ui_value0_26e9163c((count).toString()),
                   style: TextStyle(
                     fontSize: 12.5,
                     fontWeight: FontWeight.w700,
@@ -5796,7 +5921,7 @@ final class _AddReactionChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Tooltip(
-        message: 'Add reaction',
+        message: L10n.of(context).ui_add_reaction_7583c0e7,
         child: Material(
           color: context.kaede.raised,
           borderRadius: BorderRadius.circular(KaedeRadius.small),
@@ -5897,7 +6022,7 @@ final class _ReplyingBar extends StatelessWidget {
                 children: [
                   Text.rich(
                     TextSpan(
-                      text: 'Replying to ',
+                      text: L10n.of(context).ui_replying_to_0a78ca6a,
                       style: TextStyle(
                         color: context.kaede.muted,
                         fontSize: 12.5,
@@ -5930,8 +6055,9 @@ final class _ReplyingBar extends StatelessWidget {
             ),
             Tooltip(
               message: notify
-                  ? 'The author will be notified'
-                  : 'Reply without notifying the author',
+                  ? L10n.of(context).ui_the_author_will_be_notified_a8f4335e
+                  : L10n.of(context)
+                      .ui_reply_without_notifying_the_author_1d3e78c2,
               child: TextButton.icon(
                 onPressed: () => onNotifyChanged(!notify),
                 icon: Icon(
@@ -5940,7 +6066,9 @@ final class _ReplyingBar extends StatelessWidget {
                       : Icons.notifications_off_rounded,
                   size: 15,
                 ),
-                label: Text(notify ? 'ON' : 'OFF'),
+                label: Text(notify
+                    ? L10n.of(context).ui_on_80e4b050
+                    : L10n.of(context).ui_off_2e1505ea),
                 style: TextButton.styleFrom(
                   minimumSize: Size(0, 34),
                   visualDensity: VisualDensity.compact,
@@ -5957,7 +6085,7 @@ final class _ReplyingBar extends StatelessWidget {
             ),
             IconButton(
               onPressed: onClose,
-              tooltip: 'Cancel reply',
+              tooltip: L10n.of(context).ui_cancel_reply_d14b578b,
               visualDensity: VisualDensity.compact,
               icon: Icon(Icons.close_rounded, size: 18),
             ),
@@ -6042,17 +6170,18 @@ final class _UploadChip extends StatelessWidget {
               ),
             ),
           if (isAttachmentSpoiler(item.name))
-            const Positioned.fill(
+            Positioned.fill(
                 child: ColoredBox(
                     color: Color(0xEE25252B),
                     child: Center(
-                        child: Text('Spoiler',
+                        child: Text(L10n.of(context).ui_spoiler_69958ef9,
                             style: TextStyle(
                                 color: Colors.white, fontSize: 11))))),
           Positioned.fill(
               child: Semantics(
                   button: true,
-                  label: 'Edit attachment ${item.name}',
+                  label: L10n.of(context).ui_edit_attachment_value0_5029a877(
+                      (item.name).toString()),
                   child: InkWell(onTap: onEdit))),
           Positioned(
             top: 2,
@@ -6110,8 +6239,8 @@ final class _ThreadCreatedRow extends StatelessWidget {
             Expanded(
               child: Text.rich(
                 TextSpan(
-                  text:
-                      '${message.author?.name ?? 'A member'} started a thread: ',
+                  text: L10n.of(context).ui_value0_started_a_thread_7ac19294(
+                      (message.author?.name ?? 'A member').toString()),
                   style: TextStyle(
                     color: context.kaede.muted,
                     fontSize: 13,
@@ -6183,7 +6312,9 @@ final class _MessageThreadPreview extends StatelessWidget {
                           style: TextStyle(fontWeight: FontWeight.w700),
                         ),
                         Text(
-                          '${thread.messageCount} message${thread.messageCount == 1 ? '' : 's'}',
+                          L10n.of(context).ui_value0_message_value1_2baf272f(
+                              (thread.messageCount).toString(),
+                              (thread.messageCount == 1 ? '' : 's').toString()),
                           style: TextStyle(
                             color: context.kaede.muted,
                             fontSize: 12,
@@ -6462,7 +6593,7 @@ final class _MessageTile extends StatelessWidget {
                           if (displayedMessage.editedAt != null) ...[
                             SizedBox(width: 6),
                             Text(
-                              '(edited)',
+                              L10n.of(context).ui_edited_ee60fcc9,
                               style: TextStyle(
                                 color: context.kaede.muted,
                                 fontSize: 11,
@@ -6483,7 +6614,7 @@ final class _MessageTile extends StatelessWidget {
                             ),
                             SizedBox(width: 3),
                             Text(
-                              'Published',
+                              L10n.of(context).ui_published_19c90329,
                               style: TextStyle(
                                 color: context.kaede.muted,
                                 fontSize: 11,
@@ -6495,7 +6626,7 @@ final class _MessageTile extends StatelessWidget {
                     ),
                   if (deleted)
                     Text(
-                      'Message deleted',
+                      L10n.of(context).ui_message_deleted_edcce219,
                       style: TextStyle(
                         color: context.kaede.muted,
                         fontStyle: FontStyle.italic,
@@ -6503,7 +6634,7 @@ final class _MessageTile extends StatelessWidget {
                     )
                   else if (displayedMessage.contentUnavailable)
                     Text(
-                      'Message unavailable',
+                      L10n.of(context).ui_message_unavailable_f45ec49e,
                       style: TextStyle(
                         color: context.kaede.muted,
                         fontStyle: FontStyle.italic,
@@ -6701,14 +6832,19 @@ List<({String value, String label})> _richEntityOptions(
   }
   if (component.type == 6) {
     return (state.activeGuild?.roles ?? const <KaedeRole>[])
-        .map((role) => (value: role.ref.wire, label: '@${role.name}'))
+        .map((role) => (
+              value: role.ref.wire,
+              label: L10n.current.ui_value0_1b34e556((role.name).toString())
+            ))
         .toList();
   }
   if (component.type == 7) {
     return <({String value, String label})>[
       ...users.values.map((user) => (value: user.ref.wire, label: user.name)),
-      ...(state.activeGuild?.roles ?? const <KaedeRole>[])
-          .map((role) => (value: role.ref.wire, label: '@${role.name}')),
+      ...(state.activeGuild?.roles ?? const <KaedeRole>[]).map((role) => (
+            value: role.ref.wire,
+            label: L10n.current.ui_value0_1b34e556((role.name).toString())
+          )),
     ];
   }
   return (state.activeGuild?.channels ?? const <KaedeChannel>[])
@@ -6729,8 +6865,11 @@ List<({String value, String label})> _richEntityOptions(
             ChannelType.tracker => 17,
             ChannelType.unknown => -1,
           }))
-      .map((channel) =>
-          (value: channel.ref.wire, label: '#${channel.name ?? 'channel'}'))
+      .map((channel) => (
+            value: channel.ref.wire,
+            label: L10n.current
+                .ui_value0_ea2f080f((channel.name ?? 'channel').toString())
+          ))
       .toList();
 }
 
@@ -6819,8 +6958,9 @@ final class _InteractionModalDialogState
           if (component.isRadioGroup &&
               component.required &&
               (_selections[component.customId]?.isEmpty ?? true)) {
-            setState(
-                () => _error = '${row.label ?? 'This field'} is required.');
+            setState(() => _error = L10n.of(context)
+                .ui_value0_is_required_9cd2a309(
+                    (row.label ?? 'This field').toString()));
             return;
           }
           continue;
@@ -6828,9 +6968,11 @@ final class _InteractionModalDialogState
         final count = _selections[component.customId]?.length ?? 0;
         if (count < component.minValues || count > component.maxValues) {
           setState(() {
-            _error = 'Choose between ${component.minValues} and '
-                '${component.maxValues} items for '
-                '${component.placeholder ?? 'this field'}.';
+            _error = L10n.of(context)
+                .ui_choose_between_value0_and_value1_items_for_va_426ab4e0(
+                    (component.minValues).toString(),
+                    (component.maxValues).toString(),
+                    (component.placeholder ?? 'this field').toString());
           });
           return;
         }
@@ -6880,7 +7022,8 @@ final class _InteractionModalDialogState
         setState(() {
           _error = userFacingError(
             error,
-            summary: 'The bot did not receive this form',
+            summary:
+                L10n.of(context).ui_the_bot_did_not_receive_this_form_4c4694b2,
           );
         });
       }
@@ -7016,7 +7159,8 @@ final class _InteractionModalDialogState
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = userFacingError(error,
-            summary: 'One or more files could not be uploaded'));
+            summary: L10n.of(context)
+                .ui_one_or_more_files_could_not_be_uploaded_f176510d));
       }
     } finally {
       if (mounted) setState(() => _uploading.remove(customId));
@@ -7079,8 +7223,11 @@ final class _InteractionModalDialogState
                               ),
                             ),
                             Text(
-                              'Choose $minimum–'
-                              '${component.maxValues} · ${selected.length} selected',
+                              L10n.of(context)
+                                  .ui_choose_value0_value1_value2_selected_5a3959cf(
+                                      (minimum).toString(),
+                                      (component.maxValues).toString(),
+                                      (selected.length).toString()),
                               style: TextStyle(
                                 color: context.kaede.muted,
                                 fontSize: 12,
@@ -7091,14 +7238,14 @@ final class _InteractionModalDialogState
                       ),
                       TextButton(
                         onPressed: () => Navigator.pop(context),
-                        child: Text('Cancel'),
+                        child: Text(L10n.of(context).ui_cancel_35afca3b),
                       ),
                       FilledButton(
                         onPressed: selected.length < minimum ||
                                 selected.length > component.maxValues
                             ? null
                             : () => Navigator.pop(context, selected),
-                        child: Text('Done'),
+                        child: Text(L10n.of(context).ui_done_8dd31791),
                       ),
                     ],
                   ),
@@ -7265,8 +7412,14 @@ final class _InteractionModalDialogState
                                     padding: EdgeInsets.only(left: 12, top: 3),
                                     child: Text(
                                       options.isEmpty
-                                          ? 'No matching items are available in this channel.'
-                                          : 'Choose ${component.minValues}–${component.maxValues}',
+                                          ? L10n.of(context)
+                                              .ui_no_matching_items_are_available_in_this_chann_c53c70ec
+                                          : L10n.of(context)
+                                              .ui_choose_value0_value1_85494b8c(
+                                                  (component.minValues)
+                                                      .toString(),
+                                                  (component.maxValues)
+                                                      .toString()),
                                       style: TextStyle(
                                         color: context.kaede.muted,
                                         fontSize: 12,
@@ -7326,11 +7479,13 @@ final class _InteractionModalDialogState
         actions: [
           TextButton(
             onPressed: _submitting ? null : () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: _submitting ? null : _submit,
-            child: Text(_submitting ? 'Sending…' : 'Submit'),
+            child: Text(_submitting
+                ? L10n.of(context).ui_sending_e946e7bf
+                : L10n.of(context).ui_submit_4078e545),
           ),
         ],
       );
@@ -7423,7 +7578,7 @@ final class _EphemeralInteractionResponseState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Only you can see this',
+        Text(L10n.of(context).ui_only_you_can_see_this_5044e8bf,
             style: TextStyle(
                 color: context.kaede.muted,
                 fontSize: 11,
@@ -7471,7 +7626,8 @@ final class _EphemeralInteractionResponseState
             Padding(
               padding: EdgeInsets.only(top: 5),
               child: Text(
-                'These private bot controls expired. Run the command again.',
+                L10n.of(context)
+                    .ui_these_private_bot_controls_expired_run_the_co_85b4904c,
                 style: TextStyle(color: context.kaede.muted, fontSize: 11),
               ),
             ),
@@ -7500,7 +7656,8 @@ final class _PollResultUnavailable extends StatelessWidget {
             SizedBox(width: 8),
             Flexible(
               child: Text(
-                'Poll results are unavailable because they could not be verified.',
+                L10n.of(context)
+                    .ui_poll_results_are_unavailable_because_they_cou_8b6cff3b,
                 style: TextStyle(color: context.kaede.muted),
               ),
             ),
@@ -7531,7 +7688,7 @@ final class _PollResultCard extends StatelessWidget {
             : '$winner won with ${result.victorAnswerVotes} of '
                 '${result.totalVotes} votes.';
     return Semantics(
-      label: 'Poll results',
+      label: L10n.of(context).ui_poll_results_9d47b786,
       child: Container(
         margin: EdgeInsets.only(top: 5),
         padding: EdgeInsets.all(10),
@@ -7558,7 +7715,7 @@ final class _PollResultCard extends StatelessWidget {
                   Text(
                     result.questionText?.trim().isNotEmpty == true
                         ? result.questionText!.trim()
-                        : 'Poll ended',
+                        : L10n.of(context).ui_poll_ended_99aad9f4,
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
                   SizedBox(height: 2),
@@ -7621,7 +7778,7 @@ final class _RichEmbedCard extends StatelessWidget {
       return _ProxiedEmbedImage(url: external.toString(), fit: fit);
     }
     return IconButton(
-      tooltip: 'Open external image',
+      tooltip: L10n.current.ui_open_external_image_6334ed35,
       onPressed: () => _open(external.toString()),
       icon: Icon(Icons.open_in_new_rounded, size: 16),
     );
@@ -7760,7 +7917,8 @@ final class _RichEmbedCard extends StatelessWidget {
                     child: OutlinedButton.icon(
                       onPressed: () => _open(externalImage.toString()),
                       icon: Icon(Icons.open_in_new_rounded, size: 16),
-                      label: Text('Open external embed image'),
+                      label: Text(L10n.of(context)
+                          .ui_open_external_embed_image_dfe08af4),
                     ),
                   ),
                 if (embed.footerText != null || embed.timestamp != null) ...[
@@ -7876,7 +8034,8 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
         _error = null;
       });
     } on ArgumentError catch (error) {
-      setState(() => _error = '${error.message}');
+      setState(() => _error =
+          L10n.of(context).ui_value0_26e9163c((error.message).toString()));
     }
   }
 
@@ -7901,13 +8060,14 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
       );
       Navigator.pop(context, draft);
     } on ArgumentError catch (error) {
-      setState(() => _error = '${error.message}');
+      setState(() => _error =
+          L10n.of(context).ui_value0_26e9163c((error.message).toString()));
     }
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: Text('Create a poll'),
+        title: Text(L10n.of(context).ui_create_a_poll_b010ece7),
         content: SizedBox(
           width: min(MediaQuery.sizeOf(context).width - 64, 500),
           child: SingleChildScrollView(
@@ -7922,10 +8082,12 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                   maxLength: 300,
                   minLines: 1,
                   maxLines: 4,
-                  decoration: InputDecoration(labelText: 'Question'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_question_00a70065),
                 ),
                 SizedBox(height: 8),
-                Text('Answers', style: TextStyle(fontWeight: FontWeight.w800)),
+                Text(L10n.of(context).ui_answers_02c6bc64,
+                    style: TextStyle(fontWeight: FontWeight.w800)),
                 SizedBox(height: 6),
                 for (var index = 0; index < _answers.length; index++)
                   Padding(
@@ -7936,8 +8098,8 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                         IconButton(
                           key: ValueKey('poll-answer-emoji-$index'),
                           tooltip: _answers[index].emoji == null
-                              ? 'Add emoji'
-                              : 'Change emoji',
+                              ? L10n.of(context).ui_add_emoji_a3203c4a
+                              : L10n.of(context).ui_change_emoji_c01c255b,
                           onPressed: () => _chooseEmoji(_answers[index]),
                           icon: _pollEmojiIcon(_answers[index].emoji),
                         ),
@@ -7947,21 +8109,23 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                             controller: _answers[index].text,
                             maxLength: 55,
                             decoration: InputDecoration(
-                              labelText: 'Answer ${index + 1}',
+                              labelText: L10n.of(context)
+                                  .ui_answer_value0_364b0d14(
+                                      (index + 1).toString()),
                               counterText: '',
                             ),
                           ),
                         ),
                         if (_answers[index].emoji != null)
                           IconButton(
-                            tooltip: 'Remove emoji',
+                            tooltip: L10n.of(context).ui_remove_emoji_8bc8171b,
                             onPressed: () =>
                                 setState(() => _answers[index].emoji = null),
                             icon: Icon(Icons.emoji_emotions_outlined, size: 18),
                           ),
                         if (_answers.length > 2)
                           IconButton(
-                            tooltip: 'Remove answer',
+                            tooltip: L10n.of(context).ui_remove_answer_7307a041,
                             onPressed: () => _remove(_answers[index]),
                             icon: Icon(Icons.close_rounded),
                           ),
@@ -7976,14 +8140,15 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                       onPressed: () =>
                           setState(() => _answers.add(_PollAnswerEditor())),
                       icon: Icon(Icons.add_rounded),
-                      label: Text('Add answer'),
+                      label: Text(L10n.of(context).ui_add_answer_b61078fe),
                     ),
                   ),
                 SizedBox(height: 8),
                 DropdownButtonFormField<int>(
                   key: ValueKey('poll-duration'),
                   initialValue: _durationHours,
-                  decoration: InputDecoration(labelText: 'Duration'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_duration_d4c7492d),
                   items: [
                     for (final hours in _durations)
                       DropdownMenuItem(
@@ -7997,7 +8162,8 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   value: _allowMultiselect,
-                  title: Text('Allow multiple answers'),
+                  title:
+                      Text(L10n.of(context).ui_allow_multiple_answers_908e13d9),
                   onChanged: (value) =>
                       setState(() => _allowMultiselect = value),
                 ),
@@ -8017,12 +8183,12 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             key: ValueKey('poll-submit'),
             onPressed: _submit,
-            child: Text('Create poll'),
+            child: Text(L10n.of(context).ui_create_poll_7c4af1be),
           ),
         ],
       );
@@ -8104,7 +8270,7 @@ final class _PollVotersSheetState extends State<_PollVotersSheet> {
       if (mounted && generation == _generation) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not load poll voters',
+              summary: L10n.of(context).ui_could_not_load_poll_voters_17cf4c49,
             ));
       }
     } finally {
@@ -8121,9 +8287,10 @@ final class _PollVotersSheetState extends State<_PollVotersSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             ListTile(
-              title: Text('Poll voters',
+              title: Text(L10n.of(context).ui_poll_voters_6b1c994b,
                   style: TextStyle(fontWeight: FontWeight.w800)),
-              subtitle: Text('Select an answer to see who voted for it.'),
+              subtitle: Text(L10n.of(context)
+                  .ui_select_an_answer_to_see_who_voted_for_it_acf3ccf2),
             ),
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -8139,7 +8306,8 @@ final class _PollVotersSheetState extends State<_PollVotersSheet> {
                         label: Text(<String>[
                           if (answer.media.emoji case final emoji?) emoji.label,
                           answer.media.text ?? 'Answer ${answer.id}',
-                          '(${_poll.resultFor(answer.id).count})',
+                          L10n.of(context).ui_value0_2bc42655(
+                              (_poll.resultFor(answer.id).count).toString()),
                         ].join(' ')),
                         onSelected: (_) => _select(answer.id),
                       ),
@@ -8191,7 +8359,9 @@ final class _PollVotersSheetState extends State<_PollVotersSheet> {
                           padding: EdgeInsets.all(12),
                           child: OutlinedButton(
                             onPressed: () => _load(reset: false),
-                            child: Text(_error == null ? 'Load more' : 'Retry'),
+                            child: Text(_error == null
+                                ? L10n.of(context).ui_load_more_2b7b053e
+                                : L10n.of(context).ui_retry_8036af59),
                           ),
                         );
                       },
@@ -8261,8 +8431,14 @@ final class _MessagePollCardState extends State<_MessagePollCard> {
               return Semantics(
                 button: widget.onVote != null,
                 selected: result.meVoted,
-                label:
-                    '${answer.media.text ?? answer.media.emoji?.label ?? 'Option'}, ${result.count} votes, $percent percent',
+                label: L10n.of(context)
+                    .ui_value0_value1_votes_value2_percent_4fcdcd6b(
+                        (answer.media.text ??
+                                answer.media.emoji?.label ??
+                                'Option')
+                            .toString(),
+                        (result.count).toString(),
+                        (percent).toString()),
                 child: InkWell(
                   onTap: closed || widget.onVote == null || _busy != null
                       ? null
@@ -8311,7 +8487,8 @@ final class _MessagePollCardState extends State<_MessagePollCard> {
                         )
                       else
                         Text(
-                          '${result.count} · $percent%',
+                          L10n.of(context).ui_value0_value1_b067a5b4(
+                              (result.count).toString(), (percent).toString()),
                           style: TextStyle(
                             color: context.kaede.muted,
                             fontSize: 11,
@@ -8326,13 +8503,21 @@ final class _MessagePollCardState extends State<_MessagePollCard> {
           ],
           Text(
             <String>[
-              '${poll.totalVotes} vote${poll.totalVotes == 1 ? '' : 's'}',
-              poll.allowMultiselect ? 'Choose one or more' : 'Choose one',
+              L10n.of(context).ui_value0_vote_value1_91ad7e18(
+                  (poll.totalVotes).toString(),
+                  (poll.totalVotes == 1 ? '' : 's').toString()),
+              poll.allowMultiselect
+                  ? L10n.of(context).ui_choose_one_or_more_cb7ab636
+                  : L10n.of(context).ui_choose_one_f1c20b64,
               closed
-                  ? 'Poll closed'
+                  ? L10n.of(context).ui_poll_closed_b5446568
                   : poll.expiry == null
-                      ? 'End time unavailable'
-                      : 'Ends ${DateFormat.yMMMd().add_jm().format(poll.expiry!.toLocal())}',
+                      ? L10n.of(context).ui_end_time_unavailable_ba2a0fd9
+                      : L10n.of(context).ui_ends_value0_f39e7a90(
+                          (DateFormat.yMMMd()
+                                  .add_jm()
+                                  .format(poll.expiry!.toLocal()))
+                              .toString()),
             ].join(' · '),
             style: TextStyle(color: context.kaede.muted, fontSize: 10.5),
           ),
@@ -8343,7 +8528,7 @@ final class _MessagePollCardState extends State<_MessagePollCard> {
                 key: ValueKey('poll-view-voters'),
                 onPressed: widget.onViewVoters,
                 icon: Icon(Icons.people_outline_rounded, size: 17),
-                label: Text('View voters'),
+                label: Text(L10n.of(context).ui_view_voters_0c66578b),
               ),
             ),
         ],
@@ -8437,7 +8622,7 @@ final class _RichMessageComponentsState extends State<_RichMessageComponents> {
                               selected.length > component.maxValues
                           ? null
                           : () => Navigator.pop(context, selected.toList()),
-                      child: Text('Submit'),
+                      child: Text(L10n.of(context).ui_submit_4078e545),
                     ),
                   ]),
                 ),
@@ -8538,8 +8723,8 @@ final class _RichMessageComponentsState extends State<_RichMessageComponents> {
                                     : _RichEmojiIcon(component.emoji!),
                                 label: Text(component.label ??
                                     (component.style == 5
-                                        ? 'Open link'
-                                        : 'Button')),
+                                        ? L10n.of(context).ui_open_link_173a8def
+                                        : L10n.of(context).ui_button_33881a91)),
                               )
                             else if (component.isStringSelect ||
                                 component.isEntitySelect)
@@ -8703,7 +8888,9 @@ final class _RichV2Layout extends StatelessWidget {
                     )
                   : _RichV2Media(
                       media: _richObject(accessory['media']),
-                      description: accessory['description'] as String?,
+                      description:
+                          accessory[L10n.of(context).ui_description_346f3b69]
+                              as String?,
                       spoiler: accessory['spoiler'] == true,
                       attachments: attachments,
                       allowExternalMedia: allowExternalMedia,
@@ -8722,7 +8909,8 @@ final class _RichV2Layout extends StatelessWidget {
                 width: items.length == 1 ? 320 : 156,
                 child: _RichV2Media(
                   media: _richObject(item['media']),
-                  description: item['description'] as String?,
+                  description:
+                      item[L10n.of(context).ui_description_346f3b69] as String?,
                   spoiler: item['spoiler'] == true,
                   attachments: attachments,
                   allowExternalMedia: allowExternalMedia,
@@ -8737,7 +8925,10 @@ final class _RichV2Layout extends StatelessWidget {
             attachments.where((item) => item.filename == filename).firstOrNull;
         return attachment == null
             ? Text(
-                filename.isEmpty ? 'File unavailable' : '$filename unavailable',
+                filename.isEmpty
+                    ? L10n.of(context).ui_file_unavailable_f3d838f5
+                    : L10n.of(context)
+                        .ui_value0_unavailable_3073f696((filename).toString()),
                 style: TextStyle(color: context.kaede.muted),
               )
             : _AttachmentCard(attachment: attachment, pollStatus: false);
@@ -8832,7 +9023,8 @@ final class _RichV2MediaState extends State<_RichV2Media> {
               mode: LaunchMode.externalApplication,
             ),
             icon: Icon(Icons.open_in_new_rounded, size: 16),
-            label: Text('Open external component media'),
+            label: Text(
+                L10n.of(context).ui_open_external_component_media_319f6973),
           ),
         ),
       );
@@ -8841,7 +9033,7 @@ final class _RichV2MediaState extends State<_RichV2Media> {
         height: 72,
         child: Center(
           child: Text(
-            'Media unavailable',
+            L10n.of(context).ui_media_unavailable_c5521ab5,
             style: TextStyle(color: context.kaede.muted),
           ),
         ),
@@ -8860,7 +9052,7 @@ final class _RichV2MediaState extends State<_RichV2Media> {
               child: ColoredBox(
                 color: context.kaede.hover,
                 child: Center(
-                  child: Text('SPOILER',
+                  child: Text(L10n.of(context).ui_spoiler_ea48d139,
                       style: TextStyle(fontWeight: FontWeight.w800)),
                 ),
               ),
@@ -8958,13 +9150,15 @@ final class _ForwardedMessageCardState
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
                 SizedBox(width: 8),
-                Text('Loading the forwarded snapshot…',
+                Text(
+                    L10n.of(context).ui_loading_the_forwarded_snapshot_554aa920,
                     style: TextStyle(color: context.kaede.muted, fontSize: 12)),
               ]);
             }
             if (snapshot.hasError || snapshot.data == null) {
               return Text(
-                'The forwarded snapshot is unavailable.',
+                L10n.of(context)
+                    .ui_the_forwarded_snapshot_is_unavailable_66577cd0,
                 style: TextStyle(color: context.kaede.muted, fontSize: 12),
               );
             }
@@ -8976,7 +9170,7 @@ final class _ForwardedMessageCardState
                   Icon(Icons.forward_rounded,
                       size: 15, color: context.kaede.muted),
                   SizedBox(width: 5),
-                  Text('FORWARDED',
+                  Text(L10n.of(context).ui_forwarded_9c10a7cb,
                       style: TextStyle(
                           color: context.kaede.muted,
                           fontSize: 10,
@@ -8984,7 +9178,11 @@ final class _ForwardedMessageCardState
                 ]),
                 SizedBox(height: 6),
                 Text(
-                  'Snapshot · ${DateFormat.yMMMd().add_jm().format(source.createdAt.toLocal())}',
+                  L10n.of(context).ui_snapshot_value0_dc56822d(
+                      (DateFormat.yMMMd()
+                              .add_jm()
+                              .format(source.createdAt.toLocal()))
+                          .toString()),
                   style: TextStyle(
                     color: context.kaede.muted,
                     fontSize: 11,
@@ -9067,7 +9265,7 @@ final class _NestedForwardSnapshot extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Earlier forwarded snapshot',
+              L10n.of(context).ui_earlier_forwarded_snapshot_2e939275,
               style: TextStyle(
                 color: context.kaede.muted,
                 fontSize: 10,
@@ -9265,15 +9463,17 @@ final class _LinkPreviewCardState extends ConsumerState<_LinkPreviewCard> {
               ),
               child: Row(children: [
                 Expanded(
-                  child: Text('Link preview unavailable',
+                  child: Text(
+                      L10n.of(context).ui_link_preview_unavailable_3a9b0893,
                       style:
                           TextStyle(color: context.kaede.muted, fontSize: 12)),
                 ),
                 TextButton(
-                    onPressed: () => _open(widget.url), child: Text('Open')),
+                    onPressed: () => _open(widget.url),
+                    child: Text(L10n.of(context).ui_open_538b10e9)),
                 TextButton(
                   onPressed: () => setState(() => _load(retry: true)),
-                  child: Text('Retry'),
+                  child: Text(L10n.of(context).ui_retry_8036af59),
                 ),
               ]),
             );
@@ -9533,8 +9733,8 @@ final class _UndecryptableNotice extends StatelessWidget {
             SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Can\u2019t decrypt this message on this device. Verify, recover, or '
-                'update this device\u2019s encryption support.',
+                L10n.of(context)
+                    .ui_can_t_decrypt_this_message_on_this_device_ver_e91bb2f0,
                 style: TextStyle(
                   color: context.kaede.muted,
                   fontSize: 13,
@@ -9675,7 +9875,9 @@ final class _AttachmentStatusCard extends StatelessWidget {
             ),
           ),
           if (onRetry != null)
-            TextButton(onPressed: onRetry, child: Text('Retry')),
+            TextButton(
+                onPressed: onRetry,
+                child: Text(L10n.of(context).ui_retry_8036af59)),
         ],
       ),
     );
@@ -9864,7 +10066,7 @@ final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
       builder: (context) => SafeArea(
         child: ListTile(
           leading: Icon(Icons.link_rounded),
-          title: Text('Copy media link'),
+          title: Text(L10n.of(context).ui_copy_media_link_39bd84b0),
           onTap: () => Navigator.pop(context, true),
         ),
       ),
@@ -9899,14 +10101,17 @@ final class _MediaPreviewError extends StatelessWidget {
                 Text(
                   userFacingError(
                     error,
-                    summary: 'Could not load the media preview',
+                    summary: L10n.of(context)
+                        .ui_could_not_load_the_media_preview_647f8942,
                   ),
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12),
                 ),
-                TextButton(onPressed: onRetry, child: Text('Retry')),
+                TextButton(
+                    onPressed: onRetry,
+                    child: Text(L10n.of(context).ui_retry_8036af59)),
               ],
             ),
           ),
@@ -9954,8 +10159,9 @@ final class _SpoilerTextState extends State<_SpoilerText> {
   Widget build(BuildContext context) => Semantics(
         button: true,
         label: _revealed
-            ? 'Spoiler: ${widget.text}. Hide spoiler'
-            : 'Reveal spoiler',
+            ? L10n.of(context).ui_spoiler_value0_hide_spoiler_361536ee(
+                (widget.text).toString())
+            : L10n.of(context).ui_reveal_spoiler_53e9c862,
         child: ExcludeSemantics(
           child: InkWell(
             key: ValueKey('message-spoiler-${widget.text}'),
@@ -10282,7 +10488,8 @@ final class _VisibleAttachmentCardState
           icon: Icons.warning_amber_rounded,
           message: userFacingError(
             error,
-            summary: 'Could not check the attachment status',
+            summary: L10n.of(context)
+                .ui_could_not_check_the_attachment_status_f2780e05,
           ),
           error: true,
           onRetry: _retryStatus,
@@ -10291,7 +10498,8 @@ final class _VisibleAttachmentCardState
       return _AttachmentStatusCard(
         attachment: attachment,
         icon: Icons.hourglass_top_rounded,
-        message: 'Preparing ${attachment.filename}…',
+        message: L10n.of(context)
+            .ui_preparing_value0_9e048a90((attachment.filename).toString()),
       );
     }
     if (attachment.scanStatus != 'clean' &&
@@ -10314,8 +10522,12 @@ final class _VisibleAttachmentCardState
         attachment: attachment,
         icon: Icons.warning_amber_rounded,
         message: rejected
-            ? '${attachment.filename} was rejected during server processing.'
-            : '${attachment.filename} could not be processed by the server. Upload the file again later.',
+            ? L10n.of(context)
+                .ui_value0_was_rejected_during_server_processing_9708547a(
+                    (attachment.filename).toString())
+            : L10n.of(context)
+                .ui_value0_could_not_be_processed_by_the_server_u_befcb186(
+                    (attachment.filename).toString()),
         error: true,
       );
     }
@@ -10368,7 +10580,8 @@ final class _VisibleAttachmentCardState
                       Text(
                         userFacingError(
                           snapshot.error!,
-                          summary: 'Could not load the attachment',
+                          summary: L10n.of(context)
+                              .ui_could_not_load_the_attachment_1f609417,
                         ),
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
@@ -10379,7 +10592,7 @@ final class _VisibleAttachmentCardState
                 ),
                 TextButton(
                   onPressed: _retry,
-                  child: Text('Retry'),
+                  child: Text(L10n.of(context).ui_retry_8036af59),
                 ),
               ],
             ),
@@ -10435,7 +10648,8 @@ final class _VisibleAttachmentCardState
               padding: EdgeInsets.only(top: 7),
               child: Semantics(
                 button: true,
-                label: 'Open image ${attachment.filename}',
+                label: L10n.of(context).ui_open_image_value0_c2940755(
+                    (attachment.filename).toString()),
                 child: GestureDetector(
                   onLongPress: widget.onActions == null ? null : _openActions,
                   onTap: () => showDialog<void>(
@@ -10460,7 +10674,8 @@ final class _VisibleAttachmentCardState
                               top: 12,
                               right: 12,
                               child: IconButton.filled(
-                                  tooltip: 'Close image viewer',
+                                  tooltip: L10n.of(context)
+                                      .ui_close_image_viewer_909f8c30,
                                   onPressed: () => Navigator.pop(dialogContext),
                                   icon: Icon(Icons.close_rounded))),
                         ],
@@ -10682,8 +10897,8 @@ final class _FileAudioState extends State<_FileAudio> {
         children: [
           IconButton.filled(
             tooltip: _state == PlayerState.playing
-                ? 'Pause voice message'
-                : 'Play voice message',
+                ? L10n.of(context).ui_pause_voice_message_08a22788
+                : L10n.of(context).ui_play_voice_message_99160c06,
             onPressed: _toggle,
             icon: Icon(
               _state == PlayerState.playing
@@ -10702,7 +10917,7 @@ final class _FileAudioState extends State<_FileAudio> {
                         size: 14, color: context.kaede.muted),
                     SizedBox(width: 4),
                     Expanded(
-                      child: Text('Voice message',
+                      child: Text(L10n.of(context).ui_voice_message_3e8e0f42,
                           style: TextStyle(fontWeight: FontWeight.w700)),
                     ),
                     Text(
@@ -10908,12 +11123,16 @@ final class _MediaDecodeError extends StatelessWidget {
                 ),
                 SizedBox(height: 8),
                 Text(
-                  'Could not display this $kind. The file may be damaged or use an unsupported format.',
+                  L10n.of(context)
+                      .ui_could_not_display_this_value0_the_file_may_be_23e60533(
+                          (kind).toString()),
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12),
                 ),
                 if (onRetry != null)
-                  TextButton(onPressed: onRetry, child: Text('Retry')),
+                  TextButton(
+                      onPressed: onRetry,
+                      child: Text(L10n.of(context).ui_retry_8036af59)),
               ],
             ),
           ),
@@ -10949,7 +11168,8 @@ final class _MentionSuggestions extends StatelessWidget {
             title: Text(user.name),
             subtitle: Text(user.profileResolved
                 ? user.handle
-                : 'Profile unavailable · refreshes automatically'),
+                : L10n.of(context)
+                    .ui_profile_unavailable_refreshes_automatically_9ef31289),
             onTap: () => onSelected(user),
           );
         },
@@ -11079,7 +11299,7 @@ final class _ApplicationCommandSheetState
           _autocompletePath = null;
           _autocompleteError = userFacingError(
             error,
-            summary: 'Could not load suggestions',
+            summary: L10n.of(context).ui_could_not_load_suggestions_a4bcae70,
           );
         });
       }
@@ -11096,7 +11316,7 @@ final class _ApplicationCommandSheetState
       if (mounted) {
         setState(() => _submitError = userFacingError(
               error,
-              summary: 'Could not add that file',
+              summary: L10n.of(context).ui_could_not_add_that_file_0b187501,
             ));
       }
     } finally {
@@ -11109,7 +11329,8 @@ final class _ApplicationCommandSheetState
     if (errors.isNotEmpty) {
       setState(() {
         _showErrors = true;
-        _submitError = 'Review the highlighted command options.';
+        _submitError =
+            L10n.of(context).ui_review_the_highlighted_command_options_70e976ba;
       });
       return;
     }
@@ -11125,7 +11346,8 @@ final class _ApplicationCommandSheetState
       if (mounted) {
         setState(() => _submitError = userFacingError(
               error,
-              summary: 'The bot command could not be delivered',
+              summary: L10n.of(context)
+                  .ui_the_bot_command_could_not_be_delivered_95f4e409,
             ));
       }
     } finally {
@@ -11168,7 +11390,8 @@ final class _ApplicationCommandSheetState
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '/${widget.command.displayName(locale)}',
+                        L10n.of(context).ui_value0_0345d263(
+                            (widget.command.displayName(locale)).toString()),
                         style: Theme.of(context).textTheme.titleLarge,
                       ),
                       Text(
@@ -11179,7 +11402,7 @@ final class _ApplicationCommandSheetState
                   ),
                 ),
                 IconButton(
-                  tooltip: 'Cancel command',
+                  tooltip: L10n.of(context).ui_cancel_command_f383c6ae,
                   onPressed: _submitting ? null : () => Navigator.pop(context),
                   icon: Icon(Icons.close_rounded),
                 ),
@@ -11235,14 +11458,16 @@ final class _ApplicationCommandSheetState
                     Padding(
                       padding: EdgeInsets.symmetric(vertical: 18),
                       child: Text(
-                        'Choose the command path to see its options.',
+                        L10n.of(context)
+                            .ui_choose_the_command_path_to_see_its_options_2bf1700d,
                         style: TextStyle(color: context.kaede.muted),
                       ),
                     ),
                   if (model.selectors.isEmpty && model.fields.isEmpty)
                     Padding(
                       padding: EdgeInsets.symmetric(vertical: 18),
-                      child: Text('This command has no options.'),
+                      child: Text(L10n.of(context)
+                          .ui_this_command_has_no_options_66e232f1),
                     ),
                   if (_autocompleteError case final error?)
                     Padding(
@@ -11276,7 +11501,9 @@ final class _ApplicationCommandSheetState
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : Icon(Icons.send_rounded),
-              label: Text(_submitting ? 'Sending…' : 'Run command'),
+              label: Text(_submitting
+                  ? L10n.of(context).ui_sending_e946e7bf
+                  : L10n.of(context).ui_run_command_45581e4f),
             ),
           ],
         ),
@@ -11332,10 +11559,13 @@ final class _ApplicationCommandSheetState
           helperText: description,
           errorText: error,
         ),
-        items: const [
-          DropdownMenuItem(value: '', child: Text('Not set')),
-          DropdownMenuItem(value: 'true', child: Text('True')),
-          DropdownMenuItem(value: 'false', child: Text('False')),
+        items: [
+          DropdownMenuItem(
+              value: '', child: Text(L10n.of(context).ui_not_set_d7958fc6)),
+          DropdownMenuItem(
+              value: 'true', child: Text(L10n.of(context).ui_true_cdde5e05)),
+          DropdownMenuItem(
+              value: 'false', child: Text(L10n.of(context).ui_false_977555f8)),
         ],
         onChanged: _submitting
             ? null
@@ -11411,7 +11641,8 @@ final class _ApplicationCommandSheetState
               prefixIcon: Icon(Icons.attach_file_rounded),
             ),
             items: [
-              DropdownMenuItem(value: '', child: Text('No file')),
+              DropdownMenuItem(
+                  value: '', child: Text(L10n.of(context).ui_no_file_f2c54d48)),
               for (final attachment in _attachments)
                 DropdownMenuItem(
                   value: attachment.key,
@@ -11438,8 +11669,8 @@ final class _ApplicationCommandSheetState
                     )
                   : Icon(Icons.add_rounded),
               label: Text(_attachments.length >= 10
-                  ? 'Ten files already selected'
-                  : 'Add a file'),
+                  ? L10n.of(context).ui_ten_files_already_selected_6e7417c8
+                  : L10n.of(context).ui_add_a_file_33c0e163),
             ),
           ),
         ],
@@ -11598,11 +11829,11 @@ final class _ApplicationCommandPickerSheetState
             Row(
               children: [
                 Expanded(
-                  child: Text('Apps',
+                  child: Text(L10n.of(context).ui_apps_53d91aad,
                       style: Theme.of(context).textTheme.headlineSmall),
                 ),
                 IconButton(
-                  tooltip: 'Close Apps',
+                  tooltip: L10n.of(context).ui_close_apps_0b6e16a1,
                   onPressed: () => Navigator.pop(context),
                   icon: Icon(Icons.close_rounded),
                 ),
@@ -11613,7 +11844,8 @@ final class _ApplicationCommandPickerSheetState
               controller: _search,
               autofocus: true,
               decoration: InputDecoration(
-                labelText: 'Search apps and commands',
+                labelText:
+                    L10n.of(context).ui_search_apps_and_commands_0d58e860,
                 prefixIcon: Icon(Icons.search_rounded),
               ),
               onChanged: (_) => setState(() {}),
@@ -11622,7 +11854,8 @@ final class _ApplicationCommandPickerSheetState
             Expanded(
               child: groups.isEmpty && frequent.isEmpty
                   ? Center(
-                      child: Text('No apps or commands match your search.'))
+                      child: Text(L10n.of(context)
+                          .ui_no_apps_or_commands_match_your_search_16615cbb))
                   : ListView(
                       keyboardDismissBehavior:
                           ScrollViewKeyboardDismissBehavior.onDrag,
@@ -11632,7 +11865,8 @@ final class _ApplicationCommandPickerSheetState
                             header: true,
                             child: ListTile(
                               dense: true,
-                              title: Text('Frequently Used'),
+                              title: Text(
+                                  L10n.of(context).ui_frequently_used_4949bbc1),
                             ),
                           ),
                           for (final command in frequent)
@@ -11673,14 +11907,16 @@ final class _ApplicationCommandPickerSheetState
           _ => Icons.terminal_rounded,
         }),
         title: Text(
-          '${widget.contextCommands ? '' : '/'}${command.displayName(locale)}',
+          L10n.of(context).ui_value0_value1_07eda8d4(
+              (widget.contextCommands ? '' : '/').toString(),
+              (command.displayName(locale)).toString()),
         ),
         subtitle: Text(
           command.displayDescription(locale).isEmpty
               ? switch (command.type) {
-                  'message' => 'Message command',
-                  'user' => 'User command',
-                  _ => 'Run command',
+                  'message' => L10n.of(context).ui_message_command_d7d6af25,
+                  'user' => L10n.of(context).ui_user_command_2cec5497,
+                  _ => L10n.of(context).ui_run_command_45581e4f,
                 }
               : command.displayDescription(locale),
         ),
@@ -11722,7 +11958,8 @@ final class _CommandSuggestions extends StatelessWidget {
               dense: true,
               leading: Icon(Icons.forum_outlined),
               title: Text('/thread'),
-              subtitle: Text('Create a thread with a first message'),
+              subtitle: Text(L10n.of(context)
+                  .ui_create_a_thread_with_a_first_message_80d1e9e8),
               onTap: onNativeThread,
             );
           }
@@ -11730,7 +11967,8 @@ final class _CommandSuggestions extends StatelessWidget {
           return ListTile(
             dense: true,
             leading: Icon(Icons.terminal_rounded),
-            title: Text('/${command.displayName(locale)}'),
+            title: Text(L10n.of(context)
+                .ui_value0_0345d263((command.displayName(locale)).toString())),
             subtitle: Text([
               if (command.displayDescription(locale).isNotEmpty)
                 command.displayDescription(locale),
@@ -11841,7 +12079,9 @@ final class _Composer extends StatelessWidget {
                           size: 15, color: context.kaede.muted),
                       SizedBox(width: 6),
                       Text(
-                        'Slow mode · ${seconds}s remaining',
+                        L10n.of(context)
+                            .ui_slow_mode_value0_s_remaining_65bfa54c(
+                                (seconds).toString()),
                         style: TextStyle(
                           color: context.kaede.muted,
                           fontSize: 12,
@@ -11857,14 +12097,16 @@ final class _Composer extends StatelessWidget {
                   _ComposerButton(
                     icon: Icons.add_rounded,
                     tooltip: compact
-                        ? 'Add files, emoji, stickers, or GIF'
-                        : 'Add files, media, or a poll',
+                        ? L10n.of(context)
+                            .ui_add_files_emoji_stickers_or_gif_76e061dc
+                        : L10n.of(context)
+                            .ui_add_files_media_or_a_poll_74a1da28,
                     size: 22,
                     onPressed: sending ? null : onMore,
                   ),
                   _ComposerButton(
                     icon: Icons.apps_rounded,
-                    tooltip: 'Apps',
+                    tooltip: L10n.of(context).ui_apps_53d91aad,
                     size: 20,
                     onPressed: sending || !appsEnabled ? null : onApps,
                   ),
@@ -11897,7 +12139,8 @@ final class _Composer extends StatelessWidget {
                   if (!compact)
                     _ComposerButton(
                       icon: Icons.emoji_emotions_outlined,
-                      tooltip: 'GIFs, stickers, and emoji',
+                      tooltip:
+                          L10n.of(context).ui_gifs_stickers_and_emoji_eba59fbd,
                       onPressed: sending ? null : onMedia,
                     ),
                   _ComposerSend(
@@ -11984,7 +12227,7 @@ final class _ComposerSend extends StatelessWidget {
                 ? Padding(
                     padding: EdgeInsets.fromLTRB(2, 0, 5, 5),
                     child: IconButton.filled(
-                      tooltip: 'Send message',
+                      tooltip: L10n.of(context).ui_send_message_d97db31c,
                       constraints: BoxConstraints.tightFor(
                         width: 38,
                         height: 38,
@@ -12065,7 +12308,7 @@ final class _PermissionNotice extends StatelessWidget {
                   ),
                   if (onApps != null)
                     IconButton(
-                      tooltip: 'Apps',
+                      tooltip: L10n.of(context).ui_apps_53d91aad,
                       onPressed: onApps,
                       icon: Icon(Icons.apps_rounded, size: 20),
                     ),
@@ -12121,7 +12364,10 @@ final class _ConversationStart extends StatelessWidget {
             ),
             SizedBox(height: 16),
             Text(
-              guildChannel ? 'Welcome to $title' : title,
+              guildChannel
+                  ? L10n.of(context)
+                      .ui_welcome_to_value0_5a07d89d((title).toString())
+                  : title,
               style: Theme.of(context).textTheme.headlineMedium,
             ),
             SizedBox(height: 6),
@@ -12129,8 +12375,11 @@ final class _ConversationStart extends StatelessWidget {
               topic?.isNotEmpty == true
                   ? topic!
                   : guildChannel
-                      ? 'This is the start of #${name ?? 'channel'}. Say hello.'
-                      : 'This is the beginning of your conversation.',
+                      ? L10n.of(context)
+                          .ui_this_is_the_start_of_value0_say_hello_54ade90c(
+                              (name ?? 'channel').toString())
+                      : L10n.of(context)
+                          .ui_this_is_the_beginning_of_your_conversation_518bb598,
               style: TextStyle(color: context.kaede.muted, height: 1.4),
             ),
           ],

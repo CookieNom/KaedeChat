@@ -5,12 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeLanguage();
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(
       const <String>['Inter'],
@@ -66,17 +68,17 @@ final class _BootstrapFailure extends StatelessWidget {
                     children: [
                       const Icon(Icons.error_outline, size: 48),
                       const SizedBox(height: 16),
-                      const Text(
-                        'Kaede could not start',
+                      Text(
+                        L10n.of(context).ui_kaede_could_not_start_c99c204f,
                         style: TextStyle(
                           fontSize: 24,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
                       const SizedBox(height: 12),
-                      const Text(
-                        'Close and reopen the app. If this continues, share '
-                        'the diagnostic below with your instance operator.',
+                      Text(
+                        L10n.of(context)
+                            .ui_close_and_reopen_the_app_if_this_continues_sh_18b22de6,
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 16),

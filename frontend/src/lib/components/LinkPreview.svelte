@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
 
   interface Preview {
@@ -37,7 +39,7 @@
         if (!controller.signal.aborted && target === url) {
           loadError = userErrorMessage(
             caught,
-            'Could not load this link preview. Open the link directly or try again.'
+            $t('ui_could_not_load_this_link_preview_open_the_lin_02e6a4d3')
           );
         }
       });
@@ -50,8 +52,11 @@
   <aside class="link-preview link-preview-error" role="alert">
     <p>{loadError}</p>
     <div>
-      <a href={url} target="_blank" rel="noopener noreferrer nofollow">Open link</a>
-      <button type="button" onclick={() => (loadAttempt += 1)}>Try again</button>
+      <a href={url} target="_blank" rel="noopener noreferrer nofollow"
+        >{$t('ui_open_link_aab63f85')}</a
+      >
+      <button type="button" onclick={() => (loadAttempt += 1)}>{$t('ui_try_again_d8b8392e')}</button
+      >
     </div>
   </aside>
 {:else if preview && compactMedia && preview.media_url && preview.media_type === 'image'}

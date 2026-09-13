@@ -1,5 +1,6 @@
 export interface NativePlatformInfo {
   native: true;
+  locales?: string[];
   os: string;
   arch: string;
   native_voice: boolean;

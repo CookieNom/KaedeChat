@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { resolve } from '$app/paths';
   import { onMount } from 'svelte';
@@ -21,29 +23,29 @@
   onMount(() => {
     void api<Report[]>('/reports/@me')
       .then((value) => (reports = value))
-      .catch((caught) => (error = userErrorMessage(caught, 'Could not load your reports.')))
+      .catch(
+        (caught) =>
+          (error = userErrorMessage(caught, $t('ui_could_not_load_your_reports_37a1a5b1')))
+      )
       .finally(() => (loaded = true));
   });
 </script>
 
-<svelte:head><title>My reports · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_my_reports_kaede_chat_aee2e173')}</title></svelte:head>
 <main>
   <header>
     <div>
-      <span>Trust &amp; Safety</span>
-      <h1>My reports</h1>
+      <span>{$t('ui_trust_safety_5b9c374d')}</span>
+      <h1>{$t('ui_my_reports_cc6e3f45')}</h1>
     </div>
-    <a href={resolve('/settings')}>Back to settings</a>
+    <a href={resolve('/settings')}>{$t('ui_back_to_settings_dc9c6093')}</a>
   </header>
-  <p class="intro">
-    Reports go to your instance's Trust &amp; Safety team. Guild moderators do not receive them.
-    Encrypted message text cannot be submitted because your instance cannot read it.
-  </p>
+  <p class="intro">{$t('ui_reports_go_to_your_instance_s_trust_safety_te_d7a4025e')}</p>
   {#if error}<div class="notice" role="alert">{error}</div>{/if}
-  {#if !loaded}<p>Loading reports…</p>
+  {#if !loaded}<p>{$t('ui_loading_reports_4ef739f5')}</p>
   {:else if reports.length === 0}<section class="empty">
-      <h2>No reports</h2>
-      <p>Reports you submit from a message or attachment will appear here.</p>
+      <h2>{$t('ui_no_reports_c42bbbd2')}</h2>
+      <p>{$t('ui_reports_you_submit_from_a_message_or_attachme_fe341f57')}</p>
     </section>
   {:else}<div class="reports">
       {#each reports as report (report.id)}<article>
@@ -54,7 +56,11 @@
           </header>
           <p>{report.target_type} · {report.target_ref}</p>
           {#if report.description}<blockquote>{report.description}</blockquote>{/if}
-          <small>Submitted {new Date(report.created_at).toLocaleString()}</small>
+          <small
+            >{$t('ui_submitted_value0_58189b6e', {
+              value0: String(new Date(report.created_at).toLocaleString())
+            })}</small
+          >
         </article>{/each}
     </div>{/if}
 </main>

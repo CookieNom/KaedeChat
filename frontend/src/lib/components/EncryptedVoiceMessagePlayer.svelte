@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type { Attachment } from '$lib/chat/types';
   import VoiceMessageFrame from './VoiceMessageFrame.svelte';
   import { decryptEncryptedAttachment, type EncryptedFileManifest } from '$lib/e2ee/media';
@@ -85,9 +87,11 @@
       <track kind="captions" />
     </audio>
   {:else if unavailable}
-    <button type="button" onclick={() => void load()}>Try decrypting again</button>
+    <button type="button" onclick={() => void load()}
+      >{$t('ui_try_decrypting_again_4dfe8e8b')}</button
+    >
   {:else}
-    <small role="status">Decrypting audio…</small>
+    <small role="status">{$t('ui_decrypting_audio_db508ea4')}</small>
   {/if}
 </VoiceMessageFrame>
 

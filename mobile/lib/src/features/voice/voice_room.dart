@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +19,7 @@ import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/features/voice/soundboard_access.dart';
 import 'package:kaede_mobile/src/features/voice/voice_elapsed.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -129,8 +129,11 @@ Future<List<_SoundboardGroup>> _loadSoundboardGroups(
   final results = await Future.wait([defaultFuture, ...guildFutures]);
   final groups = <_SoundboardGroup>[];
   if (results.first.isNotEmpty) {
-    groups
-        .add((key: 'default', label: 'Discord Sounds', sounds: results.first));
+    groups.add((
+      key: 'default',
+      label: L10n.current.ui_discord_sounds_e639de1d,
+      sounds: results.first
+    ));
   }
   for (var index = 0; index < guilds.length; index += 1) {
     final sounds = results[index + 1];
@@ -139,7 +142,8 @@ Future<List<_SoundboardGroup>> _loadSoundboardGroups(
     groups.add((
       key: guild.ref.wire,
       label: guild.ref == currentGuildRef
-          ? '${guild.name} · Current server'
+          ? L10n.current
+              .ui_value0_current_server_cbb9b711((guild.name).toString())
           : guild.name,
       sounds: sounds,
     ));
@@ -307,7 +311,10 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                                   channel.name ??
                                   'Stage channel')
                               : channel.name ??
-                                  (callRef == null ? 'Voice channel' : 'Call'),
+                                  (callRef == null
+                                      ? L10n.of(context)
+                                          .ui_voice_channel_d243a4f2
+                                      : L10n.of(context).ui_call_341dd0c9),
                           style: Theme.of(context).textTheme.titleLarge),
                       if (channel.type == ChannelType.voice &&
                           _voiceStatus?.isNotEmpty == true)
@@ -326,7 +333,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 ),
                 if (canSetVoiceStatus)
                   IconButton(
-                    tooltip: 'Set voice channel status',
+                    tooltip:
+                        L10n.of(context).ui_set_voice_channel_status_ee4e27cc,
                     onPressed: _voiceStatusBusy ? null : _editVoiceStatus,
                     icon: Icon(Icons.edit_note_rounded),
                   ),
@@ -344,10 +352,10 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                           )
                         : Icon(Icons.call_rounded),
                     label: Text(session.connecting && thisRoom
-                        ? 'Connecting…'
+                        ? L10n.of(context).ui_connecting_4d2cf951
                         : channel.type == ChannelType.stage
-                            ? 'Join audience'
-                            : 'Join voice'),
+                            ? L10n.of(context).ui_join_audience_49b9c9c9
+                            : L10n.of(context).ui_join_voice_f86abe8f),
                   ),
               ],
             ),
@@ -384,7 +392,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                           children: [
                             CircularProgressIndicator(),
                             SizedBox(height: 14),
-                            Text('Restoring voice connection…'),
+                            Text(L10n.of(context)
+                                .ui_restoring_voice_connection_7ca9f98c),
                           ],
                         ),
                       )
@@ -437,7 +446,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
     final value = await showDialog<String?>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text('Voice channel status'),
+        title: Text(L10n.of(context).ui_voice_channel_status_7c33c678),
         content: StatefulBuilder(
           builder: (context, setDialogState) => Column(
             mainAxisSize: MainAxisSize.min,
@@ -458,7 +467,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                       }),
                     ),
                   ActionChip(
-                    label: Text('More…'),
+                    label: Text(L10n.of(context).ui_more_06a440fc),
                     avatar: Icon(Icons.emoji_emotions_outlined, size: 18),
                     onPressed: () async {
                       final emoji = await showComposerEmojiPicker(
@@ -484,8 +493,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 controller: controller,
                 autofocus: true,
                 maxLength: 500,
-                decoration:
-                    InputDecoration(hintText: 'What is happening here?'),
+                decoration: InputDecoration(
+                    hintText:
+                        L10n.of(context).ui_what_is_happening_here_4bc6e776),
               ),
             ],
           ),
@@ -493,15 +503,15 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, ''),
-            child: Text('Clear'),
+            child: Text(L10n.of(context).ui_clear_04a57fc2),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: Text('Save'),
+            child: Text(L10n.of(context).ui_save_4d2d5d68),
           ),
         ],
       ),
@@ -607,7 +617,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
           children: [
             Expanded(
               child: Text(
-                'This Stage hasn’t started yet.',
+                L10n.of(context).ui_this_stage_hasn_t_started_yet_4fb4ee3f,
                 style: TextStyle(color: context.kaede.muted),
               ),
             ),
@@ -615,7 +625,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
               FilledButton.icon(
                 onPressed: _stageLoading ? null : _startStage,
                 icon: Icon(Icons.mic_rounded),
-                label: Text('Start Stage'),
+                label: Text(L10n.of(context).ui_start_stage_1d128645),
               ),
           ],
         ),
@@ -653,7 +663,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 icon: Icon(requested
                     ? Icons.pan_tool_alt_outlined
                     : Icons.front_hand_outlined),
-                label: Text(requested ? 'Cancel request' : 'Request to speak'),
+                label: Text(requested
+                    ? L10n.of(context).ui_cancel_request_28568fb6
+                    : L10n.of(context).ui_request_to_speak_1e2c1da5),
               )
             else
               TextButton.icon(
@@ -662,18 +674,18 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                   () => session.moveSelfToStageAudience(guild.ref),
                 ),
                 icon: Icon(Icons.hearing_outlined),
-                label: Text('Move to audience'),
+                label: Text(L10n.of(context).ui_move_to_audience_de051085),
               ),
           if (_canManageStage) ...[
             TextButton.icon(
               onPressed: _stageLoading ? null : _editStage,
               icon: Icon(Icons.edit_rounded),
-              label: Text('Edit topic'),
+              label: Text(L10n.of(context).ui_edit_topic_93089e9e),
             ),
             TextButton.icon(
               onPressed: _stageLoading ? null : _endStage,
               icon: Icon(Icons.stop_circle_outlined),
-              label: Text('End Stage'),
+              label: Text(L10n.of(context).ui_end_stage_2bd54b88),
               style: TextButton.styleFrom(
                 foregroundColor: Theme.of(context).colorScheme.error,
               ),
@@ -724,21 +736,21 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
           autofocus: true,
           maxLength: 120,
           decoration: InputDecoration(
-            labelText: 'Topic',
-            hintText: 'What is this Stage about?',
+            labelText: L10n.of(context).ui_topic_68501b64,
+            hintText: L10n.of(context).ui_what_is_this_stage_about_d623a541,
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () {
               final value = controller.text.trim();
               if (value.isNotEmpty) Navigator.pop(dialogContext, value);
             },
-            child: Text('Save'),
+            child: Text(L10n.of(context).ui_save_4d2d5d68),
           ),
         ],
       ),
@@ -755,7 +767,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text('Start the Stage'),
+          title: Text(L10n.of(context).ui_start_the_stage_3d1e5c4a),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -764,8 +776,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 autofocus: true,
                 maxLength: 120,
                 decoration: InputDecoration(
-                  labelText: 'Topic',
-                  hintText: 'What is this Stage about?',
+                  labelText: L10n.of(context).ui_topic_68501b64,
+                  hintText:
+                      L10n.of(context).ui_what_is_this_stage_about_d623a541,
                 ),
               ),
               if (canNotify)
@@ -774,16 +787,16 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                   value: notify,
                   onChanged: (value) =>
                       setDialogState(() => notify = value ?? false),
-                  title: Text('Notify everyone'),
-                  subtitle:
-                      Text('Send a server-wide Stage start notification.'),
+                  title: Text(L10n.of(context).ui_notify_everyone_bb085da5),
+                  subtitle: Text(L10n.of(context)
+                      .ui_send_a_server_wide_stage_start_notification_47396c88),
                 ),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () {
@@ -792,7 +805,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                   Navigator.pop(dialogContext, (topic: topic, notify: notify));
                 }
               },
-              child: Text('Start Stage'),
+              child: Text(L10n.of(context).ui_start_stage_1d128645),
             ),
           ],
         ),
@@ -857,7 +870,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
       if (eventType == 'STAGE_INSTANCE_CREATE' &&
           event['notify_client'] == true) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Stage started: ${instance.topic}')),
+          SnackBar(
+              content: Text(L10n.of(context).ui_stage_started_value0_9fecc0d3(
+                  (instance.topic).toString()))),
         );
       }
     } on Object {
@@ -869,7 +884,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
     final current = _stageInstance;
     if (current == null) return;
     final topic = await _stageTopicDialog(
-      title: 'Edit Stage topic',
+      title: L10n.of(context).ui_edit_stage_topic_b450a62c,
       initial: current.topic,
     );
     if (topic == null || topic == current.topic || !mounted) return;
@@ -900,16 +915,17 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
     final confirmed = await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            title: Text('End Stage?'),
-            content: Text('The live Stage will end for everyone.'),
+            title: Text(L10n.of(context).ui_end_stage_b7c63115),
+            content: Text(L10n.of(context)
+                .ui_the_live_stage_will_end_for_everyone_7d77ab3b),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(dialogContext, false),
-                child: Text('Cancel'),
+                child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
-                child: Text('End Stage'),
+                child: Text(L10n.of(context).ui_end_stage_2bd54b88),
               ),
             ],
           ),
@@ -1001,8 +1017,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                             ? Icons.mic_rounded
                             : Icons.mic_off_rounded),
                         label: Text(session.pushHeld
-                            ? 'Transmitting… release to stop'
-                            : 'Hold to talk'),
+                            ? L10n.of(context)
+                                .ui_transmitting_release_to_stop_a7501aad
+                            : L10n.of(context).ui_hold_to_talk_957f6511),
                       ),
                     ),
                   ),
@@ -1112,8 +1129,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                   icon: Icon(session.pushToTalk
                       ? Icons.touch_app_rounded
                       : Icons.graphic_eq_rounded),
-                  label: Text(
-                      session.pushToTalk ? 'Push to talk' : 'Voice activity'),
+                  label: Text(session.pushToTalk
+                      ? L10n.of(context).ui_push_to_talk_40dec4c0
+                      : L10n.of(context).ui_voice_activity_88bfed22),
                 ),
             ],
           ),
@@ -1168,7 +1186,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
               SnackBar(
                 content: Text(userFacingError(
                   error,
-                  summary: 'Could not play that sound',
+                  summary:
+                      L10n.of(context).ui_could_not_play_that_sound_cb8dc1ff,
                 )),
               ),
             );
@@ -1222,10 +1241,11 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Share your screen',
+                        Text(L10n.of(context).ui_share_your_screen_2fbd40bd,
                             style: Theme.of(context).textTheme.titleLarge),
                         Text(
-                          'Choose quality before the system asks what to share.',
+                          L10n.of(context)
+                              .ui_choose_quality_before_the_system_asks_what_to_29e0d348,
                           style: TextStyle(color: context.kaede.muted),
                         ),
                       ],
@@ -1234,7 +1254,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 ],
               ),
               SizedBox(height: 22),
-              Text('VIDEO QUALITY',
+              Text(L10n.of(context).ui_video_quality_7fef5a25,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                         color: context.kaede.muted,
                         fontWeight: FontWeight.w800,
@@ -1260,7 +1280,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 ],
               ),
               SizedBox(height: 20),
-              Text('OUTGOING AUDIO',
+              Text(L10n.of(context).ui_outgoing_audio_4b8c2905,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                         color: context.kaede.muted,
                         fontWeight: FontWeight.w800,
@@ -1275,14 +1295,17 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     ChoiceChip(
                       selected: quality == audio,
                       onSelected: (_) => setSheetState(() => audio = quality),
-                      label: Text(
-                          '${quality.label} · ${quality.bitrate ~/ 1000} kbps'),
+                      label: Text(L10n.of(context)
+                          .ui_value0_value1_kbps_278fa6b3(
+                              (quality.label).toString(),
+                              (quality.bitrate ~/ 1000).toString())),
                     ),
                 ],
               ),
               SizedBox(height: 8),
               Text(
-                'Bitrate is an upper target. Opus automatically uses less bandwidth during silence and congestion.',
+                L10n.of(context)
+                    .ui_bitrate_is_an_upper_target_opus_automatically_3a7120a2,
                 style: TextStyle(fontSize: 12, color: context.kaede.muted),
               ),
               SizedBox(height: 16),
@@ -1300,7 +1323,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     SizedBox(width: 9),
                     Expanded(
                       child: Text(
-                        'Android and iOS always use a protected system chooser. Kaede cannot see other apps or your screen until you approve sharing.',
+                        L10n.of(context)
+                            .ui_android_and_ios_always_use_a_protected_system_4a3f370f,
                         style: TextStyle(
                           fontSize: 12,
                           color: context.kaede.textSoft,
@@ -1334,7 +1358,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                               SnackBar(
                                 content: Text(userFacingError(
                                   error,
-                                  summary: 'Could not start screen sharing',
+                                  summary: L10n.of(context)
+                                      .ui_could_not_start_screen_sharing_a459a6a5,
                                 )),
                               ),
                             );
@@ -1346,7 +1371,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                         }
                       },
                 icon: Icon(Icons.screen_share_rounded),
-                label: Text(starting ? 'Starting…' : 'Choose what to share'),
+                label: Text(starting
+                    ? L10n.of(context).ui_starting_73727cef
+                    : L10n.of(context).ui_choose_what_to_share_66a4c034),
               ),
             ],
           ),
@@ -1421,7 +1448,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
             children: [
               Padding(
                 padding: EdgeInsets.fromLTRB(20, 2, 20, 10),
-                child: Text('Select audio output',
+                child: Text(L10n.of(context).ui_select_audio_output_a5576730,
                     style: Theme.of(context).textTheme.titleLarge),
               ),
               for (final route in routes)
@@ -1433,9 +1460,11 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     VoiceAudioRoute.bluetooth => Icons.bluetooth_audio_rounded,
                   }),
                   title: Text(switch (route) {
-                    VoiceAudioRoute.phone => 'Phone',
-                    VoiceAudioRoute.speaker => 'Speaker',
-                    VoiceAudioRoute.bluetooth => 'Bluetooth headset',
+                    VoiceAudioRoute.phone => L10n.of(context).ui_phone_4930944f,
+                    VoiceAudioRoute.speaker =>
+                      L10n.of(context).ui_speaker_6c7955e2,
+                    VoiceAudioRoute.bluetooth =>
+                      L10n.of(context).ui_bluetooth_headset_a4c74b8b,
                   }),
                 ),
             ],
@@ -1498,7 +1527,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not complete the voice action',
+          summary:
+              L10n.of(context).ui_could_not_complete_the_voice_action_eafa3403,
         )),
       ));
     }
@@ -1547,7 +1577,8 @@ final class _StageParticipantRoster extends StatelessWidget {
             padding: EdgeInsets.symmetric(vertical: 48),
             child: Center(
               child: Text(
-                'Stage participants will appear here as they join.',
+                L10n.of(context)
+                    .ui_stage_participants_will_appear_here_as_they_j_aad90d2e,
                 style: TextStyle(color: context.kaede.muted),
               ),
             ),
@@ -1568,7 +1599,8 @@ final class _StageParticipantRoster extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '$title — ${items.length}',
+            L10n.of(context).ui_value0_value1_c34e3562(
+                (title).toString(), (items.length).toString()),
             style: Theme.of(context).textTheme.labelLarge?.copyWith(
                   color: context.kaede.muted,
                 ),
@@ -1758,7 +1790,8 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
               children: [
                 Text(name, style: Theme.of(context).textTheme.titleLarge),
                 SizedBox(height: 16),
-                Text('User volume · ${(volume * 100).round()}%'),
+                Text(L10n.of(context).ui_user_volume_value0_8788daaf(
+                    ((volume * 100).round()).toString())),
                 Slider(
                   value: volume,
                   onChanged: (value) {
@@ -1773,9 +1806,11 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                       leading: Icon(occupancy?['suppressed'] != false
                           ? Icons.record_voice_over_outlined
                           : Icons.hearing_outlined),
-                      title: Text(occupancy?['suppressed'] != false
-                          ? 'Invite to speak'
-                          : 'Move to audience'),
+                      title: Text(
+                          occupancy?[L10n.of(context).ui_suppressed_087253d7] !=
+                                  false
+                              ? L10n.of(context).ui_invite_to_speak_1cee4bdb
+                              : L10n.of(context).ui_move_to_audience_de051085),
                       onTap: () => _moderate(
                         sheetContext,
                         () => widget.session.setStageParticipantSuppressed(
@@ -1792,9 +1827,11 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                       widget.channel, Permission.muteMembers))
                     ListTile(
                       leading: Icon(Icons.mic_off_rounded),
-                      title: Text(occupancy?['server_mute'] == true
-                          ? 'Remove server mute'
-                          : 'Server mute'),
+                      title: Text(occupancy?[
+                                  L10n.of(context).ui_server_mute_8c8094fe] ==
+                              true
+                          ? L10n.of(context).ui_remove_server_mute_a9a2d0ad
+                          : L10n.of(context).ui_server_mute_5de99007),
                       onTap: () => _moderate(
                         sheetContext,
                         () => widget.session.setServerMute(
@@ -1811,9 +1848,11 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                   if (canServerDeafenInChannel(widget.channel))
                     ListTile(
                       leading: Icon(Icons.headset_off_rounded),
-                      title: Text(occupancy?['server_deaf'] == true
-                          ? 'Remove server deafen'
-                          : 'Server deafen'),
+                      title: Text(occupancy?[
+                                  L10n.of(context).ui_server_deaf_513c8fbb] ==
+                              true
+                          ? L10n.of(context).ui_remove_server_deafen_37df1a67
+                          : L10n.of(context).ui_server_deafen_5b9a5cf9),
                       onTap: () => _moderate(
                         sheetContext,
                         () => widget.session.setServerDeaf(
@@ -1832,7 +1871,8 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                         in voiceMoveDestinationChannels(guild, widget.channel))
                       ListTile(
                         leading: Icon(Icons.drive_file_move_rounded),
-                        title: Text('Move to ${target.name ?? 'voice'}'),
+                        title: Text(L10n.of(context).ui_move_to_value0_5addb086(
+                            (target.name ?? 'voice').toString())),
                         onTap: () => _moderate(
                           sheetContext,
                           () => widget.session.moveParticipant(
@@ -1851,7 +1891,8 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                     ListTile(
                       leading: Icon(Icons.call_end_rounded,
                           color: Theme.of(context).colorScheme.error),
-                      title: Text('Disconnect from voice',
+                      title: Text(
+                          L10n.of(context).ui_disconnect_from_voice_a6e0e11f,
                           style: TextStyle(
                               color: Theme.of(context).colorScheme.error)),
                       onTap: () => _moderate(
@@ -1889,7 +1930,7 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
         SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not update the voice state',
+            summary: L10n.current.ui_could_not_update_the_voice_state_3f129c64,
           )),
         ),
       );
@@ -1935,7 +1976,8 @@ final class _SoundboardPicker extends StatelessWidget {
               final available = snapshot.data ?? const <_SoundboardGroup>[];
               if (available.isEmpty) {
                 return Center(
-                  child: Text('No soundboard sounds are available.'),
+                  child: Text(L10n.of(context)
+                      .ui_no_soundboard_sounds_are_available_45e14a9e),
                 );
               }
               return ListView(
@@ -1944,7 +1986,7 @@ final class _SoundboardPicker extends StatelessWidget {
                   Padding(
                     padding: EdgeInsets.fromLTRB(8, 0, 8, 10),
                     child: Text(
-                      'Soundboard',
+                      L10n.of(context).ui_soundboard_5a91f77c,
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                   ),
@@ -1996,13 +2038,18 @@ final class _VoiceEmpty extends StatelessWidget {
               Icon(Icons.spatial_audio_off_rounded,
                   color: context.kaede.coral, size: 64),
               SizedBox(height: 14),
-              Text(canConnect ? 'Ready when you are' : 'Voice unavailable',
+              Text(
+                  canConnect
+                      ? L10n.of(context).ui_ready_when_you_are_28e0532d
+                      : L10n.of(context).ui_voice_unavailable_d810746f,
                   style: Theme.of(context).textTheme.headlineSmall),
               SizedBox(height: 8),
               Text(
                 canConnect
-                    ? 'Join the room to see and hear everyone already here.'
-                    : 'A guild role or channel permission is preventing access.',
+                    ? L10n.of(context)
+                        .ui_join_the_room_to_see_and_hear_everyone_alread_69de4235
+                    : L10n.of(context)
+                        .ui_a_guild_role_or_channel_permission_is_prevent_3514b22a,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: context.kaede.muted),
               ),
@@ -2038,11 +2085,14 @@ final class _VoiceTakeoverNotice extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Voice is active on $activeClient',
+            Text(
+                L10n.of(context).ui_voice_is_active_on_value0_0e7eda95(
+                    (activeClient).toString()),
                 style: TextStyle(fontWeight: FontWeight.w800)),
             SizedBox(height: 4),
             Text(
-              'Moving voice here will disconnect that device. It will not reconnect automatically.',
+              L10n.of(context)
+                  .ui_moving_voice_here_will_disconnect_that_device_f30aa710,
               style: TextStyle(color: context.kaede.textSoft),
             ),
             SizedBox(height: 10),
@@ -2050,12 +2100,14 @@ final class _VoiceTakeoverNotice extends StatelessWidget {
               children: [
                 FilledButton(
                   onPressed: moving ? null : onMove,
-                  child: Text(moving ? 'Moving voice…' : 'Move voice here'),
+                  child: Text(moving
+                      ? L10n.of(context).ui_moving_voice_c3ab6c0f
+                      : L10n.of(context).ui_move_voice_here_0c2d2f54),
                 ),
                 SizedBox(width: 8),
                 TextButton(
                   onPressed: moving ? null : onCancel,
-                  child: Text('Keep it there'),
+                  child: Text(L10n.of(context).ui_keep_it_there_3cd7dd37),
                 ),
               ],
             ),

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import { interactionResponses } from '$lib/chat/interaction-responses.svelte';
   import { createInteraction } from '$lib/chat/interactions';
@@ -72,7 +74,7 @@
     }
     return topLevel.components.map((input) => ({
       input,
-      label: input.type === 4 ? (input.label ?? 'Text') : 'Field',
+      label: input.type === 4 ? (input.label ?? $t('ui_text_71988c4d')) : $t('ui_field_f45fc1df'),
       description: null
     }));
   }
@@ -158,7 +160,10 @@
       uploadNames = { ...uploadNames, [component.custom_id]: selected.map((file) => file.name) };
       uploadManifests = { ...uploadManifests, ...nextManifests };
     } catch (caught) {
-      error = userErrorMessage(caught, 'One or more files could not be uploaded. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_one_or_more_files_could_not_be_uploaded_try_a_ecfc4898')
+      );
     } finally {
       const next = { ...uploading };
       delete next[component.custom_id];
@@ -174,13 +179,13 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!active || !requestContext) {
-      error = 'This form is no longer connected to its bot interaction. Run the command again.';
+      error = $t('ui_this_form_is_no_longer_connected_to_its_bot_i_8ca3a69b');
       return;
     }
     for (const { input: component } of modalFields(active.modal)) {
       if (component.type === 21) {
         if (component.required !== false && !values[component.custom_id]) {
-          error = 'Choose one option for every required field.';
+          error = $t('ui_choose_one_option_for_every_required_field_020c7c6b');
           return;
         }
         continue;
@@ -217,7 +222,7 @@
       ? modalSubmitBody(message, active.responseId, active.modal, values)
       : null;
     if (!body) {
-      error = 'This form is missing its app. Run the command again.';
+      error = $t('ui_this_form_is_missing_its_app_run_the_command__70abd81e');
       return;
     }
     submitting = true;
@@ -239,7 +244,7 @@
                   const manifest = uploadManifests[id];
                   if (!manifest)
                     throw new Error(
-                      'Reattach every file before submitting this encrypted bot form.'
+                      $t('ui_reattach_every_file_before_submitting_this_en_1705c196')
                     );
                   return [id, manifest];
                 })
@@ -251,7 +256,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'The bot did not receive this form. Check it and try again.'
+        $t('ui_the_bot_did_not_receive_this_form_check_it_an_17e1924e')
       );
     } finally {
       submitting = false;
@@ -273,8 +278,11 @@
     >
       <header>
         <h2 id="interaction-modal-title">{active.modal.title}</h2>
-        <button type="button" aria-label="Close form" disabled={submitting} onclick={dismiss}
-          >×</button
+        <button
+          type="button"
+          aria-label={$t('ui_close_form_00d7d531')}
+          disabled={submitting}
+          onclick={dismiss}>×</button
         >
       </header>
       <form onsubmit={submit}>
@@ -287,7 +295,9 @@
               {#if component.type === 4}
                 {@const input = component as TextInputComponent}
                 <label>
-                  <span>{field.label}{input.required === false ? ' (optional)' : ''}</span>
+                  <span
+                    >{field.label}{input.required === false ? $t('ui_optional_edbfc3dc') : ''}</span
+                  >
                   {#if field.description}<small>{field.description}</small>{/if}
                   {#if input.style === 2}
                     <textarea
@@ -326,7 +336,11 @@
               {:else if component.type === 3}
                 {@const select = component as StringSelectComponent}
                 <label>
-                  <span>{field.label}{select.required === false ? ' (optional)' : ''}</span>
+                  <span
+                    >{field.label}{select.required === false
+                      ? $t('ui_optional_edbfc3dc')
+                      : ''}</span
+                  >
                   {#if field.description}<small>{field.description}</small>{/if}
                   <select
                     multiple={(select.max_values ?? 1) > 1}
@@ -336,9 +350,9 @@
                     onchange={(event) => (values[select.custom_id] = selectedValues(event))}
                   >
                     {#if (select.min_values ?? 1) === 0 && (select.max_values ?? 1) === 1}
-                      <option value="">None</option>
+                      <option value="">{$t('ui_none_dc937b59')}</option>
                     {:else if (select.max_values ?? 1) === 1}
-                      <option value="" disabled>Choose an option</option>
+                      <option value="" disabled>{$t('ui_choose_an_option_aef4076f')}</option>
                     {/if}
                     {#each select.options as option (option.value)}
                       <option
@@ -355,7 +369,11 @@
                 {@const select = component as EntitySelectComponent}
                 {@const options = entitySelectOptions(select, componentContext)}
                 <label>
-                  <span>{field.label}{select.required === false ? ' (optional)' : ''}</span>
+                  <span
+                    >{field.label}{select.required === false
+                      ? $t('ui_optional_edbfc3dc')
+                      : ''}</span
+                  >
                   {#if field.description}<small>{field.description}</small>{/if}
                   <select
                     multiple={(select.max_values ?? 1) > 1}
@@ -367,9 +385,9 @@
                     onchange={(event) => (values[select.custom_id] = selectedValues(event))}
                   >
                     {#if (select.min_values ?? 1) === 0 && (select.max_values ?? 1) === 1}
-                      <option value="">None</option>
+                      <option value="">{$t('ui_none_dc937b59')}</option>
                     {:else if (select.max_values ?? 1) === 1}
-                      <option value="" disabled>Choose an item</option>
+                      <option value="" disabled>{$t('ui_choose_an_item_11997590')}</option>
                     {/if}
                     {#each options as option (option.value)}
                       <option
@@ -379,13 +397,17 @@
                     {/each}
                   </select>
                   {#if options.length === 0}
-                    <small>No matching items are available in this channel.</small>
+                    <small>{$t('ui_no_matching_items_are_available_in_this_chann_2b179cf6')}</small>
                   {/if}
                 </label>
               {:else if component.type === 21}
                 {@const radio = component as RadioGroupComponent}
                 <fieldset>
-                  <legend>{field.label}{radio.required === false ? ' (optional)' : ''}</legend>
+                  <legend
+                    >{field.label}{radio.required === false
+                      ? $t('ui_optional_edbfc3dc')
+                      : ''}</legend
+                  >
                   {#if field.description}<small>{field.description}</small>{/if}
                   {#each radio.options as option (option.value)}
                     <label class="modal-choice">
@@ -410,14 +432,19 @@
                       type="button"
                       class="clear-radio"
                       disabled={submitting}
-                      onclick={() => (values[radio.custom_id] = null)}>Clear selection</button
+                      onclick={() => (values[radio.custom_id] = null)}
+                      >{$t('ui_clear_selection_cea4d2e0')}</button
                     >
                   {/if}
                 </fieldset>
               {:else if component.type === 22}
                 {@const group = component as CheckboxGroupComponent}
                 <fieldset>
-                  <legend>{field.label}{group.required === false ? ' (optional)' : ''}</legend>
+                  <legend
+                    >{field.label}{group.required === false
+                      ? $t('ui_optional_edbfc3dc')
+                      : ''}</legend
+                  >
                   {#if field.description}<small>{field.description}</small>{/if}
                   {#each group.options as option (option.value)}
                     <label class="modal-choice">
@@ -445,7 +472,11 @@
               {:else if component.type === 19}
                 {@const upload = component as FileUploadComponent}
                 <label>
-                  <span>{field.label}{upload.required === false ? ' (optional)' : ''}</span>
+                  <span
+                    >{field.label}{upload.required === false
+                      ? $t('ui_optional_edbfc3dc')
+                      : ''}</span
+                  >
                   {#if field.description}<small>{field.description}</small>{/if}
                   <input
                     type="file"
@@ -458,7 +489,11 @@
                     onchange={(event) => void uploadFiles(upload, event.currentTarget.files)}
                   />
                   {#if uploading[upload.custom_id]}
-                    <small>Uploading… {uploading[upload.custom_id]}%</small>
+                    <small
+                      >{$t('ui_uploading_value0_2b13142b', {
+                        value0: String(uploading[upload.custom_id])
+                      })}</small
+                    >
                   {:else if uploadNames[upload.custom_id]?.length}
                     <small>{uploadNames[upload.custom_id].join(', ')}</small>
                   {/if}
@@ -469,9 +504,11 @@
         {/each}
         {#if error}<p role="alert">{error}</p>{/if}
         <footer>
-          <button type="button" disabled={submitting} onclick={dismiss}>Cancel</button>
+          <button type="button" disabled={submitting} onclick={dismiss}
+            >{$t('ui_cancel_19766ed6')}</button
+          >
           <button class="submit" type="submit" disabled={submitting}
-            >{submitting ? 'Sending…' : 'Submit'}</button
+            >{submitting ? $t('ui_sending_b8ed5279') : $t('ui_submit_155f816c')}</button
           >
         </footer>
       </form>

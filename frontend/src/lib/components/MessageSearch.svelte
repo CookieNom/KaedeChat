@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import {
@@ -171,7 +173,7 @@
   );
   const authorUser = $derived(authorRef ? userForRef(authorRef) : null);
   const mentionedUser = $derived(mentionRef ? userForRef(mentionRef) : null);
-  const suggestions = $derived.by((): Suggestion[] => {
+  let suggestions = $derived.by((): Suggestion[] => {
     if (activeOperator === 'from' || activeOperator === 'mentions') {
       return uniqueUsers
         .filter((user) => {
@@ -190,20 +192,20 @@
       {
         kind: 'operator',
         operator: 'from',
-        label: 'From a specific user',
-        hint: 'from: user'
+        label: $t('ui_from_a_specific_user_f21f0f9e'),
+        hint: $t('ui_from_user_acd6cbb9')
       },
       {
         kind: 'operator',
         operator: 'has',
-        label: 'Includes a specific type of data',
-        hint: 'has: link, embed or file'
+        label: $t('ui_includes_a_specific_type_of_data_79fc28c2'),
+        hint: $t('ui_has_link_embed_or_file_a0333b27')
       },
       {
         kind: 'operator',
         operator: 'mentions',
-        label: 'Mentions a specific user',
-        hint: 'mentions: user'
+        label: $t('ui_mentions_a_specific_user_dd1b1451'),
+        hint: $t('ui_mentions_user_3e71b2c0')
       },
       { kind: 'advanced' }
     ];
@@ -421,7 +423,7 @@
       rememberSearch();
     } catch (caught) {
       if (generation !== searchGeneration) return;
-      error = userErrorMessage(caught, 'Could not search messages. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_search_messages_try_again_ec9dac18'));
     } finally {
       if (generation === searchGeneration) loading = false;
     }
@@ -451,7 +453,7 @@
     optional
     entityName="channels"
     searchPlaceholder="Search channels"
-    placeholder="All channels"
+    placeholder={$t('ui_all_channels_4b33d5e0')}
     onChange={(values) => changeChannelFilter(values[0] ?? '')}
   />
 {/snippet}
@@ -477,7 +479,7 @@
           <button
             class="search-token"
             type="button"
-            aria-label="Remove sender filter"
+            aria-label={$t('ui_remove_sender_filter_d4de0bf0')}
             onclick={() => removeFilter('author')}
           >
             <span>from:</span>{userDisplayName(authorUser)} <b>×</b>
@@ -487,7 +489,7 @@
           <button
             class="search-token"
             type="button"
-            aria-label="Remove mention filter"
+            aria-label={$t('ui_remove_mention_filter_c142a6dd')}
             onclick={() => removeFilter('mention')}
           >
             <span>mentions:</span>{userDisplayName(mentionedUser)} <b>×</b>
@@ -507,12 +509,12 @@
           bind:this={searchInput}
           bind:value={query}
           maxlength="512"
-          aria-label="Search messages"
+          aria-label={$t('ui_search_messages_ddf0602b')}
           placeholder={searchScope === 'channel' && searchChannel?.name
             ? `Search ${searchChannel.name}`
             : scope === 'guild'
-              ? 'Search guild'
-              : 'Search'}
+              ? $t('ui_search_guild_1d1ee794')
+              : $t('ui_search_49c266ba')}
           onfocus={focusSearch}
           oninput={() => {
             open = true;
@@ -523,11 +525,18 @@
         />
       </div>
       {#if hasCriteria || response}
-        <button class="search-clear" type="button" aria-label="Clear search" onclick={resetSearch}
-          >×</button
+        <button
+          class="search-clear"
+          type="button"
+          aria-label={$t('ui_clear_search_3b7ea517')}
+          onclick={resetSearch}>×</button
         >
       {:else}
-        <button type="submit" aria-label="Run message search" disabled={loading || !hasCriteria}>
+        <button
+          type="submit"
+          aria-label={$t('ui_run_message_search_ca1a30b4')}
+          disabled={loading || !hasCriteria}
+        >
           <Icon name="search" size={17} strokeWidth={2.2} />
         </button>
       {/if}
@@ -548,7 +557,9 @@
           <button
             class="backdrop-close"
             type="button"
-            aria-label={advancedOpen ? 'Close advanced filters' : 'Close message search'}
+            aria-label={advancedOpen
+              ? $t('ui_close_advanced_filters_6ddf487e')
+              : $t('ui_close_message_search_b4a727bc')}
             onclick={() => {
               if (advancedOpen) closeAdvanced();
               else closeSearch();
@@ -562,7 +573,7 @@
           role="dialog"
           tabindex="-1"
           aria-modal={placement === 'dialog' ? 'true' : undefined}
-          aria-label="Search messages"
+          aria-label={$t('ui_search_messages_ddf0602b')}
           onkeydown={(event) => {
             if (event.key === 'Escape') {
               if (advancedOpen) closeAdvanced();
@@ -575,18 +586,22 @@
               <div>
                 <h2>
                   {advancedOpen
-                    ? 'Filters'
+                    ? $t('ui_filters_546ebb8e')
                     : response
                       ? `${response.results.length}${cursor ? '+' : ''} results`
-                      : 'Search messages'}
+                      : $t('ui_search_messages_ddf0602b')}
                 </h2>
                 {#if placement === 'dialog'}
                   <p>
-                    Typo-tolerant search across {scope === 'guild'
-                      ? 'this guild'
-                      : scope === 'dms'
-                        ? 'your direct messages'
-                        : 'this conversation'}.
+                    {$t('ui_typo_tolerant_search_across_value0_387e40f9', {
+                      value0: String(
+                        scope === 'guild'
+                          ? 'this guild'
+                          : scope === 'dms'
+                            ? 'your direct messages'
+                            : 'this conversation'
+                      )
+                    })}
                   </p>
                 {/if}
               </div>
@@ -602,13 +617,17 @@
                       suggestionsOpen = false;
                     }}
                   >
-                    Filters{activeFilterCount ? ` · ${activeFilterCount}` : ''}
+                    {$t('ui_filters_value0_94a4d25c', {
+                      value0: String(activeFilterCount ? ` · ${activeFilterCount}` : '')
+                    })}
                   </button>
                 {/if}
                 <button
                   class="close"
                   type="button"
-                  aria-label={advancedOpen ? 'Close advanced filters' : 'Close search'}
+                  aria-label={advancedOpen
+                    ? $t('ui_close_advanced_filters_6ddf487e')
+                    : $t('ui_close_search_55656b5e')}
                   onclick={advancedOpen ? closeAdvanced : closeSearch}>×</button
                 >
               </div>
@@ -625,15 +644,15 @@
               }}
             >
               <label class="query"
-                ><span class="visually-hidden">Search text</span><input
+                ><span class="visually-hidden">{$t('ui_search_text_38d268a1')}</span><input
                   bind:value={query}
                   maxlength="512"
-                  placeholder="Search messages"
+                  placeholder={$t('ui_search_messages_ddf0602b')}
                 /></label
               >
               <button
                 type="submit"
-                aria-label="Run message search"
+                aria-label={$t('ui_run_message_search_ca1a30b4')}
                 disabled={loading || !hasCriteria}><Icon name="search" size={18} /></button
               >
             </form>
@@ -644,17 +663,17 @@
               <button
                 type="button"
                 class="scope-choice"
-                aria-label="Change search channel"
+                aria-label={$t('ui_change_search_channel_1202412c')}
                 aria-expanded={channelPickerOpen}
                 onclick={toggleChannelPicker}
               >
                 <Icon name="hash" size={16} />
-                <span>{searchChannel?.name ?? 'All channels'}</span>
+                <span>{searchChannel?.name ?? $t('ui_all_channels_4b33d5e0')}</span>
                 <Icon name="chevron-down" size={14} />
               </button>
               {#if selectedChannelRef}
                 <button type="button" class="scope-all" onclick={() => changeChannelFilter('')}
-                  >Search all channels</button
+                  >{$t('ui_search_all_channels_d25f3bfd')}</button
                 >
               {/if}
             </div>
@@ -667,18 +686,13 @@
 
           {#if encrypted && !advancedOpen}
             <div class="encrypted-notice" role="status">
-              <strong>Search is unavailable for this encrypted conversation.</strong>
-              <span
-                >End-to-end encrypted message bodies never leave your devices and are never indexed
-                by Kaede.</span
-              >
+              <strong>{$t('ui_search_is_unavailable_for_this_encrypted_conv_3c49113e')}</strong>
+              <span>{$t('ui_end_to_end_encrypted_message_bodies_never_lea_3555c50f')}</span>
             </div>
           {:else if disabledByInstance}
             <div class="encrypted-notice" role="status">
-              <strong>Message search is disabled on this instance.</strong>
-              <span
-                >Your instance administrator can enable the private search service during setup.</span
-              >
+              <strong>{$t('ui_message_search_is_disabled_on_this_instance_969b507d')}</strong>
+              <span>{$t('ui_your_instance_administrator_can_enable_the_pr_74e3fc7a')}</span>
             </div>
           {:else}
             {#if advancedOpen}
@@ -692,18 +706,17 @@
                 <div class="filters">
                   {#if scope === 'guild'}
                     <label class="person-filter"
-                      >Channel
-                      {@render channelPicker()}
+                      >{$t('ui_channel_ce4683e7')} {@render channelPicker()}
                     </label>
                   {/if}
                   <label class="person-filter"
-                    >From
+                    >{$t('ui_from_21819769')}
                     <GuildMemberPicker
                       guildRef={memberPickerGuildRef}
                       fallbackUsers={uniqueUsers}
                       value={authorRef ? [authorRef] : []}
                       optional
-                      placeholder="Anyone"
+                      placeholder={$t('ui_anyone_8d486bb2')}
                       onChange={(values, users) => {
                         authorRef = values[0] ?? '';
                         selectedUsers = [
@@ -717,13 +730,13 @@
                     />
                   </label>
                   <label class="person-filter"
-                    >Mentions
+                    >{$t('ui_mentions_6f32e692')}
                     <GuildMemberPicker
                       guildRef={memberPickerGuildRef}
                       fallbackUsers={uniqueUsers}
                       value={mentionRef ? [mentionRef] : []}
                       optional
-                      placeholder="Anyone"
+                      placeholder={$t('ui_anyone_8d486bb2')}
                       onChange={(values, users) => {
                         mentionRef = values[0] ?? '';
                         selectedUsers = [
@@ -737,31 +750,33 @@
                     />
                   </label>
                   <label
-                    >Sort<select bind:value={sort}
-                      ><option value="relevance">Most relevant</option><option value="newest"
-                        >Newest</option
-                      ><option value="oldest">Oldest</option></select
+                    >{$t('ui_sort_bec69036')}<select bind:value={sort}
+                      ><option value="relevance">{$t('ui_most_relevant_6e9317d8')}</option><option
+                        value="newest">{$t('ui_newest_d15efa17')}</option
+                      ><option value="oldest">{$t('ui_oldest_505dc450')}</option></select
                     ></label
                   >
                   <label
-                    >Pinned<select bind:value={pinned}
-                      ><option value="any">Either</option><option value="yes">Pinned</option><option
-                        value="no">Not pinned</option
-                      ></select
+                    >{$t('ui_pinned_f20c8794')}<select bind:value={pinned}
+                      ><option value="any">{$t('ui_either_b5969c3e')}</option><option value="yes"
+                        >{$t('ui_pinned_f20c8794')}</option
+                      ><option value="no">{$t('ui_not_pinned_47bce0ad')}</option></select
                     ></label
                   >
                   <label
-                    >Author type<select bind:value={authorType}
-                      ><option value="any">Anyone</option><option value="user">People</option
-                      ><option value="bot">Bots</option><option value="webhook">Webhooks</option
+                    >{$t('ui_author_type_e5b40d84')}<select bind:value={authorType}
+                      ><option value="any">{$t('ui_anyone_8d486bb2')}</option><option value="user"
+                        >{$t('ui_people_7db20897')}</option
+                      ><option value="bot">{$t('ui_bots_f17c0acb')}</option><option value="webhook"
+                        >{$t('ui_webhooks_45808d75')}</option
                       ></select
                     ></label
                   >
-                  <label>After<input type="date" bind:value={after} /></label>
-                  <label>Before<input type="date" bind:value={before} /></label>
+                  <label>{$t('ui_after_7b68fe55')}<input type="date" bind:value={after} /></label>
+                  <label>{$t('ui_before_9bb72500')}<input type="date" bind:value={before} /></label>
                 </div>
                 <fieldset>
-                  <legend>Contains</legend>
+                  <legend>{$t('ui_contains_2eaecb3d')}</legend>
                   <div class="chips">
                     {#each ['image', 'video', 'audio', 'file', 'link', 'embed'] as kind (kind)}<button
                         type="button"
@@ -773,26 +788,26 @@
                 </fieldset>
                 <div class="form-actions">
                   <button class="clear-filters" type="button" onclick={clearFilters}
-                    >Clear filters</button
+                    >{$t('ui_clear_filters_7179ea00')}</button
                   >
                   <button class="submit" type="submit" disabled={loading || !hasCriteria}
-                    >{loading ? 'Searching…' : 'Search'}</button
+                    >{loading ? $t('ui_searching_c31723ab') : $t('ui_search_49c266ba')}</button
                   >
                 </div>
               </form>
             {:else if suggestionsOpen && !channelPickerOpen}
-              <section class="search-start" aria-label="Search options">
+              <section class="search-start" aria-label={$t('ui_search_options_556a0850')}>
                 <h3>
                   {activeOperator === 'from'
-                    ? 'From user'
+                    ? $t('ui_from_user_fd588027')
                     : activeOperator === 'mentions'
-                      ? 'Mentions user'
+                      ? $t('ui_mentions_user_85697ac7')
                       : activeOperator === 'has'
-                        ? 'Message contains'
-                        : 'Filters'}
+                        ? $t('ui_message_contains_772edfbc')
+                        : $t('ui_filters_546ebb8e')}
                 </h3>
                 {#if suggestions.length === 0}
-                  <p class="suggestion-empty">No matching options.</p>
+                  <p class="suggestion-empty">{$t('ui_no_matching_options_cd6bf89d')}</p>
                 {/if}
                 {#each suggestions as suggestion, index (`${suggestion.kind}-${index}`)}
                   <button
@@ -840,8 +855,8 @@
                     {:else}
                       <span class="quick-icon"><Icon name="settings" size={19} /></span>
                       <span
-                        ><strong>More filters</strong><small
-                          >dates, author type, pins and more</small
+                        ><strong>{$t('ui_more_filters_b1ab49a6')}</strong><small
+                          >{$t('ui_dates_author_type_pins_and_more_6d123231')}</small
                         ></span
                       >
                     {/if}
@@ -851,14 +866,14 @@
             {/if}
 
             {#if !channelPickerOpen && history.length && suggestionsOpen && !activeOperator}
-              <section class="history" aria-label="Recent searches">
+              <section class="history" aria-label={$t('ui_recent_searches_228c84b5')}>
                 <div>
-                  <strong>Recent searches</strong><button
+                  <strong>{$t('ui_recent_searches_228c84b5')}</strong><button
                     type="button"
                     onclick={() => {
                       history = [];
                       if (storageKey) sessionStorage.removeItem(storageKey);
-                    }}>Clear</button
+                    }}>{$t('ui_clear_83b12c22')}</button
                   >
                 </div>
                 <div class="history-list">
@@ -877,27 +892,25 @@
           {#if error}<p class="error" role="alert">{error}</p>{/if}
           {#if response && !suggestionsOpen && !advancedOpen}
             {#if response.indexing}<p class="partial" role="status">
-                Search is catching up with recent messages. Results may be incomplete for a moment.
+                {$t('ui_search_is_catching_up_with_recent_messages_re_c79a234b')}
               </p>{/if}
             {#if response.coverage.authority === 'unavailable' || response.coverage.authority === 'unsupported'}<p
                 class="partial"
                 role="status"
               >
-                Showing locally cached matches. The conversation’s home instance could not provide
-                complete results.
+                {$t('ui_showing_locally_cached_matches_the_conversati_819ba8bc')}
               </p>{:else if response.coverage.local === 'cached' && response.coverage.authority === 'not_queried'}<p
                 class="partial"
                 role="status"
               >
-                Account-wide direct-message search uses this home’s recent federated cache. Search
-                inside a conversation to ask its authority for complete results.
+                {$t('ui_account_wide_direct_message_search_uses_this__c97610d2')}
               </p>{/if}
             {#if response.encrypted_channel_refs.length}<p class="partial">
-                Encrypted channels were excluded from these results.
+                {$t('ui_encrypted_channels_were_excluded_from_these_r_7504f46e')}
               </p>{/if}
             <div class="results" aria-live="polite">
               {#if response.results.length === 0}<p class="empty">
-                  No messages matched those filters.
+                  {$t('ui_no_messages_matched_those_filters_e2e6b23d')}
                 </p>{/if}
               {#each response.results as result (entityRef(result.message))}
                 <article class="result">
@@ -905,9 +918,10 @@
                     <span
                       >{result.guild?.name ??
                         result.channel.recipients?.map(userDisplayName).join(', ') ??
-                        'Direct message'} · {result.channel.name ?? 'conversation'}</span
+                        $t('ui_direct_message_cd3e1605')} · {result.channel.name ??
+                        'conversation'}</span
                     >
-                    <span>Jump</span>
+                    <span>{$t('ui_jump_9ee0ca3e')}</span>
                   </button>
                   <MessageRow
                     message={result.message}
@@ -926,7 +940,7 @@
                 class="more"
                 type="button"
                 disabled={loading}
-                onclick={() => void runSearch(true)}>Load more</button
+                onclick={() => void runSearch(true)}>{$t('ui_load_more_ac8991ef')}</button
               >{/if}
           {/if}
         </div>

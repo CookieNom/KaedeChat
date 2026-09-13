@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/announcement_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -8,6 +7,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/announcements.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 final class AnnouncementManagementTab extends StatefulWidget {
@@ -188,7 +188,8 @@ final class _AnnouncementManagementTabState
       setState(() {
         _error = userFacingError(
           error,
-          summary: 'Could not load announcement followers',
+          summary: L10n.of(context)
+              .ui_could_not_load_announcement_followers_289f21ff,
         );
       });
     } finally {
@@ -223,15 +224,16 @@ final class _AnnouncementManagementTabState
           follow,
         ];
         _target = null;
-        _notice = 'New announcements can now be published to that channel.';
+        _notice = L10n.of(context)
+            .ui_new_announcements_can_now_be_published_to_tha_ae551f77;
       });
     } on Object catch (error) {
       if (!mounted) return;
       setState(() {
         _error = userFacingError(
           error,
-          summary:
-              'Could not add that follower. Manage Webhooks is required in the destination',
+          summary: L10n.of(context)
+              .ui_could_not_add_that_follower_manage_webhooks_i_bf8af7b1,
         );
       });
     } finally {
@@ -252,16 +254,18 @@ final class _AnnouncementManagementTabState
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Remove follower?'),
-        content: Text('Stop publishing new announcements to $label?'),
+        title: Text(L10n.of(context).ui_remove_follower_944364a6),
+        content: Text(L10n.of(context)
+            .ui_stop_publishing_new_announcements_to_value0_5baa0d7b(
+                (label).toString())),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: Text('Remove'),
+            child: Text(L10n.of(context).ui_remove_21a5901d),
           ),
         ],
       ),
@@ -291,15 +295,17 @@ final class _AnnouncementManagementTabState
         _follows = _follows
             .where((item) => item.ref != follow.ref)
             .toList(growable: false);
-        _notice = 'Stopped publishing announcements to $label.';
+        _notice = L10n.of(context)
+            .ui_stopped_publishing_announcements_to_value0_02d57979(
+                (label).toString());
       });
     } on Object catch (error) {
       if (!mounted) return;
       setState(() {
         _error = userFacingError(
           error,
-          summary:
-              'Could not remove that follower. Manage Webhooks is required in the destination',
+          summary: L10n.of(context)
+              .ui_could_not_remove_that_follower_manage_webhook_0a0ee780,
         );
       });
     } finally {
@@ -318,15 +324,18 @@ final class _AnnouncementManagementTabState
         children: [
           Text(
             widget.createOnly
-                ? 'Follow #${widget.sourceChannel?.name ?? 'announcements'}'
-                : 'Channels Followed',
+                ? L10n.of(context).ui_follow_value0_0f6d45e8(
+                    (widget.sourceChannel?.name ?? 'announcements').toString())
+                : L10n.of(context).ui_channels_followed_3396f983,
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
           ),
           SizedBox(height: 6),
           Text(
             widget.createOnly
-                ? 'Choose a text channel where you can manage webhooks. Published posts will appear there.'
-                : 'Choose which text channels receive posts when someone deliberately publishes a message from an announcement channel.',
+                ? L10n.of(context)
+                    .ui_choose_a_text_channel_where_you_can_manage_we_489a086a
+                : L10n.of(context)
+                    .ui_choose_which_text_channels_receive_posts_when_f83ffe28,
             style: TextStyle(color: context.kaede.muted, height: 1.4),
           ),
           SizedBox(height: 18),
@@ -334,10 +343,11 @@ final class _AnnouncementManagementTabState
             Card(
               child: ListTile(
                 leading: Icon(Icons.lock_outline_rounded),
-                title: Text('Followers are unavailable'),
+                title: Text(
+                    L10n.of(context).ui_followers_are_unavailable_3fb2d79c),
                 subtitle: Text(
-                  'View Channel and Read Message History are required on an '
-                  'announcement channel.',
+                  L10n.of(context)
+                      .ui_view_channel_and_read_message_history_are_req_cdb857e6,
                 ),
               ),
             )
@@ -347,14 +357,15 @@ final class _AnnouncementManagementTabState
                 key: ValueKey('announcement-source-picker-${_source?.wire}'),
                 initialValue: _source,
                 decoration: InputDecoration(
-                  labelText: 'Announcement channel',
+                  labelText: L10n.of(context).ui_announcement_channel_ec8b9fb9,
                   prefixIcon: Icon(Icons.campaign_outlined),
                 ),
                 items: [
                   for (final source in sources)
                     DropdownMenuItem(
                       value: source.ref,
-                      child: Text('#${source.name ?? 'announcement'}'),
+                      child: Text(L10n.of(context).ui_value0_ea2f080f(
+                          (source.name ?? 'announcement').toString())),
                     ),
                 ],
                 onChanged: _busyFollow != null
@@ -379,7 +390,7 @@ final class _AnnouncementManagementTabState
                     ),
                     initialValue: _target,
                     decoration: InputDecoration(
-                      labelText: 'Publish into',
+                      labelText: L10n.of(context).ui_publish_into_b1c4c262,
                       prefixIcon: Icon(Icons.call_split_rounded),
                     ),
                     items: [
@@ -408,16 +419,17 @@ final class _AnnouncementManagementTabState
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : Icon(Icons.add_rounded),
-                  label: Text('Follow'),
+                  label: Text(L10n.of(context).ui_follow_8aad7d90),
                 ),
               ],
             ),
             SizedBox(height: 8),
             Text(
               targets.isEmpty
-                  ? 'No eligible destination is available. Manage Webhooks is '
-                      'required in a plaintext text channel.'
-                  : 'Destinations can be in another Kaede guild or instance.',
+                  ? L10n.of(context)
+                      .ui_no_eligible_destination_is_available_manage_w_98334063
+                  : L10n.of(context)
+                      .ui_destinations_can_be_in_another_kaede_guild_or_44ef8be4,
               style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
             ),
             if (_error != null) ...[
@@ -439,7 +451,7 @@ final class _AnnouncementManagementTabState
             if (!widget.createOnly) ...[
               SizedBox(height: 18),
               Text(
-                'Follower channels',
+                L10n.of(context).ui_follower_channels_cb39dcf5,
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
               ),
               SizedBox(height: 8),
@@ -454,10 +466,11 @@ final class _AnnouncementManagementTabState
                 Card(
                   child: ListTile(
                     leading: Icon(Icons.notifications_none_rounded),
-                    title: Text('No follower channels yet'),
+                    title: Text(
+                        L10n.of(context).ui_no_follower_channels_yet_9846839a),
                     subtitle: Text(
-                      'Messages stay only in this channel until a destination '
-                      'is added and a message is published.',
+                      L10n.of(context)
+                          .ui_messages_stay_only_in_this_channel_until_a_de_4b30c6b0,
                     ),
                   ),
                 )
@@ -471,8 +484,10 @@ final class _AnnouncementManagementTabState
                       ),
                       title: Text(_followLabel(follow)),
                       subtitle: Text(
-                        '${follow.targetChannel.wire}'
-                        '${follow.federated ? ' · Federated' : ''}',
+                        L10n.of(context).ui_value0_value1_07eda8d4(
+                            (follow.targetChannel.wire).toString(),
+                            (follow.federated ? ' · Federated' : '')
+                                .toString()),
                       ),
                       trailing: Tooltip(
                         message: canDeleteAnnouncementFollow(
@@ -480,8 +495,9 @@ final class _AnnouncementManagementTabState
                           _guilds,
                           _currentUser,
                         )
-                            ? 'Remove follower'
-                            : 'Manage Webhooks is required in the destination',
+                            ? L10n.of(context).ui_remove_follower_5eb208bd
+                            : L10n.of(context)
+                                .ui_manage_webhooks_is_required_in_the_destinatio_bbcabccb,
                         child: IconButton(
                           onPressed: _busyFollow == null &&
                                   canDeleteAnnouncementFollow(

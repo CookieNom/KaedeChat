@@ -1,7 +1,7 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -96,7 +96,8 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
             if (failure.isForMainFrame == true && mounted) {
               setState(() {
                 loading = false;
-                error = 'The security check could not be loaded.';
+                error = L10n.of(context)
+                    .ui_the_security_check_could_not_be_loaded_0f314c52;
               });
             }
           },
@@ -117,23 +118,27 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
         final value = decoded['value'] as String;
         if (value.isEmpty || value.length > 2048) {
           setState(
-            () => error = 'The security check returned an invalid result.',
+            () => error = L10n.of(context)
+                .ui_the_security_check_returned_an_invalid_result_bfe78026,
           );
           return;
         }
         completed = true;
         Navigator.of(context).pop(value);
       } else if (decoded['kind'] == 'error' || decoded['kind'] == 'expired') {
-        setState(() => error = 'Verification expired. Please try again.');
+        setState(() => error =
+            L10n.of(context).ui_verification_expired_please_try_again_459bfd28);
       }
     } on FormatException {
-      setState(() => error = 'The security check returned an invalid result.');
+      setState(() => error = L10n.of(context)
+          .ui_the_security_check_returned_an_invalid_result_bfe78026);
     }
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text('Security check')),
+        appBar:
+            AppBar(title: Text(L10n.of(context).ui_security_check_12ffab43)),
         body: Stack(
           children: [
             WebViewWidget(controller: controller),
@@ -153,7 +158,7 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
                           });
                           controller.reload();
                         },
-                        child: Text('Retry'),
+                        child: Text(L10n.of(context).ui_retry_8036af59),
                       ),
                     ],
                   ),

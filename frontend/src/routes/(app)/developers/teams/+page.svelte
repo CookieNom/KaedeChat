@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import DeveloperPortalNav from '$lib/components/DeveloperPortalNav.svelte';
   import { api, userErrorMessage } from '$lib/api/client';
   import { onMount } from 'svelte';
@@ -74,9 +76,9 @@
       name = '';
       showCreate = false;
       await loadTeams(created.ref);
-      notice = 'Team created.';
+      notice = $t('ui_team_created_d37fde71');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not create the team.');
+      error = userErrorMessage(caught, $t('ui_could_not_create_the_team_3f83e522'));
     } finally {
       busy = false;
     }
@@ -111,9 +113,9 @@
       memberIdentity = '';
       showAddMember = false;
       await loadMembers();
-      notice = 'Team member added.';
+      notice = $t('ui_team_member_added_a2dad3e3');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not add the team member.');
+      error = userErrorMessage(caught, $t('ui_could_not_add_the_team_member_5e1c78c3'));
     } finally {
       busy = false;
     }
@@ -128,9 +130,9 @@
         { method: 'PATCH', body: JSON.stringify({ role }) }
       );
       await loadMembers();
-      notice = 'Role updated.';
+      notice = $t('ui_role_updated_0c33aa24');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update the team member.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_the_team_member_d98a0be7'));
     }
   }
 
@@ -143,9 +145,9 @@
         { method: 'DELETE' }
       );
       await loadMembers();
-      notice = 'Team member removed.';
+      notice = $t('ui_team_member_removed_86f42e0e');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not remove the team member.');
+      error = userErrorMessage(caught, $t('ui_could_not_remove_the_team_member_584dab34'));
     }
   }
 
@@ -153,23 +155,25 @@
     () =>
       void loadTeams().catch((caught) => {
         loaded = true;
-        error = userErrorMessage(caught, 'Could not load developer teams.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_developer_teams_9fad5121'));
       })
   );
 </script>
 
-<svelte:head><title>Developer teams · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_developer_teams_kaede_chat_ddf6160b')}</title></svelte:head>
 
 <main class="portal-shell">
   <DeveloperPortalNav active="teams" />
   <section class="portal-content">
     <header class="page-header">
       <div>
-        <span class="eyebrow">Access</span>
-        <h1>Teams</h1>
-        <p>Keep personal projects separate or collaborate with other local Kaede accounts.</p>
+        <span class="eyebrow">{$t('ui_access_ec5ba0ab')}</span>
+        <h1>{$t('ui_teams_1e1a1c07')}</h1>
+        <p>{$t('ui_keep_personal_projects_separate_or_collaborat_e0781153')}</p>
       </div>
-      <button class="primary" type="button" onclick={() => (showCreate = true)}>＋ New team</button>
+      <button class="primary" type="button" onclick={() => (showCreate = true)}
+        >{$t('ui_new_team_c5705ece')}</button
+      >
     </header>
 
     {#if error}<div class="notice error" role="alert">{error}</div>{/if}
@@ -178,20 +182,25 @@
     {#if showCreate}
       <form class="compact-form" onsubmit={createTeam}>
         <div>
-          <span class="eyebrow">Shared workspace</span>
-          <h2>Create a team</h2>
-          <p>Use teams when multiple people need to manage the same applications.</p>
+          <span class="eyebrow">{$t('ui_shared_workspace_4ae27ff7')}</span>
+          <h2>{$t('ui_create_a_team_00766ad4')}</h2>
+          <p>{$t('ui_use_teams_when_multiple_people_need_to_manage_a1b23809')}</p>
         </div>
         <label>
-          Team name
-          <input bind:value={name} maxlength="100" required placeholder="Platform engineering" />
+          {$t('ui_team_name_0952fcc6')}
+          <input
+            bind:value={name}
+            maxlength="100"
+            required
+            placeholder={$t('ui_platform_engineering_3188dc85')}
+          />
         </label>
         <div class="form-actions">
           <button class="secondary" type="button" onclick={() => (showCreate = false)}
-            >Cancel</button
+            >{$t('ui_cancel_19766ed6')}</button
           >
           <button class="primary" disabled={busy || !name.trim()}>
-            {busy ? 'Creating…' : 'Create team'}
+            {busy ? $t('ui_creating_c79ed949') : $t('ui_create_team_284ff194')}
           </button>
         </div>
       </form>
@@ -200,14 +209,14 @@
     <section aria-labelledby="team-list-heading">
       <div class="section-heading">
         <div>
-          <h2 id="team-list-heading">Your workspaces</h2>
-          <p>Personal is always available and private to your account.</p>
+          <h2 id="team-list-heading">{$t('ui_your_workspaces_aa48ed61')}</h2>
+          <p>{$t('ui_personal_is_always_available_and_private_to_y_7e630ea6')}</p>
         </div>
         <span>{teams.length}</span>
       </div>
 
       {#if !loaded}
-        <div class="loading-card">Loading teams…</div>
+        <div class="loading-card">{$t('ui_loading_teams_e05fe2fb')}</div>
       {:else}
         <div class="team-grid">
           {#each teams as team (team.ref)}
@@ -221,8 +230,8 @@
                 {team.personal ? 'P' : team.name.slice(0, 1).toUpperCase()}
               </span>
               <span>
-                <strong>{team.personal ? 'Personal' : team.name}</strong>
-                <small>{team.personal ? 'Only you' : team.role}</small>
+                <strong>{team.personal ? $t('ui_personal_845f9286') : team.name}</strong>
+                <small>{team.personal ? $t('ui_only_you_c080649d') : team.role}</small>
               </span>
               <span class="arrow" aria-hidden="true">›</span>
             </button>
@@ -236,13 +245,17 @@
         <header>
           <div>
             <span class="eyebrow"
-              >{selected.personal ? 'Your default workspace' : 'Shared workspace'}</span
+              >{selected.personal
+                ? $t('ui_your_default_workspace_12ccb757')
+                : $t('ui_shared_workspace_4ae27ff7')}</span
             >
-            <h2 id="selected-team-heading">{selected.personal ? 'Personal' : selected.name}</h2>
+            <h2 id="selected-team-heading">
+              {selected.personal ? $t('ui_personal_845f9286') : selected.name}
+            </h2>
             <p>
               {selected.personal
-                ? 'New applications belong here by default. This workspace cannot be shared or removed.'
-                : 'Members can manage applications according to their assigned role.'}
+                ? $t('ui_new_applications_belong_here_by_default_this__7580306d')
+                : $t('ui_members_can_manage_applications_according_to__2df1d20a')}
             </p>
           </div>
           {#if !selected.personal && ['owner', 'administrator'].includes(selected.role)}
@@ -251,7 +264,7 @@
               type="button"
               onclick={() => (showAddMember = !showAddMember)}
             >
-              ＋ Add member
+              {$t('ui_add_member_c605107a')}
             </button>
           {/if}
         </header>
@@ -259,27 +272,29 @@
         {#if showAddMember && !selected.personal}
           <form class="add-member" onsubmit={addMember}>
             <label>
-              Federated username or account ID
+              {$t('ui_federated_username_or_account_id_7660b488')}
               <input
                 bind:value={memberIdentity}
                 placeholder="developer@remote.example"
                 autocomplete="off"
                 required
               />
-              <small>Use a handle from any trusted instance or paste a qualified account ID.</small>
+              <small>{$t('ui_use_a_handle_from_any_trusted_instance_or_pas_2cc679e4')}</small>
             </label>
             <label>
-              Role
+              {$t('ui_role_14736a2e')}
               <select bind:value={memberRole}>
                 {#each roles as role (role)}<option value={role}>{role}</option>{/each}
               </select>
             </label>
-            <button class="primary" disabled={busy}>{busy ? 'Adding…' : 'Add member'}</button>
+            <button class="primary" disabled={busy}
+              >{busy ? $t('ui_adding_c6de6f45') : $t('ui_add_member_17108415')}</button
+            >
           </form>
         {/if}
 
         <div class="member-heading">
-          <h3>Members</h3>
+          <h3>{$t('ui_members_1044a4c0')}</h3>
           <span>{members.length}</span>
         </div>
         <div class="members">
@@ -301,7 +316,7 @@
                   {#each roles as role (role)}<option value={role}>{role}</option>{/each}
                 </select>
                 <button class="remove" type="button" onclick={() => removeMember(member)}
-                  >Remove</button
+                  >{$t('ui_remove_c3812fc4')}</button
                 >
               {:else}
                 <span class="role">{member.role}</span>
@@ -310,7 +325,7 @@
           {/each}
         </div>
         <footer>
-          <span>Team ID</span>
+          <span>{$t('ui_team_id_fa2758a6')}</span>
           <code>{selected.ref}</code>
         </footer>
       </section>

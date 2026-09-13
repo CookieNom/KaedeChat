@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import {
@@ -41,7 +43,7 @@
           unavailable = true;
           unavailableError = userErrorMessage(
             caught,
-            'Could not check this invitation. Check your connection and try again.'
+            $t('ui_could_not_check_this_invitation_check_your_co_d3ecd2d3')
           );
         }
       });
@@ -66,7 +68,7 @@
       if (generation !== loadGeneration) return;
       error = userErrorMessage(
         caught,
-        'Could not join this guild. Check the invite and try again.'
+        $t('ui_could_not_join_this_guild_check_the_invite_an_bea468bc')
       );
     } finally {
       if (generation === loadGeneration) busy = false;
@@ -77,7 +79,7 @@
 {#if preview}
   <aside class="invite-embed" aria-label={`Invitation to ${preview.guild.name}`}>
     <div class="invite-embed-copy">
-      <p>Guild invitation</p>
+      <p>{$t('ui_guild_invitation_b70f19ee')}</p>
       <div>
         <span class="invite-embed-icon" aria-hidden="true">
           {#if preview.guild.icon_hash}
@@ -96,17 +98,27 @@
         </p>{/if}
     </div>
     <button class="invite-join" type="button" disabled={busy || alreadyJoined} onclick={join}>
-      {busy ? 'Joining…' : alreadyJoined ? 'Already joined' : 'Join guild'}
+      {busy
+        ? $t('ui_joining_6bbb89ee')
+        : alreadyJoined
+          ? $t('ui_already_joined_8fdecf3b')
+          : $t('ui_join_guild_6562aa44')}
     </button>
     {#if error}<p class="invite-error" role="alert">{error}</p>{/if}
   </aside>
 {:else if unavailable}
-  <aside class="invite-embed unavailable" aria-label="Unavailable guild invitation">
+  <aside
+    class="invite-embed unavailable"
+    aria-label={$t('ui_unavailable_guild_invitation_b2835026')}
+  >
     <Icon name="server" size={20} />
-    <span><strong>Invitation unavailable</strong><small>{unavailableError}</small></span>
+    <span
+      ><strong>{$t('ui_invitation_unavailable_4ef9de8a')}</strong><small>{unavailableError}</small
+      ></span
+    >
   </aside>
 {:else}
-  <aside class="invite-embed loading" aria-label="Loading guild invitation">
+  <aside class="invite-embed loading" aria-label={$t('ui_loading_guild_invitation_dd7a804a')}>
     <span></span><span></span>
   </aside>
 {/if}

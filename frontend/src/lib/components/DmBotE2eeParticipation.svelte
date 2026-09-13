@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { ApiError, api, userErrorMessage } from '$lib/api/client';
   import {
     listUserApplicationInstallations,
@@ -50,7 +52,7 @@
       participation = await api<DmBotE2eeParticipation>(path());
     } catch (caught) {
       if (!(caught instanceof ApiError && caught.code === 'BOT_E2EE_PARTICIPATION_NOT_FOUND')) {
-        error = userErrorMessage(caught, 'Could not load encrypted app consent.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_encrypted_app_consent_8528b7a0'));
       }
     } finally {
       loading = false;
@@ -71,7 +73,10 @@
         loaded.find(userApplicationCanParticipateInEncryptedDm)?.application_ref ?? '';
       await loadParticipation();
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not load your participant-capable apps.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_your_participant_capable_apps_5b7bc611')
+      );
       loading = false;
     }
   }
@@ -100,7 +105,7 @@
           ? 'Everyone consented. App devices will join after the room rekeys.'
           : 'Your consent was recorded. The app remains blocked until every participant consents.';
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not record encrypted app consent.');
+      error = userErrorMessage(caught, $t('ui_could_not_record_encrypted_app_consent_7a128380'));
     } finally {
       busy = false;
     }
@@ -120,9 +125,9 @@
     notice = '';
     try {
       participation = await api<DmBotE2eeParticipation>(path(), { method: 'DELETE' });
-      notice = 'App access was revoked and a room rekey was staged.';
+      notice = $t('ui_app_access_was_revoked_and_a_room_rekey_was_s_bcc64276');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not revoke encrypted app access.');
+      error = userErrorMessage(caught, $t('ui_could_not_revoke_encrypted_app_access_7fb58554'));
     } finally {
       busy = false;
     }
@@ -142,19 +147,17 @@
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dm-apps-title">
       <header>
         <div>
-          <p>End-to-end encryption</p>
-          <h2 id="dm-apps-title">Apps in this conversation</h2>
+          <p>{$t('ui_end_to_end_encryption_1b3f0f02')}</p>
+          <h2 id="dm-apps-title">{$t('ui_apps_in_this_conversation_790e817d')}</h2>
         </div>
-        <button class="close" type="button" aria-label="Close" onclick={onClose}>×</button>
+        <button class="close" type="button" aria-label={$t('ui_close_7d9eb7ac')} onclick={onClose}
+          >×</button
+        >
       </header>
-      <p class="warning">
-        An app becomes another cryptographic participant. Every person must consent separately;
-        installation alone grants nothing. Revocation rotates keys but cannot recall data already
-        decrypted by the app operator.
-      </p>
+      <p class="warning">{$t('ui_an_app_becomes_another_cryptographic_particip_ab6ad395')}</p>
       {#if eligible.length}
         <label>
-          <span>Authorized participant app</span>
+          <span>{$t('ui_authorized_participant_app_2bef1487')}</span>
           <select
             value={selectedApplicationRef}
             disabled={loading || busy}
@@ -166,31 +169,32 @@
           </select>
         </label>
       {:else if !loading}
-        <p class="muted">
-          No participant-capable app is authorized for your account and private conversations. Add
-          one from its reviewed Add App flow, then return here.
-        </p>
+        <p class="muted">{$t('ui_no_participant_capable_app_is_authorized_for__c1d96873')}</p>
       {/if}
-      {#if loading}<p class="muted" role="status">Checking consent…</p>{/if}
+      {#if loading}<p class="muted" role="status">{$t('ui_checking_consent_c1415cf7')}</p>{/if}
       {#if participation}
         <div class="status">
           <strong>{participation.consent_state}</strong>
           <small>
             {participation.history_floor_message_ref
               ? `No app history before ${participation.history_floor_message_ref}`
-              : 'No app access to messages sent before full consent'}
+              : $t('ui_no_app_access_to_messages_sent_before_full_co_5af70ce7')}
           </small>
           <ul>
             {#each participation.participants as participant (participant.user_ref)}
               <li>
                 <code>{participant.user_ref}</code>
-                <span>{participant.consented ? 'Consented' : 'Waiting for consent'}</span>
+                <span
+                  >{participant.consented
+                    ? $t('ui_consented_588f4572')
+                    : $t('ui_waiting_for_consent_2ac3ee95')}</span
+                >
               </li>
             {/each}
           </ul>
           {#if participation.devices.length}
             <details>
-              <summary>Verified app devices</summary>
+              <summary>{$t('ui_verified_app_devices_3cc5a829')}</summary>
               {#each participation.devices as device (device.device_id)}
                 <code>{device.device_id} · {device.status} · epoch {device.joined_epoch}</code>
               {/each}
@@ -201,15 +205,15 @@
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       {#if notice}<p class="notice" role="status">{notice}</p>{/if}
       <footer>
-        <button class="secondary" type="button" onclick={onClose}>Done</button>
+        <button class="secondary" type="button" onclick={onClose}>{$t('ui_done_11a6767d')}</button>
         {#if selected}
           {#if participation && participation.consent_state !== 'revoked'}
             <button class="danger" type="button" disabled={busy || loading} onclick={revoke}>
-              {busy ? 'Removing…' : 'Remove app'}
+              {busy ? $t('ui_removing_d4b09919') : $t('ui_remove_app_2ce42874')}
             </button>
           {:else}
             <button type="button" disabled={busy || loading} onclick={consent}>
-              {busy ? 'Recording…' : 'Consent to add'}
+              {busy ? $t('ui_recording_7ea93caa') : $t('ui_consent_to_add_c627801e')}
             </button>
           {/if}
         {/if}

@@ -11,6 +11,8 @@
     rememberNativeRoute,
     storedNativeRoute
   } from '$lib/platform/native';
+  import { applyLocale, storedLocale, setSystemLanguages } from '$lib/ui/locale';
+  import { nativeInvoke, type NativePlatformInfo } from '$lib/platform/native';
   import { applyTheme, storedTheme } from '$lib/ui/theme';
   import NativeDesktopLifecycle from '$lib/components/NativeDesktopLifecycle.svelte';
   import { clearActiveE2EEState } from '$lib/e2ee/client';
@@ -43,6 +45,19 @@
         // The request layer retries transient native-vault failures and exposes
         // a useful error if the store remains unavailable.
       });
+    applyLocale(storedLocale());
+    const refreshLanguage = () => {
+      if (isNativeDesktop()) {
+        void nativeInvoke<NativePlatformInfo>('native_platform_info')
+          .then((info) => {
+            setSystemLanguages(info.locales?.length ? info.locales : undefined);
+          })
+          .catch(() => setSystemLanguages());
+      } else setSystemLanguages();
+    };
+    refreshLanguage();
+    window.addEventListener('languagechange', refreshLanguage);
+    window.addEventListener('focus', refreshLanguage);
     applyTheme(storedTheme(), false);
     const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
     const colorSchemeChanged = () => {
@@ -66,6 +81,8 @@
     window.addEventListener('pageshow', pageRestored);
     colorScheme.addEventListener('change', colorSchemeChanged);
     return () => {
+      window.removeEventListener('languagechange', refreshLanguage);
+      window.removeEventListener('focus', refreshLanguage);
       window.removeEventListener('kaede:session-expired', sessionExpired);
       window.removeEventListener('pageshow', pageRestored);
       colorScheme.removeEventListener('change', colorSchemeChanged);

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import type { BotInviteReference } from '$lib/chat/bot-invites';
@@ -43,7 +45,10 @@
       })
       .catch((caught) => {
         if (current === generation)
-          unavailable = userErrorMessage(caught, 'This bot invitation is unavailable.');
+          unavailable = userErrorMessage(
+            caught,
+            $t('ui_this_bot_invitation_is_unavailable_b2641d14')
+          );
       });
   });
 </script>
@@ -64,29 +69,39 @@
         {:else}{invite.application.name.slice(0, 1).toUpperCase()}{/if}
       </span>
       <span
-        ><small>APP AUTHORIZATION</small><strong>{invite.application.name}</strong><em
-          >{invite.application.origin_domain}</em
-        ></span
+        ><small>{$t('ui_app_authorization_08b9aae0')}</small><strong
+          >{invite.application.name}</strong
+        ><em>{invite.application.origin_domain}</em></span
       >
     </div>
     <p>{invite.template.description ?? invite.application.description ?? invite.template.name}</p>
     <div class="access">
-      <span>{invite.template.scopes.length} API scopes</span>
-      <span>{invite.template.e2ee_mode.replaceAll('_', ' ')} E2EE</span>
+      <span
+        >{$t('ui_value0_api_scopes_53034ee3', {
+          value0: String(invite.template.scopes.length)
+        })}</span
+      >
+      <span
+        >{$t('ui_value0_e2ee_042e0b59', {
+          value0: String(invite.template.e2ee_mode.replaceAll('_', ' '))
+        })}</span
+      >
     </div>
     <a
       href={resolve('/(app)/applications/[applicationRef]/install/[templateSlug]', {
         applicationRef: reference.applicationRef,
         templateSlug: reference.templateSlug
-      })}>Review and add</a
+      })}>{$t('ui_review_and_add_9f92d110')}</a
     >
   </aside>
 {:else if unavailable}
   <aside class="bot-invite unavailable">
-    <strong>Bot invitation unavailable</strong><small>{unavailable}</small>
+    <strong>{$t('ui_bot_invitation_unavailable_04aa9c1e')}</strong><small>{unavailable}</small>
   </aside>
 {:else}
-  <aside class="bot-invite loading" aria-label="Loading bot invitation"><span></span></aside>
+  <aside class="bot-invite loading" aria-label={$t('ui_loading_bot_invitation_f19e849a')}>
+    <span></span>
+  </aside>
 {/if}
 
 <style>

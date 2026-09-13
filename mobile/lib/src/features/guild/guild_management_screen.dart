@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
@@ -30,6 +29,7 @@ import 'package:kaede_mobile/src/features/guild/bot_e2ee_participation_screen.da
 import 'package:kaede_mobile/src/features/guild/guild_admin_advanced.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -273,12 +273,13 @@ final class _GuildManagementScreenState
     } else if (_sawLiveGuild) {
       _reloadGeneration += 1;
       return Scaffold(
-        appBar: AppBar(title: Text('Guild settings')),
+        appBar:
+            AppBar(title: Text(L10n.of(context).ui_guild_settings_33e2baed)),
         body: Center(
           child: Padding(
             padding: EdgeInsets.all(24),
             child: Text(
-              'This guild is no longer available.',
+              L10n.of(context).ui_this_guild_is_no_longer_available_d15ae27d,
               textAlign: TextAlign.center,
             ),
           ),
@@ -328,8 +329,9 @@ final class _GuildManagementScreenState
     final sections =
         <({String label, String description, IconData icon, Widget page})>[
       (
-        label: 'Overview',
-        description: 'Name, icon, banner and guild-wide defaults.',
+        label: L10n.of(context).ui_overview_6a494fba,
+        description: L10n.of(context)
+            .ui_name_icon_banner_and_guild_wide_defaults_fc9218fd,
         icon: Icons.home_outlined,
         page: _OverviewTab(
           guild: _guild,
@@ -344,8 +346,9 @@ final class _GuildManagementScreenState
           hasChannelManagement ||
           hasChannelPermissionManagement)
         (
-          label: 'Channels',
-          description: 'Create channels, reorder them and set permissions.',
+          label: L10n.of(context).ui_channels_c9409495,
+          description: L10n.of(context)
+              .ui_create_channels_reorder_them_and_set_permissi_f7c8fc39,
           icon: Icons.tag_rounded,
           page: _ChannelsTab(
             guild: _guild,
@@ -360,8 +363,9 @@ final class _GuildManagementScreenState
         ),
       if (canManageRoles)
         (
-          label: 'Roles',
-          description: 'Role colours, permissions and ordering.',
+          label: L10n.of(context).ui_roles_3e77ce7e,
+          description: L10n.of(context)
+              .ui_role_colours_permissions_and_ordering_e73ab61f,
           icon: Icons.badge_outlined,
           page: _RolesTab(
               guild: _guild,
@@ -371,8 +375,9 @@ final class _GuildManagementScreenState
         ),
       if (canManageMembers)
         (
-          label: 'Members',
-          description: 'Nicknames, roles, timeouts, kicks and bans.',
+          label: L10n.of(context).ui_members_ed3c96b0,
+          description: L10n.of(context)
+              .ui_nicknames_roles_timeouts_kicks_and_bans_f3a1e17f,
           icon: Icons.people_outline_rounded,
           page: _MembersTab(
               guild: _guild,
@@ -387,8 +392,9 @@ final class _GuildManagementScreenState
           _guild.allows(Permission.banMembers) ||
           _guild.allows(Permission.banInstances))
         (
-          label: 'Bans',
-          description: 'Banned accounts and blocked instances.',
+          label: L10n.of(context).ui_bans_aa74d24f,
+          description: L10n.of(context)
+              .ui_banned_accounts_and_blocked_instances_03a7b02c,
           icon: Icons.gavel_outlined,
           page: _BansTab(
             guild: _guild,
@@ -399,8 +405,9 @@ final class _GuildManagementScreenState
         ),
       if (isOwner || _guild.allows(Permission.manageAutoModeration))
         (
-          label: 'AutoMod',
-          description: 'Filter messages and member profiles automatically.',
+          label: L10n.of(context).ui_automod_d65d27ea,
+          description: L10n.of(context)
+              .ui_filter_messages_and_member_profiles_automatic_e3c9eae5,
           icon: Icons.shield_outlined,
           page: GuildAutoModTab(
             guild: _guild,
@@ -412,8 +419,9 @@ final class _GuildManagementScreenState
               (_guild.allows(Permission.kickMembers) ||
                   _guild.allows(Permission.banMembers))))
         (
-          label: 'Bulk moderation',
-          description: 'Prune inactive members and perform reviewed bulk bans.',
+          label: L10n.of(context).ui_bulk_moderation_08152917,
+          description: L10n.of(context)
+              .ui_prune_inactive_members_and_perform_reviewed_b_25827fe4,
           icon: Icons.cleaning_services_outlined,
           page: GuildBulkModerationTab(
             guild: _guild,
@@ -431,8 +439,9 @@ final class _GuildManagementScreenState
           canListGuildInvites ||
           managedInviteChannels.isNotEmpty)
         (
-          label: 'Invites',
-          description: 'Active invite links and who created them.',
+          label: L10n.of(context).ui_invites_4f9d0a79,
+          description: L10n.of(context)
+              .ui_active_invite_links_and_who_created_them_57a72920,
           icon: Icons.person_add_alt_1_rounded,
           page: _InvitesTab(
             guild: _guild,
@@ -452,8 +461,9 @@ final class _GuildManagementScreenState
         ),
       if (canCreateExpressions || canManageExpressions)
         (
-          label: 'Emoji',
-          description: 'Custom emoji available in this guild.',
+          label: L10n.of(context).ui_emoji_033ebcdd,
+          description:
+              L10n.of(context).ui_custom_emoji_available_in_this_guild_e89c2155,
           icon: Icons.emoji_emotions_outlined,
           page: _EmojiTab(
             guild: _guild,
@@ -465,8 +475,9 @@ final class _GuildManagementScreenState
         ),
       if (canCreateExpressions || canManageExpressions)
         (
-          label: 'Soundboard',
-          description: 'Manage and play short guild audio clips.',
+          label: L10n.of(context).ui_soundboard_5a91f77c,
+          description: L10n.of(context)
+              .ui_manage_and_play_short_guild_audio_clips_66e75aab,
           icon: Icons.music_note_outlined,
           page: GuildSoundboardTab(
             guild: _guild,
@@ -479,8 +490,9 @@ final class _GuildManagementScreenState
         ),
       if (canCreateExpressions || canManageExpressions)
         (
-          label: 'Stickers',
-          description: 'Static and animated stickers available in this guild.',
+          label: L10n.of(context).ui_stickers_1609e2dd,
+          description: L10n.of(context)
+              .ui_static_and_animated_stickers_available_in_thi_a7e6e49e,
           icon: Icons.sticky_note_2_outlined,
           page: _StickersTab(
             guild: _guild,
@@ -492,8 +504,9 @@ final class _GuildManagementScreenState
         ),
       if (canManageWebhooks || managedWebhookChannels.isNotEmpty)
         (
-          label: 'Integrations · Webhooks',
-          description: 'Outgoing integrations that post here.',
+          label: L10n.of(context).ui_integrations_webhooks_e59e195d,
+          description:
+              L10n.of(context).ui_outgoing_integrations_that_post_here_c2f0636b,
           icon: Icons.webhook_rounded,
           page: _WebhooksTab(
             guild: _guild,
@@ -506,8 +519,9 @@ final class _GuildManagementScreenState
         (channel) => channel.type == ChannelType.announcement,
       ))
         (
-          label: 'Integrations · Channels Followed',
-          description: 'Follower channels and published announcement delivery.',
+          label: L10n.of(context).ui_integrations_channels_followed_8fcd2555,
+          description: L10n.of(context)
+              .ui_follower_channels_and_published_announcement__9dd4254b,
           icon: Icons.campaign_outlined,
           page: AnnouncementManagementTab(
             guild: _guild,
@@ -519,9 +533,9 @@ final class _GuildManagementScreenState
         ),
       if (canManageGuild)
         (
-          label: 'Integrations · Bots & Apps',
-          description:
-              'Installed bots and apps, grants, and automation access.',
+          label: L10n.of(context).ui_integrations_bots_apps_f16dc645,
+          description: L10n.of(context)
+              .ui_installed_bots_and_apps_grants_and_automation_021af7b3,
           icon: Icons.smart_toy_outlined,
           page: _BotIntegrationsTab(
             guild: _guild,
@@ -534,8 +548,9 @@ final class _GuildManagementScreenState
         ),
       if (isOwner || _guild.allows(Permission.viewAuditLog))
         (
-          label: 'Audit',
-          description: 'Recent administrative actions.',
+          label: L10n.of(context).ui_audit_9d973548,
+          description:
+              L10n.of(context).ui_recent_administrative_actions_ce26f577,
           icon: Icons.receipt_long_outlined,
           page: _AuditTab(
             guild: _guild,
@@ -550,7 +565,7 @@ final class _GuildManagementScreenState
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(_guild.name),
-        Text('Guild settings',
+        Text(L10n.of(context).ui_guild_settings_33e2baed,
             style: TextStyle(fontSize: 12, color: context.kaede.muted)),
       ],
     );
@@ -682,7 +697,8 @@ final class _GuildManagementScreenState
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not load the guild settings',
+            summary:
+                L10n.of(context).ui_could_not_load_the_guild_settings_b6e86f92,
           )),
           backgroundColor: context.kaede.danger));
     }
@@ -1053,8 +1069,8 @@ final class _OverviewTabState extends State<_OverviewTab> {
       setState(() {
         _notificationError = userFacingError(
           error,
-          summary:
-              'This guild’s notification preference could not be loaded. Mentions is shown as a temporary default.',
+          summary: L10n.of(context)
+              .ui_this_guild_s_notification_preference_could_no_a756f155,
         );
       });
     }
@@ -1063,14 +1079,15 @@ final class _OverviewTabState extends State<_OverviewTab> {
   Future<void> _chooseHistory(String current) async {
     final chosen = await showSettingsChoiceSheet(
       context,
-      title: 'Federated message history',
-      description:
-          'Whether instances that join later may fetch older messages from this guild.',
-      choices: const [
-        SettingsChoice('disabled', 'Disabled',
+      title: L10n.of(context).ui_federated_message_history_298c1048,
+      description: L10n.of(context)
+          .ui_whether_instances_that_join_later_may_fetch_o_91bad957,
+      choices: [
+        SettingsChoice('disabled', L10n.of(context).ui_disabled_bfce9925,
             hint:
                 'The recommended default. New instances start with a blank history.'),
-        SettingsChoice('full_retained', 'Share permitted history',
+        SettingsChoice('full_retained',
+            L10n.of(context).ui_share_permitted_history_21a3c13c,
             hint: 'Later instances may fetch retained older messages.'),
       ],
       selected: current,
@@ -1090,9 +1107,9 @@ final class _OverviewTabState extends State<_OverviewTab> {
   @override
   Widget build(BuildContext context) => _PageList(children: [
         _Panel(
-          title: 'Guild profile',
-          subtitle:
-              'Identity and presentation are federated to every joined instance.',
+          title: L10n.of(context).ui_guild_profile_ade7f5a5,
+          subtitle: L10n.of(context)
+              .ui_identity_and_presentation_are_federated_to_ev_1b8fac78,
           child: Column(children: [
             Row(children: [
               GuildIcon(guild: _guild, size: 64, borderRadius: 19),
@@ -1114,7 +1131,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                         ),
                       ),
                       icon: Icon(Icons.image_outlined, size: 16),
-                      label: Text('Change icon'),
+                      label: Text(L10n.of(context).ui_change_icon_ca1b1c46),
                     ),
                     if (_guild.iconHash != null) ...[
                       SizedBox(height: 6),
@@ -1128,7 +1145,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                           padding: EdgeInsets.symmetric(horizontal: 12),
                         ),
                         icon: Icon(Icons.delete_outline_rounded, size: 16),
-                        label: Text('Remove icon'),
+                        label: Text(L10n.of(context).ui_remove_icon_bca65d06),
                       ),
                     ],
                     SizedBox(height: 6),
@@ -1145,7 +1162,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                         ),
                       ),
                       icon: Icon(Icons.panorama_outlined, size: 16),
-                      label: Text('Change banner'),
+                      label: Text(L10n.of(context).ui_change_banner_ae718a61),
                     ),
                     if (_guild.bannerHash != null) ...[
                       SizedBox(height: 6),
@@ -1159,7 +1176,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                           padding: EdgeInsets.symmetric(horizontal: 12),
                         ),
                         icon: Icon(Icons.delete_outline_rounded, size: 16),
-                        label: Text('Remove banner'),
+                        label: Text(L10n.of(context).ui_remove_banner_74d33021),
                       ),
                     ],
                   ],
@@ -1168,13 +1185,13 @@ final class _OverviewTabState extends State<_OverviewTab> {
             ]),
             SizedBox(height: 18),
             SettingsField(
-              label: 'GUILD NAME',
+              label: L10n.of(context).ui_guild_name_da252e43,
               controller: _name,
               enabled: widget.canManage,
             ),
             SizedBox(height: 16),
             SettingsField(
-              label: 'DESCRIPTION',
+              label: L10n.of(context).ui_description_41c75cc9,
               controller: _description,
               maxLines: 4,
               maxLength: 500,
@@ -1182,9 +1199,9 @@ final class _OverviewTabState extends State<_OverviewTab> {
             ),
             SizedBox(height: 18),
             SettingsChoiceRow(
-              title: 'Federated message history',
-              subtitle:
-                  'Whether instances that join later may fetch older messages.',
+              title: L10n.of(context).ui_federated_message_history_298c1048,
+              subtitle: L10n.of(context)
+                  .ui_whether_instances_that_join_later_may_fetch_o_dfbef346,
               value: _history,
               display: _history == 'full_retained'
                   ? 'Share permitted history'
@@ -1198,13 +1215,14 @@ final class _OverviewTabState extends State<_OverviewTab> {
               child: FilledButton.icon(
                   onPressed: _busy || !widget.canManage ? null : _save,
                   icon: Icon(Icons.save_outlined),
-                  label: Text('Save changes')),
+                  label: Text(L10n.of(context).ui_save_changes_61efb279)),
             ),
           ]),
         ),
         _Panel(
-          title: 'Notifications',
-          subtitle: 'What this guild is allowed to notify you about.',
+          title: L10n.of(context).ui_notifications_381d190f,
+          subtitle: L10n.of(context)
+              .ui_what_this_guild_is_allowed_to_notify_you_abou_67dbc438,
           child: Column(children: [
             if (_notificationError case final warning?) ...[
               DecoratedBox(
@@ -1229,7 +1247,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                                   height: 1.4))),
                       TextButton(
                         onPressed: _loadNotificationSettings,
-                        child: Text('Retry'),
+                        child: Text(L10n.of(context).ui_retry_8036af59),
                       ),
                     ],
                   ),
@@ -1238,10 +1256,16 @@ final class _OverviewTabState extends State<_OverviewTab> {
               SizedBox(height: 10),
             ],
             SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'all', label: Text('All messages')),
-                ButtonSegment(value: 'mentions', label: Text('Mentions')),
-                ButtonSegment(value: 'none', label: Text('Nothing')),
+              segments: [
+                ButtonSegment(
+                    value: 'all',
+                    label: Text(L10n.of(context).ui_all_messages_a6bb8868)),
+                ButtonSegment(
+                    value: 'mentions',
+                    label: Text(L10n.of(context).ui_mentions_43e4fe52)),
+                ButtonSegment(
+                    value: 'none',
+                    label: Text(L10n.of(context).ui_nothing_2cea492a)),
               ],
               selected: {_notification},
               onSelectionChanged: (value) async {
@@ -1265,12 +1289,12 @@ final class _OverviewTabState extends State<_OverviewTab> {
           ]),
         ),
         _Panel(
-          title: 'Ownership',
-          subtitle:
-              'Remote instances keep untrusted replicas. Deletion and cache purges are best effort once data has federated.',
+          title: L10n.of(context).ui_ownership_5bfe229e,
+          subtitle: L10n.of(context)
+              .ui_remote_instances_keep_untrusted_replicas_dele_c3cd0afd,
           child: Column(children: [
             SettingsRow.chevron(
-              title: 'Transfer ownership',
+              title: L10n.of(context).ui_transfer_ownership_0b7722a7,
               leading: Padding(
                 padding: EdgeInsets.all(3),
                 child: Icon(Icons.swap_horiz_rounded,
@@ -1280,7 +1304,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
               onTap: widget.isOwner ? _transfer : null,
             ),
             SettingsRow.chevron(
-              title: 'Leave guild',
+              title: L10n.of(context).ui_leave_guild_a37329a3,
               leading: Padding(
                 padding: EdgeInsets.all(3),
                 child: Icon(Icons.logout_rounded,
@@ -1291,7 +1315,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
             ),
             SettingsRow(
               danger: true,
-              title: 'Delete guild',
+              title: L10n.of(context).ui_delete_guild_260ee9b1,
               leading: Padding(
                 padding: EdgeInsets.all(3),
                 child: Icon(Icons.delete_forever_outlined,
@@ -1546,7 +1570,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         floatingActionButton: FloatingActionButton.extended(
             onPressed: widget.canManageChannels ? _create : null,
             icon: Icon(Icons.add_rounded),
-            label: Text('Create channel')),
+            label: Text(L10n.of(context).ui_create_channel_fd2226d6)),
       );
 
   Widget _channelActions(KaedeChannel channel, int index) {
@@ -1572,13 +1596,19 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                         : _edit(channel),
         itemBuilder: (_) => [
           if (canManageChannel)
-            PopupMenuItem(value: 'edit', child: Text('Edit channel')),
+            PopupMenuItem(
+                value: 'edit',
+                child: Text(L10n.of(context).ui_edit_channel_dfb3900a)),
           if (widget.canManageChannels &&
               canManageChannel &&
               channel.type != ChannelType.category)
-            PopupMenuItem(value: 'move', child: Text('Move to category')),
+            PopupMenuItem(
+                value: 'move',
+                child: Text(L10n.of(context).ui_move_to_category_dac98463)),
           if (canManagePermissions)
-            PopupMenuItem(value: 'permissions', child: Text('Permissions')),
+            PopupMenuItem(
+                value: 'permissions',
+                child: Text(L10n.of(context).ui_permissions_8700fd83)),
           if (canManageChannel &&
               {
                 ChannelType.text,
@@ -1589,20 +1619,21 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
             PopupMenuItem(
               value: 'encryption',
               child: Text(channel.encryptionMode == 'e2ee'
-                  ? 'Encryption settings'
-                  : 'Enable encryption'),
+                  ? L10n.of(context).ui_encryption_settings_233c72d9
+                  : L10n.of(context).ui_enable_encryption_a0595627),
             ),
           if (canManageChannel)
             PopupMenuItem(
                 value: 'delete',
-                child: Text('Delete',
+                child: Text(L10n.of(context).ui_delete_5797ea6a,
                     style: TextStyle(color: context.kaede.danger))),
         ],
       ),
       if (_canReorderChannel(channel)) ...[
         if (channel.type == ChannelType.category)
           Tooltip(
-            message: 'Add a channel to this category',
+            message:
+                L10n.of(context).ui_add_a_channel_to_this_category_d12cb039,
             child: InkWell(
               onTap: () => _createChannel(initialParent: channel.ref),
               borderRadius: BorderRadius.circular(10),
@@ -1616,7 +1647,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
           ReorderableDragStartListener(
             index: index,
             child: Tooltip(
-              message: 'Drag to reorder',
+              message: L10n.of(context).ui_drag_to_reorder_fce503d3,
               child: SizedBox.square(
                 dimension: 44,
                 child:
@@ -1688,7 +1719,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not reorder the channels',
+          summary: L10n.of(context).ui_could_not_reorder_the_channels_419a2fc9,
         )),
         backgroundColor: context.kaede.danger,
       ));
@@ -1709,13 +1740,14 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
     final current = channel.parentRef?.wire ?? '';
     final chosen = await showSettingsChoiceSheet(
       context,
-      title: 'Move to category',
-      description: 'Choose where ${channel.name ?? 'the channel'} lives.',
+      title: L10n.of(context).ui_move_to_category_dac98463,
+      description: L10n.of(context).ui_choose_where_value0_lives_855fa127(
+          (channel.name ?? 'the channel').toString()),
       selected: categories.any((category) => category.ref.wire == current)
           ? current
           : '',
       choices: [
-        SettingsChoice('', 'No category'),
+        SettingsChoice('', L10n.of(context).ui_no_category_44662d06),
         for (final category in categories)
           SettingsChoice(category.ref.wire, category.name ?? 'Category'),
       ],
@@ -1766,7 +1798,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not move the channel',
+          summary: L10n.of(context).ui_could_not_move_the_channel_da939b2c,
         )),
         backgroundColor: context.kaede.danger,
       ));
@@ -1957,7 +1989,8 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
             } on Object catch (caught) {
               error = userFacingError(
                 caught,
-                summary: 'Could not update end-to-end encryption.',
+                summary: L10n
+                    .current.ui_could_not_update_end_to_end_encryption_8cd06684,
               );
             } finally {
               if (dialogContext.mounted) {
@@ -1969,8 +2002,8 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
           final media = channel.type == ChannelType.voice;
           return AlertDialog(
             title: Text(encrypted
-                ? 'End-to-end encryption'
-                : 'Enable end-to-end encryption?'),
+                ? L10n.of(context).ui_end_to_end_encryption_21f71771
+                : L10n.of(context).ui_enable_end_to_end_encryption_5096f759),
             content: SizedBox(
               width: 520,
               child: SingleChildScrollView(
@@ -1980,27 +2013,34 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                   children: [
                     Text(encrypted
                         ? needsRekey
-                            ? 'Encrypted activity is paused until a manager rotates the room keys.'
-                            : 'Encryption is ${channel.encryptionState}.'
+                            ? L10n.of(context)
+                                .ui_encrypted_activity_is_paused_until_a_manager__be3437b6
+                            : L10n.of(context).ui_encryption_is_value0_b7e2290d(
+                                (channel.encryptionState).toString())
                         : media
-                            ? 'Voice, video, screen video, and screen audio will be encrypted on participant devices. The media relay still sees routing, timing, track, traffic, and participant metadata.'
-                            : 'New messages and files will be encrypted on participant devices. Existing history remains plaintext.'),
+                            ? L10n.of(context)
+                                .ui_voice_video_screen_video_and_screen_audio_wil_3aa150a1
+                            : L10n.of(context)
+                                .ui_new_messages_and_files_will_be_encrypted_on_p_3b833b3c),
                     SizedBox(height: 12),
                     Text(
-                      'Until members compare the channel safety number through a separate trusted channel, content is encrypted but identities are unverified. Comparing it is what detects first-contact or active-instance key substitution.',
+                      L10n.of(context)
+                          .ui_until_members_compare_the_channel_safety_numb_b0edc22b,
                     ),
                     SizedBox(height: 12),
                     Text(media
-                        ? 'Server recording, transcription, media moderation, and unsupported clients will be unavailable. A participant can still record on their own device. This change cannot be reversed.'
-                        : 'Search, link previews, server file previews, and malware scanning will be unavailable. Webhooks receive no access automatically; a verified webhook device can receive only future content after a server administrator grants access and the room establishes a rekey and history floor. Verified participant-mode apps follow the same future-only admission rule. Push wakes contain no message text, but participants, timing, and message-size metadata remain visible. Losing the synchronized encrypted vault, every trusted client’s local state, and the recovery backup permanently loses encrypted history. Removed members, apps, and webhooks retain content already received. This change cannot be reversed.'),
+                        ? L10n.of(context)
+                            .ui_server_recording_transcription_media_moderati_f0e397de
+                        : L10n.of(context)
+                            .ui_search_link_previews_server_file_previews_and_39ca98fe),
                     if (safetyNumber != null) ...[
                       SizedBox(height: 14),
-                      Text('Channel safety number',
+                      Text(L10n.of(context).ui_channel_safety_number_a5771c0b,
                           style: TextStyle(fontWeight: FontWeight.w800)),
                       SelectableText(safetyNumber!),
                       SizedBox(height: 6),
-                      Text(
-                          'Compare this with members through a trusted channel. It changes after membership or device changes.'),
+                      Text(L10n.of(context)
+                          .ui_compare_this_with_members_through_a_trusted_c_a53388d7),
                     ],
                     if (error != null) ...[
                       SizedBox(height: 12),
@@ -2014,7 +2054,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
             actions: [
               TextButton(
                 onPressed: busy ? null : () => Navigator.pop(dialogContext),
-                child: Text('Done'),
+                child: Text(L10n.of(context).ui_done_8dd31791),
               ),
               if (encrypted && channel.encryptionState == 'active')
                 FilledButton.tonal(
@@ -2027,7 +2067,8 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                               setDialogState(() => safetyNumber = value);
                             }
                           }),
-                  child: Text('Verify safety number'),
+                  child:
+                      Text(L10n.of(context).ui_verify_safety_number_070dce0b),
                 ),
               if (!encrypted || needsRekey)
                 FilledButton.icon(
@@ -2063,7 +2104,9 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                   icon: Icon(needsRekey
                       ? Icons.sync_lock_rounded
                       : Icons.lock_rounded),
-                  label: Text(needsRekey ? 'Rotate keys' : 'Enable'),
+                  label: Text(needsRekey
+                      ? L10n.of(context).ui_rotate_keys_014b6162
+                      : L10n.of(context).ui_enable_8614a9ee),
                 ),
             ],
           );
@@ -2155,8 +2198,8 @@ final class _RolesTabState extends State<_RolesTab> {
                 newIndex > lastMovable) {
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(
-                      'Roles cannot be moved above your role ceiling or below @everyone.'),
+                  content: Text(L10n.of(context)
+                      .ui_roles_cannot_be_moved_above_your_role_ceiling_d199e5af),
                 ));
               }
               return;
@@ -2180,7 +2223,8 @@ final class _RolesTabState extends State<_RolesTab> {
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                 content: Text(userFacingError(
                   error,
-                  summary: 'Could not reorder the roles',
+                  summary:
+                      L10n.of(context).ui_could_not_reorder_the_roles_105d4f32,
                 )),
                 backgroundColor: context.kaede.danger,
               ));
@@ -2223,7 +2267,7 @@ final class _RolesTabState extends State<_RolesTab> {
                     ? ReorderableDragStartListener(
                         index: index,
                         child: Tooltip(
-                          message: 'Drag to reorder',
+                          message: L10n.of(context).ui_drag_to_reorder_fce503d3,
                           child: SizedBox.square(
                             dimension: 44,
                             child: Icon(Icons.drag_handle_rounded,
@@ -2232,7 +2276,8 @@ final class _RolesTabState extends State<_RolesTab> {
                         ),
                       )
                     : Tooltip(
-                        message: 'This role is above your role ceiling',
+                        message: L10n.of(context)
+                            .ui_this_role_is_above_your_role_ceiling_a73f88be,
                         child: SizedBox.square(
                           dimension: 44,
                           child: Icon(Icons.lock_outline_rounded,
@@ -2249,7 +2294,7 @@ final class _RolesTabState extends State<_RolesTab> {
                 ? () => _edit(null)
                 : null,
             icon: Icon(Icons.add_rounded),
-            label: Text('Create role')),
+            label: Text(L10n.of(context).ui_create_role_b4d57cd3)),
       );
 
   bool _canMove(KaedeRole role) {
@@ -2512,7 +2557,7 @@ final class _MembersTabState extends State<_MembersTab> {
           SnackBar(
             content: Text(userFacingError(
               error,
-              summary: 'Could not load the members',
+              summary: L10n.of(context).ui_could_not_load_the_members_f9e59295,
             )),
             backgroundColor: context.kaede.danger,
           ),
@@ -2541,7 +2586,7 @@ final class _MembersTabState extends State<_MembersTab> {
               onSubmitted: (_) => _load(reset: true),
               style: TextStyle(fontSize: 14),
               decoration: InputDecoration(
-                hintText: 'Search members',
+                hintText: L10n.of(context).ui_search_members_d6e1fdce,
                 hintStyle:
                     TextStyle(color: context.kaede.muted, fontSize: 13.5),
                 prefixIcon: Icon(Icons.search_rounded,
@@ -2549,7 +2594,7 @@ final class _MembersTabState extends State<_MembersTab> {
                 suffixIcon: _search.text.isEmpty
                     ? null
                     : IconButton(
-                        tooltip: 'Clear search',
+                        tooltip: L10n.of(context).ui_clear_search_5a13e946,
                         onPressed: () {
                           _search.clear();
                           _load(reset: true);
@@ -2608,13 +2653,16 @@ final class _MembersTabState extends State<_MembersTab> {
                                   ? <String>[
                                       member.user.handle,
                                       if (roleCount > 0)
-                                        '$roleCount role'
-                                            '${roleCount == 1 ? '' : 's'}',
+                                        L10n.of(context)
+                                            .ui_value0_role_value1_5b8d3554(
+                                                (roleCount).toString(),
+                                                (roleCount == 1 ? '' : 's')
+                                                    .toString()),
                                       if (member.timeoutUntil != null)
-                                        'timed out',
+                                        L10n.of(context).ui_timed_out_9a0e1624,
                                     ].join(' · ')
-                                  : 'Profile unavailable · refreshes '
-                                      'automatically',
+                                  : L10n.of(context)
+                                      .ui_profile_unavailable_refreshes_automatically_9ef31289,
                               badge: member.user.ref == widget.guild.ownerRef ||
                                       member.user.isApplication
                                   ? Row(
@@ -2637,7 +2685,8 @@ final class _MembersTabState extends State<_MembersTab> {
                               trailing: actions.isEmpty
                                   ? null
                                   : PopupMenuButton<String>(
-                                      tooltip: 'Member actions',
+                                      tooltip: L10n.of(context)
+                                          .ui_member_actions_8d33b0d8,
                                       position: PopupMenuPosition.under,
                                       onSelected: (value) =>
                                           _action(member, value),
@@ -2660,23 +2709,30 @@ final class _MembersTabState extends State<_MembersTab> {
     final canManageTarget = _canManageMember(member);
     final items = <PopupMenuEntry<String>>[];
     if (_canAssignRoles(member)) {
-      items.add(PopupMenuItem(value: 'roles', child: Text('Manage roles')));
+      items.add(PopupMenuItem(
+          value: 'roles',
+          child: Text(L10n.of(context).ui_manage_roles_de7a2fe3)));
     }
     if (_canChangeNickname(member)) {
-      items.add(
-          PopupMenuItem(value: 'nickname', child: Text('Change nickname')));
+      items.add(PopupMenuItem(
+          value: 'nickname',
+          child: Text(L10n.of(context).ui_change_nickname_123a63b7)));
     }
     if (!self && !targetIsOwner && canManageTarget) {
       if (owner || widget.guild.allows(Permission.moderateMembers)) {
-        items.add(PopupMenuItem(value: 'timeout', child: Text('Timeout')));
+        items.add(PopupMenuItem(
+            value: 'timeout',
+            child: Text(L10n.of(context).ui_timeout_82d97e28)));
       }
       if (owner || widget.guild.allows(Permission.kickMembers)) {
-        items.add(PopupMenuItem(value: 'kick', child: Text('Kick')));
+        items.add(PopupMenuItem(
+            value: 'kick', child: Text(L10n.of(context).ui_kick_2cfbaa3f)));
       }
       if (owner || widget.guild.allows(Permission.banMembers)) {
         items.add(PopupMenuItem(
             value: 'ban',
-            child: Text('Ban', style: TextStyle(color: context.kaede.danger))));
+            child: Text(L10n.of(context).ui_ban_bfbc51a6,
+                style: TextStyle(color: context.kaede.danger))));
       }
     }
     return items;
@@ -2755,7 +2811,8 @@ final class _MembersTabState extends State<_MembersTab> {
           }
           final choice = await showModerationOptions(
             context,
-            title: 'Timeout ${member.user.name}',
+            title: L10n.of(context)
+                .ui_timeout_value0_11b9b0cd((member.user.name).toString()),
             timeout: true,
           );
           if (choice == null) return;
@@ -2809,7 +2866,8 @@ final class _MembersTabState extends State<_MembersTab> {
           }
           final choice = await showModerationOptions(
             context,
-            title: 'Ban ${member.user.name}?',
+            title: L10n.of(context)
+                .ui_ban_value0_b94c36f0((member.user.name).toString()),
             includeDeleteHistory: true,
           );
           if (choice == null) return;
@@ -2840,7 +2898,8 @@ final class _MembersTabState extends State<_MembersTab> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not apply the member action',
+          summary:
+              L10n.of(context).ui_could_not_apply_the_member_action_f0ce665c,
         )),
         backgroundColor: context.kaede.danger,
       ));
@@ -2915,7 +2974,7 @@ final class _BansTabState extends State<_BansTab> {
       ? Center(child: CircularProgressIndicator())
       : _PageList(children: [
           _Panel(
-              title: 'Member bans',
+              title: L10n.of(context).ui_member_bans_4e7de23b,
               child: Column(children: [
                 if (!widget.canBanMembers)
                   Padding(
@@ -2925,7 +2984,9 @@ final class _BansTabState extends State<_BansTab> {
                         Icon(Icons.lock_outline_rounded,
                             size: 19, color: context.kaede.muted),
                         SizedBox(width: 11),
-                        Text('You cannot manage member bans',
+                        Text(
+                            L10n.of(context)
+                                .ui_you_cannot_manage_member_bans_17cba37e,
                             style: TextStyle(
                                 color: context.kaede.muted, fontSize: 13.5)),
                       ],
@@ -2935,14 +2996,16 @@ final class _BansTabState extends State<_BansTab> {
                   if (widget.canBanMembers)
                     Padding(
                       padding: EdgeInsets.symmetric(vertical: 8),
-                      child: Text('No banned members',
+                      child: Text(
+                          L10n.of(context).ui_no_banned_members_31edfedd,
                           style: TextStyle(
                               color: context.kaede.muted, fontSize: 13.5)),
                     ),
                 for (final ban in _bans)
                   SettingsRow(
                       title: _mapName(ban),
-                      subtitle: '${ban['reason'] ?? 'No reason'}',
+                      subtitle: L10n.of(context).ui_value0_26e9163c(
+                          (ban['reason'] ?? 'No reason').toString()),
                       leading: Padding(
                         padding: EdgeInsets.all(3),
                         child: Icon(Icons.person_outline_rounded,
@@ -2978,15 +3041,15 @@ final class _BansTabState extends State<_BansTab> {
                             minimumSize: Size(0, 34),
                             padding: EdgeInsets.symmetric(horizontal: 10),
                           ),
-                          child: Text('Unban'))),
+                          child: Text(L10n.of(context).ui_unban_84c561ff))),
               ])),
           _Panel(
-              title: 'Banned instances',
-              subtitle:
-                  'This prevents every account hosted by that domain from joining. It may exclude innocent users and does not erase copies already held by a malicious peer.',
+              title: L10n.of(context).ui_banned_instances_803d2b81,
+              subtitle: L10n.of(context)
+                  .ui_this_prevents_every_account_hosted_by_that_do_c00cf818,
               child: Column(children: [
                 SettingsRow.chevron(
-                    title: 'Ban an instance',
+                    title: L10n.of(context).ui_ban_an_instance_5b6843fc,
                     leading: Padding(
                       padding: EdgeInsets.all(3),
                       child: Icon(Icons.public_off_rounded,
@@ -2998,9 +3061,14 @@ final class _BansTabState extends State<_BansTab> {
                   if (guildInstanceBanDomain(ban) case final domain?)
                     SettingsRow(
                         title: domain.value,
-                        subtitle: '${ban['reason'] ?? 'No reason'}'.isEmpty
-                            ? 'Every account on this domain is blocked.'
-                            : '${ban['reason'] ?? ''}',
+                        subtitle: L10n.of(context)
+                                .ui_value0_26e9163c(
+                                    (ban['reason'] ?? 'No reason').toString())
+                                .isEmpty
+                            ? L10n.of(context)
+                                .ui_every_account_on_this_domain_is_blocked_e77c5aa6
+                            : L10n.of(context).ui_value0_26e9163c(
+                                (ban['reason'] ?? '').toString()),
                         leading: Padding(
                           padding: EdgeInsets.all(3),
                           child: Icon(Icons.public_rounded,
@@ -3038,7 +3106,7 @@ final class _BansTabState extends State<_BansTab> {
                               minimumSize: Size(0, 34),
                               padding: EdgeInsets.symmetric(horizontal: 10),
                             ),
-                            child: Text('Remove')))
+                            child: Text(L10n.of(context).ui_remove_21a5901d)))
                   else
                     Padding(
                       padding: EdgeInsets.symmetric(vertical: 8),
@@ -3049,7 +3117,8 @@ final class _BansTabState extends State<_BansTab> {
                           SizedBox(width: 11),
                           Expanded(
                             child: Text(
-                              'Invalid instance-ban record. Refresh or contact the instance operator.',
+                              L10n.of(context)
+                                  .ui_invalid_instance_ban_record_refresh_or_contac_0ca2c462,
                               style: TextStyle(
                                   color: context.kaede.muted, fontSize: 13.5),
                             ),
@@ -3063,7 +3132,7 @@ final class _BansTabState extends State<_BansTab> {
     final domainInput = TextEditingController();
     final choice = await showModerationOptions(
       context,
-      title: 'Ban an entire instance?',
+      title: L10n.of(context).ui_ban_an_entire_instance_a8523156,
       leadingField: domainInput,
       leadingLabel: 'Instance domain',
     );
@@ -3193,8 +3262,8 @@ final class _InvitesTabState extends State<_InvitesTab> {
                 if (!widget.canListGuild && widget.managedChannels.isNotEmpty)
                   DropdownButtonFormField<KaedeChannel>(
                     initialValue: _selectedChannel,
-                    decoration: const InputDecoration(
-                      labelText: 'Channel invites',
+                    decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_channel_invites_9a2fab12,
                       prefixIcon: Icon(Icons.tag_rounded),
                     ),
                     items: widget.managedChannels
@@ -3218,28 +3287,30 @@ final class _InvitesTabState extends State<_InvitesTab> {
                 if ((widget.canListGuild ||
                         widget.managedChannels.isNotEmpty) &&
                     _items.isEmpty)
-                  const _TabEmpty(
+                  _TabEmpty(
                     icon: Icons.link_off_rounded,
-                    title: 'No active invites',
+                    title: L10n.of(context).ui_no_active_invites_4ee55886,
                     body: 'Create one to bring people in.',
                   ),
                 for (final item in _items)
                   _ManagementRow(
                     leading: Icon(Icons.link_rounded,
                         size: 19, color: context.kaede.muted),
-                    title: '${item['code']}',
+                    title: L10n.of(context)
+                        .ui_value0_26e9163c((item['code']).toString()),
                     subtitle: inviteSummaryLine(item),
                     onTap: () => _copyInvite('${item['code']}'),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
-                          tooltip: 'Copy invite link',
+                          tooltip:
+                              L10n.of(context).ui_copy_invite_link_a7c3b223,
                           onPressed: () => _copyInvite('${item['code']}'),
                           icon: Icon(Icons.copy_rounded, size: 18),
                         ),
                         IconButton(
-                          tooltip: 'Revoke invite',
+                          tooltip: L10n.of(context).ui_revoke_invite_a3ecfb24,
                           style: IconButton.styleFrom(
                             foregroundColor: context.kaede.danger,
                           ),
@@ -3278,7 +3349,7 @@ final class _InvitesTabState extends State<_InvitesTab> {
       floatingActionButton: FloatingActionButton.extended(
           onPressed: widget.canCreate ? _create : null,
           icon: Icon(Icons.person_add_alt_1),
-          label: Text('Create invite')));
+          label: Text(L10n.of(context).ui_create_invite_918a1372)));
 
   bool _canRevoke(Map<String, Object?> invite) {
     if (widget.canManage) return true;
@@ -3293,7 +3364,7 @@ final class _InvitesTabState extends State<_InvitesTab> {
     await Clipboard.setData(ClipboardData(text: 'https://$host/invite/$code'));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Invite link copied.')),
+      SnackBar(content: Text(L10n.of(context).ui_invite_link_copied_b511318e)),
     );
   }
 
@@ -3377,33 +3448,54 @@ Future<(int?, int?)?> showInviteRestrictions(BuildContext context) async {
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
-        title: Text('Invite limits'),
+        title: Text(L10n.of(context).ui_invite_limits_e57813c0),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             DropdownButtonFormField<int>(
               initialValue: age,
-              decoration: InputDecoration(labelText: 'Expires after'),
-              items: const [
-                DropdownMenuItem(value: 1800, child: Text('30 minutes')),
-                DropdownMenuItem(value: 21600, child: Text('6 hours')),
-                DropdownMenuItem(value: 86400, child: Text('1 day')),
-                DropdownMenuItem(value: 604800, child: Text('7 days')),
-                DropdownMenuItem(value: 0, child: Text('Never')),
+              decoration: InputDecoration(
+                  labelText: L10n.of(context).ui_expires_after_9311682d),
+              items: [
+                DropdownMenuItem(
+                    value: 1800,
+                    child: Text(L10n.of(context).ui_30_minutes_80e4b47f)),
+                DropdownMenuItem(
+                    value: 21600,
+                    child: Text(L10n.of(context).ui_6_hours_27b1b222)),
+                DropdownMenuItem(
+                    value: 86400,
+                    child: Text(L10n.of(context).ui_1_day_db83588e)),
+                DropdownMenuItem(
+                    value: 604800,
+                    child: Text(L10n.of(context).ui_7_days_ba4b8279)),
+                DropdownMenuItem(
+                    value: 0, child: Text(L10n.of(context).ui_never_b2ff2b29)),
               ],
               onChanged: (value) => setDialogState(() => age = value ?? age),
             ),
             SizedBox(height: 12),
             DropdownButtonFormField<int>(
               initialValue: uses,
-              decoration: InputDecoration(labelText: 'Maximum uses'),
-              items: const [
-                DropdownMenuItem(value: 1, child: Text('1 use')),
-                DropdownMenuItem(value: 5, child: Text('5 uses')),
-                DropdownMenuItem(value: 10, child: Text('10 uses')),
-                DropdownMenuItem(value: 25, child: Text('25 uses')),
-                DropdownMenuItem(value: 100, child: Text('100 uses')),
-                DropdownMenuItem(value: 0, child: Text('Unlimited')),
+              decoration: InputDecoration(
+                  labelText: L10n.of(context).ui_maximum_uses_e65fe543),
+              items: [
+                DropdownMenuItem(
+                    value: 1, child: Text(L10n.of(context).ui_1_use_626b601f)),
+                DropdownMenuItem(
+                    value: 5, child: Text(L10n.of(context).ui_5_uses_8c613760)),
+                DropdownMenuItem(
+                    value: 10,
+                    child: Text(L10n.of(context).ui_10_uses_9fef9f3c)),
+                DropdownMenuItem(
+                    value: 25,
+                    child: Text(L10n.of(context).ui_25_uses_2f0f35f0)),
+                DropdownMenuItem(
+                    value: 100,
+                    child: Text(L10n.of(context).ui_100_uses_ddfef284)),
+                DropdownMenuItem(
+                    value: 0,
+                    child: Text(L10n.of(context).ui_unlimited_2d283a80)),
               ],
               onChanged: (value) => setDialogState(() => uses = value ?? uses),
             ),
@@ -3412,14 +3504,14 @@ Future<(int?, int?)?> showInviteRestrictions(BuildContext context) async {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(
               dialogContext,
               (age == 0 ? null : age, uses == 0 ? null : uses),
             ),
-            child: Text('Create invite'),
+            child: Text(L10n.of(context).ui_create_invite_918a1372),
           ),
         ],
       ),
@@ -3474,8 +3566,8 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
         }
         void submit() {
           if (targetType == 'stream' && targetUserRef == null) {
-            setDialogState(() => validationError =
-                'Choose the member whose stream should open.');
+            setDialogState(() => validationError = L10n.of(context)
+                .ui_choose_the_member_whose_stream_should_open_47283c3a);
             return;
           }
           Navigator.pop(dialogContext, <String, Object?>{
@@ -3495,7 +3587,7 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
         }
 
         return AlertDialog(
-          title: Text('Create advanced invite'),
+          title: Text(L10n.of(context).ui_create_advanced_invite_76fe1666),
           content: SizedBox(
             width: 520,
             child: SingleChildScrollView(
@@ -3506,21 +3598,24 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                     initialValue: channelRef,
                     isExpanded: true,
                     decoration: InputDecoration(
-                      labelText: 'Channel',
-                      helperText:
-                          'Optional; leave empty for a guild-level invite.',
+                      labelText: L10n.of(context).ui_channel_655d8a44,
+                      helperText: L10n.of(context)
+                          .ui_optional_leave_empty_for_a_guild_level_invite_c5adce41,
                     ),
                     items: [
                       DropdownMenuItem<String?>(
                         value: null,
-                        child: Text('Guild landing (no channel)'),
+                        child: Text(L10n.of(context)
+                            .ui_guild_landing_no_channel_4f86f176),
                       ),
                       for (final channel in availableChannels)
                         DropdownMenuItem<String?>(
                           value: channel.ref.wire,
                           child: Text(
-                            '${channel.type.isVoiceLike ? '🔊' : '#'} '
-                            '${channel.name ?? 'channel'}',
+                            L10n.of(context).ui_value0_value1_c1a3651c(
+                                (channel.type.isVoiceLike ? '🔊' : '#')
+                                    .toString(),
+                                (channel.name ?? 'channel').toString()),
                           ),
                         ),
                     ],
@@ -3530,13 +3625,24 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                   SizedBox(height: 12),
                   DropdownButtonFormField<int>(
                     initialValue: age,
-                    decoration: InputDecoration(labelText: 'Expires after'),
-                    items: const [
-                      DropdownMenuItem(value: 1800, child: Text('30 minutes')),
-                      DropdownMenuItem(value: 21600, child: Text('6 hours')),
-                      DropdownMenuItem(value: 86400, child: Text('1 day')),
-                      DropdownMenuItem(value: 604800, child: Text('7 days')),
-                      DropdownMenuItem(value: 0, child: Text('Never')),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_expires_after_9311682d),
+                    items: [
+                      DropdownMenuItem(
+                          value: 1800,
+                          child: Text(L10n.of(context).ui_30_minutes_80e4b47f)),
+                      DropdownMenuItem(
+                          value: 21600,
+                          child: Text(L10n.of(context).ui_6_hours_27b1b222)),
+                      DropdownMenuItem(
+                          value: 86400,
+                          child: Text(L10n.of(context).ui_1_day_db83588e)),
+                      DropdownMenuItem(
+                          value: 604800,
+                          child: Text(L10n.of(context).ui_7_days_ba4b8279)),
+                      DropdownMenuItem(
+                          value: 0,
+                          child: Text(L10n.of(context).ui_never_b2ff2b29)),
                     ],
                     onChanged: (value) =>
                         setDialogState(() => age = value ?? age),
@@ -3544,14 +3650,27 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                   SizedBox(height: 12),
                   DropdownButtonFormField<int>(
                     initialValue: uses,
-                    decoration: InputDecoration(labelText: 'Maximum uses'),
-                    items: const [
-                      DropdownMenuItem(value: 1, child: Text('1 use')),
-                      DropdownMenuItem(value: 5, child: Text('5 uses')),
-                      DropdownMenuItem(value: 10, child: Text('10 uses')),
-                      DropdownMenuItem(value: 25, child: Text('25 uses')),
-                      DropdownMenuItem(value: 100, child: Text('100 uses')),
-                      DropdownMenuItem(value: 0, child: Text('Unlimited')),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_maximum_uses_e65fe543),
+                    items: [
+                      DropdownMenuItem(
+                          value: 1,
+                          child: Text(L10n.of(context).ui_1_use_626b601f)),
+                      DropdownMenuItem(
+                          value: 5,
+                          child: Text(L10n.of(context).ui_5_uses_8c613760)),
+                      DropdownMenuItem(
+                          value: 10,
+                          child: Text(L10n.of(context).ui_10_uses_9fef9f3c)),
+                      DropdownMenuItem(
+                          value: 25,
+                          child: Text(L10n.of(context).ui_25_uses_2f0f35f0)),
+                      DropdownMenuItem(
+                          value: 100,
+                          child: Text(L10n.of(context).ui_100_uses_ddfef284)),
+                      DropdownMenuItem(
+                          value: 0,
+                          child: Text(L10n.of(context).ui_unlimited_2d283a80)),
                     ],
                     onChanged: (value) =>
                         setDialogState(() => uses = value ?? uses),
@@ -3560,14 +3679,19 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                   DropdownButtonFormField<String>(
                     initialValue: targetType,
                     decoration: InputDecoration(
-                      labelText: 'Voice invite target',
-                      helperText: 'Requires a voice or Stage destination.',
+                      labelText:
+                          L10n.of(context).ui_voice_invite_target_bca51f73,
+                      helperText: L10n.of(context)
+                          .ui_requires_a_voice_or_stage_destination_59941a17,
                     ),
-                    items: const [
-                      DropdownMenuItem(value: 'none', child: Text('None')),
+                    items: [
+                      DropdownMenuItem(
+                          value: 'none',
+                          child: Text(L10n.of(context).ui_none_304ff7fb)),
                       DropdownMenuItem(
                           value: 'stream',
-                          child: Text("Member's Go Live stream")),
+                          child: Text(L10n.of(context)
+                              .ui_member_s_go_live_stream_685000f6)),
                     ],
                     onChanged: (value) => setDialogState(() {
                       targetType = value ?? 'none';
@@ -3580,10 +3704,13 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                       initialValue: targetUserRef,
                       isExpanded: true,
                       decoration: InputDecoration(
-                        labelText: 'Streaming member',
+                        labelText:
+                            L10n.of(context).ui_streaming_member_b3703b3f,
                         helperText: members.isEmpty
-                            ? 'No members are available.'
-                            : 'The member must currently be able to stream in the destination.',
+                            ? L10n.of(context)
+                                .ui_no_members_are_available_ce1d2466
+                            : L10n.of(context)
+                                .ui_the_member_must_currently_be_able_to_stream_i_95147817,
                       ),
                       items: [
                         for (final member in members)
@@ -3610,21 +3737,29 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                     initialValue: scheduledEventRef,
                     isExpanded: true,
                     decoration: InputDecoration(
-                      labelText: 'Scheduled event',
+                      labelText: L10n.of(context).ui_scheduled_event_ff96a250,
                       helperText: scheduledEvents.isEmpty
-                          ? 'No upcoming events are available.'
-                          : 'Optional and independent of the voice target.',
+                          ? L10n.of(context)
+                              .ui_no_upcoming_events_are_available_5548ff9e
+                          : L10n.of(context)
+                              .ui_optional_and_independent_of_the_voice_target_29ae45bf,
                     ),
                     items: [
                       DropdownMenuItem<EntityRef?>(
                         value: null,
-                        child: Text('No event association'),
+                        child: Text(
+                            L10n.of(context).ui_no_event_association_874e0e99),
                       ),
                       for (final event in scheduledEvents)
                         DropdownMenuItem<EntityRef?>(
                           value: event.ref,
                           child: Text(
-                            '${event.name} · ${DateFormat.yMMMd().add_jm().format(event.startTime)}',
+                            L10n.of(context).ui_value0_value1_947523d9(
+                                (event.name).toString(),
+                                (DateFormat.yMMMd()
+                                        .add_jm()
+                                        .format(event.startTime))
+                                    .toString()),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -3638,14 +3773,15 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                     SizedBox(height: 16),
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: Text('Roles (optional)',
+                      child: Text(L10n.of(context).ui_roles_optional_5359fafd,
                           style: Theme.of(context).textTheme.titleSmall),
                     ),
                     SizedBox(height: 4),
                     Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Members receive these roles when they accept, even if they already joined.',
+                        L10n.of(context)
+                            .ui_members_receive_these_roles_when_they_accept__050cdefd,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: context.kaede.muted,
                             ),
@@ -3670,9 +3806,11 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     value: temporary,
-                    title: Text('Temporary membership'),
+                    title:
+                        Text(L10n.of(context).ui_temporary_membership_4f72bf5c),
                     subtitle: Text(
-                      'Remove members when they disconnect unless a role is assigned.',
+                      L10n.of(context)
+                          .ui_remove_members_when_they_disconnect_unless_a__3922afa5,
                     ),
                     onChanged: (value) =>
                         setDialogState(() => temporary = value),
@@ -3680,9 +3818,11 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     value: unique,
-                    title: Text('Always create a unique code'),
+                    title: Text(L10n.of(context)
+                        .ui_always_create_a_unique_code_310a73ab),
                     subtitle: Text(
-                      'Otherwise Kaede may reuse a compatible invite you created.',
+                      L10n.of(context)
+                          .ui_otherwise_kaede_may_reuse_a_compatible_invite_e6bba363,
                     ),
                     onChanged: (value) => setDialogState(() => unique = value),
                   ),
@@ -3701,9 +3841,11 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(onPressed: submit, child: Text('Create invite')),
+            FilledButton(
+                onPressed: submit,
+                child: Text(L10n.of(context).ui_create_invite_918a1372)),
           ],
         );
       },
@@ -3781,9 +3923,9 @@ final class _EmojiTabState extends State<_EmojiTab> {
                   'emoji\u2019s origin.',
                 ),
                 if (_items.isEmpty)
-                  const _TabEmpty(
+                  _TabEmpty(
                     icon: Icons.emoji_emotions_outlined,
-                    title: 'No custom emoji yet',
+                    title: L10n.of(context).ui_no_custom_emoji_yet_ceb2cb11,
                     body: 'Upload a PNG, GIF or WebP up to 256 KB.',
                   ),
                 for (final item in _items)
@@ -3792,7 +3934,8 @@ final class _EmojiTabState extends State<_EmojiTab> {
                       emoji: item,
                       fallbackDomain: widget.guild.ref.domain,
                     ),
-                    title: ':${item['name']}:',
+                    title: L10n.of(context)
+                        .ui_value0_2397634a((item['name']).toString()),
                     subtitle: emojiRestrictionSummary(item),
                     trailing: (widget.canManage ||
                             (widget.canCreate &&
@@ -3807,14 +3950,15 @@ final class _EmojiTabState extends State<_EmojiTab> {
                             onSelected: (value) =>
                                 value == 'edit' ? _edit(item) : _delete(item),
                             itemBuilder: (_) => [
-                              const PopupMenuItem(
+                              PopupMenuItem(
                                 value: 'edit',
-                                child: Text('Edit emoji'),
+                                child: Text(
+                                    L10n.of(context).ui_edit_emoji_26aed3f7),
                               ),
                               PopupMenuItem(
                                 value: 'delete',
                                 child: Text(
-                                  'Delete emoji',
+                                  L10n.of(context).ui_delete_emoji_892d89b8,
                                   style: TextStyle(color: context.kaede.danger),
                                 ),
                               ),
@@ -3828,7 +3972,7 @@ final class _EmojiTabState extends State<_EmojiTab> {
           ? FloatingActionButton.extended(
               onPressed: _upload,
               icon: Icon(Icons.add_photo_alternate_outlined),
-              label: Text('Upload emoji'),
+              label: Text(L10n.of(context).ui_upload_emoji_1e4ec752),
             )
           : null);
 
@@ -3938,7 +4082,8 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
-        title: Text('Edit :${emoji['name'] ?? 'emoji'}:'),
+        title: Text(L10n.of(context)
+            .ui_edit_value0_dcc58e10((emoji['name'] ?? 'emoji').toString())),
         content: SizedBox(
           width: 520,
           child: SingleChildScrollView(
@@ -3950,8 +4095,9 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
                   controller: name,
                   maxLength: 32,
                   decoration: InputDecoration(
-                    labelText: 'Name',
-                    helperText: '2–32 letters, numbers, or underscores',
+                    labelText: L10n.of(context).ui_name_0fe07306,
+                    helperText: L10n.of(context)
+                        .ui_2_32_letters_numbers_or_underscores_a62d0546,
                   ),
                 ),
                 ListTile(
@@ -3959,19 +4105,22 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
                   leading: Icon(available
                       ? Icons.check_circle_outline
                       : Icons.do_not_disturb_on_outlined),
-                  title: Text(available ? 'Available' : 'Unavailable'),
+                  title: Text(available
+                      ? L10n.of(context).ui_available_72402638
+                      : L10n.of(context).ui_unavailable_da4baaa9),
                   subtitle: Text(
-                    'Availability is controlled by the server and cannot be edited.',
+                    L10n.of(context)
+                        .ui_availability_is_controlled_by_the_server_and__f2b39dad,
                   ),
                 ),
                 Divider(height: 28),
                 Text(
-                  'Allowed roles',
+                  L10n.of(context).ui_allowed_roles_d65c2a22,
                   style: TextStyle(fontWeight: FontWeight.w800),
                 ),
                 Text(
-                  'Leave every role unchecked to allow all members. You can '
-                  'select only roles the server allows you to manage.',
+                  L10n.of(context)
+                      .ui_leave_every_role_unchecked_to_allow_all_membe_479134e0,
                   style: TextStyle(color: context.kaede.muted, fontSize: 12),
                 ),
                 for (final role in guild.roles)
@@ -3998,14 +4147,14 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () {
               final cleaned = name.text.trim();
               if (!RegExp(r'^[A-Za-z0-9_]{2,32}$').hasMatch(cleaned)) {
-                setDialogState(() => error =
-                    'Use 2–32 letters, numbers, or underscores for the name.');
+                setDialogState(() => error = L10n.of(context)
+                    .ui_use_2_32_letters_numbers_or_underscores_for_t_5c871c2e);
                 return;
               }
               Navigator.pop(dialogContext, <String, Object?>{
@@ -4013,7 +4162,7 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
                 'role_ids': selectedRoles.map((item) => item.wire).toList(),
               });
             },
-            child: Text('Save emoji'),
+            child: Text(L10n.of(context).ui_save_emoji_69500726),
           ),
         ],
       ),
@@ -4107,7 +4256,7 @@ final class _StickersTabState extends State<_StickersTab> {
                   if (_items.isEmpty)
                     _TabEmpty(
                       icon: Icons.sticky_note_2_outlined,
-                      title: 'No stickers yet',
+                      title: L10n.of(context).ui_no_stickers_yet_374ae8a8,
                       body: 'Upload a PNG, JPEG, GIF or WebP up to '
                           '${(widget.guild.stickerMaxBytes / 1048576).ceil()} MiB.',
                     ),
@@ -4137,12 +4286,13 @@ final class _StickersTabState extends State<_StickersTab> {
                               itemBuilder: (_) => [
                                 PopupMenuItem(
                                   value: 'edit',
-                                  child: Text('Edit sticker'),
+                                  child: Text(L10n.of(context)
+                                      .ui_edit_sticker_a47edfbe),
                                 ),
                                 PopupMenuItem(
                                   value: 'delete',
                                   child: Text(
-                                    'Delete sticker',
+                                    L10n.of(context).ui_delete_sticker_ac57d8d1,
                                     style:
                                         TextStyle(color: context.kaede.danger),
                                   ),
@@ -4159,7 +4309,9 @@ final class _StickersTabState extends State<_StickersTab> {
                     ? _upload
                     : null,
                 icon: Icon(Icons.add_photo_alternate_outlined),
-                label: Text(_busy ? 'Creating…' : 'Create sticker'),
+                label: Text(_busy
+                    ? L10n.of(context).ui_creating_01fcd896
+                    : L10n.of(context).ui_create_sticker_80b5cb0a),
               )
             : null,
       );
@@ -4255,7 +4407,9 @@ final class _StickersTabState extends State<_StickersTab> {
       await _load();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${edit.name} is ready to use.')),
+          SnackBar(
+              content: Text(L10n.of(context)
+                  .ui_value0_is_ready_to_use_a797f43f((edit.name).toString()))),
         );
       }
     } on Object catch (error) {
@@ -4329,7 +4483,8 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
-        title: Text('Edit ${sticker['name'] ?? 'sticker'}'),
+        title: Text(L10n.of(context).ui_edit_value0_8e92dac2(
+            (sticker['name'] ?? 'sticker').toString())),
         content: SizedBox(
           width: 480,
           child: SingleChildScrollView(
@@ -4340,24 +4495,25 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
                   controller: name,
                   maxLength: 30,
                   decoration: InputDecoration(
-                    labelText: 'Name',
-                    helperText: '2–30 characters',
+                    labelText: L10n.of(context).ui_name_0fe07306,
+                    helperText: L10n.of(context).ui_2_30_characters_387b9381,
                   ),
                 ),
                 TextField(
                   controller: description,
                   maxLength: 100,
-                  decoration:
-                      InputDecoration(labelText: 'Description (optional)'),
+                  decoration: InputDecoration(
+                      labelText:
+                          L10n.of(context).ui_description_optional_31e71764),
                 ),
                 TextField(
                   controller: tags,
                   minLines: 2,
                   maxLines: 5,
                   decoration: InputDecoration(
-                    labelText: 'Tags',
-                    helperText:
-                        'One per line; 1–10 unique tags, 200 characters total.',
+                    labelText: L10n.of(context).ui_tags_76bda0c0,
+                    helperText: L10n.of(context)
+                        .ui_one_per_line_1_10_unique_tags_200_characters__61eb4094,
                     alignLabelWithHint: true,
                   ),
                 ),
@@ -4366,9 +4522,12 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
                   leading: Icon(available
                       ? Icons.check_circle_outline
                       : Icons.do_not_disturb_on_outlined),
-                  title: Text(available ? 'Available' : 'Unavailable'),
+                  title: Text(available
+                      ? L10n.of(context).ui_available_72402638
+                      : L10n.of(context).ui_unavailable_da4baaa9),
                   subtitle: Text(
-                    'Availability is controlled by the server and cannot be edited.',
+                    L10n.of(context)
+                        .ui_availability_is_controlled_by_the_server_and__f2b39dad,
                   ),
                 ),
                 if (error != null)
@@ -4384,7 +4543,7 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () {
@@ -4392,18 +4551,18 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
               final cleanedDescription = description.text.trim();
               final cleanedTags = normalizedStickerTags(tags.text);
               if (!validStickerName(cleanedName)) {
-                setDialogState(() =>
-                    error = 'Use 2–30 meaningful characters for the name.');
+                setDialogState(() => error = L10n.of(context)
+                    .ui_use_2_30_meaningful_characters_for_the_name_03d0bacf);
                 return;
               }
               if (!validStickerDescription(cleanedDescription)) {
-                setDialogState(() => error =
-                    'Descriptions must be empty or contain 2–100 characters.');
+                setDialogState(() => error = L10n.of(context)
+                    .ui_descriptions_must_be_empty_or_contain_2_100_c_ddf91a48);
                 return;
               }
               if (cleanedTags == null) {
-                setDialogState(() => error =
-                    'Add 1–10 unique tags using at most 200 characters total.');
+                setDialogState(() => error = L10n.of(context)
+                    .ui_add_1_10_unique_tags_using_at_most_200_charac_1a954689);
                 return;
               }
               Navigator.pop(dialogContext, <String, Object?>{
@@ -4413,7 +4572,7 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
                 'tags': cleanedTags,
               });
             },
-            child: Text('Save sticker'),
+            child: Text(L10n.of(context).ui_save_sticker_e955143f),
           ),
         ],
       ),
@@ -4455,7 +4614,7 @@ Future<StickerEdit?> showStickerEditor(
         final canCreate =
             validStickerName(name) && validStickerDescription(description);
         return AlertDialog(
-          title: Text('Create sticker'),
+          title: Text(L10n.of(context).ui_create_sticker_80b5cb0a),
           content: SizedBox(
             width: 430,
             child: SingleChildScrollView(
@@ -4467,8 +4626,8 @@ Future<StickerEdit?> showStickerEditor(
                     key: ValueKey('sticker-name'),
                     maxLength: 30,
                     decoration: InputDecoration(
-                      labelText: 'Name',
-                      helperText: '2–30 characters',
+                      labelText: L10n.of(context).ui_name_0fe07306,
+                      helperText: L10n.of(context).ui_2_30_characters_387b9381,
                     ),
                     onChanged: (value) => setDialogState(() => name = value),
                   ),
@@ -4476,7 +4635,8 @@ Future<StickerEdit?> showStickerEditor(
                     key: ValueKey('sticker-description'),
                     maxLength: 100,
                     decoration: InputDecoration(
-                      labelText: 'Description (optional)',
+                      labelText:
+                          L10n.of(context).ui_description_optional_31e71764,
                     ),
                     onChanged: (value) =>
                         setDialogState(() => description = value),
@@ -4500,8 +4660,9 @@ Future<StickerEdit?> showStickerEditor(
                   SizedBox(height: 10),
                   Text(
                     key: ValueKey('sticker-crop-summary'),
-                    'Selection: ${(cropWidth * 100).round()}% × '
-                    '${(cropHeight * 100).round()}%',
+                    L10n.of(context).ui_selection_value0_value1_a3be5c32(
+                        ((cropWidth * 100).round()).toString(),
+                        ((cropHeight * 100).round()).toString()),
                     style: TextStyle(
                       color: context.kaede.muted,
                       fontSize: 12,
@@ -4512,7 +4673,8 @@ Future<StickerEdit?> showStickerEditor(
                     children: [
                       Expanded(
                         child: Text(
-                          'Drag the box to move it. Drag a corner to resize.',
+                          L10n.of(context)
+                              .ui_drag_the_box_to_move_it_drag_a_corner_to_resi_8aea0ecb,
                           style: TextStyle(
                             color: context.kaede.muted,
                             fontSize: 12,
@@ -4527,19 +4689,22 @@ Future<StickerEdit?> showStickerEditor(
                           cropWidth = 1;
                           cropHeight = 1;
                         }),
-                        child: Text('Reset'),
+                        child: Text(L10n.of(context).ui_reset_0ac8a560),
                       ),
                     ],
                   ),
                   SwitchListTile(
                     key: ValueKey('sticker-remove-background'),
                     contentPadding: EdgeInsets.zero,
-                    title: Text('Remove background'),
+                    title: Text(L10n.of(context).ui_remove_background_a47feceb),
                     subtitle: Text(animated
-                        ? 'Background removal is unavailable for animated GIFs.'
+                        ? L10n.of(context)
+                            .ui_background_removal_is_unavailable_for_animate_b08efd28
                         : backgroundRemovalAvailable
-                            ? 'Creates a transparent cutout on the server.'
-                            : 'This server has not enabled background removal.'),
+                            ? L10n.of(context)
+                                .ui_creates_a_transparent_cutout_on_the_server_01590512
+                            : L10n.of(context)
+                                .ui_this_server_has_not_enabled_background_remova_db177c6e),
                     value: removeBackground,
                     onChanged: animated || !backgroundRemovalAvailable
                         ? null
@@ -4553,7 +4718,7 @@ Future<StickerEdit?> showStickerEditor(
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton.icon(
               onPressed: canCreate
@@ -4570,7 +4735,7 @@ Future<StickerEdit?> showStickerEditor(
                       ))
                   : null,
               icon: Icon(Icons.add_photo_alternate_outlined),
-              label: Text('Create'),
+              label: Text(L10n.of(context).ui_create_990de47d),
             ),
           ],
         );
@@ -4784,7 +4949,8 @@ final class _StickerCropperState extends State<_StickerCropper> {
                           width: crop.width * size.width,
                           height: crop.height * size.height,
                           child: Semantics(
-                            label: 'Crop selection. Drag to move.',
+                            label: L10n.of(context)
+                                .ui_crop_selection_drag_to_move_c0ba9b5b,
                             child: Stack(
                               clipBehavior: Clip.none,
                               children: [
@@ -4881,7 +5047,8 @@ final class _StickerCropperState extends State<_StickerCropper> {
       height: 40,
       child: Semantics(
         button: true,
-        label: 'Resize crop from ${corner.name} corner',
+        label: L10n.of(context).ui_resize_crop_from_value0_corner_f027c9d1(
+            (corner.name).toString()),
         child: Listener(
           key: ValueKey('sticker-crop-handle-${corner.name}'),
           behavior: HitTestBehavior.opaque,
@@ -5000,9 +5167,10 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
                       'Bots and apps keep only the scopes, live-event intents, guild permissions and channel access approved for this server. Removing one immediately revokes future access.',
                     ),
                     if (_items.isEmpty)
-                      const _TabEmpty(
+                      _TabEmpty(
                         icon: Icons.smart_toy_outlined,
-                        title: 'No bots or apps installed',
+                        title: L10n.of(context)
+                            .ui_no_bots_or_apps_installed_5544cdf9,
                         body:
                             'Open a bot invite link to review and install an automation.',
                       ),
@@ -5048,13 +5216,16 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(name, style: TextStyle(fontWeight: FontWeight.w800)),
-                  Text('${bot['handle'] ?? application['origin_domain'] ?? ''}',
+                  Text(
+                      L10n.of(context).ui_value0_26e9163c(
+                          (bot['handle'] ?? application['origin_domain'] ?? '')
+                              .toString()),
                       style:
                           TextStyle(color: context.kaede.muted, fontSize: 12)),
                 ],
               )),
               IconButton(
-                tooltip: 'Remove bot',
+                tooltip: L10n.of(context).ui_remove_bot_869c788c,
                 color: context.kaede.danger,
                 onPressed: () => _remove(item, application, name),
                 icon: Icon(Icons.delete_outline_rounded),
@@ -5062,7 +5233,9 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
             ]),
             if ('${application['description'] ?? ''}'.trim().isNotEmpty) ...[
               SizedBox(height: 8),
-              Text('${application['description']}',
+              Text(
+                  L10n.of(context).ui_value0_26e9163c(
+                      (application['description']).toString()),
                   style: TextStyle(color: context.kaede.textSoft)),
             ],
             SizedBox(height: 10),
@@ -5077,7 +5250,7 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
                 permissions.isNotEmpty)
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
-                title: Text('Approved access'),
+                title: Text(L10n.of(context).ui_approved_access_7875cc68),
                 children: [
                   Align(
                     alignment: Alignment.centerLeft,
@@ -5098,11 +5271,14 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.tag_rounded),
-              title: Text('Channel access'),
+              title: Text(L10n.of(context).ui_channel_access_b7959e86),
               subtitle: Text(
                 channelRestrictions.isEmpty
-                    ? 'All channels allowed by the bot role'
-                    : '${channelRestrictions.length} selected channels or categories',
+                    ? L10n.of(context)
+                        .ui_all_channels_allowed_by_the_bot_role_2dc63875
+                    : L10n.of(context)
+                        .ui_value0_selected_channels_or_categories_fbef2df8(
+                            (channelRestrictions.length).toString()),
               ),
               trailing: Icon(Icons.chevron_right_rounded),
               onTap: () => _editChannelAccess(item, application, name),
@@ -5110,9 +5286,10 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.tune_rounded),
-              title: Text('Command permissions'),
+              title: Text(L10n.of(context).ui_command_permissions_24ca2c7e),
               subtitle: Text(
-                'Choose which roles, members, and channels can use this app.',
+                L10n.of(context)
+                    .ui_choose_which_roles_members_and_channels_can_u_fad0659a,
               ),
               trailing: Icon(Icons.chevron_right_rounded),
               onTap: () {
@@ -5132,9 +5309,11 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.enhanced_encryption_outlined),
-                title: const Text('Encrypted channel access'),
-                subtitle: const Text(
-                  'Grant, review, or revoke this app per encrypted channel.',
+                title:
+                    Text(L10n.of(context).ui_encrypted_channel_access_45930d32),
+                subtitle: Text(
+                  L10n.of(context)
+                      .ui_grant_review_or_revoke_this_app_per_encrypted_daceaecd,
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: () {
@@ -5211,7 +5390,8 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text('$name channel access'),
+          title: Text(L10n.of(context)
+              .ui_value0_channel_access_31bc35cb((name).toString())),
           content: SizedBox(
             width: 520,
             child: SingleChildScrollView(
@@ -5220,13 +5400,15 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'This ceiling is applied in addition to the bot role and channel overrides. A selected category includes its child channels.',
+                    L10n.of(context)
+                        .ui_this_ceiling_is_applied_in_addition_to_the_bo_b42aa2d1,
                     style: TextStyle(color: context.kaede.muted),
                   ),
                   SizedBox(height: 8),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: Text('All role-permitted channels'),
+                    title: Text(L10n.of(context)
+                        .ui_all_role_permitted_channels_17a7345f),
                     value: selected.isEmpty,
                     onChanged: (enabled) {
                       if (enabled) setDialogState(selected.clear);
@@ -5237,8 +5419,8 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
                       contentPadding: EdgeInsets.zero,
                       title: Text(channel.name ?? channel.ref.id.value),
                       subtitle: Text(channel.type == ChannelType.category
-                          ? 'Category'
-                          : 'Channel'),
+                          ? L10n.of(context).ui_category_afb3e591
+                          : L10n.of(context).ui_channel_655d8a44),
                       value: selected.contains(channel.ref.wire),
                       onChanged: (enabled) => setDialogState(() {
                         if (enabled == true) {
@@ -5255,11 +5437,11 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, Set.of(selected)),
-              child: Text('Save'),
+              child: Text(L10n.of(context).ui_save_4d2d5d68),
             ),
           ],
         ),
@@ -5414,7 +5596,9 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                       Icon(Icons.lock_outline_rounded,
                           size: 19, color: context.kaede.muted),
                       SizedBox(width: 11),
-                      Text('Manage Webhooks is required',
+                      Text(
+                          L10n.of(context)
+                              .ui_manage_webhooks_is_required_995d93b1,
                           style: TextStyle(
                               color: context.kaede.muted, fontSize: 13.5)),
                     ],
@@ -5426,7 +5610,8 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                       avatarHash: item['avatar_hash'] as String?,
                       domain: widget.guild.ref.domain,
                     ),
-                    title: '${item['name'] ?? 'Webhook'}',
+                    title: L10n.of(context).ui_value0_26e9163c(
+                        (item['name'] ?? 'Webhook').toString()),
                     subtitle: _webhookChannelLabel(item),
                     trailing: PopupMenuButton<String>(
                       enabled: _canManage && _busyWebhook == null,
@@ -5436,23 +5621,33 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                           if ('${item['execution_url'] ?? ''}'.isNotEmpty)
                             PopupMenuItem(
                                 value: 'copy-url',
-                                child: Text('Copy webhook URL')),
+                                child: Text(L10n.of(context)
+                                    .ui_copy_webhook_url_60c3b358)),
                           PopupMenuItem(
-                              value: 'edit', child: Text('Edit or move')),
+                              value: 'edit',
+                              child: Text(
+                                  L10n.of(context).ui_edit_or_move_474f6553)),
                           PopupMenuItem(
-                              value: 'avatar', child: Text('Change avatar')),
+                              value: 'avatar',
+                              child: Text(
+                                  L10n.of(context).ui_change_avatar_7b892dce)),
                           if (item['avatar_hash'] != null)
                             PopupMenuItem(
                               value: 'clear-avatar',
-                              child: Text('Remove avatar'),
+                              child: Text(
+                                  L10n.of(context).ui_remove_avatar_d6403a8e),
                             ),
                           PopupMenuItem(
-                              value: 'rotate', child: Text('Rotate token')),
+                              value: 'rotate',
+                              child: Text(
+                                  L10n.of(context).ui_rotate_token_9c8fb5eb)),
                         ],
                         PopupMenuItem(
                           value: 'delete',
                           child: Text(
-                            item['type'] == 2 ? 'Stop following' : 'Delete',
+                            item[L10n.of(context).ui_type_5127f14d] == 2
+                                ? L10n.of(context).ui_stop_following_7a795c5e
+                                : L10n.of(context).ui_delete_5797ea6a,
                             style: TextStyle(color: context.kaede.danger),
                           ),
                         ),
@@ -5466,8 +5661,11 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                     children: [
                       Text(
                         _uploadProgress < 100
-                            ? 'Uploading webhook avatar… $_uploadProgress%'
-                            : 'Upload complete. Running media safety checks…',
+                            ? L10n.of(context)
+                                .ui_uploading_webhook_avatar_value0_f73e9506(
+                                    (_uploadProgress).toString())
+                            : L10n.of(context)
+                                .ui_upload_complete_running_media_safety_checks_47ba9a1d,
                         style: TextStyle(
                           color: context.kaede.muted,
                           fontSize: 12,
@@ -5487,7 +5685,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
       floatingActionButton: FloatingActionButton.extended(
           onPressed: _canManage ? _create : null,
           icon: Icon(Icons.add_rounded),
-          label: Text('Webhook')));
+          label: Text(L10n.of(context).ui_webhook_bac3fbc6)));
 
   String _webhookChannelLabel(Map<String, Object?> webhook) {
     final id = '${webhook['channel_id'] ?? ''}';
@@ -5546,7 +5744,9 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
           await Clipboard.setData(ClipboardData(text: url));
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Webhook URL copied.')),
+              SnackBar(
+                  content:
+                      Text(L10n.of(context).ui_webhook_url_copied_62a2ee15)),
             );
           }
           return;
@@ -5595,9 +5795,11 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
             await showDialog<void>(
               context: context,
               builder: (dialogContext) => AlertDialog(
-                title: Text('New webhook URL'),
+                title: Text(L10n.of(context).ui_new_webhook_url_5a8adb85),
                 content: SelectableText(
-                  '${rotated['execution_url'] ?? 'Webhook URL unavailable.'}',
+                  L10n.of(context).ui_value0_26e9163c(
+                      (rotated['execution_url'] ?? 'Webhook URL unavailable.')
+                          .toString()),
                 ),
                 actions: [
                   if (rotated['execution_url'] is String)
@@ -5609,11 +5811,11 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                           Navigator.pop(dialogContext);
                         }
                       },
-                      child: Text('Copy URL'),
+                      child: Text(L10n.of(context).ui_copy_url_0c62d7e5),
                     ),
                   TextButton(
                     onPressed: () => Navigator.pop(dialogContext),
-                    child: Text('Done'),
+                    child: Text(L10n.of(context).ui_done_8dd31791),
                   ),
                 ],
               ),
@@ -5695,7 +5897,8 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Webhook avatar updated.')),
+      SnackBar(
+          content: Text(L10n.of(context).ui_webhook_avatar_updated_a553b36e)),
     );
     await _load();
   }
@@ -5717,7 +5920,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
     final channel = await showGuildChannelPicker(
       context,
       channels: channels,
-      title: 'Post this webhook in…',
+      title: L10n.of(context).ui_post_this_webhook_in_97bf590d,
     );
     if (channel == null || !mounted) return;
     try {
@@ -5727,9 +5930,11 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
         await showDialog<void>(
             context: context,
             builder: (dialogContext) => AlertDialog(
-                    title: Text('Webhook created'),
-                    content: SelectableText(
-                        '${created['execution_url'] ?? 'Webhook URL is available only now.'}'),
+                    title: Text(L10n.of(context).ui_webhook_created_1bca0506),
+                    content: SelectableText(L10n.of(context).ui_value0_26e9163c(
+                        (created['execution_url'] ??
+                                'Webhook URL is available only now.')
+                            .toString())),
                     actions: [
                       if (created['execution_url'] is String)
                         TextButton(
@@ -5740,10 +5945,10 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                                 Navigator.pop(dialogContext);
                               }
                             },
-                            child: Text('Copy URL')),
+                            child: Text(L10n.of(context).ui_copy_url_0c62d7e5)),
                       TextButton(
                           onPressed: () => Navigator.pop(dialogContext),
-                          child: Text('Done'))
+                          child: Text(L10n.of(context).ui_done_8dd31791))
                     ]));
       }
       await _load();
@@ -5789,7 +5994,9 @@ Future<bool> showWebhookAvatarPreviewConfirmation(
     await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text(replacing ? 'Replace webhook avatar?' : 'Use this avatar?'),
+        title: Text(replacing
+            ? L10n.of(context).ui_replace_webhook_avatar_4c569128
+            : L10n.of(context).ui_use_this_avatar_048a68fa),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -5813,8 +6020,12 @@ Future<bool> showWebhookAvatarPreviewConfirmation(
             SizedBox(height: 12),
             Text(
               replacing
-                  ? '$webhookName’s existing avatar and historical webhook author images will be updated after safety scanning.'
-                  : '$webhookName will use this image after it passes safety scanning.',
+                  ? L10n.of(context)
+                      .ui_value0_s_existing_avatar_and_historical_webho_c17038d2(
+                          (webhookName).toString())
+                  : L10n.of(context)
+                      .ui_value0_will_use_this_image_after_it_passes_sa_39eda3a5(
+                          (webhookName).toString()),
               textAlign: TextAlign.center,
             ),
           ],
@@ -5822,12 +6033,12 @@ Future<bool> showWebhookAvatarPreviewConfirmation(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             key: Key('confirm-webhook-avatar'),
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text('Upload avatar'),
+            child: Text(L10n.of(context).ui_upload_avatar_5c00299d),
           ),
         ],
       ),
@@ -5872,7 +6083,8 @@ final class _WebhookSettingsEditorDialogState
   void _save() {
     final cleaned = _name.text.trim();
     if (cleaned.isEmpty) {
-      setState(() => _error = 'Webhook names cannot be blank.');
+      setState(() =>
+          _error = L10n.of(context).ui_webhook_names_cannot_be_blank_83327c5e);
       return;
     }
     Navigator.pop(
@@ -5883,7 +6095,7 @@ final class _WebhookSettingsEditorDialogState
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: Text('Edit webhook'),
+        title: Text(L10n.of(context).ui_edit_webhook_d4d6ac44),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -5893,18 +6105,27 @@ final class _WebhookSettingsEditorDialogState
                 key: Key('webhook-name-field'),
                 controller: _name,
                 maxLength: 80,
-                decoration: InputDecoration(labelText: 'Webhook name'),
+                decoration: InputDecoration(
+                    labelText: L10n.of(context).ui_webhook_name_d1cff1d9),
               ),
               DropdownButtonFormField<KaedeChannel>(
                 key: Key('webhook-channel-field'),
                 initialValue: _channel,
-                decoration: InputDecoration(labelText: 'Post in'),
+                decoration: InputDecoration(
+                    labelText: L10n.of(context).ui_post_in_fc98179e),
                 items: [
                   for (final channel in widget.channels)
                     DropdownMenuItem(
                       value: channel,
                       child: Text(
-                        '${channel.type == ChannelType.forum ? 'Forum' : channel.type == ChannelType.announcement ? 'Announcement' : 'Text'} · ${channel.name ?? channel.ref.id.value}',
+                        L10n.of(context).ui_value0_value1_947523d9(
+                            (channel.type == ChannelType.forum
+                                    ? 'Forum'
+                                    : channel.type == ChannelType.announcement
+                                        ? 'Announcement'
+                                        : 'Text')
+                                .toString(),
+                            (channel.name ?? channel.ref.id.value).toString()),
                       ),
                     ),
                 ],
@@ -5922,12 +6143,12 @@ final class _WebhookSettingsEditorDialogState
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             key: Key('save-webhook-settings'),
             onPressed: _save,
-            child: Text('Save webhook'),
+            child: Text(L10n.of(context).ui_save_webhook_f889ec79),
           ),
         ],
       );
@@ -6078,7 +6299,7 @@ final class _AuditTabState extends State<_AuditTab> {
       setState(() {
         _error = userFacingError(
           error,
-          summary: 'Could not load the audit log',
+          summary: L10n.of(context).ui_could_not_load_the_audit_log_e027207f,
         );
         _loading = false;
         _refreshing = false;
@@ -6210,7 +6431,7 @@ final class _AuditTabState extends State<_AuditTab> {
                 Icon(Icons.lock_outline_rounded,
                     size: 19, color: context.kaede.muted),
                 SizedBox(width: 11),
-                Text('View Audit Log is required',
+                Text(L10n.of(context).ui_view_audit_log_is_required_c3a0fa90,
                     style:
                         TextStyle(color: context.kaede.muted, fontSize: 13.5)),
               ],
@@ -6246,10 +6467,10 @@ final class _AuditTabState extends State<_AuditTab> {
       padding: EdgeInsets.fromLTRB(14, 12, 14, 32),
       children: [
         SettingsSectionHeader(
-          'Audit log',
+          L10n.of(context).ui_audit_log_cb83f9ca,
           top: 0,
-          subheading:
-              'Review moderation and configuration changes made in this guild.',
+          subheading: L10n.of(context)
+              .ui_review_moderation_and_configuration_changes_m_e46d550e,
         ),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
@@ -6258,7 +6479,7 @@ final class _AuditTabState extends State<_AuditTab> {
               _AuditActorFilterButton(
                 icon: Icons.person_outline_rounded,
                 label: _actorFilter == null
-                    ? 'All members'
+                    ? L10n.of(context).ui_all_members_15595a57
                     : guildAuditActorNameFromKey(_actorFilter!, users),
                 onPressed: _pickActorFilter,
               ),
@@ -6266,7 +6487,7 @@ final class _AuditTabState extends State<_AuditTab> {
               _AuditFilterButton<String>(
                 icon: Icons.tune_rounded,
                 label: _actionFilter == null
-                    ? 'All actions'
+                    ? L10n.of(context).ui_all_actions_4ff15157
                     : actions[_actionFilter] ?? 'All actions',
                 value: _actionFilter,
                 allLabel: 'All actions',
@@ -6278,12 +6499,12 @@ final class _AuditTabState extends State<_AuditTab> {
                 SizedBox(width: 4),
                 TextButton(
                   onPressed: () => unawaited(_clearFilters()),
-                  child: Text('Clear'),
+                  child: Text(L10n.of(context).ui_clear_04a57fc2),
                 ),
               ],
               SizedBox(width: 4),
               IconButton(
-                tooltip: 'Refresh audit log',
+                tooltip: L10n.of(context).ui_refresh_audit_log_8ef0543d,
                 onPressed: _loading || _refreshing || _loadingOlder
                     ? null
                     : () => unawaited(_load(refresh: true)),
@@ -6307,16 +6528,18 @@ final class _AuditTabState extends State<_AuditTab> {
         ],
         if (_items.isEmpty && _error == null)
           _actorFilter == null && _actionFilter == null
-              ? const _AuditEmptyState(
-                  title: 'No audit events yet',
-                  message: 'Administrative actions will show up here.',
+              ? _AuditEmptyState(
+                  title: L10n.of(context).ui_no_audit_events_yet_e67a2180,
+                  message: L10n.of(context)
+                      .ui_administrative_actions_will_show_up_here_fc7a8e6e,
                 )
               : _AuditEmptyState(
-                  title: 'No matching events',
-                  message: 'Try another member or action filter.',
+                  title: L10n.of(context).ui_no_matching_events_192c7226,
+                  message: L10n.of(context)
+                      .ui_try_another_member_or_action_filter_24ef4c64,
                   action: TextButton(
                     onPressed: () => unawaited(_clearFilters()),
-                    child: Text('Clear filters'),
+                    child: Text(L10n.of(context).ui_clear_filters_240d53c9),
                   ),
                 )
         else
@@ -6337,7 +6560,9 @@ final class _AuditTabState extends State<_AuditTab> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : Icon(Icons.expand_more_rounded),
-              label: Text(_loadingOlder ? 'Loading…' : 'Load older events'),
+              label: Text(_loadingOlder
+                  ? L10n.of(context).ui_loading_c4e2f181
+                  : L10n.of(context).ui_load_older_events_0c5a4a98),
             ),
           ),
         ],
@@ -6370,10 +6595,10 @@ final class _AuditActorFilterButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Tooltip(
-        message: 'Filter audit log by actor',
+        message: L10n.of(context).ui_filter_audit_log_by_actor_de3dff5a,
         child: Semantics(
           button: true,
-          label: 'Filter audit log by actor',
+          label: L10n.of(context).ui_filter_audit_log_by_actor_de3dff5a,
           value: label,
           child: Material(
             color: Colors.transparent,
@@ -6561,7 +6786,7 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
       setState(() {
         _error = userFacingError(
           error,
-          summary: 'Could not search guild members.',
+          summary: L10n.of(context).ui_could_not_search_guild_members_67e5f469,
         );
         _retryLoadsMore = false;
       });
@@ -6622,7 +6847,8 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
       setState(() {
         _error = userFacingError(
           error,
-          summary: 'Could not load more guild members.',
+          summary:
+              L10n.of(context).ui_could_not_load_more_guild_members_f1b1067c,
         );
         _retryLoadsMore = true;
       });
@@ -6691,13 +6917,13 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Filter by audit actor',
+                  L10n.of(context).ui_filter_by_audit_actor_98b183de,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 SizedBox(height: 6),
                 Text(
-                  'Search the full guild roster or enter an exact canonical '
-                  'user ID for someone who has left.',
+                  L10n.of(context)
+                      .ui_search_the_full_guild_roster_or_enter_an_exac_5b817a46,
                   style: TextStyle(color: context.kaede.muted),
                 ),
                 SizedBox(height: 12),
@@ -6705,7 +6931,8 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                   key: ValueKey('audit-actor-query'),
                   controller: _query,
                   autoFocus: true,
-                  hintText: 'Name, handle, or 123@chat.example',
+                  hintText: L10n.of(context)
+                      .ui_name_handle_or_123_chat_example_54cb5e3d,
                   leading: Icon(Icons.search_rounded),
                   onChanged: _queryChanged,
                 ),
@@ -6715,7 +6942,8 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                     child: Padding(
                       padding: EdgeInsets.fromLTRB(4, 8, 4, 0),
                       child: Text(
-                        'Enter a canonical user ID like 123@chat.example.',
+                        L10n.of(context)
+                            .ui_enter_a_canonical_user_id_like_123_chat_examp_f80e9a27,
                         style: TextStyle(
                           color: Theme.of(context).colorScheme.error,
                           fontSize: 12,
@@ -6752,7 +6980,7 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                                           unawaited(_search(value, generation));
                                         }
                                       },
-                            child: Text('Retry'),
+                            child: Text(L10n.of(context).ui_retry_8036af59),
                           ),
                         ],
                       ),
@@ -6771,8 +6999,9 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                 ListTile(
                   key: ValueKey('audit-actor-all'),
                   leading: Icon(Icons.groups_outlined),
-                  title: Text('All members'),
-                  subtitle: Text('Do not filter by actor'),
+                  title: Text(L10n.of(context).ui_all_members_15595a57),
+                  subtitle:
+                      Text(L10n.of(context).ui_do_not_filter_by_actor_e7d232fb),
                   trailing: widget.selectedKey == null
                       ? Icon(Icons.check_rounded)
                       : null,
@@ -6790,7 +7019,9 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                 else if (actors.isEmpty)
                   Padding(
                     padding: EdgeInsets.all(28),
-                    child: Center(child: Text('No matching guild members.')),
+                    child: Center(
+                        child: Text(L10n.of(context)
+                            .ui_no_matching_guild_members_962648f1)),
                   )
                 else
                   for (final actor in actors)
@@ -6804,20 +7035,29 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                       title: Text(
                         actor.user?.name ??
                             (exactIsDeparted && actor.ref == exact
-                                ? 'Use ${actor.ref.wire}'
-                                : '@${actor.ref.id.value}'),
+                                ? L10n.of(context).ui_use_value0_a62295a9(
+                                    (actor.ref.wire).toString())
+                                : L10n.of(context).ui_value0_1b34e556(
+                                    (actor.ref.id.value).toString())),
                       ),
                       subtitle: Text(
                         actor.user == null
                             ? exactIsDeparted && actor.ref == exact
-                                ? 'Filter a departed actor by exact canonical ID'
-                                : '${actor.ref.wire} • Known audit actor'
-                            : '${actor.user!.handle} • ${actor.ref.wire}',
+                                ? L10n.of(context)
+                                    .ui_filter_a_departed_actor_by_exact_canonical_id_7a8774d3
+                                : L10n.of(context)
+                                    .ui_value0_known_audit_actor_e242117d(
+                                        (actor.ref.wire).toString())
+                            : L10n.of(context).ui_value0_value1_d927892c(
+                                (actor.user!.handle).toString(),
+                                (actor.ref.wire).toString()),
                       ),
                       trailing: actor.ref.wire == widget.selectedKey
                           ? Icon(Icons.check_rounded)
                           : exactIsDeparted && actor.ref == exact
-                              ? Chip(label: Text('Exact ID'))
+                              ? Chip(
+                                  label: Text(
+                                      L10n.of(context).ui_exact_id_1c3e7ca1))
                               : null,
                       onTap: () => _select(actor),
                     ),
@@ -6839,7 +7079,9 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                             )
                           : Icon(Icons.expand_more_rounded),
                       label: Text(
-                        _loadingMore ? 'Loading…' : 'Load more members',
+                        _loadingMore
+                            ? L10n.of(context).ui_loading_c4e2f181
+                            : L10n.of(context).ui_load_more_members_01d2c605,
                       ),
                     ),
                   ),
@@ -6984,31 +7226,33 @@ final class _AuditEventCard extends StatelessWidget {
             Divider(height: 1),
             SizedBox(height: 12),
             if (reason.isNotEmpty) ...[
-              _AuditDetailLabel(label: 'Reason', value: reason),
+              _AuditDetailLabel(
+                  label: L10n.of(context).ui_reason_41314139, value: reason),
               SizedBox(height: 10),
             ],
             _AuditDetailLabel(
-              label: 'Target',
+              label: L10n.of(context).ui_target_8b67f168,
               value: guildAuditTargetDetail(item, guild, users),
             ),
             if (createdAt != null) ...[
               SizedBox(height: 10),
               _AuditDetailLabel(
-                label: 'When',
+                label: L10n.of(context).ui_when_021e3a39,
                 value: DateFormat('MMM d, y • h:mm:ss a').format(createdAt),
               ),
             ],
             if (reason.isEmpty) ...[
               SizedBox(height: 10),
-              const _AuditDetailLabel(
-                  label: 'Reason', value: 'No reason provided'),
+              _AuditDetailLabel(
+                  label: L10n.of(context).ui_reason_41314139,
+                  value: 'No reason provided'),
             ],
             if (changes.isNotEmpty) ...[
               SizedBox(height: 14),
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'CHANGES',
+                  L10n.of(context).ui_changes_1c5e9f2a,
                   style: TextStyle(
                     color: context.kaede.muted,
                     fontSize: 10.5,
@@ -7045,7 +7289,7 @@ final class _AuditDetailLabel extends StatelessWidget {
             ),
             children: [
               TextSpan(
-                text: '$label  ',
+                text: L10n.of(context).ui_value0_7e5b9bdc((label).toString()),
                 style: TextStyle(
                   color: context.kaede.muted,
                   fontWeight: FontWeight.w600,
@@ -7087,7 +7331,7 @@ final class _AuditChangeRow extends StatelessWidget {
                 ),
                 children: [
                   TextSpan(
-                    text: '$key: ',
+                    text: L10n.of(context).ui_value0_fa24b216((key).toString()),
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                   TextSpan(text: value),
@@ -7167,7 +7411,7 @@ final class _AuditInlineError extends StatelessWidget {
             ),
             TextButton(
               onPressed: () => unawaited(retry()),
-              child: Text('Retry'),
+              child: Text(L10n.of(context).ui_retry_8036af59),
             ),
           ],
         ),
@@ -7298,7 +7542,8 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
           SnackBar(
             content: Text(userFacingError(
               error,
-              summary: 'Could not search the members',
+              summary:
+                  L10n.of(context).ui_could_not_search_the_members_7dee0555,
             )),
             backgroundColor: context.kaede.danger,
           ),
@@ -7352,7 +7597,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
           SnackBar(
             content: Text(userFacingError(
               error,
-              summary: 'Could not load more members',
+              summary: L10n.of(context).ui_could_not_load_more_members_89005185,
             )),
             backgroundColor: context.kaede.danger,
           ),
@@ -7397,17 +7642,19 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
           ),
     ];
     return Scaffold(
-      appBar: AppBar(title: Text('#${widget.channel.name} permissions')),
+      appBar: AppBar(
+          title: Text(L10n.of(context).ui_value0_permissions_31cd145b(
+              (widget.channel.name).toString()))),
       body: Column(children: [
         if (widget.channel.parentRef != null &&
             !widget.channel.permissionsSynced)
           MaterialBanner(
-            content:
-                Text('Permissions are independent from the parent category.'),
+            content: Text(L10n.of(context)
+                .ui_permissions_are_independent_from_the_parent_c_fdf95228),
             actions: [
               TextButton(
                 onPressed: _mutating ? null : _sync,
-                child: Text('Sync with category'),
+                child: Text(L10n.of(context).ui_sync_with_category_d984adf6),
               ),
             ],
           ),
@@ -7442,7 +7689,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
         padding: EdgeInsets.all(12),
         child: SearchBar(
           controller: _search,
-          hintText: 'Search roles or members',
+          hintText: L10n.of(context).ui_search_roles_or_members_570939c6,
           leading: Icon(Icons.search_rounded),
           trailing: [
             if (_loadingMembers)
@@ -7492,10 +7739,12 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
             children: [
               Icon(Icons.shield_outlined, size: 36, color: context.kaede.muted),
               SizedBox(height: 10),
-              Text('Choose a role or member',
+              Text(L10n.of(context).ui_choose_a_role_or_member_a7e7d77c,
                   style: TextStyle(fontWeight: FontWeight.w800)),
               SizedBox(height: 4),
-              Text('Then set channel-specific permissions.',
+              Text(
+                  L10n.of(context)
+                      .ui_then_set_channel_specific_permissions_fc806672,
                   textAlign: TextAlign.center,
                   style: TextStyle(color: context.kaede.muted)),
             ],
@@ -7513,17 +7762,18 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
     final groups = relevant.map((item) => item.group).toSet();
     final targetEligible = _selectedTargetEligible;
     return ListView(padding: EdgeInsets.all(16), children: [
-      Text('Channel override',
+      Text(L10n.of(context).ui_channel_override_03778c74,
           style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
       SizedBox(height: 4),
       Text(
-        'Deny blocks the role permission here. Inherit keeps the role value. Allow grants it here.',
+        L10n.of(context)
+            .ui_deny_blocks_the_role_permission_here_inherit__31d3fe51,
         style: TextStyle(color: context.kaede.muted),
       ),
       if (!targetEligible) ...[
         SizedBox(height: 8),
         Text(
-          'You can no longer manage this target.',
+          L10n.of(context).ui_you_can_no_longer_manage_this_target_4a555956,
           style: TextStyle(color: context.kaede.danger),
         ),
       ],
@@ -7560,7 +7810,9 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
           child: FilledButton.icon(
               onPressed: _mutating || !targetEligible ? null : _save,
               icon: Icon(Icons.save_outlined),
-              label: Text(_mutating ? 'Saving…' : 'Save overwrite')),
+              label: Text(_mutating
+                  ? L10n.of(context).ui_saving_bd79b37d
+                  : L10n.of(context).ui_save_overwrite_739365dd)),
         ),
         if (_hasOverwrite) ...[
           SizedBox(width: 10),
@@ -7575,7 +7827,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
                 ? null
                 : _delete,
             icon: Icon(Icons.restart_alt_rounded),
-            label: Text('Reset'),
+            label: Text(L10n.of(context).ui_reset_0ac8a560),
           ),
         ],
       ]),
@@ -7655,8 +7907,8 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
             _hasOverwrite = true;
           }
         });
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Permissions saved')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(L10n.of(context).ui_permissions_saved_b08c8fd8)));
       }
     } on Object catch (error) {
       if (mounted) _showMutationError('Could not save permissions', error);
@@ -7687,8 +7939,8 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
           _hasOverwrite = false;
         }
       });
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Overwrite reset')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(L10n.of(context).ui_overwrite_reset_bcd25479)));
     } on Object catch (error) {
       if (mounted) _showMutationError('Could not reset permissions', error);
     } finally {
@@ -7935,256 +8187,277 @@ final class GuildAuditActionDefinition {
 /// Kaede's existing overloaded member/instance and channel-order codes also
 /// include a target type so the server can disambiguate them without changing
 /// any protocol values.
-const List<GuildAuditActionDefinition> guildAuditActionDefinitions = [
-  GuildAuditActionDefinition(actionType: 1, label: 'Guild updated'),
+final List<GuildAuditActionDefinition> guildAuditActionDefinitions = [
+  GuildAuditActionDefinition(
+      actionType: 1, label: L10n.current.ui_guild_updated_f6a4e19f),
   GuildAuditActionDefinition(
     actionType: 10,
-    label: 'Channel created',
+    label: L10n.current.ui_channel_created_23af65f4,
     tone: GuildAuditActionTone.success,
   ),
   GuildAuditActionDefinition(
     actionType: 11,
     targetType: 'channel',
-    label: 'Channel updated',
+    label: L10n.current.ui_channel_updated_0b334ccb,
   ),
   GuildAuditActionDefinition(
     actionType: 11,
     targetType: 'channel_order',
-    label: 'Channel order updated',
+    label: L10n.current.ui_channel_order_updated_691b36eb,
   ),
   GuildAuditActionDefinition(
     actionType: 12,
-    label: 'Channel deleted',
+    label: L10n.current.ui_channel_deleted_302f4b59,
     tone: GuildAuditActionTone.danger,
   ),
-  GuildAuditActionDefinition(actionType: 13, label: 'Channel permission added'),
+  GuildAuditActionDefinition(
+      actionType: 13, label: L10n.current.ui_channel_permission_added_2d003831),
   GuildAuditActionDefinition(
     actionType: 14,
-    label: 'Channel permission updated',
+    label: L10n.current.ui_channel_permission_updated_16332b24,
   ),
   GuildAuditActionDefinition(
     actionType: 15,
-    label: 'Channel permissions updated',
+    label: L10n.current.ui_channel_permissions_updated_7c7e5fbf,
   ),
   GuildAuditActionDefinition(
     actionType: 16,
-    label: 'Channel permissions removed',
+    label: L10n.current.ui_channel_permissions_removed_4585d6e4,
   ),
   GuildAuditActionDefinition(
     actionType: 17,
-    label: 'Channel permissions synced',
+    label: L10n.current.ui_channel_permissions_synced_db0dc85a,
   ),
   GuildAuditActionDefinition(
     actionType: 20,
-    label: 'Member kicked',
+    label: L10n.current.ui_member_kicked_a300da32,
     tone: GuildAuditActionTone.danger,
   ),
-  GuildAuditActionDefinition(actionType: 21, label: 'Members pruned'),
+  GuildAuditActionDefinition(
+      actionType: 21, label: L10n.current.ui_members_pruned_2abddb7c),
   GuildAuditActionDefinition(
     actionType: 22,
-    label: 'Member banned',
+    label: L10n.current.ui_member_banned_7f42801d,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 23,
-    label: 'Member unbanned',
+    label: L10n.current.ui_member_unbanned_0c6a5dc6,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 24, label: 'Member updated'),
+  GuildAuditActionDefinition(
+      actionType: 24, label: L10n.current.ui_member_updated_370ac234),
   GuildAuditActionDefinition(
     actionType: 25,
     targetType: 'member',
-    label: 'Member roles updated',
+    label: L10n.current.ui_member_roles_updated_00295fb1,
   ),
   GuildAuditActionDefinition(
     actionType: 25,
     targetType: 'instance',
-    label: 'Instance banned',
+    label: L10n.current.ui_instance_banned_740b0efe,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 26,
     targetType: 'member',
-    label: 'Member moved',
+    label: L10n.current.ui_member_moved_69b0bb14,
   ),
   GuildAuditActionDefinition(
     actionType: 26,
     targetType: 'instance',
-    label: 'Instance unbanned',
+    label: L10n.current.ui_instance_unbanned_edcb88c9,
     tone: GuildAuditActionTone.success,
   ),
   GuildAuditActionDefinition(
     actionType: 27,
     targetType: 'member',
-    label: 'Member disconnected',
+    label: L10n.current.ui_member_disconnected_fcf4df8e,
   ),
   GuildAuditActionDefinition(
     actionType: 27,
     targetType: 'user',
-    label: 'Ownership transferred',
+    label: L10n.current.ui_ownership_transferred_bdc1b5b0,
   ),
   GuildAuditActionDefinition(
     actionType: 28,
-    label: 'Bot added',
+    label: L10n.current.ui_bot_added_aef436b8,
     tone: GuildAuditActionTone.success,
   ),
   GuildAuditActionDefinition(
     actionType: 30,
-    label: 'Role created',
+    label: L10n.current.ui_role_created_9afd451d,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 31, label: 'Role updated'),
+  GuildAuditActionDefinition(
+      actionType: 31, label: L10n.current.ui_role_updated_22ca2f7a),
   GuildAuditActionDefinition(
     actionType: 32,
-    label: 'Role deleted',
+    label: L10n.current.ui_role_deleted_23b256a4,
     tone: GuildAuditActionTone.danger,
   ),
-  GuildAuditActionDefinition(actionType: 33, label: 'Roles reordered'),
+  GuildAuditActionDefinition(
+      actionType: 33, label: L10n.current.ui_roles_reordered_0182f1b0),
   GuildAuditActionDefinition(
     actionType: 40,
-    label: 'Invite created',
+    label: L10n.current.ui_invite_created_37a57250,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 41, label: 'Invite updated'),
-  GuildAuditActionDefinition(actionType: 42, label: 'Invite deleted'),
+  GuildAuditActionDefinition(
+      actionType: 41, label: L10n.current.ui_invite_updated_8f52b70f),
+  GuildAuditActionDefinition(
+      actionType: 42, label: L10n.current.ui_invite_deleted_c6b85add),
   GuildAuditActionDefinition(
     actionType: 50,
-    label: 'Webhook created',
+    label: L10n.current.ui_webhook_created_1bca0506,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 51, label: 'Webhook updated'),
+  GuildAuditActionDefinition(
+      actionType: 51, label: L10n.current.ui_webhook_updated_ec85f9bd),
   GuildAuditActionDefinition(
     actionType: 52,
-    label: 'Webhook deleted',
+    label: L10n.current.ui_webhook_deleted_dc43192b,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 60,
-    label: 'Emoji created',
+    label: L10n.current.ui_emoji_created_16fdca11,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 61, label: 'Emoji updated'),
+  GuildAuditActionDefinition(
+      actionType: 61, label: L10n.current.ui_emoji_updated_29d84a76),
   GuildAuditActionDefinition(
     actionType: 62,
-    label: 'Emoji deleted',
+    label: L10n.current.ui_emoji_deleted_fc82c9b0,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 72,
-    label: 'Message deleted',
+    label: L10n.current.ui_message_deleted_edcce219,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 73,
-    label: 'Messages bulk deleted',
+    label: L10n.current.ui_messages_bulk_deleted_1c218842,
     tone: GuildAuditActionTone.danger,
   ),
-  GuildAuditActionDefinition(actionType: 74, label: 'Message pinned'),
-  GuildAuditActionDefinition(actionType: 75, label: 'Message unpinned'),
+  GuildAuditActionDefinition(
+      actionType: 74, label: L10n.current.ui_message_pinned_0245fc7e),
+  GuildAuditActionDefinition(
+      actionType: 75, label: L10n.current.ui_message_unpinned_5a9b3c59),
   GuildAuditActionDefinition(
     actionType: 80,
-    label: 'App integration added',
+    label: L10n.current.ui_app_integration_added_2c3214a0,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 81, label: 'App integration updated'),
+  GuildAuditActionDefinition(
+      actionType: 81, label: L10n.current.ui_app_integration_updated_a03127bd),
   GuildAuditActionDefinition(
     actionType: 82,
-    label: 'App integration removed',
+    label: L10n.current.ui_app_integration_removed_0457ca96,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 83,
-    label: 'Stage instance created',
+    label: L10n.current.ui_stage_instance_created_e7072554,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 84, label: 'Stage instance updated'),
+  GuildAuditActionDefinition(
+      actionType: 84, label: L10n.current.ui_stage_instance_updated_50c0832b),
   GuildAuditActionDefinition(
     actionType: 85,
-    label: 'Stage instance deleted',
+    label: L10n.current.ui_stage_instance_deleted_1fc488b9,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 90,
-    label: 'Sticker created',
+    label: L10n.current.ui_sticker_created_3c32a2cc,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 91, label: 'Sticker updated'),
+  GuildAuditActionDefinition(
+      actionType: 91, label: L10n.current.ui_sticker_updated_9edf4cc3),
   GuildAuditActionDefinition(
     actionType: 92,
-    label: 'Sticker deleted',
+    label: L10n.current.ui_sticker_deleted_b18c5be1,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 100,
-    label: 'Scheduled event created',
+    label: L10n.current.ui_scheduled_event_created_02bbcaf0,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 101, label: 'Scheduled event updated'),
+  GuildAuditActionDefinition(
+      actionType: 101, label: L10n.current.ui_scheduled_event_updated_57f039af),
   GuildAuditActionDefinition(
     actionType: 102,
-    label: 'Scheduled event deleted',
+    label: L10n.current.ui_scheduled_event_deleted_91ceb37d,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 110,
-    label: 'Thread created',
+    label: L10n.current.ui_thread_created_7a4bcdb5,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 111, label: 'Thread updated'),
+  GuildAuditActionDefinition(
+      actionType: 111, label: L10n.current.ui_thread_updated_0fc12d52),
   GuildAuditActionDefinition(
     actionType: 112,
-    label: 'Thread deleted',
+    label: L10n.current.ui_thread_deleted_3e8d0d2c,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 121,
-    label: 'Command permissions updated',
+    label: L10n.current.ui_command_permissions_updated_f62b2015,
   ),
   GuildAuditActionDefinition(
     actionType: 130,
-    label: 'Soundboard sound created',
+    label: L10n.current.ui_soundboard_sound_created_4c2a7bdf,
     tone: GuildAuditActionTone.success,
   ),
   GuildAuditActionDefinition(
-      actionType: 131, label: 'Soundboard sound updated'),
+      actionType: 131,
+      label: L10n.current.ui_soundboard_sound_updated_eab6637c),
   GuildAuditActionDefinition(
     actionType: 132,
-    label: 'Soundboard sound deleted',
+    label: L10n.current.ui_soundboard_sound_deleted_1ea7f246,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 140,
-    label: 'AutoMod rule created',
+    label: L10n.current.ui_automod_rule_created_384f9568,
     tone: GuildAuditActionTone.success,
   ),
-  GuildAuditActionDefinition(actionType: 141, label: 'AutoMod rule updated'),
+  GuildAuditActionDefinition(
+      actionType: 141, label: L10n.current.ui_automod_rule_updated_3dffe807),
   GuildAuditActionDefinition(
     actionType: 142,
-    label: 'AutoMod rule deleted',
+    label: L10n.current.ui_automod_rule_deleted_b5012fc5,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 143,
-    label: 'AutoMod action applied',
+    label: L10n.current.ui_automod_action_applied_7bd25a81,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
-      actionType: 144, label: 'Message flagged by AutoMod'),
+      actionType: 144,
+      label: L10n.current.ui_message_flagged_by_automod_ee2afb82),
   GuildAuditActionDefinition(
     actionType: 145,
-    label: 'Member timed out by AutoMod',
+    label: L10n.current.ui_member_timed_out_by_automod_bc7f6770,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
     actionType: 146,
-    label: 'Member quarantined by AutoMod',
+    label: L10n.current.ui_member_quarantined_by_automod_554276b5,
     tone: GuildAuditActionTone.danger,
   ),
   GuildAuditActionDefinition(
-      actionType: 192, label: 'Voice channel status set'),
+      actionType: 192,
+      label: L10n.current.ui_voice_channel_status_set_7459c4e8),
   GuildAuditActionDefinition(
     actionType: 193,
-    label: 'Voice channel status removed',
+    label: L10n.current.ui_voice_channel_status_removed_87d001bc,
   ),
 ];
 
@@ -8728,13 +9001,15 @@ final class _PermissionRow extends StatelessWidget {
           ButtonSegment(
               value: -1,
               icon: Icon(Icons.close, color: context.kaede.danger),
-              tooltip: 'Deny'),
-          const ButtonSegment(
-              value: 0, icon: Icon(Icons.horizontal_rule), tooltip: 'Inherit'),
+              tooltip: L10n.of(context).ui_deny_07d5fa87),
+          ButtonSegment(
+              value: 0,
+              icon: Icon(Icons.horizontal_rule),
+              tooltip: L10n.of(context).ui_inherit_e1611680),
           ButtonSegment(
               value: 1,
               icon: Icon(Icons.check, color: context.kaede.mint),
-              tooltip: 'Allow')
+              tooltip: L10n.of(context).ui_allow_546d19d2)
         ],
         selected: {value},
         onSelectionChanged: enabled ? (value) => changed(value.first) : null,
@@ -8754,12 +9029,14 @@ final class _PermissionRow extends StatelessWidget {
               if (channelPermissionDependencyLabels(metadata)
                   case final dependencies when dependencies.isNotEmpty)
                 Text(
-                  'Also requires: ${dependencies.join(', ')}',
+                  L10n.of(context).ui_also_requires_value0_7f2e23b9(
+                      (dependencies.join(', ')).toString()),
                   style: TextStyle(color: context.kaede.muted, fontSize: 12),
                 ),
               if (!enabled)
                 Text(
-                  'You can only change permissions you currently hold here.',
+                  L10n.of(context)
+                      .ui_you_can_only_change_permissions_you_currently_84b00a2e,
                   style: TextStyle(color: context.kaede.muted, fontSize: 12),
                 ),
             ],
@@ -8893,12 +9170,17 @@ Future<KaedeChannel?> showGuildChannelPicker(
                     }),
                     title: Text(channel.name ?? 'channel'),
                     subtitle: Text(switch (channel.type) {
-                      ChannelType.announcement => 'Announcement channel',
-                      ChannelType.forum => 'Forum channel',
-                      ChannelType.voice => 'Voice channel',
-                      ChannelType.stage => 'Stage channel',
-                      ChannelType.tracker => 'Task tracker channel',
-                      _ => 'Text channel',
+                      ChannelType.announcement =>
+                        L10n.of(context).ui_announcement_channel_ec8b9fb9,
+                      ChannelType.forum =>
+                        L10n.of(context).ui_forum_channel_cdffa0a5,
+                      ChannelType.voice =>
+                        L10n.of(context).ui_voice_channel_d243a4f2,
+                      ChannelType.stage =>
+                        L10n.of(context).ui_stage_channel_8ff46126,
+                      ChannelType.tracker =>
+                        L10n.of(context).ui_task_tracker_channel_7292dbc3,
+                      _ => L10n.of(context).ui_text_channel_58162d0d,
                     }),
                     trailing: Icon(Icons.chevron_right_rounded),
                     onTap: () => Navigator.pop(sheetContext, channel),
@@ -9008,7 +9290,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
       setState(() {
         _voiceRegionsError = userFacingError(
           error,
-          summary: 'Region overrides are temporarily unavailable',
+          summary: L10n.of(context)
+              .ui_region_overrides_are_temporarily_unavailable_84a7f6a8,
         );
       });
     } finally {
@@ -9033,22 +9316,21 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text('Require end-to-end encryption for posts?'),
+        title: Text(L10n.of(context)
+            .ui_require_end_to_end_encryption_for_posts_c262b4d3),
         content: Text(
-          'Only new posts will use this policy. Each post first establishes '
-          'its keys, then sends its entire starter, files, and future replies '
-          'end-to-end encrypted. Once this forum is saved, the requirement '
-          'cannot be turned off.',
+          L10n.of(context)
+              .ui_only_new_posts_will_use_this_policy_each_post_1635f1d1,
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton.icon(
             onPressed: () => Navigator.pop(dialogContext, true),
             icon: Icon(Icons.lock_rounded),
-            label: Text('Require encryption'),
+            label: Text(L10n.of(context).ui_require_encryption_aa6a2ced),
           ),
         ],
       ),
@@ -9082,8 +9364,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
           onPressed: _save,
           icon: Icon(
               widget.channel == null ? Icons.add_rounded : Icons.save_outlined),
-          label:
-              Text(widget.channel == null ? 'Create channel' : 'Save changes'),
+          label: Text(widget.channel == null
+              ? L10n.of(context).ui_create_channel_fd2226d6
+              : L10n.of(context).ui_save_changes_61efb279),
         ),
       ),
     );
@@ -9109,8 +9392,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           children: [
                             Text(
                               widget.channel == null
-                                  ? 'Create a channel'
-                                  : 'Edit channel',
+                                  ? L10n.of(context)
+                                      .ui_create_a_channel_fa787131
+                                  : L10n.of(context).ui_edit_channel_dfb3900a,
                               style: Theme.of(context)
                                   .textTheme
                                   .headlineSmall
@@ -9119,15 +9403,17 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             SizedBox(height: 3),
                             Text(
                               widget.channel == null
-                                  ? 'Choose what members can use this space for.'
-                                  : 'Update how this channel appears and behaves.',
+                                  ? L10n.of(context)
+                                      .ui_choose_what_members_can_use_this_space_for_71b22a5d
+                                  : L10n.of(context)
+                                      .ui_update_how_this_channel_appears_and_behaves_d3703cec,
                               style: TextStyle(color: context.kaede.muted),
                             ),
                           ],
                         ),
                       ),
                       IconButton(
-                        tooltip: 'Close',
+                        tooltip: L10n.of(context).ui_close_cd86acc3,
                         onPressed: () => Navigator.pop(context),
                         icon: Icon(Icons.close_rounded),
                       ),
@@ -9150,10 +9436,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                         maxLength: 100,
                         textInputAction: TextInputAction.next,
                         decoration: InputDecoration(
-                          labelText: 'Channel name',
+                          labelText: L10n.of(context).ui_channel_name_0700b8a7,
                           hintText: _type == ChannelType.category
-                              ? 'New category'
-                              : 'new-channel',
+                              ? L10n.of(context).ui_new_category_e3f79467
+                              : L10n.of(context).ui_new_channel_34469ca7,
                           prefixIcon: Icon(switch (_type) {
                             ChannelType.category => Icons.folder_outlined,
                             ChannelType.voice => Icons.volume_up_rounded,
@@ -9171,7 +9457,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                       ),
                       if (widget.channel == null) ...[
                         SizedBox(height: 8),
-                        Text('Channel type',
+                        Text(L10n.of(context).ui_channel_type_151683a4,
                             style: Theme.of(context).textTheme.titleMedium),
                         SizedBox(height: 9),
                         GridView.count(
@@ -9226,7 +9512,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             SizedBox(width: 7),
                             Expanded(
                               child: Text(
-                                '${switch (_type) {
+                                L10n.of(context)
+                                    .ui_value0_the_type_cannot_change_after_creation_5ea0cc90(
+                                        (switch (_type) {
                                   ChannelType.category => 'Category',
                                   ChannelType.voice => 'Voice channel',
                                   ChannelType.stage => 'Stage channel',
@@ -9234,8 +9522,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                     'Announcement channel',
                                   ChannelType.forum => 'Forum channel',
                                   ChannelType.tracker => 'Task tracker',
-                                  _ => 'Text channel',
-                                }} · the type cannot change after creation',
+                                  _ => 'Text channel'
+                                })
+                                            .toString()),
                                 style: TextStyle(
                                   color: context.kaede.muted,
                                   fontSize: 12,
@@ -9255,12 +9544,14 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                               : '',
                           isExpanded: true,
                           decoration: InputDecoration(
-                            labelText: 'Category',
+                            labelText: L10n.of(context).ui_category_afb3e591,
                             prefixIcon: Icon(Icons.folder_outlined),
                           ),
                           items: [
                             DropdownMenuItem(
-                                value: '', child: Text('No category')),
+                                value: '',
+                                child: Text(
+                                    L10n.of(context).ui_no_category_44662d06)),
                             for (final category in categories)
                               DropdownMenuItem(
                                 value: category.ref.wire,
@@ -9279,17 +9570,22 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           textCapitalization: TextCapitalization.sentences,
                           decoration: InputDecoration(
                             labelText: _voiceLike
-                                ? 'Description (optional)'
+                                ? L10n.of(context)
+                                    .ui_description_optional_31e71764
                                 : _type == ChannelType.forum
-                                    ? 'Post Guidelines (optional)'
-                                    : 'Topic (optional)',
+                                    ? L10n.of(context)
+                                        .ui_post_guidelines_optional_5d4ad955
+                                    : L10n.of(context)
+                                        .ui_topic_optional_3542345b,
                             alignLabelWithHint: true,
                           ),
                         ),
                         if (_voiceLike) ...[
                           SizedBox(height: 14),
                           Text(
-                            'Audio bitrate: ${(_bitrate / 1000).round()} kbps',
+                            L10n.of(context)
+                                .ui_audio_bitrate_value0_kbps_4f0c3405(
+                                    ((_bitrate / 1000).round()).toString()),
                             style: TextStyle(fontWeight: FontWeight.w700),
                           ),
                           Slider(
@@ -9303,7 +9599,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             min: 8000,
                             max: _type == ChannelType.stage ? 64000 : 384000,
                             divisions: _type == ChannelType.stage ? 7 : 47,
-                            label: '${(_bitrate / 1000).round()} kbps',
+                            label: L10n.of(context).ui_value0_kbps_f480dbec(
+                                ((_bitrate / 1000).round()).toString()),
                             onChanged: (value) => setState(
                               () => _bitrate = (value / 8000)
                                       .round()
@@ -9318,8 +9615,11 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           SizedBox(height: 4),
                           Text(
                             _userLimit == 0
-                                ? 'User limit: Unlimited'
-                                : 'User limit: $_userLimit',
+                                ? L10n.of(context)
+                                    .ui_user_limit_unlimited_fce2e0fa
+                                : L10n.of(context)
+                                    .ui_user_limit_value0_08b75f4e(
+                                        (_userLimit).toString()),
                             style: TextStyle(fontWeight: FontWeight.w700),
                           ),
                           Slider(
@@ -9328,8 +9628,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             min: 0,
                             max: _type == ChannelType.stage ? 10000 : 99,
                             divisions: _type == ChannelType.stage ? 10000 : 99,
-                            label:
-                                _userLimit == 0 ? 'Unlimited' : '$_userLimit',
+                            label: _userLimit == 0
+                                ? L10n.of(context).ui_unlimited_2d283a80
+                                : L10n.of(context).ui_value0_26e9163c(
+                                    (_userLimit).toString()),
                             onChanged: (value) =>
                                 setState(() => _userLimit = value.round()),
                           ),
@@ -9338,16 +9640,21 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             key: ValueKey('voice-video-quality-field'),
                             initialValue: _videoQualityMode,
                             decoration: InputDecoration(
-                              labelText: 'Camera video quality',
-                              helperText:
-                                  'Automatic adapts to network conditions; Full keeps the configured quality target.',
+                              labelText: L10n.of(context)
+                                  .ui_camera_video_quality_b2692988,
+                              helperText: L10n.of(context)
+                                  .ui_automatic_adapts_to_network_conditions_full_k_e86fa367,
                               prefixIcon: Icon(Icons.videocam_outlined),
                             ),
-                            items: const [
+                            items: [
                               DropdownMenuItem(
-                                  value: 1, child: Text('Automatic')),
+                                  value: 1,
+                                  child: Text(
+                                      L10n.of(context).ui_automatic_616a6784)),
                               DropdownMenuItem(
-                                  value: 2, child: Text('Full quality')),
+                                  value: 2,
+                                  child: Text(L10n.of(context)
+                                      .ui_full_quality_d085cb95)),
                             ],
                             onChanged: (value) =>
                                 setState(() => _videoQualityMode = value ?? 1),
@@ -9358,7 +9665,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             initialValue: _rtcRegion ?? '',
                             isExpanded: true,
                             decoration: InputDecoration(
-                              labelText: 'Region Override',
+                              labelText:
+                                  L10n.of(context).ui_region_override_0f60d437,
                               helperText: _voiceRegionsError ??
                                   'Automatic chooses the lowest-latency region advertised by this server.',
                               errorMaxLines: 2,
@@ -9375,7 +9683,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                   : _voiceRegionsError == null
                                       ? null
                                       : IconButton(
-                                          tooltip: 'Retry region discovery',
+                                          tooltip: L10n.of(context)
+                                              .ui_retry_region_discovery_ceb09eb1,
                                           onPressed: _loadVoiceRegions,
                                           icon: Icon(Icons.refresh_rounded),
                                         ),
@@ -9383,14 +9692,17 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             items: [
                               DropdownMenuItem(
                                 value: '',
-                                child: Text('Automatic'),
+                                child: Text(
+                                    L10n.of(context).ui_automatic_616a6784),
                               ),
                               if (_rtcRegion != null &&
                                   !_voiceRegions
                                       .any((region) => region.id == _rtcRegion))
                                 DropdownMenuItem(
                                   value: _rtcRegion,
-                                  child: Text('$_rtcRegion (unavailable)'),
+                                  child: Text(L10n.of(context)
+                                      .ui_value0_unavailable_b6c9188d(
+                                          (_rtcRegion).toString())),
                                 ),
                               for (final region in _voiceRegions)
                                 DropdownMenuItem(
@@ -9398,7 +9710,17 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                   enabled: !region.deprecated ||
                                       region.id == _rtcRegion,
                                   child: Text(
-                                    '${region.name}${region.optimal ? ' — Recommended' : ''}${region.deprecated ? ' — Deprecated' : ''}',
+                                    L10n.of(context)
+                                        .ui_value0_value1_value2_d1940c97(
+                                            (region.name).toString(),
+                                            (region.optimal
+                                                    ? ' — Recommended'
+                                                    : '')
+                                                .toString(),
+                                            (region.deprecated
+                                                    ? ' — Deprecated'
+                                                    : '')
+                                                .toString()),
                                   ),
                                 ),
                             ],
@@ -9417,11 +9739,13 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             isExpanded: true,
                             decoration: InputDecoration(
                               labelText: _type == ChannelType.forum
-                                  ? 'Post slow mode'
-                                  : 'Slow mode',
+                                  ? L10n.of(context).ui_post_slow_mode_3edd7fdb
+                                  : L10n.of(context).ui_slow_mode_855fc3fb,
                               helperText: _type == ChannelType.forum
-                                  ? 'How long members wait between posts.'
-                                  : 'How long members wait between messages.',
+                                  ? L10n.of(context)
+                                      .ui_how_long_members_wait_between_posts_f02942be
+                                  : L10n.of(context)
+                                      .ui_how_long_members_wait_between_messages_234b28b9,
                               prefixIcon: Icon(Icons.timer_outlined),
                             ),
                             items: [
@@ -9439,9 +9763,11 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             SwitchListTile.adaptive(
                               key: ValueKey('channel-nsfw-field'),
                               contentPadding: EdgeInsets.zero,
-                              title: Text('Age-restricted channel'),
+                              title: Text(L10n.of(context)
+                                  .ui_age_restricted_channel_9dfeba31),
                               subtitle: Text(
-                                'Only age-assured adults can use age-restricted app commands here. Threads inherit this setting.',
+                                L10n.of(context)
+                                    .ui_only_age_assured_adults_can_use_age_restricte_e906349c,
                               ),
                               value: _nsfw,
                               onChanged: (value) =>
@@ -9458,9 +9784,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             maxLength: 10,
                             textCapitalization: TextCapitalization.characters,
                             decoration: InputDecoration(
-                              labelText: 'Task key prefix',
-                              helperText:
-                                  'Used for task IDs, for example TASK-24.',
+                              labelText:
+                                  L10n.of(context).ui_task_key_prefix_37585bcd,
+                              helperText: L10n.of(context)
+                                  .ui_used_for_task_ids_for_example_task_24_97923cfd,
                               prefixIcon: Icon(Icons.tag_rounded),
                             ),
                             validator: (value) => RegExp(
@@ -9475,18 +9802,27 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           DropdownButtonFormField<int>(
                             initialValue: _defaultAutoArchive,
                             decoration: InputDecoration(
-                              labelText: 'Hide posts after inactivity',
+                              labelText: L10n.of(context)
+                                  .ui_hide_posts_after_inactivity_d29b91de,
                               prefixIcon: Icon(Icons.archive_outlined),
                             ),
-                            items: const [
+                            items: [
                               DropdownMenuItem(
-                                  value: 60, child: Text('1 hour')),
+                                  value: 60,
+                                  child: Text(
+                                      L10n.of(context).ui_1_hour_0c43fb4a)),
                               DropdownMenuItem(
-                                  value: 1440, child: Text('24 hours')),
+                                  value: 1440,
+                                  child: Text(
+                                      L10n.of(context).ui_24_hours_42929680)),
                               DropdownMenuItem(
-                                  value: 4320, child: Text('3 days')),
+                                  value: 4320,
+                                  child: Text(
+                                      L10n.of(context).ui_3_days_2d8e0d65)),
                               DropdownMenuItem(
-                                  value: 10080, child: Text('1 week')),
+                                  value: 10080,
+                                  child: Text(
+                                      L10n.of(context).ui_1_week_d0d53158)),
                             ],
                             onChanged: (value) => setState(() =>
                                 _defaultAutoArchive =
@@ -9496,9 +9832,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           DropdownButtonFormField<int>(
                             initialValue: _threadSlow,
                             decoration: InputDecoration(
-                              labelText: 'Default reply slow mode',
-                              helperText:
-                                  'How long members wait between replies.',
+                              labelText: L10n.of(context)
+                                  .ui_default_reply_slow_mode_b521b1f6,
+                              helperText: L10n.of(context)
+                                  .ui_how_long_members_wait_between_replies_6513bbbb,
                               prefixIcon: Icon(Icons.timer_outlined),
                             ),
                             items: [
@@ -9515,14 +9852,19 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           DropdownButtonFormField<int>(
                             initialValue: _forumSort,
                             decoration: InputDecoration(
-                              labelText: 'Default sort order',
+                              labelText: L10n.of(context)
+                                  .ui_default_sort_order_d01cf9d6,
                               prefixIcon: Icon(Icons.swap_vert_rounded),
                             ),
-                            items: const [
+                            items: [
                               DropdownMenuItem(
-                                  value: 0, child: Text('Recently Active')),
+                                  value: 0,
+                                  child: Text(L10n.of(context)
+                                      .ui_recently_active_58db5e19)),
                               DropdownMenuItem(
-                                  value: 1, child: Text('Date Posted')),
+                                  value: 1,
+                                  child: Text(L10n.of(context)
+                                      .ui_date_posted_1e479eb4)),
                             ],
                             onChanged: (value) =>
                                 setState(() => _forumSort = value ?? 0),
@@ -9531,15 +9873,23 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           DropdownButtonFormField<int>(
                             initialValue: _forumLayout,
                             decoration: InputDecoration(
-                              labelText: 'Default layout',
+                              labelText:
+                                  L10n.of(context).ui_default_layout_04af82c4,
                               prefixIcon: Icon(Icons.view_agenda_outlined),
                             ),
-                            items: const [
+                            items: [
                               DropdownMenuItem(
-                                  value: 0, child: Text('Not set')),
-                              DropdownMenuItem(value: 1, child: Text('List')),
+                                  value: 0,
+                                  child: Text(
+                                      L10n.of(context).ui_not_set_d7958fc6)),
                               DropdownMenuItem(
-                                  value: 2, child: Text('Gallery')),
+                                  value: 1,
+                                  child:
+                                      Text(L10n.of(context).ui_list_8d2937a1)),
+                              DropdownMenuItem(
+                                  value: 2,
+                                  child: Text(
+                                      L10n.of(context).ui_gallery_d7b54cdd)),
                             ],
                             onChanged: (value) =>
                                 setState(() => _forumLayout = value ?? 0),
@@ -9551,17 +9901,20 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             onChanged: (_) =>
                                 setState(() => _defaultReactionEdited = true),
                             decoration: InputDecoration(
-                              labelText: 'Default reaction emoji (optional)',
+                              labelText: L10n.of(context)
+                                  .ui_default_reaction_emoji_optional_edb59386,
                               counterText: '',
                               prefixIcon: Icon(Icons.add_reaction_outlined),
                               helperText: !_defaultReactionEdited &&
                                       _defaultReactionId?.isNotEmpty == true
-                                  ? 'A custom emoji is selected.'
+                                  ? L10n.of(context)
+                                      .ui_a_custom_emoji_is_selected_84469cf2
                                   : null,
                               suffixIcon: !_defaultReactionEdited &&
                                       _defaultReactionId?.isNotEmpty == true
                                   ? IconButton(
-                                      tooltip: 'Clear default reaction',
+                                      tooltip: L10n.of(context)
+                                          .ui_clear_default_reaction_c02d6396,
                                       onPressed: () => setState(() {
                                         _defaultReactionEdited = true;
                                         _defaultReaction.clear();
@@ -9576,9 +9929,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             value: _requireTag,
                             onChanged: (value) =>
                                 setState(() => _requireTag = value),
-                            title: Text('Require a tag'),
-                            subtitle: Text(
-                                'Members must select a tag before posting.'),
+                            title: Text(
+                                L10n.of(context).ui_require_a_tag_96b692a3),
+                            subtitle: Text(L10n.of(context)
+                                .ui_members_must_select_a_tag_before_posting_70a7a179),
                           ),
                           if (widget.e2eeActivationEnabled || _e2eeRequired)
                             SwitchListTile(
@@ -9588,17 +9942,21 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                   ? null
                                   : (value) =>
                                       unawaited(_setE2eeRequired(value)),
-                              title: Text(
-                                  'Require end-to-end encryption for posts'),
+                              title: Text(L10n.of(context)
+                                  .ui_require_end_to_end_encryption_for_posts_c95f87fe),
                               subtitle: Text(_e2eeRequired
-                                  ? 'The entire starter, its files, and all future replies are encrypted after each post establishes its keys.'
-                                  : 'New post starters, files, and replies remain readable to the server.'),
+                                  ? L10n.of(context)
+                                      .ui_the_entire_starter_its_files_and_all_future_r_b7ce425c
+                                  : L10n.of(context)
+                                      .ui_new_post_starters_files_and_replies_remain_re_bf6049f4),
                             ),
                           SizedBox(height: 8),
                           Row(
                             children: [
                               Expanded(
-                                child: Text('Tags (${_forumTags.length}/20)',
+                                child: Text(
+                                    L10n.of(context).ui_tags_value0_20_3af19317(
+                                        (_forumTags.length).toString()),
                                     style: Theme.of(context)
                                         .textTheme
                                         .titleMedium),
@@ -9608,7 +9966,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                     ? null
                                     : () => _editForumTag(),
                                 icon: Icon(Icons.add_rounded, size: 17),
-                                label: Text('Create Tag'),
+                                label: Text(
+                                    L10n.of(context).ui_create_tag_deec4e4d),
                               ),
                             ],
                           ),
@@ -9624,18 +9983,20 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                               ),
                               title: Text(_forumTags[index].name),
                               subtitle: _forumTags[index].moderated
-                                  ? Text('Moderated')
+                                  ? Text(L10n.of(context).ui_moderated_eaca0b0c)
                                   : null,
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   IconButton(
-                                    tooltip: 'Edit tag',
+                                    tooltip:
+                                        L10n.of(context).ui_edit_tag_82fd7fa1,
                                     onPressed: () => _editForumTag(index),
                                     icon: Icon(Icons.edit_outlined),
                                   ),
                                   IconButton(
-                                    tooltip: 'Delete tag',
+                                    tooltip:
+                                        L10n.of(context).ui_delete_tag_5b3fe0de,
                                     onPressed: () => setState(
                                         () => _forumTags.removeAt(index)),
                                     icon: Icon(Icons.delete_outline_rounded),
@@ -9652,21 +10013,25 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             initialValue: _history,
                             isExpanded: true,
                             decoration: InputDecoration(
-                              labelText: 'Federated history',
-                              helperText:
-                                  'Override how remote instances retain this channel.',
+                              labelText: L10n.of(context)
+                                  .ui_federated_history_3e086dab,
+                              helperText: L10n.of(context)
+                                  .ui_override_how_remote_instances_retain_this_cha_783e4cf3,
                               prefixIcon: Icon(Icons.history_rounded),
                             ),
-                            items: const [
+                            items: [
                               DropdownMenuItem(
                                   value: 'inherit',
-                                  child: Text('Use guild setting')),
+                                  child: Text(L10n.of(context)
+                                      .ui_use_guild_setting_5c1e91cb)),
                               DropdownMenuItem(
                                   value: 'disabled',
-                                  child: Text('Recent messages only')),
+                                  child: Text(L10n.of(context)
+                                      .ui_recent_messages_only_9a1ca024)),
                               DropdownMenuItem(
                                   value: 'full_retained',
-                                  child: Text('Retain full history')),
+                                  child: Text(L10n.of(context)
+                                      .ui_retain_full_history_55f35965)),
                             ],
                             onChanged: (value) =>
                                 setState(() => _history = value ?? 'inherit'),
@@ -9696,7 +10061,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text(existing == null ? 'Create Tag' : 'Edit Tag'),
+          title: Text(existing == null
+              ? L10n.of(context).ui_create_tag_deec4e4d
+              : L10n.of(context).ui_edit_tag_e5881741),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -9705,7 +10072,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                 autofocus: true,
                 maxLength: 20,
                 decoration: InputDecoration(
-                  labelText: 'Tag name',
+                  labelText: L10n.of(context).ui_tag_name_e96325c2,
                   counterText: '',
                 ),
               ),
@@ -9715,39 +10082,39 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                 maxLength: 64,
                 onChanged: (_) => setDialogState(() => emojiEdited = true),
                 decoration: InputDecoration(
-                  labelText: 'Emoji (optional)',
+                  labelText: L10n.of(context).ui_emoji_optional_008fc6b8,
                   counterText: '',
-                  helperText:
-                      !emojiEdited && existing?.emojiId?.isNotEmpty == true
-                          ? 'A custom emoji is selected.'
-                          : null,
-                  suffixIcon:
-                      !emojiEdited && existing?.emojiId?.isNotEmpty == true
-                          ? IconButton(
-                              tooltip: 'Clear tag emoji',
-                              onPressed: () => setDialogState(() {
-                                emojiEdited = true;
-                                emoji.clear();
-                              }),
-                              icon: Icon(Icons.close_rounded),
-                            )
-                          : null,
+                  helperText: !emojiEdited &&
+                          existing?.emojiId?.isNotEmpty == true
+                      ? L10n.of(context).ui_a_custom_emoji_is_selected_84469cf2
+                      : null,
+                  suffixIcon: !emojiEdited &&
+                          existing?.emojiId?.isNotEmpty == true
+                      ? IconButton(
+                          tooltip: L10n.of(context).ui_clear_tag_emoji_c5f2138c,
+                          onPressed: () => setDialogState(() {
+                            emojiEdited = true;
+                            emoji.clear();
+                          }),
+                          icon: Icon(Icons.close_rounded),
+                        )
+                      : null,
                 ),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 value: moderated,
                 onChanged: (value) => setDialogState(() => moderated = value),
-                title: Text('Moderated'),
-                subtitle: Text(
-                    'Only members who can manage threads can use this tag.'),
+                title: Text(L10n.of(context).ui_moderated_eaca0b0c),
+                subtitle: Text(L10n.of(context)
+                    .ui_only_members_who_can_manage_threads_can_use_t_7a11d6af),
               ),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
@@ -9767,7 +10134,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             emojiId: emojiEdited ? null : existing?.emojiId,
                           ),
                         ),
-                child: Text(existing == null ? 'Create' : 'Save'),
+                child: Text(existing == null
+                    ? L10n.of(context).ui_create_990de47d
+                    : L10n.of(context).ui_save_4d2d5d68),
               ),
             ),
           ],
@@ -10076,12 +10445,13 @@ final class _RoleEditorState extends State<_RoleEditor> {
     return Scaffold(
         appBar: AppBar(
             title: Text(widget.role == null
-                ? 'Create role'
-                : 'Edit ${widget.role!.name}'),
+                ? L10n.of(context).ui_create_role_b4d57cd3
+                : L10n.of(context)
+                    .ui_edit_value0_8e92dac2((widget.role!.name).toString())),
             actions: [
               if (widget.role != null)
                 IconButton(
-                    tooltip: 'Delete role',
+                    tooltip: L10n.of(context).ui_delete_role_bdde90c6,
                     style: IconButton.styleFrom(
                       foregroundColor: context.kaede.danger,
                     ),
@@ -10091,19 +10461,24 @@ final class _RoleEditorState extends State<_RoleEditor> {
         body: ListView(padding: EdgeInsets.all(16), children: [
           TextField(
               controller: _name,
-              decoration: InputDecoration(labelText: 'Role name')),
+              decoration: InputDecoration(
+                  labelText: L10n.of(context).ui_role_name_275452c0)),
           SizedBox(height: 18),
-          Text('Role colour', style: Theme.of(context).textTheme.titleMedium),
+          Text(L10n.of(context).ui_role_colour_9152d88b,
+              style: Theme.of(context).textTheme.titleMedium),
           SizedBox(height: 4),
           Text(
-            'Members show their highest coloured role.',
+            L10n.of(context)
+                .ui_members_show_their_highest_coloured_role_fc60b70c,
             style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
           ),
           SizedBox(height: 12),
           Wrap(spacing: 10, runSpacing: 10, children: [
             for (final color in _colors)
               Tooltip(
-                message: color == 0 ? 'No colour' : 'Custom colour',
+                message: color == 0
+                    ? L10n.of(context).ui_no_colour_2e52ed02
+                    : L10n.of(context).ui_custom_colour_f6e243be,
                 child: InkWell(
                   onTap: () => setState(() => _color = color),
                   borderRadius: BorderRadius.circular(KaedeRadius.medium),
@@ -10139,10 +10514,12 @@ final class _RoleEditorState extends State<_RoleEditor> {
               ),
           ]),
           SizedBox(height: 18),
-          Text('Role icon', style: Theme.of(context).textTheme.titleMedium),
+          Text(L10n.of(context).ui_role_icon_73cd9e0a,
+              style: Theme.of(context).textTheme.titleMedium),
           SizedBox(height: 4),
           Text(
-            'Shown beside names in chat. A member uses their highest role icon.',
+            L10n.of(context)
+                .ui_shown_beside_names_in_chat_a_member_uses_thei_e0ff5023,
             style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
           ),
           SizedBox(height: 12),
@@ -10177,8 +10554,8 @@ final class _RoleEditorState extends State<_RoleEditor> {
               onPressed: _pickRoleIcon,
               icon: Icon(Icons.image_outlined),
               label: Text(_iconFile == null && widget.role?.iconHash == null
-                  ? 'Choose icon'
-                  : 'Change icon'),
+                  ? L10n.of(context).ui_choose_icon_0bf69081
+                  : L10n.of(context).ui_change_icon_ca1b1c46),
             ),
             if (_iconFile != null ||
                 (!_removeIcon && widget.role?.iconHash != null)) ...[
@@ -10188,49 +10565,53 @@ final class _RoleEditorState extends State<_RoleEditor> {
                   _iconFile = null;
                   _removeIcon = true;
                 }),
-                child: Text('Remove'),
+                child: Text(L10n.of(context).ui_remove_21a5901d),
               ),
             ],
           ]),
           SizedBox(height: 18),
           _Panel(
-            title: 'Display',
+            title: L10n.of(context).ui_display_5a05d9b5,
             child: Column(
               children: [
                 SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: Text('Show separately in the member list'),
+                    title: Text(L10n.of(context)
+                        .ui_show_separately_in_the_member_list_1948a204),
                     subtitle: Text(
-                      'Members with this role get their own section.',
+                      L10n.of(context)
+                          .ui_members_with_this_role_get_their_own_section_89e8a92f,
                     ),
                     value: _hoist,
                     onChanged: (value) => setState(() => _hoist = value)),
                 SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: Text('Allow anyone to mention this role'),
+                    title: Text(L10n.of(context)
+                        .ui_allow_anyone_to_mention_this_role_d963c24f),
                     value: _mentionable,
                     onChanged: (value) => setState(() => _mentionable = value)),
               ],
             ),
           ),
-          Text('Permissions', style: Theme.of(context).textTheme.titleMedium),
+          Text(L10n.of(context).ui_permissions_8700fd83,
+              style: Theme.of(context).textTheme.titleMedium),
           SizedBox(height: 4),
           Text(
-            'Roles grant guild-wide abilities and channel defaults. Channel '
-            'overrides can refine them later.',
+            L10n.of(context)
+                .ui_roles_grant_guild_wide_abilities_and_channel__f491df60,
             style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
           ),
           SizedBox(height: 14),
           TextField(
             controller: _permissionSearch,
             decoration: InputDecoration(
-              hintText: 'Search permissions',
+              hintText: L10n.of(context).ui_search_permissions_6eb9399d,
               isDense: true,
               prefixIcon: Icon(Icons.search_rounded, size: 19),
               suffixIcon: _permissionSearch.text.isEmpty
                   ? null
                   : IconButton(
-                      tooltip: 'Clear search',
+                      tooltip: L10n.of(context).ui_clear_search_5a13e946,
                       onPressed: _permissionSearch.clear,
                       icon: Icon(Icons.close_rounded, size: 18),
                     ),
@@ -10244,10 +10625,10 @@ final class _RoleEditorState extends State<_RoleEditor> {
               child: ListTile(
                 leading: Icon(Icons.warning_amber_rounded,
                     color: context.kaede.warning),
-                title:
-                    Text('Administrator bypasses every channel restriction.'),
-                subtitle: Text(
-                    'Only grant it to people who should have unrestricted control of this guild.'),
+                title: Text(L10n.of(context)
+                    .ui_administrator_bypasses_every_channel_restrict_35ffa5ee),
+                subtitle: Text(L10n.of(context)
+                    .ui_only_grant_it_to_people_who_should_have_unres_56724462),
               ),
             ),
           for (final group in groups)
@@ -10273,7 +10654,9 @@ final class _RoleEditorState extends State<_RoleEditor> {
                           subtitle: Text(rolePermissionCanChange(
                                   widget.heldPermissions, permission.bit)
                               ? permission.description
-                              : '${permission.description}\nYou can only change permissions you currently hold.'),
+                              : L10n.of(context)
+                                  .ui_value0_you_can_only_change_permissions_you_cu_a77e0a05(
+                                      (permission.description).toString())),
                           value: _permissions & BigInt.from(permission.bit) !=
                               BigInt.zero,
                           onChanged: !rolePermissionCanChange(
@@ -10294,7 +10677,9 @@ final class _RoleEditorState extends State<_RoleEditor> {
           onPressed: _name.text.trim().isEmpty ? null : _submit,
           icon: Icon(
               widget.role == null ? Icons.add_rounded : Icons.save_outlined),
-          label: Text(widget.role == null ? 'Create role' : 'Save role'),
+          label: Text(widget.role == null
+              ? L10n.of(context).ui_create_role_b4d57cd3
+              : L10n.of(context).ui_save_role_c76e36e8),
         ));
   }
 
@@ -10374,7 +10759,8 @@ final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
   late final selected = normalizedMemberRoleIds(widget.member.roleIds);
   @override
   Widget build(BuildContext context) => AlertDialog(
-          title: Text('Roles for ${widget.member.user.name}'),
+          title: Text(L10n.of(context).ui_roles_for_value0_0c4d969a(
+              (widget.member.user.name).toString())),
           content: SizedBox(
               width: 420,
               child: ListView(shrinkWrap: true, children: [
@@ -10390,10 +10776,11 @@ final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
               ])),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(context), child: Text('Cancel')),
+                onPressed: () => Navigator.pop(context),
+                child: Text(L10n.of(context).ui_cancel_35afca3b)),
             FilledButton(
                 onPressed: () => Navigator.pop(context, selected),
-                child: Text('Save'))
+                child: Text(L10n.of(context).ui_save_4d2d5d68))
           ]);
 }
 
@@ -10480,27 +10867,45 @@ Future<ModerationOptions?> showModerationOptions(
                 DropdownButtonFormField<int>(
                   initialValue: duration,
                   decoration: InputDecoration(
-                    labelText: timeout ? 'Timeout duration' : 'Ban duration',
+                    labelText: timeout
+                        ? L10n.of(context).ui_timeout_duration_e54242e8
+                        : L10n.of(context).ui_ban_duration_19e60b8e,
                   ),
                   items: timeout
-                      ? const [
+                      ? [
                           DropdownMenuItem(
-                              value: 600, child: Text('10 minutes')),
-                          DropdownMenuItem(value: 3600, child: Text('1 hour')),
-                          DropdownMenuItem(value: 86400, child: Text('1 day')),
+                              value: 600,
+                              child: Text(
+                                  L10n.of(context).ui_10_minutes_5da9f7ad)),
                           DropdownMenuItem(
-                              value: 604800, child: Text('7 days')),
+                              value: 3600,
+                              child: Text(L10n.of(context).ui_1_hour_0c43fb4a)),
                           DropdownMenuItem(
-                              value: -1, child: Text('Indefinite')),
+                              value: 86400,
+                              child: Text(L10n.of(context).ui_1_day_db83588e)),
+                          DropdownMenuItem(
+                              value: 604800,
+                              child: Text(L10n.of(context).ui_7_days_ba4b8279)),
+                          DropdownMenuItem(
+                              value: -1,
+                              child: Text(
+                                  L10n.of(context).ui_indefinite_cc65e072)),
                         ]
-                      : const [
+                      : [
                           DropdownMenuItem(
-                              value: 0, child: Text('Until removed')),
-                          DropdownMenuItem(value: 86400, child: Text('1 day')),
+                              value: 0,
+                              child: Text(
+                                  L10n.of(context).ui_until_removed_d2938883)),
                           DropdownMenuItem(
-                              value: 604800, child: Text('7 days')),
+                              value: 86400,
+                              child: Text(L10n.of(context).ui_1_day_db83588e)),
                           DropdownMenuItem(
-                              value: 2592000, child: Text('30 days')),
+                              value: 604800,
+                              child: Text(L10n.of(context).ui_7_days_ba4b8279)),
+                          DropdownMenuItem(
+                              value: 2592000,
+                              child:
+                                  Text(L10n.of(context).ui_30_days_7a572af9)),
                         ],
                   onChanged: (value) =>
                       setDialogState(() => duration = value ?? duration),
@@ -10509,14 +10914,24 @@ Future<ModerationOptions?> showModerationOptions(
                   SizedBox(height: 12),
                   DropdownButtonFormField<int>(
                     initialValue: deleteSeconds,
-                    decoration:
-                        InputDecoration(labelText: 'Delete message history'),
-                    items: const [
-                      DropdownMenuItem(value: 0, child: Text('Do not delete')),
-                      DropdownMenuItem(value: 3600, child: Text('Past hour')),
-                      DropdownMenuItem(value: 86400, child: Text('Past day')),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context)
+                            .ui_delete_message_history_8633b9d9),
+                    items: [
                       DropdownMenuItem(
-                          value: 604800, child: Text('Past 7 days')),
+                          value: 0,
+                          child:
+                              Text(L10n.of(context).ui_do_not_delete_a97967f4)),
+                      DropdownMenuItem(
+                          value: 3600,
+                          child: Text(L10n.of(context).ui_past_hour_3ba56051)),
+                      DropdownMenuItem(
+                          value: 86400,
+                          child: Text(L10n.of(context).ui_past_day_65bc6323)),
+                      DropdownMenuItem(
+                          value: 604800,
+                          child:
+                              Text(L10n.of(context).ui_past_7_days_8c882b6b)),
                     ],
                     onChanged: (value) => setDialogState(
                         () => deleteSeconds = value ?? deleteSeconds),
@@ -10528,7 +10943,8 @@ Future<ModerationOptions?> showModerationOptions(
                   maxLength: 512,
                   maxLines: 3,
                   decoration: InputDecoration(
-                    labelText: 'Audit reason (optional)',
+                    labelText:
+                        L10n.of(context).ui_audit_reason_optional_2fa64eeb,
                     alignLabelWithHint: true,
                   ),
                 ),
@@ -10538,14 +10954,15 @@ Future<ModerationOptions?> showModerationOptions(
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: () {
                 if (leadingField != null && leadingField.text.trim().isEmpty) {
                   ScaffoldMessenger.of(dialogContext).showSnackBar(
                     SnackBar(
-                        content: Text('Enter ${leadingLabel ?? 'a value'}.')),
+                        content: Text(L10n.of(context).ui_enter_value0_49bbb7b0(
+                            (leadingLabel ?? 'a value').toString()))),
                   );
                   return;
                 }
@@ -10558,7 +10975,9 @@ Future<ModerationOptions?> showModerationOptions(
                   ),
                 );
               },
-              child: Text(timeout ? 'Apply timeout' : 'Ban'),
+              child: Text(timeout
+                  ? L10n.of(context).ui_apply_timeout_9a1bf1bc
+                  : L10n.of(context).ui_ban_bfbc51a6),
             ),
           ],
         ),
@@ -10590,10 +11009,10 @@ Future<String?> _prompt(BuildContext context, String title, String label,
               actions: [
                 TextButton(
                     onPressed: () => Navigator.pop(context),
-                    child: Text('Cancel')),
+                    child: Text(L10n.of(context).ui_cancel_35afca3b)),
                 FilledButton(
                     onPressed: () => Navigator.pop(context, input.text.trim()),
-                    child: Text('Continue'))
+                    child: Text(L10n.of(context).ui_continue_ab43d664))
               ]));
 }
 
@@ -10605,14 +11024,16 @@ Future<bool> _confirm(BuildContext context, String title, String body,
             AlertDialog(title: Text(title), content: Text(body), actions: [
               TextButton(
                   onPressed: () => Navigator.pop(context, false),
-                  child: Text('Cancel')),
+                  child: Text(L10n.of(context).ui_cancel_35afca3b)),
               FilledButton(
                   onPressed: () => Navigator.pop(context, true),
                   style: destructive
                       ? FilledButton.styleFrom(
                           backgroundColor: context.kaede.danger)
                       : null,
-                  child: Text(destructive ? 'Delete' : 'Confirm'))
+                  child: Text(destructive
+                      ? L10n.of(context).ui_delete_5797ea6a
+                      : L10n.of(context).ui_confirm_a183c9ef))
             ])) ??
     false;
 

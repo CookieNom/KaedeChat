@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { onMount } from 'svelte';
   import type { PendingUpload } from '$lib/media/uploads';
   import { isAttachmentSpoiler } from '$lib/media/spoilers';
@@ -19,7 +21,7 @@
 </script>
 
 <dialog bind:this={dialog} onclose={onClose} aria-labelledby="attachment-editor-title">
-  <h2 id="attachment-editor-title">Attachment</h2>
+  <h2 id="attachment-editor-title">{$t('ui_attachment_040d2b36')}</h2>
   <div class="preview"><FilePreview file={upload.file} /></div>
   <p>{upload.file.name}</p>
   {#if onSpoiler}
@@ -29,11 +31,12 @@
         checked={isAttachmentSpoiler(upload.file.name)}
         disabled={disabled || upload.updating}
         onchange={(event) => onSpoiler?.(upload.key, event.currentTarget.checked)}
-      /> Mark as spoiler</label
+      />
+      {$t('ui_mark_as_spoiler_a954e083')}</label
     >
   {/if}
   {#if upload.error}<p role="alert">{upload.error}</p>{/if}
-  <button type="button" onclick={() => dialog.close()}>Done</button>
+  <button type="button" onclick={() => dialog.close()}>{$t('ui_done_11a6767d')}</button>
 </dialog>
 
 <style>

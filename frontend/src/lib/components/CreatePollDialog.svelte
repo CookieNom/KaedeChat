@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import type { CustomEmojiOption } from '$lib/chat/emojis';
   import type { PartialEmoji, PollCreatePayload } from '$lib/chat/rich-content';
@@ -91,7 +93,7 @@
         layout_type: 1
       });
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not create the poll. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_create_the_poll_try_again_30970709'));
     } finally {
       busy = false;
     }
@@ -106,11 +108,15 @@
     if (event.key === 'Escape' && !busy) onClose();
   }}
 >
-  <button class="poll-dialog-backdrop" type="button" aria-label="Cancel poll" onclick={onClose}
+  <button
+    class="poll-dialog-backdrop"
+    type="button"
+    aria-label={$t('ui_cancel_poll_0523b31a')}
+    onclick={onClose}
   ></button>
   <form
     class="poll-dialog"
-    aria-label="Create poll"
+    aria-label={$t('ui_create_poll_92f4f3f2')}
     onsubmit={(event) => {
       event.preventDefault();
       void submit();
@@ -118,17 +124,19 @@
   >
     <header>
       <div>
-        <small>New message</small>
-        <h2>Create a poll</h2>
+        <small>{$t('ui_new_message_78f5975a')}</small>
+        <h2>{$t('ui_create_a_poll_177ac87a')}</h2>
       </div>
-      <button type="button" aria-label="Close" disabled={busy} onclick={onClose}>×</button>
+      <button type="button" aria-label={$t('ui_close_7d9eb7ac')} disabled={busy} onclick={onClose}
+        >×</button
+      >
     </header>
     <label>
-      Question
+      {$t('ui_question_289aff12')}
       <input bind:this={questionInput} bind:value={question} maxlength="300" required />
     </label>
     <fieldset>
-      <legend>Answers</legend>
+      <legend>{$t('ui_answers_4ad0a0a6')}</legend>
       {#each answers as answer, index (index)}
         <div class="poll-answer-field">
           <button
@@ -176,7 +184,8 @@
         <button
           type="button"
           class="add-answer"
-          onclick={() => (answers = [...answers, { text: '', emoji: null }])}>Add answer</button
+          onclick={() => (answers = [...answers, { text: '', emoji: null }])}
+          >{$t('ui_add_answer_3659e141')}</button
         >
       {/if}
       {#if emojiAnswerIndex !== null}
@@ -191,26 +200,26 @@
     </fieldset>
     <div class="poll-options">
       <label>
-        Duration
+        {$t('ui_duration_4fc52a3c')}
         <select bind:value={duration} required>
-          <option value={1}>1 hour</option>
-          <option value={4}>4 hours</option>
-          <option value={8}>8 hours</option>
-          <option value={24}>24 hours</option>
-          <option value={72}>3 days</option>
-          <option value={168}>1 week</option>
+          <option value={1}>{$t('ui_1_hour_f8b8883f')}</option>
+          <option value={4}>{$t('ui_4_hours_e5bc9927')}</option>
+          <option value={8}>{$t('ui_8_hours_1ee36a42')}</option>
+          <option value={24}>{$t('ui_24_hours_f0514e8d')}</option>
+          <option value={72}>{$t('ui_3_days_36071944')}</option>
+          <option value={168}>{$t('ui_1_week_c8cc5223')}</option>
         </select>
       </label>
       <label class="poll-checkbox">
         <input type="checkbox" bind:checked={allowMultiselect} />
-        Allow multiple answers
+        {$t('ui_allow_multiple_answers_2f68e65b')}
       </label>
     </div>
     {#if error}<p role="alert">{error}</p>{/if}
     <footer>
-      <button type="button" disabled={busy} onclick={onClose}>Cancel</button>
+      <button type="button" disabled={busy} onclick={onClose}>{$t('ui_cancel_19766ed6')}</button>
       <button class="primary" type="submit" disabled={busy || !complete}
-        >{busy ? 'Creating…' : 'Create poll'}</button
+        >{busy ? $t('ui_creating_c79ed949') : $t('ui_create_poll_92f4f3f2')}</button
       >
     </footer>
   </form>

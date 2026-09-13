@@ -243,7 +243,11 @@ class SettingsPatch(UnambiguousInputModel):
     @field_validator("locale")
     @classmethod
     def validate_locale(cls, value: str | None) -> str | None:
-        if value is not None and not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", value):
+        if (
+            value is not None
+            and value != "system"
+            and not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", value)
+        ):
             raise ValueError("must be a valid language tag")
         return value
 

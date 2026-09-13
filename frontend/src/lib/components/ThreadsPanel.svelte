@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { entityKey } from '$lib/chat/refs';
   import type { Channel, Guild } from '$lib/chat/types';
   import { guildChannelPath } from '$lib/navigation/routes';
@@ -95,30 +97,36 @@
 <svelte:window onpointerdown={dismissOnOutsidePointer} onkeydown={dismissOnEscape} />
 
 <details bind:this={panel} class="threads-panel" bind:open ontoggle={opened}>
-  <summary class="icon-button" aria-label="Threads" title="Threads">
+  <summary
+    class="icon-button"
+    aria-label={$t('ui_threads_3e42e385')}
+    title={$t('ui_threads_3e42e385')}
+  >
     <Icon name="threads" size={19} />
   </summary>
   <div class="threads-popover">
     <header>
-      <strong>Threads in {parent.name}</strong>
+      <strong>{$t('ui_threads_in_value0_e6d5adc3', { value0: String(parent.name) })}</strong>
       {#if canCreatePublic || canCreatePrivate}
-        <button type="button" disabled={busy} onclick={startCreating}>Create Thread</button>
+        <button type="button" disabled={busy} onclick={startCreating}
+          >{$t('ui_create_thread_4ce9bbfd')}</button
+        >
       {/if}
     </header>
-    <div class="thread-tabs" role="tablist" aria-label="Thread status">
+    <div class="thread-tabs" role="tablist" aria-label={$t('ui_thread_status_b5c2efab')}>
       <button
         class:active={view === 'active'}
         type="button"
         role="tab"
         aria-selected={view === 'active'}
-        onclick={() => (view = 'active')}>Active</button
+        onclick={() => (view = 'active')}>{$t('ui_active_92340695')}</button
       >
       <button
         class:active={view === 'archived'}
         type="button"
         role="tab"
         aria-selected={view === 'archived'}
-        onclick={() => (view = 'archived')}>Archived</button
+        onclick={() => (view = 'archived')}>{$t('ui_archived_bdb86505')}</button
       >
     </div>
     {#if creating}
@@ -129,19 +137,19 @@
         }}
       >
         <label>
-          Thread Name
+          {$t('ui_thread_name_abe55ef5')}
           <input bind:value={name} maxlength="100" required disabled={busy} />
         </label>
         <label>
-          Message <small>Optional</small>
+          {$t('ui_message_2f77668a')} <small>{$t('ui_optional_59be7133')}</small>
           <textarea
             bind:value={message}
             rows="2"
             maxlength="4000"
             disabled={busy || !canSendStarter}
             placeholder={canSendStarter
-              ? 'Type the first message in your thread'
-              : 'You can create the thread, but cannot send its first message'}
+              ? $t('ui_type_the_first_message_in_your_thread_dc3d4661')
+              : $t('ui_you_can_create_the_thread_but_cannot_send_its_5173d0fb')}
           ></textarea>
         </label>
         {#if canCreatePrivate}
@@ -151,34 +159,43 @@
               bind:checked={privateThread}
               disabled={busy || !canCreatePublic}
             />
-            <span><strong>Private Thread</strong><small>Only invited people can join.</small></span>
+            <span
+              ><strong>{$t('ui_private_thread_e1fd6c53')}</strong><small
+                >{$t('ui_only_invited_people_can_join_9f1af1ab')}</small
+              ></span
+            >
           </label>
         {/if}
         <footer>
-          <button type="button" disabled={busy} onclick={() => (creating = false)}>Cancel</button>
+          <button type="button" disabled={busy} onclick={() => (creating = false)}
+            >{$t('ui_cancel_19766ed6')}</button
+          >
           <button class="primary" disabled={busy || !name.trim()}>
-            {busy ? 'Creating…' : 'Create Thread'}
+            {busy ? $t('ui_creating_c79ed949') : $t('ui_create_thread_4ce9bbfd')}
           </button>
         </footer>
       </form>
     {/if}
     {#if loading}
-      <p role="status">Loading threads…</p>
+      <p role="status">{$t('ui_loading_threads_b732ef3e')}</p>
     {:else if !visibleThreads.length}
-      <p>No {view} threads.</p>
+      <p>{$t('ui_no_value0_threads_c9814454', { value0: String(view) })}</p>
     {:else}
       <nav aria-label={`${view} threads`} onscroll={directoryScrolled}>
         {#each visibleThreads as thread (entityKey(thread))}
           <a href={guildChannelPath(guild, thread)}>
             <Icon name="message" size={16} />
             <span
-              ><strong>{thread.name}</strong><small>{thread.message_count ?? 0} messages</small
+              ><strong>{thread.name}</strong><small
+                >{$t('ui_value0_messages_2f6a6143', {
+                  value0: String(thread.message_count ?? 0)
+                })}</small
               ></span
             >
             {#if thread.type === 12}<Icon name="lock" size={14} />{/if}
           </a>
         {/each}
-        {#if loadingMore}<p role="status">Loading threads…</p>{/if}
+        {#if loadingMore}<p role="status">{$t('ui_loading_threads_b732ef3e')}</p>{/if}
       </nav>
     {/if}
   </div>

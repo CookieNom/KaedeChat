@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +15,7 @@ import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -248,7 +248,8 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       if (!silent) {
         setState(() {
           _loading = false;
-          _error = userFacingError(error, summary: 'Could not load posts');
+          _error = userFacingError(error,
+              summary: L10n.of(context).ui_could_not_load_posts_6050ecea);
         });
       }
     }
@@ -283,7 +284,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       if (mounted && generation == _requestGeneration) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not load more posts',
+              summary: L10n.of(context).ui_could_not_load_more_posts_9c18b04d,
             ));
       }
     } finally {
@@ -307,7 +308,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('Sort By',
+                Text(L10n.of(context).ui_sort_by_e5fab21e,
                     style: TextStyle(
                       color: context.kaede.muted,
                       fontSize: 16,
@@ -321,12 +322,13 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                     children: [
                       RadioListTile<int>(
                         contentPadding: EdgeInsets.zero,
-                        title: Text('Recently Active'),
+                        title:
+                            Text(L10n.of(context).ui_recently_active_58db5e19),
                         value: 0,
                       ),
                       RadioListTile<int>(
                         contentPadding: EdgeInsets.zero,
-                        title: Text('Date Posted'),
+                        title: Text(L10n.of(context).ui_date_posted_1e479eb4),
                         value: 1,
                       ),
                     ],
@@ -334,7 +336,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                 ),
                 Divider(),
                 SizedBox(height: 8),
-                Text('View As',
+                Text(L10n.of(context).ui_view_as_9a20fd28,
                     style: TextStyle(
                       color: context.kaede.muted,
                       fontSize: 16,
@@ -348,12 +350,12 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                     children: [
                       RadioListTile<ForumViewMode>(
                         contentPadding: EdgeInsets.zero,
-                        title: Text('List'),
+                        title: Text(L10n.of(context).ui_list_8d2937a1),
                         value: ForumViewMode.list,
                       ),
                       RadioListTile<ForumViewMode>(
                         contentPadding: EdgeInsets.zero,
-                        title: Text('Gallery'),
+                        title: Text(L10n.of(context).ui_gallery_d7b54cdd),
                         value: ForumViewMode.gallery,
                       ),
                     ],
@@ -374,12 +376,12 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                           : ForumViewMode.list,
                     ),
                   ),
-                  child: Text('Reset to default'),
+                  child: Text(L10n.of(context).ui_reset_to_default_0db9f7dc),
                 ),
                 SizedBox(height: 4),
                 FilledButton(
                   onPressed: () => Navigator.pop(sheetContext, (sort, view)),
-                  child: Text('Done'),
+                  child: Text(L10n.of(context).ui_done_8dd31791),
                 ),
               ],
             ),
@@ -414,7 +416,9 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       if (!_selectedTags.remove(tag)) {
         if (_selectedTags.length == 5) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Select up to 5 tags.')),
+            SnackBar(
+                content:
+                    Text(L10n.of(context).ui_select_up_to_5_tags_526e5769)),
           );
           return;
         }
@@ -451,7 +455,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                     controller: _search,
                     textInputAction: TextInputAction.search,
                     decoration: InputDecoration(
-                      hintText: 'Search',
+                      hintText: L10n.of(context).ui_search_c646a2c9,
                       prefixIcon: Icon(Icons.search_rounded),
                     ),
                   ),
@@ -464,7 +468,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   key: ValueKey('forum-new-post'),
                   onPressed: _newPost,
                   icon: Icon(Icons.chat_bubble_rounded, size: 17),
-                  label: Text('New Post'),
+                  label: Text(L10n.of(context).ui_new_post_962e3f25),
                 ),
               ],
             ],
@@ -500,7 +504,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                 key: ValueKey('forum-sort-view'),
                 onPressed: _showSortAndView,
                 icon: Icon(Icons.swap_vert_rounded, size: 18),
-                label: Text('Sort & View'),
+                label: Text(L10n.of(context).ui_sort_view_a4a696b0),
               ),
             ),
           ),
@@ -514,7 +518,8 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   child: Padding(
                     padding: EdgeInsets.all(28),
                     child: Text(
-                      'Message history is unavailable. New posts will appear when history access is restored.',
+                      L10n.of(context)
+                          .ui_message_history_is_unavailable_new_posts_will_33622782,
                       textAlign: TextAlign.center,
                       style: TextStyle(color: context.kaede.muted),
                     ),
@@ -538,7 +543,9 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
             children: [
               Text(error, textAlign: TextAlign.center),
               SizedBox(height: 12),
-              OutlinedButton(onPressed: _load, child: Text('Retry')),
+              OutlinedButton(
+                  onPressed: _load,
+                  child: Text(L10n.of(context).ui_retry_8036af59)),
             ],
           ),
         ),
@@ -548,8 +555,8 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
       return Center(
         child: Text(
           _search.text.trim().isNotEmpty || _selectedTags.isNotEmpty
-              ? 'No posts match your search.'
-              : 'No posts yet.',
+              ? L10n.of(context).ui_no_posts_match_your_search_6560539d
+              : L10n.of(context).ui_no_posts_yet_bd6ea88b,
           style: TextStyle(color: context.kaede.muted),
         ),
       );
@@ -712,7 +719,9 @@ final class _ForumPostCard extends StatelessWidget {
                   Icon(Icons.chat_bubble_rounded,
                       size: 13, color: context.kaede.muted),
                   SizedBox(width: 4),
-                  Text('${post.messageCount}',
+                  Text(
+                      L10n.of(context)
+                          .ui_value0_26e9163c((post.messageCount).toString()),
                       style:
                           TextStyle(color: context.kaede.muted, fontSize: 12)),
                   if (date != null) ...[
@@ -821,7 +830,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
           forum,
           hasAttachments: _attachments.isNotEmpty,
         )) {
-      setState(() => _error = 'Forum permissions changed. Try again.');
+      setState(() => _error =
+          L10n.of(context).ui_forum_permissions_changed_try_again_c7e38449);
       return;
     }
     final title = _title.text.trim();
@@ -834,7 +844,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       selectedTagCount: _selectedTags.length,
     )) {
       if (_requiresTag && _selectedTags.isEmpty) {
-        setState(() => _error = 'Choose at least one tag.');
+        setState(() =>
+            _error = L10n.of(context).ui_choose_at_least_one_tag_0176252e);
       }
       return;
     }
@@ -857,8 +868,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
         _encryptedDraftKey != null &&
         _encryptedDraftKey != encryptedDraftKey) {
       setState(() {
-        _error =
-            'Finish retrying the pending encrypted post before changing its starter.';
+        _error = L10n.of(context)
+            .ui_finish_retrying_the_pending_encrypted_post_be_dd042599;
       });
       return;
     }
@@ -888,7 +899,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
         );
         if (channelEncryptionPaused(thread)) {
           throw StateError(
-            'Encryption setup is required before the starter can be sent.',
+            L10n.current
+                .ui_encryption_setup_is_required_before_the_start_25894d76,
           );
         }
         if (_encryptedClaimEnvelope == null) {
@@ -922,7 +934,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
               : state.guilds.where((item) => item.ref == guildRef).firstOrNull;
           if (guild == null || guildRef == null) {
             throw StateError(
-              'The current guild roster is unavailable for encrypted mentions.',
+              L10n.current
+                  .ui_the_current_guild_roster_is_unavailable_for_e_a8abf549,
             );
           }
           _encryptedClaimMentions =
@@ -990,8 +1003,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       if (mounted) Navigator.pop(context, created);
     } on Object catch (error) {
       if (mounted) {
-        setState(() => _error =
-            userFacingError(error, summary: 'Could not create the post'));
+        setState(() => _error = userFacingError(error,
+            summary: L10n.of(context).ui_could_not_create_the_post_6cc87148));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -1006,7 +1019,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       return Center(
         child: Padding(
           padding: EdgeInsets.all(24),
-          child: Text('Forum permissions changed. Close and try again.'),
+          child: Text(L10n.of(context)
+              .ui_forum_permissions_changed_close_and_try_again_9d41f8e2),
         ),
       );
     }
@@ -1030,14 +1044,14 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
               Row(
                 children: [
                   IconButton(
-                    tooltip: 'Close',
+                    tooltip: L10n.of(context).ui_close_cd86acc3,
                     onPressed: _busy || _encryptedReservation != null
                         ? null
                         : () => Navigator.pop(context),
                     icon: Icon(Icons.close_rounded),
                   ),
                   Expanded(
-                    child: Text('New Post',
+                    child: Text(L10n.of(context).ui_new_post_962e3f25,
                         style: TextStyle(
                             fontSize: 19, fontWeight: FontWeight.w800)),
                   ),
@@ -1063,7 +1077,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                                 child:
                                     CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : Text('Post'),
+                            : Text(L10n.of(context).ui_post_f0c79167),
                       ),
                     ),
                   ),
@@ -1085,7 +1099,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                         children: [
                           Icon(Icons.fact_check_outlined, size: 18),
                           SizedBox(width: 8),
-                          Text('Post Guidelines',
+                          Text(L10n.of(context).ui_post_guidelines_8554f4d6,
                               style: TextStyle(fontWeight: FontWeight.w800)),
                         ],
                       ),
@@ -1103,7 +1117,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                 autofocus: true,
                 maxLength: 100,
                 decoration: InputDecoration(
-                  hintText: 'Title',
+                  hintText: L10n.of(context).ui_title_24d471a9,
                   counterText: '',
                 ),
               ),
@@ -1115,13 +1129,16 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                 maxLines: 12,
                 maxLength: 2000,
                 decoration: InputDecoration(
-                  hintText: 'Enter a message…',
+                  hintText: L10n.of(context).ui_enter_a_message_eb2817db,
                   counterText: '',
                 ),
               ),
               if (channel.availableTags.isNotEmpty) ...[
                 SizedBox(height: 14),
-                Text(_requiresTag ? 'Tags · Required' : 'Tags',
+                Text(
+                    _requiresTag
+                        ? L10n.of(context).ui_tags_required_31ed3784
+                        : L10n.of(context).ui_tags_76bda0c0,
                     style: TextStyle(fontWeight: FontWeight.w700)),
                 SizedBox(height: 8),
                 Wrap(
@@ -1158,8 +1175,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                     leading: Icon(Icons.insert_drive_file_outlined),
                     title: Text(attachment.name),
                     subtitle: Text(isAttachmentSpoiler(attachment.name)
-                        ? 'Spoiler · Tap to edit'
-                        : 'Tap to edit attachment'),
+                        ? L10n.of(context).ui_spoiler_tap_to_edit_ca812f16
+                        : L10n.of(context).ui_tap_to_edit_attachment_240315ca),
                     onTap: _busy
                         ? null
                         : () async {
@@ -1177,7 +1194,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                             }
                           },
                     trailing: IconButton(
-                      tooltip: 'Remove attachment',
+                      tooltip: L10n.of(context).ui_remove_attachment_2d603512,
                       onPressed: _busy
                           ? null
                           : () =>
@@ -1192,7 +1209,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                   onPressed:
                       _busy || _attachments.length >= 10 ? null : _pickFiles,
                   icon: Icon(Icons.add_photo_alternate_outlined),
-                  label: Text('Add files'),
+                  label: Text(L10n.of(context).ui_add_files_dd45c7bb),
                 ),
               ],
               if (_error case final error?) ...[

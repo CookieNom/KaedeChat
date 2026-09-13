@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import type { Attachment, Channel, Message, Role, UserSummary } from '$lib/chat/types';
   import type {
@@ -88,7 +90,7 @@
         : null;
     const id = customId(component);
     if (!body || !id || !appRef || !channelRef) {
-      error = 'This control is no longer connected to its app.';
+      error = $t('ui_this_control_is_no_longer_connected_to_its_ap_43aedfb8');
       return;
     }
     busyId = id;
@@ -111,9 +113,12 @@
         body,
         { componentType: component.type }
       );
-      notice = 'Sent to the bot.';
+      notice = $t('ui_sent_to_the_bot_7a75e66a');
     } catch (caught) {
-      error = userErrorMessage(caught, 'The bot did not receive that interaction. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_the_bot_did_not_receive_that_interaction_try__eecca92f')
+      );
     } finally {
       busyId = null;
     }
@@ -166,7 +171,7 @@
             rel="noopener noreferrer nofollow"
           >
             {#if button.emoji}<PartialEmoji emoji={button.emoji} decorative />{/if}
-            <span>{button.label ?? 'Open link'}</span>
+            <span>{button.label ?? $t('ui_open_link_aab63f85')}</span>
             <span aria-hidden="true">↗</span>
           </a>
         {:else if button.style === 6}
@@ -174,10 +179,10 @@
             class={buttonClass(button)}
             type="button"
             disabled
-            title="Premium purchase buttons do not invoke the bot"
+            title={$t('ui_premium_purchase_buttons_do_not_invoke_the_bo_57795a26')}
           >
             {#if button.emoji}<PartialEmoji emoji={button.emoji} decorative />{/if}
-            <span>{button.label ?? 'Premium item'}</span>
+            <span>{button.label ?? $t('ui_premium_item_b6ad116b')}</span>
           </button>
         {:else}
           <button
@@ -187,7 +192,7 @@
             onclick={() => void invoke(button)}
           >
             {#if button.emoji}<PartialEmoji emoji={button.emoji} decorative />{/if}
-            <span>{button.label ?? 'Button'}</span>
+            <span>{button.label ?? $t('ui_button_707eab0c')}</span>
           </button>
         {/if}
       {:else if component.type === 3}
@@ -196,12 +201,14 @@
         {@const values = stagedValues(key, select)}
         {@const submission = selectSubmissionState(select, values)}
         <label class="select-wrap">
-          <span class="visually-hidden">{select.placeholder ?? 'Choose an option'}</span>
+          <span class="visually-hidden"
+            >{select.placeholder ?? $t('ui_choose_an_option_aef4076f')}</span
+          >
           <select
             multiple={submission.staged}
             size={submission.staged ? Math.min(select.options.length, 5) : 1}
             disabled={disabled || select.disabled || busyId !== null || !appRef}
-            aria-label={select.placeholder ?? 'Choose an option'}
+            aria-label={select.placeholder ?? $t('ui_choose_an_option_aef4076f')}
             onchange={(event) => {
               const next = selectedValues(event);
               if (submission.staged) stageSelection(key, next);
@@ -209,10 +216,10 @@
             }}
           >
             {#if (select.min_values ?? 1) === 0 && (select.max_values ?? 1) === 1}
-              <option value="">{select.placeholder ?? 'None'}</option>
+              <option value="">{select.placeholder ?? $t('ui_none_dc937b59')}</option>
             {:else if (select.max_values ?? 1) === 1}
               <option value="" disabled selected={values.length === 0}
-                >{select.placeholder ?? 'Choose an option'}</option
+                >{select.placeholder ?? $t('ui_choose_an_option_aef4076f')}</option
               >
             {/if}
             {#each select.options as option (option.value)}
@@ -233,10 +240,16 @@
                 !appRef ||
                 !submission.valid}
               onclick={() => void invoke(select, values)}
-              >Submit selection · {values.length}/{submission.maximum}</button
+              >{$t('ui_submit_selection_value0_value1_d987e15d', {
+                value0: String(values.length),
+                value1: String(submission.maximum)
+              })}</button
             >
             {#if !submission.valid}<small
-                >Choose between {submission.minimum} and {submission.maximum} options.</small
+                >{$t('ui_choose_between_value0_and_value1_options_d030049f', {
+                  value0: String(submission.minimum),
+                  value1: String(submission.maximum)
+                })}</small
               >{/if}
           {/if}
         </label>
@@ -252,7 +265,9 @@
           channels
         })}
         <label class="select-wrap">
-          <span class="visually-hidden">{select.placeholder ?? 'Choose an item'}</span>
+          <span class="visually-hidden"
+            >{select.placeholder ?? $t('ui_choose_an_item_11997590')}</span
+          >
           {#if searchesGuildMembers}
             <GuildMemberPicker
               {guildRef}
@@ -262,7 +277,7 @@
               multiple={submission.staged}
               maxValues={submission.maximum}
               optional={submission.minimum === 0}
-              placeholder={select.placeholder ?? 'Choose an item'}
+              placeholder={select.placeholder ?? $t('ui_choose_an_item_11997590')}
               disabled={disabled || select.disabled || busyId !== null || !appRef}
               onChange={(next) => {
                 if (submission.staged) stageSelection(key, next);
@@ -278,7 +293,7 @@
                 busyId !== null ||
                 !appRef ||
                 options.length === 0}
-              aria-label={select.placeholder ?? 'Choose an item'}
+              aria-label={select.placeholder ?? $t('ui_choose_an_item_11997590')}
               onchange={(event) => {
                 const next = selectedValues(event);
                 if (submission.staged) stageSelection(key, next);
@@ -286,10 +301,10 @@
               }}
             >
               {#if submission.minimum === 0 && !submission.staged}
-                <option value="">{select.placeholder ?? 'None'}</option>
+                <option value="">{select.placeholder ?? $t('ui_none_dc937b59')}</option>
               {:else if !submission.staged}
                 <option value="" disabled selected={values.length === 0}
-                  >{select.placeholder ?? 'Choose an item'}</option
+                  >{select.placeholder ?? $t('ui_choose_an_item_11997590')}</option
                 >
               {/if}
               {#each options as option (option.value)}
@@ -298,7 +313,9 @@
                 >
               {/each}
             </select>
-            {#if options.length === 0}<small>No matching items are available here.</small>{/if}
+            {#if options.length === 0}<small
+                >{$t('ui_no_matching_items_are_available_here_819381a3')}</small
+              >{/if}
           {/if}
           {#if submission.staged}
             <button
@@ -310,10 +327,16 @@
                 !appRef ||
                 !submission.valid}
               onclick={() => void invoke(select, values)}
-              >Submit selection · {values.length}/{submission.maximum}</button
+              >{$t('ui_submit_selection_value0_value1_d987e15d', {
+                value0: String(values.length),
+                value1: String(submission.maximum)
+              })}</button
             >
             {#if !submission.valid}<small
-                >Choose between {submission.minimum} and {submission.maximum} items.</small
+                >{$t('ui_choose_between_value0_and_value1_items_fc0f82f2', {
+                  value0: String(submission.minimum),
+                  value1: String(submission.maximum)
+                })}</small
               >{/if}
           {/if}
         </label>
@@ -322,7 +345,7 @@
   </div>
 {/snippet}
 
-<div class="message-components" aria-label="Message controls and layout">
+<div class="message-components" aria-label={$t('ui_message_controls_and_layout_fea37363')}>
   {#each rows as layout, rowIndex (`${viewVersion ?? message?.view_version ?? 0}:${layout.id ?? rowIndex}`)}
     {@const rowKey = `${viewVersion ?? message?.view_version ?? 0}:${layout.id ?? rowIndex}`}
     {#if layout.type === 1}

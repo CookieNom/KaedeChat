@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import { api, userErrorMessage } from '$lib/api/client';
   import { forwardedMessagePath } from '$lib/chat/interactions';
@@ -90,7 +92,7 @@
     } catch (caught) {
       attachmentError = userErrorMessage(
         caught,
-        'Could not decrypt this forwarded file on this device.'
+        $t('ui_could_not_decrypt_this_forwarded_file_on_this_41b65606')
       );
     }
   }
@@ -144,23 +146,25 @@
   });
 </script>
 
-<aside class="forwarded-message" aria-label="Forwarded message snapshot">
+<aside class="forwarded-message" aria-label={$t('ui_forwarded_message_snapshot_a2f37f5e')}>
   <header>
-    <span aria-hidden="true">↪</span><strong>Forwarded</strong>
+    <span aria-hidden="true">↪</span><strong>{$t('ui_forwarded_99498a5f')}</strong>
     <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- linkFor composes only route helpers that already call resolve() -->
-    {#if sourceHref}<a href={sourceHref}>Go to source</a>{/if}
+    {#if sourceHref}<a href={sourceHref}>{$t('ui_go_to_source_bebf5c02')}</a>{/if}
   </header>
   {#if loading && !snapshot}
-    <p class="muted" role="status">Loading the forwarded snapshot…</p>
+    <p class="muted" role="status">{$t('ui_loading_the_forwarded_snapshot_17b80aa3')}</p>
   {:else if unavailable && !snapshot}
     <p class="muted">{unavailable}</p>
   {:else if snapshot}
     <time datetime={snapshot.created_at}
-      >Snapshot · {new Date(snapshot.created_at).toLocaleString()}</time
+      >{$t('ui_snapshot_value0_77ad2699', {
+        value0: String(new Date(snapshot.created_at).toLocaleString())
+      })}</time
     >
     {#if snapshot.content}<Markdown content={snapshot.content} {mentionUsers} {mentionRoles} />{/if}
     {#if snapshot.sticker_items?.length}
-      <div class="forwarded-stickers" aria-label="Forwarded stickers">
+      <div class="forwarded-stickers" aria-label={$t('ui_forwarded_stickers_905f4142')}>
         {#each snapshot.sticker_items as sticker (`${sticker.id}@${sticker.origin_domain}`)}
           <img
             src={stickerUrl(sticker.id, sticker.origin_domain)}
@@ -241,7 +245,7 @@
       {#if attachmentError}<p class="attachment-error" role="alert">{attachmentError}</p>{/if}
     {/if}
   {:else}
-    <p class="muted">The forwarded snapshot is unavailable.</p>
+    <p class="muted">{$t('ui_the_forwarded_snapshot_is_unavailable_0bb7e289')}</p>
   {/if}
 </aside>
 

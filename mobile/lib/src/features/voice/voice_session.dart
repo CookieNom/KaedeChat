@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +17,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/features/voice/e2ee_policy.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/voice_background_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -562,10 +562,10 @@ final class VoiceSession extends ChangeNotifier {
         appActive: _appActive,
       )) {
         _retryJoinOnResume = true;
-        throw const KaedeException(
+        throw KaedeException(
           code: 'VOICE_FOREGROUND_REQUIRED',
-          message:
-              'Return to Kaede to finish joining voice. Android will not start a call service from the background.',
+          message: L10n.current
+              .ui_return_to_kaede_to_finish_joining_voice_andro_72a759fb,
           status: 409,
         );
       }
@@ -602,20 +602,20 @@ final class VoiceSession extends ChangeNotifier {
       final url = '${grant['url'] ?? ''}';
       final token = '${grant['token'] ?? ''}';
       if (url.isEmpty || token.isEmpty) {
-        throw const KaedeException(
+        throw KaedeException(
           code: 'VOICE_HOME_INVALID_RESPONSE',
-          message:
-              'The voice server returned an invalid connection. Try again or contact your instance operator.',
+          message: L10n.current
+              .ui_the_voice_server_returned_an_invalid_connecti_9d903908,
           status: 502,
         );
       }
 
       final grantEncryptionMode = grant['e2ee'];
       if (grantEncryptionMode is! bool) {
-        throw const KaedeException(
+        throw KaedeException(
           code: 'VOICE_E2EE_POLICY_MISMATCH',
-          message:
-              'The voice server omitted its encryption policy. Nothing was connected.',
+          message: L10n.current
+              .ui_the_voice_server_omitted_its_encryption_polic_6bdfe8c1,
           status: 409,
         );
       }
@@ -625,10 +625,10 @@ final class VoiceSession extends ChangeNotifier {
       if (encryptedGrant != encryptedChannel ||
           mediaPolicy == null ||
           !voiceGrantMatchesChannelPolicy(grant, target)) {
-        throw const KaedeException(
+        throw KaedeException(
           code: 'VOICE_E2EE_POLICY_MISMATCH',
-          message:
-              'The voice grant did not match this channel policy. Nothing was connected.',
+          message: L10n.current
+              .ui_the_voice_grant_did_not_match_this_channel_po_62de3a23,
           status: 409,
         );
       }
@@ -713,7 +713,8 @@ final class VoiceSession extends ChangeNotifier {
         ..on<RoomReconnectingEvent>((_) {
           if (_room != room) return;
           _recoverableDisconnect = true;
-          _error = 'Voice connection interrupted. Reconnecting…';
+          _error = L10n
+              .current.ui_voice_connection_interrupted_reconnecting_6458068c;
           notifyListeners();
         })
         ..on<RoomReconnectedEvent>((_) {
@@ -732,7 +733,8 @@ final class VoiceSession extends ChangeNotifier {
             return;
           }
           _recoverableDisconnect = true;
-          _error = 'Voice connection interrupted. Reconnecting…';
+          _error = L10n
+              .current.ui_voice_connection_interrupted_reconnecting_6458068c;
           notifyListeners();
           if (_appActive) unawaited(_recoverDisconnectedRoom(room));
         })
@@ -829,14 +831,13 @@ final class VoiceSession extends ChangeNotifier {
               return;
             }
           } else if (!_appActive) {
-            _error =
-                'Voice connected in listen-only mode while Kaede is in the background. Return to resume the microphone.';
+            _error = L10n.current
+                .ui_voice_connected_in_listen_only_mode_while_kae_11831bce;
           }
         } else {
           _muted = true;
-          _error =
-              'Microphone access was denied. You’re connected listen-only. '
-              'Open your phone’s Settings, find Kaede, and allow microphone access to speak.';
+          _error = L10n.current
+              .ui_microphone_access_was_denied_you_re_connected_ff4a5275;
         }
       }
       if (!_canStream) {
@@ -894,7 +895,8 @@ final class VoiceSession extends ChangeNotifier {
     _channel = fresh;
     if (!fresh.allows(Permission.connect)) {
       await leave(
-        reason: 'You no longer have permission to join this voice channel.',
+        reason: L10n
+            .current.ui_you_no_longer_have_permission_to_join_this_vo_423fdc47,
       );
       return;
     }
@@ -1027,7 +1029,7 @@ final class VoiceSession extends ChangeNotifier {
     if (!_canStream) return;
     final next = !_camera;
     if (next && !(await permissions.Permission.camera.request()).isGranted) {
-      _error = 'Camera access was not granted.';
+      _error = L10n.current.ui_camera_access_was_not_granted_d30811e7;
       notifyListeners();
       return;
     }
@@ -1078,7 +1080,7 @@ final class VoiceSession extends ChangeNotifier {
     if (isAndroid) {
       final approved = await rtc.Helper.requestCapturePermission();
       if (!approved) {
-        _error = 'Screen sharing was cancelled.';
+        _error = L10n.current.ui_screen_sharing_was_cancelled_fbb2b697;
         notifyListeners();
         return;
       }
@@ -1171,7 +1173,8 @@ final class VoiceSession extends ChangeNotifier {
     final parameters = sender.parameters;
     final encodings = parameters.encodings;
     if (encodings == null || encodings.isEmpty) {
-      throw StateError('The microphone encoder is not available.');
+      throw StateError(
+          L10n.current.ui_the_microphone_encoder_is_not_available_d4ab7f18);
     }
     final previousBitrates =
         encodings.map((encoding) => encoding.maxBitrate).toList();
@@ -1186,7 +1189,8 @@ final class VoiceSession extends ChangeNotifier {
         encodings[index].maxBitrate = previousBitrates[index];
       }
       await sender.setParameters(parameters);
-      throw StateError('The microphone encoder rejected that bitrate.');
+      throw StateError(L10n
+          .current.ui_the_microphone_encoder_rejected_that_bitrate_662ada30);
     }
     // LiveKit uses this on a future transport negotiation/reconnect, at which
     // point the DTX preference is applied as well as the bitrate ceiling.
@@ -1223,8 +1227,8 @@ final class VoiceSession extends ChangeNotifier {
       if (hasBluetooth) routes.add(VoiceAudioRoute.bluetooth);
     } on Object {
       if (defaultTargetPlatform == TargetPlatform.android) {
-        _error =
-            'Bluetooth devices could not be checked. Reconnect the headset and try again.';
+        _error = L10n
+            .current.ui_bluetooth_devices_could_not_be_checked_reconn_5f3cd65e;
         notifyListeners();
       }
     }
@@ -1320,9 +1324,8 @@ final class VoiceSession extends ChangeNotifier {
             );
           } else {
             _muted = true;
-            _error =
-                'Microphone access was denied. You’re connected listen-only. '
-                'Open your phone’s Settings, find Kaede, and allow microphone access to speak.';
+            _error = L10n.current
+                .ui_microphone_access_was_denied_you_re_connected_ff4a5275;
           }
         }
         if (!_canStream) {
@@ -1564,8 +1567,8 @@ final class VoiceSession extends ChangeNotifier {
     );
     if (!isCurrent()) return;
     if (deviceRestoreFailed && !media.failed) {
-      _error =
-          'Voice reconnected, but a media device could not be restored. Check the microphone and audio route.';
+      _error = L10n
+          .current.ui_voice_reconnected_but_a_media_device_could_no_40cfbe37;
       notifyListeners();
     }
   }
@@ -1583,7 +1586,8 @@ final class VoiceSession extends ChangeNotifier {
       screenRequested: screenRequested,
       publishCamera: () async {
         if (participant == null) {
-          throw StateError('The local voice participant is unavailable.');
+          throw StateError(L10n
+              .current.ui_the_local_voice_participant_is_unavailable_79825800);
         }
         await participant.setCameraEnabled(
           true,
@@ -1593,7 +1597,8 @@ final class VoiceSession extends ChangeNotifier {
       },
       publishScreen: () async {
         if (participant == null) {
-          throw StateError('The local voice participant is unavailable.');
+          throw StateError(L10n
+              .current.ui_the_local_voice_participant_is_unavailable_79825800);
         }
         await participant.setScreenShareEnabled(
           true,
@@ -1613,8 +1618,9 @@ final class VoiceSession extends ChangeNotifier {
         if (result.cameraFailed) 'camera',
         if (result.screenFailed) 'screen sharing',
       ].join(' and ');
-      _error =
-          'Voice reconnected, but $failed could not be restored. Turn it on again to retry.';
+      _error = L10n.current
+          .ui_voice_reconnected_but_value0_could_not_be_res_93448138(
+              (failed).toString());
       notifyListeners();
     }
     return result;

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type {
     ApplicationCommandAutocompleteChoice,
     ApplicationCommandOption,
@@ -157,7 +159,7 @@
         aria-label={`Choose ${selector.label} for /${commandName}`}
         onchange={(event) => onValueChange(selector.path, event.currentTarget.value)}
       >
-        <option value="">Select</option>
+        <option value="">{$t('ui_select_2a78025d')}</option>
         {#each selector.options as option (option.name)}
           <option value={option.name}>{optionName(option)}</option>
         {/each}
@@ -167,7 +169,7 @@
   {#each model.fields as field (field.path)}
     {@const option = field.option}
     <label title={optionDescription(option)}>
-      <span>{optionName(option)}{option.required ? '' : ' (optional)'}</span>
+      <span>{optionName(option)}{option.required ? '' : $t('ui_optional_edbfc3dc')}</span>
       {#if option.choices?.length && !option.autocomplete}
         <select
           value={String(values[field.path] ?? '')}
@@ -175,7 +177,7 @@
           required={option.required}
           onchange={(event) => optionValueChanged(option, field.path, event.currentTarget.value)}
         >
-          <option value="">Select</option>
+          <option value="">{$t('ui_select_2a78025d')}</option>
           {#each option.choices as choice (`${field.path}:${choice.value}`)}
             <option value={String(choice.value)}
               >{localizedCommandText(choice.name, choice.name_localizations, locale)}</option
@@ -192,9 +194,9 @@
             onValueChange(field.path, value === '' ? '' : value === 'true');
           }}
         >
-          <option value="">Select</option>
-          <option value="true">True</option>
-          <option value="false">False</option>
+          <option value="">{$t('ui_select_2a78025d')}</option>
+          <option value="true">{$t('ui_true_3cbc87c7')}</option>
+          <option value="false">{$t('ui_false_60a33e6c')}</option>
         </select>
       {:else if option.type === 'user'}
         <GuildMemberPicker
@@ -202,7 +204,7 @@
           fallbackUsers={guildRef ? [] : users}
           value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
           optional={!option.required}
-          placeholder="Select a user"
+          placeholder={$t('ui_select_a_user_8b2477f1')}
           {disabled}
           onChange={(selected) => onValueChange(field.path, selected[0] ?? '')}
         />
@@ -216,7 +218,7 @@
             }))}
           value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
           optional={!option.required}
-          placeholder="Select a channel"
+          placeholder={$t('ui_select_a_channel_364ccb65')}
           entityName="channels"
           searchPlaceholder="Search channels"
           {disabled}
@@ -227,7 +229,7 @@
           staticOptions={roles.map((role) => ({ value: entityRef(role), label: `@${role.name}` }))}
           value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
           optional={!option.required}
-          placeholder="Select a role"
+          placeholder={$t('ui_select_a_role_977844fd')}
           entityName="roles"
           searchPlaceholder="Search roles"
           {disabled}
@@ -244,7 +246,7 @@
           }))}
           value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
           optional={!option.required}
-          placeholder="Select a user or role"
+          placeholder={$t('ui_select_a_user_or_role_4c7e7e3b')}
           {disabled}
           onChange={(selected) => onValueChange(field.path, selected[0] ?? '')}
         />
@@ -258,7 +260,7 @@
           required={option.required}
           onchange={(event) => onValueChange(field.path, event.currentTarget.value)}
         >
-          <option value="">Select an uploaded file</option>
+          <option value="">{$t('ui_select_an_uploaded_file_e5eaefaf')}</option>
           {#each matchingAttachments as attachment (attachment.id)}
             <option value={attachment.id}>{attachment.label}</option>
           {/each}
@@ -302,7 +304,9 @@
     </label>
   {/each}
   {#if applicationName}<small>{applicationName}</small>{/if}
-  <button type="button" {disabled} aria-label="Cancel command" onclick={onCancel}>×</button>
+  <button type="button" {disabled} aria-label={$t('ui_cancel_command_8ade4bee')} onclick={onCancel}
+    >×</button
+  >
 </div>
 
 <style>

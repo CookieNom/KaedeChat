@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -13,6 +12,7 @@ import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 List<String> _lines(String value, {bool commaSeparated = false}) {
@@ -117,7 +117,7 @@ Future<bool> _confirm(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             style:
@@ -202,7 +202,8 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
       });
     } on Object catch (error) {
       if (!mounted) return;
-      _showError(context, 'Could not load AutoMod rules.', error);
+      _showError(context,
+          L10n.of(context).ui_could_not_load_automod_rules_71b7a617, error);
       setState(() => _loading = false);
     }
   }
@@ -230,14 +231,17 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(existing == null
-                ? 'AutoMod rule created.'
-                : 'AutoMod rule saved.'),
+                ? L10n.of(context).ui_automod_rule_created_eb47fd32
+                : L10n.of(context).ui_automod_rule_saved_703a3fb7),
           ),
         );
       }
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not save the AutoMod rule.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_save_the_automod_rule_ff27bd9e,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -265,7 +269,10 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
       await _load();
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not update the AutoMod rule.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_update_the_automod_rule_0c714e2a,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -275,7 +282,7 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
   Future<void> _delete(AutoModRule rule) async {
     if (!await _confirm(
       context,
-      title: 'Delete “${rule.name}”?',
+      title: L10n.of(context).ui_delete_value0_2d1b16fb((rule.name).toString()),
       body: 'AutoMod will immediately stop enforcing this rule.',
       action: 'Delete rule',
     )) {
@@ -287,7 +294,10 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
       await _load();
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not delete the AutoMod rule.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_delete_the_automod_rule_82d07320,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -310,9 +320,10 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
                   if (_rules.isEmpty)
                     ListTile(
                       leading: Icon(Icons.shield_outlined),
-                      title: Text('No AutoMod rules'),
-                      subtitle:
-                          Text('Create a rule to start filtering activity.'),
+                      title:
+                          Text(L10n.of(context).ui_no_automod_rules_7c6bb928),
+                      subtitle: Text(L10n.of(context)
+                          .ui_create_a_rule_to_start_filtering_activity_9fda4f8a),
                     ),
                   for (final rule in _rules)
                     Card(
@@ -328,8 +339,14 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
                         ),
                         title: Text(rule.name),
                         subtitle: Text(
-                          '${rule.triggerType.replaceAll('_', ' ')} · '
-                          '${rule.actions.map((item) => item.type.replaceAll('_', ' ')).join(', ')}',
+                          L10n.of(context).ui_value0_value1_947523d9(
+                              (rule.triggerType.replaceAll('_', ' '))
+                                  .toString(),
+                              (rule.actions
+                                      .map((item) =>
+                                          item.type.replaceAll('_', ' '))
+                                      .join(', '))
+                                  .toString()),
                         ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
@@ -347,12 +364,13 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
                               itemBuilder: (_) => [
                                 PopupMenuItem(
                                   value: 'edit',
-                                  child: Text('Edit rule'),
+                                  child: Text(
+                                      L10n.of(context).ui_edit_rule_f6a4a6bd),
                                 ),
                                 PopupMenuItem(
                                   value: 'delete',
                                   child: Text(
-                                    'Delete rule',
+                                    L10n.of(context).ui_delete_rule_77459648,
                                     style:
                                         TextStyle(color: context.kaede.danger),
                                   ),
@@ -368,7 +386,7 @@ final class _GuildAutoModTabState extends State<GuildAutoModTab> {
         floatingActionButton: FloatingActionButton.extended(
           onPressed: _busy ? null : _edit,
           icon: Icon(Icons.add_rounded),
-          label: Text('AutoMod rule'),
+          label: Text(L10n.of(context).ui_automod_rule_da11eec8),
         ),
       );
 }
@@ -534,8 +552,8 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
         title: Text(widget.existing == null
-            ? 'Create AutoMod rule'
-            : 'Edit AutoMod rule'),
+            ? L10n.of(context).ui_create_automod_rule_494814d6
+            : L10n.of(context).ui_edit_automod_rule_4f7ef0ba),
         content: SizedBox(
           width: 680,
           child: SingleChildScrollView(
@@ -546,21 +564,32 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                 TextField(
                   controller: _name,
                   maxLength: 100,
-                  decoration: InputDecoration(labelText: 'Rule name'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_rule_name_b052ee02),
                 ),
                 DropdownButtonFormField<String>(
                   initialValue: _trigger,
-                  decoration: InputDecoration(labelText: 'Trigger'),
-                  items: const [
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_trigger_a5ea0da3),
+                  items: [
                     DropdownMenuItem(
-                        value: 'keyword', child: Text('Keyword or regex')),
-                    DropdownMenuItem(value: 'spam', child: Text('Spam')),
+                        value: 'keyword',
+                        child: Text(
+                            L10n.of(context).ui_keyword_or_regex_d4f3e4d2)),
                     DropdownMenuItem(
-                        value: 'keyword_preset', child: Text('Keyword preset')),
+                        value: 'spam',
+                        child: Text(L10n.of(context).ui_spam_a8a83328)),
                     DropdownMenuItem(
-                        value: 'mention_spam', child: Text('Mention spam')),
+                        value: 'keyword_preset',
+                        child:
+                            Text(L10n.of(context).ui_keyword_preset_a5983093)),
                     DropdownMenuItem(
-                        value: 'member_profile', child: Text('Member profile')),
+                        value: 'mention_spam',
+                        child: Text(L10n.of(context).ui_mention_spam_5659ad2e)),
+                    DropdownMenuItem(
+                        value: 'member_profile',
+                        child:
+                            Text(L10n.of(context).ui_member_profile_0f72e78a)),
                   ],
                   onChanged: (value) {
                     if (value != null) _selectTrigger(value);
@@ -573,8 +602,9 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                     minLines: 3,
                     maxLines: 6,
                     decoration: InputDecoration(
-                      labelText: 'Keywords',
-                      helperText: 'One per line. Use * as a wildcard.',
+                      labelText: L10n.of(context).ui_keywords_f16d9775,
+                      helperText: L10n.of(context)
+                          .ui_one_per_line_use_as_a_wildcard_3c4f3998,
                       alignLabelWithHint: true,
                     ),
                   ),
@@ -584,15 +614,17 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                     minLines: 2,
                     maxLines: 5,
                     decoration: InputDecoration(
-                      labelText: 'Safe regular expressions (optional)',
-                      helperText: 'One expression per line; up to 10.',
+                      labelText: L10n.of(context)
+                          .ui_safe_regular_expressions_optional_a7825092,
+                      helperText: L10n.of(context)
+                          .ui_one_expression_per_line_up_to_10_e2a2be00,
                       alignLabelWithHint: true,
                     ),
                   ),
                 ],
                 if (_trigger == 'keyword_preset') ...[
                   SizedBox(height: 12),
-                  Text('Keyword presets',
+                  Text(L10n.of(context).ui_keyword_presets_8e94f0a0,
                       style: TextStyle(fontWeight: FontWeight.w800)),
                   for (final preset in const [
                     'profanity',
@@ -621,40 +653,46 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                     minLines: 2,
                     maxLines: 5,
                     decoration: InputDecoration(
-                      labelText: 'Allowed terms (optional)',
-                      helperText: 'One exception per line.',
+                      labelText:
+                          L10n.of(context).ui_allowed_terms_optional_eb570b67,
+                      helperText:
+                          L10n.of(context).ui_one_exception_per_line_98fb579d,
                       alignLabelWithHint: true,
                     ),
                   ),
                 ],
                 if (_trigger == 'mention_spam') ...[
                   SizedBox(height: 12),
-                  Text('Mention limit: $_mentionLimit'),
+                  Text(L10n.of(context).ui_mention_limit_value0_bf7b11a5(
+                      (_mentionLimit).toString())),
                   Slider(
                     value: _mentionLimit.toDouble(),
                     min: 1,
                     max: 50,
                     divisions: 49,
-                    label: '$_mentionLimit',
+                    label: L10n.of(context)
+                        .ui_value0_26e9163c((_mentionLimit).toString()),
                     onChanged: (value) =>
                         setState(() => _mentionLimit = value.round()),
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     value: _mentionRaid,
-                    title: Text('Mention raid protection'),
-                    subtitle: Text(
-                        'Use account-wide burst signals in addition to the per-message limit.'),
+                    title: Text(
+                        L10n.of(context).ui_mention_raid_protection_8d156a02),
+                    subtitle: Text(L10n.of(context)
+                        .ui_use_account_wide_burst_signals_in_addition_to_3d4643d9),
                     onChanged: (value) => setState(() => _mentionRaid = value),
                   ),
                 ],
                 Divider(height: 28),
-                Text('Actions', style: TextStyle(fontWeight: FontWeight.w900)),
+                Text(L10n.of(context).ui_actions_e65fb504,
+                    style: TextStyle(fontWeight: FontWeight.w900)),
                 if (_trigger != 'member_profile')
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     value: _block,
-                    title: Text('Block message'),
+                    title: Text(L10n.of(context).ui_block_message_f88e1fe5),
                     onChanged: (value) => setState(() => _block = value),
                   ),
                 if (_block)
@@ -662,13 +700,15 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                     controller: _blockMessage,
                     maxLength: 150,
                     decoration: InputDecoration(
-                      labelText: 'Message shown to the author (optional)',
+                      labelText: L10n.of(context)
+                          .ui_message_shown_to_the_author_optional_426a9d0b,
                     ),
                   ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   value: _alert,
-                  title: Text('Send moderator alert'),
+                  title:
+                      Text(L10n.of(context).ui_send_moderator_alert_3e1f3952),
                   onChanged: (value) => setState(() => _alert = value),
                 ),
                 if (_alert)
@@ -677,12 +717,14 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                             .any((item) => item.ref.wire == _alertChannel)
                         ? _alertChannel
                         : null,
-                    decoration: InputDecoration(labelText: 'Alert channel'),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_alert_channel_64af8af2),
                     items: [
                       for (final channel in _alertChannels)
                         DropdownMenuItem(
                           value: channel.ref.wire,
-                          child: Text('#${channel.name ?? 'channel'}'),
+                          child: Text(L10n.of(context).ui_value0_ea2f080f(
+                              (channel.name ?? 'channel').toString())),
                         ),
                     ],
                     onChanged: (value) => setState(() => _alertChannel = value),
@@ -691,22 +733,35 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     value: _timeout,
-                    title: Text('Timeout member'),
+                    title: Text(L10n.of(context).ui_timeout_member_f494c0ea),
                     onChanged: (value) => setState(() => _timeout = value),
                   ),
                   if (_timeout)
                     DropdownButtonFormField<int>(
                       initialValue: _timeoutSeconds,
-                      decoration:
-                          InputDecoration(labelText: 'Timeout duration'),
-                      items: const [
-                        DropdownMenuItem(value: 60, child: Text('1 minute')),
-                        DropdownMenuItem(value: 600, child: Text('10 minutes')),
-                        DropdownMenuItem(value: 3600, child: Text('1 hour')),
-                        DropdownMenuItem(value: 86400, child: Text('1 day')),
-                        DropdownMenuItem(value: 604800, child: Text('7 days')),
+                      decoration: InputDecoration(
+                          labelText:
+                              L10n.of(context).ui_timeout_duration_e54242e8),
+                      items: [
                         DropdownMenuItem(
-                            value: 2419200, child: Text('28 days')),
+                            value: 60,
+                            child: Text(L10n.of(context).ui_1_minute_983277c4)),
+                        DropdownMenuItem(
+                            value: 600,
+                            child:
+                                Text(L10n.of(context).ui_10_minutes_5da9f7ad)),
+                        DropdownMenuItem(
+                            value: 3600,
+                            child: Text(L10n.of(context).ui_1_hour_0c43fb4a)),
+                        DropdownMenuItem(
+                            value: 86400,
+                            child: Text(L10n.of(context).ui_1_day_db83588e)),
+                        DropdownMenuItem(
+                            value: 604800,
+                            child: Text(L10n.of(context).ui_7_days_ba4b8279)),
+                        DropdownMenuItem(
+                            value: 2419200,
+                            child: Text(L10n.of(context).ui_28_days_ddd98ada)),
                       ],
                       onChanged: (value) =>
                           setState(() => _timeoutSeconds = value ?? 600),
@@ -716,15 +771,16 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     value: _blockInteraction,
-                    title: Text('Block member interaction'),
-                    subtitle: Text(
-                        'Prevent the member from messaging or joining voice until their profile is changed.'),
+                    title: Text(
+                        L10n.of(context).ui_block_member_interaction_1dbd61b8),
+                    subtitle: Text(L10n.of(context)
+                        .ui_prevent_the_member_from_messaging_or_joining__c6d31f30),
                     onChanged: (value) =>
                         setState(() => _blockInteraction = value),
                   ),
                 Divider(height: 28),
                 _MultiRefPicker(
-                  label: 'Exempt roles',
+                  label: L10n.of(context).ui_exempt_roles_424fc5cf,
                   options: [
                     for (final role in widget.guild.roles)
                       (role.ref, role.name),
@@ -734,7 +790,7 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                 ),
                 SizedBox(height: 12),
                 _MultiRefPicker(
-                  label: 'Exempt channels',
+                  label: L10n.of(context).ui_exempt_channels_7046844e,
                   options: [
                     for (final channel in widget.guild.channels)
                       (channel.ref, '#${channel.name ?? 'channel'}'),
@@ -745,7 +801,7 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   value: _enabled,
-                  title: Text('Enable immediately'),
+                  title: Text(L10n.of(context).ui_enable_immediately_98b65cb4),
                   onChanged: (value) => setState(() => _enabled = value),
                 ),
                 if (_error != null)
@@ -757,9 +813,11 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(onPressed: _save, child: Text('Save rule')),
+          FilledButton(
+              onPressed: _save,
+              child: Text(L10n.of(context).ui_save_rule_0e059e66)),
         ],
       );
 }
@@ -790,8 +848,9 @@ final class _MultiRefPickerState extends State<_MultiRefPicker> {
         title: Text(widget.label),
         subtitle: Text(
           widget.selected.isEmpty
-              ? 'None'
-              : '${widget.selected.length} selected',
+              ? L10n.of(context).ui_none_304ff7fb
+              : L10n.of(context).ui_value0_selected_9b815dfd(
+                  (widget.selected.length).toString()),
         ),
         children: [
           for (final option in widget.options)
@@ -868,7 +927,10 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
       if (mounted) setState(() => _estimate = estimate);
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not estimate inactive members.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_estimate_inactive_members_a69596af,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -880,14 +942,15 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
     if (estimate == null) {
       _showError(
         context,
-        'Estimate inactive members first.',
+        L10n.of(context).ui_estimate_inactive_members_first_779e1801,
         UserInputException('Run an estimate before pruning.'),
       );
       return;
     }
     if (!await _confirm(
       context,
-      title: 'Prune $estimate inactive member${estimate == 1 ? '' : 's'}?',
+      title: L10n.of(context).ui_prune_value0_inactive_member_value1_4ef74ea2(
+          (estimate).toString(), (estimate == 1 ? '' : 's').toString()),
       body:
           'Eligible members inactive for at least $_days days will be removed. '
           'Bots, owners, and members above your role are protected.',
@@ -910,7 +973,10 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
       });
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not prune inactive members.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_prune_inactive_members_8003176f,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -924,7 +990,7 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
     } on Object catch (error) {
       _showError(
         context,
-        'Check the user references.',
+        L10n.of(context).ui_check_the_user_references_02a97e8f,
         UserInputException(
           error is FormatException
               ? error.message.toString()
@@ -935,7 +1001,8 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
     }
     if (!await _confirm(
       context,
-      title: 'Ban ${users.length} user${users.length == 1 ? '' : 's'}?',
+      title: L10n.of(context).ui_ban_value0_user_value1_3e8a7edf(
+          (users.length).toString(), (users.length == 1 ? '' : 's').toString()),
       body: 'Each user is checked independently against guild ownership and '
           'role hierarchy. Failures will be listed after the operation.',
       action: 'Ban users',
@@ -954,7 +1021,10 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
       setState(() => _bulkResult = result);
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not complete the bulk ban.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_complete_the_bulk_ban_191bca08,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -978,16 +1048,19 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Text('Prune inactive members',
+                      Text(L10n.of(context).ui_prune_inactive_members_fcdae99b,
                           style: Theme.of(context).textTheme.titleLarge),
                       SizedBox(height: 8),
-                      Text('Inactive for at least $_days days'),
+                      Text(L10n.of(context)
+                          .ui_inactive_for_at_least_value0_days_cb2a820d(
+                              (_days).toString())),
                       Slider(
                         value: _days.toDouble(),
                         min: 1,
                         max: 30,
                         divisions: 29,
-                        label: '$_days days',
+                        label: L10n.of(context)
+                            .ui_value0_days_e87125e7((_days).toString()),
                         onChanged: _busy
                             ? null
                             : (value) => setState(() {
@@ -996,7 +1069,8 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                                 }),
                       ),
                       _MultiRefPicker(
-                        label: 'Include members with selected roles',
+                        label: L10n.of(context)
+                            .ui_include_members_with_selected_roles_cf186bbc,
                         options: [
                           for (final role in widget.guild.roles)
                             if (role.ref != widget.guild.ref)
@@ -1013,12 +1087,16 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                         controller: _pruneReason,
                         maxLength: 512,
                         decoration: InputDecoration(
-                          labelText: 'Audit-log reason (optional)',
+                          labelText: L10n.of(context)
+                              .ui_audit_log_reason_optional_76d5ed0c,
                         ),
                       ),
                       if (_estimate != null)
                         Text(
-                          '$_estimate member${_estimate == 1 ? '' : 's'} eligible',
+                          L10n.of(context)
+                              .ui_value0_member_value1_eligible_f231a11f(
+                                  (_estimate).toString(),
+                                  (_estimate == 1 ? '' : 's').toString()),
                           style: TextStyle(fontWeight: FontWeight.w800),
                         ),
                       if (_pruneResult != null)
@@ -1034,7 +1112,9 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                         children: [
                           OutlinedButton(
                             onPressed: _busy ? null : _estimatePrune,
-                            child: Text(_busy ? 'Checking…' : 'Estimate'),
+                            child: Text(_busy
+                                ? L10n.of(context).ui_checking_87f62cb7
+                                : L10n.of(context).ui_estimate_2649bd57),
                           ),
                           FilledButton(
                             style: FilledButton.styleFrom(
@@ -1042,7 +1122,8 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                             ),
                             onPressed:
                                 _busy || (_estimate ?? 0) == 0 ? null : _prune,
-                            child: Text('Prune eligible members'),
+                            child: Text(L10n.of(context)
+                                .ui_prune_eligible_members_97dfe373),
                           ),
                         ],
                       ),
@@ -1057,7 +1138,7 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Text('Bulk ban',
+                      Text(L10n.of(context).ui_bulk_ban_44425fac,
                           style: Theme.of(context).textTheme.titleLarge),
                       SizedBox(height: 8),
                       TextField(
@@ -1065,9 +1146,12 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                         minLines: 5,
                         maxLines: 10,
                         decoration: InputDecoration(
-                          labelText: 'User references',
-                          helperText: 'One id@domain per line; up to 200.',
-                          hintText: '123456789@chat.example',
+                          labelText:
+                              L10n.of(context).ui_user_references_56c6a9f0,
+                          helperText: L10n.of(context)
+                              .ui_one_id_domain_per_line_up_to_200_7ddcd74e,
+                          hintText: L10n.of(context)
+                              .ui_123456789_chat_example_4e1d684a,
                           alignLabelWithHint: true,
                         ),
                       ),
@@ -1075,16 +1159,25 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                       DropdownButtonFormField<int>(
                         initialValue: _deleteMessageSeconds,
                         decoration: InputDecoration(
-                            labelText: 'Delete recent messages'),
-                        items: const [
+                            labelText: L10n.of(context)
+                                .ui_delete_recent_messages_c26243d7),
+                        items: [
                           DropdownMenuItem(
-                              value: 0, child: Text('Do not delete')),
+                              value: 0,
+                              child: Text(
+                                  L10n.of(context).ui_do_not_delete_a97967f4)),
                           DropdownMenuItem(
-                              value: 3600, child: Text('Previous hour')),
+                              value: 3600,
+                              child: Text(
+                                  L10n.of(context).ui_previous_hour_3c77cb2e)),
                           DropdownMenuItem(
-                              value: 86400, child: Text('Previous day')),
+                              value: 86400,
+                              child: Text(
+                                  L10n.of(context).ui_previous_day_dfd421a2)),
                           DropdownMenuItem(
-                              value: 604800, child: Text('Previous 7 days')),
+                              value: 604800,
+                              child: Text(L10n.of(context)
+                                  .ui_previous_7_days_ee76f450)),
                         ],
                         onChanged: (value) =>
                             setState(() => _deleteMessageSeconds = value ?? 0),
@@ -1093,8 +1186,9 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                       TextField(
                         controller: _bulkReason,
                         maxLength: 512,
-                        decoration:
-                            InputDecoration(labelText: 'Reason (optional)'),
+                        decoration: InputDecoration(
+                            labelText:
+                                L10n.of(context).ui_reason_optional_8e7414f4),
                       ),
                       if (_bulkResult != null)
                         _ModerationResult(
@@ -1109,7 +1203,9 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                           style: FilledButton.styleFrom(
                               backgroundColor: context.kaede.danger),
                           onPressed: _busy ? null : _bulkBan,
-                          child: Text(_busy ? 'Working…' : 'Review and ban'),
+                          child: Text(_busy
+                              ? L10n.of(context).ui_working_d5507854
+                              : L10n.of(context).ui_review_and_ban_79a5b82d),
                         ),
                       ),
                     ],
@@ -1143,12 +1239,17 @@ final class _ModerationResult extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('$succeeded $successLabel · ${failures.length} failed'),
+            Text(L10n.of(context).ui_value0_value1_value2_failed_284995e7(
+                (succeeded).toString(),
+                (successLabel).toString(),
+                (failures.length).toString())),
             for (final failure in failures)
               Padding(
                 padding: EdgeInsets.only(top: 5),
                 child: Text(
-                  '${failure.userRef.wire}: ${failure.message}',
+                  L10n.of(context).ui_value0_value1_cf87e38e(
+                      (failure.userRef.wire).toString(),
+                      (failure.message).toString()),
                   style: TextStyle(color: context.kaede.danger),
                 ),
               ),
@@ -1214,8 +1315,8 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
         try {
           guildEmojis = await widget.repository.guildEmojis(widget.guild.ref);
         } on Object {
-          emojiWarning =
-              'Custom emoji choices could not be loaded. Unicode emoji are still available.';
+          emojiWarning = L10n.current
+              .ui_custom_emoji_choices_could_not_be_loaded_unic_fee95380;
         }
       }
       if (!mounted) return;
@@ -1227,7 +1328,8 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
       });
     } on Object catch (error) {
       if (!mounted) return;
-      _showError(context, 'Could not load guild sounds.', error);
+      _showError(context,
+          L10n.of(context).ui_could_not_load_guild_sounds_0e4c3380, error);
       setState(() => _loading = false);
     }
   }
@@ -1244,7 +1346,7 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
     if (selected.path == null) {
       _showError(
         context,
-        'Could not open the audio file.',
+        L10n.of(context).ui_could_not_open_the_audio_file_841fdedc,
         UserInputException('Choose a file stored on this device.'),
       );
       return;
@@ -1253,14 +1355,14 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
     if (contentType == null) {
       _showError(
         context,
-        'Could not upload the sound.',
+        L10n.of(context).ui_could_not_upload_the_sound_165d6dae,
         UserInputException('Choose an MP3 or Ogg audio file.'),
       );
       return;
     }
     final draft = await showSoundboardSoundEditor(
       context,
-      title: 'Upload sound',
+      title: L10n.of(context).ui_upload_sound_8385b2ab,
       action: 'Upload',
       initialName: selected.name.replaceFirst(RegExp(r'\.[^.]+$'), ''),
       guildEmojis: _guildEmojis,
@@ -1282,11 +1384,17 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
       await _load();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('“${draft.name}” is ready to play.')),
+          SnackBar(
+              content: Text(L10n.of(context)
+                  .ui_value0_is_ready_to_play_8faa88cd(
+                      (draft.name).toString()))),
         );
       }
     } on Object catch (error) {
-      if (mounted) _showError(context, 'Could not upload the sound.', error);
+      if (mounted) {
+        _showError(context,
+            L10n.of(context).ui_could_not_upload_the_sound_165d6dae, error);
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1295,7 +1403,7 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
   Future<void> _edit(SoundboardSound sound) async {
     final draft = await showSoundboardSoundEditor(
       context,
-      title: 'Edit sound',
+      title: L10n.of(context).ui_edit_sound_1fb48f02,
       action: 'Save',
       initialName: sound.name,
       initialEmojiRef: sound.emojiRef,
@@ -1321,7 +1429,10 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
       );
       await _load();
     } on Object catch (error) {
-      if (mounted) _showError(context, 'Could not save the sound.', error);
+      if (mounted) {
+        _showError(context,
+            L10n.of(context).ui_could_not_save_the_sound_2b04bdba, error);
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1330,7 +1441,8 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
   Future<void> _delete(SoundboardSound sound) async {
     if (!await _confirm(
       context,
-      title: 'Delete “${sound.name}”?',
+      title:
+          L10n.of(context).ui_delete_value0_2d1b16fb((sound.name).toString()),
       body: 'The sound will immediately stop being available in this guild.',
       action: 'Delete sound',
     )) {
@@ -1342,7 +1454,10 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
           .deleteSoundboardSound(widget.guild.ref, sound.ref);
       await _load();
     } on Object catch (error) {
-      if (mounted) _showError(context, 'Could not delete the sound.', error);
+      if (mounted) {
+        _showError(context,
+            L10n.of(context).ui_could_not_delete_the_sound_87663458, error);
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1357,7 +1472,8 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
         !channel.type.isVoiceLike) {
       _showError(
         context,
-        'Join one of this guild’s voice channels first.',
+        L10n.of(context)
+            .ui_join_one_of_this_guild_s_voice_channels_first_fd77f301,
         UserInputException(
           'Soundboard playback is sent to the voice channel currently connected on this device.',
         ),
@@ -1375,13 +1491,17 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text(
-                  'Playing “${sound.name}” in ${channel.name ?? 'voice'}.')),
+              content: Text(L10n.of(context)
+                  .ui_playing_value0_in_value1_e274c3f4((sound.name).toString(),
+                      (channel.name ?? 'voice').toString()))),
         );
       }
     } on Object catch (error) {
       if (mounted) {
-        _showError(context, 'Could not play the sound in voice.', error);
+        _showError(
+            context,
+            L10n.of(context).ui_could_not_play_the_sound_in_voice_c1e02436,
+            error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -1421,8 +1541,10 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
                 if (_sounds.isEmpty)
                   ListTile(
                     leading: Icon(Icons.music_note_outlined),
-                    title: Text('No soundboard clips'),
-                    subtitle: Text('Upload an MP3 or Ogg clip to get started.'),
+                    title:
+                        Text(L10n.of(context).ui_no_soundboard_clips_2440507c),
+                    subtitle: Text(L10n.of(context)
+                        .ui_upload_an_mp3_or_ogg_clip_to_get_started_289b9d57),
                   ),
                 for (final sound in _sounds)
                   Card(
@@ -1430,9 +1552,14 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
                       leading: _SoundboardEmoji(sound: sound),
                       title: Text(sound.name),
                       subtitle: Text(
-                        '${(sound.durationMilliseconds / 1000).toStringAsFixed(1)} seconds · '
-                        '${(sound.volume * 100).round()}% default volume · '
-                        '${sound.available ? 'available' : 'unavailable'}',
+                        L10n.of(context)
+                            .ui_value0_seconds_value1_default_volume_value2_20c853b6(
+                                ((sound.durationMilliseconds / 1000)
+                                        .toStringAsFixed(1))
+                                    .toString(),
+                                ((sound.volume * 100).round()).toString(),
+                                (sound.available ? 'available' : 'unavailable')
+                                    .toString()),
                       ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -1440,8 +1567,10 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
                           if (widget.canUse)
                             IconButton(
                               tooltip: connected == null
-                                  ? 'Join voice to play'
-                                  : 'Play in ${connected.name ?? 'voice'}',
+                                  ? L10n.of(context)
+                                      .ui_join_voice_to_play_83f9c06e
+                                  : L10n.of(context).ui_play_in_value0_b2fa7bf3(
+                                      (connected.name ?? 'voice').toString()),
                               onPressed:
                                   _busy || !sound.available || connected == null
                                       ? null
@@ -1463,11 +1592,14 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
                                   ? _edit(sound)
                                   : _delete(sound),
                               itemBuilder: (_) => [
-                                const PopupMenuItem(
-                                    value: 'edit', child: Text('Edit sound')),
+                                PopupMenuItem(
+                                    value: 'edit',
+                                    child: Text(L10n.of(context)
+                                        .ui_edit_sound_1fb48f02)),
                                 PopupMenuItem(
                                   value: 'delete',
-                                  child: Text('Delete sound',
+                                  child: Text(
+                                      L10n.of(context).ui_delete_sound_35292f7d,
                                       style: TextStyle(
                                           color: context.kaede.danger)),
                                 ),
@@ -1483,7 +1615,9 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
           ? FloatingActionButton.extended(
               onPressed: _busy || _sounds.length >= 48 ? null : _upload,
               icon: Icon(Icons.upload_file_rounded),
-              label: Text(_busy ? 'Processing…' : 'Upload sound'),
+              label: Text(_busy
+                  ? L10n.of(context).ui_processing_a38b68a6
+                  : L10n.of(context).ui_upload_sound_8385b2ab),
             )
           : null,
     );
@@ -1595,7 +1729,8 @@ final class _SoundDialogState extends State<_SoundDialog> {
       emojiName = _emojiName.text.trim();
       if (emojiName.isEmpty || emojiName.length > 64) {
         setState(() {
-          _emojiError = 'Enter a Unicode emoji of at most 64 characters.';
+          _emojiError = L10n.of(context)
+              .ui_enter_a_unicode_emoji_of_at_most_64_character_954cd154;
         });
         return;
       }
@@ -1604,7 +1739,8 @@ final class _SoundDialogState extends State<_SoundDialog> {
       emojiRef =
           _customEmojis.where((item) => item.ref.wire == wire).firstOrNull?.ref;
       if (emojiRef == null) {
-        setState(() => _emojiError = 'Choose an available guild emoji.');
+        setState(() => _emojiError =
+            L10n.of(context).ui_choose_an_available_guild_emoji_a097f4a5);
         return;
       }
     }
@@ -1629,27 +1765,29 @@ final class _SoundDialogState extends State<_SoundDialog> {
               controller: _name,
               maxLength: 32,
               decoration: InputDecoration(
-                labelText: 'Name',
-                helperText: '2–32 characters',
+                labelText: L10n.of(context).ui_name_0fe07306,
+                helperText: L10n.of(context).ui_2_32_characters_12a9229f,
               ),
             ),
             DropdownButtonFormField<String>(
               key: Key('soundboard-emoji-source'),
               initialValue: _emojiSelection,
-              decoration: InputDecoration(labelText: 'Display emoji'),
+              decoration: InputDecoration(
+                  labelText: L10n.of(context).ui_display_emoji_685584d3),
               items: [
                 DropdownMenuItem(
                   value: 'none',
-                  child: Text('No emoji'),
+                  child: Text(L10n.of(context).ui_no_emoji_e86dfba8),
                 ),
                 DropdownMenuItem(
                   value: 'unicode',
-                  child: Text('Unicode emoji'),
+                  child: Text(L10n.of(context).ui_unicode_emoji_11f432fe),
                 ),
                 for (final emoji in _customEmojis)
                   DropdownMenuItem(
                     value: 'custom:${emoji.ref.wire}',
-                    child: Text(':${emoji.name}: · custom'),
+                    child: Text(L10n.of(context)
+                        .ui_value0_custom_a1bc0988((emoji.name).toString())),
                   ),
               ],
               onChanged: (value) {
@@ -1667,7 +1805,7 @@ final class _SoundDialogState extends State<_SoundDialog> {
                 controller: _emojiName,
                 maxLength: 64,
                 decoration: InputDecoration(
-                  labelText: 'Unicode emoji',
+                  labelText: L10n.of(context).ui_unicode_emoji_11f432fe,
                   hintText: '🎉',
                 ),
               ),
@@ -1680,7 +1818,8 @@ final class _SoundDialogState extends State<_SoundDialog> {
                 ),
               ),
             SizedBox(height: 8),
-            Text('Default volume: ${(_volume * 100).round()}%'),
+            Text(L10n.of(context).ui_default_volume_value0_402f0e1a(
+                ((_volume * 100).round()).toString())),
             Slider(
               value: _volume,
               min: 0,
@@ -1693,7 +1832,7 @@ final class _SoundDialogState extends State<_SoundDialog> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: _name,

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import type { Channel, Role } from '$lib/chat/types';
   import GuildMemberPicker from './GuildMemberPicker.svelte';
@@ -56,7 +58,7 @@
     }))
   );
   const channelOptions = $derived([
-    { value: allChannelsRef(guildRef), label: 'All channels' },
+    { value: allChannelsRef(guildRef), label: $t('ui_all_channels_4b33d5e0') },
     ...channels
       .filter((channel) => ![4, 10, 11, 12].includes(channel.type))
       .map((channel) => ({
@@ -77,7 +79,7 @@
       loadedFor = key;
       selectScope(scopes[0]?.id ?? '');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not load command permissions.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_command_permissions_f7a78469'));
     } finally {
       loading = false;
     }
@@ -94,7 +96,7 @@
   function addEntry() {
     if (!targetId || draft.length >= 100) return;
     if (draft.some((entry) => entry.type === targetType && entry.id === targetId)) {
-      error = 'That role, member, or channel already has an override.';
+      error = $t('ui_that_role_member_or_channel_already_has_an_ov_443ee32d');
       return;
     }
     draft = [...draft, { id: targetId, type: targetType, permission: targetPermission }];
@@ -105,7 +107,7 @@
   function syncWithApplication() {
     if (!selected?.command || !applicationDefaults) return;
     draft = applicationDefaults.permissions.map((entry) => ({ ...entry }));
-    notice = 'Application defaults copied. Save to synchronize this command.';
+    notice = $t('ui_application_defaults_copied_save_to_synchroni_f8c17444');
   }
 
   async function save() {
@@ -125,7 +127,7 @@
       selectScope(saved.id);
       notice = saved.synced ? 'This command now uses the app defaults.' : 'Command access updated.';
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update command permissions.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_command_permissions_2b9cfac1'));
     } finally {
       saving = false;
     }
@@ -158,17 +160,17 @@
     if (open) void load();
   }}
 >
-  <summary>Command permissions</summary>
+  <summary>{$t('ui_command_permissions_837154fa')}</summary>
   {#if loading}
-    <p role="status">Loading command permissions…</p>
+    <p role="status">{$t('ui_loading_command_permissions_05c829c7')}</p>
   {:else if error && scopes.length === 0}
     <p class="error" role="alert">{error}</p>
-    <button type="button" onclick={() => void load()}>Retry</button>
+    <button type="button" onclick={() => void load()}>{$t('ui_retry_942087cc')}</button>
   {:else if scopes.length === 0}
-    <p>This app has no guild commands to configure.</p>
+    <p>{$t('ui_this_app_has_no_guild_commands_to_configure_aa0c9503')}</p>
   {:else}
     <label>
-      Command
+      {$t('ui_command_71316697')}
       <select value={selectedId} onchange={(event) => selectScope(event.currentTarget.value)}>
         {#each scopes as scope (scope.id)}
           <option value={scope.id}>
@@ -181,12 +183,12 @@
       <p class="scope-note">
         {selected.command
           ? selected.synced
-            ? 'Synced with this app’s default command access.'
-            : 'This command has custom access.'
-          : 'Default access inherited by commands without custom overrides.'}
+            ? $t('ui_synced_with_this_app_s_default_command_access_b5574726')
+            : $t('ui_this_command_has_custom_access_df9ad635')
+          : $t('ui_default_access_inherited_by_commands_without__7042ed35')}
       </p>
       {#if draft.length === 0}
-        <p>No role, member, or channel overrides.</p>
+        <p>{$t('ui_no_role_member_or_channel_overrides_2ec058be')}</p>
       {:else}
         <ul>
           {#each draft as entry, index (`${entry.type}:${entry.id}`)}
@@ -199,14 +201,15 @@
                 onclick={() =>
                   (draft = draft.map((item, itemIndex) =>
                     itemIndex === index ? { ...item, permission: !item.permission } : item
-                  ))}>{entry.permission ? 'Allowed' : 'Denied'}</button
+                  ))}
+                >{entry.permission ? $t('ui_allowed_1bb201d1') : $t('ui_denied_da404deb')}</button
               >
               <button
                 type="button"
                 aria-label={`Remove ${targetLabel(entry)} override`}
                 disabled={!canManage || saving}
                 onclick={() => (draft = draft.filter((_, itemIndex) => itemIndex !== index))}
-                >Remove</button
+                >{$t('ui_remove_c3812fc4')}</button
               >
             </li>
           {/each}
@@ -215,53 +218,59 @@
       {#if canManage}
         <div class="add-entry">
           <select
-            aria-label="Permission target type"
+            aria-label={$t('ui_permission_target_type_69d77ae2')}
             bind:value={targetType}
             onchange={() => (targetId = '')}
           >
-            <option value="role">Role</option>
-            <option value="user">Member</option>
-            <option value="channel">Channel</option>
+            <option value="role">{$t('ui_role_14736a2e')}</option>
+            <option value="user">{$t('ui_member_7c968fb7')}</option>
+            <option value="channel">{$t('ui_channel_ce4683e7')}</option>
           </select>
           {#if targetType === 'user'}
             <GuildMemberPicker
               {guildRef}
               value={targetId ? [targetId] : []}
               optional
-              placeholder="Choose a member"
+              placeholder={$t('ui_choose_a_member_c6aaa720')}
               disabled={saving}
               onChange={(values) => (targetId = values[0] ?? '')}
             />
           {:else}
             <select aria-label={`Choose a ${targetType}`} bind:value={targetId} disabled={saving}>
-              <option value="">Choose a {targetType}</option>
+              <option value=""
+                >{$t('ui_choose_a_value0_7c81bdd2', { value0: String(targetType) })}</option
+              >
               {#each targetType === 'role' ? roleOptions : channelOptions as option (option.value)}
                 <option value={option.value}>{option.label}</option>
               {/each}
             </select>
           {/if}
-          <select aria-label="Allow or deny" bind:value={targetPermission} disabled={saving}>
-            <option value={true}>Allow</option>
-            <option value={false}>Deny</option>
+          <select
+            aria-label={$t('ui_allow_or_deny_b364941f')}
+            bind:value={targetPermission}
+            disabled={saving}
+          >
+            <option value={true}>{$t('ui_allow_e213c161')}</option>
+            <option value={false}>{$t('ui_deny_05a2d733')}</option>
           </select>
           <button
             type="button"
             disabled={!targetId || draft.length >= 100 || saving}
-            onclick={addEntry}>Add</button
+            onclick={addEntry}>{$t('ui_add_9fd728c6')}</button
           >
         </div>
         <div class="actions">
           {#if selected.command}
             <button type="button" disabled={saving} onclick={syncWithApplication}
-              >Use app defaults</button
+              >{$t('ui_use_app_defaults_0f89d751')}</button
             >
           {/if}
           <button type="button" disabled={saving} onclick={() => void save()}
-            >{saving ? 'Saving…' : 'Save permissions'}</button
+            >{saving ? $t('ui_saving_23e39291') : $t('ui_save_permissions_1eab372a')}</button
           >
         </div>
       {:else}
-        <p>Manage Server and Manage Roles are required to change command access.</p>
+        <p>{$t('ui_manage_server_and_manage_roles_are_required_t_06ba8349')}</p>
       {/if}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       {#if notice}<p class="notice">{notice}</p>{/if}

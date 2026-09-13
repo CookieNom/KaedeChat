@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +9,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 /// Wording shared by the member list, profile sheets and the account bar.
@@ -50,7 +50,7 @@ final class ApplicationTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
-        label: 'Application account',
+        label: L10n.of(context).ui_application_account_c4c86f4a,
         child: ExcludeSemantics(
           child: Container(
             padding: EdgeInsets.symmetric(
@@ -62,7 +62,7 @@ final class ApplicationTag extends StatelessWidget {
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
-              'APP',
+              L10n.of(context).ui_app_61a6c98c,
               style: TextStyle(
                 color: context.kaede.onPurple,
                 fontSize: compact ? 8 : 9,
@@ -371,7 +371,7 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
           key: const ValueKey('bot-profile-add-app'),
           onPressed: () => _addApplication(application),
           icon: const Icon(Icons.add_rounded),
-          label: const Text('Add App'),
+          label: Text(L10n.of(context).ui_add_app_57813d5f),
         ),
       ...widget.actions,
     ];
@@ -484,8 +484,8 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                               child: Text(
                                 user.profileResolved
                                     ? user.handle
-                                    : 'Profile unavailable · refreshes '
-                                        'automatically',
+                                    : L10n.of(context)
+                                        .ui_profile_unavailable_refreshes_automatically_9ef31289,
                                 style: TextStyle(
                                   color: context.kaede.muted,
                                   fontSize: 13,
@@ -542,7 +542,7 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                         if (user.bio?.trim().isNotEmpty == true) ...[
                           SizedBox(height: 10),
                           _ProfileCard(
-                            label: 'About me',
+                            label: L10n.of(context).ui_about_me_683da950,
                             child: Text(
                               user.bio!.trim(),
                               style: TextStyle(height: 1.4),
@@ -552,17 +552,18 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                         if (_developerMode(context)) ...[
                           SizedBox(height: 10),
                           _ProfileCard(
-                            label: 'Developer mode',
+                            label: L10n.of(context).ui_developer_mode_80d8dbd0,
                             child: ListTile(
                               contentPadding: EdgeInsets.zero,
                               dense: true,
                               leading: Icon(Icons.badge_outlined),
-                              title: Text('Copy user ID'),
+                              title: Text(
+                                  L10n.of(context).ui_copy_user_id_b36e9128),
                               subtitle: Text(user.ref.wire),
                               onTap: () => copyDeveloperId(
                                 context,
                                 value: user.ref.wire,
-                                label: 'User',
+                                label: L10n.of(context).ui_user_e0a63e12,
                               ),
                             ),
                           ),

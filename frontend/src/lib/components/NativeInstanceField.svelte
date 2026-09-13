@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import { isNativeDesktop, setNativeInstance, storedNativeInstance } from '$lib/platform/native';
 
@@ -24,7 +26,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not connect to that Kaede server. Check the domain, such as chat.example.com, and try again.'
+        $t('ui_could_not_connect_to_that_kaede_server_check__0e3f69e1')
       );
       return false;
     }
@@ -39,7 +41,7 @@
 
 {#if isNativeDesktop()}
   <label class="native-instance-field">
-    Your Kaede server
+    {$t('ui_your_kaede_server_f45cfa9f')}
     <input
       bind:value={instance}
       placeholder="chat.example.com"
@@ -53,15 +55,16 @@
     />
   </label>
   <p class="field-note" id="home-instance-help">
-    This is the server where you created your account—also called your home instance. For
-    <strong>@alex@chat.example.com</strong>, enter <strong>chat.example.com</strong>.
-    {#if suggestedInstance}
-      Don’t have a server yet?
+    {$t('ui_this_is_the_server_where_you_created_your_acc_4557e0bb')}
+    <strong>@alex@chat.example.com</strong>{$t('ui_enter_df392f7d')}
+    <strong>chat.example.com</strong>.
+    {#if suggestedInstance}{$t('ui_don_t_have_a_server_yet_7fd67bfd')}
       <button
         class="native-instance-suggestion"
         type="button"
         {disabled}
-        onclick={() => void useSuggestedInstance()}>Use {suggestedInstance}</button
+        onclick={() => void useSuggestedInstance()}
+        >{$t('ui_use_value0_89497461', { value0: String(suggestedInstance) })}</button
       >.
     {/if}
   </p>

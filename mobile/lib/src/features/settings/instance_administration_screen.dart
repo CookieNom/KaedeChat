@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -13,6 +12,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/instance_administration.dart';
 import 'package:kaede_mobile/src/features/settings/administration_attachment_viewer.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 enum _AdminSection {
   overview('Overview', 'admin.read'),
@@ -96,7 +96,8 @@ final class _InstanceAdministrationScreenState
       if (!mounted) return;
       setState(() {
         _error = userFacingError(error,
-            summary: 'Administration is unavailable for this account');
+            summary: L10n.of(context)
+                .ui_administration_is_unavailable_for_this_accoun_8ced1d3f);
         _loading = false;
       });
     }
@@ -130,7 +131,8 @@ final class _InstanceAdministrationScreenState
       if (!mounted) return;
       setState(() {
         _error = userFacingError(error,
-            summary: 'Could not load ${_section.label.toLowerCase()}');
+            summary: L10n.of(context).ui_could_not_load_value0_786258fa(
+                (_section.label.toLowerCase()).toString()));
         _loading = false;
       });
     }
@@ -162,7 +164,9 @@ final class _InstanceAdministrationScreenState
                 leading: Icon(user.restricted
                     ? Icons.lock_open_outlined
                     : Icons.block_outlined),
-                title: user.restricted ? 'Restore access' : 'Ban account',
+                title: user.restricted
+                    ? L10n.of(context).ui_restore_access_f5893039
+                    : L10n.of(context).ui_ban_account_ed1ab91d,
                 danger: !user.restricted,
                 onTap: () => Navigator.pop(context, 'access'),
               ),
@@ -172,7 +176,8 @@ final class _InstanceAdministrationScreenState
                   leading: Icon(user.ageAssuranceState == state
                       ? Icons.radio_button_checked
                       : Icons.radio_button_unchecked),
-                  title: Text('Age assurance: $state'),
+                  title: Text(L10n.of(context)
+                      .ui_age_assurance_value0_25fb9d7a((state).toString())),
                   onTap: user.ageAssuranceState == state
                       ? null
                       : () => Navigator.pop(context, 'age:$state'),
@@ -190,7 +195,8 @@ final class _InstanceAdministrationScreenState
           user.ref,
           <String, Object?>{'disabled': !user.restricted, 'reason': null},
         );
-        _notice = '${user.label} access was updated.';
+        _notice = L10n.current
+            .ui_value0_access_was_updated_607c5a7e((user.label).toString());
       } else if (action.startsWith('age:')) {
         final state = action.substring(4);
         if (!await _confirm('Set ${user.label} age assurance to $state?')) {
@@ -200,7 +206,8 @@ final class _InstanceAdministrationScreenState
           user.ref,
           <String, Object?>{'age_assurance_state': state, 'reason': null},
         );
-        _notice = '${user.label} age assurance is now $state.';
+        _notice = L10n.current.ui_value0_age_assurance_is_now_value1_415c4a90(
+            (user.label).toString(), (state).toString());
       }
       await _loadSection();
     } on Object catch (error) {
@@ -222,7 +229,8 @@ final class _InstanceAdministrationScreenState
         application.ref,
         status: next,
       );
-      _notice = '${application.name} is now $next.';
+      _notice = L10n.current.ui_value0_is_now_value1_f1974346(
+          (application.name).toString(), (next).toString());
       await _loadSection();
     } on Object catch (error) {
       _setError(error, 'Could not update the application');
@@ -253,16 +261,20 @@ final class _InstanceAdministrationScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text('Report #${report.id}',
+                    Text(
+                        L10n.of(context)
+                            .ui_report_value0_f2ff09eb((report.id).toString()),
                         style: Theme.of(context).textTheme.titleLarge),
                     const SizedBox(height: 6),
-                    Text('${report.category} · ${report.targetType}'),
+                    Text(L10n.of(context).ui_value0_value1_947523d9(
+                        (report.category).toString(),
+                        (report.targetType).toString())),
                     if (report.description case final description?) ...[
                       const SizedBox(height: 8),
                       Text(description),
                     ],
                     const SizedBox(height: 12),
-                    Text('Evidence',
+                    Text(L10n.of(context).ui_evidence_f800be44,
                         style: Theme.of(context).textTheme.titleMedium),
                     if (report.attachments.isNotEmpty) ...[
                       const SizedBox(height: 8),
@@ -291,7 +303,8 @@ final class _InstanceAdministrationScreenState
                     if (can('reports.manage')) ...[
                       DropdownButtonFormField<String>(
                         initialValue: status,
-                        decoration: const InputDecoration(labelText: 'Status'),
+                        decoration: InputDecoration(
+                            labelText: L10n.of(context).ui_status_005ef20f),
                         items: [
                           for (final value in _reportStatuses)
                             DropdownMenuItem(value: value, child: Text(value)),
@@ -304,21 +317,22 @@ final class _InstanceAdministrationScreenState
                         maxLength: 2000,
                         minLines: 2,
                         maxLines: 4,
-                        decoration:
-                            const InputDecoration(labelText: 'Resolution'),
+                        decoration: InputDecoration(
+                            labelText: L10n.of(context).ui_resolution_aee818af),
                       ),
                       FilledButton(
                         onPressed: () => Navigator.pop(sheetContext, 'update'),
-                        child: const Text('Update report'),
+                        child: Text(L10n.of(context).ui_update_report_8cfeddee),
                       ),
                       if (report.subjectRef != null) ...[
                         const Divider(height: 32),
-                        Text('Enforcement',
+                        Text(L10n.of(context).ui_enforcement_d891dff9,
                             style: Theme.of(context).textTheme.titleMedium),
                         DropdownButtonFormField<String>(
                           initialValue: accountAction,
-                          decoration: const InputDecoration(
-                              labelText: 'Account action'),
+                          decoration: InputDecoration(
+                              labelText:
+                                  L10n.of(context).ui_account_action_c48c1176),
                           items: [
                             for (final value in _accountActions)
                               DropdownMenuItem(
@@ -329,8 +343,9 @@ final class _InstanceAdministrationScreenState
                         ),
                         DropdownButtonFormField<String>(
                           initialValue: messageAction,
-                          decoration: const InputDecoration(
-                              labelText: 'Message action'),
+                          decoration: InputDecoration(
+                              labelText:
+                                  L10n.of(context).ui_message_action_8395e6fe),
                           items: [
                             for (final value in _messageActions)
                               DropdownMenuItem(
@@ -344,8 +359,9 @@ final class _InstanceAdministrationScreenState
                           minLines: 2,
                           maxLines: 4,
                           maxLength: 500,
-                          decoration:
-                              const InputDecoration(labelText: 'Audit reason'),
+                          decoration: InputDecoration(
+                              labelText:
+                                  L10n.of(context).ui_audit_reason_e1feab54),
                         ),
                         FilledButton.tonalIcon(
                           onPressed: accountAction == 'none' &&
@@ -353,7 +369,8 @@ final class _InstanceAdministrationScreenState
                               ? null
                               : () => Navigator.pop(sheetContext, 'enforce'),
                           icon: const Icon(Icons.gavel_outlined),
-                          label: const Text('Apply enforcement'),
+                          label: Text(
+                              L10n.of(context).ui_apply_enforcement_b557d875),
                         ),
                       ],
                     ],
@@ -372,7 +389,8 @@ final class _InstanceAdministrationScreenState
           status: status,
           resolution: resolution.text,
         );
-        _notice = 'Report #${report.id} was updated.';
+        _notice = L10n.current
+            .ui_report_value0_was_updated_06afce71((report.id).toString());
       } else {
         if (reason.text.trim().length < 3) {
           throw const UserInputException(
@@ -388,7 +406,9 @@ final class _InstanceAdministrationScreenState
           messageAction: messageAction,
           reason: reason.text,
         );
-        _notice = 'Enforcement was applied to report #${report.id}.';
+        _notice = L10n.current
+            .ui_enforcement_was_applied_to_report_value0_b86dd132(
+                (report.id).toString());
       }
       await _loadSection();
     } on Object catch (error) {
@@ -409,7 +429,7 @@ final class _InstanceAdministrationScreenState
         context: context,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
-            title: const Text('Federation restriction'),
+            title: Text(L10n.of(context).ui_federation_restriction_f38c3ae2),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -418,17 +438,21 @@ final class _InstanceAdministrationScreenState
                     controller: domain,
                     autofocus: true,
                     autocorrect: false,
-                    decoration:
-                        const InputDecoration(labelText: 'Instance domain'),
+                    decoration: InputDecoration(
+                        labelText:
+                            L10n.of(context).ui_instance_domain_f42d351a),
                   ),
                   DropdownButtonFormField<String>(
                     initialValue: level,
-                    decoration: const InputDecoration(labelText: 'Level'),
-                    items: const [
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_level_4155597d),
+                    items: [
                       DropdownMenuItem(
-                          value: 'silence', child: Text('Silence')),
+                          value: 'silence',
+                          child: Text(L10n.of(context).ui_silence_76177b2c)),
                       DropdownMenuItem(
-                          value: 'suspend', child: Text('Suspend')),
+                          value: 'suspend',
+                          child: Text(L10n.of(context).ui_suspend_e196ab03)),
                     ],
                     onChanged: (value) =>
                         setDialogState(() => level = value ?? level),
@@ -436,15 +460,16 @@ final class _InstanceAdministrationScreenState
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
                     value: includeSubdomains,
-                    title: const Text('Include subdomains'),
+                    title:
+                        Text(L10n.of(context).ui_include_subdomains_19bcf456),
                     onChanged: (value) => setDialogState(
                         () => includeSubdomains = value ?? false),
                   ),
                   TextField(
                     controller: reason,
                     maxLength: 500,
-                    decoration:
-                        const InputDecoration(labelText: 'Audit reason'),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_audit_reason_e1feab54),
                   ),
                 ],
               ),
@@ -452,11 +477,11 @@ final class _InstanceAdministrationScreenState
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(dialogContext, false),
-                child: const Text('Cancel'),
+                child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
-                child: const Text('Save'),
+                child: Text(L10n.of(context).ui_save_4d2d5d68),
               ),
             ],
           ),
@@ -469,7 +494,7 @@ final class _InstanceAdministrationScreenState
         includeSubdomains: includeSubdomains,
         reason: reason.text,
       );
-      _notice = 'Federation policy updated.';
+      _notice = L10n.current.ui_federation_policy_updated_8e141fc1;
       await _loadSection();
     } on Object catch (error) {
       _setError(error, 'Could not update federation policy');
@@ -497,20 +522,22 @@ final class _InstanceAdministrationScreenState
         context: context,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
-            title: const Text('Delegate administration'),
+            title: Text(L10n.of(context).ui_delegate_administration_b2c8dbd0),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextField(
                   controller: user,
                   autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Username or qualified local user ID',
+                  decoration: InputDecoration(
+                    labelText: L10n.of(context)
+                        .ui_username_or_qualified_local_user_id_f8fc62ab,
                   ),
                 ),
                 DropdownButtonFormField<String>(
                   initialValue: role,
-                  decoration: const InputDecoration(labelText: 'Role'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_role_902b7e39),
                   items: [
                     for (final value in _operatorRoles)
                       DropdownMenuItem(value: value, child: Text(value)),
@@ -523,11 +550,11 @@ final class _InstanceAdministrationScreenState
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(dialogContext, false),
-                child: const Text('Cancel'),
+                child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
-                child: const Text('Grant'),
+                child: Text(L10n.of(context).ui_grant_5710d90d),
               ),
             ],
           ),
@@ -538,7 +565,7 @@ final class _InstanceAdministrationScreenState
         user: await repository.resolveUserIdentity(user.text),
         role: role,
       );
-      _notice = 'Administrative role granted.';
+      _notice = L10n.current.ui_administrative_role_granted_f99615fc;
       await _loadSection();
     } on Object catch (error) {
       _setError(error, 'Could not grant the role');
@@ -568,7 +595,7 @@ final class _InstanceAdministrationScreenState
 
   Future<bool> _confirm(String message) => showSettingsConfirmation(
         context,
-        title: 'Confirm administrative action',
+        title: L10n.of(context).ui_confirm_administrative_action_7085757f,
         message: message,
       );
 
@@ -579,10 +606,10 @@ final class _InstanceAdministrationScreenState
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-          title: const Text('Administration'),
+          title: Text(L10n.of(context).ui_administration_8fd91fef),
           actions: [
             IconButton(
-              tooltip: 'Refresh',
+              tooltip: L10n.of(context).ui_refresh_0815aad4,
               onPressed: _loading ? null : _loadSection,
               icon: const Icon(Icons.refresh_rounded),
             ),
@@ -596,13 +623,16 @@ final class _InstanceAdministrationScreenState
               children: [
                 if (_identity case final identity?) ...[
                   Text(
-                    'Signed in as ${identity.username} · ${identity.roles.join(', ')}',
+                    L10n.of(context).ui_signed_in_as_value0_value1_b1cc472c(
+                        (identity.username).toString(),
+                        (identity.roles.join(', ')).toString()),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 10),
                   DropdownButtonFormField<_AdminSection>(
                     initialValue: _section,
-                    decoration: const InputDecoration(labelText: 'Section'),
+                    decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_section_2d877b6c),
                     items: [
                       for (final section in sections)
                         DropdownMenuItem(
@@ -648,10 +678,10 @@ final class _InstanceAdministrationScreenState
       };
 
   List<Widget> _overviewWidgets() => [
-        const SettingsSectionHeader(
-          'Instance overview',
-          subheading:
-              'Live local counts and Trust & Safety workload from the authoritative instance.',
+        SettingsSectionHeader(
+          L10n.of(context).ui_instance_overview_f5d9d875,
+          subheading: L10n.of(context)
+              .ui_live_local_counts_and_trust_safety_workload_f_ad776ba5,
         ),
         GridView.count(
           crossAxisCount: 2,
@@ -667,7 +697,9 @@ final class _InstanceAdministrationScreenState
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text('${entry.value}',
+                      Text(
+                          L10n.of(context)
+                              .ui_value0_26e9163c((entry.value).toString()),
                           style: Theme.of(context).textTheme.headlineMedium),
                       Text(entry.key.replaceAll('_', ' ')),
                     ],
@@ -679,16 +711,16 @@ final class _InstanceAdministrationScreenState
       ];
 
   List<Widget> _userWidgets() => [
-        const SettingsSectionHeader('Local users'),
+        SettingsSectionHeader(L10n.of(context).ui_local_users_82c9b538),
         TextField(
           controller: _userSearch,
           textInputAction: TextInputAction.search,
           onSubmitted: (_) => _loadSection(),
           decoration: InputDecoration(
-            labelText: 'Search username',
+            labelText: L10n.of(context).ui_search_username_95ab926b,
             prefixIcon: const Icon(Icons.search_rounded),
             suffixIcon: IconButton(
-              tooltip: 'Search',
+              tooltip: L10n.of(context).ui_search_c646a2c9,
               onPressed: _loadSection,
               icon: const Icon(Icons.arrow_forward_rounded),
             ),
@@ -701,7 +733,10 @@ final class _InstanceAdministrationScreenState
                 : Icons.person_outline_rounded),
             title: Text(user.label),
             subtitle: Text(
-              '${user.ref.wire} · ${user.accountType} · age ${user.ageAssuranceState}',
+              L10n.of(context).ui_value0_value1_age_value2_fd663362(
+                  (user.ref.wire).toString(),
+                  (user.accountType).toString(),
+                  (user.ageAssuranceState).toString()),
             ),
             trailing: can('users.manage')
                 ? const Icon(Icons.more_horiz_rounded)
@@ -711,25 +746,33 @@ final class _InstanceAdministrationScreenState
       ];
 
   List<Widget> _applicationWidgets() => [
-        const SettingsSectionHeader(
-          'Applications',
-          subheading: 'Suspend unsafe integrations across local installs.',
+        SettingsSectionHeader(
+          L10n.of(context).ui_applications_2f7f7f22,
+          subheading: L10n.of(context)
+              .ui_suspend_unsafe_integrations_across_local_inst_c7890512,
         ),
         for (final application in _applications)
           ListTile(
             leading: const Icon(Icons.smart_toy_outlined),
             title: Text(application.name),
             subtitle: Text(
-              '${application.ref.wire} · ${application.status} · ${_date(application.updatedAt)}'
-              '${application.canManageState ? '' : '\nState managed by ${application.stateAuthority.value}'}',
+              L10n.of(context).ui_value0_value1_value2_value3_d8f7a34d(
+                  (application.ref.wire).toString(),
+                  (application.status).toString(),
+                  (_date(application.updatedAt)).toString(),
+                  (application.canManageState
+                          ? ''
+                          : '\nState managed by ${application.stateAuthority.value}')
+                      .toString()),
             ),
             trailing: can('bots.manage')
                 ? IconButton(
                     tooltip: !application.canManageState
-                        ? 'State managed by ${application.stateAuthority.value}'
+                        ? L10n.of(context).ui_state_managed_by_value0_a952f851(
+                            (application.stateAuthority.value).toString())
                         : application.status == 'suspended'
-                            ? 'Activate'
-                            : 'Suspend',
+                            ? L10n.of(context).ui_activate_3b8f0190
+                            : L10n.of(context).ui_suspend_e196ab03,
                     onPressed: application.canManageState
                         ? () => _applicationActions(application)
                         : null,
@@ -742,18 +785,24 @@ final class _InstanceAdministrationScreenState
       ];
 
   List<Widget> _reportWidgets() => [
-        const SettingsSectionHeader(
-          'Trust & Safety reports',
-          subheading:
-              'Review server-verified evidence and apply audited enforcement.',
+        SettingsSectionHeader(
+          L10n.of(context).ui_trust_safety_reports_522da1b4,
+          subheading: L10n.of(context)
+              .ui_review_server_verified_evidence_and_apply_aud_122b0cad,
         ),
         for (final report in _reports)
           Card(
             child: ListTile(
               leading: const Icon(Icons.flag_outlined),
-              title: Text('${report.category} · ${report.targetType}'),
+              title: Text(L10n.of(context).ui_value0_value1_947523d9(
+                  (report.category).toString(),
+                  (report.targetType).toString())),
               subtitle: Text(
-                '${report.status} · ${report.severity} · ${_date(report.createdAt)}\n${report.description ?? report.targetRef}',
+                L10n.of(context).ui_value0_value1_value2_value3_f9e0d55d(
+                    (report.status).toString(),
+                    (report.severity).toString(),
+                    (_date(report.createdAt)).toString(),
+                    (report.description ?? report.targetRef).toString()),
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -765,21 +814,25 @@ final class _InstanceAdministrationScreenState
       ];
 
   List<Widget> _blockWidgets() => [
-        const SettingsSectionHeader(
-          'Federation restrictions',
-          subheading:
-              'Silence or suspend traffic from a remote instance and optionally its subdomains.',
+        SettingsSectionHeader(
+          L10n.of(context).ui_federation_restrictions_f6c03243,
+          subheading: L10n.of(context)
+              .ui_silence_or_suspend_traffic_from_a_remote_inst_45798a43,
         ),
         for (final block in _blocks)
           ListTile(
             leading: const Icon(Icons.public_off_outlined),
             title: Text(block.domain),
             subtitle: Text(
-              '${block.level}${block.includeSubdomains ? ' · includes subdomains' : ''}${block.reason == null ? '' : '\n${block.reason}'}',
+              L10n.of(context).ui_value0_value1_value2_d1940c97(
+                  (block.level).toString(),
+                  (block.includeSubdomains ? ' · includes subdomains' : '')
+                      .toString(),
+                  (block.reason == null ? '' : '\n${block.reason}').toString()),
             ),
             trailing: can('instances.manage')
                 ? IconButton(
-                    tooltip: 'Remove restriction',
+                    tooltip: L10n.of(context).ui_remove_restriction_e9623e5b,
                     onPressed: () => _removeBlock(block),
                     icon: const Icon(Icons.delete_outline),
                   )
@@ -789,25 +842,27 @@ final class _InstanceAdministrationScreenState
           OutlinedButton.icon(
             onPressed: _addBlock,
             icon: const Icon(Icons.add_rounded),
-            label: const Text('Add restriction'),
+            label: Text(L10n.of(context).ui_add_restriction_10b486ea),
           ),
       ];
 
   List<Widget> _operatorWidgets() => [
-        const SettingsSectionHeader(
-          'Delegated operators',
-          subheading:
-              'Scoped roles are auditable and can be revoked by owners.',
+        SettingsSectionHeader(
+          L10n.of(context).ui_delegated_operators_69573ea7,
+          subheading: L10n.of(context)
+              .ui_scoped_roles_are_auditable_and_can_be_revoked_c3271608,
         ),
         for (final operator in _operators)
           ListTile(
             leading: const Icon(Icons.admin_panel_settings_outlined),
             title: Text(operator.displayName ?? operator.username),
-            subtitle: Text('${operator.userRef.wire} · ${operator.role}'),
+            subtitle: Text(L10n.of(context).ui_value0_value1_947523d9(
+                (operator.userRef.wire).toString(),
+                (operator.role).toString())),
             trailing: _identity?.roles.contains('owner') == true &&
                     operator.role != 'owner'
                 ? IconButton(
-                    tooltip: 'Revoke role',
+                    tooltip: L10n.of(context).ui_revoke_role_0709c115,
                     onPressed: () => _removeOperator(operator),
                     icon: const Icon(Icons.delete_outline),
                   )
@@ -817,28 +872,35 @@ final class _InstanceAdministrationScreenState
           OutlinedButton.icon(
             onPressed: _addOperator,
             icon: const Icon(Icons.person_add_alt_1_outlined),
-            label: const Text('Grant role'),
+            label: Text(L10n.of(context).ui_grant_role_6149e6e3),
           ),
       ];
 
   List<Widget> _auditWidgets() => [
-        const SettingsSectionHeader(
-          'Instance audit log',
-          subheading: 'Security-sensitive administrative changes.',
+        SettingsSectionHeader(
+          L10n.of(context).ui_instance_audit_log_a6713c43,
+          subheading: L10n.of(context)
+              .ui_security_sensitive_administrative_changes_3bb3f36d,
         ),
         for (final event in _audit)
           ExpansionTile(
             leading: const Icon(Icons.history_rounded),
             title: Text(event.action),
             subtitle: Text(
-              '${event.targetType} ${event.targetRef} · ${_date(event.createdAt)}',
+              L10n.of(context).ui_value0_value1_value2_1f260e62(
+                  (event.targetType).toString(),
+                  (event.targetRef).toString(),
+                  (_date(event.createdAt)).toString()),
             ),
             childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             children: [
               Align(
                 alignment: Alignment.centerLeft,
                 child: SelectableText(
-                  'Actor: ${event.actorRef ?? event.actorKind}\n${const JsonEncoder.withIndent('  ').convert(event.detail)}',
+                  L10n.of(context).ui_actor_value0_value1_2f109519(
+                      (event.actorRef ?? event.actorKind).toString(),
+                      (const JsonEncoder.withIndent('  ').convert(event.detail))
+                          .toString()),
                   style: const TextStyle(fontFamily: 'monospace'),
                 ),
               ),
@@ -890,7 +952,8 @@ final class _ReportAttachmentRow extends StatelessWidget {
                     <String>[
                       if (contentType != null) contentType,
                       if (attachment.size case final size?) _bytes(size),
-                      if (disclosed) 'reporter disclosed',
+                      if (disclosed)
+                        L10n.of(context).ui_reporter_disclosed_59b3796c,
                     ].join(' · '),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
@@ -908,7 +971,9 @@ final class _ReportAttachmentRow extends StatelessWidget {
             ),
             IconButton(
               tooltip: restriction ??
-                  (previewable ? 'Preview or download' : 'Open or download'),
+                  (previewable
+                      ? L10n.of(context).ui_preview_or_download_fdc18684
+                      : L10n.of(context).ui_open_or_download_86382136),
               onPressed: restriction == null ? onOpen : null,
               icon: Icon(previewable
                   ? Icons.visibility_outlined

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import { userErrorMessage } from '$lib/api/client';
   import type { Attachment } from '$lib/chat/types';
@@ -150,21 +152,22 @@
   }
 </script>
 
-<div class="private-attachments" aria-label="Private response attachments">
+<div class="private-attachments" aria-label={$t('ui_private_response_attachments_88d3aad4')}>
   {#each attachments as attachment (key(attachment))}
-    <section class="private-attachment" aria-label="Attachment">
+    <section class="private-attachment" aria-label={$t('ui_attachment_040d2b36')}>
       <AttachmentSpoiler
         filename={encryptedManifests[key(attachment)]?.filename ?? attachment.filename}
         identity={key(attachment)}
       >
         {#if attachment.encryption_mode === 'e2ee' && !encryptedManifests[key(attachment)]}
           <p class="attachment-state" role="alert">
-            <span aria-hidden="true">⚠</span> This encrypted private attachment is unavailable on this
-            device.
+            <span aria-hidden="true">⚠</span>
+            {$t('ui_this_encrypted_private_attachment_is_unavaila_e475c579')}
           </p>
         {:else if attachment.encryption_mode === 'e2ee' && encryptedLoading[key(attachment)]}
           <p class="attachment-state" role="status">
-            <span class="spinner" aria-hidden="true"></span> Decrypting {attachment.filename}…
+            <span class="spinner" aria-hidden="true"></span>
+            {$t('ui_decrypting_value0_4c6ce589', { value0: String(attachment.filename) })}
           </p>
         {:else if attachment.encryption_mode === 'e2ee' && failures[key(attachment)]}
           <div class="attachment-state rejected" role="alert">
@@ -176,7 +179,7 @@
                   attachment,
                   encryptedManifests[key(attachment)],
                   encryptedGeneration
-                )}>Try again</button
+                )}>{$t('ui_try_again_d8b8392e')}</button
             >
           </div>
         {:else if attachment.encryption_mode === 'e2ee' && encryptedUrls[key(attachment)]}
@@ -216,26 +219,35 @@
           {/if}
           <footer>
             <span>{attachment.filename} · {sizeLabel(attachment.size)}</span>
-            <button type="button" onclick={() => void download(attachment)}>Download</button>
+            <button type="button" onclick={() => void download(attachment)}
+              >{$t('ui_download_d6eafe82')}</button
+            >
           </footer>
         {:else if attachment.scan_status === 'pending'}
           <p class="attachment-state" role="status">
-            <span class="spinner" aria-hidden="true"></span> Preparing {attachment.filename}…
+            <span class="spinner" aria-hidden="true"></span>
+            {$t('ui_preparing_value0_17b89445', { value0: String(attachment.filename) })}
           </p>
         {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
           <p class="attachment-state rejected" role="alert">
             <span aria-hidden="true">⚠</span>
-            {attachment.filename} was rejected during server processing.
+            {$t('ui_value0_was_rejected_during_server_processing_05e3a7f4', {
+              value0: String(attachment.filename)
+            })}
           </p>
         {:else if attachment.scan_status === 'failed' || attachment.scan_status === 'encrypted'}
           <p class="attachment-state rejected" role="alert">
             <span aria-hidden="true">⚠</span>
-            {attachment.filename} could not be processed by the server.
+            {$t('ui_value0_could_not_be_processed_by_the_server_bebb4e1d', {
+              value0: String(attachment.filename)
+            })}
           </p>
         {:else if failures[key(attachment)]}
           <div class="attachment-state rejected" role="alert">
             <span>{failures[key(attachment)]}</span>
-            <button type="button" onclick={() => retry(attachment)}>Try again</button>
+            <button type="button" onclick={() => retry(attachment)}
+              >{$t('ui_try_again_d8b8392e')}</button
+            >
           </div>
         {:else}
           {#key `${key(attachment)}:${attempts[key(attachment)] ?? 0}`}
@@ -298,7 +310,9 @@
           {#if attachment.content_type.startsWith('image/') || attachment.content_type.startsWith('video/') || attachment.content_type.startsWith('audio/')}
             <footer>
               <span>{attachment.filename} · {sizeLabel(attachment.size)}</span>
-              <button type="button" onclick={() => void download(attachment)}>Download</button>
+              <button type="button" onclick={() => void download(attachment)}
+                >{$t('ui_download_d6eafe82')}</button
+              >
             </footer>
           {/if}
         {/if}

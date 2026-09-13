@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' show max;
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -33,6 +32,7 @@ import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
@@ -153,7 +153,8 @@ Future<void> _showE2eeRoomSettings(
           } on Object catch (caught) {
             error = userFacingError(
               caught,
-              summary: 'Could not update end-to-end encryption.',
+              summary: L10n
+                  .current.ui_could_not_update_end_to_end_encryption_8cd06684,
             );
           } finally {
             if (dialogContext.mounted) {
@@ -166,7 +167,9 @@ Future<void> _showE2eeRoomSettings(
           title: Row(children: [
             Icon(Icons.lock_rounded),
             SizedBox(width: 10),
-            Expanded(child: Text('End-to-end encryption')),
+            Expanded(
+                child:
+                    Text(L10n.of(context).ui_end_to_end_encryption_21f71771)),
           ]),
           content: SizedBox(
             width: 520,
@@ -178,55 +181,58 @@ Future<void> _showE2eeRoomSettings(
                   Text(
                     active
                         ? _isVoiceLikeChannel(channel)
-                            ? 'Encryption is active for microphone, camera, screen video, and screen audio.'
-                            : 'Encryption is active for new messages, files, and supported calls in this channel.'
+                            ? L10n.of(context)
+                                .ui_encryption_is_active_for_microphone_camera_sc_5cc5adf0
+                            : L10n.of(context)
+                                .ui_encryption_is_active_for_new_messages_files_a_c1a9f72a
                         : needsRekey
-                            ? 'Encrypted activity is paused until a member rotates the room keys.'
+                            ? L10n.of(context)
+                                .ui_encrypted_activity_is_paused_until_a_member_r_71e7684f
                             : encrypted
-                                ? 'Encryption is being prepared. Messaging remains paused until setup completes.'
+                                ? L10n.of(context)
+                                    .ui_encryption_is_being_prepared_messaging_remain_1ff9f908
                                 : _isVoiceLikeChannel(channel)
-                                    ? 'Encryption is optional and cannot be turned off after it is enabled for this voice channel.'
-                                    : 'Encryption is optional and cannot be turned off after it is enabled for this conversation.',
+                                    ? L10n.of(context)
+                                        .ui_encryption_is_optional_and_cannot_be_turned_o_0a0475ce
+                                    : L10n.of(context)
+                                        .ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26,
                   ),
                   SizedBox(height: 12),
                   Text(
-                    'Identity verification',
+                    L10n.of(context).ui_identity_verification_62bbdbca,
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
                   SizedBox(height: 6),
                   Text(
-                    'Until participants compare the safety number through a separate trusted channel, content is encrypted but identities are unverified. Comparing it is what detects first-contact or active-instance key substitution.',
+                    L10n.of(context)
+                        .ui_until_participants_compare_the_safety_number__4f3c114b,
                   ),
                   SizedBox(height: 12),
                   if (!encrypted) ...[
                     Text(
-                      'Before enabling:',
+                      L10n.of(context).ui_before_enabling_75d41f20,
                       style: TextStyle(fontWeight: FontWeight.w800),
                     ),
                     SizedBox(height: 6),
                     Text(
                       _isVoiceLikeChannel(channel)
-                          ? '• Server recording, transcription, and media moderation will be unavailable.\n'
-                              '• Unsupported clients cannot join.\n'
-                              '• Participants, timing, track types, and traffic metadata remain visible.\n'
-                              '• Anyone can still record media on their own device.'
-                          : '• Server message search, link previews, server-side file previews and malware scanning will be unavailable. Webhooks receive no access automatically; a verified webhook device can receive only future content after an explicit grant, rekey, and history floor. Verified participant-mode apps follow the same future-only admission rule.\n'
-                              '• Notification wakes contain no message content.\n'
-                              '• Existing history stays plaintext; new content is encrypted.\n'
-                              '• Metadata such as participants, timing, and message size remains visible.\n'
-                              '• Losing the synchronized encrypted vault, every trusted client’s local state, and the recovery backup permanently loses encrypted history.\n'
-                              '• Removed members, apps, and webhooks retain content already received.',
+                          ? L10n.of(context)
+                              .ui_server_recording_transcription_and_media_mode_ba4c3058
+                          : L10n.of(context)
+                              .ui_server_message_search_link_previews_server_si_725febb3,
                     ),
                   ],
                   if (safetyNumber != null) ...[
                     SizedBox(height: 14),
-                    Text('Conversation safety number',
+                    Text(
+                        L10n.of(context).ui_conversation_safety_number_ac78c3e9,
                         style: TextStyle(fontWeight: FontWeight.w800)),
                     SizedBox(height: 6),
                     SelectableText(safetyNumber!),
                     SizedBox(height: 6),
                     Text(
-                      'Compare this number with the other participants through a trusted channel. It changes when membership or devices change.',
+                      L10n.of(context)
+                          .ui_compare_this_number_with_the_other_participan_16d9c070,
                     ),
                   ],
                   if (error != null) ...[
@@ -240,7 +246,7 @@ Future<void> _showE2eeRoomSettings(
           actions: [
             TextButton(
               onPressed: busy ? null : () => Navigator.pop(dialogContext),
-              child: Text('Done'),
+              child: Text(L10n.of(context).ui_done_8dd31791),
             ),
             if (active)
               FilledButton.tonal(
@@ -253,7 +259,7 @@ Future<void> _showE2eeRoomSettings(
                             setDialogState(() => safetyNumber = value);
                           }
                         }),
-                child: Text('Verify safety number'),
+                child: Text(L10n.of(context).ui_verify_safety_number_070dce0b),
               ),
             if (canManage && (!encrypted || needsRekey))
               FilledButton.icon(
@@ -285,7 +291,9 @@ Future<void> _showE2eeRoomSettings(
                         }),
                 icon: Icon(
                     needsRekey ? Icons.sync_lock_rounded : Icons.lock_rounded),
-                label: Text(needsRekey ? 'Rotate keys' : 'Enable encryption'),
+                label: Text(needsRekey
+                    ? L10n.of(context).ui_rotate_keys_014b6162
+                    : L10n.of(context).ui_enable_encryption_a0595627),
               ),
           ],
         );
@@ -397,7 +405,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                   ],
                 ),
               _ShellSection.friends => _SectionScreen(
-                  title: 'Friends',
+                  title: L10n.of(context).ui_friends_63cc7b7a,
                   onBack: () => _showSection(_ShellSection.messages),
                   child: _FriendsPage(onOpenChat: () {
                     _showSection(_ShellSection.messages);
@@ -405,7 +413,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                   }),
                 ),
               _ShellSection.settings => _SectionScreen(
-                  title: 'Settings',
+                  title: L10n.of(context).ui_settings_4b058728,
                   onBack: () => _showSection(_ShellSection.messages),
                   child: SettingsScreen(),
                 ),
@@ -538,18 +546,18 @@ final class _IncomingCallBanner extends ConsumerWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontWeight: FontWeight.w800),
                     ),
-                    Text('Incoming call'),
+                    Text(L10n.of(context).ui_incoming_call_6927a8fb),
                   ],
                 ),
               ),
               IconButton.filledTonal(
-                tooltip: 'Decline',
+                tooltip: L10n.of(context).ui_decline_58eaef39,
                 onPressed: controller.declineIncomingCall,
                 icon: Icon(Icons.call_end_rounded, color: context.kaede.coral),
               ),
               SizedBox(width: 6),
               IconButton.filled(
-                tooltip: 'Answer',
+                tooltip: L10n.of(context).ui_answer_f94ea0ff,
                 onPressed: controller.answerIncomingCall,
                 icon: Icon(Icons.call_rounded),
               ),
@@ -704,18 +712,18 @@ final class _ConversationScreenState
         barrierDismissible: false,
         builder: (dialogContext) => AlertDialog(
           icon: Icon(Icons.lock_rounded),
-          title: Text('Encrypted room'),
+          title: Text(L10n.of(context).ui_encrypted_room_263e6916),
           content: SingleChildScrollView(
             child: Text(encryptedRoomJoinWarning(kind)),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: Text('Go back'),
+              child: Text(L10n.of(context).ui_go_back_628e5a9e),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: Text('Continue'),
+              child: Text(L10n.of(context).ui_continue_ab43d664),
             ),
           ],
         ),
@@ -1050,7 +1058,7 @@ final class _ConversationScreenState
             dense: true,
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.push_pin_outlined),
-            title: Text('Pinned messages'),
+            title: Text(L10n.of(context).ui_pinned_messages_c56c8a9d),
           ),
         ),
       if (isDm && callUsesOverflow)
@@ -1062,7 +1070,9 @@ final class _ConversationScreenState
             contentPadding: EdgeInsets.zero,
             leading: Icon(
                 _activeCall == null ? Icons.call_outlined : Icons.call_rounded),
-            title: Text(_activeCall == null ? 'Start call' : 'Join call'),
+            title: Text(_activeCall == null
+                ? L10n.of(context).ui_start_call_29ddf6b1
+                : L10n.of(context).ui_join_call_a0c061ab),
           ),
         ),
       if (supportsThreads && compactHeader)
@@ -1072,7 +1082,7 @@ final class _ConversationScreenState
             dense: true,
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.forum_outlined),
-            title: Text('Threads'),
+            title: Text(L10n.of(context).ui_threads_23244ec6),
           ),
         ),
       if ((widget.onMembers != null || widget.channel.isThread) &&
@@ -1083,7 +1093,7 @@ final class _ConversationScreenState
             dense: true,
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.people_alt_outlined),
-            title: Text('Member list'),
+            title: Text(L10n.of(context).ui_member_list_8190cf45),
           ),
         ),
       PopupMenuItem(
@@ -1093,12 +1103,12 @@ final class _ConversationScreenState
           contentPadding: EdgeInsets.zero,
           leading: Icon(Icons.settings_outlined),
           title: Text(widget.channel.isThread
-              ? 'Thread settings'
+              ? L10n.of(context).ui_thread_settings_122d2eee
               : widget.channel.guildRef != null
-                  ? 'Channel settings'
+                  ? L10n.of(context).ui_channel_settings_635bf631
                   : _isGroup
-                      ? 'Group settings'
-                      : 'Conversation settings'),
+                      ? L10n.of(context).ui_group_settings_f4ca53a9
+                      : L10n.of(context).ui_conversation_settings_7d66c7d7),
         ),
       ),
     ];
@@ -1140,13 +1150,15 @@ final class _ConversationScreenState
                   mobile.user,
                 ))
               IconButton(
-                tooltip: 'Follow announcements',
+                tooltip: L10n.of(context).ui_follow_announcements_6b55eefc,
                 onPressed: _showAnnouncementFollow,
                 icon: Icon(Icons.notifications_none_rounded),
               ),
             if (isDm && !callUsesOverflow)
               IconButton(
-                tooltip: _activeCall == null ? 'Start call' : 'Join call',
+                tooltip: _activeCall == null
+                    ? L10n.of(context).ui_start_call_29ddf6b1
+                    : L10n.of(context).ui_join_call_a0c061ab,
                 onPressed: _callBusy ? null : _startOrJoinCall,
                 icon: Icon(_activeCall == null
                     ? Icons.call_outlined
@@ -1155,10 +1167,11 @@ final class _ConversationScreenState
             if (widget.channel.isThread && !compactHeader)
               IconButton(
                 tooltip: widget.channel.archived
-                    ? 'Archived threads cannot be followed'
+                    ? L10n.of(context)
+                        .ui_archived_threads_cannot_be_followed_bf519f3e
                     : widget.channel.followed
-                        ? 'Unfollow thread'
-                        : 'Follow thread',
+                        ? L10n.of(context).ui_unfollow_thread_37f433b1
+                        : L10n.of(context).ui_follow_thread_889dfc80,
                 onPressed: _threadBusy || widget.channel.archived
                     ? null
                     : _toggleThreadFollow,
@@ -1168,7 +1181,7 @@ final class _ConversationScreenState
               ),
             if (supportsThreads && !compactHeader)
               IconButton(
-                tooltip: 'Threads',
+                tooltip: L10n.of(context).ui_threads_23244ec6,
                 onPressed: _showThreads,
                 icon: Icon(Icons.forum_outlined),
               ),
@@ -1176,22 +1189,23 @@ final class _ConversationScreenState
                 !widget.channel.isForum &&
                 widget.channel.type != ChannelType.tracker)
               IconButton(
-                tooltip: 'Search this conversation',
+                tooltip: L10n.of(context).ui_search_this_conversation_3abf7012,
                 onPressed: _showMessageSearch,
                 icon: Icon(Icons.search_rounded),
               ),
             if ((widget.onMembers != null || widget.channel.isThread) &&
                 !compactHeader)
               IconButton(
-                tooltip:
-                    widget.channel.isThread ? 'Thread members' : 'Member list',
+                tooltip: widget.channel.isThread
+                    ? L10n.of(context).ui_thread_members_b6d96a16
+                    : L10n.of(context).ui_member_list_8190cf45,
                 onPressed: widget.channel.isThread
                     ? _showThreadMembers
                     : widget.onMembers,
                 icon: Icon(Icons.people_alt_outlined),
               ),
             PopupMenuButton<String>(
-              tooltip: 'More options',
+              tooltip: L10n.of(context).ui_more_options_bff24c7e,
               position: PopupMenuPosition.under,
               icon: Icon(Icons.more_vert_rounded),
               onSelected: (action) {
@@ -1302,7 +1316,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text('Create Thread'),
+          title: Text(L10n.of(context).ui_create_thread_e32ec947),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1311,7 +1325,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                 autofocus: true,
                 maxLength: 100,
                 decoration: InputDecoration(
-                  labelText: 'Thread name',
+                  labelText: L10n.of(context).ui_thread_name_f63426e8,
                   counterText: '',
                 ),
               ),
@@ -1320,15 +1334,16 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                   contentPadding: EdgeInsets.zero,
                   value: private,
                   onChanged: (value) => setDialogState(() => private = value),
-                  title: Text('Private Thread'),
-                  subtitle: Text('Only invited members can view it.'),
+                  title: Text(L10n.of(context).ui_private_thread_ac8a0e9c),
+                  subtitle: Text(L10n.of(context)
+                      .ui_only_invited_members_can_view_it_f640098f),
                 ),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
@@ -1339,7 +1354,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                           dialogContext,
                           (value.text.trim(), private),
                         ),
-                child: Text('Create'),
+                child: Text(L10n.of(context).ui_create_990de47d),
               ),
             ),
           ],
@@ -1399,14 +1414,14 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
             child: Row(
               children: [
                 Expanded(
-                  child: Text('Threads',
+                  child: Text(L10n.of(context).ui_threads_23244ec6,
                       style: Theme.of(context).textTheme.headlineSmall),
                 ),
                 if (canCreate)
                   FilledButton.icon(
                     onPressed: _busy ? null : _create,
                     icon: Icon(Icons.add_rounded, size: 18),
-                    label: Text('Create'),
+                    label: Text(L10n.of(context).ui_create_990de47d),
                   ),
               ],
             ),
@@ -1422,7 +1437,8 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                     child: Padding(
                       padding: EdgeInsets.all(28),
                       child: Text(
-                        'Message history is unavailable in this channel.',
+                        L10n.of(context)
+                            .ui_message_history_is_unavailable_in_this_channe_088d854e,
                         textAlign: TextAlign.center,
                         style: TextStyle(color: context.kaede.muted),
                       ),
@@ -1438,7 +1454,9 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                             const _ThreadSectionLabel('Active Threads'),
                             if (_active!.isEmpty)
                               ListTile(
-                                title: Text('No active threads',
+                                title: Text(
+                                    L10n.of(context)
+                                        .ui_no_active_threads_76595eb1,
                                     style:
                                         TextStyle(color: context.kaede.muted)),
                               ),
@@ -1451,7 +1469,9 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                             const _ThreadSectionLabel('Archived Threads'),
                             if (_archived!.isEmpty)
                               ListTile(
-                                title: Text('No archived threads',
+                                title: Text(
+                                    L10n.of(context)
+                                        .ui_no_archived_threads_383ff4c1,
                                     style:
                                         TextStyle(color: context.kaede.muted)),
                               ),
@@ -1500,8 +1520,10 @@ final class _ThreadBrowseRow extends StatelessWidget {
             thread.locked ? Icons.lock_outline_rounded : Icons.forum_outlined),
         title: Text(thread.name ?? 'thread'),
         subtitle: Text([
-          '${thread.messageCount} messages',
-          '${thread.memberCount} members',
+          L10n.of(context)
+              .ui_value0_messages_44ded9c0((thread.messageCount).toString()),
+          L10n.of(context)
+              .ui_value0_members_174769cf((thread.memberCount).toString()),
         ].join(' · ')),
         trailing: Icon(Icons.chevron_right_rounded),
         onTap: onOpen,
@@ -1585,7 +1607,7 @@ final class _ThreadDetailsSheetState
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text('Edit thread'),
+          title: Text(L10n.of(context).ui_edit_thread_d2cf424b),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1594,19 +1616,29 @@ final class _ThreadDetailsSheetState
                 autofocus: true,
                 maxLength: 100,
                 decoration: InputDecoration(
-                  labelText: 'Thread name',
+                  labelText: L10n.of(context).ui_thread_name_f63426e8,
                   counterText: '',
                 ),
               ),
               SizedBox(height: 12),
               DropdownButtonFormField<int>(
                 initialValue: duration,
-                decoration: InputDecoration(labelText: 'Hide after inactivity'),
-                items: const [
-                  DropdownMenuItem(value: 60, child: Text('1 hour')),
-                  DropdownMenuItem(value: 1440, child: Text('24 hours')),
-                  DropdownMenuItem(value: 4320, child: Text('3 days')),
-                  DropdownMenuItem(value: 10080, child: Text('1 week')),
+                decoration: InputDecoration(
+                    labelText:
+                        L10n.of(context).ui_hide_after_inactivity_04436fdb),
+                items: [
+                  DropdownMenuItem(
+                      value: 60,
+                      child: Text(L10n.of(context).ui_1_hour_0c43fb4a)),
+                  DropdownMenuItem(
+                      value: 1440,
+                      child: Text(L10n.of(context).ui_24_hours_42929680)),
+                  DropdownMenuItem(
+                      value: 4320,
+                      child: Text(L10n.of(context).ui_3_days_2d8e0d65)),
+                  DropdownMenuItem(
+                      value: 10080,
+                      child: Text(L10n.of(context).ui_1_week_d0d53158)),
                 ],
                 onChanged: (value) =>
                     setDialogState(() => duration = value ?? duration),
@@ -1615,7 +1647,9 @@ final class _ThreadDetailsSheetState
                 SizedBox(height: 14),
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Tags (${appliedTags.length}/5)',
+                  child: Text(
+                      L10n.of(context).ui_tags_value0_5_2157bb60(
+                          (appliedTags.length).toString()),
                       style: TextStyle(fontWeight: FontWeight.w700)),
                 ),
                 SizedBox(height: 8),
@@ -1647,7 +1681,7 @@ final class _ThreadDetailsSheetState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
@@ -1665,7 +1699,7 @@ final class _ThreadDetailsSheetState
                             appliedTags.toList(growable: false),
                           ),
                         ),
-                child: Text('Save'),
+                child: Text(L10n.of(context).ui_save_4d2d5d68),
               ),
             ),
           ],
@@ -1699,7 +1733,7 @@ final class _ThreadDetailsSheetState
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Notifications',
+              Text(L10n.of(context).ui_notifications_381d190f,
                   style: Theme.of(sheetContext).textTheme.titleLarge),
               SizedBox(height: 8),
               RadioGroup<String>(
@@ -1711,22 +1745,22 @@ final class _ThreadDetailsSheetState
                   children: [
                     RadioListTile<String>(
                       contentPadding: EdgeInsets.zero,
-                      title: Text('Use Default'),
+                      title: Text(L10n.of(context).ui_use_default_4b479d31),
                       value: 'inherit',
                     ),
                     RadioListTile<String>(
                       contentPadding: EdgeInsets.zero,
-                      title: Text('All Messages'),
+                      title: Text(L10n.of(context).ui_all_messages_dd382488),
                       value: 'all',
                     ),
                     RadioListTile<String>(
                       contentPadding: EdgeInsets.zero,
-                      title: Text('Only @mentions'),
+                      title: Text(L10n.of(context).ui_only_mentions_7876db1c),
                       value: 'mentions',
                     ),
                     RadioListTile<String>(
                       contentPadding: EdgeInsets.zero,
-                      title: Text('Nothing'),
+                      title: Text(L10n.of(context).ui_nothing_2cea492a),
                       value: 'none',
                     ),
                   ],
@@ -1755,17 +1789,17 @@ final class _ThreadDetailsSheetState
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Delete thread?'),
-        content: Text('This cannot be undone.'),
+        title: Text(L10n.of(context).ui_delete_thread_9f21116f),
+        content: Text(L10n.of(context).ui_this_cannot_be_undone_f97155ee),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: Text('Cancel')),
+              child: Text(L10n.of(context).ui_cancel_35afca3b)),
           FilledButton(
             style:
                 FilledButton.styleFrom(backgroundColor: context.kaede.danger),
             onPressed: () => Navigator.pop(context, true),
-            child: Text('Delete'),
+            child: Text(L10n.of(context).ui_delete_5797ea6a),
           ),
         ],
       ),
@@ -1804,33 +1838,44 @@ final class _ThreadDetailsSheetState
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(isPost ? 'Post settings' : 'Thread settings',
+            Text(
+                isPost
+                    ? L10n.of(context).ui_post_settings_09813008
+                    : L10n.of(context).ui_thread_settings_122d2eee,
                 style: Theme.of(context).textTheme.headlineSmall),
             SizedBox(height: 16),
             if (canReadRetainedChannelHistory(thread))
               _SettingsRow(
                 icon: Icons.push_pin_outlined,
-                title: 'Pins',
-                subtitle: 'Messages saved in this conversation',
+                title: L10n.of(context).ui_pins_73b7ddc5,
+                subtitle: L10n.of(context)
+                    .ui_messages_saved_in_this_conversation_b345454a,
                 onTap: widget.onPins,
               ),
             if (canEdit)
               _SettingsRow(
                 icon: Icons.edit_outlined,
-                title: isPost ? 'Edit post' : 'Edit thread',
+                title: isPost
+                    ? L10n.of(context).ui_edit_post_d6d25d05
+                    : L10n.of(context).ui_edit_thread_d2cf424b,
                 subtitle: thread.archived
-                    ? 'Reopen before editing'
-                    : 'Name and auto-archive duration',
+                    ? L10n.of(context).ui_reopen_before_editing_67d5aa33
+                    : L10n.of(context)
+                        .ui_name_and_auto_archive_duration_98eff6a3,
                 onTap: _busy || thread.archived ? null : _edit,
               ),
             _SettingsRow(
               icon: thread.followed
                   ? Icons.notifications_rounded
                   : Icons.notifications_none_rounded,
-              title: thread.followed ? 'Unfollow' : 'Follow',
+              title: thread.followed
+                  ? L10n.of(context).ui_unfollow_f4a8c527
+                  : L10n.of(context).ui_follow_8aad7d90,
               subtitle: thread.archived
-                  ? 'Archived threads cannot be joined or followed'
-                  : 'Get updates from this ${isPost ? 'post' : 'thread'}',
+                  ? L10n.of(context)
+                      .ui_archived_threads_cannot_be_joined_or_followed_3ad2e048
+                  : L10n.of(context).ui_get_updates_from_this_value0_bbdc4cde(
+                      (isPost ? 'post' : 'thread').toString()),
               onTap: _busy || thread.archived
                   ? null
                   : () => _run(() => ref
@@ -1840,7 +1885,7 @@ final class _ThreadDetailsSheetState
             if (thread.followed)
               _SettingsRow(
                 icon: Icons.notifications_outlined,
-                title: 'Notifications',
+                title: L10n.of(context).ui_notifications_381d190f,
                 subtitle: _notificationLabel(
                   thread.member?.notificationLevel ?? 'inherit',
                 ),
@@ -1852,12 +1897,15 @@ final class _ThreadDetailsSheetState
                     ? Icons.unarchive_outlined
                     : Icons.archive_outlined,
                 title: thread.archived
-                    ? (isPost ? 'Reopen Post' : 'Unarchive Thread')
+                    ? (isPost
+                        ? L10n.of(context).ui_reopen_post_bbc3bea2
+                        : L10n.of(context).ui_unarchive_thread_03dc2e50)
                     : isPost && canManage
-                        ? 'Close Post'
-                        : 'Archive Thread',
+                        ? L10n.of(context).ui_close_post_976debdb
+                        : L10n.of(context).ui_archive_thread_2c39724f,
                 subtitle: thread.locked && thread.archived
-                    ? 'Only a moderator can reopen this locked thread'
+                    ? L10n.of(context)
+                        .ui_only_a_moderator_can_reopen_this_locked_threa_9d8814d8
                     : null,
                 onTap: _busy || (thread.archived && !canReopen)
                     ? null
@@ -1878,10 +1926,14 @@ final class _ThreadDetailsSheetState
                 icon: thread.locked
                     ? Icons.lock_open_outlined
                     : Icons.lock_outline_rounded,
-                title: thread.locked ? 'Unlock' : 'Lock',
+                title: thread.locked
+                    ? L10n.of(context).ui_unlock_9c799975
+                    : L10n.of(context).ui_lock_71b42d62,
                 subtitle: thread.locked
-                    ? 'Allow members to send after reopening'
-                    : 'Only moderators can send or reopen',
+                    ? L10n.of(context)
+                        .ui_allow_members_to_send_after_reopening_3e1052a9
+                    : L10n.of(context)
+                        .ui_only_moderators_can_send_or_reopen_799bf41d,
                 onTap: _busy
                     ? null
                     : () => _run(
@@ -1899,10 +1951,14 @@ final class _ThreadDetailsSheetState
                 icon: thread.pinned
                     ? Icons.push_pin_rounded
                     : Icons.push_pin_outlined,
-                title: thread.pinned ? 'Unpin Post' : 'Pin Post',
+                title: thread.pinned
+                    ? L10n.of(context).ui_unpin_post_c181bc75
+                    : L10n.of(context).ui_pin_post_89204e56,
                 subtitle: thread.archived
-                    ? 'Reopen the post before pinning it'
-                    : 'Only one post can be pinned in this forum',
+                    ? L10n.of(context)
+                        .ui_reopen_the_post_before_pinning_it_50e13048
+                    : L10n.of(context)
+                        .ui_only_one_post_can_be_pinned_in_this_forum_a7b74c08,
                 onTap: _busy || thread.archived
                     ? null
                     : () => _run(
@@ -1926,7 +1982,8 @@ final class _ThreadDetailsSheetState
                               'invitable': value,
                             }),
                         authorized: () => _canEdit),
-                title: Text('Allow members to invite'),
+                title:
+                    Text(L10n.of(context).ui_allow_members_to_invite_850ce963),
               ),
             if (showEncryption)
               _SettingsRow(
@@ -1936,12 +1993,14 @@ final class _ThreadDetailsSheetState
                 iconColor: thread.encryptionMode == 'e2ee'
                     ? context.kaede.mint
                     : context.kaede.muted,
-                title: 'End-to-end encryption',
+                title: L10n.of(context).ui_end_to_end_encryption_21f71771,
                 subtitle: thread.encryptionMode == 'e2ee'
                     ? thread.encryptionState == 'active'
-                        ? 'Active · verify the safety number'
-                        : 'Paused until keys are activated'
-                    : 'Off · permanent once enabled',
+                        ? L10n.of(context)
+                            .ui_active_verify_the_safety_number_4ec52ac7
+                        : L10n.of(context)
+                            .ui_paused_until_keys_are_activated_68f95d70
+                    : L10n.of(context).ui_off_permanent_once_enabled_9ad29d71,
                 onTap: _busy
                     ? null
                     : () => _showE2eeRoomSettings(
@@ -1955,8 +2014,11 @@ final class _ThreadDetailsSheetState
               _SettingsRow(
                 icon: Icons.delete_outline_rounded,
                 iconColor: context.kaede.danger,
-                title: isPost ? 'Delete Post' : 'Delete Thread',
-                subtitle: 'Permanently delete all messages',
+                title: isPost
+                    ? L10n.of(context).ui_delete_post_67a10810
+                    : L10n.of(context).ui_delete_thread_76378fea,
+                subtitle: L10n.of(context)
+                    .ui_permanently_delete_all_messages_f3028cc2,
                 onTap: _busy ? null : _delete,
               ),
             if (_error case final error?) ...[
@@ -2092,7 +2154,7 @@ final class _ThreadMembersSheetState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Thread members',
+            Text(L10n.of(context).ui_thread_members_b6d96a16,
                 style: Theme.of(context).textTheme.headlineSmall),
             if (canInvite) ...[
               SizedBox(height: 14),
@@ -2102,15 +2164,16 @@ final class _ThreadMembersSheetState
                     child: TextField(
                       controller: _invite,
                       decoration: InputDecoration(
-                        labelText: 'Add member',
-                        hintText: '@friend@example.net',
+                        labelText: L10n.of(context).ui_add_member_fa100f0e,
+                        hintText:
+                            L10n.of(context).ui_friend_example_net_40f1e54c,
                       ),
                       onSubmitted: (_) => _add(),
                     ),
                   ),
                   SizedBox(width: 8),
                   IconButton.filled(
-                    tooltip: 'Add member',
+                    tooltip: L10n.of(context).ui_add_member_fa100f0e,
                     onPressed: _busy ? null : _add,
                     icon: Icon(Icons.person_add_alt_1_rounded),
                   ),
@@ -2126,7 +2189,9 @@ final class _ThreadMembersSheetState
               child: members == null
                   ? Center(child: CircularProgressIndicator())
                   : members.isEmpty
-                      ? Center(child: Text('No joined members.'))
+                      ? Center(
+                          child: Text(
+                              L10n.of(context).ui_no_joined_members_35b9cdae))
                       : ListView.builder(
                           itemCount: members.length,
                           itemBuilder: (context, index) {
@@ -2147,7 +2212,8 @@ final class _ThreadMembersSheetState
                               trailing: canRemove &&
                                       member.userRef != state.user?.ref
                                   ? IconButton(
-                                      tooltip: 'Remove member',
+                                      tooltip: L10n.of(context)
+                                          .ui_remove_member_89834045,
                                       onPressed:
                                           _busy ? null : () => _remove(member),
                                       icon: Icon(Icons.person_remove_outlined),
@@ -2265,11 +2331,12 @@ final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
             : CustomEmojiImage(
                 ref: customRef,
                 label: _customEmoji == null
-                    ? 'Custom emoji'
-                    : ':${_customEmoji!.name}:',
+                    ? L10n.of(context).ui_custom_emoji_317ed9c4
+                    : L10n.of(context)
+                        .ui_value0_2397634a((_customEmoji!.name).toString()),
                 size: 18,
               ),
-        label: Text('React to Post'),
+        label: Text(L10n.of(context).ui_react_to_post_339537a9),
       ),
     );
   }
@@ -2360,7 +2427,9 @@ final class _ChannelDetailsSheetState
         !canManageChannelSettings(currentGuild, current, state.user?.ref) ||
         (parentChanged && !parentAllowed)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Channel permissions changed. Try again.')),
+        SnackBar(
+            content: Text(L10n.of(context)
+                .ui_channel_permissions_changed_try_again_dfa2520f)),
       );
       return;
     }
@@ -2376,7 +2445,7 @@ final class _ChannelDetailsSheetState
       await controller.refreshNavigation();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Channel saved')),
+          SnackBar(content: Text(L10n.of(context).ui_channel_saved_abc0dbb7)),
         );
       }
     } on Object catch (error) {
@@ -2384,7 +2453,7 @@ final class _ChannelDetailsSheetState
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not save the channel',
+            summary: L10n.of(context).ui_could_not_save_the_channel_03e95f40,
           )),
         ));
       }
@@ -2450,15 +2519,17 @@ final class _ChannelDetailsSheetState
             if (supportsPinnedMessages(channel))
               _SettingsRow(
                 icon: Icons.push_pin_outlined,
-                title: 'Pins',
-                subtitle: 'Messages saved in this channel',
+                title: L10n.of(context).ui_pins_73b7ddc5,
+                subtitle:
+                    L10n.of(context).ui_messages_saved_in_this_channel_92ad60e8,
                 onTap: widget.onPins,
               ),
             if (canManage)
               _SettingsRow(
                 icon: Icons.edit_outlined,
-                title: 'Edit channel',
-                subtitle: 'Name, category, topic and slow mode',
+                title: L10n.of(context).ui_edit_channel_dfb3900a,
+                subtitle: L10n.of(context)
+                    .ui_name_category_topic_and_slow_mode_906bd7bc,
                 onTap: _busy ? null : _edit,
               ),
             if (showEncryption)
@@ -2469,12 +2540,14 @@ final class _ChannelDetailsSheetState
                 iconColor: channel.encryptionMode == 'e2ee'
                     ? context.kaede.mint
                     : context.kaede.muted,
-                title: 'End-to-end encryption',
+                title: L10n.of(context).ui_end_to_end_encryption_21f71771,
                 subtitle: channel.encryptionMode == 'e2ee'
                     ? channel.encryptionState == 'active'
-                        ? 'Active · verify the safety number'
-                        : 'Paused until a member rotates the keys'
-                    : 'Off · permanent once enabled',
+                        ? L10n.of(context)
+                            .ui_active_verify_the_safety_number_4ec52ac7
+                        : L10n.of(context)
+                            .ui_paused_until_a_member_rotates_the_keys_47fd4b5f
+                    : L10n.of(context).ui_off_permanent_once_enabled_9ad29d71,
                 onTap: _busy
                     ? null
                     : () {
@@ -2489,14 +2562,16 @@ final class _ChannelDetailsSheetState
               ),
             if (!canManage && !showEncryption)
               Text(
-                'You do not have permission to change this channel.',
+                L10n.of(context)
+                    .ui_you_do_not_have_permission_to_change_this_cha_8a12d339,
                 style: TextStyle(color: context.kaede.muted, fontSize: 13),
               ),
             if (guild != null && canManage)
               _SettingsRow(
                 icon: Icons.tune_rounded,
-                title: 'Guild settings',
-                subtitle: 'Roles, members and every channel',
+                title: L10n.of(context).ui_guild_settings_33e2baed,
+                subtitle: L10n.of(context)
+                    .ui_roles_members_and_every_channel_d86dbc40,
                 onTap: _busy
                     ? null
                     : () {
@@ -2511,23 +2586,23 @@ final class _ChannelDetailsSheetState
             if (state.developerMode) ...[
               _SettingsRow(
                 icon: Icons.badge_outlined,
-                title: 'Copy channel ID',
+                title: L10n.of(context).ui_copy_channel_id_8e258228,
                 subtitle: channel.ref.wire,
                 onTap: () => copyDeveloperId(
                   context,
                   value: channel.ref.wire,
-                  label: 'Channel',
+                  label: L10n.of(context).ui_channel_655d8a44,
                 ),
               ),
               if (widget.guild case final guild?)
                 _SettingsRow(
                   icon: Icons.badge_outlined,
-                  title: 'Copy server ID',
+                  title: L10n.of(context).ui_copy_server_id_d51c0888,
                   subtitle: guild.ref.wire,
                   onTap: () => copyDeveloperId(
                     context,
                     value: guild.ref.wire,
-                    label: 'Server',
+                    label: L10n.of(context).ui_server_6d7302f2,
                   ),
                 ),
             ],
@@ -2580,14 +2655,15 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Conversation settings',
+              L10n.of(context).ui_conversation_settings_7d66c7d7,
               style: Theme.of(context).textTheme.headlineSmall,
             ),
             SizedBox(height: 16),
             _SettingsRow(
               icon: Icons.push_pin_outlined,
-              title: 'Pins',
-              subtitle: 'Messages saved in this conversation',
+              title: L10n.of(context).ui_pins_73b7ddc5,
+              subtitle: L10n.of(context)
+                  .ui_messages_saved_in_this_conversation_b345454a,
               onTap: onPins,
             ),
             if (recipient != null)
@@ -2611,12 +2687,13 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
                 iconColor: current.encryptionMode == 'e2ee'
                     ? context.kaede.mint
                     : context.kaede.muted,
-                title: 'End-to-end encryption',
+                title: L10n.of(context).ui_end_to_end_encryption_21f71771,
                 subtitle: current.encryptionMode == 'e2ee'
                     ? current.encryptionState == 'active'
-                        ? 'Active · verify the safety number'
-                        : 'Paused until keys rotate'
-                    : 'Off · permanent once enabled',
+                        ? L10n.of(context)
+                            .ui_active_verify_the_safety_number_4ec52ac7
+                        : L10n.of(context).ui_paused_until_keys_rotate_a126d4c8
+                    : L10n.of(context).ui_off_permanent_once_enabled_9ad29d71,
                 onTap: () => _showE2eeRoomSettings(
                   context,
                   ref,
@@ -2627,8 +2704,9 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
             if (current.encryptionMode == 'e2ee')
               _SettingsRow(
                 icon: Icons.apps_outlined,
-                title: 'Apps in this conversation',
-                subtitle: 'Review consent, devices, and history access',
+                title: L10n.of(context).ui_apps_in_this_conversation_9f084fd7,
+                subtitle: L10n.of(context)
+                    .ui_review_consent_devices_and_history_access_4c180a43,
                 onTap: () => _showDmBotE2eeParticipation(context, ref, current),
               ),
           ],
@@ -2791,7 +2869,8 @@ final class _PinnedMessagesSheetState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not load pinned messages',
+              summary:
+                  L10n.of(context).ui_could_not_load_pinned_messages_a7b04fe7,
             ));
       }
     } finally {
@@ -2814,16 +2893,17 @@ final class _PinnedMessagesSheetState
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Remove this pin?'),
-        content: Text('The message will remain in the conversation.'),
+        title: Text(L10n.of(context).ui_remove_this_pin_09a4d331),
+        content: Text(L10n.of(context)
+            .ui_the_message_will_remain_in_the_conversation_59e103da),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: Text('Remove pin'),
+            child: Text(L10n.of(context).ui_remove_pin_49a985ee),
           ),
         ],
       ),
@@ -2849,7 +2929,8 @@ final class _PinnedMessagesSheetState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not unpin that message',
+              summary:
+                  L10n.of(context).ui_could_not_unpin_that_message_6b3dae65,
             ));
       }
     } finally {
@@ -2889,7 +2970,7 @@ final class _PinnedMessagesSheetState
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'Pinned messages',
+                      L10n.of(context).ui_pinned_messages_c56c8a9d,
                       style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.w800,
@@ -2897,7 +2978,7 @@ final class _PinnedMessagesSheetState
                     ),
                   ),
                   IconButton(
-                    tooltip: 'Close',
+                    tooltip: L10n.of(context).ui_close_cd86acc3,
                     onPressed: () => Navigator.pop(context),
                     icon: Icon(Icons.close_rounded),
                   ),
@@ -2912,7 +2993,9 @@ final class _PinnedMessagesSheetState
                   child: Row(
                     children: [
                       Expanded(child: Text(error)),
-                      TextButton(onPressed: _load, child: Text('Retry')),
+                      TextButton(
+                          onPressed: _load,
+                          child: Text(L10n.of(context).ui_retry_8036af59)),
                     ],
                   ),
                 ),
@@ -2923,7 +3006,8 @@ final class _PinnedMessagesSheetState
                       child: Padding(
                         padding: EdgeInsets.all(28),
                         child: Text(
-                          'Message history is unavailable in this channel.',
+                          L10n.of(context)
+                              .ui_message_history_is_unavailable_in_this_channe_088d854e,
                           textAlign: TextAlign.center,
                           style: TextStyle(color: context.kaede.muted),
                         ),
@@ -2936,7 +3020,8 @@ final class _PinnedMessagesSheetState
                               child: Padding(
                                 padding: EdgeInsets.all(28),
                                 child: Text(
-                                  'Pinned messages are unavailable right now.',
+                                  L10n.of(context)
+                                      .ui_pinned_messages_are_unavailable_right_now_f7c1934b,
                                   textAlign: TextAlign.center,
                                   style: TextStyle(color: context.kaede.muted),
                                 ),
@@ -2985,7 +3070,8 @@ final class _PinnedMessagesSheetState
                                         ),
                                         trailing: canManage
                                             ? IconButton(
-                                                tooltip: 'Unpin message',
+                                                tooltip: L10n.of(context)
+                                                    .ui_unpin_message_122b93fa,
                                                 onPressed: _unpinning
                                                         .contains(message.ref)
                                                     ? null
@@ -3028,12 +3114,13 @@ final class _EmptyPinnedMessages extends StatelessWidget {
                   size: 38, color: context.kaede.muted),
               SizedBox(height: 12),
               Text(
-                'No pinned messages yet.',
+                L10n.of(context).ui_no_pinned_messages_yet_e7f59500,
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
               SizedBox(height: 5),
               Text(
-                'Pinned messages stay easy to find here.',
+                L10n.of(context)
+                    .ui_pinned_messages_stay_easy_to_find_here_714814f4,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: context.kaede.muted),
               ),
@@ -3054,7 +3141,7 @@ final class _DmCallRoom extends ConsumerWidget {
         appBar: AppBar(
           title: Text(channel.name ??
               (channel.recipients.isEmpty
-                  ? 'Conversation call'
+                  ? L10n.of(context).ui_conversation_call_74d80636
                   : channel.recipients.first.name)),
           actions: [
             Padding(
@@ -3080,7 +3167,7 @@ final class _DmCallRoom extends ConsumerWidget {
                     }
                   }
                 },
-                label: Text('End call'),
+                label: Text(L10n.of(context).ui_end_call_25446c02),
               ),
             ),
           ],
@@ -3168,13 +3255,14 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Group settings',
+                L10n.of(context).ui_group_settings_f4ca53a9,
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
               SizedBox(height: 4),
               Text(
-                '${channel.recipients.length + 1} members · anyone can add a '
-                'friend',
+                L10n.of(context)
+                    .ui_value0_members_anyone_can_add_a_friend_6278ff7a(
+                        (channel.recipients.length + 1).toString()),
                 style: TextStyle(
                   color: context.kaede.muted,
                   fontSize: 12.5,
@@ -3183,15 +3271,16 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
               SizedBox(height: 20),
               _SettingsRow(
                 icon: Icons.push_pin_outlined,
-                title: 'Pins',
-                subtitle: 'Messages saved in this conversation',
+                title: L10n.of(context).ui_pins_73b7ddc5,
+                subtitle: L10n.of(context)
+                    .ui_messages_saved_in_this_conversation_b345454a,
                 onTap: widget.onPins,
               ),
               TextField(
                 controller: _name,
                 maxLength: 100,
                 decoration: InputDecoration(
-                  labelText: 'Group name',
+                  labelText: L10n.of(context).ui_group_name_1f8de81f,
                   counterText: '',
                 ),
               ),
@@ -3212,7 +3301,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                       : _name.text.trim(),
                                 );
                           }),
-                  child: Text('Save name'),
+                  child: Text(L10n.of(context).ui_save_name_7692acbb),
                 ),
               ),
               SizedBox(height: 18),
@@ -3220,8 +3309,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                 controller: _invite,
                 onChanged: (_) => setState(() {}),
                 decoration: InputDecoration(
-                  labelText: 'Add a friend',
-                  hintText: '@friend@example.net',
+                  labelText: L10n.of(context).ui_add_a_friend_829f4dad,
+                  hintText: L10n.of(context).ui_friend_example_net_40f1e54c,
                 ),
               ),
               SizedBox(height: 8),
@@ -3239,7 +3328,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                             _invite.clear();
                           }),
                   icon: Icon(Icons.person_add_alt_1_rounded, size: 18),
-                  label: Text('Add member'),
+                  label: Text(L10n.of(context).ui_add_member_fa100f0e),
                 ),
               ),
               if (channel.encryptionMode == 'e2ee' ||
@@ -3281,7 +3370,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'End-to-end encryption',
+                                  L10n.of(context)
+                                      .ui_end_to_end_encryption_21f71771,
                                   style: TextStyle(
                                     fontWeight: FontWeight.w600,
                                     fontSize: 14.5,
@@ -3290,10 +3380,11 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                 Text(
                                   channel.encryptionMode == 'e2ee'
                                       ? channel.encryptionState == 'active'
-                                          ? 'Active'
-                                          : 'Paused until keys rotate'
-                                      : 'Optional · review the tradeoffs '
-                                          'before enabling',
+                                          ? L10n.of(context).ui_active_1f89134f
+                                          : L10n.of(context)
+                                              .ui_paused_until_keys_rotate_a126d4c8
+                                      : L10n.of(context)
+                                          .ui_optional_review_the_tradeoffs_before_enabling_d453c0a6,
                                   style: TextStyle(
                                     color: context.kaede.muted,
                                     fontSize: 12,
@@ -3312,8 +3403,10 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                 if (channel.encryptionMode == 'e2ee')
                   _SettingsRow(
                     icon: Icons.apps_outlined,
-                    title: 'Apps in this conversation',
-                    subtitle: 'Review each member’s consent and app devices',
+                    title:
+                        L10n.of(context).ui_apps_in_this_conversation_9f084fd7,
+                    subtitle: L10n.of(context)
+                        .ui_review_each_member_s_consent_and_app_devices_db108ab1,
                     onTap: _busy
                         ? null
                         : () => _showDmBotE2eeParticipation(
@@ -3325,7 +3418,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
               ],
               SizedBox(height: 20),
               Text(
-                'MEMBERS',
+                L10n.of(context).ui_members_4ffd31b0,
                 style: TextStyle(
                   color: context.kaede.muted,
                   fontSize: 11,
@@ -3343,9 +3436,9 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                     ringColor: context.kaede.panel,
                   ),
                   title: Text(current.name),
-                  subtitle: Text('You'),
+                  subtitle: Text(L10n.of(context).ui_you_b5bdd13c),
                   trailing: current.ref == channel.ownerRef
-                      ? Chip(label: Text('Owner'))
+                      ? Chip(label: Text(L10n.of(context).ui_owner_9b22be74))
                       : null,
                 ),
               for (final member in channel.recipients)
@@ -3366,10 +3459,11 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                     mobile.presenceByUser[member.ref] ?? member.presence,
                   ),
                   trailing: member.ref == channel.ownerRef
-                      ? Chip(label: Text('Owner'))
+                      ? Chip(label: Text(L10n.of(context).ui_owner_9b22be74))
                       : isOwner
                           ? IconButton(
-                              tooltip: 'Remove member',
+                              tooltip:
+                                  L10n.of(context).ui_remove_member_89834045,
                               onPressed: _busy
                                   ? null
                                   : () => _run(() => ref
@@ -3419,7 +3513,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                           }
                         }),
                 icon: Icon(Icons.logout_rounded),
-                label: Text('Leave group'),
+                label: Text(L10n.of(context).ui_leave_group_f299bc23),
               ),
             ],
           ),
@@ -3445,9 +3539,10 @@ final class _GuildMemberRoute extends ConsumerWidget {
     final live = liveGuildByRef(state, guild.ref);
     if (live == null || !canViewGuildMemberRoster(live, state.user?.ref)) {
       return Scaffold(
-        appBar: AppBar(title: Text('Members')),
+        appBar: AppBar(title: Text(L10n.of(context).ui_members_ed3c96b0)),
         body: Center(
-          child: Text('The member list is no longer available.'),
+          child: Text(L10n.of(context)
+              .ui_the_member_list_is_no_longer_available_5902875d),
         ),
       );
     }
@@ -3538,7 +3633,8 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
           _error = _members!.isEmpty
               ? userFacingError(
                   error,
-                  summary: 'Could not load the member list',
+                  summary: L10n.of(context)
+                      .ui_could_not_load_the_member_list_a01b2ed4,
                 )
               : null;
           _partial = _members!.isNotEmpty;
@@ -3604,10 +3700,11 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
               onPressed: widget.onBack,
               icon: Icon(Icons.arrow_back_rounded),
             ),
-            title: 'Members',
+            title: L10n.of(context).ui_members_ed3c96b0,
             subtitle: members == null
                 ? widget.guild.name
-                : '$total in ${widget.guild.name}',
+                : L10n.of(context).ui_value0_in_value1_f7d9cad5(
+                    (total).toString(), (widget.guild.name).toString()),
           ),
           Expanded(
             child: SafeArea(
@@ -3626,17 +3723,20 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                     icon: Icons.info_outline_rounded,
                                     background: context.kaede.warningSoft,
                                     foreground: context.kaede.warning,
-                                    title: 'Partial member list',
-                                    subtitle:
-                                        'Only members seen in cached messages '
-                                        'are shown. Pull down to retry.',
+                                    title: L10n.of(context)
+                                        .ui_partial_member_list_bc6e6a10,
+                                    subtitle: L10n.of(context)
+                                        .ui_only_members_seen_in_cached_messages_are_show_cce21c8d,
                                   ),
                                 ),
                               for (final section in groups) ...[
                                 SliverToBoxAdapter(
                                   child: _SidebarSectionHeader(
-                                    title: '${section.title} — '
-                                        '${section.members.length}',
+                                    title: L10n.of(context)
+                                        .ui_value0_value1_c34e3562(
+                                            (section.title).toString(),
+                                            (section.members.length)
+                                                .toString()),
                                   ),
                                 ),
                                 SliverList.builder(
@@ -3673,7 +3773,8 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                               },
                                               icon: Icon(Icons
                                                   .chat_bubble_outline_rounded),
-                                              label: Text('Message'),
+                                              label: Text(L10n.of(context)
+                                                  .ui_message_ae0ed984),
                                             ),
                                         ],
                                       ),
@@ -3771,14 +3872,14 @@ List<MemberListSection> groupGuildMembers({
       around.where((member) => !claimed.contains(member.user.ref)).toList();
   if (remaining.isNotEmpty) {
     sections.add(MemberListSection(
-      title: 'Online',
+      title: L10n.current.ui_online_bc3b88aa,
       members: remaining,
       offline: false,
     ));
   }
   if (offline.isNotEmpty) {
     sections.add(MemberListSection(
-      title: 'Offline',
+      title: L10n.current.ui_offline_c47c37c8,
       members: offline,
       offline: true,
     ));
@@ -3891,7 +3992,7 @@ final class _MemberListError extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: onRetry,
                 icon: Icon(Icons.refresh_rounded),
-                label: Text('Try again'),
+                label: Text(L10n.of(context).ui_try_again_213e90fa),
               ),
             ],
           ),
@@ -3994,7 +4095,7 @@ final class _ServerRail extends ConsumerWidget {
             children: [
               SizedBox(height: 8),
               _RailButton(
-                label: 'Direct messages',
+                label: L10n.of(context).ui_direct_messages_0db1f240,
                 active: state.selectedGuild == null,
                 onTap: onOpenHome,
                 badge: state.dms.fold(
@@ -4092,7 +4193,7 @@ final class _ServerRail extends ConsumerWidget {
                 ),
               ),
               _RailButton(
-                label: 'Add a guild',
+                label: L10n.of(context).ui_add_a_guild_d81da1e0,
                 active: false,
                 onTap: onAddGuild,
                 idleColor: context.kaede.rail,
@@ -4101,7 +4202,7 @@ final class _ServerRail extends ConsumerWidget {
                     color: context.kaede.mint, size: 26),
               ),
               _RailButton(
-                label: 'Organize guilds',
+                label: L10n.of(context).ui_organize_guilds_ce4e5c64,
                 active: false,
                 onTap: () => showModalBottomSheet<void>(
                   context: context,
@@ -4238,8 +4339,9 @@ final class _GuildOrganizerSheetState
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text(
-              existing == null ? 'Create guild group' : 'Edit guild group'),
+          title: Text(existing == null
+              ? L10n.of(context).ui_create_guild_group_04069761
+              : L10n.of(context).ui_edit_guild_group_7f3f192d),
           content: SizedBox(
             width: 420,
             child: Column(
@@ -4249,7 +4351,8 @@ final class _GuildOrganizerSheetState
                   controller: name,
                   autofocus: true,
                   maxLength: 32,
-                  decoration: InputDecoration(labelText: 'Group name'),
+                  decoration: InputDecoration(
+                      labelText: L10n.of(context).ui_group_name_1f8de81f),
                 ),
                 SizedBox(height: 8),
                 Flexible(
@@ -4279,7 +4382,7 @@ final class _GuildOrganizerSheetState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               onPressed: name.text.trim().isEmpty || selected.isEmpty
@@ -4288,7 +4391,7 @@ final class _GuildOrganizerSheetState
                         context,
                         _GuildGroupDraft(name.text.trim(), selected.toList()),
                       ),
-              child: Text('Save group'),
+              child: Text(L10n.of(context).ui_save_group_71c0db3b),
             ),
           ],
         ),
@@ -4325,12 +4428,13 @@ final class _GuildOrganizerSheetState
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Organize guilds',
+                L10n.of(context).ui_organize_guilds_ce4e5c64,
                 style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
               ),
               SizedBox(height: 4),
               Text(
-                'Press and hold a row, then drag it. Groups and ordering sync to web and desktop.',
+                L10n.of(context)
+                    .ui_press_and_hold_a_row_then_drag_it_groups_and__6148d229,
                 style: TextStyle(color: context.kaede.muted),
               ),
               SizedBox(height: 12),
@@ -4383,11 +4487,15 @@ final class _GuildOrganizerSheetState
                             });
                           }
                         },
-                        itemBuilder: (context) => const [
+                        itemBuilder: (context) => [
                           PopupMenuItem(
-                              value: 'edit', child: Text('Edit group')),
+                              value: 'edit',
+                              child: Text(
+                                  L10n.of(context).ui_edit_group_42453e5a)),
                           PopupMenuItem(
-                              value: 'ungroup', child: Text('Ungroup guilds')),
+                              value: 'ungroup',
+                              child: Text(
+                                  L10n.of(context).ui_ungroup_guilds_499385bb)),
                         ],
                       ),
                     );
@@ -4400,7 +4508,7 @@ final class _GuildOrganizerSheetState
                   OutlinedButton.icon(
                     onPressed: _editGroup,
                     icon: Icon(Icons.create_new_folder_outlined),
-                    label: Text('Create group'),
+                    label: Text(L10n.of(context).ui_create_group_12e0eaee),
                   ),
                   Spacer(),
                   FilledButton.icon(
@@ -4411,7 +4519,7 @@ final class _GuildOrganizerSheetState
                       if (context.mounted) Navigator.pop(context);
                     },
                     icon: Icon(Icons.sync_rounded),
-                    label: Text('Save'),
+                    label: Text(L10n.of(context).ui_save_4d2d5d68),
                   ),
                 ],
               ),
@@ -4486,12 +4594,12 @@ final class _DirectMessageBrowser extends ConsumerWidget {
               children: [
                 Expanded(
                   child: Text(
-                    'Messages',
+                    L10n.of(context).ui_messages_f8611fd5,
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
                 ),
                 _SquareAction(
-                  tooltip: 'New conversation',
+                  tooltip: L10n.of(context).ui_new_conversation_90d5317c,
                   icon: Icons.edit_square,
                   filled: true,
                   onTap: () => _newConversationAction(
@@ -4515,18 +4623,19 @@ final class _DirectMessageBrowser extends ConsumerWidget {
             padding: EdgeInsets.fromLTRB(12, 4, 12, 2),
             child: _NavRow(
               icon: Icons.people_alt_rounded,
-              title: 'Friends',
+              title: L10n.of(context).ui_friends_63cc7b7a,
               subtitle: pendingRequests > 0
-                  ? '$pendingRequests waiting on you'
+                  ? L10n.of(context).ui_value0_waiting_on_you_b2263797(
+                      (pendingRequests).toString())
                   : null,
               badge: pendingRequests,
               onTap: onOpenFriends,
             ),
           ),
           _SidebarSectionHeader(
-            title: 'Direct messages',
+            title: L10n.of(context).ui_direct_messages_0db1f240,
             trailing: IconButton(
-              tooltip: 'New conversation',
+              tooltip: L10n.of(context).ui_new_conversation_90d5317c,
               visualDensity: VisualDensity.compact,
               onPressed: () => _newConversationAction(
                 context,
@@ -4539,9 +4648,9 @@ final class _DirectMessageBrowser extends ConsumerWidget {
           ),
           Expanded(
             child: state.dms.isEmpty
-                ? const _EmptyNavigation(
+                ? _EmptyNavigation(
                     icon: Icons.chat_bubble_outline_rounded,
-                    title: 'No conversations yet',
+                    title: L10n.of(context).ui_no_conversations_yet_fc94ca24,
                     body: 'Start a message with a friend to see it here.',
                   )
                 : ListView.builder(
@@ -4575,11 +4684,13 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                         ),
                         title: title,
                         subtitle: group
-                            ? '${dm.recipients.length + 1} members'
+                            ? L10n.of(context).ui_value0_members_174769cf(
+                                (dm.recipients.length + 1).toString())
                             : person?.customStatus?.trim().isNotEmpty == true
                                 ? person!.customStatus!.trim()
                                 : presence == null
-                                    ? 'Direct message'
+                                    ? L10n.of(context)
+                                        .ui_direct_message_6e16acb3
                                     : presenceLabel(presence),
                         active: dm.ref == state.selectedChannel,
                         unread: state.unreadCounts[dm.ref] ?? 0,
@@ -4742,7 +4853,9 @@ final class _GuildBrowser extends ConsumerWidget {
       Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => Scaffold(
-            appBar: AppBar(title: Text('${guild.name} Events')),
+            appBar: AppBar(
+                title: Text(L10n.of(context)
+                    .ui_value0_events_617caa6d((guild.name).toString()))),
             body: GuildScheduledEventsTab(
               guild: guild,
               repository: controller.repository,
@@ -4876,7 +4989,7 @@ final class _GuildBrowser extends ConsumerWidget {
                 if (canCreateInvite) ...[
                   SizedBox(width: 8),
                   _SquareAction(
-                    tooltip: 'Invite people',
+                    tooltip: L10n.of(context).ui_invite_people_a3ce4cb3,
                     icon: Icons.person_add_alt_1_rounded,
                     size: 38,
                     onTap: () async {
@@ -4885,8 +4998,8 @@ final class _GuildBrowser extends ConsumerWidget {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                             content: Text(
-                              'You do not have permission to create an invite '
-                              'in any channel.',
+                              L10n.of(context)
+                                  .ui_you_do_not_have_permission_to_create_an_invit_4d051f96,
                             ),
                           ),
                         );
@@ -4895,7 +5008,7 @@ final class _GuildBrowser extends ConsumerWidget {
                       final channel = await showGuildChannelPicker(
                         context,
                         channels: targets,
-                        title: 'Invite people to…',
+                        title: L10n.of(context).ui_invite_people_to_ad3fae84,
                       );
                       if (channel == null || !context.mounted) return;
                       _createAndShowInvite(context, controller, guild, channel);
@@ -4916,7 +5029,7 @@ final class _GuildBrowser extends ConsumerWidget {
                 ),
                 leading: Icon(Icons.event_available_outlined, size: 21),
                 title: Text(
-                  'Events',
+                  L10n.of(context).ui_events_003420a4,
                   style: TextStyle(fontWeight: FontWeight.w700),
                 ),
                 trailing: Icon(Icons.chevron_right_rounded, size: 20),
@@ -5055,7 +5168,7 @@ final class _GuildHeader extends StatelessWidget {
                   ),
                   if (onSettings != null || onCreateEvent != null)
                     PopupMenuButton<String>(
-                      tooltip: 'Server menu',
+                      tooltip: L10n.of(context).ui_server_menu_7435ca49,
                       onSelected: (value) {
                         if (value == 'create-event') onCreateEvent?.call();
                         if (value == 'settings') onSettings?.call();
@@ -5067,7 +5180,8 @@ final class _GuildHeader extends StatelessWidget {
                             child: ListTile(
                               contentPadding: EdgeInsets.zero,
                               leading: Icon(Icons.event_available_outlined),
-                              title: Text('Create Event'),
+                              title: Text(
+                                  L10n.of(context).ui_create_event_2890a125),
                             ),
                           ),
                         if (onSettings != null)
@@ -5076,7 +5190,8 @@ final class _GuildHeader extends StatelessWidget {
                             child: ListTile(
                               contentPadding: EdgeInsets.zero,
                               leading: Icon(Icons.settings_outlined),
-                              title: Text('Server Settings'),
+                              title: Text(
+                                  L10n.of(context).ui_server_settings_29034fa3),
                             ),
                           ),
                       ],
@@ -5117,7 +5232,7 @@ final class GuildChannelsHeader extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                'Channels',
+                L10n.of(context).ui_channels_c9409495,
                 style: TextStyle(
                   color: context.kaede.muted,
                   fontSize: 11,
@@ -5141,7 +5256,7 @@ final class GuildChannelsHeader extends StatelessWidget {
                 ),
                 onPressed: onAddChannel,
                 icon: Icon(Icons.add_rounded, size: 16),
-                label: Text('Add channel'),
+                label: Text(L10n.of(context).ui_add_channel_786ad81f),
               ),
           ],
         ),
@@ -5166,7 +5281,9 @@ Future<void> _createGuildChannel(
     final created = await controller.createGuildChannel(guild.ref, draft.json);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('#${created.name ?? draft.name} created')),
+      SnackBar(
+          content: Text(L10n.of(context).ui_value0_created_fd624aa3(
+              (created.name ?? draft.name).toString()))),
     );
   } on Object catch (error) {
     if (context.mounted) {
@@ -5174,7 +5291,7 @@ Future<void> _createGuildChannel(
         SnackBar(
           content: Text(userFacingError(
             error,
-            summary: 'Could not create the channel',
+            summary: L10n.of(context).ui_could_not_create_the_channel_4ce6aac1,
           )),
           backgroundColor: context.kaede.danger,
         ),
@@ -5516,7 +5633,11 @@ final class _NavRow extends StatelessWidget {
                   ),
                 ),
                 if (badge > 0)
-                  Badge(label: Text(badge > 99 ? '99+' : '$badge')),
+                  Badge(
+                      label: Text(badge > 99
+                          ? '99+'
+                          : L10n.of(context)
+                              .ui_value0_26e9163c((badge).toString()))),
               ],
             ),
           ),
@@ -5643,7 +5764,9 @@ final class _AccountBar extends ConsumerWidget {
             ),
             if (voice.joined)
               IconButton(
-                tooltip: voice.muted ? 'Unmute' : 'Mute',
+                tooltip: voice.muted
+                    ? L10n.of(context).ui_unmute_bb6972bb
+                    : L10n.of(context).ui_mute_3f609f74,
                 visualDensity: VisualDensity.compact,
                 onPressed: voice.canSpeak
                     ? () => _runVisibleAction(
@@ -5663,7 +5786,7 @@ final class _AccountBar extends ConsumerWidget {
                 ),
               ),
             IconButton(
-              tooltip: 'Settings',
+              tooltip: L10n.of(context).ui_settings_4b058728,
               visualDensity: VisualDensity.compact,
               onPressed: onTap,
               icon: Icon(Icons.settings_rounded, size: 19),
@@ -5739,9 +5862,11 @@ final class _AccountBar extends ConsumerWidget {
                 ),
                 title: Text(presenceLabel(status)),
                 subtitle: status == PresenceStatus.dnd
-                    ? Text('Notifications stay silent')
+                    ? Text(
+                        L10n.of(context).ui_notifications_stay_silent_19e683d1)
                     : status == PresenceStatus.invisible
-                        ? Text('Appear offline to everyone')
+                        ? Text(L10n.of(context)
+                            .ui_appear_offline_to_everyone_68d50fb1)
                         : null,
                 trailing: status == presence ? Icon(Icons.check_rounded) : null,
                 onTap: () {
@@ -5754,7 +5879,7 @@ final class _AccountBar extends ConsumerWidget {
             Divider(),
             ListTile(
               leading: Icon(Icons.settings_outlined),
-              title: Text('Account settings'),
+              title: Text(L10n.of(context).ui_account_settings_358e8719),
               onTap: () {
                 Navigator.pop(sheetContext);
                 onTap();
@@ -5800,7 +5925,8 @@ final class _ShellBanners extends ConsumerWidget {
             icon: Icons.cloud_off_rounded,
             background: context.kaede.coralSoft,
             foreground: context.kaede.coralText,
-            title: 'Offline · showing saved conversations',
+            title: L10n.of(context)
+                .ui_offline_showing_saved_conversations_78e86edb,
             actionLabel: 'Retry',
             onAction: () =>
                 ref.read(mobileControllerProvider.notifier).refreshNavigation(),
@@ -5835,8 +5961,9 @@ final class _ShellBanners extends ConsumerWidget {
             foreground: context.kaede.warning,
             title: state.degradedWarnings.values.first,
             subtitle: state.degradedWarnings.length > 1
-                ? '${state.degradedWarnings.length} account areas need to '
-                    'resync.'
+                ? L10n.of(context)
+                    .ui_value0_account_areas_need_to_resync_297d62f4(
+                        (state.degradedWarnings.length).toString())
                 : null,
             actionLabel: 'Retry',
             onAction: () =>
@@ -6033,8 +6160,10 @@ final class _VoiceStatusBar extends StatelessWidget {
                       ),
                       Text(
                         voice.reconnecting
-                            ? 'Reconnecting · keeping your place'
-                            : '${voice.participants.length} connected',
+                            ? L10n.of(context)
+                                .ui_reconnecting_keeping_your_place_08ff5426
+                            : L10n.of(context).ui_value0_connected_ac41549b(
+                                (voice.participants.length).toString()),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -6046,7 +6175,9 @@ final class _VoiceStatusBar extends StatelessWidget {
                   ),
                 ),
                 IconButton(
-                  tooltip: voice.muted ? 'Unmute' : 'Mute',
+                  tooltip: voice.muted
+                      ? L10n.of(context).ui_unmute_bb6972bb
+                      : L10n.of(context).ui_mute_3f609f74,
                   onPressed: onToggleMute,
                   visualDensity: VisualDensity.compact,
                   style: IconButton.styleFrom(
@@ -6059,7 +6190,7 @@ final class _VoiceStatusBar extends StatelessWidget {
                   ),
                 ),
                 IconButton(
-                  tooltip: 'Leave voice',
+                  tooltip: L10n.of(context).ui_leave_voice_dc19c17a,
                   onPressed: onLeave,
                   visualDensity: VisualDensity.compact,
                   style: IconButton.styleFrom(
@@ -6087,12 +6218,13 @@ final class _NoConversationSelected extends StatelessWidget {
               Icon(Icons.forum_outlined, size: 38, color: context.kaede.muted),
               SizedBox(height: 14),
               Text(
-                'No conversation open',
+                L10n.of(context).ui_no_conversation_open_446fd523,
                 style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
               ),
               SizedBox(height: 4),
               Text(
-                'Pick a channel or direct message to start reading.',
+                L10n.of(context)
+                    .ui_pick_a_channel_or_direct_message_to_start_rea_68a66fec,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: context.kaede.muted),
               ),
@@ -6163,13 +6295,13 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Add a guild',
+              L10n.of(context).ui_add_a_guild_d81da1e0,
               style: Theme.of(context).textTheme.headlineSmall,
             ),
             SizedBox(height: 4),
             Text(
-              'Guilds are communities. Create your own or join one with an '
-              'invite from any Kaede server.',
+              L10n.of(context)
+                  .ui_guilds_are_communities_create_your_own_or_joi_3654bae9,
               style: TextStyle(color: context.kaede.muted, fontSize: 13),
             ),
             SizedBox(height: 18),
@@ -6188,7 +6320,7 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
                 });
               },
               icon: Icon(Icons.add_rounded),
-              label: Text('Create a guild'),
+              label: Text(L10n.of(context).ui_create_a_guild_cbd46599),
             ),
             SizedBox(height: 10),
             OutlinedButton.icon(
@@ -6209,7 +6341,7 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
                 });
               },
               icon: Icon(Icons.public_rounded),
-              label: Text('Join with an invite'),
+              label: Text(L10n.of(context).ui_join_with_an_invite_f089d967),
             ),
           ],
         ),
@@ -6236,7 +6368,8 @@ Future<void> _createAndShowInvite(BuildContext context,
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Invite permissions changed before the invite was created.',
+          L10n.of(context)
+              .ui_invite_permissions_changed_before_the_invite__47558fce,
         ),
       ),
     );
@@ -6257,13 +6390,14 @@ Future<void> _createAndShowInvite(BuildContext context,
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: Icon(Icons.person_add_alt_1_rounded),
-        title: Text('Invite people'),
+        title: Text(L10n.of(context).ui_invite_people_a3ce4cb3),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Anyone with this link can join '
-                '#${liveChannel.name ?? 'channel'}.'),
+            Text(L10n.of(context)
+                .ui_anyone_with_this_link_can_join_value0_2f28645d(
+                    (liveChannel.name ?? 'channel').toString())),
             SizedBox(height: 14),
             Container(
               width: double.infinity,
@@ -6274,7 +6408,10 @@ Future<void> _createAndShowInvite(BuildContext context,
                 border: Border.all(color: context.kaede.border),
               ),
               child: SelectableText(
-                link ?? (code.isEmpty ? 'Invite created.' : code),
+                link ??
+                    (code.isEmpty
+                        ? L10n.of(context).ui_invite_created_17733c5a
+                        : code),
                 style: TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 13,
@@ -6286,7 +6423,7 @@ Future<void> _createAndShowInvite(BuildContext context,
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: Text('Done'),
+            child: Text(L10n.of(context).ui_done_8dd31791),
           ),
           if (link != null || code.isNotEmpty)
             FilledButton.icon(
@@ -6295,12 +6432,14 @@ Future<void> _createAndShowInvite(BuildContext context,
                 if (dialogContext.mounted) Navigator.pop(dialogContext);
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Invite link copied.')),
+                    SnackBar(
+                        content: Text(
+                            L10n.of(context).ui_invite_link_copied_b511318e)),
                   );
                 }
               },
               icon: Icon(Icons.copy_rounded),
-              label: Text('Copy link'),
+              label: Text(L10n.of(context).ui_copy_link_23f990dc),
             ),
         ],
       ),
@@ -6310,7 +6449,7 @@ Future<void> _createAndShowInvite(BuildContext context,
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not create the invite',
+          summary: L10n.of(context).ui_could_not_create_the_invite_3b4edd17,
         )),
       ));
     }
@@ -6451,7 +6590,9 @@ final class _RailButton extends StatelessWidget {
               isLabelVisible: badge > 0,
               offset: Offset(-2, 2),
               alignment: Alignment.bottomRight,
-              label: Text(badge > 99 ? '99+' : '$badge'),
+              label: Text(badge > 99
+                  ? '99+'
+                  : L10n.of(context).ui_value0_26e9163c((badge).toString())),
               child: Material(
                 color: active
                     ? activeColor ?? context.kaede.selected
@@ -6499,7 +6640,9 @@ final class _ChannelUnread extends StatelessWidget {
       return Badge(
         backgroundColor: context.kaede.danger,
         textColor: Theme.of(context).colorScheme.onError,
-        label: Text(mentions > 99 ? '99+' : '$mentions'),
+        label: Text(mentions > 99
+            ? '99+'
+            : L10n.of(context).ui_value0_26e9163c((mentions).toString())),
       );
     }
     return SizedBox.shrink();
@@ -6519,7 +6662,9 @@ final class _DmUnread extends StatelessWidget {
     return Badge(
       backgroundColor: context.kaede.danger,
       textColor: Theme.of(context).colorScheme.onError,
-      label: Text(count > 99 ? '99+' : '$count'),
+      label: Text(count > 99
+          ? '99+'
+          : L10n.of(context).ui_value0_26e9163c((count).toString())),
     );
   }
 }
@@ -6592,14 +6737,14 @@ final class _FriendsPage extends ConsumerWidget {
                   .refreshNavigation();
             }),
             icon: Icon(Icons.person_add_alt_1_rounded),
-            label: Text('Add friend'),
+            label: Text(L10n.of(context).ui_add_friend_6a7bbb34),
           ),
           SizedBox(height: 6),
           Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),
             child: Text(
-              'Friends live on their own home server. Use their full address, '
-              'like @maple@kaede.chat.',
+              L10n.of(context)
+                  .ui_friends_live_on_their_own_home_server_use_the_ac7f516d,
               style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
             ),
           ),
@@ -6608,31 +6753,32 @@ final class _FriendsPage extends ConsumerWidget {
               padding: EdgeInsets.only(top: 40),
               child: _EmptyNavigation(
                 icon: Icons.people_outline_rounded,
-                title: 'No friends yet',
+                title: L10n.of(context).ui_no_friends_yet_07ad5fe9,
                 body: 'Send a request to start a conversation.',
               ),
             ),
           if (sections['pending_in']!.isNotEmpty)
             _RelationshipSection(
-              title: 'Incoming requests',
+              title: L10n.of(context).ui_incoming_requests_8955d605,
               relationships: sections['pending_in']!,
               onOpenChat: onOpenChat,
             ),
           if (sections['pending_out']!.isNotEmpty)
             _RelationshipSection(
-              title: 'Sent requests',
+              title: L10n.of(context).ui_sent_requests_cfdb71db,
               relationships: sections['pending_out']!,
               onOpenChat: onOpenChat,
             ),
           if (sections['friend']!.isNotEmpty)
             _RelationshipSection(
-              title: 'Friends — ${sections['friend']!.length}',
+              title: L10n.of(context).ui_friends_value0_af4de1cd(
+                  (sections['friend']!.length).toString()),
               relationships: sections['friend']!,
               onOpenChat: onOpenChat,
             ),
           if (sections['blocked']!.isNotEmpty)
             _RelationshipSection(
-              title: 'Blocked',
+              title: L10n.of(context).ui_blocked_e378ac53,
               relationships: sections['blocked']!,
               onOpenChat: onOpenChat,
             ),
@@ -6738,7 +6884,8 @@ final class _RelationshipTile extends ConsumerWidget {
                       Text(
                         user.profileResolved
                             ? user.handle
-                            : 'Profile unavailable · refreshes automatically',
+                            : L10n.of(context)
+                                .ui_profile_unavailable_refreshes_automatically_9ef31289,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -6751,7 +6898,7 @@ final class _RelationshipTile extends ConsumerWidget {
                 ),
                 if (!userProfileSupportsFriendshipActions(user))
                   IconButton(
-                    tooltip: 'Message',
+                    tooltip: L10n.of(context).ui_message_ae0ed984,
                     onPressed: user.profileResolved
                         ? () => _openDm(context, ref, user, onOpenChat)
                         : null,
@@ -6763,7 +6910,7 @@ final class _RelationshipTile extends ConsumerWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           IconButton(
-                            tooltip: 'Accept',
+                            tooltip: L10n.of(context).ui_accept_50b26149,
                             style: IconButton.styleFrom(
                               foregroundColor: context.kaede.mint,
                             ),
@@ -6777,7 +6924,7 @@ final class _RelationshipTile extends ConsumerWidget {
                             icon: Icon(Icons.check_circle_rounded),
                           ),
                           IconButton(
-                            tooltip: 'Decline',
+                            tooltip: L10n.of(context).ui_decline_58eaef39,
                             onPressed: () => _relationshipAction(
                                 context,
                                 ref,
@@ -6790,7 +6937,7 @@ final class _RelationshipTile extends ConsumerWidget {
                         ],
                       ),
                     'friend' => IconButton(
-                        tooltip: 'Message',
+                        tooltip: L10n.of(context).ui_message_ae0ed984,
                         onPressed: user.profileResolved
                             ? () => _openDm(context, ref, user, onOpenChat)
                             : null,
@@ -6804,10 +6951,10 @@ final class _RelationshipTile extends ConsumerWidget {
                                 .read(mobileControllerProvider.notifier)
                                 .repository
                                 .unblock(user.ref)),
-                        child: Text('Unblock'),
+                        child: Text(L10n.of(context).ui_unblock_987c7d5f),
                       ),
                     _ => IconButton(
-                        tooltip: 'Cancel request',
+                        tooltip: L10n.of(context).ui_cancel_request_28568fb6,
                         onPressed: () => _relationshipAction(
                             context,
                             ref,
@@ -6847,7 +6994,8 @@ Future<void> _relationshipAction(BuildContext context, WidgetRef ref,
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not update the relationship',
+          summary:
+              L10n.of(context).ui_could_not_update_the_relationship_61b322b3,
         )),
       ));
     }
@@ -6870,7 +7018,8 @@ Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not open the direct message',
+          summary:
+              L10n.of(context).ui_could_not_open_the_direct_message_0370d958,
         )),
       ));
     }
@@ -6907,7 +7056,7 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
             _openDm(context, ref, profile, onOpenChat);
           },
           icon: Icon(Icons.chat_bubble_outline_rounded),
-          label: Text('Message'),
+          label: Text(L10n.of(context).ui_message_ae0ed984),
         ),
       if (profile.profileResolved &&
           userProfileSupportsFriendshipActions(profile) &&
@@ -6926,7 +7075,7 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                     .requestFriend(profile.handle));
           },
           icon: Icon(Icons.person_add_alt_1_rounded),
-          label: Text('Send friend request'),
+          label: Text(L10n.of(context).ui_send_friend_request_719d5c00),
         ),
       if (userProfileSupportsFriendshipActions(profile) &&
           relationshipType == 'friend')
@@ -6946,7 +7095,7 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
             side: BorderSide(color: context.kaede.dangerSoft),
           ),
           icon: Icon(Icons.person_remove_alt_1_rounded),
-          label: Text('Remove friend'),
+          label: Text(L10n.of(context).ui_remove_friend_1b6055cb),
         ),
       if (relationshipType == 'blocked')
         OutlinedButton.icon(
@@ -6961,7 +7110,7 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                     .unblock(profile.ref));
           },
           icon: Icon(Icons.lock_open_rounded),
-          label: Text('Unblock'),
+          label: Text(L10n.of(context).ui_unblock_987c7d5f),
         ),
     ],
   );
@@ -7044,14 +7193,16 @@ Future<void> _newConversationAction(
         children: [
           ListTile(
             leading: Icon(Icons.person_outline_rounded),
-            title: Text('Direct message'),
-            subtitle: Text('Start a private conversation with one person'),
+            title: Text(L10n.of(context).ui_direct_message_6e16acb3),
+            subtitle: Text(L10n.of(context)
+                .ui_start_a_private_conversation_with_one_person_c51df8ab),
             onTap: () => Navigator.pop(context, 'direct'),
           ),
           ListTile(
             leading: Icon(Icons.group_outlined),
-            title: Text('Create group DM'),
-            subtitle: Text('Choose two or more friends'),
+            title: Text(L10n.of(context).ui_create_group_dm_f99283c5),
+            subtitle:
+                Text(L10n.of(context).ui_choose_two_or_more_friends_b5c6938d),
             onTap: () => Navigator.pop(context, 'group'),
           ),
         ],
@@ -7084,7 +7235,7 @@ Future<void> _newConversationAction(
     context: context,
     builder: (context) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
-        title: Text('Create group DM'),
+        title: Text(L10n.of(context).ui_create_group_dm_f99283c5),
         content: SizedBox(
           width: 440,
           child: Column(
@@ -7094,13 +7245,15 @@ Future<void> _newConversationAction(
                 controller: name,
                 maxLength: 100,
                 decoration: InputDecoration(
-                  labelText: 'Group name',
-                  hintText: 'Optional',
+                  labelText: L10n.of(context).ui_group_name_1f8de81f,
+                  hintText: L10n.of(context).ui_optional_fdd15019,
                 ),
               ),
               Align(
                 alignment: Alignment.centerLeft,
-                child: Text('${selected.length} of 9 friends selected'),
+                child: Text(L10n.of(context)
+                    .ui_value0_of_9_friends_selected_3c57a378(
+                        (selected.length).toString())),
               ),
               SizedBox(height: 8),
               SizedBox(
@@ -7131,11 +7284,11 @@ Future<void> _newConversationAction(
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: Text('Cancel')),
+              child: Text(L10n.of(context).ui_cancel_35afca3b)),
           FilledButton(
             onPressed:
                 selected.length < 2 ? null : () => Navigator.pop(context, true),
-            child: Text('Create'),
+            child: Text(L10n.of(context).ui_create_990de47d),
           ),
         ],
       ),
@@ -7189,7 +7342,8 @@ Future<void> _textAction(
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(userFacingError(
           error,
-          summary: 'Could not complete “$title”',
+          summary: L10n.of(context)
+              .ui_could_not_complete_value0_5e6e6ede((title).toString()),
         )),
       ));
     }

@@ -438,6 +438,7 @@ struct NativeUploadTicket {
 #[derive(Debug, Serialize)]
 #[allow(clippy::struct_excessive_bools)]
 struct PlatformInfo {
+    locales: Vec<String>,
     native: bool,
     os: &'static str,
     arch: &'static str,
@@ -486,9 +487,47 @@ enum VoiceControl {
     ScreenOff,
 }
 
+struct NativeLanguageMenu {
+    show: MenuItem<tauri::Wry>,
+    leave_voice: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+}
+
+#[derive(Deserialize)]
+struct NativeMenuLabels {
+    show: String,
+    leave_voice: String,
+    quit: String,
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects state and deserializes command arguments by value.
+fn native_set_menu_language(
+    menu: tauri::State<'_, NativeLanguageMenu>,
+    labels: NativeMenuLabels,
+) -> Result<(), NativeError> {
+    for (item, text) in [
+        (&menu.show, &labels.show),
+        (&menu.leave_voice, &labels.leave_voice),
+        (&menu.quit, &labels.quit),
+    ] {
+        if text.trim().is_empty() || text.len() > 512 || text.chars().any(char::is_control) {
+            return Err(NativeError::local(
+                "INVALID_LABEL",
+                "Invalid translated menu label.",
+            ));
+        }
+        item.set_text(text).map_err(|error| {
+            NativeError::operation("MENU_LANGUAGE", "Could not update menu language.", error)
+        })?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn native_platform_info() -> PlatformInfo {
     PlatformInfo {
+        locales: sys_locale::get_locales().collect(),
         native: true,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
@@ -3167,6 +3206,7 @@ fn main() {
                 MenuItem::with_id(app, "leave_voice", "Leave voice", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &leave_voice, &quit])?;
+            app.manage(NativeLanguageMenu { show, leave_voice, quit });
             let mut tray = TrayIconBuilder::new()
                 .tooltip("Kaede Chat")
                 .menu(&menu)
@@ -3209,6 +3249,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             native_platform_info,
+            native_set_menu_language,
             native_update_check,
             native_update_install,
             native_autostart_status,

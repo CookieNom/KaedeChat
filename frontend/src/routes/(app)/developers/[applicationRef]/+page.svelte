@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, userErrorMessage } from '$lib/api/client';
   import { assetUrl } from '$lib/media/assets';
   import ApplicationCommandEditor from '$lib/components/ApplicationCommandEditor.svelte';
@@ -181,12 +183,12 @@
     ['bot_dm', 'App direct messages'],
     ['private_channel', 'Group and user direct messages']
   ] as const;
-  const readinessLabels: Record<DirectoryReadinessKey, string> = {
+  let readinessLabels: Record<DirectoryReadinessKey, string> = $derived({
     directory_enabled: 'Directory listing enabled',
     summary: 'Summary',
     category: 'Category',
     tags: 'One to five tags',
-    description: 'Description',
+    description: $t('ui_description_526e0087'),
     support_url: 'Support URL',
     privacy_url: 'Privacy policy URL',
     terms_url: 'Terms of service URL',
@@ -196,7 +198,7 @@
     description_localizations: 'Localized descriptions valid',
     install_path: 'Active install path',
     user_install_command: 'Active global user-install command'
-  };
+  });
   let application = $state<Application | null>(null);
   let directoryAssets = $state<ApplicationAsset[]>([]);
   let directoryPreview = $state<DirectoryPreviewResponse | null>(null);
@@ -395,7 +397,7 @@
         app.ref !== applicationRef ||
         assetList.some((asset) => asset.application_ref !== applicationRef)
       ) {
-        throw new Error('The application response returned a different identity.');
+        throw new Error($t('ui_the_application_response_returned_a_different_bb3280e9'));
       }
       // Inventory actions must not replace the settings the user is editing.
       if (!application) {
@@ -416,7 +418,7 @@
       directoryAssets = assetList;
     } catch (caught) {
       if (loadIsCurrent(applicationRef, controller, generation)) {
-        error = userErrorMessage(caught, 'Could not load this application.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_this_application_b2582710'));
       }
     }
   }
@@ -451,13 +453,16 @@
         preview.application_ref !== applicationRef ||
         preview.application.ref !== applicationRef
       ) {
-        throw new Error('The directory preview returned a different application.');
+        throw new Error($t('ui_the_directory_preview_returned_a_different_ap_03cd19f1'));
       }
       directoryPreview = preview;
     } catch (caught) {
       if (previewIsCurrent(applicationRef, controller, generation)) {
         directoryPreview = null;
-        previewError = userErrorMessage(caught, 'Could not load the directory preview.');
+        previewError = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_the_directory_preview_6f22f5bc')
+        );
       }
     } finally {
       if (previewIsCurrent(applicationRef, controller, generation)) previewLoading = false;
@@ -599,8 +604,7 @@
           !applicationSettingsMatch(updatedApplication, changedSettings)
         ) {
           saveState = 'error';
-          saveError =
-            'The server did not confirm all of your changes. Your edits are still here; retry saving.';
+          saveError = $t('ui_the_server_did_not_confirm_all_of_your_change_21776b21');
           return;
         }
         const savedTags = updatedApplication.directory_tags.join(', ');
@@ -624,7 +628,7 @@
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
         saveState = 'error';
-        saveError = userErrorMessage(caught, 'Could not save the application.');
+        saveError = userErrorMessage(caught, $t('ui_could_not_save_the_application_d8ac44a2'));
       }
     } finally {
       if (mutationIsCurrent(applicationRef, generation)) busy = false;
@@ -648,13 +652,13 @@
       });
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;
       savedCommandsText = commandDraft;
-      commandNotice = 'Commands published.';
+      commandNotice = $t('ui_commands_published_f067e39c');
       void loadDirectoryPreview(applicationRef);
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
         commandError = userErrorMessage(
           caught,
-          'Could not publish commands. Your draft is still here.'
+          $t('ui_could_not_publish_commands_your_draft_is_stil_34700cfe')
         );
       }
     } finally {
@@ -686,11 +690,11 @@
       );
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;
       credentialToken = created.token;
-      notice = 'Control credential created. Copy it now; it will not be shown again.';
+      notice = $t('ui_control_credential_created_copy_it_now_it_wil_d3e4ba34');
       await load(applicationRef);
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
-        error = userErrorMessage(caught, 'Could not create the control credential.');
+        error = userErrorMessage(caught, $t('ui_could_not_create_the_control_credential_2ebf1ae5'));
       }
     } finally {
       if (mutationIsCurrent(applicationRef, generation)) busy = false;
@@ -700,7 +704,7 @@
     if (!routeOwnsApplication(ref, application)) return;
     const applicationRef = ref;
     const currentApplication = application;
-    if (!confirm('Revoke this control credential?')) return;
+    if (!confirm($t('ui_revoke_this_control_credential_d9571ed2'))) return;
     await api(`/applications/${encodeURIComponent(applicationRef)}/credentials/${id}`, {
       method: 'DELETE'
     });
@@ -733,11 +737,11 @@
       });
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;
       workerKey = '';
-      notice = 'Worker enrolled.';
+      notice = $t('ui_worker_enrolled_8eb34994');
       await load(applicationRef);
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
-        error = userErrorMessage(caught, 'Could not enroll the worker.');
+        error = userErrorMessage(caught, $t('ui_could_not_enroll_the_worker_e3f1b6a7'));
       }
     } finally {
       if (mutationIsCurrent(applicationRef, generation)) busy = false;
@@ -747,8 +751,7 @@
     if (!routeOwnsApplication(ref, application)) return;
     const applicationRef = ref;
     const currentApplication = application;
-    if (!confirm('Revoke this worker? Existing tokens and gateway sessions will stop working.'))
-      return;
+    if (!confirm($t('ui_revoke_this_worker_existing_tokens_and_gatewa_b261f624'))) return;
     await api(`/applications/${encodeURIComponent(applicationRef)}/workers/${id}`, {
       method: 'DELETE'
     });
@@ -788,7 +791,7 @@
       await load(applicationRef);
     } catch (caught) {
       if (mutationIsCurrent(applicationRef, generation, currentApplication)) {
-        error = userErrorMessage(caught, 'Could not create the invite link.');
+        error = userErrorMessage(caught, $t('ui_could_not_create_the_invite_link_a628cd8b'));
       }
     } finally {
       if (mutationIsCurrent(applicationRef, generation)) busy = false;
@@ -810,7 +813,7 @@
       await load(applicationRef);
     } catch (caught) {
       if (routeOwnsApplication(applicationRef, currentApplication)) {
-        error = userErrorMessage(caught, 'Could not save the instance rule.');
+        error = userErrorMessage(caught, $t('ui_could_not_save_the_instance_rule_60845bb1'));
       }
     }
   }
@@ -873,12 +876,14 @@
 
 <svelte:head
   ><title
-    >{loadedRef === ref ? (application?.name ?? 'Application') : 'Application'} · Developer Portal</title
+    >{$t('ui_value0_developer_portal_c6be8bbc', {
+      value0: String(loadedRef === ref ? (application?.name ?? 'Application') : 'Application')
+    })}</title
   ></svelte:head
 >
 <main class="page">
   <header class="top">
-    <a class="back-link" href={resolve('/developers')}>← All applications</a>
+    <a class="back-link" href={resolve('/developers')}>{$t('ui_all_applications_18f901c8')}</a>
     <div class="app-heading">
       <div class="app-monogram" aria-hidden="true">
         {#if application?.icon_hash}<img
@@ -887,8 +892,12 @@
           />{:else}{application?.name.slice(0, 1).toUpperCase() || 'K'}{/if}
       </div>
       <div>
-        <small>Developer Portal</small>
-        <h1>{loadedRef === ref ? (application?.name ?? 'Loading…') : 'Loading…'}</h1>
+        <small>{$t('ui_developer_portal_1eb68022')}</small>
+        <h1>
+          {loadedRef === ref
+            ? (application?.name ?? $t('ui_loading_ba3bbbe1'))
+            : $t('ui_loading_ba3bbbe1')}
+        </h1>
         <p>{loadedRef === ref ? (application?.bot_user.handle ?? ref) : ref}</p>
       </div>
       {#if application}<span class="app-status">{application.status.replaceAll('_', ' ')}</span
@@ -900,99 +909,102 @@
     >
       <span>{notice}</span><button
         class="notice-dismiss"
-        aria-label="Dismiss"
+        aria-label={$t('ui_dismiss_48845bff')}
         onclick={() => (notice = '')}>×</button
       >
     </div>{/if}
   {#if application && loadedRef === ref}
     {#if activePanel === 'commands'}
-      <aside class="save-card command-save-card" aria-label="Publish application commands">
+      <aside
+        class="save-card command-save-card"
+        aria-label={$t('ui_publish_application_commands_673bcaba')}
+      >
         <div class="save-status" role="status" aria-live="polite">
           <strong
             >{publishingCommands
-              ? 'Publishing commands…'
+              ? $t('ui_publishing_commands_066633b6')
               : commandError
-                ? 'Commands not published'
+                ? $t('ui_commands_not_published_bb128a80')
                 : commandsDirty
-                  ? 'Unpublished command changes'
-                  : commandNotice || 'Commands up to date'}</strong
+                  ? $t('ui_unpublished_command_changes_7d89734e')
+                  : commandNotice || $t('ui_commands_up_to_date_3ce16817')}</strong
           >
           <small
             >{commandError ||
               (commandsDirty
-                ? 'Publish to update the commands people can use.'
-                : 'Commands and app settings are saved separately.')}</small
+                ? $t('ui_publish_to_update_the_commands_people_can_use_e76b7219')
+                : $t('ui_commands_and_app_settings_are_saved_separatel_161ca214'))}</small
           >
           <small
             >{saveState === 'error'
               ? saveError
               : saveState === 'saving'
-                ? 'Saving app settings…'
+                ? $t('ui_saving_app_settings_b1ea9324')
                 : hasUnsavedChanges
-                  ? 'App settings also have unsaved changes.'
-                  : 'App settings are saved.'}</small
+                  ? $t('ui_app_settings_also_have_unsaved_changes_5bbf3e9d')
+                  : $t('ui_app_settings_are_saved_73903ba3')}</small
           >
         </div>
         <div class="save-actions">
           <button class="secondary" onclick={saveApplication} disabled={busy || !hasUnsavedChanges}
-            >Save app settings</button
+            >{$t('ui_save_app_settings_b6f3074e')}</button
           >
           <button onclick={saveCommands} disabled={busy || !commandsDirty}
-            >{publishingCommands ? 'Publishing…' : 'Publish commands'}</button
+            >{publishingCommands
+              ? $t('ui_publishing_582e0f1a')
+              : $t('ui_publish_commands_f399e404')}</button
           >
         </div>
       </aside>
     {:else}
-      <aside class="save-card" aria-label="Save application settings">
+      <aside class="save-card" aria-label={$t('ui_save_application_settings_12dfbeb2')}>
         <div class="save-status" role="status" aria-live="polite">
           <strong
             >{saveState === 'saving'
-              ? 'Saving settings…'
+              ? $t('ui_saving_settings_67c658e7')
               : saveState === 'error'
-                ? 'Settings not saved'
+                ? $t('ui_settings_not_saved_b0ebcb44')
                 : hasUnsavedChanges
-                  ? 'Unsaved changes'
+                  ? $t('ui_unsaved_changes_a710c2b9')
                   : saveState === 'saved'
-                    ? 'Application settings saved.'
-                    : 'App settings saved'}</strong
+                    ? $t('ui_application_settings_saved_bb68cc15')
+                    : $t('ui_app_settings_saved_a6280bef')}</strong
           >
           <small
             >{saveState === 'error'
               ? saveError
               : hasUnsavedChanges
-                ? 'Save your general, discovery, and access settings.'
+                ? $t('ui_save_your_general_discovery_and_access_settin_d1be2438')
                 : commandsDirty
-                  ? 'You also have unpublished changes in Commands.'
-                  : 'Your app settings are up to date.'}</small
+                  ? $t('ui_you_also_have_unpublished_changes_in_commands_f931e9f0')
+                  : $t('ui_your_app_settings_are_up_to_date_b7334b9f')}</small
           >
         </div>
         <button onclick={saveApplication} disabled={busy || !hasUnsavedChanges}>
           {saveState === 'saving'
-            ? 'Saving…'
+            ? $t('ui_saving_23e39291')
             : saveState === 'error'
-              ? 'Retry save'
-              : 'Save changes'}
+              ? $t('ui_retry_save_71fdfa79')
+              : $t('ui_save_changes_dd0ae7a5')}
         </button>
       </aside>
     {/if}
     {#if application.status === 'draft'}
       <div class="notice activation-notice" role="status">
-        <strong>Activate your application before connecting your bot.</strong>
-        <p>
-          New applications start as drafts. Save your permissions, then create your first invite
-          link to activate this application. Until then, SDK worker enrollment and command
-          publishing reject even valid control credentials. App Directory approval is not required.
-        </p>
+        <strong>{$t('ui_activate_your_application_before_connecting_y_fc7323ee')}</strong>
+        <p>{$t('ui_new_applications_start_as_drafts_save_your_pe_31d3e2cf')}</p>
         <button class="activation-action" onclick={() => selectPanel('distribution')}
-          >Go to invite links</button
+          >{$t('ui_go_to_invite_links_af191ab3')}</button
         >
       </div>
     {/if}
     <div class="layout">
-      <nav aria-label="Application sections">
-        <span class="nav-label">Configure your app</span>
+      <nav aria-label={$t('ui_application_sections_43a5ee22')}>
+        <span class="nav-label">{$t('ui_configure_your_app_91a4e22a')}</span>
         {#each panels as panel, index (panel.id)}
-          {#if index === 3}<span class="nav-label nav-divider">Build & manage</span>{/if}
+          {#if index === 3}<span class="nav-label nav-divider"
+              >{$t('ui_build_manage_cafdba3c')}</span
+            >{/if}
           <button
             class:active={activePanel === panel.id}
             aria-current={activePanel === panel.id ? 'page' : undefined}
@@ -1002,12 +1014,12 @@
             <span class="nav-symbol" aria-hidden="true">{panel.symbol}</span><span
               ><strong>{panel.title}</strong><small>{panel.subtitle}</small
               >{#if panel.id === 'commands' && commandsDirty}<small class="draft-marker"
-                  >Unpublished changes</small
+                  >{$t('ui_unpublished_changes_1a020bb7')}</small
                 >{/if}</span
             >
           </button>
         {/each}
-        <p class="nav-tip">Settings save together. Commands have their own publish step.</p>
+        <p class="nav-tip">{$t('ui_settings_save_together_commands_have_their_ow_f5d8b87b')}</p>
       </nav>
       <div class="sections">
         <div class="panel-heading">
@@ -1017,35 +1029,42 @@
         </div>
         <div id="general-panel" class="panel-sections" hidden={activePanel !== 'general'}>
           <section id="general">
-            <h2>General information</h2>
+            <h2>{$t('ui_general_information_3960ba72')}</h2>
             <div class="grid">
-              <label>Name<input bind:value={application.name} maxlength="100" /></label><label
-                >Status<input value={application.status} disabled /></label
+              <label
+                >{$t('ui_name_dcd1d522')}<input
+                  bind:value={application.name}
+                  maxlength="100"
+                /></label
+              ><label>{$t('ui_status_920e413c')}<input value={application.status} disabled /></label
               >
             </div>
             <label
-              >Description<textarea bind:value={application.description} rows="3" maxlength="1000"
+              >{$t('ui_description_526e0087')}<textarea
+                bind:value={application.description}
+                rows="3"
+                maxlength="1000"
               ></textarea></label
             >
           </section>
           <section aria-labelledby="bot-reference-heading">
-            <h2 id="bot-reference-heading">Bot identity</h2>
+            <h2 id="bot-reference-heading">{$t('ui_bot_identity_78c13cf0')}</h2>
             <p>
-              The snowflake is your bot’s numeric ID. Combine it with its home domain to form the
-              full bot reference used by APIs and tools that ask for <code>bot_ref</code>.
+              {$t('ui_the_snowflake_is_your_bot_s_numeric_id_combin_5305add8')}
+              <code>bot_ref</code>.
             </p>
             <div class="identity-grid">
               <div>
-                <label for="bot-snowflake">Bot ID (snowflake)</label>
+                <label for="bot-snowflake">{$t('ui_bot_id_snowflake_43ade0e3')}</label>
                 <div class="identity-value">
                   <input id="bot-snowflake" value={application.bot_user.id} readonly />
                   <button class="secondary" onclick={() => copy(application!.bot_user.id, 'Bot ID')}
-                    >Copy ID</button
+                    >{$t('ui_copy_id_72ac0d58')}</button
                   >
                 </div>
               </div>
               <div>
-                <label for="bot-reference">Bot reference</label>
+                <label for="bot-reference">{$t('ui_bot_reference_d7d6c461')}</label>
                 <div class="identity-value">
                   <input
                     id="bot-reference"
@@ -1058,32 +1077,32 @@
                       copy(
                         `${application!.bot_user.id}@${application!.bot_user.origin_domain}`,
                         'Bot reference'
-                      )}>Copy ref</button
+                      )}>{$t('ui_copy_ref_a115ec27')}</button
                   >
                 </div>
               </div>
               <div>
-                <label for="bot-username">Full bot username</label>
+                <label for="bot-username">{$t('ui_full_bot_username_84cd8554')}</label>
                 <div class="identity-value">
                   <input id="bot-username" value={application.bot_user.handle} readonly />
                   <button
                     class="secondary"
                     onclick={() => copy(application!.bot_user.handle, 'Bot username')}
-                    >Copy username</button
+                    >{$t('ui_copy_username_7ba3cdab')}</button
                   >
                 </div>
               </div>
             </div>
             <p class="identity-help">
-              For tools asking for <code>application_ref</code>, use <code>{application.ref}</code> instead.
+              {$t('ui_for_tools_asking_for_73aeb7dd')} <code>application_ref</code>{$t(
+                'ui_use_6195382a'
+              )} <code>{application.ref}</code>
+              instead.
             </p>
           </section>
           <section id="media">
-            <h2>Bot profile</h2>
-            <p>
-              Give your bot a profile picture and banner. These images also represent your app in
-              the directory.
-            </p>
+            <h2>{$t('ui_bot_profile_652c08c4')}</h2>
+            <p>{$t('ui_give_your_bot_a_profile_picture_and_banner_th_feb536a9')}</p>
             <ApplicationMediaManager
               applicationRef={ref}
               bind:iconHash={application.icon_hash}
@@ -1092,65 +1111,72 @@
             />
           </section>
           <div class="setup-heading">
-            <h2>Keep building</h2>
-            <p>Pick the next step for your app. Your drafts stay here when you switch sections.</p>
+            <h2>{$t('ui_keep_building_9af6b1c1')}</h2>
+            <p>{$t('ui_pick_the_next_step_for_your_app_your_drafts_s_c67a163e')}</p>
           </div>
           <div class="setup-cards">
             <button onclick={() => selectPanel('directory')}
-              ><span>01 · Present your app</span><strong
-                >Create a directory listing <span aria-hidden="true">↗</span></strong
-              ><small>Add a summary, screenshots, and support links.</small></button
+              ><span>{$t('ui_01_present_your_app_21801ed4')}</span><strong
+                >{$t('ui_create_a_directory_listing_fb560fcf')}
+                <span aria-hidden="true">↗</span></strong
+              ><small>{$t('ui_add_a_summary_screenshots_and_support_links_d5a2d7b9')}</small
+              ></button
             >
             <button onclick={() => selectPanel('commands')}
-              ><span>02 · Add interactions</span><strong
-                >Build your first command <span aria-hidden="true">↗</span></strong
-              ><small>Create slash commands and actions with a guided editor.</small></button
+              ><span>{$t('ui_02_add_interactions_592aceb8')}</span><strong
+                >{$t('ui_build_your_first_command_5557bd26')}
+                <span aria-hidden="true">↗</span></strong
+              ><small>{$t('ui_create_slash_commands_and_actions_with_a_guid_dc2fcf33')}</small
+              ></button
             >
             <button onclick={() => selectPanel('deployment')}
-              ><span>03 · Connect your code</span><strong
-                >Set up your bot <span aria-hidden="true">↗</span></strong
-              ><small>Manage credentials and the workers that respond to people.</small></button
+              ><span>{$t('ui_03_connect_your_code_f42def75')}</span><strong
+                >{$t('ui_set_up_your_bot_f65862aa')} <span aria-hidden="true">↗</span></strong
+              ><small>{$t('ui_manage_credentials_and_the_workers_that_respo_c845d00c')}</small
+              ></button
             >
           </div>
         </div>
         <div id="directory-panel" class="panel-sections" hidden={activePanel !== 'directory'}>
           <section id="discovery-settings">
-            <h2>Discovery settings</h2>
-            <p>Describe how your app appears in the desktop and browser App Directory.</p>
+            <h2>{$t('ui_discovery_settings_97d48058')}</h2>
+            <p>{$t('ui_describe_how_your_app_appears_in_the_desktop__98a25ffa')}</p>
             <div class="grid">
               <label
-                >Category<select bind:value={application.directory_category}
-                  ><option value={null}>Choose a category</option><option value="entertainment"
-                    >Entertainment</option
-                  ><option value="games">Games</option><option value="moderation">Moderation</option
-                  ><option value="productivity">Productivity</option><option value="social"
-                    >Social</option
-                  ><option value="utilities">Utilities</option></select
+                >{$t('ui_category_292c06f0')}<select bind:value={application.directory_category}
+                  ><option value={null}>{$t('ui_choose_a_category_42d2f266')}</option><option
+                    value="entertainment">{$t('ui_entertainment_ceaa553e')}</option
+                  ><option value="games">{$t('ui_games_d9dae781')}</option><option
+                    value="moderation">{$t('ui_moderation_126d4415')}</option
+                  ><option value="productivity">{$t('ui_productivity_f42bca63')}</option><option
+                    value="social">{$t('ui_social_f1b7505a')}</option
+                  ><option value="utilities">{$t('ui_utilities_0a035c2b')}</option></select
                 ></label
               ><label
-                >Tags<input
+                >{$t('ui_tags_1331275b')}<input
                   bind:value={directoryTags}
-                  placeholder="moderation, utility, community"
-                /><small>1–5 unique lowercase tags, separated by commas.</small></label
+                  placeholder={$t('ui_moderation_utility_community_68b4af19')}
+                /><small>{$t('ui_1_5_unique_lowercase_tags_separated_by_commas_e3b39c85')}</small
+                ></label
               >
             </div>
             <label
-              >Directory summary<textarea
+              >{$t('ui_directory_summary_a01017e6')}<textarea
                 bind:value={application.directory_summary}
                 rows="2"
                 maxlength="200"
-                placeholder="A short explanation of what your app helps people do."
+                placeholder={$t('ui_a_short_explanation_of_what_your_app_helps_pe_06e4f1b8')}
               ></textarea></label
             >
             <div class="grid">
               <label
-                >Support URL<input
+                >{$t('ui_support_url_6cca2fba')}<input
                   type="url"
                   bind:value={application.support_url}
                   placeholder="https://support.example"
                 /></label
               ><label
-                >Privacy policy URL<input
+                >{$t('ui_privacy_policy_url_ce306668')}<input
                   type="url"
                   bind:value={application.privacy_url}
                   placeholder="https://example/privacy"
@@ -1158,7 +1184,7 @@
               >
             </div>
             <label
-              >Terms of service URL<input
+              >{$t('ui_terms_of_service_url_20185ca0')}<input
                 type="url"
                 bind:value={application.terms_url}
                 placeholder="https://example/terms"
@@ -1181,17 +1207,18 @@
           <section id="discovery-status">
             <div class="section-title-row">
               <div>
-                <h2>Discovery status</h2>
-                <p>Review the saved publication checklist before submitting your listing.</p>
+                <h2>{$t('ui_discovery_status_8d9e51d9')}</h2>
+                <p>{$t('ui_review_the_saved_publication_checklist_before_3d286a74')}</p>
               </div>
               <button
                 class="secondary"
                 onclick={() => void loadDirectoryPreview(ref)}
-                disabled={previewLoading}>{previewLoading ? 'Refreshing…' : 'Refresh'}</button
+                disabled={previewLoading}
+                >{previewLoading ? $t('ui_refreshing_1c0def7b') : $t('ui_refresh_0e916101')}</button
               >
             </div>
             <label
-              >Directory status<input
+              >{$t('ui_directory_status_cf9de437')}<input
                 value={application.directory_approved
                   ? 'Approved'
                   : application.directory_enabled
@@ -1202,10 +1229,8 @@
             >
             <label class="toggle"
               ><input type="checkbox" bind:checked={application.directory_enabled} /><span
-                ><strong>List in the App Directory</strong><small
-                  >Your home instance reviews the listing before it becomes searchable. Account
-                  installation requires an active global command that explicitly supports user
-                  installation.</small
+                ><strong>{$t('ui_list_in_the_app_directory_47855e09')}</strong><small
+                  >{$t('ui_your_home_instance_reviews_the_listing_before_7d961ff2')}</small
                 ></span
               ></label
             >
@@ -1214,12 +1239,12 @@
               <div class="readiness-summary">
                 <strong
                   >{directoryPreview.readiness.status === 'approved'
-                    ? 'Approved'
+                    ? $t('ui_approved_87b42e40')
                     : directoryPreview.readiness.status === 'ready_for_review'
-                      ? 'Ready for review'
-                      : 'Incomplete'}</strong
+                      ? $t('ui_ready_for_review_75c2a5c8')
+                      : $t('ui_incomplete_75f33cdf')}</strong
                 >
-                <small>This checklist reflects your last saved settings.</small>
+                <small>{$t('ui_this_checklist_reflects_your_last_saved_setti_3bf06151')}</small>
               </div>
               <ul class="checklist">
                 {#each directoryPreview.readiness.items as item (item.key)}
@@ -1229,18 +1254,16 @@
                   </li>
                 {/each}
               </ul>
-            {:else if previewLoading}<p>Loading readiness…</p>{/if}
+            {:else if previewLoading}<p>{$t('ui_loading_readiness_dabdd1b0')}</p>{/if}
             {#if application.directory_enabled && !application.directory_approved}
-              <p>
-                Your saved listing will await approval from your home instance once it is ready.
-              </p>
+              <p>{$t('ui_your_saved_listing_will_await_approval_from_y_56d17dbe')}</p>
             {/if}
           </section>
           <section id="discovery-preview">
             <div class="section-title-row">
               <div>
-                <h2>Product page preview</h2>
-                <p>Preview the saved listing that reviewers and members will see.</p>
+                <h2>{$t('ui_product_page_preview_ba9e20de')}</h2>
+                <p>{$t('ui_preview_the_saved_listing_that_reviewers_and__08dcb16d')}</p>
               </div>
             </div>
             {#if directoryPreview?.application}
@@ -1249,13 +1272,16 @@
                 <div class="preview-identity">
                   <span class="preview-icon">{product.name.slice(0, 1).toUpperCase()}</span>
                   <div>
-                    <small>{product.category ?? 'Category not set'}</small>
+                    <small>{product.category ?? $t('ui_category_not_set_91a910aa')}</small>
                     <h3>{product.name}{product.verified ? ' ✓' : ''}</h3>
-                    <p>{product.summary ?? 'Add a summary to complete this preview.'}</p>
+                    <p>
+                      {product.summary ?? $t('ui_add_a_summary_to_complete_this_preview_b59a1799')}
+                    </p>
                   </div>
                 </div>
                 <p class="preview-description">
-                  {product.description ?? 'Add a description to complete this preview.'}
+                  {product.description ??
+                    $t('ui_add_a_description_to_complete_this_preview_db56cbee')}
                 </p>
                 {#if product.media.length}
                   <div
@@ -1270,36 +1296,40 @@
                 {/if}
                 <div class="preview-meta">
                   <span>{product.tags.join(' · ')}</span>
-                  <span>{product.install_template?.name ?? 'Install path not configured'}</span>
+                  <span
+                    >{product.install_template?.name ??
+                      $t('ui_install_path_not_configured_d2f6f538')}</span
+                  >
                   {#if product.supported_locales.length}<span
-                      >{product.supported_locales.length} supported language{product
-                        .supported_locales.length === 1
-                        ? ''
-                        : 's'}</span
+                      >{$t('ui_value0_supported_language_value1_805a269a', {
+                        value0: String(product.supported_locales.length),
+                        value1: String(product.supported_locales.length === 1 ? '' : 's')
+                      })}</span
                     >{/if}
                 </div>
               </article>
             {:else if previewLoading}
-              <p>Loading product preview…</p>
-            {:else if !previewError}<p>Product preview unavailable.</p>{/if}
+              <p>{$t('ui_loading_product_preview_37ea6af0')}</p>
+            {:else if !previewError}<p>{$t('ui_product_preview_unavailable_e30623dc')}</p>{/if}
           </section>
         </div>
         <div id="access-panel" class="panel-sections" hidden={activePanel !== 'access'}>
           <section id="access">
-            <h2>API access</h2>
-            <p>
-              Scopes control what the bot can request. Intents control which live events are
-              delivered. A guild may approve less.
-            </p>
+            <h2>{$t('ui_api_access_923fd434')}</h2>
+            <p>{$t('ui_scopes_control_what_the_bot_can_request_inten_6b4c081d')}</p>
             <div class="section-title-row access-heading">
-              <h3>Scopes</h3>
-              <span>{application.default_scopes.length} selected</span>
+              <h3>{$t('ui_scopes_0d5644ff')}</h3>
+              <span
+                >{$t('ui_value0_selected_975acbfe', {
+                  value0: String(application.default_scopes.length)
+                })}</span
+              >
             </div>
             <label class="scope-search"
-              >Search scopes<input
+              >{$t('ui_search_scopes_4072c9de')}<input
                 type="search"
                 bind:value={accessSearch}
-                placeholder="Filter by name, e.g. messages"
+                placeholder={$t('ui_filter_by_name_e_g_messages_758bc50b')}
               /></label
             >
             <div class="chips scope-grid">
@@ -1314,10 +1344,16 @@
                   />{scope}</label
                 >{/each}
             </div>
-            {#if visibleScopes.length === 0}<p>No scopes match your search.</p>{/if}
+            {#if visibleScopes.length === 0}<p>
+                {$t('ui_no_scopes_match_your_search_d171c91a')}
+              </p>{/if}
             <div class="section-title-row access-heading">
-              <h3>Gateway intents</h3>
-              <span>{application.default_intents.length} selected</span>
+              <h3>{$t('ui_gateway_intents_cf01b087')}</h3>
+              <span
+                >{$t('ui_value0_selected_975acbfe', {
+                  value0: String(application.default_intents.length)
+                })}</span
+              >
             </div>
             <div class="chips">
               {#each intents as intent (intent)}<label
@@ -1337,20 +1373,18 @@
             />
             <div class="grid">
               <label
-                >Target policy<select bind:value={application.target_policy}
-                  ><option value="open">Open federation</option><option value="allowlist"
-                    >Allowlist only</option
-                  ><option value="blocklist">Open except blocked instances</option><option
-                    value="local_only">Local instance only</option
+                >{$t('ui_target_policy_67430900')}<select bind:value={application.target_policy}
+                  ><option value="open">{$t('ui_open_federation_d1174896')}</option><option
+                    value="allowlist">{$t('ui_allowlist_only_07b99b6b')}</option
+                  ><option value="blocklist"
+                    >{$t('ui_open_except_blocked_instances_aad789d8')}</option
+                  ><option value="local_only">{$t('ui_local_instance_only_c7bf2ec3')}</option
                   ></select
                 ></label
               >
             </div>
-            <h3>Installation contexts</h3>
-            <p>
-              Choose where Discord-style Add App authorization is offered. User installs authorize
-              only interactions the account explicitly starts.
-            </p>
+            <h3>{$t('ui_installation_contexts_075d2fd6')}</h3>
+            <p>{$t('ui_choose_where_discord_style_add_app_authorizat_154a5fa8')}</p>
             <div class="chips">
               {#each installTypes as installType (installType[0])}
                 <label class:active={application.supported_install_types.includes(installType[0])}
@@ -1365,7 +1399,7 @@
               {/each}
             </div>
             {#if application.supported_install_types.includes('user_install')}
-              <h3>User-install scopes</h3>
+              <h3>{$t('ui_user_install_scopes_a673a0bc')}</h3>
               <div class="chips">
                 {#each userInstallScopes as scope (scope)}<label
                     class:active={application.user_install_scopes.includes(scope)}
@@ -1382,7 +1416,7 @@
                     />{scope}</label
                   >{/each}
               </div>
-              <h3>User-install command contexts</h3>
+              <h3>{$t('ui_user_install_command_contexts_14cab2cc')}</h3>
               <div class="chips">
                 {#each userInstallContexts as context (context[0])}<label
                     class:active={application.user_install_contexts.includes(context[0])}
@@ -1401,29 +1435,26 @@
                   >{/each}
               </div>
             {/if}
-            <p class="warning">
-              Message content and history remain unavailable in E2EE channels unless the bot is
-              installed and explicitly admitted per channel as a visible cryptographic participant.
-              Admission grants only future encrypted content and rotates the room keys.
-            </p>
+            <p class="warning">{$t('ui_message_content_and_history_remain_unavailabl_fd99caf8')}</p>
           </section>
           <section id="federation">
-            <h2>Federated instance policy</h2>
-            <p>
-              Rules match exact verified instance domains. Deny always wins. Wildcards are not
-              supported.
-            </p>
+            <h2>{$t('ui_federated_instance_policy_40316a71')}</h2>
+            <p>{$t('ui_rules_match_exact_verified_instance_domains_d_ea65ceb9')}</p>
             <div class="inline">
               <input bind:value={ruleDomain} placeholder="instance.example" /><select
                 bind:value={ruleEffect}
-                ><option value="deny">Deny</option><option value="allow">Allow</option></select
-              ><button onclick={addRule}>Add rule</button>
+                ><option value="deny">{$t('ui_deny_05a2d733')}</option><option value="allow"
+                  >{$t('ui_allow_e213c161')}</option
+                ></select
+              ><button onclick={addRule}>{$t('ui_add_rule_a27cff51')}</button>
             </div>
             <div class="rows">
               {#each rules as rule (rule.target_domain)}<article>
                   <code>{rule.target_domain}</code><span class:revoked={rule.effect === 'deny'}
                     >{rule.effect}</span
-                  ><button onclick={() => deleteRule(rule.target_domain)}>Remove</button>
+                  ><button onclick={() => deleteRule(rule.target_domain)}
+                    >{$t('ui_remove_c3812fc4')}</button
+                  >
                 </article>{/each}
             </div>
           </section>
@@ -1442,21 +1473,23 @@
         </div>
         <div id="deployment-panel" class="panel-sections" hidden={activePanel !== 'deployment'}>
           <section id="credentials">
-            <h2>Control credentials</h2>
-            <p>
-              Deployment tools use these scoped secrets only to enroll workers and publish command
-              definitions. They cannot connect as the bot or sign in as a user.
-            </p>
+            <h2>{$t('ui_control_credentials_e4590f5d')}</h2>
+            <p>{$t('ui_deployment_tools_use_these_scoped_secrets_onl_d092f56b')}</p>
             <div class="inline">
-              <input bind:value={credentialLabel} maxlength="100" placeholder="Deployment" /><button
-                onclick={createCredential}
-                disabled={busy || !credentialLabel.trim()}>Create credential</button
+              <input
+                bind:value={credentialLabel}
+                maxlength="100"
+                placeholder={$t('ui_deployment_870a8ffd')}
+              /><button onclick={createCredential} disabled={busy || !credentialLabel.trim()}
+                >{$t('ui_create_credential_4d8f1172')}</button
               >
             </div>
             {#if credentialToken}
               <div class="secret" role="status">
-                <strong>Copy this token now</strong><code>{credentialToken}</code><button
-                  onclick={() => copy(credentialToken, 'Credential')}>Copy</button
+                <strong>{$t('ui_copy_this_token_now_d7db5a6e')}</strong><code
+                  >{credentialToken}</code
+                ><button onclick={() => copy(credentialToken, 'Credential')}
+                  >{$t('ui_copy_e21f935f')}</button
                 >
               </div>
             {/if}
@@ -1468,49 +1501,51 @@
                     >
                   </div>
                   <span class:revoked={credential.revoked_at}
-                    >{credential.revoked_at ? 'Revoked' : 'Active'}</span
+                    >{credential.revoked_at
+                      ? $t('ui_revoked_f6f738d0')
+                      : $t('ui_active_92340695')}</span
                   >{#if !credential.revoked_at}<button
                       class="danger"
-                      onclick={() => revokeCredential(credential.id)}>Revoke</button
+                      onclick={() => revokeCredential(credential.id)}
+                      >{$t('ui_revoke_87e6d00b')}</button
                     >{/if}
                 </article>{/each}
             </div>
           </section>
           <section id="workers">
-            <h2>Worker keys</h2>
-            <p>
-              A worker signs short-lived token assertions and connects directly to every target
-              instance. Private keys never leave the worker.
-            </p>
+            <h2>{$t('ui_worker_keys_32de92f0')}</h2>
+            <p>{$t('ui_a_worker_signs_short_lived_token_assertions_a_730723a3')}</p>
             <div class="grid">
-              <label>Worker name<input bind:value={workerName} /></label><label
-                >Ed25519 public key (base64url)<input
+              <label>{$t('ui_worker_name_73f1a739')}<input bind:value={workerName} /></label><label
+                >{$t('ui_ed25519_public_key_base64url_376654e9')}<input
                   bind:value={workerKey}
-                  placeholder="43-character public key"
+                  placeholder={$t('ui_43_character_public_key_11f315fc')}
                 /></label
               >
             </div>
             <label
-              >Target domains (comma separated, empty means any approved target)<input
+              >{$t('ui_target_domains_comma_separated_empty_means_an_5f34f0fa')}<input
                 bind:value={workerTargets}
-                placeholder="chat.example, community.example"
+                placeholder={$t('ui_chat_example_community_example_724bfe02')}
               /></label
             ><button onclick={createWorker} disabled={busy || workerKey.length < 43}
-              >Enroll worker</button
+              >{$t('ui_enroll_worker_56dd9f32')}</button
             >
             <div class="rows">
               {#each workers as worker (worker.id)}<article>
                   <div>
                     <strong>{worker.name}</strong><small
                       >#{worker.id} · {worker.target_domains.join(', ') ||
-                        'all approved targets'}</small
+                        $t('ui_all_approved_targets_d0c8a4b1')}</small
                     >
                   </div>
                   <span class:revoked={worker.revoked_at}
-                    >{worker.revoked_at ? 'Revoked' : 'Active'}</span
+                    >{worker.revoked_at
+                      ? $t('ui_revoked_f6f738d0')
+                      : $t('ui_active_92340695')}</span
                   >{#if !worker.revoked_at}<button
                       class="danger"
-                      onclick={() => revokeWorker(worker.id)}>Revoke</button
+                      onclick={() => revokeWorker(worker.id)}>{$t('ui_revoke_87e6d00b')}</button
                     >{/if}
                 </article>{/each}
             </div>
@@ -1518,53 +1553,61 @@
         </div>
         <div id="distribution-panel" class="panel-sections" hidden={activePanel !== 'distribution'}>
           <section id="invites">
-            <h2>Bot invite links</h2>
-            <p>
-              Invite pages show the app origin, requested permissions, data access, and E2EE
-              behavior before an administrator approves.
-            </p>
+            <h2>{$t('ui_bot_invite_links_9fe9f9e7')}</h2>
+            <p>{$t('ui_invite_pages_show_the_app_origin_requested_pe_cbc07163')}</p>
             <div class="grid">
-              <label>Slug<input bind:value={templateSlug} /></label><label
-                >Invite name<input bind:value={templateName} /></label
+              <label>{$t('ui_slug_d15387ec')}<input bind:value={templateSlug} /></label><label
+                >{$t('ui_invite_name_d596f9ea')}<input bind:value={templateName} /></label
               >
             </div>
-            <label>Description<input bind:value={templateDescription} /></label><button
-              onclick={createTemplate}
-              disabled={busy}>Create invite link</button
+            <label>{$t('ui_description_526e0087')}<input bind:value={templateDescription} /></label
+            ><button onclick={createTemplate} disabled={busy}
+              >{$t('ui_create_invite_link_f71e6194')}</button
             >
             <div class="rows">
               {#each templates as template (template.id)}<article>
                   <div>
                     <strong>{template.name}</strong>
-                    <small>Invite link: {template.active ? 'Active' : 'Disabled'}</small>
+                    <small
+                      >{$t('ui_invite_link_value0_451dde78', {
+                        value0: String(template.active ? 'Active' : 'Disabled')
+                      })}</small
+                    >
                     <small>
-                      Encrypted chat participation: {template.e2ee_mode === 'participant'
-                        ? 'Enabled'
-                        : 'Disabled'}
+                      {$t('ui_encrypted_chat_participation_value0_a6f65c6d', {
+                        value0: String(
+                          template.e2ee_mode === 'participant' ? 'Enabled' : 'Disabled'
+                        )
+                      })}
                     </small>
                   </div>
                   <code>{template.invite_url}</code><button
-                    onclick={() => copy(template.invite_url)}>Copy</button
+                    onclick={() => copy(template.invite_url)}>{$t('ui_copy_e21f935f')}</button
                   >
                 </article>{/each}
             </div>
           </section>
           <section id="installations">
-            <h2>Installations</h2>
+            <h2>{$t('ui_installations_df2bd1e0')}</h2>
             <div class="rows">
               {#each installations as installation (installation.id)}<article>
                   <div>
                     <strong>{installation.guild_ref}</strong><small
-                      >{installation.e2ee_mode} · revision {installation.grant_revision} ·
-                      {installation.channel_restrictions.length
-                        ? `${installation.channel_restrictions.length} channel restrictions`
-                        : 'all role-permitted channels'}</small
+                      >{$t('ui_value0_revision_value1_value2_6b5665d8', {
+                        value0: String(installation.e2ee_mode),
+                        value1: String(installation.grant_revision),
+                        value2: String(
+                          installation.channel_restrictions.length
+                            ? `${installation.channel_restrictions.length} channel restrictions`
+                            : 'all role-permitted channels'
+                        )
+                      })}</small
                     >
                   </div>
                   <span class:revoked={installation.status !== 'active'}>{installation.status}</span
                   >
                 </article>{/each}{#if installations.length === 0}<p>
-                  No guilds have installed this application.
+                  {$t('ui_no_guilds_have_installed_this_application_ea04990e')}
                 </p>{/if}
             </div>
           </section>

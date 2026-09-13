@@ -1,10 +1,10 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 final class MyReportsScreen extends ConsumerStatefulWidget {
@@ -50,14 +50,15 @@ final class _MyReportsScreenState extends ConsumerState<MyReportsScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text('My reports')),
+        appBar: AppBar(title: Text(L10n.of(context).ui_my_reports_78d941fc)),
         body: RefreshIndicator(
           onRefresh: _load,
           child: ListView(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 32),
             children: [
               Text(
-                'Reports go to your home instance’s Trust & Safety team, not guild moderators.',
+                L10n.of(context)
+                    .ui_reports_go_to_your_home_instance_s_trust_safe_c190412f,
                 style: TextStyle(color: context.kaede.muted, height: 1.4),
               ),
               SizedBox(height: 16),
@@ -66,7 +67,8 @@ final class _MyReportsScreenState extends ConsumerState<MyReportsScreen> {
               else if (_error case final error?)
                 _ReportsNotice(
                   text: userFacingError(error,
-                      summary: 'Could not load your reports'),
+                      summary: L10n.of(context)
+                          .ui_could_not_load_your_reports_ca3024c3),
                   onRetry: _load,
                 )
               else if (_reports.isEmpty)
@@ -97,7 +99,10 @@ final class _ReportCard extends StatelessWidget {
             Row(children: [
               Expanded(
                 child: Text(
-                  '${report['category'] ?? 'report'}'.replaceAll('_', ' '),
+                  L10n.of(context)
+                      .ui_value0_26e9163c(
+                          (report['category'] ?? 'report').toString())
+                      .replaceAll('_', ' '),
                   style: TextStyle(fontWeight: FontWeight.w800),
                 ),
               ),
@@ -105,16 +110,22 @@ final class _ReportCard extends StatelessWidget {
             ]),
             SizedBox(height: 6),
             Text(
-                '${report['target_type'] ?? 'item'} · ${report['target_ref'] ?? ''}',
+                L10n.of(context).ui_value0_value1_947523d9(
+                    (report['target_type'] ?? 'item').toString(),
+                    (report['target_ref'] ?? '').toString()),
                 style: TextStyle(color: context.kaede.muted, fontSize: 12)),
             if ('${report['description'] ?? ''}'.trim().isNotEmpty) ...[
               SizedBox(height: 10),
-              Text('${report['description']}',
+              Text(
+                  L10n.of(context)
+                      .ui_value0_26e9163c((report['description']).toString()),
                   style: TextStyle(color: context.kaede.textSoft)),
             ],
             if (created != null) ...[
               SizedBox(height: 10),
-              Text('Submitted ${DateFormat.yMMMd().add_jm().format(created)}',
+              Text(
+                  L10n.of(context).ui_submitted_value0_0046881b(
+                      (DateFormat.yMMMd().add_jm().format(created)).toString()),
                   style: TextStyle(color: context.kaede.muted, fontSize: 11)),
             ],
           ],
@@ -148,7 +159,9 @@ final class _ReportsNotice extends StatelessWidget {
         child: ListTile(
           leading: Icon(Icons.error_outline_rounded),
           title: Text(text),
-          trailing: TextButton(onPressed: onRetry, child: Text('Retry')),
+          trailing: TextButton(
+              onPressed: onRetry,
+              child: Text(L10n.of(context).ui_retry_8036af59)),
         ),
       );
 }
@@ -162,9 +175,12 @@ final class _ReportsEmpty extends StatelessWidget {
           child: Column(children: [
             Icon(Icons.flag_outlined, size: 34, color: context.kaede.muted),
             SizedBox(height: 10),
-            Text('No reports', style: TextStyle(fontWeight: FontWeight.w800)),
+            Text(L10n.of(context).ui_no_reports_c2c3799d,
+                style: TextStyle(fontWeight: FontWeight.w800)),
             SizedBox(height: 4),
-            Text('Reports submitted from a message menu will appear here.',
+            Text(
+                L10n.of(context)
+                    .ui_reports_submitted_from_a_message_menu_will_ap_57101117,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: context.kaede.muted)),
           ]),

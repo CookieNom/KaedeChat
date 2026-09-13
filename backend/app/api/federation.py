@@ -9305,7 +9305,10 @@ async def federation_dm_history_media_authorize(
     )
     response = Response(
         status_code=204,
-        headers={"X-Kaede-Media-Encryption": attachment.encryption_mode},
+        headers={
+            "X-Kaede-Media-Encryption": attachment.encryption_mode,
+            "X-Kaede-Media-Uploader": (f"{attachment.uploader_id}@{attachment.uploader_domain}"),
+        },
     )
     await session.commit()
     return response

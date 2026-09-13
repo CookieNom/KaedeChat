@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { onDestroy, onMount, untrack } from 'svelte';
   import { userErrorMessage } from '$lib/api/client';
   import { entityKey, entityRef } from '$lib/chat/refs';
@@ -137,7 +139,7 @@
     const file = files?.item(0) ?? null;
     if (!file) return;
     if (!file.type.toLowerCase().startsWith('image/') || file.size > 10 * 1024 * 1024) {
-      error = 'Choose an image up to 10 MiB.';
+      error = $t('ui_choose_an_image_up_to_10_mib_64233874');
       return;
     }
     releaseCoverPreview();
@@ -259,8 +261,8 @@
       error = userErrorMessage(
         caught,
         detailsSaved
-          ? 'The event details were saved, but its cover could not be updated. Try the cover again.'
-          : 'Could not save the scheduled event. Check its details and try again.'
+          ? $t('ui_the_event_details_were_saved_but_its_cover_co_bf85aafa')
+          : $t('ui_could_not_save_the_scheduled_event_check_its__595e0f14')
       );
     } finally {
       busyRef = '';
@@ -301,9 +303,12 @@
     try {
       await deleteScheduledEvent(guildRef, event);
       publish(events.filter((item) => scheduledEventRef(item) !== reference));
-      notice = 'Scheduled event deleted.';
+      notice = $t('ui_scheduled_event_deleted_0c416c45');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not delete this scheduled event. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_delete_this_scheduled_event_try_aga_8913c833')
+      );
     } finally {
       busyRef = '';
     }
@@ -344,7 +349,10 @@
         subscribed = { ...subscribed, [reference]: false };
       }
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not load event subscribers. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_event_subscribers_try_again_09d9dbee')
+      );
     } finally {
       subscriberLoading = { ...subscriberLoading, [reference]: false };
     }
@@ -393,7 +401,10 @@
       }
       notice = next ? 'You will be notified about this event.' : 'Event notifications turned off.';
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update event notifications. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_update_event_notifications_try_agai_df0a5a44')
+      );
     } finally {
       busyRef = '';
     }
@@ -403,12 +414,13 @@
 <section id="scheduled-events" class="events-panel" aria-labelledby="scheduled-events-title">
   <header>
     <div>
-      <h2 id="scheduled-events-title">Scheduled events</h2>
-      <p>Plan voice gatherings or external events and let members follow updates.</p>
+      <h2 id="scheduled-events-title">{$t('ui_scheduled_events_d44a8828')}</h2>
+      <p>{$t('ui_plan_voice_gatherings_or_external_events_and__450b54aa')}</p>
     </div>
     {#if canCreate}
       <button class="primary" type="button" onclick={openCreate} disabled={Boolean(busyRef)}>
-        <Icon name="plus" size={16} /> Create event
+        <Icon name="plus" size={16} />
+        {$t('ui_create_event_946cbe2d')}
       </button>
     {/if}
   </header>
@@ -449,10 +461,10 @@
           {/if}
           <p>
             {event.entity_type === ScheduledEventEntityType.stage
-              ? `Stage · ${channel?.name ?? 'Unavailable channel'}`
+              ? `Stage · ${channel?.name ?? $t('ui_unavailable_channel_f5738ddc')}`
               : event.entity_type === ScheduledEventEntityType.voice
-                ? `Voice · ${channel?.name ?? 'Unavailable channel'}`
-                : `External · ${event.entity_metadata?.location ?? 'Location unavailable'}`}
+                ? `Voice · ${channel?.name ?? $t('ui_unavailable_channel_f5738ddc')}`
+                : `External · ${event.entity_metadata?.location ?? $t('ui_location_unavailable_e601be73')}`}
           </p>
           {#if event.description}<p class="description">{event.description}</p>{/if}
           <div class="actions">
@@ -461,57 +473,57 @@
               onclick={() => void toggleSubscription(event)}
               disabled={Boolean(busyRef)}
             >
-              {following ? 'Following' : 'Notify me'}
+              {following ? $t('ui_following_344b4271') : $t('ui_notify_me_a5b3a748')}
             </button>
             <button
               type="button"
               onclick={() => void showSubscribers(event)}
               disabled={subscriberLoading[reference]}
             >
-              {event.user_count ?? 0} interested
+              {$t('ui_value0_interested_5fd37df6', { value0: String(event.user_count ?? 0) })}
             </button>
             {#if canManageEvent(event)}
               <button type="button" onclick={() => openEdit(event)} disabled={Boolean(busyRef)}
-                >Edit</button
+                >{$t('ui_edit_464c4ffd')}</button
               >
               {#if event.status === ScheduledEventStatus.scheduled}
                 <button
                   type="button"
                   onclick={() => void transition(event, 2)}
-                  disabled={Boolean(busyRef)}>Start</button
+                  disabled={Boolean(busyRef)}>{$t('ui_start_e4bb9f1e')}</button
                 >
                 <button
                   class="danger-text"
                   type="button"
                   onclick={() => void transition(event, 4)}
-                  disabled={Boolean(busyRef)}>Cancel</button
+                  disabled={Boolean(busyRef)}>{$t('ui_cancel_19766ed6')}</button
                 >
               {:else if event.status === ScheduledEventStatus.active}
                 <button
                   type="button"
                   onclick={() => void transition(event, 3)}
-                  disabled={Boolean(busyRef)}>Complete</button
+                  disabled={Boolean(busyRef)}>{$t('ui_complete_143b270a')}</button
                 >
               {/if}
               <button
                 class="danger-text"
                 type="button"
                 onclick={() => void remove(event)}
-                disabled={Boolean(busyRef)}>Delete</button
+                disabled={Boolean(busyRef)}>{$t('ui_delete_e2d0a549')}</button
               >
             {/if}
           </div>
           {#if expandedRef === reference}
             <div class="subscribers">
-              <strong>Interested members</strong>
+              <strong>{$t('ui_interested_members_cc26d3f7')}</strong>
               {#if subscriberLoading[reference] && !subscriberPages[reference]?.length}
-                <p>Loading members…</p>
+                <p>{$t('ui_loading_members_027c36b0')}</p>
               {:else}
                 <ul>
                   {#each subscriberPages[reference] ?? [] as subscription (entityKey(subscription.user))}
                     <li>{subscription.member?.nickname ?? userDisplayName(subscription.user)}</li>
                   {:else}
-                    <li>No one has followed this event yet.</li>
+                    <li>{$t('ui_no_one_has_followed_this_event_yet_ea4a3490')}</li>
                   {/each}
                 </ul>
                 {#if (subscriberPages[reference]?.length ?? 0) < (event.user_count ?? 0)}
@@ -520,7 +532,9 @@
                     onclick={() => void loadSubscriberPage(event)}
                     disabled={subscriberLoading[reference]}
                   >
-                    {subscriberLoading[reference] ? 'Loading…' : 'Load more'}
+                    {subscriberLoading[reference]
+                      ? $t('ui_loading_ba3bbbe1')
+                      : $t('ui_load_more_ac8991ef')}
                   </button>
                 {/if}
               {/if}
@@ -531,11 +545,11 @@
     {:else}
       <div class="empty">
         <span aria-hidden="true">◷</span>
-        <strong>No upcoming events</strong>
+        <strong>{$t('ui_no_upcoming_events_ff785ccc')}</strong>
         <p>
           {canCreate
-            ? 'Create one when your community has something planned.'
-            : 'Nothing is scheduled yet.'}
+            ? $t('ui_create_one_when_your_community_has_something__c1c44a3e')
+            : $t('ui_nothing_is_scheduled_yet_bdeee6c5')}
         </p>
       </div>
     {/each}
@@ -554,22 +568,24 @@
       >
         <header>
           <div>
-            <h2 id="event-editor-title">{editing ? 'Edit event' : 'Create event'}</h2>
-            <p>Choose a Stage, voice channel, or external location.</p>
+            <h2 id="event-editor-title">
+              {editing ? $t('ui_edit_event_a5eca6bb') : $t('ui_create_event_946cbe2d')}
+            </h2>
+            <p>{$t('ui_choose_a_stage_voice_channel_or_external_loca_8d93dacc')}</p>
           </div>
           <button
             class="close"
             type="button"
-            aria-label="Close"
+            aria-label={$t('ui_close_7d9eb7ac')}
             onclick={() => (editorOpen = false)}>×</button
           >
         </header>
         <label>
-          <span>Name</span>
+          <span>{$t('ui_name_dcd1d522')}</span>
           <input bind:value={draft.name} maxlength="100" required disabled={Boolean(busyRef)} />
         </label>
         <label>
-          <span>Description <small>optional</small></span>
+          <span>{$t('ui_description_526e0087')} <small>optional</small></span>
           <textarea
             bind:value={draft.description}
             maxlength="1000"
@@ -578,9 +594,16 @@
           ></textarea>
         </label>
         <label>
-          <span>Cover image <small>optional · up to 10 MiB</small></span>
+          <span
+            >{$t('ui_cover_image_b62cee93')}
+            <small>{$t('ui_optional_up_to_10_mib_83263074')}</small></span
+          >
           {#if coverPreview}
-            <img class="cover-preview" src={coverPreview} alt="Event cover preview" />
+            <img
+              class="cover-preview"
+              src={coverPreview}
+              alt={$t('ui_event_cover_preview_e47e4079')}
+            />
           {/if}
           <div class="cover-controls">
             <input
@@ -591,61 +614,82 @@
                 chooseCover((changeEvent.currentTarget as HTMLInputElement).files)}
             />
             {#if coverPreview}
-              <button type="button" onclick={clearCover} disabled={Boolean(busyRef)}>Remove</button>
+              <button type="button" onclick={clearCover} disabled={Boolean(busyRef)}
+                >{$t('ui_remove_c3812fc4')}</button
+              >
             {/if}
           </div>
           {#if uploadProgress > 0 && uploadProgress < 100}
-            <small>Uploading cover… {uploadProgress}%</small>
+            <small
+              >{$t('ui_uploading_cover_value0_b8be4ec0', { value0: String(uploadProgress) })}</small
+            >
           {/if}
         </label>
         <div class="form-grid">
           <label>
-            <span>Event type</span>
+            <span>{$t('ui_event_type_70d81703')}</span>
             <select
               bind:value={draft.entityType}
               disabled={Boolean(busyRef) || editing?.status === ScheduledEventStatus.active}
             >
-              <option value={ScheduledEventEntityType.stage}>Stage channel</option>
-              <option value={ScheduledEventEntityType.voice}>Voice channel</option>
+              <option value={ScheduledEventEntityType.stage}
+                >{$t('ui_stage_channel_7dda295e')}</option
+              >
+              <option value={ScheduledEventEntityType.voice}
+                >{$t('ui_voice_channel_52909660')}</option
+              >
               {#if canCreateExternal || editing?.entity_type === ScheduledEventEntityType.external}
-                <option value={ScheduledEventEntityType.external}>External</option>
+                <option value={ScheduledEventEntityType.external}
+                  >{$t('ui_external_68c114ea')}</option
+                >
               {/if}
             </select>
           </label>
           <label>
-            <span>Repeat</span>
+            <span>{$t('ui_repeat_b6b7a006')}</span>
             <select
               bind:value={draft.recurrence}
               disabled={Boolean(busyRef) || editing?.status === ScheduledEventStatus.active}
             >
-              <option value={ScheduledEventRecurrencePreset.none}>Does not repeat</option>
-              <option value={ScheduledEventRecurrencePreset.daily}>Daily</option>
-              <option value={ScheduledEventRecurrencePreset.weekly}>Weekly</option>
-              <option value={ScheduledEventRecurrencePreset.biweekly}>Every 2 weeks</option>
-              <option value={ScheduledEventRecurrencePreset.monthly}>Monthly</option>
-              <option value={ScheduledEventRecurrencePreset.yearly}>Yearly</option>
+              <option value={ScheduledEventRecurrencePreset.none}
+                >{$t('ui_does_not_repeat_621d129a')}</option
+              >
+              <option value={ScheduledEventRecurrencePreset.daily}>{$t('ui_daily_b36c2611')}</option
+              >
+              <option value={ScheduledEventRecurrencePreset.weekly}
+                >{$t('ui_weekly_29751324')}</option
+              >
+              <option value={ScheduledEventRecurrencePreset.biweekly}
+                >{$t('ui_every_2_weeks_6327e3a0')}</option
+              >
+              <option value={ScheduledEventRecurrencePreset.monthly}
+                >{$t('ui_monthly_9b11f6b7')}</option
+              >
+              <option value={ScheduledEventRecurrencePreset.yearly}
+                >{$t('ui_yearly_6e69b59e')}</option
+              >
             </select>
           </label>
           {#if draft.entityType !== ScheduledEventEntityType.external}
             <label>
               <span
                 >{draft.entityType === ScheduledEventEntityType.stage
-                  ? 'Stage channel'
-                  : 'Voice channel'}</span
+                  ? $t('ui_stage_channel_7dda295e')
+                  : $t('ui_voice_channel_52909660')}</span
               >
               <select bind:value={draft.channelRef} required disabled={Boolean(busyRef)}>
-                <option value="">Choose a channel</option>
+                <option value="">{$t('ui_choose_a_channel_86306895')}</option>
                 {#each eventChannels as channel (entityKey(channel))}
                   <option value={entityRef(channel)}>{channel.name}</option>
                 {/each}
               </select>
               {#if !eventChannels.length}<small
-                  >You need Create Events, View Channel, and Connect in a matching channel.</small
+                  >{$t('ui_you_need_create_events_view_channel_and_conne_d6d5bcf3')}</small
                 >{/if}
             </label>
           {:else}
             <label>
-              <span>Location or link</span>
+              <span>{$t('ui_location_or_link_59336fd0')}</span>
               <input
                 bind:value={draft.location}
                 maxlength="100"
@@ -655,7 +699,7 @@
             </label>
           {/if}
           <label>
-            <span>Starts</span>
+            <span>{$t('ui_starts_96dbedec')}</span>
             <input
               type="datetime-local"
               bind:value={draft.startTime}
@@ -665,9 +709,11 @@
           </label>
           <label>
             <span
-              >Ends {draft.entityType !== ScheduledEventEntityType.external
-                ? '· optional'
-                : ''}</span
+              >{$t('ui_ends_value0_8bd4ae7c', {
+                value0: String(
+                  draft.entityType !== ScheduledEventEntityType.external ? '· optional' : ''
+                )
+              })}</span
             >
             <input
               type="datetime-local"
@@ -680,10 +726,10 @@
         {#if error}<p class="banner error" role="alert">{error}</p>{/if}
         <footer>
           <button type="button" onclick={() => (editorOpen = false)} disabled={Boolean(busyRef)}
-            >Cancel</button
+            >{$t('ui_cancel_19766ed6')}</button
           >
           <button class="primary" disabled={Boolean(busyRef)}
-            >{busyRef ? 'Saving…' : 'Save event'}</button
+            >{busyRef ? $t('ui_saving_23e39291') : $t('ui_save_event_2ea84a3c')}</button
           >
         </footer>
       </form>

@@ -1,5 +1,5 @@
-// Shared settings controls with visible touch targets in both themes.
 import 'package:flutter/material.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 /// Theme-aware layers shared by every settings surface. These deliberately use
 /// Material color roles so a stored light preference changes custom panes as
@@ -110,7 +110,9 @@ class SettingsStatusPanel extends StatelessWidget {
         title: Text(message),
         trailing: onRetry == null
             ? null
-            : TextButton(onPressed: onRetry, child: const Text('Retry')),
+            : TextButton(
+                onPressed: onRetry,
+                child: Text(L10n.of(context).ui_retry_8036af59)),
       ),
     );
   }
@@ -143,7 +145,7 @@ Future<String?> showSettingsTextDialog(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: input,
@@ -176,7 +178,7 @@ Future<bool> showSettingsConfirmation(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),

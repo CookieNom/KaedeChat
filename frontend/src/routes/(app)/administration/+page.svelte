@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { resolve } from '$app/paths';
   import { hasAdminCapability } from '$lib/admin/capabilities';
   import { api, userErrorMessage } from '$lib/api/client';
+  import ReportExternal from '$lib/components/ReportExternal.svelte';
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
   import { authenticatedMedia, downloadAuthenticatedMedia } from '$lib/media/authenticated';
   import { onMount } from 'svelte';
@@ -171,57 +174,57 @@
     ['new-and-noteworthy', 'New & noteworthy']
   ] as const;
 
-  const sections: SectionDefinition[] = [
+  let sections: SectionDefinition[] = $derived([
     {
       id: 'overview',
-      label: 'Overview',
+      label: $t('ui_overview_d4b1ea57'),
       icon: 'server',
-      description: 'Instance health and the work that needs attention.',
+      description: $t('ui_instance_health_and_the_work_that_needs_atten_907d1f90'),
       capability: 'admin.read'
     },
     {
       id: 'users',
-      label: 'Users',
+      label: $t('ui_users_6b0cc904'),
       icon: 'users',
-      description: 'Find local accounts and manage account access.',
+      description: $t('ui_find_local_accounts_and_manage_account_access_d0741a41'),
       capability: 'admin.read'
     },
     {
       id: 'applications',
-      label: 'Applications',
+      label: $t('ui_applications_98e33b0f'),
       icon: 'sparkles',
-      description: 'Review apps and suspend unsafe integrations.',
+      description: $t('ui_review_apps_and_suspend_unsafe_integrations_b3f18ce6'),
       capability: 'admin.read'
     },
     {
       id: 'reports',
-      label: 'Reports',
+      label: $t('ui_reports_dacca3cb'),
       icon: 'shield',
-      description: 'Triage user and automated safety reports.',
+      description: $t('ui_triage_user_and_automated_safety_reports_dcb7ca15'),
       capability: 'reports.read'
     },
     {
       id: 'instances',
-      label: 'Instances',
+      label: $t('ui_instances_aa8c181a'),
       icon: 'globe',
-      description: 'Control federation with specific remote instances.',
+      description: $t('ui_control_federation_with_specific_remote_insta_eca0fb79'),
       capability: 'admin.read'
     },
     {
       id: 'operators',
-      label: 'Operators',
+      label: $t('ui_operators_2cd413f0'),
       icon: 'key',
-      description: 'Delegate scoped administrative access.',
+      description: $t('ui_delegate_scoped_administrative_access_3674dd98'),
       capability: 'admin.read'
     },
     {
       id: 'audit',
-      label: 'Audit log',
+      label: $t('ui_audit_log_e4d36f9a'),
       icon: 'clock',
-      description: 'Review recent administrative changes.',
+      description: $t('ui_review_recent_administrative_changes_6bebe643'),
       capability: 'audit.read'
     }
-  ];
+  ]);
 
   const overviewCards = [
     ['local_users', 'Local users', 'Human and bot accounts hosted here'],
@@ -245,22 +248,22 @@
   ];
   const closedReportStatuses = new Set(['action_taken', 'closed_no_action', 'duplicate']);
   const roleOptions = ['administrator', 'trust_safety', 'bot_reviewer', 'operations', 'auditor'];
-  const accountActionOptions: { value: AccountAction; label: string }[] = [
-    { value: 'none', label: 'No account restriction' },
-    { value: 'suspend_24h', label: 'Suspend for 24 hours' },
-    { value: 'suspend_7d', label: 'Suspend for 7 days' },
-    { value: 'suspend_30d', label: 'Suspend for 30 days' },
-    { value: 'ban_permanent', label: 'Ban permanently' }
-  ];
-  const messageActionOptions: { value: MessageAction; label: string }[] = [
-    { value: 'none', label: 'Keep messages' },
-    { value: 'delete_reported', label: 'Delete reported message' },
-    { value: 'delete_1h', label: 'Delete messages from last hour' },
-    { value: 'delete_24h', label: 'Delete messages from last 24 hours' },
-    { value: 'delete_7d', label: 'Delete messages from last 7 days' },
-    { value: 'delete_30d', label: 'Delete messages from last 30 days' },
-    { value: 'delete_all', label: 'Delete all message history' }
-  ];
+  let accountActionOptions: { value: AccountAction; label: string }[] = $derived([
+    { value: 'none', label: $t('ui_no_account_restriction_5510f78d') },
+    { value: 'suspend_24h', label: $t('ui_suspend_for_24_hours_4d238d3d') },
+    { value: 'suspend_7d', label: $t('ui_suspend_for_7_days_aeb0c389') },
+    { value: 'suspend_30d', label: $t('ui_suspend_for_30_days_64100ba6') },
+    { value: 'ban_permanent', label: $t('ui_ban_permanently_394212ab') }
+  ]);
+  let messageActionOptions: { value: MessageAction; label: string }[] = $derived([
+    { value: 'none', label: $t('ui_keep_messages_2376e3cd') },
+    { value: 'delete_reported', label: $t('ui_delete_reported_message_0eebb9d5') },
+    { value: 'delete_1h', label: $t('ui_delete_messages_from_last_hour_540f64ce') },
+    { value: 'delete_24h', label: $t('ui_delete_messages_from_last_24_hours_6343ef64') },
+    { value: 'delete_7d', label: $t('ui_delete_messages_from_last_7_days_affbf68c') },
+    { value: 'delete_30d', label: $t('ui_delete_messages_from_last_30_days_6bf27920') },
+    { value: 'delete_all', label: $t('ui_delete_all_message_history_298a1530') }
+  ]);
 
   let me = $state<AdminIdentity | null>(null);
   let overview = $state<Record<string, number>>({});
@@ -624,7 +627,10 @@
           .map((section) => loadSection(section.id))
       );
     } catch (caught) {
-      globalError = userErrorMessage(caught, 'Administration is unavailable for this account.');
+      globalError = userErrorMessage(
+        caught,
+        $t('ui_administration_is_unavailable_for_this_accoun_60f4dfa9')
+      );
     } finally {
       identityLoading = false;
     }
@@ -648,7 +654,7 @@
       users = await api<User[]>(`/administration/users?query=${encodeURIComponent(userQuery)}`);
       loaded.users = true;
     } catch (caught) {
-      sectionErrors.users = userErrorMessage(caught, 'Could not search users.');
+      sectionErrors.users = userErrorMessage(caught, $t('ui_could_not_search_users_f5d53a80'));
     } finally {
       loading.users = false;
     }
@@ -656,7 +662,12 @@
 
   async function patchUser(user: User): Promise<void> {
     const disabled = !userIsSuspended(user);
-    if (!confirm(`${disabled ? 'Ban' : 'Restore access for'} ${user.username}?`)) return;
+    if (
+      !confirm(
+        `${disabled ? $t('ui_ban_520ed297') : $t('ui_restore_access_for_d81d3c37')} ${user.username}?`
+      )
+    )
+      return;
     clearFeedback();
     busyAction = `user:${user.id}@${user.origin_domain}`;
     try {
@@ -708,7 +719,12 @@
   async function patchApp(app: App): Promise<void> {
     if (!app.can_manage_state) return;
     const status = app.status === 'suspended' ? 'active' : 'suspended';
-    if (!confirm(`${status === 'suspended' ? 'Suspend' : 'Activate'} ${app.name}?`)) return;
+    if (
+      !confirm(
+        `${status === 'suspended' ? $t('ui_suspend_4948e134') : $t('ui_activate_24433c70')} ${app.name}?`
+      )
+    )
+      return;
     clearFeedback();
     busyAction = `app:${app.ref}`;
     try {
@@ -731,11 +747,16 @@
     if (!app.can_manage_state) return;
     const reason = directoryReason(app);
     if (reason.length < 3) {
-      showError(new Error('Enter a review reason with at least 3 characters.'), '');
+      showError(new Error($t('ui_enter_a_review_reason_with_at_least_3_charact_14a27137')), '');
       return;
     }
     const approved = !app.directory_approved;
-    if (!confirm(`${approved ? 'Approve' : 'Remove'} ${app.name} from the App Directory?`)) return;
+    if (
+      !confirm(
+        `${approved ? $t('ui_approve_6007acbe') : $t('ui_remove_c3812fc4')} ${app.name} from the App Directory?`
+      )
+    )
+      return;
     clearFeedback();
     busyAction = `app-directory:${app.ref}`;
     try {
@@ -757,7 +778,7 @@
     if (!app.can_manage_state) return;
     const reason = directoryReason(app);
     if (reason.length < 3) {
-      showError(new Error('Enter a curation reason with at least 3 characters.'), '');
+      showError(new Error($t('ui_enter_a_curation_reason_with_at_least_3_chara_7b65a4f3')), '');
       return;
     }
     const collections = app.directory_collections.includes(collection)
@@ -822,7 +843,7 @@
     if (
       !confirm(
         `Apply to ${identityName(report.subject_user, subject)} (${identityContext(report.subject_user, subject)})?\n\n${selected.join('\n')}${
-          draft.message_action === 'none' ? '' : '\n\nMessage deletion cannot be undone.'
+          draft.message_action === 'none' ? '' : $t('ui_message_deletion_cannot_be_undone_68e73d30')
         }`
       )
     )
@@ -890,7 +911,7 @@
       blockDomain = '';
       blockReason = '';
       blockSubdomains = false;
-      notice = 'Federation policy updated.';
+      notice = $t('ui_federation_policy_updated_02ff654d');
       await Promise.all([loadSection('instances'), loadSection('overview')]);
     } catch (caught) {
       showError(caught, 'Could not update federation policy.');
@@ -927,7 +948,7 @@
         body: JSON.stringify({ user_ref: operatorRef.trim(), role: operatorRole })
       });
       operatorRef = '';
-      notice = 'Administrative role granted.';
+      notice = $t('ui_administrative_role_granted_54987673');
       await loadSection('operators');
     } catch (caught) {
       showError(caught, 'Could not grant the role.');
@@ -966,18 +987,18 @@
   });
 </script>
 
-<svelte:head><title>Instance Administration · Kaede Chat</title></svelte:head>
+<svelte:head><title>{$t('ui_instance_administration_kaede_chat_179586fc')}</title></svelte:head>
 
 <main class="admin-shell">
   <aside class="sidebar">
     <div class="sidebar-top">
       <a class="back-link" href={resolve('/settings')}>
         <Icon name="arrow-left" size={18} />
-        <span>User settings</span>
+        <span>{$t('ui_user_settings_2b363e87')}</span>
       </a>
       <div class="instance-label">
-        <span>Instance control</span>
-        <h1>Administration</h1>
+        <span>{$t('ui_instance_control_5d9f5c05')}</span>
+        <h1>{$t('ui_administration_4b42c669')}</h1>
       </div>
       {#if me}
         <div class="identity">
@@ -992,7 +1013,7 @@
       {/if}
     </div>
 
-    <nav aria-label="Administration sections">
+    <nav aria-label={$t('ui_administration_sections_deaacf99')}>
       {#each visibleSections as section (section.id)}
         <button
           type="button"
@@ -1011,7 +1032,7 @@
 
     <div class="sidebar-footer">
       <span class="status-dot"></span>
-      <span>Authenticated with your user session</span>
+      <span>{$t('ui_authenticated_with_your_user_session_02177c9d')}</span>
     </div>
   </aside>
 
@@ -1019,7 +1040,7 @@
     <div class="content-inner">
       <header class="page-header">
         <div>
-          <span class="eyebrow">Instance control center</span>
+          <span class="eyebrow">{$t('ui_instance_control_center_a14905d6')}</span>
           <h2>{activeSection.label}</h2>
           <p>{activeSection.description}</p>
         </div>
@@ -1032,7 +1053,11 @@
             disabled={loading[view] || identityLoading}
             onclick={() => void refreshCurrent()}>↻</button
           >
-          <a class="icon-button" href={resolve('/home')} aria-label="Close administration">×</a>
+          <a
+            class="icon-button"
+            href={resolve('/home')}
+            aria-label={$t('ui_close_administration_d6def969')}>×</a
+          >
         </div>
       </header>
 
@@ -1043,35 +1068,39 @@
         <section class="state-card" aria-live="polite">
           <span class="spinner"></span>
           <div>
-            <h3>Loading administration</h3>
-            <p>Checking your roles and instance data…</p>
+            <h3>{$t('ui_loading_administration_0c4f7692')}</h3>
+            <p>{$t('ui_checking_your_roles_and_instance_data_2512ca19')}</p>
           </div>
         </section>
       {:else if !me}
         <section class="state-card error-state">
           <Icon name="shield" size={30} />
           <div>
-            <h3>Administration unavailable</h3>
-            <p>{globalError || 'This account does not have administrative access.'}</p>
+            <h3>{$t('ui_administration_unavailable_78a6757f')}</h3>
+            <p>{globalError || $t('ui_this_account_does_not_have_administrative_acc_a81faf8d')}</p>
           </div>
         </section>
       {:else if sectionErrors[view]}
         <section class="state-card error-state" role="alert">
           <Icon name="shield" size={28} />
           <div>
-            <h3>This section could not load</h3>
+            <h3>{$t('ui_this_section_could_not_load_c86f34da')}</h3>
             <p>{sectionErrors[view]}</p>
           </div>
           <button type="button" class="secondary-button" onclick={() => void refreshCurrent()}
-            >Try again</button
+            >{$t('ui_try_again_d8b8392e')}</button
           >
         </section>
       {:else if loading[view] && !loaded[view]}
         <section class="state-card" aria-live="polite">
           <span class="spinner"></span>
           <div>
-            <h3>Loading {activeSection.label.toLowerCase()}</h3>
-            <p>Fetching the latest instance data…</p>
+            <h3>
+              {$t('ui_loading_value0_e87d0f13', {
+                value0: String(activeSection.label.toLowerCase())
+              })}
+            </h3>
+            <p>{$t('ui_fetching_the_latest_instance_data_19146c34')}</p>
           </div>
         </section>
       {:else if view === 'overview'}
@@ -1092,12 +1121,8 @@
         <section class="panel access-panel">
           <div class="panel-icon"><Icon name="key" size={24} /></div>
           <div>
-            <h3>Administrative access is scoped and auditable</h3>
-            <p>
-              Your browser uses your normal Kaede session. Owner grants remain CLI-managed, while
-              delegated roles can be reviewed and revoked here. The server's static admin token is
-              never sent to this page.
-            </p>
+            <h3>{$t('ui_administrative_access_is_scoped_and_auditable_db2fa516')}</h3>
+            <p>{$t('ui_your_browser_uses_your_normal_kaede_session_o_89c6c56c')}</p>
           </div>
         </section>
       {:else if view === 'users'}
@@ -1113,17 +1138,19 @@
               <Icon name="search" size={19} />
               <input
                 bind:value={userQuery}
-                aria-label="Search local usernames"
-                placeholder="Search local usernames"
+                aria-label={$t('ui_search_local_usernames_100a7d88')}
+                placeholder={$t('ui_search_local_usernames_100a7d88')}
               />
             </label>
-            <button type="submit" class="primary-button" disabled={loading.users}>Search</button>
+            <button type="submit" class="primary-button" disabled={loading.users}
+              >{$t('ui_search_49c266ba')}</button
+            >
           </form>
           {#if users.length === 0}
             <div class="empty-state">
               <Icon name="users" size={28} />
-              <h3>No local users found</h3>
-              <p>Try a different username, or clear the search to list recent accounts.</p>
+              <h3>{$t('ui_no_local_users_found_94352f6a')}</h3>
+              <p>{$t('ui_try_a_different_username_or_clear_the_search__54614f07')}</p>
             </div>
           {:else}
             <div class="data-list">
@@ -1141,14 +1168,18 @@
                   </div>
                   <span class:danger-badge={userIsSuspended(user)} class="badge"
                     >{user.disabled_at
-                      ? 'Banned'
+                      ? $t('ui_banned_05eb2107')
                       : userIsSuspended(user)
                         ? `Suspended until ${new Date(user.suspended_until!).toLocaleString()}`
-                        : 'Active'}</span
+                        : $t('ui_active_92340695')}</span
                   >
                   {#if can('users.manage') && user.account_type !== 'bot'}
                     <label class="age-assurance-control">
-                      <span class="sr-only">Age assurance for {user.username}</span>
+                      <span class="sr-only"
+                        >{$t('ui_age_assurance_for_value0_cb69de11', {
+                          value0: String(user.username)
+                        })}</span
+                      >
                       <select
                         value={user.age_assurance_state}
                         disabled={busyAction === `user:${user.id}@${user.origin_domain}`}
@@ -1158,9 +1189,9 @@
                             event.currentTarget.value as User['age_assurance_state']
                           )}
                       >
-                        <option value="unknown">Age unknown</option>
-                        <option value="adult">Verified adult</option>
-                        <option value="minor">Verified minor</option>
+                        <option value="unknown">{$t('ui_age_unknown_0f9f75f1')}</option>
+                        <option value="adult">{$t('ui_verified_adult_9820090d')}</option>
+                        <option value="minor">{$t('ui_verified_minor_7abbad37')}</option>
                       </select>
                     </label>
                   {/if}
@@ -1171,7 +1202,9 @@
                       class:secondary-button={userIsSuspended(user)}
                       disabled={busyAction === `user:${user.id}@${user.origin_domain}`}
                       onclick={() => void patchUser(user)}
-                      >{userIsSuspended(user) ? 'Restore access' : 'Ban permanently'}</button
+                      >{userIsSuspended(user)
+                        ? $t('ui_restore_access_4ba2fb20')
+                        : $t('ui_ban_permanently_394212ab')}</button
                     >
                   {/if}
                 </article>
@@ -1183,19 +1216,13 @@
         <section class="panel">
           <div class="panel-intro">
             <Icon name="sparkles" size={22} />
-            <p>
-              Suspending an application immediately suspends active installations and advances its
-              credential revocation generation.
-            </p>
+            <p>{$t('ui_suspending_an_application_immediately_suspend_de60bca4')}</p>
           </div>
           {#if apps.length === 0}
             <div class="empty-state">
               <Icon name="sparkles" size={28} />
-              <h3>No applications</h3>
-              <p>
-                Applications registered on this instance or learned through federation will appear
-                here.
-              </p>
+              <h3>{$t('ui_no_applications_62a5da4b')}</h3>
+              <p>{$t('ui_applications_registered_on_this_instance_or_l_fdaae04f')}</p>
             </div>
           {:else}
             <div class="data-list">
@@ -1204,11 +1231,14 @@
                   <div class="row-avatar app-avatar"><Icon name="sparkles" size={20} /></div>
                   <div class="row-main">
                     <strong>{app.name}</strong><small
-                      >{app.ref} · team {app.team_ref} · updated {new Date(
-                        app.updated_at
-                      ).toLocaleString()}{app.can_manage_state
-                        ? ''
-                        : ` · state managed by ${app.state_authority}`}</small
+                      >{$t('ui_value0_team_value1_updated_value2_value3_e02e9da4', {
+                        value0: String(app.ref),
+                        value1: String(app.team_ref),
+                        value2: String(new Date(app.updated_at).toLocaleString()),
+                        value3: String(
+                          app.can_manage_state ? '' : ` · state managed by ${app.state_authority}`
+                        )
+                      })}</small
                     >
                   </div>
                   <span class:danger-badge={app.status === 'suspended'} class="badge"
@@ -1217,19 +1247,19 @@
                   {#if can('bots.manage')}
                     {#if app.directory_enabled}
                       <label class="directory-review-reason">
-                        <span>Directory review reason</span>
+                        <span>{$t('ui_directory_review_reason_de6f4781')}</span>
                         <input
                           value={directoryReasons[app.ref] ?? ''}
                           minlength="3"
                           maxlength="500"
-                          placeholder="Required for approval and curation"
+                          placeholder={$t('ui_required_for_approval_and_curation_b4b637af')}
                           disabled={!app.can_manage_state ||
                             busyAction === `app-directory:${app.ref}`}
                           aria-describedby={`directory-reason-help-${app.ref}`}
                           oninput={(event) => setDirectoryReason(app, event.currentTarget.value)}
                         />
                         <small id={`directory-reason-help-${app.ref}`}
-                          >At least 3 characters; stored in the audit log.</small
+                          >{$t('ui_at_least_3_characters_stored_in_the_audit_log_b23bcb3e')}</small
                         >
                       </label>
                       {#each directoryCollections as collection (collection[0])}
@@ -1242,7 +1272,7 @@
                             !hasDirectoryReason(app) ||
                             busyAction === `app-directory:${app.ref}`}
                           title={!hasDirectoryReason(app)
-                            ? 'Enter a directory review reason first.'
+                            ? $t('ui_enter_a_directory_review_reason_first_aaf19345')
                             : undefined}
                           aria-pressed={app.directory_collections.includes(collection[0])}
                           onclick={() => void toggleAppDirectoryCollection(app, collection[0])}
@@ -1257,10 +1287,12 @@
                           !hasDirectoryReason(app) ||
                           busyAction === `app-directory:${app.ref}`}
                         title={!hasDirectoryReason(app)
-                          ? 'Enter a directory review reason first.'
+                          ? $t('ui_enter_a_directory_review_reason_first_aaf19345')
                           : undefined}
                         onclick={() => void patchAppDirectory(app)}
-                        >{app.directory_approved ? 'Remove listing' : 'Approve listing'}</button
+                        >{app.directory_approved
+                          ? $t('ui_remove_listing_2063d5a7')
+                          : $t('ui_approve_listing_ac630df2')}</button
                       >
                     {/if}
                     <button
@@ -1272,7 +1304,9 @@
                         ? undefined
                         : `Application state is managed by ${app.state_authority}.`}
                       onclick={() => void patchApp(app)}
-                      >{app.status === 'suspended' ? 'Activate' : 'Suspend'}</button
+                      >{app.status === 'suspended'
+                        ? $t('ui_activate_24433c70')
+                        : $t('ui_suspend_4948e134')}</button
                     >
                   {/if}
                 </article>
@@ -1282,36 +1316,34 @@
         </section>
       {:else if view === 'reports'}
         <div class="report-controls">
-          <div class="segmented" aria-label="Report filter">
+          <div class="segmented" aria-label={$t('ui_report_filter_8908b6f8')}>
             <button
               type="button"
               class:active={reportFilter === 'open'}
-              onclick={() => (reportFilter = 'open')}>Open <span>{openReportCount}</span></button
+              onclick={() => (reportFilter = 'open')}
+              >{$t('ui_open_ed077f3d')} <span>{openReportCount}</span></button
             >
             <button
               type="button"
               class:active={reportFilter === 'closed'}
-              onclick={() => (reportFilter = 'closed')}>Closed</button
+              onclick={() => (reportFilter = 'closed')}>{$t('ui_closed_c21ead06')}</button
             >
             <button
               type="button"
               class:active={reportFilter === 'all'}
-              onclick={() => (reportFilter = 'all')}>All</button
+              onclick={() => (reportFilter = 'all')}>{$t('ui_all_a52ace42')}</button
             >
           </div>
-          <p>
-            Encrypted-message evidence is shown only when the reporter explicitly disclosed
-            decrypted text. Keys are never included.
-          </p>
+          <p>{$t('ui_encrypted_message_evidence_is_shown_only_when_15c2dfa5')}</p>
         </div>
         {#if visibleReports.length === 0}
           <section class="empty-state panel">
             <Icon name="shield" size={30} />
-            <h3>No {reportFilter} reports</h3>
+            <h3>{$t('ui_no_value0_reports_cb513443', { value0: String(reportFilter) })}</h3>
             <p>
               {reportFilter === 'open'
-                ? 'There are no safety cases waiting for review.'
-                : 'Reports matching this filter will appear here.'}
+                ? $t('ui_there_are_no_safety_cases_waiting_for_review_4e885628')
+                : $t('ui_reports_matching_this_filter_will_appear_here_7f395142')}
             </p>
           </section>
         {:else}
@@ -1322,12 +1354,12 @@
                   <div class="report-title">
                     <span class:danger-badge={report.source === 'photodna'} class="badge"
                       >{report.source === 'photodna'
-                        ? 'High-priority child-safety match'
+                        ? $t('ui_high_priority_child_safety_match_39ead0cd')
                         : report.category.replaceAll('_', ' ')}</span
                     >
                     {#if report.severity}<span class="badge danger-badge">{report.severity}</span
                       >{/if}
-                    <h3>Report #{report.id}</h3>
+                    <h3>{$t('ui_report_value0_064ff921', { value0: String(report.id) })}</h3>
                   </div>
                   <time datetime={report.created_at}
                     >{new Date(report.created_at).toLocaleString()}</time
@@ -1336,11 +1368,11 @@
                 <div class="report-grid">
                   <dl>
                     <div>
-                      <dt>Target</dt>
+                      <dt>{$t('ui_target_978354db')}</dt>
                       <dd>{report.target_type} · {report.target_ref}</dd>
                     </div>
                     <div>
-                      <dt>Reporter</dt>
+                      <dt>{$t('ui_reporter_ed738fe8')}</dt>
                       <dd class="report-identity">
                         <strong>
                           {identityName(
@@ -1357,7 +1389,7 @@
                       </dd>
                     </div>
                     {#if report.subject_user || reportSubjectRef(report)}<div>
-                        <dt>Reported user</dt>
+                        <dt>{$t('ui_reported_user_b4f2b206')}</dt>
                         <dd class="report-identity">
                           <strong>
                             {identityName(
@@ -1374,23 +1406,24 @@
                         </dd>
                       </div>{/if}
                     <div>
-                      <dt>Evidence mode</dt>
-                      <dd>{report.encryption_mode?.replaceAll('_', ' ') ?? 'metadata only'}</dd>
+                      <dt>{$t('ui_evidence_mode_51a56731')}</dt>
+                      <dd>
+                        {report.encryption_mode?.replaceAll('_', ' ') ??
+                          $t('ui_metadata_only_1878533c')}
+                      </dd>
                     </div>
                     {#if report.assigned_admin_ref}<div>
-                        <dt>Assigned</dt>
+                        <dt>{$t('ui_assigned_8191888d')}</dt>
                         <dd>{report.assigned_admin_ref}</dd>
                       </div>{/if}
                   </dl>
                   <div class="report-body">
-                    <p>{report.description ?? 'No reporter note was provided.'}</p>
+                    <p>{report.description ?? $t('ui_no_reporter_note_was_provided_88bbb541')}</p>
                     {#if (report.target_type === 'attachment' || reportAttachments(report).length) && report.source !== 'photodna'}
                       <div class="safety-note attachment-evidence-note">
                         <Icon name="image" size={19} />
                         <span>
-                          This report covers the complete message and its attachments. Verified
-                          attachment metadata and, when an attachment was highlighted, a restricted
-                          preview appear below.
+                          {$t('ui_this_report_covers_the_complete_message_and_i_276e23e7')}
                         </span>
                       </div>
                       {#if reportAttachments(report).length}
@@ -1401,7 +1434,7 @@
                             reportedAttachmentErrors[`${report.id}:${attachment.attachment_ref}`]}
                           <section class="reported-attachment">
                             <dl class="match-metadata">
-                              {#each [['Attachment', attachment.attachment_ref], ['Uploader', attachment.uploader_ref], ['Filename', attachment.filename], ['Content type', attachment.content_type], ['Size', attachment.size], ['Encryption', attachment.encryption_mode]] as [label, value] (label)}
+                              {#each [[$t('ui_attachment_040d2b36'), attachment.attachment_ref], [$t('ui_uploader_29ca9741'), attachment.uploader_ref], [$t('ui_filename_971b9742'), attachment.filename], [$t('ui_content_type_6f51cb04'), attachment.content_type], [$t('ui_size_1af85190'), attachment.size], [$t('ui_encryption_82f4e719'), attachment.encryption_mode]] as [label, value] (label)}
                                 {#if typeof value === 'string' || typeof value === 'number'}
                                   <div>
                                     <dt>{label}</dt>
@@ -1426,7 +1459,7 @@
                                     }}
                                     alt={attachment.filename
                                       ? `Reported attachment: ${attachment.filename}`
-                                      : 'Reported attachment preview'}
+                                      : $t('ui_reported_attachment_preview_c0d5978c')}
                                   />
                                 {:else if contentType.startsWith('video/')}
                                   <video
@@ -1450,35 +1483,45 @@
                                   ></audio>
                                 {/if}
                                 <small>
-                                  Restricted {isDisclosedReportAttachment(report, attachment)
-                                    ? 'reporter-disclosed plaintext evidence'
-                                    : 'preview'} · successful access is recorded in the audit log.
+                                  {$t('ui_restricted_value0_successful_access_is_record_c982762b', {
+                                    value0: String(
+                                      isDisclosedReportAttachment(report, attachment)
+                                        ? 'reporter-disclosed plaintext evidence'
+                                        : 'preview'
+                                    )
+                                  })}
                                 </small>
                               </div>
                             {:else if isDisclosedReportAttachment(report, attachment)}
                               <small class="disclosure-note">
                                 {report.evidence.disclosed_attachment_scan_status === 'quarantined'
-                                  ? 'The disclosed copy was quarantined after a safety match and cannot be rendered.'
+                                  ? $t('ui_the_disclosed_copy_was_quarantined_after_a_sa_1719e4b1')
                                   : report.evidence.disclosed_attachment_scan_status ===
                                         'infected' ||
                                       report.evidence.disclosed_attachment_scan_status ===
                                         'rejected'
-                                    ? 'The disclosed copy failed safety validation and cannot be rendered.'
+                                    ? $t(
+                                        'ui_the_disclosed_copy_failed_safety_validation_a_368cd349'
+                                      )
                                     : report.evidence.disclosed_attachment_scan_status === 'failed'
-                                      ? 'The disclosed copy could not be processed. Follow the media-processing incident procedure.'
+                                      ? $t(
+                                          'ui_the_disclosed_copy_could_not_be_processed_fol_f8b94c4f'
+                                        )
                                       : report.evidence.disclosed_attachment_scan_status === 'clean'
-                                        ? 'This evidence type cannot be shown inline; download the original below.'
-                                        : 'The disclosed evidence is being scanned. Reload this queue shortly.'}
+                                        ? $t(
+                                            'ui_this_evidence_type_cannot_be_shown_inline_dow_2242a0ef'
+                                          )
+                                        : $t(
+                                            'ui_the_disclosed_evidence_is_being_scanned_reloa_239e583a'
+                                          )}
                               </small>
                             {:else if report.encryption_mode === 'e2ee_metadata' || attachment.encryption_mode === 'e2ee'}
                               <small class="disclosure-note">
-                                Encrypted attachment metadata only; no decrypted file or key was
-                                disclosed.
+                                {$t('ui_encrypted_attachment_metadata_only_no_decrypt_541c1fb9')}
                               </small>
                             {:else if !accessible}
                               <small class="disclosure-note">
-                                Preview unavailable here. Remote attachments must be reviewed by
-                                their home instance.
+                                {$t('ui_preview_unavailable_here_remote_attachments_m_50af80a0')}
                               </small>
                             {/if}
                             {#if accessible}
@@ -1488,7 +1531,7 @@
                                   class="secondary-button"
                                   onclick={() =>
                                     void downloadReportedAttachment(report, attachment)}
-                                  >Download original</button
+                                  >{$t('ui_download_original_9f82c2f9')}</button
                                 >
                               </div>
                             {/if}
@@ -1497,7 +1540,7 @@
                               </p>{/if}
                             {#if isDisclosedReportAttachment(report, attachment)}
                               <dl class="match-metadata disclosed-attachment-metadata">
-                                {#each [['Disclosed evidence', report.evidence.disclosed_attachment_ref], ['Disclosed filename', report.evidence.disclosed_filename], ['Disclosed content type', report.evidence.disclosed_content_type], ['Disclosed size', report.evidence.disclosed_size], ['Disclosed scan', report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
+                                {#each [[$t('ui_disclosed_evidence_91092f42'), report.evidence.disclosed_attachment_ref], [$t('ui_disclosed_filename_50ae8674'), report.evidence.disclosed_filename], [$t('ui_disclosed_content_type_6de0f59d'), report.evidence.disclosed_content_type], [$t('ui_disclosed_size_69410324'), report.evidence.disclosed_size], [$t('ui_disclosed_scan_4cf68eb9'), report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
                                   {#if typeof value === 'string' || typeof value === 'number'}
                                     <div>
                                       <dt>{label}</dt>
@@ -1509,9 +1552,7 @@
                                 {/each}
                               </dl>
                               <small class="disclosure-note">
-                                The reporter explicitly decrypted and uploaded this attachment. The
-                                plaintext evidence is reporter-supplied; the server can scan the
-                                uploaded copy but cannot prove it matches the original ciphertext.
+                                {$t('ui_the_reporter_explicitly_decrypted_and_uploade_bd1bb025')}
                               </small>
                             {/if}
                           </section>
@@ -1521,8 +1562,7 @@
                         <div class="safety-note">
                           <Icon name="shield" size={19} />
                           <span>
-                            The disclosed evidence produced a critical PhotoDNA safety match. Its
-                            bytes were quarantined and are not renderable from this queue.
+                            {$t('ui_the_disclosed_evidence_produced_a_critical_ph_dc3d18f6')}
                           </span>
                         </div>
                       {/if}
@@ -1530,50 +1570,58 @@
                     {#if typeof report.evidence.content === 'string'}
                       <blockquote>
                         <small
-                          >Message by {identityName(
-                            report.subject_user,
-                            report.evidence.author_ref ?? 'unknown'
-                          )} · {identityContext(
-                            report.subject_user,
-                            report.evidence.author_ref ?? 'unknown'
-                          )} in {report.evidence.channel_ref ?? 'unknown'}</small
+                          >{$t('ui_message_by_value0_value1_in_value2_8e17e75d', {
+                            value0: String(
+                              identityName(
+                                report.subject_user,
+                                report.evidence.author_ref ?? 'unknown'
+                              )
+                            ),
+                            value1: String(
+                              identityContext(
+                                report.subject_user,
+                                report.evidence.author_ref ?? 'unknown'
+                              )
+                            ),
+                            value2: String(report.evidence.channel_ref ?? 'unknown')
+                          })}</small
                         >
                         <p>
                           {report.evidence.content ||
-                            '(No message text; this was an attachment-only encrypted message.)'}
+                            $t('ui_no_message_text_this_was_an_attachment_only_e_b7aa3e2d')}
                         </p>
                         {#if report.evidence.disclosure}<small class="disclosure-note"
-                            >Reporter-disclosed E2EE evidence; the server could not verify the
-                            plaintext.</small
+                            >{$t(
+                              'ui_reporter_disclosed_e2ee_evidence_the_server_c_cb260edd'
+                            )}</small
                           >{/if}
                       </blockquote>
                     {:else if report.source === 'photodna'}
                       <div class="safety-note">
                         <Icon name="image" size={19} /><span
-                          >Matched-image content is not rendered in the queue. Review the restricted
-                          match metadata and follow your incident procedure.</span
+                          >{$t('ui_matched_image_content_is_not_rendered_in_the__80c64088')}</span
                         >
                       </div>
                       <dl class="match-metadata">
                         {#if photoDnaEvidence(report, 'attachment_ref')}<div>
-                            <dt>Attachment</dt>
+                            <dt>{$t('ui_attachment_040d2b36')}</dt>
                             <dd>{photoDnaEvidence(report, 'attachment_ref')}</dd>
                           </div>{/if}
                         {#if photoDnaEvidence(report, 'uploader_ref')}<div>
-                            <dt>Uploader</dt>
+                            <dt>{$t('ui_uploader_29ca9741')}</dt>
                             <dd>{photoDnaEvidence(report, 'uploader_ref')}</dd>
                           </div>{/if}
                         {#if photoDnaEvidence(report, 'detected_content_type')}<div>
-                            <dt>Detected type</dt>
+                            <dt>{$t('ui_detected_type_c9edcac7')}</dt>
                             <dd>{photoDnaEvidence(report, 'detected_content_type')}</dd>
                           </div>{/if}
                         {#if photoDnaEvidence(report, 'provider_tracking_id')}<div>
-                            <dt>Provider tracking ID</dt>
+                            <dt>{$t('ui_provider_tracking_id_6eee2cc0')}</dt>
                             <dd>{photoDnaEvidence(report, 'provider_tracking_id')}</dd>
                           </div>{/if}
                         {#each photoDnaFlags(report) as flag, index (`${flag.source}:${flag.match_id ?? index}`)}
                           <div>
-                            <dt>Match source</dt>
+                            <dt>{$t('ui_match_source_aff375b1')}</dt>
                             <dd>
                               {flag.source}{flag.violations.length
                                 ? ` · ${flag.violations.join(', ')}`
@@ -1591,25 +1639,33 @@
                   {@const subjectRef = reportSubjectRef(report)}
                   {@const localSubjectRef = localReportSubject(report)}
                   {#if subjectRef}
-                    <section class="enforcement-panel" aria-label="Report enforcement">
+                    <section
+                      class="enforcement-panel"
+                      aria-label={$t('ui_report_enforcement_9287e6de')}
+                    >
                       <div class="enforcement-heading">
                         <div class="panel-icon danger-icon"><Icon name="shield" size={20} /></div>
                         <div>
                           <h4>
-                            Enforce against {identityName(report.subject_user, subjectRef)}
+                            {$t('ui_enforce_against_value0_52979137', {
+                              value0: String(identityName(report.subject_user, subjectRef))
+                            })}
                           </h4>
                           <small>{identityContext(report.subject_user, subjectRef)}</small>
                           <p>
-                            {localSubjectRef
-                              ? 'Suspend creation access or ban login, and remove messages in rooms this instance controls.'
-                              : 'Suspend this remote user across locally hosted guilds, or ban and remove them from those guilds.'}
-                            Every action is written to the audit log.
+                            {$t('ui_value0_every_action_is_written_to_the_audit_l_cfe25c20', {
+                              value0: String(
+                                localSubjectRef
+                                  ? 'Suspend creation access or ban login, and remove messages in rooms this instance controls.'
+                                  : 'Suspend this remote user across locally hosted guilds, or ban and remove them from those guilds.'
+                              )
+                            })}
                           </p>
                         </div>
                       </div>
                       <div class="enforcement-fields">
                         <label>
-                          <span>Account action</span>
+                          <span>{$t('ui_account_action_ff17cf80')}</span>
                           <select
                             bind:value={enforcementDrafts[report.id].account_action}
                             disabled={!can('users.manage')}
@@ -1620,7 +1676,7 @@
                           </select>
                         </label>
                         <label>
-                          <span>Message action</span>
+                          <span>{$t('ui_message_action_aed12200')}</span>
                           <select bind:value={enforcementDrafts[report.id].message_action}>
                             {#each messageActionOptions as option (option.value)}
                               <option
@@ -1632,12 +1688,14 @@
                           </select>
                         </label>
                         <label class="enforcement-reason">
-                          <span>Enforcement reason</span>
+                          <span>{$t('ui_enforcement_reason_5a273008')}</span>
                           <textarea
                             bind:value={enforcementDrafts[report.id].reason}
                             rows="2"
                             maxlength="500"
-                            placeholder="Required; visible in the administrative audit trail"
+                            placeholder={$t(
+                              'ui_required_visible_in_the_administrative_audit__d7cafec2'
+                            )}
                           ></textarea>
                         </label>
                         <button
@@ -1647,41 +1705,44 @@
                             !hasEnforcementAction(report)}
                           onclick={() => void enforceReport(report)}
                           >{busyAction === `enforce:${report.id}`
-                            ? 'Applying…'
-                            : 'Apply punishment'}</button
+                            ? $t('ui_applying_3329a9bb')
+                            : $t('ui_apply_punishment_40100d0d')}</button
                         >
                       </div>
                       <small>
-                        “All messages” means all active messages stored in locally authoritative
-                        rooms. A remote ban also prevents the user from joining any guild hosted
-                        here.
+                        {$t('ui_all_messages_means_all_active_messages_stored_26524da2')}
                       </small>
                     </section>
                   {:else}
                     <div class="enforcement-unavailable">
                       <Icon name="globe" size={18} />
                       <span>
-                        This report does not identify a user account that can receive an account or
-                        message-history punishment.
+                        {$t('ui_this_report_does_not_identify_a_user_account__7848305c')}
                       </span>
                     </div>
                   {/if}
                 {/if}
+                {#if report.source === 'photodna' || typeof report.evidence.photodna === 'object'}
+                  <ReportExternal {report} canManage={can('reports.manage')} />
+                {/if}
                 <footer class="case-actions">
                   {#if can('reports.manage')}
                     <label
-                      ><span>Status</span><select bind:value={reportDrafts[report.id].status}
+                      ><span>{$t('ui_status_920e413c')}</span><select
+                        bind:value={reportDrafts[report.id].status}
                         >{#each reportStatuses as status (status)}<option value={status}
                             >{status.replaceAll('_', ' ')}</option
                           >{/each}</select
                       ></label
                     >
                     <label class="resolution-field"
-                      ><span>Internal resolution note</span><textarea
+                      ><span>{$t('ui_internal_resolution_note_188c05e1')}</span><textarea
                         bind:value={reportDrafts[report.id].resolution}
                         rows="2"
                         maxlength="2000"
-                        placeholder="Record what was reviewed and any action taken"
+                        placeholder={$t(
+                          'ui_record_what_was_reviewed_and_any_action_taken_8c5f30ce'
+                        )}
                       ></textarea></label
                     >
                     <button
@@ -1689,7 +1750,9 @@
                       class="primary-button"
                       disabled={busyAction === `report:${report.id}` || !reportChanged(report)}
                       onclick={() => void patchReport(report)}
-                      >{busyAction === `report:${report.id}` ? 'Saving…' : 'Save case'}</button
+                      >{busyAction === `report:${report.id}`
+                        ? $t('ui_saving_23e39291')
+                        : $t('ui_save_case_4309a079')}</button
                     >
                   {:else}
                     <span class="badge">{report.status.replaceAll('_', ' ')}</span>
@@ -1704,8 +1767,10 @@
           <div class="panel-intro">
             <Icon name="globe" size={22} />
             <p>
-              <strong>Silence</strong> stops inbound delivery and reports. <strong>Suspend</strong> also
-              disables shared replicas and outbound contact. Exact-domain rules are safest.
+              <strong>{$t('ui_silence_6c61fe49')}</strong>
+              {$t('ui_stops_inbound_delivery_and_reports_ab31e8e0')}
+              <strong>{$t('ui_suspend_4948e134')}</strong>
+              {$t('ui_also_disables_shared_replicas_and_outbound_co_2530539a')}
             </p>
           </div>
           {#if can('instances.manage')}
@@ -1717,40 +1782,42 @@
               }}
             >
               <label
-                ><span>Instance domain</span><input
+                ><span>{$t('ui_instance_domain_57b0b406')}</span><input
                   bind:value={blockDomain}
                   required
                   placeholder="instance.example"
                 /></label
               >
               <label
-                ><span>Policy</span><select bind:value={blockLevel}
-                  ><option value="silence">Silence</option><option value="suspend">Suspend</option
+                ><span>{$t('ui_policy_c611981f')}</span><select bind:value={blockLevel}
+                  ><option value="silence">{$t('ui_silence_6c61fe49')}</option><option
+                    value="suspend">{$t('ui_suspend_4948e134')}</option
                   ></select
                 ></label
               >
               <label class="reason-field"
-                ><span>Reason <small>(optional)</small></span><input
+                ><span>{$t('ui_reason_f81ab834')} <small>{$t('ui_optional_0059798b')}</small></span
+                ><input
                   bind:value={blockReason}
                   maxlength="500"
-                  placeholder="Internal reason for this policy"
+                  placeholder={$t('ui_internal_reason_for_this_policy_3560846e')}
                 /></label
               >
               <label class="checkbox-field"
                 ><input type="checkbox" bind:checked={blockSubdomains} /><span
-                  >Include subdomains</span
+                  >{$t('ui_include_subdomains_504d83dc')}</span
                 ></label
               >
               <button type="submit" class="primary-button" disabled={busyAction === 'block:add'}
-                >Apply policy</button
+                >{$t('ui_apply_policy_8c90340e')}</button
               >
             </form>
           {/if}
           {#if blocks.length === 0}
             <div class="empty-state">
               <Icon name="globe" size={28} />
-              <h3>No federation restrictions</h3>
-              <p>This instance currently accepts federation from every known peer.</p>
+              <h3>{$t('ui_no_federation_restrictions_59fcdb2c')}</h3>
+              <p>{$t('ui_this_instance_currently_accepts_federation_fr_1405134a')}</p>
             </div>
           {:else}
             <div class="data-list">
@@ -1759,9 +1826,10 @@
                   <div class="row-avatar"><Icon name="globe" size={20} /></div>
                   <div class="row-main">
                     <strong>{block.domain}</strong><small
-                      >{block.reason ?? 'No internal reason'}{block.include_subdomains
-                        ? ' · includes subdomains'
-                        : ' · exact domain only'}</small
+                      >{block.reason ??
+                        $t('ui_no_internal_reason_c9dd2a04')}{block.include_subdomains
+                        ? $t('ui_includes_subdomains_f36ef546')
+                        : $t('ui_exact_domain_only_ed4382ee')}</small
                     >
                   </div>
                   <span class="badge danger-badge">{block.level}</span>
@@ -1769,7 +1837,8 @@
                       type="button"
                       class="secondary-button"
                       disabled={busyAction === `block:${block.domain}`}
-                      onclick={() => void removeBlock(block.domain)}>Remove</button
+                      onclick={() => void removeBlock(block.domain)}
+                      >{$t('ui_remove_c3812fc4')}</button
                     >{/if}
                 </article>
               {/each}
@@ -1780,10 +1849,7 @@
         <section class="panel">
           <div class="panel-intro">
             <Icon name="key" size={22} />
-            <p>
-              Owner access is CLI-only. Owners may delegate fixed operational roles to local human
-              accounts; every change is written to the audit log.
-            </p>
+            <p>{$t('ui_owner_access_is_cli_only_owners_may_delegate__4ada0b95')}</p>
           </div>
           {#if me.roles.includes('owner')}
             <form
@@ -1794,29 +1860,29 @@
               }}
             >
               <label
-                ><span>Local user reference</span><input
+                ><span>{$t('ui_local_user_reference_b89270f9')}</span><input
                   bind:value={operatorRef}
                   required
                   placeholder="123456789@this.instance"
                 /></label
               >
               <label
-                ><span>Role</span><select bind:value={operatorRole}
+                ><span>{$t('ui_role_14736a2e')}</span><select bind:value={operatorRole}
                   >{#each roleOptions as role (role)}<option value={role}
                       >{role.replaceAll('_', ' ')}</option
                     >{/each}</select
                 ></label
               >
               <button type="submit" class="primary-button" disabled={busyAction === 'operator:add'}
-                >Grant role</button
+                >{$t('ui_grant_role_4549a77f')}</button
               >
             </form>
           {/if}
           {#if operators.length === 0}
             <div class="empty-state">
               <Icon name="key" size={28} />
-              <h3>No active operator grants</h3>
-              <p>Grant a scoped role to a local user, or use the CLI to create an owner.</p>
+              <h3>{$t('ui_no_active_operator_grants_f5063598')}</h3>
+              <p>{$t('ui_grant_a_scoped_role_to_a_local_user_or_use_th_42c4ba3c')}</p>
             </div>
           {:else}
             <div class="data-list">
@@ -1827,8 +1893,12 @@
                   </div>
                   <div class="row-main">
                     <strong>{operator.user.display_name ?? operator.user.username}</strong><small
-                      >@{operator.user.username} · {operator.user.id}@{operator.user.origin_domain} ·
-                      granted {new Date(operator.created_at).toLocaleDateString()}</small
+                      >{$t('ui_value0_value1_value2_granted_value3_0d225df8', {
+                        value0: String(operator.user.username),
+                        value1: String(operator.user.id),
+                        value2: String(operator.user.origin_domain),
+                        value3: String(new Date(operator.created_at).toLocaleDateString())
+                      })}</small
                     >
                   </div>
                   <span class="badge">{operator.role.replaceAll('_', ' ')}</span>
@@ -1836,7 +1906,8 @@
                       type="button"
                       class="secondary-button"
                       disabled={busyAction === `operator:${operator.id}`}
-                      onclick={() => void removeOperator(operator)}>Revoke</button
+                      onclick={() => void removeOperator(operator)}
+                      >{$t('ui_revoke_87e6d00b')}</button
                     >{/if}
                 </article>
               {/each}
@@ -1848,10 +1919,8 @@
           {#if audits.length === 0}
             <div class="empty-state">
               <Icon name="clock" size={28} />
-              <h3>No audit events</h3>
-              <p>
-                Administrative changes will appear here with their actor, target, and safe metadata.
-              </p>
+              <h3>{$t('ui_no_audit_events_2c223793')}</h3>
+              <p>{$t('ui_administrative_changes_will_appear_here_with__27085372')}</p>
             </div>
           {:else}
             <div class="audit-list">
@@ -1866,7 +1935,7 @@
                     >
                     <p>{event.target_type}: <code>{event.target_ref}</code></p>
                     {#if Object.keys(event.metadata).length > 0}<details>
-                        <summary>Safe metadata</summary>
+                        <summary>{$t('ui_safe_metadata_1e07ac6f')}</summary>
                         <pre>{JSON.stringify(event.metadata, null, 2)}</pre>
                       </details>{/if}
                   </div>

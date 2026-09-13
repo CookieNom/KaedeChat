@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import {
     listUserApplicationInstallations,
@@ -24,7 +26,10 @@
       .then((items) => (installations = items))
       .catch((caught) => {
         if (!controller.signal.aborted) {
-          error = userErrorMessage(caught, 'Could not load your authorized apps. Try again.');
+          error = userErrorMessage(
+            caught,
+            $t('ui_could_not_load_your_authorized_apps_try_again_761f15e7')
+          );
         }
       })
       .finally(() => {
@@ -49,7 +54,7 @@
         : [...installation.contexts, context]
       : installation.contexts.filter((item) => item !== context);
     if (!contexts.length) {
-      error = 'Keep at least one command context enabled, or revoke the app instead.';
+      error = $t('ui_keep_at_least_one_command_context_enabled_or__832cf59f');
       return;
     }
     busyId = installation.id;
@@ -60,7 +65,10 @@
       installations = installations.map((item) => (item.id === updated.id ? updated : item));
       notice = `${installation.application_name} access updated.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update that app’s command access. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_update_that_app_s_command_access_tr_06d900d7')
+      );
     } finally {
       busyId = null;
     }
@@ -83,7 +91,7 @@
       installations = installations.filter((item) => item.id !== installation.id);
       notice = `${installation.application_name} was revoked.`;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not revoke that app. Try again.');
+      error = userErrorMessage(caught, $t('ui_could_not_revoke_that_app_try_again_1f2779e9'));
     } finally {
       busyId = null;
     }
@@ -93,8 +101,8 @@
 <section id="authorized-apps" class="authorized-apps">
   <header>
     <div>
-      <h2>Authorized apps</h2>
-      <p>Manage apps installed for your account and where their commands appear.</p>
+      <h2>{$t('ui_authorized_apps_c3ecd1b4')}</h2>
+      <p>{$t('ui_manage_apps_installed_for_your_account_and_wh_c1a417cb')}</p>
     </div>
   </header>
 
@@ -102,14 +110,15 @@
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
 
   <p class="install-guidance">
-    Install an app from its reviewed <strong>Add App</strong> invitation. Kaede will show the app’s supported
-    locations and requested access before you authorize it.
+    {$t('ui_install_an_app_from_its_reviewed_78e20714')}
+    <strong>{$t('ui_add_app_3de6a773')}</strong>
+    {$t('ui_invitation_kaede_will_show_the_app_s_supporte_333b24e8')}
   </p>
 
   {#if loading}
-    <p class="muted">Loading authorized apps…</p>
+    <p class="muted">{$t('ui_loading_authorized_apps_8e54fce1')}</p>
   {:else if installations.length === 0}
-    <p class="muted">You have not installed any apps for your account.</p>
+    <p class="muted">{$t('ui_you_have_not_installed_any_apps_for_your_acco_05df2fd5')}</p>
   {:else}
     <div class="installation-list">
       {#each installations as installation (installation.id)}
@@ -135,7 +144,9 @@
                 <strong>{installation.application_name}</strong>
                 {#if installation.status !== 'active'}
                   <small class="status-chip">
-                    {installation.status === 'suspended' ? 'Suspended · unavailable' : 'Revoked'}
+                    {installation.status === 'suspended'
+                      ? $t('ui_suspended_unavailable_e8a2540f')
+                      : $t('ui_revoked_f6f738d0')}
                   </small>
                 {/if}
               </span>
@@ -144,14 +155,14 @@
           </div>
           {#if unavailableReason}
             <p class="unavailable-explanation" role="status">
-              <strong>Commands unavailable</strong>
+              <strong>{$t('ui_commands_unavailable_bad5ded8')}</strong>
               <span>{unavailableReason}</span>
             </p>
           {/if}
           <fieldset
             disabled={busyId !== null || !userApplicationInstallationCanEditGrants(installation)}
           >
-            <legend>Show commands in</legend>
+            <legend>{$t('ui_show_commands_in_0b6f8011')}</legend>
             <label>
               <input
                 type="checkbox"
@@ -159,7 +170,7 @@
                 onchange={(event) =>
                   void toggleContext(installation, 'guild', event.currentTarget.checked)}
               />
-              Guild channels
+              {$t('ui_guild_channels_a51396a0')}
             </label>
             <label>
               <input
@@ -168,7 +179,7 @@
                 onchange={(event) =>
                   void toggleContext(installation, 'private_channel', event.currentTarget.checked)}
               />
-              Private conversations
+              {$t('ui_private_conversations_65f20ef7')}
             </label>
             <label>
               <input
@@ -177,7 +188,7 @@
                 onchange={(event) =>
                   void toggleContext(installation, 'bot_dm', event.currentTarget.checked)}
               />
-              Direct messages with bots
+              {$t('ui_direct_messages_with_bots_90dacb89')}
             </label>
           </fieldset>
           <footer>
@@ -188,7 +199,7 @@
               disabled={busyId !== null}
               onclick={() => void revoke(installation)}
             >
-              {busyId === installation.id ? 'Saving…' : 'Revoke'}
+              {busyId === installation.id ? $t('ui_saving_23e39291') : $t('ui_revoke_87e6d00b')}
             </button>
           </footer>
         </article>

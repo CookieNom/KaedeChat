@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { onDestroy } from 'svelte';
   import ImageUploadField from './ImageUploadField.svelte';
   import Icon from './Icon.svelte';
@@ -107,7 +109,10 @@
       emojis = loadedEmojis;
     } catch (caught) {
       if (requestIsCurrent(applicationRef, signal, generation)) {
-        error = userErrorMessage(caught, 'Could not load application assets and emoji.');
+        error = userErrorMessage(
+          caught,
+          $t('ui_could_not_load_application_assets_and_emoji_3a322467')
+        );
       }
     } finally {
       if (requestIsCurrent(applicationRef, signal, generation)) loading = false;
@@ -137,9 +142,9 @@
 
   function validateImage(file: File): void {
     if (!acceptedTypes.has(file.type)) {
-      throw new Error('Choose a PNG, JPEG, GIF, or WebP image.');
+      throw new Error($t('ui_choose_a_png_jpeg_gif_or_webp_image_4cef2205'));
     }
-    if (!file.size) throw new Error('The selected image is empty.');
+    if (!file.size) throw new Error($t('ui_the_selected_image_is_empty_9b8e6cb1'));
   }
 
   function updateProfile(asset: ApplicationAsset, removed = false): void {
@@ -235,7 +240,7 @@
       notice = `${created.name} saved. No need to save app settings again.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
-        error = userErrorMessage(caught, 'Could not create the application asset.');
+        error = userErrorMessage(caught, $t('ui_could_not_create_the_application_asset_266c3598'));
       }
     } finally {
       if (operationIsCurrent(applicationRef, signal) && busy === 'asset-create') {
@@ -260,7 +265,7 @@
     try {
       validateImage(file);
       if (!/^[A-Za-z0-9_]{2,32}$/.test(targetName)) {
-        throw new Error('Emoji names use 2–32 letters, numbers, or underscores.');
+        throw new Error($t('ui_emoji_names_use_2_32_letters_numbers_or_under_d0100112'));
       }
       const ticket = await api<UploadTicket>(`/applications/${targetRef}/emojis/tickets`, {
         method: 'POST',
@@ -300,7 +305,7 @@
       notice = `:${created.name}: is ready.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
-        error = userErrorMessage(caught, 'Could not create the application emoji.');
+        error = userErrorMessage(caught, $t('ui_could_not_create_the_application_emoji_01e05b11'));
       }
     } finally {
       if (operationIsCurrent(applicationRef, signal) && busy === 'emoji-create') {
@@ -332,7 +337,7 @@
       notice = `${updated.name} was updated.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
-        error = userErrorMessage(caught, 'Could not update the application asset.');
+        error = userErrorMessage(caught, $t('ui_could_not_update_the_application_asset_8781a9c1'));
         busy = '';
         await reload(applicationRef);
       }
@@ -357,7 +362,7 @@
       notice = `${asset.name} was deleted.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
-        error = userErrorMessage(caught, 'Could not delete the application asset.');
+        error = userErrorMessage(caught, $t('ui_could_not_delete_the_application_asset_49766c4f'));
       }
     } finally {
       if (operationIsCurrent(applicationRef, signal) && busy === operation) busy = '';
@@ -384,7 +389,7 @@
       notice = `:${updated.name}: was updated.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
-        error = userErrorMessage(caught, 'Could not update the application emoji.');
+        error = userErrorMessage(caught, $t('ui_could_not_update_the_application_emoji_96d119d1'));
         busy = '';
         await reload(applicationRef);
       }
@@ -408,7 +413,7 @@
       notice = `:${emoji.name}: was deleted.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
-        error = userErrorMessage(caught, 'Could not delete the application emoji.');
+        error = userErrorMessage(caught, $t('ui_could_not_delete_the_application_emoji_d6eabef9'));
       }
     } finally {
       if (operationIsCurrent(applicationRef, signal) && busy === operation) busy = '';
@@ -436,10 +441,10 @@
 {#if notice}<div class="media-notice success" role="status">{notice}</div>{/if}
 
 {#if loading}
-  <p class="state">Loading application media…</p>
+  <p class="state">{$t('ui_loading_application_media_b98a26af')}</p>
 {:else}
   <div class="profile-images">
-    {#each [{ kind: 'icon' as const, label: 'Profile picture', hash: iconHash, hint: 'A square image works best. This also becomes your app icon.' }, { kind: 'cover' as const, label: 'Profile banner', hash: bannerHash, hint: 'A wide image works best. This also becomes your directory cover.' }] as image (image.kind)}
+    {#each [{ kind: 'icon' as const, label: $t('ui_profile_picture_a7acc4eb'), hash: iconHash, hint: $t('ui_a_square_image_works_best_this_also_becomes_y_6740dd7e') }, { kind: 'cover' as const, label: $t('ui_profile_banner_82d4157c'), hash: bannerHash, hint: $t('ui_a_wide_image_works_best_this_also_becomes_you_d511f8a0') }] as image (image.kind)}
       {@const currentAsset = assets.find(
         (asset) => asset.kind === image.kind && asset.media_hash === image.hash
       )}
@@ -454,7 +459,7 @@
               aria-label={`No ${image.label.toLowerCase()} yet`}
             >
               <Icon name={image.kind === 'icon' ? 'user' : 'image'} size={36} />
-              {#if image.kind === 'cover'}<span>No banner yet</span>{/if}
+              {#if image.kind === 'cover'}<span>{$t('ui_no_banner_yet_69b792b3')}</span>{/if}
             </span>{/if}
         </div>
         <p>{image.hint}</p>
@@ -467,7 +472,10 @@
           {#if currentAsset}<button
               class="remove-image"
               disabled={Boolean(busy)}
-              onclick={() => deleteAsset(currentAsset)}>Remove {image.label.toLowerCase()}</button
+              onclick={() => deleteAsset(currentAsset)}
+              >{$t('ui_remove_value0_3028bf7d', {
+                value0: String(image.label.toLowerCase())
+              })}</button
             >{/if}
         </div>
       </div>
@@ -476,14 +484,14 @@
   <p class="state" role="status">
     {busy === 'asset-create'
       ? `Uploading image… ${uploadProgress}%`
-      : 'Images save automatically after upload.'}
+      : $t('ui_images_save_automatically_after_upload_0e897298')}
   </p>
   <details class="asset-library">
-    <summary>More assets and custom emoji</summary>
+    <summary>{$t('ui_more_assets_and_custom_emoji_2162eec1')}</summary>
     <div class="media-grid">
       <div>
-        <h3>Application assets</h3>
-        <p>Manage icons, covers, store art, achievements, and activity artwork.</p>
+        <h3>{$t('ui_application_assets_e62130d5')}</h3>
+        <p>{$t('ui_manage_icons_covers_store_art_achievements_an_0ccb1e56')}</p>
         <form
           class="create"
           onsubmit={(event) => {
@@ -492,7 +500,7 @@
           }}
         >
           <label
-            >Asset name<input
+            >{$t('ui_asset_name_8a6233dd')}<input
               bind:value={assetName}
               minlength="1"
               maxlength="100"
@@ -500,12 +508,12 @@
             /></label
           >
           <label
-            >Kind<select bind:value={assetKind}>
+            >{$t('ui_kind_f5387f9b')}<select bind:value={assetKind}>
               {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
             </select></label
           >
           <label
-            >Image<input
+            >{$t('ui_image_1aa4cb0b')}<input
               bind:this={assetInput}
               type="file"
               accept="image/png,image/jpeg,image/gif,image/webp"
@@ -514,7 +522,7 @@
             /></label
           >
           <button disabled={Boolean(busy) || !assetFile || !assetName.trim()}>
-            {busy === 'asset-create' ? `Uploading ${uploadProgress}%` : 'Add asset'}
+            {busy === 'asset-create' ? `Uploading ${uploadProgress}%` : $t('ui_add_asset_48f15767')}
           </button>
         </form>
         <div class="items">
@@ -522,9 +530,11 @@
             <article>
               <img src={assetUrl(asset.media_hash, 'thumbnail_512', mediaDomain)} alt="" />
               <div class="fields">
-                <label>Name<input bind:value={asset.name} maxlength="100" /></label>
                 <label
-                  >Kind<select bind:value={asset.kind}>
+                  >{$t('ui_name_dcd1d522')}<input bind:value={asset.name} maxlength="100" /></label
+                >
+                <label
+                  >{$t('ui_kind_f5387f9b')}<select bind:value={asset.kind}>
                     {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
                   </select></label
                 >
@@ -535,24 +545,26 @@
               <div class="actions">
                 <button
                   disabled={Boolean(busy) || !asset.name.trim()}
-                  onclick={() => saveAsset(asset)}>Save</button
+                  onclick={() => saveAsset(asset)}>{$t('ui_save_1509f561')}</button
                 >
                 <button class="danger" disabled={Boolean(busy)} onclick={() => deleteAsset(asset)}
-                  >Delete</button
+                  >{$t('ui_delete_e2d0a549')}</button
                 >
               </div>
             </article>
           {/each}
-          {#if !assets.length}<p class="state">No application assets yet.</p>{/if}
+          {#if !assets.length}<p class="state">
+              {$t('ui_no_application_assets_yet_16220926')}
+            </p>{/if}
         </div>
       </div>
 
       <div>
-        <h3>Application emoji</h3>
-        <p>Application emoji are portable and do not consume a guild’s emoji slots.</p>
+        <h3>{$t('ui_application_emoji_b353123d')}</h3>
+        <p>{$t('ui_application_emoji_are_portable_and_do_not_con_17da1315')}</p>
         <form class="create" onsubmit={createEmoji}>
           <label
-            >Emoji name<input
+            >{$t('ui_emoji_name_7d88502e')}<input
               bind:value={emojiName}
               minlength="2"
               maxlength="32"
@@ -561,7 +573,7 @@
             /></label
           >
           <label
-            >Image<input
+            >{$t('ui_image_1aa4cb0b')}<input
               bind:this={emojiInput}
               type="file"
               accept="image/png,image/jpeg,image/gif,image/webp"
@@ -570,7 +582,7 @@
             /></label
           >
           <button disabled={Boolean(busy) || !emojiFile || !emojiName.trim()}>
-            {busy === 'emoji-create' ? `Uploading ${uploadProgress}%` : 'Add emoji'}
+            {busy === 'emoji-create' ? `Uploading ${uploadProgress}%` : $t('ui_add_emoji_d8506d01')}
           </button>
         </form>
         <div class="items">
@@ -578,24 +590,30 @@
             <article>
               <img src={assetUrl(emoji.media_hash, 'thumbnail_128', mediaDomain)} alt="" />
               <div class="fields">
-                <label>Name<input bind:value={emoji.name} minlength="2" maxlength="32" /></label>
+                <label
+                  >{$t('ui_name_dcd1d522')}<input
+                    bind:value={emoji.name}
+                    minlength="2"
+                    maxlength="32"
+                  /></label
+                >
                 <small
-                  >{emoji.animated ? 'Animated' : 'Static'} ·
-                  {emoji.available ? 'Available' : 'Unavailable'} · v{emoji.version}</small
+                  >{emoji.animated ? $t('ui_animated_d1d63279') : $t('ui_static_1d2c73dc')} ·
+                  {emoji.available ? $t('ui_available_e6744473') : $t('ui_unavailable_ca184496')} · v{emoji.version}</small
                 >
               </div>
               <div class="actions">
                 <button
                   disabled={Boolean(busy) || !emoji.name.trim()}
-                  onclick={() => saveEmoji(emoji)}>Save</button
+                  onclick={() => saveEmoji(emoji)}>{$t('ui_save_1509f561')}</button
                 >
                 <button class="danger" disabled={Boolean(busy)} onclick={() => deleteEmoji(emoji)}
-                  >Delete</button
+                  >{$t('ui_delete_e2d0a549')}</button
                 >
               </div>
             </article>
           {/each}
-          {#if !emojis.length}<p class="state">No application emoji yet.</p>{/if}
+          {#if !emojis.length}<p class="state">{$t('ui_no_application_emoji_yet_5453685f')}</p>{/if}
         </div>
       </div>
     </div>

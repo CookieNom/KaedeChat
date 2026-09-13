@@ -1,6 +1,6 @@
 import 'dart:io';
-
 import 'package:flutter/material.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 bool isAttachmentSpoiler(String filename) => filename.startsWith('SPOILER_');
 
@@ -41,14 +41,15 @@ Future<bool?> showAttachmentSpoilerEditor(
             ),
           Text(filename, maxLines: 2, overflow: TextOverflow.ellipsis),
           SwitchListTile(
-            title: const Text('Mark as spoiler'),
-            subtitle: const Text('Others must tap to reveal this attachment.'),
+            title: Text(L10n.of(context).ui_mark_as_spoiler_ed256e32),
+            subtitle: Text(L10n.of(context)
+                .ui_others_must_tap_to_reveal_this_attachment_45975bcd),
             value: spoiler,
             onChanged: (value) => setState(() => spoiler = value),
           ),
           FilledButton(
               onPressed: () => Navigator.pop(context, spoiler),
-              child: const Text('Done')),
+              child: Text(L10n.of(context).ui_done_8dd31791)),
         ]),
       ),
     ),
@@ -88,8 +89,9 @@ class _AttachmentSpoilerState extends State<AttachmentSpoiler> {
       child: FilledButton.tonal(
         onPressed: () => setState(() => _revealed = token),
         child: Semantics(
-            label: 'Reveal spoiler attachment',
-            child: const ExcludeSemantics(child: Text('SPOILER'))),
+            label: L10n.of(context).ui_reveal_spoiler_attachment_965a0ac3,
+            child: ExcludeSemantics(
+                child: Text(L10n.of(context).ui_spoiler_ea48d139))),
       ),
     );
   }

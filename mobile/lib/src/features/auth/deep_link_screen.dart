@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -11,6 +10,7 @@ import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/permission_selection.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -214,12 +214,13 @@ final class _DeepLinkActionScreenState
     if (_running) return;
     if (widget.link.kind == MobileLinkKind.resetPassword) {
       if (_password.text.length < 10) {
-        setState(() => _error =
-            UserInputException('Use a password with at least 10 characters.'));
+        setState(() => _error = UserInputException(L10n.of(context)
+            .ui_use_a_password_with_at_least_10_characters_e92a08df));
         return;
       }
       if (_password.text != _confirmation.text) {
-        setState(() => _error = UserInputException('Passwords do not match.'));
+        setState(() => _error = UserInputException(
+            L10n.of(context).ui_passwords_do_not_match_fd207588));
         return;
       }
     }
@@ -326,14 +327,17 @@ final class _DeepLinkActionScreenState
                       TextField(
                         controller: _password,
                         obscureText: true,
-                        decoration: InputDecoration(labelText: 'New password'),
+                        decoration: InputDecoration(
+                            labelText:
+                                L10n.of(context).ui_new_password_6a3aaab2),
                       ),
                       SizedBox(height: 12),
                       TextField(
                         controller: _confirmation,
                         obscureText: true,
-                        decoration:
-                            InputDecoration(labelText: 'Confirm password'),
+                        decoration: InputDecoration(
+                            labelText:
+                                L10n.of(context).ui_confirm_password_5ad9dc20),
                       ),
                     ],
                     if (_error case final error?) ...[
@@ -352,7 +356,7 @@ final class _DeepLinkActionScreenState
                     if (_success != null)
                       FilledButton(
                         onPressed: () => context.go('/'),
-                        child: Text('Continue'),
+                        child: Text(L10n.of(context).ui_continue_ab43d664),
                       )
                     else
                       FilledButton(
@@ -369,11 +373,12 @@ final class _DeepLinkActionScreenState
                                     CircularProgressIndicator(strokeWidth: 2))
                             : Text(widget.link.kind ==
                                     MobileLinkKind.resetPassword
-                                ? 'Reset password'
+                                ? L10n.of(context).ui_reset_password_679a51e9
                                 : widget.link.kind == MobileLinkKind.invite &&
                                         _invitePreview != null
-                                    ? 'Accept invitation'
-                                    : 'Try again'),
+                                    ? L10n.of(context)
+                                        .ui_accept_invitation_968c52bc
+                                    : L10n.of(context).ui_try_again_213e90fa),
                       ),
                   ],
                 ),
@@ -406,7 +411,8 @@ final class _DeepLinkActionScreenState
 String qualifiedInviteCode(MobileDeepLink link, Domain? home) {
   final code = link.code;
   if (link.kind != MobileLinkKind.invite || code == null || code.isEmpty) {
-    throw ArgumentError('A guild invite link with a code is required.');
+    throw ArgumentError(
+        L10n.current.ui_a_guild_invite_link_with_a_code_is_required_588ca9dd);
   }
   if (code.contains('@') || home == null || home == link.instance) return code;
   return '$code@${link.instance.value}';
@@ -561,7 +567,8 @@ final class _ApplicationInstallDeepLinkScreenState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'This application invitation is unavailable',
+              summary: L10n.of(context)
+                  .ui_this_application_invitation_is_unavailable_6876cc30,
             ));
       }
     } finally {
@@ -578,7 +585,8 @@ final class _ApplicationInstallDeepLinkScreenState
       if (_botDms) 'bot_dm',
     ];
     if (contexts.isEmpty) {
-      setState(() => _error = 'Choose at least one place for this app.');
+      setState(() => _error =
+          L10n.of(context).ui_choose_at_least_one_place_for_this_app_cc13afa3);
       return;
     }
     setState(() {
@@ -596,7 +604,8 @@ final class _ApplicationInstallDeepLinkScreenState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not authorize this app for your account',
+              summary: L10n.of(context)
+                  .ui_could_not_authorize_this_app_for_your_account_aaa20c98,
             ));
       }
     } finally {
@@ -625,7 +634,8 @@ final class _ApplicationInstallDeepLinkScreenState
       if (mounted) {
         setState(() => _error = userFacingError(
               error,
-              summary: 'Could not add this app to the server',
+              summary: L10n.of(context)
+                  .ui_could_not_add_this_app_to_the_server_e6821d4e,
             ));
       }
     } finally {
@@ -637,7 +647,7 @@ final class _ApplicationInstallDeepLinkScreenState
   Widget build(BuildContext context) {
     final invite = _invite;
     return Scaffold(
-      appBar: AppBar(title: Text('Add App')),
+      appBar: AppBar(title: Text(L10n.of(context).ui_add_app_57813d5f)),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -665,7 +675,7 @@ final class _ApplicationInstallDeepLinkScreenState
                             ),
                             SizedBox(height: 20),
                             if (invite.supportsGuildInstall) ...[
-                              Text('Add to a server',
+                              Text(L10n.of(context).ui_add_to_a_server_eca6de19,
                                   style: Theme.of(context)
                                       .textTheme
                                       .titleMedium
@@ -677,7 +687,8 @@ final class _ApplicationInstallDeepLinkScreenState
                                 DropdownButtonFormField<String>(
                                   initialValue: _selectedGuild,
                                   decoration: InputDecoration(
-                                    labelText: 'Server',
+                                    labelText:
+                                        L10n.of(context).ui_server_6d7302f2,
                                   ),
                                   items: [
                                     for (final guild in _availableGuilds)
@@ -695,7 +706,8 @@ final class _ApplicationInstallDeepLinkScreenState
                                   Padding(
                                     padding: EdgeInsets.only(top: 8),
                                     child: Text(
-                                      'You need Manage Server in a server to add this app.',
+                                      L10n.of(context)
+                                          .ui_you_need_manage_server_in_a_server_to_add_thi_42ac4a66,
                                       style:
                                           TextStyle(color: context.kaede.muted),
                                     ),
@@ -714,8 +726,9 @@ final class _ApplicationInstallDeepLinkScreenState
                                         )
                                       : Icon(Icons.add_to_photos_outlined),
                                   label: Text(_guildSaving
-                                      ? 'Adding…'
-                                      : 'Authorize and add app'),
+                                      ? L10n.of(context).ui_adding_2060c750
+                                      : L10n.of(context)
+                                          .ui_authorize_and_add_app_c6da0429),
                                 ),
                               ],
                               SizedBox(height: 20),
@@ -723,21 +736,25 @@ final class _ApplicationInstallDeepLinkScreenState
                             if (invite.supportsUserInstall && _installed)
                               _ApplicationInstalledNotice(invite: invite)
                             else if (invite.supportsUserInstall) ...[
-                              Text('Install for your account',
+                              Text(
+                                  L10n.of(context)
+                                      .ui_install_for_your_account_d367e7f9,
                                   style: Theme.of(context)
                                       .textTheme
                                       .titleMedium
                                       ?.copyWith(fontWeight: FontWeight.w800)),
                               SizedBox(height: 6),
                               Text(
-                                'The app receives only command interactions you explicitly start. It does not become a guild member.',
+                                L10n.of(context)
+                                    .ui_the_app_receives_only_command_interactions_yo_f341864d,
                                 style: TextStyle(color: context.kaede.muted),
                               ),
                               if (invite.userInstallContexts.contains('guild'))
                                 CheckboxListTile(
                                   contentPadding: EdgeInsets.zero,
                                   value: _guilds,
-                                  title: Text('Guild channels'),
+                                  title: Text(L10n.of(context)
+                                      .ui_guild_channels_fcb4d8c8),
                                   onChanged: _saving
                                       ? null
                                       : (value) => setState(
@@ -748,7 +765,8 @@ final class _ApplicationInstallDeepLinkScreenState
                                 CheckboxListTile(
                                   contentPadding: EdgeInsets.zero,
                                   value: _privateChannels,
-                                  title: Text('Private conversations'),
+                                  title: Text(L10n.of(context)
+                                      .ui_private_conversations_0de4d400),
                                   onChanged: _saving
                                       ? null
                                       : (value) => setState(() =>
@@ -758,7 +776,8 @@ final class _ApplicationInstallDeepLinkScreenState
                                 CheckboxListTile(
                                   contentPadding: EdgeInsets.zero,
                                   value: _botDms,
-                                  title: Text('Direct messages with bots'),
+                                  title: Text(L10n.of(context)
+                                      .ui_direct_messages_with_bots_f733fcd2),
                                   onChanged: _saving
                                       ? null
                                       : (value) => setState(
@@ -775,8 +794,9 @@ final class _ApplicationInstallDeepLinkScreenState
                                       )
                                     : Icon(Icons.verified_user_outlined),
                                 label: Text(_saving
-                                    ? 'Authorizing…'
-                                    : 'Authorize for my account'),
+                                    ? L10n.of(context).ui_authorizing_14b71d35
+                                    : L10n.of(context)
+                                        .ui_authorize_for_my_account_b07cd520),
                               ),
                             ],
                             SizedBox(height: 20),
@@ -793,7 +813,8 @@ final class _ApplicationInstallDeepLinkScreenState
                             SizedBox(height: 18),
                             OutlinedButton(
                               onPressed: () => context.go('/'),
-                              child: Text('Back to Kaede'),
+                              child: Text(
+                                  L10n.of(context).ui_back_to_kaede_e4c68b03),
                             ),
                           ],
                         ),
@@ -821,7 +842,7 @@ final class _ApplicationInviteError extends StatelessWidget {
           SizedBox(height: 16),
           FilledButton(
             onPressed: () => unawaited(onRetry()),
-            child: Text('Try again'),
+            child: Text(L10n.of(context).ui_try_again_213e90fa),
           ),
         ],
       );
@@ -852,7 +873,7 @@ final class _ApplicationInviteHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('APP AUTHORIZATION',
+                Text(L10n.of(context).ui_app_authorization_748f85d5,
                     style: TextStyle(
                       color: context.kaede.muted,
                       fontSize: 10,
@@ -892,12 +913,14 @@ final class _ApplicationInstalledNotice extends StatelessWidget {
               Icon(Icons.check_circle_outline_rounded,
                   color: context.kaede.mint),
               SizedBox(width: 8),
-              Text('Authorized for your account',
+              Text(L10n.of(context).ui_authorized_for_your_account_33a340ad,
                   style: TextStyle(fontWeight: FontWeight.w800)),
             ]),
             SizedBox(height: 6),
             Text(
-              '${invite.applicationName} can now offer commands in the contexts you selected. Manage or revoke it under Settings → Authorized apps.',
+              L10n.of(context)
+                  .ui_value0_can_now_offer_commands_in_the_contexts_2fa598df(
+                      (invite.applicationName).toString()),
               style: TextStyle(color: context.kaede.textSoft),
             ),
           ],
@@ -920,7 +943,7 @@ final class _GuildApplicationInstalledNotice extends StatelessWidget {
           Icon(Icons.check_circle_outline_rounded, color: context.kaede.mint),
           SizedBox(width: 8),
           Expanded(
-            child: Text('App added to the server',
+            child: Text(L10n.of(context).ui_app_added_to_the_server_06ec620f,
                 style: TextStyle(fontWeight: FontWeight.w800)),
           ),
         ]),
@@ -943,13 +966,13 @@ final class _ApplicationInviteAccess extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Access review',
+            Text(L10n.of(context).ui_access_review_451257ad,
                 style: TextStyle(fontWeight: FontWeight.w800)),
             SizedBox(height: 7),
             Text(
               invite.supportsUserInstall
-                  ? 'Account installation requests:'
-                  : 'Server installation requests:',
+                  ? L10n.of(context).ui_account_installation_requests_159bac48
+                  : L10n.of(context).ui_server_installation_requests_588f5c6a,
               style: TextStyle(color: context.kaede.muted),
             ),
             SizedBox(height: 8),
@@ -962,7 +985,9 @@ final class _ApplicationInviteAccess extends StatelessWidget {
                     : invite.scopes)
                   Chip(label: Text(scope)),
                 if (invite.supportsUserInstall)
-                  Chip(label: Text('interactions intent')),
+                  Chip(
+                      label: Text(
+                          L10n.of(context).ui_interactions_intent_bdae144e)),
               ],
             ),
             if (invite.supportsUserInstall &&
@@ -970,7 +995,8 @@ final class _ApplicationInviteAccess extends StatelessWidget {
                 (invite.scopes.isNotEmpty || invite.intents.isNotEmpty)) ...[
               SizedBox(height: 12),
               Text(
-                'Guild-install template (not granted by personal authorization):',
+                L10n.of(context)
+                    .ui_guild_install_template_not_granted_by_persona_b99ca78f,
                 style: TextStyle(color: context.kaede.muted, fontSize: 12),
               ),
               SizedBox(height: 6),
@@ -980,7 +1006,9 @@ final class _ApplicationInviteAccess extends StatelessWidget {
                 children: [
                   for (final scope in invite.scopes) Chip(label: Text(scope)),
                   for (final intent in invite.intents)
-                    Chip(label: Text('$intent intent')),
+                    Chip(
+                        label: Text(L10n.of(context)
+                            .ui_value0_intent_955fc082((intent).toString()))),
                 ],
               ),
             ],
@@ -990,7 +1018,8 @@ final class _ApplicationInviteAccess extends StatelessWidget {
             ],
             SizedBox(height: 12),
             Text(
-              'Opening this link never grants encrypted-room access automatically. A server administrator must admit a participant-mode app to each encrypted server channel; every person in an encrypted private conversation must consent there. App interactions stay unavailable until its verified devices are admitted and the room is rekeyed.',
+              L10n.of(context)
+                  .ui_opening_this_link_never_grants_encrypted_room_b05baaef,
               style: TextStyle(color: context.kaede.muted, fontSize: 12),
             ),
           ],
@@ -1010,13 +1039,13 @@ final class _ServerPermissionSummary extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Server permissions:',
+          L10n.of(context).ui_server_permissions_19d984ac,
           style: TextStyle(color: context.kaede.muted),
         ),
         SizedBox(height: 6),
         if (permissions.isEmpty)
           Text(
-            'No server permissions requested.',
+            L10n.of(context).ui_no_server_permissions_requested_3b5377f5,
             style: TextStyle(color: context.kaede.muted, fontSize: 12),
           )
         else

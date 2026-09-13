@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { isAttachmentSpoiler } from '$lib/media/spoilers';
   import AttachmentUploadEditor from './AttachmentUploadEditor.svelte';
   import type { PendingUpload } from '$lib/media/uploads';
@@ -26,7 +28,7 @@
   }
 </script>
 
-<div class="upload-preview-tray" aria-label="Message attachments">
+<div class="upload-preview-tray" aria-label={$t('ui_message_attachments_724df319')}>
   {#each uploads as upload (upload.key)}
     <article class:failed={upload.status === 'failed'} class="upload-preview-card">
       <button
@@ -41,7 +43,7 @@
         type="button"
         class="upload-preview-remove"
         aria-label={`Remove ${upload.file.name}`}
-        title="Remove attachment"
+        title={$t('ui_remove_attachment_595b066a')}
         onclick={() => onRemove(upload.key)}>×</button
       >
       <div class="upload-preview-copy">
@@ -51,7 +53,9 @@
             disabled={disabled || upload.updating}
             aria-pressed={isAttachmentSpoiler(upload.file.name)}
             onclick={() => onSpoiler?.(upload.key, !isAttachmentSpoiler(upload.file.name))}
-            >{isAttachmentSpoiler(upload.file.name) ? 'Spoiler ✓' : 'Mark as spoiler'}</button
+            >{isAttachmentSpoiler(upload.file.name)
+              ? $t('ui_spoiler_32ab9e45')
+              : $t('ui_mark_as_spoiler_a954e083')}</button
           >
         {/if}
         <strong title={upload.file.name}>{upload.file.name}</strong>

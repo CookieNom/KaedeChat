@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -13,6 +12,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 /// Native entry point for the subset of the Developer Portal concerned with
@@ -61,7 +61,8 @@ final class _ApplicationMediaScreenState
       setState(() {
         _error = userFacingError(
           error,
-          summary: 'Could not load your developer applications',
+          summary: L10n.of(context)
+              .ui_could_not_load_your_developer_applications_adbee2a5,
         );
         _loading = false;
       });
@@ -73,7 +74,7 @@ final class _ApplicationMediaScreenState
         backgroundColor: settingsSurface(context),
         appBar: AppBar(
           backgroundColor: settingsSurface(context),
-          title: Text('Application media'),
+          title: Text(L10n.of(context).ui_application_media_4fb1e2c1),
         ),
         body: SafeArea(
           child: RefreshIndicator(
@@ -84,28 +85,30 @@ final class _ApplicationMediaScreenState
               padding: EdgeInsets.fromLTRB(16, 0, 16, 36),
               children: [
                 SettingsSectionHeader(
-                  'Developer applications',
-                  subheading:
-                      'Choose an application you own personally or through a developer team.',
+                  L10n.of(context).ui_developer_applications_60f5fe14,
+                  subheading: L10n.of(context)
+                      .ui_choose_an_application_you_own_personally_or_t_639131ab,
                 ),
                 if (_loading)
-                  const _MediaState(
+                  _MediaState(
                     icon: Icons.hourglass_top_rounded,
-                    title: 'Loading applications…',
+                    title: L10n.of(context).ui_loading_applications_d3fed322,
                     progress: true,
                   )
                 else if (_error case final message?)
                   _MediaState(
                     icon: Icons.cloud_off_rounded,
-                    title: 'Applications are unavailable',
+                    title: L10n.of(context)
+                        .ui_applications_are_unavailable_201549ba,
                     detail: message,
                     actionLabel: 'Try again',
                     onAction: _load,
                   )
                 else if (_applications.isEmpty)
-                  const _MediaState(
+                  _MediaState(
                     icon: Icons.developer_board_outlined,
-                    title: 'No developer applications',
+                    title:
+                        L10n.of(context).ui_no_developer_applications_d4b57be7,
                     detail:
                         'Create an application in the Web or Desktop Developer Portal, or ask a team owner to add you. It will then appear here.',
                   )
@@ -199,10 +202,12 @@ final class _ApplicationMediaManagerScreenState
       setState(() {
         _permissionDenied = error is KaedeException && error.status == 403;
         _error = _permissionDenied
-            ? 'You can view this team application, but only team owners, administrators, and developers can manage its media.'
+            ? L10n.of(context)
+                .ui_you_can_view_this_team_application_but_only_t_0e075835
             : userFacingError(
                 error,
-                summary: 'Could not load application media',
+                summary: L10n.of(context)
+                    .ui_could_not_load_application_media_beaf697f,
               );
         _loading = false;
       });
@@ -232,7 +237,7 @@ final class _ApplicationMediaManagerScreenState
     if (selected.path == null || validation != null) {
       _showError(
         selected.path == null
-            ? 'Choose an image stored on this device.'
+            ? L10n.of(context).ui_choose_an_image_stored_on_this_device_8ae19cfa
             : validation!,
       );
       return null;
@@ -250,7 +255,7 @@ final class _ApplicationMediaManagerScreenState
     if (image == null || !mounted) return;
     final draft = await showApplicationAssetEditor(
       context,
-      title: 'Add application asset',
+      title: L10n.of(context).ui_add_application_asset_8aca62f2,
       action: 'Upload asset',
       initial: ApplicationAssetDraft(
         name: _basename(image.filename),
@@ -277,12 +282,14 @@ final class _ApplicationMediaManagerScreenState
       setState(() {
         _assets = [..._assets.where((item) => item.id != asset.id), asset]
           ..sort(_compareAssets);
-        _notice = '${asset.name} is ready.';
+        _notice = L10n.of(context)
+            .ui_value0_is_ready_de500e77((asset.name).toString());
       });
     } on Object catch (error) {
       _showError(userFacingError(
         error,
-        summary: 'Could not create the application asset',
+        summary:
+            L10n.of(context).ui_could_not_create_the_application_asset_520a0b1c,
       ));
     } finally {
       if (mounted) {
@@ -300,7 +307,7 @@ final class _ApplicationMediaManagerScreenState
     if (image == null || !mounted) return;
     final draft = await showApplicationEmojiEditor(
       context,
-      title: 'Add application emoji',
+      title: L10n.of(context).ui_add_application_emoji_9b934d70,
       action: 'Upload emoji',
       initial: ApplicationEmojiDraft(name: _basename(image.filename)),
     );
@@ -324,12 +331,14 @@ final class _ApplicationMediaManagerScreenState
       setState(() {
         _emojis = [..._emojis.where((item) => item.id != emoji.id), emoji]
           ..sort((left, right) => left.name.compareTo(right.name));
-        _notice = ':${emoji.name}: is ready.';
+        _notice = L10n.of(context)
+            .ui_value0_is_ready_c2c993a1((emoji.name).toString());
       });
     } on Object catch (error) {
       _showError(userFacingError(
         error,
-        summary: 'Could not create the application emoji',
+        summary:
+            L10n.of(context).ui_could_not_create_the_application_emoji_10779392,
       ));
     } finally {
       if (mounted) {
@@ -345,7 +354,7 @@ final class _ApplicationMediaManagerScreenState
     if (_busy != null) return;
     final draft = await showApplicationAssetEditor(
       context,
-      title: 'Edit asset',
+      title: L10n.of(context).ui_edit_asset_5db3b1f5,
       action: 'Save changes',
       initial: ApplicationAssetDraft(name: asset.name, kind: asset.kind),
     );
@@ -366,12 +375,14 @@ final class _ApplicationMediaManagerScreenState
             .map((item) => item.id == updated.id ? updated : item)
             .toList()
           ..sort(_compareAssets);
-        _notice = '${updated.name} was updated.';
+        _notice = L10n.of(context)
+            .ui_value0_was_updated_b041a9a4((updated.name).toString());
       });
     } on Object catch (error) {
       _showError(userFacingError(
         error,
-        summary: 'Could not update the application asset',
+        summary:
+            L10n.of(context).ui_could_not_update_the_application_asset_74565491,
       ));
     } finally {
       if (mounted) setState(() => _busy = null);
@@ -382,7 +393,7 @@ final class _ApplicationMediaManagerScreenState
     if (_busy != null) return;
     final draft = await showApplicationEmojiEditor(
       context,
-      title: 'Edit emoji',
+      title: L10n.of(context).ui_edit_emoji_26aed3f7,
       action: 'Save changes',
       initial: ApplicationEmojiDraft(name: emoji.name),
     );
@@ -411,12 +422,14 @@ final class _ApplicationMediaManagerScreenState
             .map((item) => item.id == updated.id ? updated : item)
             .toList()
           ..sort((left, right) => left.name.compareTo(right.name));
-        _notice = ':${updated.name}: was updated.';
+        _notice = L10n.of(context)
+            .ui_value0_was_updated_5b2bb66a((updated.name).toString());
       });
     } on Object catch (error) {
       _showError(userFacingError(
         error,
-        summary: 'Could not update the application emoji',
+        summary:
+            L10n.of(context).ui_could_not_update_the_application_emoji_6679e91b,
       ));
     } finally {
       if (mounted) setState(() => _busy = null);
@@ -426,7 +439,8 @@ final class _ApplicationMediaManagerScreenState
   Future<void> _deleteAsset(ApplicationAsset asset) async {
     if (_busy != null ||
         !await _confirmDelete(
-          title: 'Delete ${asset.name}?',
+          title: L10n.of(context)
+              .ui_delete_value0_5861e774((asset.name).toString()),
           detail:
               'Existing references to this application asset will stop resolving.',
         )) {
@@ -441,12 +455,14 @@ final class _ApplicationMediaManagerScreenState
       if (!mounted) return;
       setState(() {
         _assets = _assets.where((item) => item.id != asset.id).toList();
-        _notice = '${asset.name} was deleted.';
+        _notice = L10n.of(context)
+            .ui_value0_was_deleted_328445d6((asset.name).toString());
       });
     } on Object catch (error) {
       _showError(userFacingError(
         error,
-        summary: 'Could not delete the application asset',
+        summary:
+            L10n.current.ui_could_not_delete_the_application_asset_118f826b,
       ));
     } finally {
       if (mounted) setState(() => _busy = null);
@@ -456,7 +472,8 @@ final class _ApplicationMediaManagerScreenState
   Future<void> _deleteEmoji(ApplicationEmoji emoji) async {
     if (_busy != null ||
         !await _confirmDelete(
-          title: 'Delete :${emoji.name}:?',
+          title: L10n.of(context)
+              .ui_delete_value0_4119b3f2((emoji.name).toString()),
           detail: 'Existing uses of this emoji may stop rendering.',
         )) {
       return;
@@ -470,12 +487,14 @@ final class _ApplicationMediaManagerScreenState
       if (!mounted) return;
       setState(() {
         _emojis = _emojis.where((item) => item.id != emoji.id).toList();
-        _notice = ':${emoji.name}: was deleted.';
+        _notice = L10n.of(context)
+            .ui_value0_was_deleted_1521827c((emoji.name).toString());
       });
     } on Object catch (error) {
       _showError(userFacingError(
         error,
-        summary: 'Could not delete the application emoji',
+        summary:
+            L10n.current.ui_could_not_delete_the_application_emoji_92b112ad,
       ));
     } finally {
       if (mounted) setState(() => _busy = null);
@@ -494,14 +513,14 @@ final class _ApplicationMediaManagerScreenState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
-              child: Text('Cancel'),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             FilledButton(
               key: Key('confirm-application-media-delete'),
               style:
                   FilledButton.styleFrom(backgroundColor: context.kaede.danger),
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: Text('Delete'),
+              child: Text(L10n.of(context).ui_delete_5797ea6a),
             ),
           ],
         ),
@@ -537,23 +556,23 @@ final class _ApplicationMediaManagerScreenState
 
   Widget _body() {
     if (_loading) {
-      return const _MediaState(
+      return _MediaState(
         icon: Icons.hourglass_top_rounded,
-        title: 'Loading application media…',
+        title: L10n.of(context).ui_loading_application_media_28210b97,
         progress: true,
       );
     }
     if (_permissionDenied) {
       return _MediaState(
         icon: Icons.lock_outline_rounded,
-        title: 'Media management is restricted',
+        title: L10n.of(context).ui_media_management_is_restricted_29120c37,
         detail: _error,
       );
     }
     if (_error != null && _assets.isEmpty && _emojis.isEmpty) {
       return _MediaState(
         icon: Icons.cloud_off_rounded,
-        title: 'Application media is unavailable',
+        title: L10n.of(context).ui_application_media_is_unavailable_0c03d789,
         detail: _error,
         actionLabel: 'Try again',
         onAction: _load,
@@ -586,16 +605,16 @@ final class _ApplicationMediaManagerScreenState
         padding: EdgeInsets.fromLTRB(16, 8, 16, 36),
         children: [
           SettingsRow(
-            title: 'Add asset',
-            subtitle:
-                'Icons, covers, store art, achievements, or activity art.',
+            title: L10n.of(context).ui_add_asset_5f71a334,
+            subtitle: L10n.of(context)
+                .ui_icons_covers_store_art_achievements_or_activi_c983e278,
             leading: Icon(Icons.add_photo_alternate_outlined),
             onTap: _busy == null ? _createAsset : null,
           ),
           if (_assets.isEmpty)
-            const _MediaState(
+            _MediaState(
               icon: Icons.image_not_supported_outlined,
-              title: 'No application assets yet',
+              title: L10n.of(context).ui_no_application_assets_yet_998c9d23,
               detail: 'Add an image to publish it with this application.',
               compact: true,
             )
@@ -606,8 +625,10 @@ final class _ApplicationMediaManagerScreenState
                 image:
                     _mediaImage(asset.mediaHash, asset.applicationRef.domain),
                 title: asset.name,
-                subtitle:
-                    '${asset.kind.label} · ${asset.dimensions} · v${asset.version}',
+                subtitle: L10n.of(context).ui_value0_value1_v_value2_fb7a7d2d(
+                    (asset.kind.label).toString(),
+                    (asset.dimensions).toString(),
+                    (asset.version).toString()),
                 busy: _busy == 'asset-${asset.id.value}',
                 onEdit: () => _editAsset(asset),
                 onDelete: () => _deleteAsset(asset),
@@ -620,15 +641,16 @@ final class _ApplicationMediaManagerScreenState
         padding: EdgeInsets.fromLTRB(16, 8, 16, 36),
         children: [
           SettingsRow(
-            title: 'Add emoji',
-            subtitle: 'PNG, JPEG, GIF, or WebP. Names follow :emoji_name:.',
+            title: L10n.of(context).ui_add_emoji_a3203c4a,
+            subtitle: L10n.of(context)
+                .ui_png_jpeg_gif_or_webp_names_follow_emoji_name_c44cdf60,
             leading: Icon(Icons.add_reaction_outlined),
             onTap: _busy == null ? _createEmoji : null,
           ),
           if (_emojis.isEmpty)
-            const _MediaState(
+            _MediaState(
               icon: Icons.emoji_emotions_outlined,
-              title: 'No application emoji yet',
+              title: L10n.of(context).ui_no_application_emoji_yet_c4a722cc,
               detail: 'Add an emoji for messages and interaction responses.',
               compact: true,
             )
@@ -638,13 +660,17 @@ final class _ApplicationMediaManagerScreenState
                 key: Key('application-emoji-${emoji.id.value}'),
                 image:
                     _mediaImage(emoji.mediaHash, emoji.applicationRef.domain),
-                title: ':${emoji.name}:',
-                subtitle:
-                    '${emoji.animated ? 'Animated' : 'Static'} · v${emoji.version}',
+                title: L10n.of(context)
+                    .ui_value0_2397634a((emoji.name).toString()),
+                subtitle: L10n.of(context).ui_value0_v_value1_7b65e035(
+                    (emoji.animated ? 'Animated' : 'Static').toString(),
+                    (emoji.version).toString()),
                 busy: _busy == 'emoji-${emoji.id.value}',
                 availability: Text(
                   key: Key('application-emoji-availability-${emoji.id.value}'),
-                  emoji.available ? 'Available' : 'Unavailable',
+                  emoji.available
+                      ? L10n.of(context).ui_available_72402638
+                      : L10n.of(context).ui_unavailable_da4baaa9,
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
                         color: emoji.available
                             ? context.kaede.mint
@@ -765,14 +791,15 @@ final class _ApplicationAssetEditorDialogState
                 autofocus: true,
                 maxLength: 100,
                 decoration: InputDecoration(
-                  labelText: 'Asset name',
+                  labelText: L10n.of(context).ui_asset_name_007d64fa,
                   errorText: _validation,
                 ),
               ),
               DropdownButtonFormField<ApplicationAssetKind>(
                 key: Key('application-asset-kind-field'),
                 initialValue: _kind,
-                decoration: InputDecoration(labelText: 'Asset kind'),
+                decoration: InputDecoration(
+                    labelText: L10n.of(context).ui_asset_kind_64cad39f),
                 items: [
                   for (final option in ApplicationAssetKind.values)
                     DropdownMenuItem(value: option, child: Text(option.label)),
@@ -787,7 +814,7 @@ final class _ApplicationAssetEditorDialogState
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             key: Key('save-application-asset'),
@@ -854,8 +881,9 @@ final class _ApplicationEmojiEditorDialogState
                 autofocus: true,
                 maxLength: 32,
                 decoration: InputDecoration(
-                  labelText: 'Emoji name',
-                  helperText: 'Letters, numbers, and underscores',
+                  labelText: L10n.of(context).ui_emoji_name_c9418744,
+                  helperText: L10n.of(context)
+                      .ui_letters_numbers_and_underscores_205abdd4,
                   errorText: _validation,
                 ),
               ),
@@ -865,7 +893,7 @@ final class _ApplicationEmojiEditorDialogState
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel'),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           FilledButton(
             key: Key('save-application-emoji'),
@@ -977,12 +1005,12 @@ final class _ApplicationMediaTile extends StatelessWidget {
             else ...[
               if (availability case final control?) control,
               IconButton(
-                tooltip: 'Edit',
+                tooltip: L10n.of(context).ui_edit_c2c76cb1,
                 onPressed: onEdit,
                 icon: Icon(Icons.edit_outlined),
               ),
               IconButton(
-                tooltip: 'Delete',
+                tooltip: L10n.of(context).ui_delete_5797ea6a,
                 color: context.kaede.danger,
                 onPressed: onDelete,
                 icon: Icon(Icons.delete_outline_rounded),

@@ -1782,6 +1782,92 @@ async def view_report_attachment(
     return response
 
 
+class ExternalReportSubmission(UnambiguousInputModel):
+    destination: str = Field(min_length=1, max_length=300)
+    reference: str = Field(min_length=1, max_length=300)
+    submitted_at: datetime
+    notes: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("destination", "reference")
+    @classmethod
+    def meaningful_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
+
+    @field_validator("submitted_at")
+    @classmethod
+    def submission_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value > datetime.now(UTC):
+            raise ValueError("must be a timezone-aware time in the past")
+        return value.astimezone(UTC)
+
+
+@router.get("/administration/reports/{report_id}/export")
+async def export_report(
+    report_id: int,
+    principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    response: Response,
+) -> dict[str, object]:
+    principal.require("reports.manage")
+    report = await session.get(AbuseReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    users = await report_identity_lookup(session, [report], settings.domain)
+    package: dict[str, object] = {
+        "schema": "kaede.safety-report.v1",
+        "exported_at": datetime.now(UTC).isoformat(),
+        "reporting_instance": settings.domain,
+        "exported_by": f"{principal.user.id}@{principal.user.origin_domain}",
+        "report": report_payload_with_lookup(report, users, settings.domain),
+        "notice": "Metadata export only. Exporting does not submit a report to any authority. "
+        "Remote identities are assertions of the originating instance. "
+        "Unavailable information is not proof that it does not exist at the origin.",
+    }
+    await audit(session, snowflake, principal, "admin.report.export", "report", str(report.id))
+    await session.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return package
+
+
+@router.post("/administration/reports/{report_id}/external-submissions")
+async def record_external_submission(
+    report_id: int,
+    payload: ExternalReportSubmission,
+    principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+) -> dict[str, object]:
+    principal.require("reports.manage")
+    report = await session.get(AbuseReport, report_id, with_for_update=True)
+    if report is None:
+        raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    entry = {
+        **payload.model_dump(mode="json"),
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "recorded_by": f"{principal.user.id}@{principal.user.origin_domain}",
+    }
+    report.evidence = {
+        **report.evidence,
+        "external_submissions": [*report.evidence.get("external_submissions", []), entry],
+    }
+    await audit(
+        session,
+        snowflake,
+        principal,
+        "admin.report.external_submission",
+        "report",
+        str(report.id),
+        metadata=entry,
+    )
+    await session.commit()
+    await session.refresh(report)
+    return report_payload(report)
+
+
 @router.patch("/administration/reports/{report_id}")
 async def patch_report(
     report_id: int,

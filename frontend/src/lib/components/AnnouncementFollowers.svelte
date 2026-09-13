@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import {
     announcementTargets,
@@ -72,7 +74,7 @@
       if (signal.aborted || generation !== requestGeneration) return;
       error = userErrorMessage(
         caught,
-        'Could not load announcement followers. Check your connection and try again.'
+        $t('ui_could_not_load_announcement_followers_check_y_7eecb641')
       );
     } finally {
       if (generation === requestGeneration) loading = false;
@@ -107,11 +109,11 @@
       const created = await createAnnouncementFollow(sourceRef, targetRef);
       follows = [...follows.filter((follow) => follow.ref !== created.ref), created];
       selectedTarget = '';
-      notice = 'New announcement posts can now be published to that channel.';
+      notice = $t('ui_new_announcement_posts_can_now_be_published_t_31eedf98');
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not follow this announcement channel. You need Manage Webhooks in the destination.'
+        $t('ui_could_not_follow_this_announcement_channel_yo_0ae2a661')
       );
     } finally {
       busyFollowId = null;
@@ -132,7 +134,7 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        'Could not remove this follower. You need Manage Webhooks in the destination.'
+        $t('ui_could_not_remove_this_follower_you_need_manag_ed645a81')
       );
     } finally {
       busyFollowId = null;
@@ -148,13 +150,17 @@
   <div class="announcement-heading">
     <span class="announcement-icon" aria-hidden="true"><Icon name="bell" size={18} /></span>
     <div>
-      <span>{mode === 'create' ? 'Follow announcement channel' : 'Announcement distribution'}</span>
+      <span
+        >{mode === 'create'
+          ? $t('ui_follow_announcement_channel_d4bae827')
+          : $t('ui_announcement_distribution_21b34f29')}</span
+      >
       <h4 id="announcement-followers-title">
         {mode === 'create' ? `Follow #${sourceChannel.name ?? 'announcements'}` : manageTitle}
       </h4>
       <p>
         {mode === 'create'
-          ? 'Choose a text channel where you can manage webhooks. Published posts will appear there.'
+          ? $t('ui_choose_a_text_channel_where_you_can_manage_we_464e5673')
           : manageDescription}
       </p>
     </div>
@@ -163,7 +169,7 @@
   {#if !canRead}
     <div class="announcement-state locked" role="note">
       <Icon name="lock" size={18} />
-      <span>You need View Channel and Read Message History to view announcement followers.</span>
+      <span>{$t('ui_you_need_view_channel_and_read_message_histor_b0b502f3')}</span>
     </div>
   {:else}
     <form
@@ -174,42 +180,43 @@
       }}
     >
       <label>
-        <span>Publish into</span>
+        <span>{$t('ui_publish_into_e49d1bfc')}</span>
         <select
           bind:value={selectedTarget}
           disabled={Boolean(busyFollowId) || loading || availableTargets.length === 0}
           aria-describedby="announcement-target-help"
         >
-          <option value="">Choose a destination</option>
+          <option value="">{$t('ui_choose_a_destination_ee63978f')}</option>
           {#each availableTargets as target (target.ref)}
             <option value={target.ref}>{target.label}</option>
           {/each}
         </select>
       </label>
       <button class="primary-button" disabled={Boolean(busyFollowId) || loading || !selectedTarget}>
-        {busyFollowId === 'create' ? 'Following…' : 'Follow'}
+        {busyFollowId === 'create' ? $t('ui_following_408ac0c4') : $t('ui_follow_641d1ef6')}
       </button>
     </form>
     <p id="announcement-target-help" class="help-copy">
-      {#if targets.length === 0}
-        No eligible destinations are available. You need Manage Webhooks in a plaintext text
-        channel.
-      {:else if availableTargets.length === 0}
-        Every eligible destination already follows this channel.
-      {:else}
-        Publishing is deliberate: ordinary messages are not copied until you choose Publish.
-      {/if}
+      {#if targets.length === 0}{$t(
+          'ui_no_eligible_destinations_are_available_you_ne_2d6e1433'
+        )}{:else if availableTargets.length === 0}{$t(
+          'ui_every_eligible_destination_already_follows_th_d361a7ba'
+        )}{:else}{$t('ui_publishing_is_deliberate_ordinary_messages_ar_3d71d30a')}{/if}
     </p>
 
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
     {#if notice}<p class="form-success" role="status">{notice}</p>{/if}
 
     {#if mode === 'manage' && loading}
-      <div class="announcement-state" role="status">Loading follower channels…</div>
+      <div class="announcement-state" role="status">
+        {$t('ui_loading_follower_channels_0c54ad77')}
+      </div>
     {:else if mode === 'manage' && follows.length === 0}
-      <div class="announcement-state">No channels follow this announcement channel yet.</div>
+      <div class="announcement-state">
+        {$t('ui_no_channels_follow_this_announcement_channel__ca9af932')}
+      </div>
     {:else if mode === 'manage'}
-      <div class="follow-list" aria-label="Announcement follower channels">
+      <div class="follow-list" aria-label={$t('ui_announcement_follower_channels_86cf0004')}>
         {#each follows as follow (follow.ref)}
           {@const targetRef = `${follow.target_channel_id}@${follow.target_channel_domain}`}
           {@const canDelete = canDeleteAnnouncementFollow(follow, guilds)}
@@ -218,7 +225,7 @@
             <span class="follow-details">
               <strong>{targetLabel(follow)}</strong>
               <small>
-                {targetRef}{follow.federated ? ' · Federated' : ''}
+                {targetRef}{follow.federated ? $t('ui_federated_bfc21067') : ''}
               </small>
             </span>
             <button
@@ -227,10 +234,10 @@
               disabled={Boolean(busyFollowId) || !canDelete}
               title={canDelete
                 ? `Stop publishing to ${targetLabel(follow)}`
-                : 'Manage Webhooks is required in the destination channel'}
+                : $t('ui_manage_webhooks_is_required_in_the_destinatio_fc5e198d')}
               onclick={() => void removeFollow(follow)}
             >
-              {busyFollowId === follow.ref ? 'Removing…' : 'Remove'}
+              {busyFollowId === follow.ref ? $t('ui_removing_d4b09919') : $t('ui_remove_c3812fc4')}
             </button>
           </div>
         {/each}

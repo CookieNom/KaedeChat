@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { tick } from 'svelte';
 
   export type PresencePreference = 'online' | 'idle' | 'dnd' | 'invisible';
@@ -15,16 +17,32 @@
   let root = $state<HTMLElement | null>(null);
   let menu = $state<HTMLElement | null>(null);
 
-  const statuses: Array<{
+  let statuses: Array<{
     value: PresencePreference;
     label: string;
     description: string;
-  }> = [
-    { value: 'online', label: 'Online', description: 'Available to chat' },
-    { value: 'idle', label: 'Idle', description: 'Away for a while' },
-    { value: 'dnd', label: 'Do not disturb', description: 'Suppress notifications' },
-    { value: 'invisible', label: 'Invisible', description: 'Appear offline' }
-  ];
+  }> = $derived([
+    {
+      value: 'online',
+      label: $t('ui_online_0d21bd52'),
+      description: $t('ui_available_to_chat_14360e53')
+    },
+    {
+      value: 'idle',
+      label: $t('ui_idle_ab0171ca'),
+      description: $t('ui_away_for_a_while_ff7263bd')
+    },
+    {
+      value: 'dnd',
+      label: $t('ui_do_not_disturb_fe39f3cd'),
+      description: $t('ui_suppress_notifications_8b11705f')
+    },
+    {
+      value: 'invisible',
+      label: $t('ui_invisible_4ee447c5'),
+      description: $t('ui_appear_offline_ec36f358')
+    }
+  ]);
 
   const selected = $derived(statuses.find((status) => status.value === value) ?? statuses[0]);
 
@@ -87,10 +105,10 @@
       class="presence-picker-menu"
       role="menu"
       tabindex="-1"
-      aria-label="Set your status"
+      aria-label={$t('ui_set_your_status_0a1663af')}
       onkeydown={menuKeydown}
     >
-      <header>Your status</header>
+      <header>{$t('ui_your_status_7a7f2d0a')}</header>
       {#each statuses as status (status.value)}
         <button
           type="button"

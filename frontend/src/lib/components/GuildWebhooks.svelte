@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { userErrorMessage } from '$lib/api/client';
   import { entityRef } from '$lib/chat/refs';
   import type { Guild } from '$lib/chat/types';
@@ -55,7 +57,7 @@
       installDrafts(webhooks);
     } catch (caught) {
       if (signal.aborted || generation !== requestGeneration) return;
-      error = userErrorMessage(caught, 'Could not load webhooks for this guild.');
+      error = userErrorMessage(caught, $t('ui_could_not_load_webhooks_for_this_guild_95453ac7'));
     } finally {
       if (generation === requestGeneration) loading = false;
     }
@@ -111,9 +113,9 @@
       };
       newName = '';
       revealedExecutionUrl = created.execution_url ?? '';
-      notice = 'Webhook created. Its URL remains available to server managers.';
+      notice = $t('ui_webhook_created_its_url_remains_available_to__15821689');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not create the webhook.');
+      error = userErrorMessage(caught, $t('ui_could_not_create_the_webhook_4c1e6b2a'));
     } finally {
       busyRef = '';
     }
@@ -125,11 +127,11 @@
       channelDrafts[webhook.id] ?? `${webhook.channel_id}@${webhook.channel_domain}`;
     if (!canManage || busyRef) return;
     if (!name) {
-      error = 'Webhook names cannot be blank.';
+      error = $t('ui_webhook_names_cannot_be_blank_7a077d9b');
       return;
     }
     if (!channels.some((channel) => entityRef(channel) === channelRef)) {
-      error = 'Choose a manageable plaintext text, announcement, or forum channel.';
+      error = $t('ui_choose_a_manageable_plaintext_text_announceme_4b4d7c74');
       return;
     }
     busyRef = webhook.id;
@@ -137,9 +139,9 @@
     notice = '';
     try {
       replaceWebhook(await updateGuildWebhook(guildRef, webhook, { name, channel_id: channelRef }));
-      notice = 'Webhook saved.';
+      notice = $t('ui_webhook_saved_11589616');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not save the webhook.');
+      error = userErrorMessage(caught, $t('ui_could_not_save_the_webhook_e3317c53'));
     } finally {
       busyRef = '';
     }
@@ -160,9 +162,9 @@
       const updated = await rotateGuildWebhook(guildRef, webhook);
       replaceWebhook(updated);
       revealedExecutionUrl = updated.execution_url ?? '';
-      notice = 'Webhook token rotated. The previous token no longer works.';
+      notice = $t('ui_webhook_token_rotated_the_previous_token_no_l_b93ec265');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not rotate the webhook token.');
+      error = userErrorMessage(caught, $t('ui_could_not_rotate_the_webhook_token_37a682e8'));
     } finally {
       busyRef = '';
     }
@@ -185,7 +187,9 @@
     } catch (caught) {
       error = userErrorMessage(
         caught,
-        followed ? 'Could not stop following that channel.' : 'Could not delete the webhook.'
+        followed
+          ? $t('ui_could_not_stop_following_that_channel_e9de7de5')
+          : $t('ui_could_not_delete_the_webhook_49321159')
       );
     } finally {
       busyRef = '';
@@ -196,9 +200,9 @@
     if (!url) return;
     try {
       await navigator.clipboard.writeText(url);
-      notice = 'Webhook URL copied.';
+      notice = $t('ui_webhook_url_copied_d08595e0');
     } catch {
-      error = 'Could not copy automatically. Select the webhook URL and copy it manually.';
+      error = $t('ui_could_not_copy_automatically_select_the_webho_529aa9dc');
     }
   }
 
@@ -219,7 +223,7 @@
   async function uploadAvatar(webhook: WebhookSummary, file: File | null, input: HTMLInputElement) {
     if (!file || !canManage || busyRef) return;
     if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type) || !file.size) {
-      error = 'Choose a non-empty PNG, JPEG, GIF, or WebP image.';
+      error = $t('ui_choose_a_non_empty_png_jpeg_gif_or_webp_image_bd72768e');
       input.value = '';
       return;
     }
@@ -252,16 +256,17 @@
           break;
         }
         if (['infected', 'rejected', 'failed'].includes(result.attachment.scan_status)) {
-          throw new Error('The webhook avatar did not pass media safety processing.');
+          throw new Error($t('ui_the_webhook_avatar_did_not_pass_media_safety__f45f1a3f'));
         }
         await waitForScan(controller.signal);
       }
-      if (!updated) throw new Error('Webhook avatar processing is taking longer than expected.');
+      if (!updated)
+        throw new Error($t('ui_webhook_avatar_processing_is_taking_longer_th_8cb9d57e'));
       replaceWebhook(updated);
       input.value = '';
-      notice = 'Webhook avatar updated.';
+      notice = $t('ui_webhook_avatar_updated_a4a0a1f5');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update the webhook avatar.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_the_webhook_avatar_5257094d'));
     } finally {
       controller.abort();
       busyRef = '';
@@ -281,9 +286,9 @@
     notice = '';
     try {
       replaceWebhook(await deleteGuildWebhookAvatar(guildRef, webhook));
-      notice = 'Webhook avatar removed.';
+      notice = $t('ui_webhook_avatar_removed_607e6eae');
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not remove the webhook avatar.');
+      error = userErrorMessage(caught, $t('ui_could_not_remove_the_webhook_avatar_dc0cfbf1'));
     } finally {
       busyRef = '';
     }
@@ -294,12 +299,9 @@
   <header>
     <span class="section-icon" aria-hidden="true"><Icon name="globe" size={19} /></span>
     <div>
-      <span>Incoming automation</span>
-      <h2 id="guild-webhooks-title">Webhooks</h2>
-      <p>
-        Create and manage webhook identities across this server. Authorized managers can copy a
-        webhook URL whenever an external website needs it.
-      </p>
+      <span>{$t('ui_incoming_automation_4c9a1317')}</span>
+      <h2 id="guild-webhooks-title">{$t('ui_webhooks_45808d75')}</h2>
+      <p>{$t('ui_create_and_manage_webhook_identities_across_t_580bad51')}</p>
     </div>
   </header>
 
@@ -308,20 +310,22 @@
   {#if revealedExecutionUrl}
     <div class="token-notice" role="status">
       <Icon name="lock" size={18} />
-      <span><strong>Webhook URL</strong><code>{revealedExecutionUrl}</code></span>
+      <span
+        ><strong>{$t('ui_webhook_url_84805a75')}</strong><code>{revealedExecutionUrl}</code></span
+      >
       <button class="secondary-button" type="button" onclick={() => void copyExecutionUrl()}>
-        Copy webhook URL
+        {$t('ui_copy_webhook_url_69179edf')}
       </button>
     </div>
   {/if}
 
   {#if !canManage}
     <div class="empty-state">
-      <strong>Manage Webhooks is required</strong>
-      <p>A server administrator can grant this permission before webhook details are shown.</p>
+      <strong>{$t('ui_manage_webhooks_is_required_df6097a8')}</strong>
+      <p>{$t('ui_a_server_administrator_can_grant_this_permiss_7ccbb219')}</p>
     </div>
   {:else if loading}
-    <div class="empty-state" role="status">Loading webhooks…</div>
+    <div class="empty-state" role="status">{$t('ui_loading_webhooks_bb656a75')}</div>
   {:else}
     <form
       class="create-form"
@@ -331,7 +335,7 @@
       }}
     >
       <label>
-        <span>Webhook name</span>
+        <span>{$t('ui_webhook_name_d28bddc1')}</span>
         <input
           bind:value={newName}
           minlength="1"
@@ -341,7 +345,7 @@
         />
       </label>
       <label>
-        <span>Post to channel</span>
+        <span>{$t('ui_post_to_channel_6bcc7da9')}</span>
         <select
           bind:value={newChannelRef}
           required
@@ -353,16 +357,14 @@
         </select>
       </label>
       <button disabled={Boolean(busyRef) || !newName.trim() || !newChannelRef}>
-        {busyRef === 'create' ? 'Creating…' : 'Create webhook'}
+        {busyRef === 'create' ? $t('ui_creating_c79ed949') : $t('ui_create_webhook_4a2b33ad')}
       </button>
     </form>
     {#if channels.length === 0}
-      <p class="help-copy">
-        No manageable plaintext text, announcement, or forum channel is available.
-      </p>
+      <p class="help-copy">{$t('ui_no_manageable_plaintext_text_announcement_or__1072f0d8')}</p>
     {/if}
 
-    <div class="webhook-list" aria-label="Server webhooks">
+    <div class="webhook-list" aria-label={$t('ui_server_webhooks_58d34859')}>
       {#each ordinaryWebhooks as webhook (webhook.id)}
         <article class="webhook-row">
           <div class="avatar-editor">
@@ -377,7 +379,11 @@
               >
             {/if}
             <label class="secondary-button">
-              <span>{webhook.avatar_hash ? 'Replace avatar' : 'Add avatar'}</span>
+              <span
+                >{webhook.avatar_hash
+                  ? $t('ui_replace_avatar_ec965b00')
+                  : $t('ui_add_avatar_97bc36ba')}</span
+              >
               <input
                 type="file"
                 accept="image/png,image/jpeg,image/gif,image/webp"
@@ -393,13 +399,16 @@
                 class="danger-text"
                 type="button"
                 disabled={Boolean(busyRef)}
-                onclick={() => void removeAvatar(webhook)}>Remove avatar</button
+                onclick={() => void removeAvatar(webhook)}>{$t('ui_remove_avatar_5ae2a862')}</button
               >
             {/if}
           </div>
           <div class="fields">
             <label>
-              <span>Name <small>ID {webhook.id}</small></span>
+              <span
+                >{$t('ui_name_dcd1d522')}
+                <small>{$t('ui_id_value0_19b3c40a', { value0: String(webhook.id) })}</small></span
+              >
               <input
                 value={nameDrafts[webhook.id] ?? webhook.name}
                 minlength="1"
@@ -410,7 +419,7 @@
               />
             </label>
             <label>
-              <span>Post to channel</span>
+              <span>{$t('ui_post_to_channel_6bcc7da9')}</span>
               <select
                 value={channelDrafts[webhook.id] ??
                   `${webhook.channel_id}@${webhook.channel_domain}`}
@@ -434,40 +443,42 @@
                 type="button"
                 disabled={Boolean(busyRef)}
                 onclick={() => void copyExecutionUrl(webhook.execution_url)}
-                >Copy webhook URL</button
+                >{$t('ui_copy_webhook_url_69179edf')}</button
               >
             {/if}
             <button
               class="secondary-button"
               type="button"
               disabled={Boolean(busyRef) || !(nameDrafts[webhook.id] ?? webhook.name).trim()}
-              onclick={() => void saveWebhook(webhook)}>Save</button
+              onclick={() => void saveWebhook(webhook)}>{$t('ui_save_1509f561')}</button
             >
             <button
               class="secondary-button"
               type="button"
               disabled={Boolean(busyRef)}
-              onclick={() => void rotateWebhook(webhook)}>Rotate token</button
+              onclick={() => void rotateWebhook(webhook)}>{$t('ui_rotate_token_4ade7882')}</button
             >
             <button
               class="danger-text"
               type="button"
               disabled={Boolean(busyRef)}
-              onclick={() => void removeWebhook(webhook)}>Delete</button
+              onclick={() => void removeWebhook(webhook)}>{$t('ui_delete_e2d0a549')}</button
             >
           </div>
         </article>
       {:else}
-        <div class="empty-state">No ordinary webhooks have been created for this server.</div>
+        <div class="empty-state">
+          {$t('ui_no_ordinary_webhooks_have_been_created_for_th_ea33ab73')}
+        </div>
       {/each}
     </div>
 
     {#if followedChannels.length}
       <div class="followed-webhooks" aria-labelledby="incoming-follows-title">
         <div>
-          <span>Following into this server</span>
-          <h3 id="incoming-follows-title">Connected announcement channels</h3>
-          <p>These system-managed webhooks deliver published posts into this server.</p>
+          <span>{$t('ui_following_into_this_server_bfb9e7c4')}</span>
+          <h3 id="incoming-follows-title">{$t('ui_connected_announcement_channels_65ee3071')}</h3>
+          <p>{$t('ui_these_system_managed_webhooks_deliver_publish_7589b5c0')}</p>
         </div>
         {#each followedChannels as webhook (webhook.id)}
           <div class="follow-row">
@@ -475,8 +486,8 @@
             <span>
               <strong>{webhook.source_channel?.name ?? webhook.name}</strong>
               <small>
-                {webhook.source_guild?.name ?? 'Announcement source'} → {webhook.channel_id}@{webhook.channel_domain}{webhook.federated
-                  ? ' · Federated'
+                {webhook.source_guild?.name ?? $t('ui_announcement_source_f5d80a6d')} → {webhook.channel_id}@{webhook.channel_domain}{webhook.federated
+                  ? $t('ui_federated_bfc21067')
                   : ''}
               </small>
             </span>
@@ -484,7 +495,7 @@
               class="danger-text"
               type="button"
               disabled={Boolean(busyRef)}
-              onclick={() => void removeWebhook(webhook)}>Stop following</button
+              onclick={() => void removeWebhook(webhook)}>{$t('ui_stop_following_fcc32e2a')}</button
             >
           </div>
         {/each}

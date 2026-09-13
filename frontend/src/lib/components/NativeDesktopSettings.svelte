@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { desktopLifecycle } from '$lib/platform/desktop-lifecycle.svelte';
   import { nativeError } from '$lib/platform/native';
   import { onMount } from 'svelte';
@@ -21,7 +23,7 @@
       desktopLifecycle.update?.supported &&
       !desktopLifecycle.update.available
     ) {
-      notice = 'Kaede is up to date.';
+      notice = $t('ui_kaede_is_up_to_date_f8acf878');
     }
   }
 
@@ -29,7 +31,7 @@
     notice = '';
     await desktopLifecycle.requestTaskbarPin();
     if (!desktopLifecycle.pinError && desktopLifecycle.taskbar?.pinned) {
-      notice = 'Kaede is pinned to the taskbar.';
+      notice = $t('ui_kaede_is_pinned_to_the_taskbar_0d85b3e5');
     }
   }
 
@@ -42,24 +44,25 @@
   <div class="settings-section-heading">
     <span class="section-icon" aria-hidden="true">↻</span>
     <div>
-      <h2>Desktop app</h2>
-      <p>Keep this installed copy current and easy to reach.</p>
+      <h2>{$t('ui_desktop_app_71028420')}</h2>
+      <p>{$t('ui_keep_this_installed_copy_current_and_easy_to__7e01bce7')}</p>
     </div>
   </div>
   <div class="settings-card desktop-settings">
     <div class="settings-card-row">
       <div>
-        <strong>Application updates</strong>
-        <p>
-          Kaede checks signed GitHub Releases when it starts and every six hours. Updates install
-          only after you approve the restart.
-        </p>
+        <strong>{$t('ui_application_updates_4dae8ce0')}</strong>
+        <p>{$t('ui_kaede_checks_signed_github_releases_when_it_s_0a4665fd')}</p>
         {#if desktopLifecycle.update}
           <small>
-            Installed: {desktopLifecycle.update.current_version}{desktopLifecycle.update
-              .available && desktopLifecycle.update.version
-              ? ` · Available: ${desktopLifecycle.update.version}`
-              : ''}
+            {$t('ui_installed_value0_value1_7fdaca2a', {
+              value0: String(desktopLifecycle.update.current_version),
+              value1: String(
+                desktopLifecycle.update.available && desktopLifecycle.update.version
+                  ? ` · Available: ${desktopLifecycle.update.version}`
+                  : ''
+              )
+            })}
           </small>
           {#if desktopLifecycle.update.support_message}
             <small>{desktopLifecycle.update.support_message}</small>
@@ -73,7 +76,9 @@
           disabled={desktopLifecycle.checking || desktopLifecycle.installing}
           onclick={() => void checkForUpdates()}
         >
-          {desktopLifecycle.checking ? 'Checking…' : 'Check for updates'}
+          {desktopLifecycle.checking
+            ? $t('ui_checking_ec963ffc')
+            : $t('ui_check_for_updates_f26f3275')}
         </button>
         {#if desktopLifecycle.update?.available}
           <button
@@ -82,7 +87,9 @@
             disabled={desktopLifecycle.installing}
             onclick={() => void desktopLifecycle.installUpdate()}
           >
-            {desktopLifecycle.installing ? 'Installing…' : 'Update and restart'}
+            {desktopLifecycle.installing
+              ? $t('ui_installing_530bcc35')
+              : $t('ui_update_and_restart_853c6a3c')}
           </button>
         {/if}
       </div>
@@ -93,11 +100,8 @@
 
     <div class="settings-card-row desktop-autostart">
       <div>
-        <strong>Launch at sign-in</strong>
-        <p>
-          Start Kaede in the system tray when you sign in. It stays out of the way and checks for
-          updates immediately.
-        </p>
+        <strong>{$t('ui_launch_at_sign_in_ae13d4e8')}</strong>
+        <p>{$t('ui_start_kaede_in_the_system_tray_when_you_sign__09b74933')}</p>
       </div>
       <label class="desktop-toggle">
         <input
@@ -106,7 +110,11 @@
           disabled={!desktopLifecycle.autostart || desktopLifecycle.savingAutostart}
           onchange={(event) => void desktopLifecycle.setAutostart(event.currentTarget.checked)}
         />
-        <span>{desktopLifecycle.autostart?.enabled ? 'On' : 'Off'}</span>
+        <span
+          >{desktopLifecycle.autostart?.enabled
+            ? $t('ui_on_13001175')
+            : $t('ui_off_ca7981b4')}</span
+        >
       </label>
     </div>
     {#if desktopLifecycle.autostartError}
@@ -116,13 +124,13 @@
     {#if desktopLifecycle.taskbar}
       <div class="settings-card-row desktop-taskbar">
         <div>
-          <strong>Windows taskbar</strong>
+          <strong>{$t('ui_windows_taskbar_63eeece9')}</strong>
           <p>
             {desktopLifecycle.taskbar.pinned
-              ? 'Kaede is already pinned.'
+              ? $t('ui_kaede_is_already_pinned_4941bec5')
               : desktopLifecycle.taskbar.supported && desktopLifecycle.taskbar.allowed
-                ? 'Windows will show its own confirmation before pinning Kaede.'
-                : 'Use Pin to taskbar from Kaede’s running taskbar icon on this Windows version.'}
+                ? $t('ui_windows_will_show_its_own_confirmation_before_a76f7dcc')
+                : $t('ui_use_pin_to_taskbar_from_kaede_s_running_taskb_254f9683')}
           </p>
         </div>
         {#if !desktopLifecycle.taskbar.pinned && desktopLifecycle.taskbar.supported && desktopLifecycle.taskbar.allowed}
@@ -132,7 +140,9 @@
             disabled={desktopLifecycle.pinning}
             onclick={() => void pinToTaskbar()}
           >
-            {desktopLifecycle.pinning ? 'Asking Windows…' : 'Pin to taskbar'}
+            {desktopLifecycle.pinning
+              ? $t('ui_asking_windows_35238601')
+              : $t('ui_pin_to_taskbar_4ea2fc5b')}
           </button>
         {/if}
       </div>
@@ -141,10 +151,7 @@
       <p class="desktop-error" role="alert">{displayError(desktopLifecycle.pinError)}</p>
     {/if}
     {#if notice}<p class="desktop-notice" role="status">{notice}</p>{/if}
-    <p class="settings-helper">
-      On Windows, Kaede installs per-user in Local AppData and appears in Windows Installed apps for
-      normal uninstallation. The installer lets you choose whether to add a Start menu shortcut.
-    </p>
+    <p class="settings-helper">{$t('ui_on_windows_kaede_installs_per_user_in_local_a_d1a3907f')}</p>
   </div>
 </section>
 

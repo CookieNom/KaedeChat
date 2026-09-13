@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import type {
     DirectoryExternalLink,
     DirectoryLocale,
@@ -62,7 +64,7 @@
     mediaError = '';
     const asset = assetsById.get(assetDraft);
     if (!asset || asset.kind !== 'store') {
-      mediaError = 'Choose an uploaded store asset.';
+      mediaError = $t('ui_choose_an_uploaded_store_asset_17841268');
       return;
     }
     if (media.length >= DIRECTORY_MEDIA_LIMIT) {
@@ -78,7 +80,7 @@
     mediaError = '';
     const videoId = parseYouTubeVideoId(youtubeDraft);
     if (!videoId) {
-      mediaError = 'Enter a valid YouTube video ID or HTTPS YouTube URL.';
+      mediaError = $t('ui_enter_a_valid_youtube_video_id_or_https_youtu_1d77e6c7');
       return;
     }
     if (media.length >= DIRECTORY_MEDIA_LIMIT) {
@@ -86,7 +88,7 @@
       return;
     }
     if (media.some((item) => item.type === 'youtube' && item.video_id === videoId)) {
-      mediaError = 'That YouTube video is already included.';
+      mediaError = $t('ui_that_youtube_video_is_already_included_76c8182a');
       return;
     }
     onMediaChange([...media, { type: 'youtube', video_id: videoId }]);
@@ -124,12 +126,12 @@
 </script>
 
 <fieldset {disabled}>
-  <legend>Product page content</legend>
+  <legend>{$t('ui_product_page_content_28db4a96')}</legend>
   <div class="editor-block">
     <div class="heading">
       <div>
-        <h3>Media</h3>
-        <p>Arrange up to five uploaded store images or YouTube videos.</p>
+        <h3>{$t('ui_media_d357175c')}</h3>
+        <p>{$t('ui_arrange_up_to_five_uploaded_store_images_or_y_bcc75114')}</p>
       </div>
       <span>{media.length}/{DIRECTORY_MEDIA_LIMIT}</span>
     </div>
@@ -146,8 +148,8 @@
             <div>
               <strong
                 >{item.type === 'image'
-                  ? (asset?.name ?? 'Missing store asset')
-                  : 'YouTube video'}</strong
+                  ? (asset?.name ?? $t('ui_missing_store_asset_d3d0edb8'))
+                  : $t('ui_youtube_video_4d78938a')}</strong
               >
               <small>{item.type === 'image' ? `Asset ${item.asset_id}` : item.video_id}</small>
             </div>
@@ -169,27 +171,27 @@
                 type="button"
                 aria-label={`Remove ${item.type === 'image' ? (asset?.name ?? 'image') : 'video'}`}
                 onclick={() => onMediaChange(media.filter((_, itemIndex) => itemIndex !== index))}
-                >Remove</button
+                >{$t('ui_remove_c3812fc4')}</button
               >
             </div>
           </li>
         {/each}
       </ol>
-    {:else}<p class="empty">No product-page media selected.</p>{/if}
+    {:else}<p class="empty">{$t('ui_no_product_page_media_selected_83ab4f7b')}</p>{/if}
     <div class="add-grid">
       <label
-        >Uploaded store image<select bind:value={assetDraft}>
-          <option value="">Choose an asset</option>
+        >{$t('ui_uploaded_store_image_8df213ef')}<select bind:value={assetDraft}>
+          <option value="">{$t('ui_choose_an_asset_f8ea137b')}</option>
           {#each availableAssets as asset (asset.id)}<option value={asset.id}>{asset.name}</option
             >{/each}
         </select></label
       ><button
         type="button"
         disabled={disabled || !assetDraft || media.length >= DIRECTORY_MEDIA_LIMIT}
-        onclick={addImage}>Add image</button
+        onclick={addImage}>{$t('ui_add_image_04136060')}</button
       >
       <label
-        >YouTube ID or URL<input
+        >{$t('ui_youtube_id_or_url_510ed94a')}<input
           bind:value={youtubeDraft}
           maxlength="2048"
           placeholder="https://youtu.be/…"
@@ -197,11 +199,12 @@
       ><button
         type="button"
         disabled={disabled || !youtubeDraft.trim() || media.length >= DIRECTORY_MEDIA_LIMIT}
-        onclick={addYouTube}>Add video</button
+        onclick={addYouTube}>{$t('ui_add_video_36aeaefe')}</button
       >
     </div>
     {#if !availableAssets.length}<small
-        >Upload an asset with the <strong>store</strong> kind in Assets & emoji to add another image.</small
+        >{$t('ui_upload_an_asset_with_the_ef8f054d')} <strong>store</strong>
+        {$t('ui_kind_in_assets_emoji_to_add_another_image_b46d3acd')}</small
       >{/if}
     {#if mediaError}<p class="inline-error" role="alert">{mediaError}</p>{/if}
   </div>
@@ -209,8 +212,8 @@
   <div class="editor-block">
     <div class="heading">
       <div>
-        <h3>External links</h3>
-        <p>Add up to five named HTTPS links, such as documentation or a community.</p>
+        <h3>{$t('ui_external_links_2cedb069')}</h3>
+        <p>{$t('ui_add_up_to_five_named_https_links_such_as_docu_6f5e133a')}</p>
       </div>
       <span>{externalLinks.length}/{DIRECTORY_EXTERNAL_LINK_LIMIT}</span>
     </div>
@@ -218,7 +221,7 @@
       {#each externalLinks as link, index (index)}
         <div class="link-row">
           <label
-            >Name<input
+            >{$t('ui_name_dcd1d522')}<input
               value={link.name}
               maxlength="100"
               oninput={(event) =>
@@ -226,7 +229,7 @@
             /></label
           >
           <label
-            >HTTPS URL<input
+            >{$t('ui_https_url_c3cf95f4')}<input
               type="url"
               value={link.url}
               maxlength="2048"
@@ -256,7 +259,7 @@
               aria-label={`Remove ${link.name || `link ${index + 1}`}`}
               onclick={() =>
                 onExternalLinksChange(externalLinks.filter((_, linkIndex) => linkIndex !== index))}
-              >Remove</button
+              >{$t('ui_remove_c3812fc4')}</button
             >
           </div>
         </div>
@@ -267,28 +270,28 @@
       type="button"
       disabled={disabled || externalLinks.length >= DIRECTORY_EXTERNAL_LINK_LIMIT}
       onclick={() => onExternalLinksChange([...externalLinks, { name: '', url: '' }])}
-      >Add external link</button
+      >{$t('ui_add_external_link_18a39758')}</button
     >
   </div>
 
   <div class="editor-block">
     <div class="heading">
       <div>
-        <h3>Languages</h3>
-        <p>Select supported languages and optionally translate the full description.</p>
+        <h3>{$t('ui_languages_318655ce')}</h3>
+        <p>{$t('ui_select_supported_languages_and_optionally_tra_731becd1')}</p>
       </div>
       <span>{supportedLocales.length}/{DIRECTORY_LOCALES.length}</span>
     </div>
     <div class="locale-add">
       <label
-        >Language<select bind:value={localeDraft}>
-          <option value="">Choose a language</option>
+        >{$t('ui_language_a4fe6526')}<select bind:value={localeDraft}>
+          <option value="">{$t('ui_choose_a_language_f8416d79')}</option>
           {#each availableLocales as locale (locale[0])}<option value={locale[0]}
               >{locale[1]} ({locale[0]})</option
             >{/each}
         </select></label
       ><button type="button" disabled={disabled || !localeDraft} onclick={addLocale}
-        >Add language</button
+        >{$t('ui_add_language_7ef7c441')}</button
       >
     </div>
     <div class="locale-list">
@@ -300,15 +303,15 @@
               class="remove"
               type="button"
               aria-label={`Remove ${localeName(locale)}`}
-              onclick={() => removeLocale(locale)}>Remove</button
+              onclick={() => removeLocale(locale)}>{$t('ui_remove_c3812fc4')}</button
             >
           </div>
           <label
-            >Localized description (optional)<textarea
+            >{$t('ui_localized_description_optional_e1efef01')}<textarea
               rows="3"
               maxlength="1000"
               value={descriptionLocalizations[locale] ?? ''}
-              placeholder="Leave blank to use the default description."
+              placeholder={$t('ui_leave_blank_to_use_the_default_description_129521fb')}
               oninput={(event) =>
                 onDescriptionLocalizationsChange({
                   ...descriptionLocalizations,

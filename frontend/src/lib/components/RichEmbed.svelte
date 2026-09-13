@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
   import type { Attachment, Role, UserSummary } from '$lib/chat/types';
   import type { EmbedMedia, MessageEmbed } from '$lib/chat/rich-content';
@@ -54,7 +56,7 @@
               href={embed.author.icon_url}
               target="_blank"
               rel="noopener noreferrer nofollow"
-              aria-label="Open external author image">↗</a
+              aria-label={$t('ui_open_external_author_image_63e03a5c')}>↗</a
             >
           {/if}
         {/if}
@@ -118,7 +120,7 @@
             class="external-media-placeholder"
             href={embed.image.url}
             target="_blank"
-            rel="noopener noreferrer nofollow">Open external embed image</a
+            rel="noopener noreferrer nofollow">{$t('ui_open_external_embed_image_31ca006d')}</a
           >
         {/if}
       {/if}
@@ -134,7 +136,7 @@
               href={embed.footer.icon_url}
               target="_blank"
               rel="noopener noreferrer nofollow"
-              aria-label="Open external footer image">↗</a
+              aria-label={$t('ui_open_external_footer_image_4c3ced56')}>↗</a
             >
           {/if}
         {/if}
@@ -175,7 +177,7 @@
           class="external-media-placeholder thumbnail"
           href={embed.thumbnail.url}
           target="_blank"
-          rel="noopener noreferrer nofollow">External image</a
+          rel="noopener noreferrer nofollow">{$t('ui_external_image_caf171f3')}</a
         >
       {/if}
     </aside>

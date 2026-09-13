@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { entityKey } from '$lib/chat/refs';
   import type { CustomEmojiOption } from '$lib/chat/emojis';
   import { isForumChannel, isPinnedForumPost } from '$lib/chat/threads';
@@ -76,15 +78,15 @@
   let threadActionsRoot = $state<HTMLElement | null>(null);
   let threadActionsMenu = $state<HTMLDetailsElement | null>(null);
   const forumPost = $derived(isForumChannel(parent));
-  const notificationOptions: Array<{
+  let notificationOptions: Array<{
     value: NonNullable<ThreadMember['notification_level']>;
     label: string;
-  }> = [
-    { value: 'inherit', label: 'Use Default' },
-    { value: 'all', label: 'All Messages' },
-    { value: 'mentions', label: 'Only @mentions' },
-    { value: 'none', label: 'Nothing' }
-  ];
+  }> = $derived([
+    { value: 'inherit', label: $t('ui_use_default_230969a6') },
+    { value: 'all', label: $t('ui_all_messages_020dc04d') },
+    { value: 'mentions', label: $t('ui_only_mentions_c7ccfee6') },
+    { value: 'none', label: $t('ui_nothing_67e1bca0') }
+  ]);
   const memberKeys = $derived(
     new Set(
       threadMembers.flatMap((member) => {
@@ -172,8 +174,10 @@
       <div class="thread-title">
         <Icon name={forumPost ? 'message' : 'threads'} size={18} />
         <strong>{thread.name}</strong>
-        {#if thread.archived}<small>Archived</small>{/if}
-        {#if thread.locked}<small>{forumPost ? 'Closed' : 'Locked'}</small>{/if}
+        {#if thread.archived}<small>{$t('ui_archived_bdb86505')}</small>{/if}
+        {#if thread.locked}<small
+            >{forumPost ? $t('ui_closed_c21ead06') : $t('ui_locked_a424e33d')}</small
+          >{/if}
       </div>
     </div>
     <div bind:this={threadActionsRoot} class="thread-actions">
@@ -181,20 +185,23 @@
         <button
           type="button"
           disabled={busy || thread.archived}
-          title={thread.archived ? 'Archived threads cannot be joined' : undefined}
+          title={thread.archived ? $t('ui_archived_threads_cannot_be_joined_3cb2d207') : undefined}
           onclick={() => void onMembership(!joined)}
         >
           <Icon name={joined ? 'check' : 'bell'} size={16} />
-          {joined ? 'Leave' : 'Join'}
+          {joined ? $t('ui_leave_fc6e4a40') : $t('ui_join_fd30fe68')}
         </button>
       {/if}
       {#if !forumPost && joined && !thread.archived}
         <details>
-          <summary aria-label="Thread notification settings" title="Notification Settings">
+          <summary
+            aria-label={$t('ui_thread_notification_settings_e3b90dc8')}
+            title={$t('ui_notification_settings_07a063ca')}
+          >
             <Icon name="bell" size={17} />
           </summary>
           <div class="notification-popover">
-            <strong>Notifications</strong>
+            <strong>{$t('ui_notifications_78801183')}</strong>
             {#each notificationOptions as option (option.value)}
               <button
                 class:selected={notificationLevel === option.value}
@@ -217,11 +224,11 @@
             ></summary
           >
           <div class="member-popover">
-            <strong>Thread Members</strong>
+            <strong>{$t('ui_thread_members_cdcd834a')}</strong>
             {#if canInviteMembers || canRemoveMembers}<input
                 bind:value={memberQuery}
-                placeholder="Search members"
-                aria-label="Search members"
+                placeholder={$t('ui_search_members_6497fc6f')}
+                aria-label={$t('ui_search_members_6497fc6f')}
               />{/if}
             <div>
               {#each canInviteMembers || canRemoveMembers ? visibleGuildMembers : guildMembers.filter( (member) => memberKeys.has(entityKey(member.user)) ) as member (entityKey(member.user))}
@@ -247,7 +254,7 @@
       {/if}
       {#if forumPost && availableTags.length}
         <details>
-          <summary>Tags</summary>
+          <summary>{$t('ui_tags_1331275b')}</summary>
           <div class="tag-popover">
             {#each availableTags as tag (tag.id)}
               <label>
@@ -278,11 +285,15 @@
       {/if}
       {#if canEdit || canManage || canEnableEncryption || canRekeyEncryption}
         <details bind:this={threadActionsMenu}>
-          <summary aria-label="Thread actions"><Icon name="more" size={19} /></summary>
+          <summary aria-label={$t('ui_thread_actions_3f526143')}
+            ><Icon name="more" size={19} /></summary
+          >
           <div class="thread-menu">
             {#if canEnableEncryption || canRekeyEncryption}
               <button type="button" disabled={busy} onclick={() => runThreadAction(onEncryption)}>
-                {canRekeyEncryption ? 'Secure Current Members' : 'Turn on End-to-End Encryption'}
+                {canRekeyEncryption
+                  ? $t('ui_secure_current_members_638bb60c')
+                  : $t('ui_turn_on_end_to_end_encryption_1133faf3')}
               </button>
             {/if}
             {#if canEdit}
@@ -291,7 +302,7 @@
                 disabled={busy || thread.archived}
                 onclick={() => runThreadAction(startRename)}
               >
-                Rename {forumPost ? 'Post' : 'Thread'}
+                {$t('ui_rename_value0_bb7a240d', { value0: String(forumPost ? 'Post' : 'Thread') })}
               </button>
               <button
                 type="button"
@@ -299,8 +310,8 @@
                 onclick={() => runThreadAction(() => onArchive(!thread.archived))}
               >
                 {thread.archived
-                  ? `Unarchive ${forumPost ? 'Post' : 'Thread'}`
-                  : `Archive ${forumPost ? 'Post' : 'Thread'}`}
+                  ? `Unarchive ${forumPost ? $t('ui_post_a5554622') : $t('ui_thread_5373c7f8')}`
+                  : `Archive ${forumPost ? $t('ui_post_a5554622') : $t('ui_thread_5373c7f8')}`}
               </button>
               {#if thread.type === 12}
                 <button
@@ -308,7 +319,9 @@
                   disabled={busy || thread.archived}
                   onclick={() => runThreadAction(() => onInvitable(!thread.invitable))}
                 >
-                  {thread.invitable ? 'Disable Member Invites' : 'Allow Member Invites'}
+                  {thread.invitable
+                    ? $t('ui_disable_member_invites_0b717631')
+                    : $t('ui_allow_member_invites_4248bf56')}
                 </button>
               {/if}
             {/if}
@@ -319,7 +332,9 @@
                   disabled={busy || thread.archived}
                   onclick={() => runThreadAction(() => onPin(!isPinnedForumPost(thread)))}
                 >
-                  {isPinnedForumPost(thread) ? 'Unpin Post' : 'Pin Post'}
+                  {isPinnedForumPost(thread)
+                    ? $t('ui_unpin_post_d0d533bb')
+                    : $t('ui_pin_post_f4eab505')}
                 </button>
               {/if}
               <button
@@ -329,11 +344,11 @@
               >
                 {forumPost
                   ? thread.locked
-                    ? 'Reopen Post'
-                    : 'Close Post'
+                    ? $t('ui_reopen_post_754cab40')
+                    : $t('ui_close_post_627ad5af')
                   : thread.locked
-                    ? 'Unlock Thread'
-                    : 'Lock Thread'}
+                    ? $t('ui_unlock_thread_f6cfa58c')
+                    : $t('ui_lock_thread_a3a01699')}
               </button>
               <button
                 class="danger"
@@ -341,7 +356,7 @@
                 disabled={busy}
                 onclick={() => runThreadAction(onDelete)}
               >
-                Delete {forumPost ? 'Post' : 'Thread'}
+                {$t('ui_delete_value0_8782b778', { value0: String(forumPost ? 'Post' : 'Thread') })}
               </button>
             {/if}
           </div>
@@ -351,8 +366,8 @@
         <a
           class="thread-close-action"
           href={guildChannelPath(guild, parent)}
-          aria-label="Close post"
-          title="Close post"
+          aria-label={$t('ui_close_post_8ba96933')}
+          title={$t('ui_close_post_8ba96933')}
         >
           <Icon name="x" size={19} />
         </a>
@@ -364,7 +379,7 @@
       <button
         class="rename-dialog-backdrop"
         type="button"
-        aria-label="Close rename dialog"
+        aria-label={$t('ui_close_rename_dialog_48e461c3')}
         disabled={busy}
         onclick={() => (renameOpen = false)}
       ></button>
@@ -375,10 +390,12 @@
         aria-labelledby="rename-thread-title"
       >
         <header>
-          <h2 id="rename-thread-title">Rename {forumPost ? 'Post' : 'Thread'}</h2>
+          <h2 id="rename-thread-title">
+            {$t('ui_rename_value0_bb7a240d', { value0: String(forumPost ? 'Post' : 'Thread') })}
+          </h2>
           <button
             type="button"
-            aria-label="Close"
+            aria-label={$t('ui_close_7d9eb7ac')}
             disabled={busy}
             onclick={() => (renameOpen = false)}>×</button
           >
@@ -390,18 +407,18 @@
           }}
         >
           <label>
-            {forumPost ? 'Post' : 'Thread'} Name
+            {$t('ui_value0_name_e746c221', { value0: String(forumPost ? 'Post' : 'Thread') })}
             <input bind:value={renameName} maxlength="100" required disabled={busy} />
           </label>
           <footer>
             <button type="button" disabled={busy} onclick={() => (renameOpen = false)}>
-              Cancel
+              {$t('ui_cancel_19766ed6')}
             </button>
             <button
               class="primary"
               disabled={busy || !renameName.trim() || renameName.trim() === thread.name}
             >
-              {busy ? 'Saving…' : 'Save'}
+              {busy ? $t('ui_saving_23e39291') : $t('ui_save_1509f561')}
             </button>
           </footer>
         </form>

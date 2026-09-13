@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:kaede_mobile/src/domain/voice_messages.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -108,13 +108,14 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
     try {
       if (!await _recorder.hasPermission()) {
         throw StateError(
-          'Microphone access was denied. Open your phone’s Settings, find Kaede, '
-          'and allow microphone access to record voice messages.',
+          L10n.current
+              .ui_microphone_access_was_denied_open_your_phone__809f1998,
         );
       }
       if (!await _recorder.isEncoderSupported(AudioEncoder.aacLc)) {
         throw StateError(
-          'This device cannot record the supported voice-message format.',
+          L10n.current
+              .ui_this_device_cannot_record_the_supported_voice_41006eef,
         );
       }
       if (!mounted || _cancelAfterStart || (_finishAfterStart && !_locked)) {
@@ -247,7 +248,8 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
       } else {
         final path = await _recorder.stop();
         if (path == null || path.isEmpty) {
-          throw StateError('The recorder did not return an audio file.');
+          throw StateError(L10n
+              .current.ui_the_recorder_did_not_return_an_audio_file_0c6a4b2d);
         }
         final recording = VoiceRecording(
           file: File(path),
@@ -338,7 +340,7 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
         child: Semantics(
           button: true,
           enabled: _available,
-          label: 'Hold to record a voice message',
+          label: L10n.of(context).ui_hold_to_record_a_voice_message_3e5bc950,
           onTap: _available ? () => unawaited(_start()) : null,
           child: Listener(
             behavior: HitTestBehavior.opaque,
@@ -352,7 +354,8 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
             },
             child: Tooltip(
               triggerMode: TooltipTriggerMode.manual,
-              message: 'Hold to record a voice message',
+              message:
+                  L10n.of(context).ui_hold_to_record_a_voice_message_3e5bc950,
               child: SizedBox.square(
                 dimension: 46,
                 child: Icon(Icons.mic_none_rounded,
@@ -396,12 +399,13 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
               ),
               child: Text(
                 _starting
-                    ? 'Starting microphone…'
+                    ? L10n.of(context).ui_starting_microphone_a479a9ed
                     : ready
-                        ? 'Ready to send'
+                        ? L10n.of(context).ui_ready_to_send_7142ee89
                         : _locked
-                            ? 'Recording locked'
-                            : 'Release to send · Swipe up to lock',
+                            ? L10n.of(context).ui_recording_locked_c6d24d6a
+                            : L10n.of(context)
+                                .ui_release_to_send_swipe_up_to_lock_a0d2ad19,
                 style: TextStyle(color: context.kaede.textSoft, fontSize: 12),
               ),
             ),
@@ -416,7 +420,7 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
             ),
             child: Row(children: [
               IconButton(
-                tooltip: 'Discard voice message',
+                tooltip: L10n.of(context).ui_discard_voice_message_bd5b29f4,
                 onPressed: _finishing ? null : () => _finish(send: false),
                 icon: Icon(Icons.delete_outline_rounded),
               ),
@@ -441,14 +445,14 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
               ),
               if (_locked && !ready && !_starting)
                 IconButton(
-                  tooltip: 'Stop recording',
+                  tooltip: L10n.of(context).ui_stop_recording_8313d4fa,
                   onPressed: _finishing
                       ? null
                       : () => _finish(send: false, keep: true),
                   icon: Icon(Icons.stop_rounded),
                 ),
               IconButton.filled(
-                tooltip: 'Send voice message',
+                tooltip: L10n.of(context).ui_send_voice_message_75c5531a,
                 onPressed:
                     _finishing || _starting ? null : () => _finish(send: true),
                 icon: _finishing || _starting

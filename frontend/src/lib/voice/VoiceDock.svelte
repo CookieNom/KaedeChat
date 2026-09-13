@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { Permission } from '$lib/generated/permissions';
@@ -247,14 +249,14 @@
     void voice.reconcileBrowserPermissions(next).then(
       () => {
         if (mounted && !next.canConnect) {
-          error = 'Your permission to connect to this voice channel was removed.';
+          error = $t('ui_your_permission_to_connect_to_this_voice_chan_0d7f59e4');
         }
       },
       (caught) => {
         if (mounted) {
           error = userErrorMessage(
             caught,
-            'A voice permission changed and the media connection was closed.'
+            $t('ui_a_voice_permission_changed_and_the_media_conn_3ded6eec')
           );
         }
       }
@@ -328,7 +330,7 @@
         if (mounted) {
           error = userErrorMessage(
             caught,
-            'A Stage permission changed and the media connection was closed.'
+            $t('ui_a_stage_permission_changed_and_the_media_conn_db82fee3')
           );
         }
       });
@@ -439,7 +441,7 @@
         [userRef]: { ...(stageVoiceOverrides[userRef] ?? {}), ...patch, ...result }
       };
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update this Stage participant.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_this_stage_participant_935208d2'));
     } finally {
       stageVoiceBusy = '';
     }
@@ -461,7 +463,7 @@
   async function senderDeviceId(channel: Channel): Promise<string | null> {
     if (channel?.encryption_mode !== 'e2ee') return null;
     const user = entities.currentUser;
-    if (!user) throw new Error('Sign in again before joining encrypted voice.');
+    if (!user) throw new Error($t('ui_sign_in_again_before_joining_encrypted_voice_2ec63236'));
     return (await initializeE2EE(user)).deviceId;
   }
 
@@ -476,13 +478,12 @@
     void (async () => {
       try {
         const channel = selectedChannel(targetRef);
-        if (!channel) throw new Error('The destination voice channel is unavailable.');
+        if (!channel)
+          throw new Error($t('ui_the_destination_voice_channel_is_unavailable_1b495919'));
         const targetEncrypted = channel.encryption_mode === 'e2ee';
         if (voice.encrypted !== targetEncrypted) {
           await voice.disconnect();
-          throw new Error(
-            'The destination uses a different voice encryption policy. Review it and join manually.'
-          );
+          throw new Error($t('ui_the_destination_uses_a_different_voice_encryp_33e3a699'));
         }
         const key = await mediaKey(grant, channel);
         connectionId = grant.connection_id;
@@ -498,7 +499,10 @@
         if (!mounted || !connectionFence.isCurrent(generation)) await voice.disconnect();
       } catch (caught) {
         if (mounted && connectionFence.isCurrent(generation)) {
-          error = userErrorMessage(caught, 'Could not move voice rooms. Try joining again.');
+          error = userErrorMessage(
+            caught,
+            $t('ui_could_not_move_voice_rooms_try_joining_again_a250680a')
+          );
         }
       }
     })();
@@ -559,7 +563,7 @@
         if (mounted && voice.connected && channelRef === expectedChannelRef) {
           error = userErrorMessage(
             caught,
-            `Could not play ${detail.sound?.name ? `“${detail.sound.name}”` : 'the guild sound'}. Check this app's audio permissions.`
+            `Could not play ${detail.sound?.name ? `“${detail.sound.name}”` : $t('ui_the_guild_sound_aa76f54b')}. Check this app's audio permissions.`
           );
         }
       }
@@ -603,7 +607,7 @@
     expectedVoicePolicy(grant, channel);
     if (!grant.e2ee) return undefined;
     const user = entities.currentUser;
-    if (!user) throw new Error('Encrypted room state is unavailable on this device.');
+    if (!user) throw new Error($t('ui_encrypted_room_state_is_unavailable_on_this_d_3c6e6cd7'));
     const client = await initializeE2EE(user);
     await client.syncRoomState(channel);
     return client.exportMediaKey(
@@ -655,7 +659,7 @@
     joinController?.abort();
     joinController = null;
     await voice.disconnect();
-    if (mounted) error = 'Voice permissions changed. Rejoin to refresh your media access.';
+    if (mounted) error = $t('ui_voice_permissions_changed_rejoin_to_refresh_y_7cb6973c');
   }
 
   async function join(takeover = false) {
@@ -674,7 +678,8 @@
     takeoverPrompt = null;
     try {
       const channel = selectedChannel();
-      if (!channel) throw new Error('Voice channel policy is unavailable. Refresh and try again.');
+      if (!channel)
+        throw new Error($t('ui_voice_channel_policy_is_unavailable_refresh_a_412347ce'));
       const deviceId = await senderDeviceId(channel);
       const path = callRef
         ? `/calls/${encodeURIComponent(callRef)}/voice/token`
@@ -694,7 +699,7 @@
       if (!mounted || !connectionFence.isCurrent(generation) || controller.signal.aborted) return;
       if (isNativeDesktop()) {
         const reference = callRef ?? channelRef;
-        if (!reference) throw new Error('Voice channel is unavailable.');
+        if (!reference) throw new Error($t('ui_voice_channel_is_unavailable_7a98368b'));
         await voice.connectNative(
           reference,
           Boolean(callRef),
@@ -741,7 +746,7 @@
               : voice.error ||
                 userErrorMessage(
                   caught,
-                  'Could not join voice. Check your network and microphone permission, then try again.'
+                  $t('ui_could_not_join_voice_check_your_network_and_m_e636db48')
                 );
         }
       }
@@ -755,7 +760,8 @@
     try {
       await action();
     } catch (caught) {
-      if (mounted) error = userErrorMessage(caught, 'Voice control failed. Try again.');
+      if (mounted)
+        error = userErrorMessage(caught, $t('ui_voice_control_failed_try_again_b01a1b36'));
     }
   }
 
@@ -825,7 +831,11 @@
       }
       const groups: SoundboardGroup[] = [];
       if (defaultResult.status === 'fulfilled' && defaultResult.value.length) {
-        groups.push({ key: 'default', label: 'Discord Sounds', sounds: defaultResult.value });
+        groups.push({
+          key: 'default',
+          label: $t('ui_discord_sounds_4704277b'),
+          sounds: defaultResult.value
+        });
       }
       guildResults.forEach((result, index) => {
         if (result.status !== 'fulfilled' || !result.value.items.length) return;
@@ -841,7 +851,10 @@
       });
       soundboardGroups = groups;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not load available soundboard sounds.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_available_soundboard_sounds_6b120ce7')
+      );
       soundboardOpen = false;
     } finally {
       soundboardLoading = false;
@@ -889,7 +902,7 @@
       if (caught instanceof ApiError && caught.status === 404) {
         stageInstance = null;
       } else {
-        error = userErrorMessage(caught, 'Could not load this Stage.');
+        error = userErrorMessage(caught, $t('ui_could_not_load_this_stage_a500ec6a'));
       }
     } finally {
       stageLoading = false;
@@ -902,14 +915,14 @@
     const topic = prompt('What is this Stage about?', stageInstance?.topic ?? '')?.trim();
     if (!topic) return;
     if (topic.length > 120) {
-      error = 'Stage topics can be at most 120 characters.';
+      error = $t('ui_stage_topics_can_be_at_most_120_characters_dae43069');
       return;
     }
     stageLoading = true;
     error = '';
     try {
       const sendStartNotification =
-        canNotifyStage && confirm('Notify everyone in this server that the Stage is starting?');
+        canNotifyStage && confirm($t('ui_notify_everyone_in_this_server_that_the_stage_619e8203'));
       stageInstance = await api<StageInstance>('/stage-instances', {
         method: 'POST',
         body: JSON.stringify({
@@ -921,7 +934,7 @@
       });
       stageLoaded = true;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not start this Stage.');
+      error = userErrorMessage(caught, $t('ui_could_not_start_this_stage_774bd91c'));
     } finally {
       stageLoading = false;
     }
@@ -932,7 +945,7 @@
     const topic = prompt('Stage topic', stageInstance.topic)?.trim();
     if (!topic || topic === stageInstance.topic) return;
     if (topic.length > 120) {
-      error = 'Stage topics can be at most 120 characters.';
+      error = $t('ui_stage_topics_can_be_at_most_120_characters_dae43069');
       return;
     }
     stageLoading = true;
@@ -943,7 +956,7 @@
         { method: 'PATCH', body: JSON.stringify({ topic }) }
       );
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not update the Stage topic.');
+      error = userErrorMessage(caught, $t('ui_could_not_update_the_stage_topic_3c463968'));
     } finally {
       stageLoading = false;
     }
@@ -955,7 +968,7 @@
       !stageInstance ||
       !canManageStage ||
       stageLoading ||
-      !confirm('End this Stage for everyone?')
+      !confirm($t('ui_end_this_stage_for_everyone_5569b25d'))
     )
       return;
     stageLoading = true;
@@ -965,7 +978,7 @@
       stageInstance = null;
       stageLoaded = true;
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not end this Stage.');
+      error = userErrorMessage(caught, $t('ui_could_not_end_this_stage_67e01a3b'));
     } finally {
       stageLoading = false;
     }
@@ -989,7 +1002,7 @@
             </span>
             <div>
               <strong>{stageOccupantName(occupant)}</strong>
-              {#if self}<small>You</small>{/if}
+              {#if self}<small>{$t('ui_you_08b04193')}</small>{/if}
             </div>
             {#if !self && canModerateStageOccupant(occupant)}
               <button
@@ -998,7 +1011,9 @@
                 onclick={() =>
                   void updateStageVoiceState(occupant, { suppress: !occupant.suppressed })}
               >
-                {occupant.suppressed ? 'Invite to speak' : 'Move to audience'}
+                {occupant.suppressed
+                  ? $t('ui_invite_to_speak_b8bcd639')
+                  : $t('ui_move_to_audience_05b73155')}
               </button>
             {/if}
           </article>
@@ -1008,25 +1023,25 @@
   {/if}
 {/snippet}
 
-<section class="voice-panel" aria-label="Voice channel">
+<section class="voice-panel" aria-label={$t('ui_voice_channel_52909660')}>
   <header class="voice-heading">
     <div class="voice-status">
       <span class:connected={view.connected} class="status-dot" aria-hidden="true"></span>
       <div>
         <strong>
           {isStageChannel
-            ? (stageInstance?.topic ?? 'Stage channel')
+            ? (stageInstance?.topic ?? $t('ui_stage_channel_7dda295e'))
             : view.connected
-              ? 'Voice connected'
-              : 'Voice channel'}
+              ? $t('ui_voice_connected_a81da256')
+              : $t('ui_voice_channel_52909660')}
         </strong>
         <span>
           {isStageChannel && !stageLoaded
-            ? 'Loading Stage…'
+            ? $t('ui_loading_stage_c5500254')
             : isStageChannel && !stageInstance
-              ? 'The Stage has not started'
+              ? $t('ui_the_stage_has_not_started_dce9b212')
               : view.connected
-                ? `${participantCards.length} ${participantCards.length === 1 ? 'participant' : 'participants'} · ${view.encrypted ? 'End-to-end encrypted' : 'Not end-to-end encrypted'}${elapsedVoiceTime ? ` · ${elapsedVoiceTime}` : ''}`
+                ? `${participantCards.length} ${participantCards.length === 1 ? 'participant' : 'participants'} · ${view.encrypted ? $t('ui_end_to_end_encrypted_f01afb7a') : $t('ui_not_end_to_end_encrypted_fbac7965')}${elapsedVoiceTime ? ` · ${elapsedVoiceTime}` : ''}`
                 : elapsedVoiceTime
                   ? `Active for ${elapsedVoiceTime} · ${voiceCapabilitySummary}`
                   : voiceCapabilitySummary}
@@ -1037,21 +1052,31 @@
       {#if canManageStage && stageLoaded}
         {#if stageInstance}
           <button class="secondary" disabled={stageLoading} onclick={editStageTopic}
-            >Edit topic</button
+            >{$t('ui_edit_topic_d0b599b6')}</button
           >
-          <button class="danger" disabled={stageLoading} onclick={endStage}>End Stage</button>
+          <button class="danger" disabled={stageLoading} onclick={endStage}
+            >{$t('ui_end_stage_5e3d874c')}</button
+          >
         {:else}
-          <button class="primary" disabled={stageLoading} onclick={startStage}>Start Stage</button>
+          <button class="primary" disabled={stageLoading} onclick={startStage}
+            >{$t('ui_start_stage_dbd54230')}</button
+          >
         {/if}
       {/if}
       {#if !view.connected && (!isStageChannel || stageInstance)}
         <button
           class="primary"
           disabled={view.connecting || !canJoinVoice}
-          title={!canConnect ? 'You do not have permission to join this voice channel.' : undefined}
+          title={!canConnect
+            ? $t('ui_you_do_not_have_permission_to_join_this_voice_4875c87d')
+            : undefined}
           onclick={() => join()}
         >
-          {view.connecting ? 'Connecting…' : isStageChannel ? 'Join audience' : 'Join voice'}
+          {view.connecting
+            ? $t('ui_connecting_72021eb7')
+            : isStageChannel
+              ? $t('ui_join_audience_deb0900c')
+              : $t('ui_join_voice_201f8c4e')}
         </button>
       {/if}
     </div>
@@ -1064,13 +1089,17 @@
     {#if takeoverPrompt}
       <div class="takeover-prompt" role="alertdialog" aria-labelledby="voice-takeover-title">
         <span><Icon name="screen" size={28} /></span>
-        <strong id="voice-takeover-title">Voice is active on {takeoverPrompt}</strong>
-        <p>Moving voice here will disconnect that device. It will not reconnect automatically.</p>
+        <strong id="voice-takeover-title"
+          >{$t('ui_voice_is_active_on_value0_9d7639ad', { value0: String(takeoverPrompt) })}</strong
+        >
+        <p>{$t('ui_moving_voice_here_will_disconnect_that_device_ff972cf1')}</p>
         <div class="takeover-actions">
           <button class="primary" disabled={view.connecting} onclick={() => join(true)}>
-            {view.connecting ? 'Moving voice…' : 'Move voice here'}
+            {view.connecting ? $t('ui_moving_voice_05114666') : $t('ui_move_voice_here_a24a87c4')}
           </button>
-          <button class="secondary" onclick={() => (takeoverPrompt = null)}>Keep it there</button>
+          <button class="secondary" onclick={() => (takeoverPrompt = null)}
+            >{$t('ui_keep_it_there_2d0d45fb')}</button
+          >
         </div>
       </div>
     {:else if view.connected}
@@ -1081,8 +1110,8 @@
           {@render stageGroup('Audience', stageAudience)}
           {#if !stageOccupants.length}
             <div class="join-prompt">
-              <strong>No one else is here yet</strong>
-              <p>Stage participants will appear here as they join.</p>
+              <strong>{$t('ui_no_one_else_is_here_yet_60949b4f')}</strong>
+              <p>{$t('ui_stage_participants_will_appear_here_as_they_j_794f4437')}</p>
             </div>
           {/if}
         </div>
@@ -1095,8 +1124,12 @@
             <div class="priority-speaker-roster" role="status">
               <Icon name="megaphone" size={17} />
               <span>
-                {activePriorityCards.map((participant) => participant.name).join(', ')}
-                {activePriorityCards.length === 1 ? ' is' : ' are'} speaking with priority
+                {$t('ui_value0_value1_speaking_with_priority_bc61d2c3', {
+                  value0: String(
+                    activePriorityCards.map((participant) => participant.name).join(', ')
+                  ),
+                  value1: String(activePriorityCards.length === 1 ? ' is' : ' are')
+                })}
               </span>
             </div>
           {/if}
@@ -1109,14 +1142,16 @@
               {#if view.prioritySpeakers.has(tile.identity)}
                 <span
                   class="priority-speaker-cue"
-                  title="Priority speaker"
-                  aria-label="Priority speaker"
+                  title={$t('ui_priority_speaker_415c3cdd')}
+                  aria-label={$t('ui_priority_speaker_415c3cdd')}
                 >
                   <Icon name="megaphone" size={17} />
                 </span>
               {/if}
               <div class="video-host" use:attachVideo={tile}></div>
-              <span class="video-tile-name">{tile.name}{tile.local ? ' (you)' : ''}</span>
+              <span class="video-tile-name"
+                >{tile.name}{tile.local ? $t('ui_you_9d84cd48') : ''}</span
+              >
             </article>
           {/each}
         </div>
@@ -1131,8 +1166,8 @@
               {#if participant.priority}
                 <span
                   class="priority-speaker-cue"
-                  title="Priority speaker"
-                  aria-label="Priority speaker"
+                  title={$t('ui_priority_speaker_415c3cdd')}
+                  aria-label={$t('ui_priority_speaker_415c3cdd')}
                 >
                   <Icon name="megaphone" size={17} />
                 </span>
@@ -1142,12 +1177,14 @@
               </div>
               <div class="participant-name">
                 <strong>{participant.name}</strong>
-                {#if participant.local}<span>You</span>{/if}
+                {#if participant.local}<span>{$t('ui_you_08b04193')}</span>{/if}
               </div>
               <span
                 class:muted={!participant.microphone}
                 class="participant-mic"
-                title={participant.microphone ? 'Microphone on' : 'Muted'}
+                title={participant.microphone
+                  ? $t('ui_microphone_on_891fd461')
+                  : $t('ui_muted_2346f214')}
               >
                 <Icon name={participant.microphone ? 'microphone' : 'microphone-off'} size={17} />
               </span>
@@ -1158,27 +1195,29 @@
     {:else if isStageChannel && stageLoaded && !stageInstance}
       <div class="join-prompt">
         <span><Icon name="microphone" size={28} /></span>
-        <strong>This Stage hasn’t started yet</strong>
+        <strong>{$t('ui_this_stage_hasn_t_started_yet_dbe8f54e')}</strong>
         <p>
           {canManageStage
-            ? 'Start the Stage when you are ready to bring the audience in.'
-            : 'Check back when a moderator starts the Stage.'}
+            ? $t('ui_start_the_stage_when_you_are_ready_to_bring_t_cf2db575')
+            : $t('ui_check_back_when_a_moderator_starts_the_stage_2b2b7462')}
         </p>
         {#if canManageStage}
-          <button class="primary" disabled={stageLoading} onclick={startStage}>Start Stage</button>
+          <button class="primary" disabled={stageLoading} onclick={startStage}
+            >{$t('ui_start_stage_dbd54230')}</button
+          >
         {/if}
       </div>
     {:else if !canConnect}
       <div class="join-prompt permission-prompt">
         <span><Icon name="lock" size={26} /></span>
-        <strong>You cannot join this voice channel</strong>
-        <p>Your roles do not include the Connect permission for this channel.</p>
+        <strong>{$t('ui_you_cannot_join_this_voice_channel_31a69281')}</strong>
+        <p>{$t('ui_your_roles_do_not_include_the_connect_permiss_a9784a5e')}</p>
       </div>
     {:else}
       <div class="join-prompt">
         <span><Icon name="volume" size={28} /></span>
-        <strong>Ready when you are</strong>
-        <p>Join the room to talk with everyone already here.</p>
+        <strong>{$t('ui_ready_when_you_are_34ef5704')}</strong>
+        <p>{$t('ui_join_the_room_to_talk_with_everyone_already_h_921e49c0')}</p>
       </div>
     {/if}
   </main>
@@ -1192,49 +1231,49 @@
             disabled={(!currentStageVoiceState.request_to_speak_timestamp && !canRequestToSpeak) ||
               Boolean(stageVoiceBusy)}
             title={!currentStageVoiceState.request_to_speak_timestamp && !canRequestToSpeak
-              ? 'You do not have permission to request to speak.'
+              ? $t('ui_you_do_not_have_permission_to_request_to_spea_d4b85f0e')
               : undefined}
             onclick={toggleRequestToSpeak}
           >
             {currentStageVoiceState.request_to_speak_timestamp
-              ? 'Cancel request'
-              : 'Request to speak'}
+              ? $t('ui_cancel_request_56196683')
+              : $t('ui_request_to_speak_41418813')}
           </button>
         {:else}
           <button
             class="secondary"
             disabled={Boolean(stageVoiceBusy)}
             onclick={() => void updateStageVoiceState(null, { suppress: true })}
-            >Move to audience</button
+            >{$t('ui_move_to_audience_05b73155')}</button
           >
         {/if}
       </div>
     {/if}
     {#if !view.canSpeak || !view.canStream}
       <div class="voice-permission-notice" role="status">
-        {#if isStageChannel && currentStageVoiceState?.suppressed}
-          You are listening from the audience. A Stage moderator can invite you to speak.
-        {:else if !view.canSpeak && !view.canStream}
-          You can listen, but your roles do not allow speaking, camera, or screen sharing here.
-        {:else if !view.canSpeak}
-          You can listen and share video, but your roles do not allow speaking here.
-        {:else}
-          You can speak, but your roles do not allow camera or screen sharing here.
-        {/if}
+        {#if isStageChannel && currentStageVoiceState?.suppressed}{$t(
+            'ui_you_are_listening_from_the_audience_a_stage_m_90f9e777'
+          )}{:else if !view.canSpeak && !view.canStream}{$t(
+            'ui_you_can_listen_but_your_roles_do_not_allow_sp_91ed173b'
+          )}{:else if !view.canSpeak}{$t(
+            'ui_you_can_listen_and_share_video_but_your_roles_06e6350e'
+          )}{:else}{$t('ui_you_can_speak_but_your_roles_do_not_allow_cam_92ace2ec')}{/if}
       </div>
     {/if}
-    <footer class="voice-dock" aria-label="Voice controls">
+    <footer class="voice-dock" aria-label={$t('ui_voice_controls_1ce5a1da')}>
       <button
         class:active={view.camera}
         class="control-button"
         disabled={!view.canStream}
         aria-pressed={view.camera}
-        aria-label={view.camera ? 'Turn camera off' : 'Turn camera on'}
+        aria-label={view.camera
+          ? $t('ui_turn_camera_off_2050f56d')
+          : $t('ui_turn_camera_on_95e9fb56')}
         title={!view.canStream
-          ? 'You do not have permission to use video in this channel.'
+          ? $t('ui_you_do_not_have_permission_to_use_video_in_th_b3e90649')
           : view.camera
-            ? 'Camera off'
-            : 'Camera on'}
+            ? $t('ui_camera_off_ce3ef745')
+            : $t('ui_camera_on_071a189a')}
         onclick={() => safely(() => voice.toggleCamera())}
       >
         <Icon name={view.camera ? 'video' : 'video-off'} size={21} />
@@ -1244,12 +1283,14 @@
         class="control-button"
         disabled={!view.canStream}
         aria-pressed={view.screen}
-        aria-label={view.screen ? 'Stop sharing screen' : 'Share screen'}
+        aria-label={view.screen
+          ? $t('ui_stop_sharing_screen_f350f649')
+          : $t('ui_share_screen_5a271ba7')}
         title={!view.canStream
-          ? 'You do not have permission to share your screen in this channel.'
+          ? $t('ui_you_do_not_have_permission_to_share_your_scre_d1e5b2c9')
           : view.screen
-            ? 'Stop sharing'
-            : 'Share screen'}
+            ? $t('ui_stop_sharing_b2c78147')
+            : $t('ui_share_screen_5a271ba7')}
         onclick={() => {
           if (view.screen) void safely(() => voice.stopScreenShare());
           else screenShareOpen = true;
@@ -1261,9 +1302,9 @@
         <button
           class="control-button"
           type="button"
-          aria-label="Open Apps"
+          aria-label={$t('ui_open_apps_4d95ac69')}
           aria-haspopup="dialog"
-          title="Apps"
+          title={$t('ui_apps_89dd7484')}
           onclick={onApps}
         >
           <Icon name="sparkles" size={20} />
@@ -1276,8 +1317,10 @@
           class="control-button push-to-talk-button"
           disabled={!view.canSpeak || view.deafened}
           aria-pressed={view.microphone}
-          aria-label="Hold to talk"
-          title={view.deafened ? 'Undeafen before talking.' : 'Hold to talk'}
+          aria-label={$t('ui_hold_to_talk_988091e6')}
+          title={view.deafened
+            ? $t('ui_undeafen_before_talking_50b7e9dc')
+            : $t('ui_hold_to_talk_988091e6')}
           onpointerdown={pushToTalkPointerDown}
           onpointerup={pushToTalkPointerUp}
           onpointercancel={pushToTalkPointerUp}
@@ -1285,7 +1328,7 @@
           onkeyup={pushToTalkKeyUp}
         >
           <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
-          <span>Hold</span>
+          <span>{$t('ui_hold_8e685d54')}</span>
         </button>
       {:else}
         <button
@@ -1293,12 +1336,14 @@
           class="control-button"
           disabled={!view.canSpeak}
           aria-pressed={view.microphone}
-          aria-label={view.microphone ? 'Mute microphone' : 'Unmute microphone'}
+          aria-label={view.microphone
+            ? $t('ui_mute_microphone_2d1be690')
+            : $t('ui_unmute_microphone_a22cb32b')}
           title={!view.canSpeak
-            ? 'You do not have permission to speak in this channel.'
+            ? $t('ui_you_do_not_have_permission_to_speak_in_this_c_2feb0c86')
             : view.microphone
-              ? 'Mute'
-              : 'Unmute'}
+              ? $t('ui_mute_8dd6857b')
+              : $t('ui_unmute_ce4ee4ef')}
           onclick={() => safely(() => voice.toggleMicrophone())}
         >
           <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
@@ -1308,8 +1353,8 @@
         class:off={view.deafened}
         class="control-button"
         aria-pressed={view.deafened}
-        aria-label={view.deafened ? 'Undeafen' : 'Deafen'}
-        title={view.deafened ? 'Undeafen' : 'Deafen'}
+        aria-label={view.deafened ? $t('ui_undeafen_1e4529c6') : $t('ui_deafen_97081eb7')}
+        title={view.deafened ? $t('ui_undeafen_1e4529c6') : $t('ui_deafen_97081eb7')}
         onclick={() => safely(() => voice.toggleDeafen())}
       >
         <Icon name={view.deafened ? 'headphones-off' : 'headphones'} size={20} />
@@ -1321,17 +1366,17 @@
             class="control-button"
             disabled={!canPlaySoundboard}
             aria-expanded={soundboardOpen && canPlaySoundboard}
-            aria-label="Open soundboard"
-            title={soundboardUnavailableReason ?? 'Soundboard'}
+            aria-label={$t('ui_open_soundboard_bb20902b')}
+            title={soundboardUnavailableReason ?? $t('ui_soundboard_07ff885c')}
             onclick={() => void toggleSoundboard()}
           >
             <Icon name="music" size={20} />
           </button>
           {#if soundboardOpen && canPlaySoundboard}
-            <div class="soundboard-popover" aria-label="Soundboard sounds">
-              <strong>Soundboard</strong>
+            <div class="soundboard-popover" aria-label={$t('ui_soundboard_sounds_ed5874c6')}>
+              <strong>{$t('ui_soundboard_07ff885c')}</strong>
               {#if soundboardLoading}
-                <span>Loading sounds…</span>
+                <span>{$t('ui_loading_sounds_034bcbe7')}</span>
               {:else if visibleSoundboardGroups.length}
                 {#each visibleSoundboardGroups as group (group.key)}
                   <h4>{group.label}</h4>
@@ -1347,7 +1392,7 @@
                   {/each}
                 {/each}
               {:else}
-                <span>No soundboard sounds are available.</span>
+                <span>{$t('ui_no_soundboard_sounds_are_available_d1ffe02a')}</span>
               {/if}
             </div>
           {/if}
@@ -1356,8 +1401,8 @@
       <span class="control-divider" aria-hidden="true"></span>
       <button
         class="control-button danger"
-        aria-label={isStageChannel ? 'Exit Quietly' : 'Leave voice'}
-        title={isStageChannel ? 'Exit Quietly' : 'Leave voice'}
+        aria-label={isStageChannel ? $t('ui_exit_quietly_407e6c8b') : $t('ui_leave_voice_ecb0fa25')}
+        title={isStageChannel ? $t('ui_exit_quietly_407e6c8b') : $t('ui_leave_voice_ecb0fa25')}
         onclick={() => safely(leave)}
       >
         <Icon name="phone-off" size={21} />

@@ -1,4 +1,6 @@
 <script lang="ts" generics="T extends { key: string }">
+  import { t } from '$lib/ui/locale';
+
   import { onMount, tick, untrack, type Snippet } from 'svelte';
 
   let {
@@ -15,7 +17,7 @@
     onLoadLater,
     onBottomChange,
     targetKey,
-    label = 'Messages'
+    label = $t('ui_messages_04d7b483')
   }: {
     items: T[];
     renderItem: Snippet<[item: T, index: number]>;
@@ -163,8 +165,7 @@
 
 <div class="virtual-message-shell">
   <span id="message-history-keyboard-help" class="visually-hidden">
-    Scroll this region with Page Up and Page Down. Each message has a keyboard-accessible actions
-    menu.
+    {$t('ui_scroll_this_region_with_page_up_and_page_down_7fffc5aa')}
   </span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scrollable message region needs a keyboard entry point) -->
   <div
@@ -179,7 +180,7 @@
     <div bind:this={contentElement} class="virtual-message-content">
       {#if hasEarlier}
         <button class="history-button" disabled={loadingEarlier} onclick={loadEarlierAnchored}>
-          {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
+          {loadingEarlier ? $t('ui_loading_ba3bbbe1') : $t('ui_load_earlier_messages_33fd46b9')}
         </button>
       {:else if items.length && historyStart}
         {@render historyStart()}
@@ -193,14 +194,17 @@
       {/each}
       {#if hasLater}
         <button class="history-button" disabled={loadingLater} onclick={onLoadLater}>
-          {loadingLater ? 'Loading…' : 'Load newer messages'}
+          {loadingLater ? $t('ui_loading_ba3bbbe1') : $t('ui_load_newer_messages_dc294d6b')}
         </button>
       {/if}
     </div>
   </div>
   {#if unseen > 0}
     <button class="new-message-pill" onclick={scrollToBottom} aria-label={`${unseen} new messages`}>
-      {unseen} new {unseen === 1 ? 'message' : 'messages'} ↓
+      {$t('ui_value0_new_value1_48a9cfef', {
+        value0: String(unseen),
+        value1: String(unseen === 1 ? 'message' : 'messages')
+      })}
     </button>
   {/if}
 </div>

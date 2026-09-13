@@ -1,0 +1,46 @@
+{
+  "project": {
+    "name": "KaedeChat",
+    "slug": "kaede-chat",
+    "web": "https://kaede.chat/"
+  },
+  "components": [
+    {
+      "name": "Web and desktop",
+      "slug": "frontend",
+      "repo": "https://github.com/CookieNom/KaedeChat.git",
+      "branch": "main",
+      "vcs": "git",
+      "push_branch": "weblate-translations",
+      "filemask": "frontend/src/lib/locales/*.json",
+      "template": "frontend/src/lib/locales/en.json",
+      "new_base": "",
+      "file_format": "json",
+      "source_language": "en",
+      "check_flags": "icu-message-format",
+      "edit_template": false,
+      "push": "git@github.com:CookieNom/KaedeChat.git",
+      "push_on_commit": true,
+      "file_format_params": {
+        "json_indent": 2,
+        "json_indent_style": "spaces"
+      }
+    },
+    {
+      "name": "Mobile",
+      "slug": "mobile",
+      "repo": "weblate://kaede-chat/frontend",
+      "vcs": "git",
+      "filemask": "mobile/lib/l10n/app_*.arb",
+      "template": "mobile/lib/l10n/app_en.arb",
+      "new_base": "",
+      "file_format": "arb",
+      "source_language": "en",
+      "edit_template": false,
+      "file_format_params": {
+        "json_indent": 2,
+        "json_indent_style": "spaces"
+      }
+    }
+  ]
+}

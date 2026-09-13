@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/ui/locale';
+
   import { SvelteMap } from 'svelte/reactivity';
 
   import { api, userErrorMessage } from '$lib/api/client';
@@ -74,7 +76,7 @@
     event.preventDefault();
     const reference = canonicalAuditActorRef(actorReferenceInput);
     if (!reference) {
-      actorReferenceError = 'Enter a complete user reference such as 123@instance.example.';
+      actorReferenceError = $t('ui_enter_a_complete_user_reference_such_as_123_i_0f3a57fd');
       return;
     }
     actorFilter = reference;
@@ -129,7 +131,10 @@
       hasMore = page.length === 50;
     } catch (caught) {
       if (request !== requestSerial) return;
-      error = userErrorMessage(caught, 'Could not load the guild audit log. Try again.');
+      error = userErrorMessage(
+        caught,
+        $t('ui_could_not_load_the_guild_audit_log_try_again_8cb7433a')
+      );
       retryAppend = append;
     } finally {
       if (request === requestSerial) {
@@ -164,76 +169,84 @@
 
 <div class="audit-toolbar">
   <div class="actor-picker">
-    <span>Moderator</span>
+    <span>{$t('ui_moderator_6748ec8b')}</span>
     <GuildMemberPicker
       guildRef={entityRef(guild)}
       staticOptions={actorOptions}
       value={actorFilter ? [actorFilter] : []}
       optional
-      placeholder="Everyone"
+      placeholder={$t('ui_everyone_da2e5dc5')}
       disabled={loading}
       onChange={chooseActor}
     />
   </div>
   <form class="exact-actor" onsubmit={applyExactActor}>
     <label>
-      <span>Departed moderator ID</span>
+      <span>{$t('ui_departed_moderator_id_4bbaa048')}</span>
       <div class="exact-actor-row">
         <input
           bind:value={actorReferenceInput}
           disabled={loading}
           placeholder="123@instance.example"
-          aria-label="Filter by an exact moderator reference"
+          aria-label={$t('ui_filter_by_an_exact_moderator_reference_e56f8069')}
           aria-describedby={actorReferenceError ? 'audit-actor-reference-error' : undefined}
         />
-        <button type="submit" disabled={loading}>Apply</button>
+        <button type="submit" disabled={loading}>{$t('ui_apply_31e392d1')}</button>
       </div>
     </label>
     {#if actorReferenceError}
       <small id="audit-actor-reference-error" role="alert">{actorReferenceError}</small>
     {:else}
-      <small>Use an exact reference for an account that has left the guild.</small>
+      <small>{$t('ui_use_an_exact_reference_for_an_account_that_ha_5ac57825')}</small>
     {/if}
   </form>
   <label>
-    <span>Action</span>
-    <select bind:value={actionFilter} disabled={loading} aria-label="Filter by action">
-      <option value="">All actions</option>
+    <span>{$t('ui_action_64cff131')}</span>
+    <select
+      bind:value={actionFilter}
+      disabled={loading}
+      aria-label={$t('ui_filter_by_action_ef58fbae')}
+    >
+      <option value="">{$t('ui_all_actions_83140cf1')}</option>
       {#each actions as action (auditActionFilterValue(action))}
         <option value={auditActionFilterValue(action)}>{action.label}</option>
       {/each}
     </select>
   </label>
   <button class="audit-refresh" type="button" disabled={loading || loadingMore} onclick={refresh}>
-    <Icon name="clock" size={16} />{loading ? 'Loading…' : 'Refresh'}
+    <Icon name="clock" size={16} />{loading ? $t('ui_loading_ba3bbbe1') : $t('ui_refresh_0e916101')}
   </button>
 </div>
 
 {#if error}
   <div class="audit-error" role="alert">
     <span>{error}</span>
-    <button type="button" disabled={loading || loadingMore} onclick={retry}>Try again</button>
+    <button type="button" disabled={loading || loadingMore} onclick={retry}
+      >{$t('ui_try_again_d8b8392e')}</button
+    >
   </div>
 {/if}
 
 {#if loading && !entries.length}
-  <p class="audit-state" role="status">Loading audit log…</p>
+  <p class="audit-state" role="status">{$t('ui_loading_audit_log_e3ee9c3d')}</p>
 {:else if error && !entries.length}
   <div class="audit-state">
     <Icon name="shield" size={24} />
-    <strong>Audit log unavailable</strong>
-    <span>Try again when the connection is available.</span>
+    <strong>{$t('ui_audit_log_unavailable_7655b953')}</strong>
+    <span>{$t('ui_try_again_when_the_connection_is_available_5d564d6a')}</span>
   </div>
 {:else if !entries.length}
   <div class="audit-state">
     <Icon name="shield" size={24} />
     <strong
-      >{actorFilter || actionFilter ? 'No matching audit entries' : 'No audit entries yet'}</strong
+      >{actorFilter || actionFilter
+        ? $t('ui_no_matching_audit_entries_5458c341')
+        : $t('ui_no_audit_entries_yet_093cd309')}</strong
     >
     <span
       >{actorFilter || actionFilter
-        ? 'Try another moderator or action.'
-        : 'Administrative actions will appear here.'}</span
+        ? $t('ui_try_another_moderator_or_action_6f43cc2c')
+        : $t('ui_administrative_actions_will_appear_here_77cb8226')}</span
     >
   </div>
 {:else}
@@ -251,7 +264,9 @@
             >
           </div>
           <p>{auditSummary(actor, entry, target)}</p>
-          {#if entry.reason}<blockquote>Reason: {entry.reason}</blockquote>{/if}
+          {#if entry.reason}<blockquote>
+              {$t('ui_reason_value0_0e8a3391', { value0: String(entry.reason) })}
+            </blockquote>{/if}
           {#if entry.changes.length}
             <dl>
               {#each entry.changes as change, index (`${change.key}-${index}`)}
@@ -272,7 +287,9 @@
       type="button"
       disabled={loading || loadingMore}
       onclick={() => void loadEntries(true)}
-      >{loadingMore ? 'Loading older entries…' : 'Load older entries'}</button
+      >{loadingMore
+        ? $t('ui_loading_older_entries_b84f0b00')
+        : $t('ui_load_older_entries_79069c83')}</button
     >
   {/if}
 {/if}
