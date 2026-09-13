@@ -1,9 +1,8 @@
 # Bots and automations
 
 This is the bot API reference: authentication, installations, scopes, REST
-routes, Gateway events, and encryption. For a runnable first bot, start with
-the [quickstart](bot-api-quickstart.md); for feature examples, use the
-[SDK recipes](bot-sdk-recipes.md).
+routes, Gateway events, and encryption. For a runnable first bot and feature
+examples, use the [Bot SDK guide](bot-api-quickstart.md).
 
 The management interfaces for application owners and instance operators are
 covered in [Instance Administration and Developer Portal](administration-and-developer-portals.md).
@@ -1110,7 +1109,7 @@ the server.
 ## Python SDK
 
 Use the [bot quickstart](bot-api-quickstart.md) for enrollment, command
-publishing, and a runnable `/ping` bot. The [SDK recipes](bot-sdk-recipes.md)
+publishing, and a runnable `/ping` bot. The [SDK recipes](bot-api-quickstart.md#sdk-recipes)
 cover feature examples and required grants, including federation and media.
 The SDK handles target token exchange, request signing, and Gateway recovery.
 

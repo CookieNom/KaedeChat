@@ -373,8 +373,38 @@ cursors, described in [the bot reference](bots-and-automations.md#bot-gateway).
 Forums contain child threads with starter messages, tags, sorting, pagination,
 and archive/lock controls. Encrypted child threads have independent MLS groups;
 a parent's encryption does not admit a device to its children. See
-[E2EE](e2ee.md), [group DMs](group-direct-messages.md), and
+[E2EE](e2ee.md), [group DMs](#group-direct-messages), and
 [task boards](task-tracker.md) for their separate access and storage rules.
+
+### Group direct messages
+
+Group DMs contain 3–10 people. Any member may rename the group or add an
+existing friend; both homes must confirm the friendship. Only the owner may
+remove another member. Leaving transfers ownership to the earliest remaining
+member, and the conversation closes when its last member leaves. Removal ends
+access immediately but does not erase previously delivered messages.
+
+The creator's home owns the group identity, membership, name, and state version.
+Other homes route mutations there and accept only newer signed full-state
+updates; equal-version conflicts are rejected. Messages travel directly between
+members' homes, which verify current membership. History and attachments remain
+requester-bound. One active call may ring the current members; call actions and
+media tokens recheck membership. Bots cannot start or join group-DM calls.
+
+The authenticated client routes use composite channel and user references:
+
+```text
+POST   /api/v1/users/@me/channels/group
+PATCH  /api/v1/users/@me/channels/{channel_ref}/group
+POST   /api/v1/users/@me/channels/{channel_ref}/group/recipients
+DELETE /api/v1/users/@me/channels/{channel_ref}/group/recipients/{user_ref}
+POST   /api/v1/users/@me/channels/{channel_ref}/group/leave
+```
+
+Creation accepts 2–9 unique friend handles and an optional name. Group channels
+have `conversation_type: "group"`, `owner_id`, `owner_domain`, and `recipients`
+(the other current members). Compare both owner fields. Existing message,
+search, attachment, reaction, and call APIs operate on the group channel.
 
 ## Media storage and processing
 
@@ -407,4 +437,19 @@ retryable. The [operator guide](operator.md) covers limits and storage repair.
 
 Webhook messages retain their webhook attribution. Tokens are shown only at
 creation or rotation, stored as digests, and invalidated by rotation/revocation.
-See [bot recipes](bot-sdk-recipes.md) for sending and managing them.
+See [bot recipes](bot-api-quickstart.md#sdk-recipes) for sending and managing them.
+
+### Attachment spoilers
+
+Clients mark spoilers with a `SPOILER_` filename prefix and must conceal their
+media and download controls until revealed, including embeds and forwarded
+attachments. Forum thumbnails omit spoiler images. This is presentation, not
+access control; older clients do not conceal spoilers, so deploy backend and
+client updates together. Encrypted files keep the prefix in the authenticated
+private manifest filename; their public upload name stays `encrypted-file`.
+
+`PATCH /api/v1/attachments/{id}/spoiler` accepts `{"spoiler": true}` or `false`
+for the uploader's queued plaintext message attachment, before finalization or
+message/response binding. It locks against finalization and rejects encrypted
+uploads and non-message assets. Clients must block Send while this update is
+pending or failed. Mobile applies the prefix before uploading on Send.

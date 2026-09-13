@@ -15,9 +15,8 @@ Tauri desktop, and Flutter mobile clients share the same server APIs.
 | I want to… | Start here |
 | --- | --- |
 | Host a Kaede instance | [Server setup below](#setup) |
-| Build a bot from scratch | [Bot quickstart](docs/bot-api-quickstart.md) |
+| Build a bot and add features | [Bot SDK guide](docs/bot-api-quickstart.md) |
 | Deploy the Discord bridge | [Bridge setup](official-bots/discord-bridge/README.md) |
-| Add bot features, including federation, voice, and video | [SDK recipes](docs/bot-sdk-recipes.md) |
 | Maintain an existing server | [Operator guide](docs/operator.md) |
 | Build a desktop or mobile client | [Desktop](desktop/README.md) · [Mobile](mobile/README.md) |
 | Understand the APIs and design | [Documentation index](docs/README.md) |

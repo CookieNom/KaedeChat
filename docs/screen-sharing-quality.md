@@ -93,6 +93,20 @@ The system broadcast picker and red recording indicator remain authoritative.
 The extension ignores ReplayKit app/microphone audio because Kaede publishes
 call audio through its normal LiveKit microphone track.
 
+## Call video visibility
+
+Mobile enters native picture in picture when leaving a video call if the
+locally saved **Automatic picture in picture** setting is enabled (the default)
+and OS support and permissions allow it. Android supports PiP from Android 8;
+iOS uses video-call PiP on iOS 15+. Desktop offers an always-on-top **Picture in
+picture** window and a normal **Pop out video** window. Closing either returns
+video inline, using the same call and encryption context without duplicate audio.
+
+Browsers pause incoming video in hidden tabs. Desktop pauses it when the active
+video window is hidden or minimized; mobile pauses it in the background unless
+native PiP is visible. Audio, signaling, and outgoing media continue. Restoring
+visibility resumes incoming video subscriptions.
+
 ## Release validation
 
 Before a store or desktop release, validate every preset on a physical receiver
@@ -102,6 +116,11 @@ testing must confirm MediaProjection foreground-service ordering. iOS testing
 must use a signed physical device because the app-group extension path cannot
 be validated by Flutter's Linux CI or treated as proven by project-file
 presence alone.
+
+Also test backgrounding, restoring, closing PiP, and desktop minimize/tray
+behavior in plaintext and encrypted calls. Incoming video should pause only
+when its presentation is hidden, while audio continues. Leaving or reconnecting
+a call must not leave a stale video window.
 
 ## Voice and call routing
 
@@ -130,7 +149,7 @@ null` leaves selection automatic. `make voice-check` exercises disposable
 LiveKit and Dragonfly services; it does not replace physical-device checks.
 
 For bot playback, receiving, video publication, and calls, use the
-[SDK recipes](bot-sdk-recipes.md#play-audio-in-a-voice-channel).
+[SDK recipes](bot-api-quickstart.md#play-audio-in-a-voice-channel).
 Encrypted media requires the room's current MLS state; see [E2EE](e2ee.md).
 
 ## Codec defaults

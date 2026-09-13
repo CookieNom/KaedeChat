@@ -160,6 +160,27 @@ Authorized staff can triage, review, request more information, record action or
 no action, mark duplicates, and reopen cases. Report creation is rate limited to
 10 per local user per hour.
 
+### External safety reporting
+
+In **Administration → Reports**, staff with `reports.manage` can export a
+PhotoDNA case as authenticated JSON, submit it through the destination's own
+process, and record its destination, receipt, submission time, and notes.
+Exports and submission records are audited. Recording a submission appends to
+the case without changing its review status or sending data to another service.
+
+Exports include case timestamps, available identities, message/attachment
+references, evidence, previous submissions, and the exporting instance and
+administrator. Remote matches may include the origin, observation time, scanned
+variant, size, conversation reference, and a federation-authorized source URL
+without access tokens. Remote identities are federation claims, not verified
+real-world identities; missing fields remain unavailable and older cases are
+not retroactively enriched.
+
+The export does not retain matched image bytes or perceptual hashes, collect
+remote IP/account records, or submit automatically. The originating instance
+may hold additional information. Record the destination's receipt after manual
+submission.
+
 ### Administration API
 
 | Method | Path | Purpose |

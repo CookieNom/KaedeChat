@@ -28,7 +28,7 @@ Keep the worker directory private, persistent, and writable for replay cursors.
 
 ## Examples and reference
 
-[SDK recipes](https://github.com/CookieNom/KaedeChat/blob/main/docs/bot-sdk-recipes.md)
+[SDK recipes](https://github.com/CookieNom/KaedeChat/blob/main/docs/bot-api-quickstart.md#sdk-recipes)
 cover messages, interactions, files, polls, buttons, forums, threads, task
 boards, guild administration, webhooks, events, federated guilds and DMs,
 audio playback/receiving, camera and screen video, and encrypted participants.
