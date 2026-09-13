@@ -22,6 +22,7 @@ import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/dm_bot_e2ee_participation_screen.dart';
 import 'package:kaede_mobile/src/features/chat/forum_channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
+import 'package:kaede_mobile/src/features/chat/read_inbox_screen.dart';
 import 'package:kaede_mobile/src/features/guild/announcement_management_tab.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/guild/scheduled_events_tab.dart';
@@ -424,7 +425,26 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     );
     return ValueListenableBuilder<int>(
       valueListenable: _messagePage,
-      child: Scaffold(body: body),
+      child: Scaffold(
+          body: body,
+          floatingActionButton: ValueListenableBuilder<int>(
+              valueListenable: _messagePage,
+              builder: (context, page, _) =>
+                  page != 0 || _section != _ShellSection.messages
+                      ? const SizedBox.shrink()
+                      : FloatingActionButton.small(
+                          tooltip: L10n.of(context).chat_inbox,
+                          child: const Icon(Icons.inbox_outlined),
+                          onPressed: () async {
+                            final opened = await Navigator.of(context)
+                                .push<bool>(MaterialPageRoute(
+                                    builder: (_) => const ReadInboxScreen()));
+                            if (mounted && opened == true) {
+                              _showSection(_ShellSection.messages);
+                              _openConversation();
+                            }
+                          },
+                        ))),
       builder: (context, page, child) => PopScope(
         canPop: _section == _ShellSection.messages && page == 0,
         onPopInvokedWithResult: (didPop, _) {
@@ -1051,6 +1071,23 @@ final class _ConversationScreenState
         (widget.channel.type == ChannelType.text ||
             widget.channel.type == ChannelType.announcement);
     final overflowItems = <PopupMenuEntry<String>>[
+      if (canReadHistory)
+        PopupMenuItem(
+            value: 'mark-read',
+            child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.done_all),
+                title: Text(L10n.of(context).chat_mark_read))),
+      if (activeGuild != null)
+        PopupMenuItem(
+            value: 'mark-server-read',
+            child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.done_all),
+                title: Text(L10n.of(context).chat_mark_server_read))),
+      const PopupMenuDivider(),
       if (supportsPinnedMessages(widget.channel))
         PopupMenuItem(
           value: 'pins',
@@ -1210,6 +1247,22 @@ final class _ConversationScreenState
               icon: Icon(Icons.more_vert_rounded),
               onSelected: (action) {
                 switch (action) {
+                  case 'mark-read':
+                    unawaited(_runVisibleAction(
+                        context,
+                        'Could not mark conversation read',
+                        () => ref
+                            .read(mobileControllerProvider.notifier)
+                            .markChannelsRead(channel: widget.channel.ref)));
+                    return;
+                  case 'mark-server-read':
+                    unawaited(_runVisibleAction(
+                        context,
+                        'Could not mark server read',
+                        () => ref
+                            .read(mobileControllerProvider.notifier)
+                            .markChannelsRead(guild: activeGuild!.ref)));
+                    return;
                   case 'pins':
                     unawaited(_showPinnedMessages());
                     return;

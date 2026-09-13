@@ -21,7 +21,7 @@ from fastapi import (
     status,
 )
 from redis.asyncio import Redis
-from sqlalchemy import case, delete, exists, func, insert, select, tuple_, update
+from sqlalchemy import and_, case, delete, exists, func, insert, literal, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -14181,19 +14181,92 @@ async def acknowledge_channel(
         required_permissions("read_state.update"),
     )
     acknowledged = await channel_message(session, settings, channel, payload.message_id)
+    # Serialize with mention projection before taking the count's database snapshot.
+    # This also covers DMs and first-ever acknowledgements without a read-state row.
+    await session.execute(
+        pg_insert(ReadState)
+        .values(
+            user_id=auth.user.id,
+            user_domain=auth.user.origin_domain,
+            user_is_local=True,
+            channel_id=channel.id,
+            channel_domain=channel.origin_domain,
+            mention_count=0,
+        )
+        .on_conflict_do_nothing()
+    )
+    locked = await session.scalar(
+        select(ReadState)
+        .where(
+            ReadState.user_id == auth.user.id,
+            ReadState.user_domain == auth.user.origin_domain,
+            ReadState.channel_id == channel.id,
+            ReadState.channel_domain == channel.origin_domain,
+        )
+        .with_for_update()
+    )
+    if locked.read_version != payload.read_version:
+        raise HTTPException(
+            status_code=409, detail="Read position changed; refresh before retrying"
+        )
+    if payload.mark_unread:
+        acknowledged = await session.scalar(
+            select(Message)
+            .where(
+                Message.channel_id == channel.id,
+                Message.channel_domain == channel.origin_domain,
+                tuple_(Message.id, Message.origin_domain)
+                < (acknowledged.id, acknowledged.origin_domain),
+            )
+            .order_by(Message.id.desc(), Message.origin_domain.desc())
+            .limit(1)
+        )
+    cursor_id = acknowledged.id if acknowledged is not None else None
+    cursor_domain = acknowledged.origin_domain if acknowledged is not None else None
+    # Pending projections increment later, provided their message is still unread.
+    remaining_mentions = (
+        select(func.count())
+        .select_from(MessageProjection)
+        .join(
+            Message,
+            and_(
+                Message.id == MessageProjection.message_id,
+                Message.origin_domain == MessageProjection.message_domain,
+            ),
+        )
+        .where(
+            MessageProjection.channel_id == channel.id,
+            MessageProjection.channel_domain == channel.origin_domain,
+            MessageProjection.processed_at.is_not(None),
+            tuple_(MessageProjection.message_id, MessageProjection.message_domain)
+            > (cursor_id, cursor_domain)
+            if cursor_id is not None
+            else True,
+            MessageProjection.mention_user_refs.contains(
+                [{"id": str(auth.user.id), "origin_domain": auth.user.origin_domain}]
+            ),
+            tuple_(Message.author_id, Message.author_domain)
+            != (auth.user.id, auth.user.origin_domain),
+        )
+        .scalar_subquery()
+    )
     statement = pg_insert(ReadState).values(
         user_id=auth.user.id,
         user_domain=auth.user.origin_domain,
         user_is_local=True,
         channel_id=channel.id,
         channel_domain=channel.origin_domain,
-        last_message_id=acknowledged.id,
-        last_message_domain=acknowledged.origin_domain,
-        mention_count=0,
+        last_message_id=cursor_id,
+        last_message_domain=cursor_domain,
+        mention_count=remaining_mentions,
     )
-    advances = ReadState.last_message_id.is_(None) | (
-        tuple_(statement.excluded.last_message_id, statement.excluded.last_message_domain)
-        >= tuple_(ReadState.last_message_id, ReadState.last_message_domain)
+    advances = (
+        literal(payload.mark_unread)
+        | ReadState.last_message_id.is_(None)
+        | (
+            tuple_(statement.excluded.last_message_id, statement.excluded.last_message_domain)
+            >= tuple_(ReadState.last_message_id, ReadState.last_message_domain)
+        )
     )
     state = (
         await session.scalars(
@@ -14213,10 +14286,15 @@ async def acknowledge_channel(
                         (advances, statement.excluded.last_message_domain),
                         else_=ReadState.last_message_domain,
                     ),
-                    "mention_count": case((advances, 0), else_=ReadState.mention_count),
+                    "mention_count": case(
+                        (advances, remaining_mentions), else_=ReadState.mention_count
+                    ),
+                    "read_version": ReadState.read_version + int(payload.mark_unread),
                     "updated_at": func.now(),
                 },
-            ).returning(ReadState)
+            )
+            .returning(ReadState)
+            .execution_options(populate_existing=True)
         )
     ).one()
     await session.commit()
@@ -14232,7 +14310,13 @@ async def acknowledge_channel(
         {
             "channel_id": str(channel.id),
             "channel_domain": channel.origin_domain,
-            "last_message_id": str(state.last_message_id),
+            "last_message_id": str(state.last_message_id)
+            if state.last_message_id is not None
+            else None,
+            "read_version": state.read_version,
+            "manual_unread": payload.mark_unread,
+            "unread_message_id": str(payload.message_id.id) if payload.mark_unread else None,
+            "unread_message_domain": payload.message_id.domain if payload.mark_unread else None,
             "last_message_domain": state.last_message_domain,
             "mention_count": state.mention_count,
             "unread": unread,

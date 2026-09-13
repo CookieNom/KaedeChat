@@ -1,4 +1,6 @@
 {
+  "chat_jump_to_read": "Jump to where you left off",
+  "chat_jump_to_latest": "Jump to latest",
   "language_name": "English",
   "language_settings": "Language",
   "language_description": "Choose the language used for Kaede’s interface, dates, and numbers.",
@@ -2997,5 +2999,23 @@
   "ui_managed_bot_role_notice": "This role is managed by a bot integration. You can edit its permissions, but cannot assign or remove it manually. Remove the integration to remove this role.",
   "ui_bot_role_scope_notice": "Role and channel permissions control what this bot can do. API scopes, event access, channel restrictions, and encrypted-channel consent also apply; changing this role does not grant those capabilities.",
   "ui_bot_initial_permissions": "Initial role permissions",
-  "ui_bot_edit_role_permissions": "Edit this bot’s role in Server Settings → Roles. The permissions below were used at installation and do not limit later role changes."
+  "ui_bot_edit_role_permissions": "Edit this bot’s role in Server Settings → Roles. The permissions below were used at installation and do not limit later role changes.",
+  "chat_mark_unread": "Mark unread",
+  "chat_inbox": "Inbox",
+  "chat_close": "Close",
+  "chat_unreads": "Unreads",
+  "chat_mentions": "Mentions",
+  "chat_inbox_filter": "Filter conversations",
+  "chat_all_conversations": "All conversations",
+  "chat_mark_all_read": "Mark all as read",
+  "chat_refresh": "Refresh",
+  "chat_direct_message": "Direct message",
+  "chat_jump_to_mention": "Jump to mention",
+  "chat_dismiss": "Dismiss",
+  "chat_mark_read": "Mark as read",
+  "chat_loading": "Loading…",
+  "chat_caught_up": "You’re all caught up",
+  "chat_load_more": "Load more",
+  "chat_mark_server_read": "Mark server as read",
+  "chat_show_muted": "Show muted servers"
 }

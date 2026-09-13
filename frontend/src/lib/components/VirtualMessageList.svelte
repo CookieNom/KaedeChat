@@ -16,6 +16,12 @@
     onLoadEarlier,
     onLoadLater,
     onBottomChange,
+    onRead,
+    canJumpToRead = false,
+    forceJumpToLatest = false,
+    onJumpToRead,
+    onJumpToLatest,
+    jumpingHistory = false,
     targetKey,
     label = $t('ui_messages_04d7b483')
   }: {
@@ -33,6 +39,12 @@
     onLoadEarlier?: () => Promise<void> | void;
     onLoadLater?: () => Promise<void> | void;
     onBottomChange?: (atBottom: boolean) => void;
+    onRead?: (key: string) => void;
+    canJumpToRead?: boolean;
+    forceJumpToLatest?: boolean;
+    onJumpToRead?: () => Promise<unknown> | unknown;
+    onJumpToLatest?: () => Promise<unknown> | unknown;
+    jumpingHistory?: boolean;
     targetKey?: string | null;
     label?: string;
   } = $props();
@@ -41,9 +53,48 @@
   let atBottom = $state(false);
   let unseen = $state(0);
   let previousLastKey = '';
-  let initialized = false;
+  let initialized = $state(false);
   let contentElement = $state<HTMLDivElement | null>(null);
   let resizeFrame = 0;
+  let readTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleRead() {
+    clearTimeout(readTimer);
+    readTimer = setTimeout(() => {
+      if (
+        !viewport ||
+        !initialized ||
+        document.visibilityState !== 'visible' ||
+        !document.hasFocus()
+      )
+        return;
+      const bounds = viewport.getBoundingClientRect();
+      const visible = Array.from(
+        viewport.querySelectorAll<HTMLElement>('[data-virtual-key^="message:"]')
+      )
+        .reverse()
+        .find((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.bottom > bounds.top && rect.bottom <= bounds.bottom;
+        });
+      if (visible?.dataset.virtualKey) onRead?.(visible.dataset.virtualKey);
+    }, 250);
+  }
+
+  async function jumpToLatest() {
+    if ((hasLater || forceJumpToLatest) && onJumpToLatest) await onJumpToLatest();
+    else await scrollToBottom();
+  }
+
+  function historyKeydown(event: KeyboardEvent) {
+    if (event.shiftKey && event.key === 'PageUp' && canJumpToRead) {
+      event.preventDefault();
+      void onJumpToRead?.();
+    } else if (event.ctrlKey && event.key === 'End') {
+      event.preventDefault();
+      void jumpToLatest();
+    }
+  }
 
   function prefersReducedMotion(): boolean {
     return (
@@ -56,20 +107,21 @@
   function updateBottom(next: boolean) {
     if (next === atBottom) return;
     atBottom = next;
-    onBottomChange?.(next);
+    onBottomChange?.(next && !hasLater);
   }
 
   function pinViewportToBottom() {
     if (!viewport || !items.length) return;
     viewport.scrollTop = viewport.scrollHeight;
-    updateBottom(true);
+    updateBottom(!hasLater);
     unseen = 0;
   }
 
   function viewportScrolled() {
     if (!viewport) return;
     const nextAtBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
-    updateBottom(nextAtBottom);
+    updateBottom(nextAtBottom && !hasLater);
+    scheduleRead();
     if (nextAtBottom) unseen = 0;
     if (initialized && viewport.scrollTop <= 24 && hasEarlier && !loadingEarlier) {
       void loadEarlierAnchored();
@@ -100,9 +152,10 @@
     if (!wasInitialized) {
       viewport.scrollTop = viewport.scrollHeight;
     }
-    updateBottom(true);
+    updateBottom(!hasLater);
     initialized = true;
     unseen = 0;
+    scheduleRead();
     return true;
   }
 
@@ -114,6 +167,8 @@
       block: 'center'
     });
     initialized = true;
+    updateBottom(false);
+    scheduleRead();
     return true;
   }
 
@@ -127,15 +182,27 @@
     });
     if (contentElement) resizeObserver.observe(contentElement);
     currentViewport.addEventListener('scroll', viewportScrolled);
+    window.addEventListener('focus', scheduleRead);
+    document.addEventListener('visibilitychange', scheduleRead);
     if (items.length && !initialized) {
       if (targetKey) void tick().then(() => scrollToTarget(targetKey));
       else void tick().then(scrollToBottom);
     }
     return () => {
+      clearTimeout(readTimer);
+      window.removeEventListener('focus', scheduleRead);
+      document.removeEventListener('visibilitychange', scheduleRead);
       resizeObserver.disconnect();
       window.cancelAnimationFrame(resizeFrame);
       currentViewport.removeEventListener('scroll', viewportScrolled);
     };
+  });
+
+  $effect(() => {
+    const later = hasLater;
+    untrack(() => {
+      if (!later && initialized) void tick().then(viewportScrolled);
+    });
   });
 
   $effect.pre(() => {
@@ -164,10 +231,15 @@
 </script>
 
 <div class="virtual-message-shell">
+  {#if canJumpToRead}
+    <button class="read-position-banner" disabled={jumpingHistory} onclick={onJumpToRead}>
+      {$t('chat_jump_to_read')}
+    </button>
+  {/if}
   <span id="message-history-keyboard-help" class="visually-hidden">
     {$t('ui_scroll_this_region_with_page_up_and_page_down_7fffc5aa')}
   </span>
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scrollable message region needs a keyboard entry point) -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (the scrollable message region needs a keyboard entry point) -->
   <div
     bind:this={viewport}
     class="virtual-message-viewport"
@@ -175,7 +247,8 @@
     tabindex="0"
     aria-label={`${label} history`}
     aria-describedby="message-history-keyboard-help"
-    aria-busy={loadingEarlier}
+    onkeydown={historyKeydown}
+    aria-busy={loadingEarlier || loadingLater || jumpingHistory}
   >
     <div bind:this={contentElement} class="virtual-message-content">
       {#if hasEarlier}
@@ -199,12 +272,9 @@
       {/if}
     </div>
   </div>
-  {#if unseen > 0}
-    <button class="new-message-pill" onclick={scrollToBottom} aria-label={`${unseen} new messages`}>
-      {$t('ui_value0_new_value1_48a9cfef', {
-        value0: String(unseen),
-        value1: String(unseen === 1 ? 'message' : 'messages')
-      })}
+  {#if forceJumpToLatest || unseen > 0 || hasLater || (initialized && !atBottom)}
+    <button class="new-message-pill" disabled={jumpingHistory} onclick={jumpToLatest}>
+      {$t('chat_jump_to_latest')}
     </button>
   {/if}
 </div>

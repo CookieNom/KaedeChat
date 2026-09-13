@@ -459,7 +459,7 @@ async def project_message_record(
             updated_at=func.now(),
         )
     )
-    mention_states: list[tuple[int, int | None, str | None, int]] = []
+    mention_states: list[tuple[int, int | None, str | None, int, int]] = []
     for pending, message in messages:
         seen: set[int] = set()
         for reference in pending.mention_user_refs[:5_000]:
@@ -510,10 +510,11 @@ async def project_message_record(
                         ReadState.last_message_id,
                         ReadState.last_message_domain,
                         ReadState.mention_count,
+                        ReadState.read_version,
                     )
                 )
             ).one()
-            mention_states.append((row[0], row[1], row[2], row[3]))
+            mention_states.append((row[0], row[1], row[2], row[3], row[4]))
     for pending in projections:
         pending.processed_at = now
     await session.commit()
@@ -527,7 +528,13 @@ async def project_message_record(
             latest.origin_domain,
         ),
     )
-    for user_id, last_message_id, last_message_domain, mention_count in mention_states:
+    for (
+        user_id,
+        last_message_id,
+        last_message_domain,
+        mention_count,
+        read_version,
+    ) in mention_states:
         await publish_dispatch(
             redis,
             user_topic(settings.domain, user_id),
@@ -538,6 +545,7 @@ async def project_message_record(
                 "last_message_id": (str(last_message_id) if last_message_id is not None else None),
                 "last_message_domain": last_message_domain,
                 "mention_count": mention_count,
+                "read_version": read_version,
                 "unread": last_message_id is None
                 or (last_message_id, last_message_domain or "") < (latest.id, latest.origin_domain),
             },

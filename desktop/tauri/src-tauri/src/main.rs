@@ -2842,6 +2842,7 @@ async fn native_voice_video_window(app: tauri::AppHandle, mode: String) -> Resul
 }
 
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle command arguments by value.
 fn native_voice_video_detached(app: tauri::AppHandle) -> bool {
     app.get_webview_window("voice-video").is_some()
 }

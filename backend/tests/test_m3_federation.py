@@ -4547,6 +4547,7 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
         position=0,
         hoist=False,
         mentionable=False,
+        managed=False,
         updated_at=resource_version,
     )
     emoji = SimpleNamespace(
@@ -4590,6 +4591,7 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
     assert payload["member_snapshot_at"] == snapshot_at.isoformat()
     assert payload["guild"]["version"] == resource_version.isoformat()
     assert payload["roles"][0]["version"] == resource_version.isoformat()
+    assert payload["roles"][0]["managed"] is False
     assert payload["channels"][0]["version"] == resource_version.isoformat()
     assert payload["emojis"][0]["version"] == resource_version.isoformat()
     assert payload["stickers"][0]["version"] == resource_version.isoformat()

@@ -119,6 +119,7 @@
     onMessageAuthor,
     onRetry,
     onViewProfile,
+    onMarkUnread,
     onReply,
     onForward,
     forwardUnavailableReason = null,
@@ -171,6 +172,7 @@
     onMessageAuthor?: (message: Message) => void;
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
+    onMarkUnread?: (message: Message) => void;
     onReply?: (message: Message) => void;
     onForward?: (message: Message) => void;
     forwardUnavailableReason?: string | null;
@@ -1516,6 +1518,19 @@
                   value0: String(userDisplayName(message.author))
                 })}</span
               >
+            </button>
+          {/if}
+          {#if onMarkUnread && !message.deleted_at}
+            <button
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={() => {
+                closeMenu();
+                onMarkUnread?.(message);
+              }}
+            >
+              <span>{$t('chat_mark_unread')}</span>
             </button>
           {/if}
           {#if onReply && !message.deleted_at}

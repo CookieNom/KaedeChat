@@ -5399,6 +5399,8 @@ progress {
 }
 
 .virtual-message-shell {
+  display: flex;
+  flex-direction: column;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -5406,6 +5408,8 @@ progress {
 }
 
 .virtual-message-viewport {
+  flex: 1;
+  min-height: 0;
   width: 100%;
   height: 100%;
   overflow-y: auto;
@@ -9641,4 +9645,15 @@ body.media-viewer-open {
   font-weight: 800;
   line-height: 1.25;
   letter-spacing: 0.04em;
+}
+
+.read-position-banner {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 0.4rem 0.8rem;
+  border: 0;
+  color: var(--on-accent);
+  background: var(--accent);
+  text-align: left;
+  cursor: pointer;
 }

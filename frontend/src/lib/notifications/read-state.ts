@@ -4,6 +4,10 @@ import type { Channel, Message, ReadStateStatus, UserSummary } from '$lib/chat/t
 type ReadStateChannel = Pick<Channel, 'id' | 'origin_domain' | 'guild_id' | 'guild_domain'>;
 
 export interface ReadStateDispatch {
+  read_version?: number;
+  manual_unread?: boolean;
+  unread_message_id?: string | null;
+  unread_message_domain?: string | null;
   channel_id: string;
   channel_domain: string;
   last_message_id: string | null;
@@ -103,8 +107,23 @@ export function applyReadStateDispatch(
     const sameChannel =
       state.channel_id === update.channel_id && state.channel_domain === update.channel_domain;
     if (!sameChannel) return state;
+    if ((update.read_version ?? 0) < (state.read_version ?? 0)) return state;
+    const reset = (update.read_version ?? 0) > (state.read_version ?? 0);
+    if (
+      !reset &&
+      state.read_message_id &&
+      state.read_message_domain &&
+      (!update.last_message_id ||
+        !update.last_message_domain ||
+        compareEntityRefs(
+          { id: state.read_message_id, origin_domain: state.read_message_domain },
+          { id: update.last_message_id, origin_domain: update.last_message_domain }
+        ) > 0)
+    )
+      return state;
     return {
       ...state,
+      read_version: update.read_version ?? 0,
       read_message_id: update.last_message_id,
       read_message_domain: update.last_message_domain,
       mention_count: update.mention_count,

@@ -1465,11 +1465,16 @@ final class KaedeRepository {
     );
   }
 
-  Future<void> acknowledge(EntityRef channel, EntityRef message) =>
+  Future<void> acknowledge(EntityRef channel, EntityRef message,
+          {int readVersion = 0, bool markUnread = false}) =>
       api.sendJson(
         'POST',
         '/api/v1/channels/${channel.wire}/ack',
-        data: <String, Object?>{'message_id': message.wire},
+        data: <String, Object?>{
+          'message_id': message.wire,
+          'read_version': readVersion,
+          'mark_unread': markUnread
+        },
       );
   Future<void> typing(EntityRef channel) =>
       api.sendJson('POST', '/api/v1/channels/${channel.wire}/typing');

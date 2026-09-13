@@ -5,6 +5,7 @@ import { createClassComponent } from 'svelte/legacy';
 import ThreadsPanel from './ThreadsPanel.svelte';
 import ThreadHeader from './ThreadHeader.svelte';
 import MessageRow from './MessageRow.svelte';
+import { rememberReaction } from '$lib/chat/reactions';
 import type { Channel, Guild, Message } from '$lib/chat/types';
 
 const media = vi.hoisted(() => ({ copy: vi.fn().mockResolvedValue(undefined), load: vi.fn() }));
@@ -19,6 +20,8 @@ afterEach(() => {
   component = undefined;
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.clearAllMocks();
+  localStorage.clear();
 });
 const guild = { id: '1', origin_domain: 'chat.example', name: 'Guild' } as Guild;
 const parent = {
@@ -130,65 +133,92 @@ describe('Discord parity interactions', () => {
     expect(menu.open).toBe(false);
   });
 
-  it('uses the full message menu for mobile images and exposes image copying', async () => {
-    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390);
-    const message = {
-      id: '3',
-      origin_domain: 'chat.example',
-      channel_id: '2',
-      channel_domain: 'chat.example',
-      content: 'A photo',
-      flags: 0,
-      message_type: 0,
-      created_at: '2026-01-01T00:00:00Z',
-      edited_at: null,
-      author: {
-        id: '7',
+  it.each(
+    [390, 1280].flatMap((width) =>
+      [[], ['🎉'], ['🎉', '😎', '🚀', '👀', '💯']].map((history) => ({ width, history }))
+    )
+  )(
+    'keeps four reactions first in message and image menus at $width with history $history',
+    async ({ width, history }) => {
+      vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(width);
+      for (const emoji of history) rememberReaction('menu-test', emoji);
+      const message = {
+        id: '3',
         origin_domain: 'chat.example',
-        username: 'author',
-        display_name: null,
-        avatar_hash: null
-      },
-      attachments: [
-        {
-          id: '8',
+        channel_id: '2',
+        channel_domain: 'chat.example',
+        content: 'A photo',
+        flags: 0,
+        message_type: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        edited_at: null,
+        author: {
+          id: '7',
           origin_domain: 'chat.example',
-          filename: 'photo.png',
-          content_type: 'image/png',
-          size: 40,
-          scan_status: 'clean',
-          encryption_mode: 'plaintext',
-          variants: {}
-        }
-      ],
-      embeds: [],
-      components: [],
-      sticker_items: [],
-      reactions: []
-    } as unknown as Message;
-    component = createClassComponent({
-      component: MessageRow,
-      target: document.body,
-      props: { message }
-    });
-    flushSync();
-    document
-      .querySelector('[aria-label="Open photo.png"]')!
-      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    await tick();
-    const menu = document.querySelector('[role="menu"]')!;
-    expect(menu).not.toBeNull();
-    expect(menu.textContent).toContain('Report message');
-    expect(menu.textContent).toContain('Copy message link');
-    button('Copy image').click();
-    await tick();
-    expect(media.copy).toHaveBeenCalledExactlyOnceWith({
-      path: '/media/chat.example/8/original',
-      contentType: 'image/png'
-    });
-    expect(document.querySelector('[role="menu"]')).toBeNull();
-    await vi.waitFor(() =>
-      expect(document.body.textContent).toContain('Image copied to clipboard.')
-    );
-  });
+          username: 'author',
+          display_name: null,
+          avatar_hash: null
+        },
+        attachments: [
+          {
+            id: '8',
+            origin_domain: 'chat.example',
+            filename: 'photo.png',
+            content_type: 'image/png',
+            size: 40,
+            scan_status: 'clean',
+            encryption_mode: 'plaintext',
+            variants: {}
+          }
+        ],
+        embeds: [],
+        components: [],
+        sticker_items: [],
+        reactions: []
+      } as unknown as Message;
+      component = createClassComponent({
+        component: MessageRow,
+        target: document.body,
+        props: { message, canReact: true, onToggleReaction: vi.fn(), reactionUserKey: 'menu-test' }
+      });
+      flushSync();
+      const assertReactionsFirst = async () => {
+        await tick();
+        await tick();
+        const menu = document.querySelector('.message-context-menu')!;
+        const row = menu.querySelector('.quick-reactions')!;
+        expect(menu.firstElementChild).toBe(row);
+        const reactions = [...row.querySelectorAll<HTMLButtonElement>('button')];
+        expect(reactions).toHaveLength(4);
+        expect(new Set(reactions.map((item) => item.title)).size).toBe(4);
+        expect([...menu.querySelectorAll('[role="menuitem"]')].slice(0, 4)).toEqual(reactions);
+        expect(reactions.every((item) => !item.disabled && item.textContent?.trim())).toBe(true);
+      };
+      document
+        .querySelector('.message-row')!
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await assertReactionsFirst();
+      escape();
+      await tick();
+      document
+        .querySelector('[aria-label="Open photo.png"]')!
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await tick();
+      await assertReactionsFirst();
+      const menu = document.querySelector('[role="menu"]')!;
+      expect(menu).not.toBeNull();
+      expect(menu.textContent).toContain('Report message');
+      expect(menu.textContent).toContain('Copy message link');
+      button('Copy image').click();
+      await tick();
+      expect(media.copy).toHaveBeenCalledExactlyOnceWith({
+        path: '/media/chat.example/8/original',
+        contentType: 'image/png'
+      });
+      expect(document.querySelector('[role="menu"]')).toBeNull();
+      await vi.waitFor(() =>
+        expect(document.body.textContent).toContain('Image copied to clipboard.')
+      );
+    }
+  );
 });

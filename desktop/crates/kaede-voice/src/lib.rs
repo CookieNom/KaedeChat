@@ -921,11 +921,13 @@ async fn run_room(
                         video.requested_variant = desired;
                     }
                     let has_variant = video.variants.lock().is_ok_and(|tracks| !tracks.is_empty());
-                    if let Some(codec) = desired {
-                        if (!has_variant || (codec == VideoCodec::AV1 && has_h264)) && video.variant_retry == 0 && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
-                            video.adjustment = Some(enable_video_variant(&room, video, codec, h264_compatible(&video_peers, room.remote_participants().len(), &demand_key)));
-                            video.variant_retry = 6;
-                        }
+                    if let Some(codec) = desired
+                        && (!has_variant || (codec == VideoCodec::AV1 && has_h264))
+                        && video.variant_retry == 0
+                        && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished)
+                    {
+                        video.adjustment = Some(enable_video_variant(&room, video, codec, h264_compatible(&video_peers, room.remote_participants().len(), &demand_key)));
+                        video.variant_retry = 6;
                     }
                     if video.capture_level.load(Ordering::Acquire) != u32::from(budget.level)
                         && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
@@ -999,10 +1001,11 @@ async fn run_room(
                                     }
                                 }
                             }
-                            if !sampled {
-                                if let Ok(mut states) = receiver_state.lock() {
-                                    if let Some(state) = states.get_mut(&key) { state.unknown(); }
-                                }
+                            if !sampled
+                                && let Ok(mut states) = receiver_state.lock()
+                                && let Some(state) = states.get_mut(&key)
+                            {
+                                state.unknown();
                             }
                         }
                         cpu |= combined_load > 0.8;
@@ -1285,12 +1288,13 @@ async fn run_room(
                         let Some(participant) = participant else { continue };
                         let identity = participant.identity().to_string();
                         if topic.as_deref() == Some("kaede.video.v1") {
-                            if payload.len() <= 8192 {
-                                if let Ok(peer) = serde_json::from_slice::<VideoPeer>(&payload) {
-                                    if peer.v == 1 && !peer.codecs.is_empty() && peer.codecs.len() <= 3 && peer.codecs.iter().all(|codec| matches!(codec.as_str(), "av1" | "vp8" | "h264")) && peer.demand.len() <= 64 {
-                                        video_peers.insert(identity, peer);
-                                    }
-                                }
+                            if payload.len() <= 8192
+                                && let Ok(peer) = serde_json::from_slice::<VideoPeer>(&payload)
+                                && peer.v == 1 && !peer.codecs.is_empty() && peer.codecs.len() <= 3
+                                && peer.codecs.iter().all(|codec| matches!(codec.as_str(), "av1" | "vp8" | "h264"))
+                                && peer.demand.len() <= 64
+                            {
+                                video_peers.insert(identity, peer);
                             }
                             continue;
                         }
@@ -1537,6 +1541,14 @@ fn h264_compatible(
         })
 }
 
+fn adapted_bitrate(bitrate: u64, level: u8) -> u64 {
+    // Exact 0.65^level for the four adaptation levels; u128 avoids overflow.
+    let numerator = [8000_u128, 5200, 3380, 2197][usize::from(level.min(3))];
+    u64::try_from(u128::from(bitrate) * numerator / 8000)
+        .unwrap_or(bitrate)
+        .max(300_000)
+}
+
 fn enable_video_variant(
     room: &Room,
     video: &PublishedVideo,
@@ -1548,9 +1560,9 @@ fn enable_video_variant(
     let source = video.track.rtc_source();
     let dimensions = source.video_resolution();
     let mut encoding = video.encoding.clone();
-    let level = video.capture_level.load(Ordering::Acquire).min(3);
-    let factor = 0.65_f64.powi(level as i32);
-    encoding.max_bitrate = ((encoding.max_bitrate as f64 * factor) as u64).max(300_000);
+    let level = u8::try_from(video.capture_level.load(Ordering::Acquire).min(3)).unwrap_or(3);
+    let factor = 0.65_f64.powi(i32::from(level));
+    encoding.max_bitrate = adapted_bitrate(encoding.max_bitrate, level);
     encoding.max_framerate = (encoding.max_framerate * factor.sqrt()).max(5.0);
     let variants = video.variants.clone();
     let track_source = video.source;
@@ -1636,10 +1648,9 @@ fn enable_video_variant(
             .publish_track(LocalTrack::Video(track.clone()), options)
             .await
             .is_ok()
+            && let Ok(mut variants) = variants.lock()
         {
-            if let Ok(mut variants) = variants.lock() {
-                variants.push(track);
-            }
+            variants.push(track);
         }
     })
 }
@@ -1658,7 +1669,7 @@ fn adjust_video_budget(
     let source = video.source;
     let mut encoding = video.encoding.clone();
     let factor = 0.65_f64.powi(i32::from(level));
-    encoding.max_bitrate = ((encoding.max_bitrate as f64 * factor) as u64).max(300_000);
+    encoding.max_bitrate = adapted_bitrate(encoding.max_bitrate, level);
     // Low-motion screen content keeps pixels legible by surrendering frames
     // first. Motion-oriented shares and cameras retain at least 15 fps.
     let floor = if source == TrackSource::Screenshare && encoding.max_framerate <= 15.0 {
@@ -1748,7 +1759,7 @@ impl ReceiverHealth {
         let decode_time = stat.inbound.total_decode_time - self.decode_time;
         let lost = stat.received.packets_lost.saturating_sub(self.lost);
         let received = stat.received.packets_received.saturating_sub(self.received);
-        let download = lost > 0 && lost as f64 / (received as f64 + lost as f64).max(1.0) > 0.05;
+        let download = lost > 0 && u128::from(lost.unsigned_abs()) * 19 > u128::from(received);
         let stalled = frames == 0 && complete > 0;
         let known_decode = frames > 0 && decode_time.is_finite() && decode_time > 0.0;
         let decode = stalled
@@ -2235,7 +2246,7 @@ async fn publish_camera(
                 camera_id,
                 settings,
                 ready_tx,
-            )
+            );
         }) {
         Ok(thread) => thread,
         Err(error) => return Err(VoiceError::CaptureThread(error)),
@@ -2383,7 +2394,12 @@ fn run_camera_capture(
                     (settings.height >> shift).max(180),
                 );
                 let buffer = if width != converted.width || height != converted.height {
-                    buffer.scale(width as i32, height as i32)
+                    let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height))
+                    else {
+                        tracing::warn!(width, height, "camera scale exceeds native dimensions");
+                        continue;
+                    };
+                    buffer.scale(width, height)
                 } else {
                     buffer
                 };
@@ -2755,6 +2771,28 @@ mod tests {
     }
 
     #[test]
+    fn receiver_loss_threshold_handles_large_and_negative_counters() {
+        for (lost, received, expected) in [
+            (1, 19, None), // Exactly five percent is not overload.
+            (1, 18, Some("download")),
+            (-1, 0, None), // WebRTC may correct cumulative loss downwards.
+            (i64::MAX, u64::MAX, Some("download")),
+        ] {
+            let mut health = super::ReceiverHealth {
+                initialized: true,
+                bad: 2,
+                ..super::ReceiverHealth::default()
+            };
+            let mut stat = livekit::webrtc::stats::InboundRtpStats::default();
+            stat.inbound.frames_decoded = 1;
+            stat.inbound.total_decode_time = 0.001;
+            stat.received.packets_lost = lost;
+            stat.received.packets_received = received;
+            assert_eq!(health.observe(&stat), expected);
+        }
+    }
+
+    #[test]
     fn native_h264_requires_every_viewer_and_respects_explicit_demand() {
         let key = "publisher/camera";
         let mut peers = std::collections::BTreeMap::new();
@@ -2763,7 +2801,7 @@ mod tests {
             super::VideoPeer {
                 v: 1,
                 codecs: vec!["vp8".to_owned(), "h264".to_owned()],
-                demand: Default::default(),
+                demand: std::collections::BTreeMap::default(),
             },
         );
         assert_eq!(
@@ -2771,18 +2809,18 @@ mod tests {
             Some(VideoCodec::H264)
         );
         assert_eq!(super::preferred_native_variant(&peers, 2, key, 0), None);
-        peers
-            .get_mut("viewer")
-            .unwrap()
-            .demand
-            .insert(key.to_owned(), "vp8".to_owned());
+        if let Some(viewer) = peers.get_mut("viewer") {
+            viewer.demand.insert(key.to_owned(), "vp8".to_owned());
+        } else {
+            panic!("viewer fixture is missing");
+        }
         assert_eq!(super::preferred_native_variant(&peers, 1, key, 0), None);
-        peers.get_mut("viewer").unwrap().demand.clear();
-        peers
-            .get_mut("viewer")
-            .unwrap()
-            .codecs
-            .push("av1".to_owned());
+        if let Some(viewer) = peers.get_mut("viewer") {
+            viewer.demand.clear();
+            viewer.codecs.push("av1".to_owned());
+        } else {
+            panic!("viewer fixture is missing");
+        }
         assert_eq!(
             super::preferred_native_variant(&peers, 1, key, 0),
             Some(VideoCodec::AV1)
@@ -2790,6 +2828,19 @@ mod tests {
         assert_eq!(
             super::preferred_native_variant(&peers, 1, key, 1),
             Some(VideoCodec::H264)
+        );
+    }
+
+    #[test]
+    fn bitrate_adaptation_is_bounded_and_does_not_overflow() {
+        for (level, expected) in [(0, 2_500_000), (1, 1_625_000), (2, 1_056_250), (3, 686_562)] {
+            assert_eq!(super::adapted_bitrate(2_500_000, level), expected);
+        }
+        assert_eq!(super::adapted_bitrate(0, 3), 300_000);
+        assert_eq!(super::adapted_bitrate(u64::MAX, 0), u64::MAX);
+        assert_eq!(
+            super::adapted_bitrate(u64::MAX, 255),
+            super::adapted_bitrate(u64::MAX, 3)
         );
     }
 
@@ -2820,7 +2871,10 @@ mod tests {
             assert_eq!(options.video_codec, VideoCodec::VP8);
             assert!(options.backup_codec.is_none());
             assert!(options.scalability_mode.is_none());
-            assert_eq!(options.video_encoding.unwrap().max_bitrate, 2_500_000);
+            assert_eq!(
+                options.video_encoding.map(|encoding| encoding.max_bitrate),
+                Some(2_500_000)
+            );
         }
     }
 

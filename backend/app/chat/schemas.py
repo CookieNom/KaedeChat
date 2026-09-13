@@ -839,6 +839,8 @@ class ChannelFollowCreate(RequestModel):
 
 class ReadStateUpdate(RequestModel):
     message_id: EntityRef
+    read_version: int = Field(default=0, ge=0)
+    mark_unread: bool = False
 
 
 class ReactionCreate(RequestModel):

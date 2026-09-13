@@ -3806,12 +3806,28 @@ class FederatedDMRowCharge(Base):
     )
 
 
+class InboxDismissal(Base, LocalUserMixin):
+    __tablename__ = "inbox_dismissals"
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "user_domain", "message_id", "message_domain"),
+        *LocalUserMixin.locality_constraints("inbox_dismissals"),
+        ForeignKeyConstraint(
+            ["message_id", "message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
 class ReadState(Base, LocalUserMixin):
     __tablename__ = "read_states"
     channel_id: Mapped[int] = mapped_column(BigInteger)
     channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     last_message_id: Mapped[int | None] = mapped_column(BigInteger)
     last_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    read_version: Mapped[int] = mapped_column(Integer, server_default="0")
     mention_count: Mapped[int] = mapped_column(Integer, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (

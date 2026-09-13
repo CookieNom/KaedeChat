@@ -641,7 +641,6 @@ List<String> rankRecentReactions(List<String> history, {int limit = 4}) {
     counts[emoji] = (counts[emoji] ?? 0) + 1;
     lastUsed[emoji] = index;
   }
-  if (counts.isEmpty) return _defaultRecentReactions.take(limit).toList();
   final ranked = counts.keys.toList()
     ..sort((left, right) {
       final byCount = counts[right]!.compareTo(counts[left]!);
@@ -649,7 +648,7 @@ List<String> rankRecentReactions(List<String> history, {int limit = 4}) {
           ? byCount
           : lastUsed[right]!.compareTo(lastUsed[left]!);
     });
-  return ranked.take(limit).toList();
+  return <String>{...ranked, ..._defaultRecentReactions}.take(limit).toList();
 }
 
 @visibleForTesting
@@ -1023,16 +1022,21 @@ final class ChannelView extends ConsumerStatefulWidget {
   ConsumerState<ChannelView> createState() => _ChannelViewState();
 }
 
-final class _ChannelViewState extends ConsumerState<ChannelView> {
+final class _ChannelViewState extends ConsumerState<ChannelView>
+    with WidgetsBindingObserver {
+  late final MobileController _controller;
   final _composer = TextEditingController();
   final _composerFocus = FocusNode();
   final _scroll = ScrollController();
+  final _historyViewportKey = GlobalKey();
+  Timer? _readTimer;
+  bool _revealingMessage = false;
+  bool _loadingNewer = false;
   var _showJumpToPresent = false;
   final _messageKeys = <String, GlobalKey>{};
   final _uploads = <_PendingUpload>[];
   EntityRef? _renderedChannel;
   EntityRef? _renderedLastMessage;
-  final _savedOffsets = <EntityRef, double>{};
   var _initialScrollPending = false;
   KaedeMessage? _reply;
   DateTime? _lastTypingSent;
@@ -1061,12 +1065,63 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   @override
   void initState() {
     super.initState();
+    _controller = ref.read(mobileControllerProvider.notifier);
     _composer.addListener(_composerChanged);
     _scroll.addListener(_handleScroll);
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _scheduleVisibleRead();
+    } else {
+      _readTimer?.cancel();
+    }
+  }
+
+  void _scheduleVisibleRead() {
+    if (_readTimer?.isActive == true) return;
+    _readTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted ||
+          _revealingMessage ||
+          _initialScrollPending ||
+          _loadingNewer ||
+          WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed ||
+          ModalRoute.of(context)?.isCurrent == false) {
+        return;
+      }
+      final state = ref.read(mobileControllerProvider);
+      if (state.loadingMessages ||
+          state.offline ||
+          state.error != null ||
+          state.messageJump != null ||
+          state.selectedChannel != _renderedChannel) {
+        return;
+      }
+      final viewport = _historyViewportKey.currentContext?.findRenderObject();
+      if (viewport is! RenderBox || !viewport.hasSize) return;
+      final top = viewport.localToGlobal(Offset.zero).dy;
+      final bottom = top + viewport.size.height;
+      for (final message in state.messages.reversed) {
+        final box =
+            _messageKeys[message.ref.wire]?.currentContext?.findRenderObject();
+        if (box is! RenderBox || !box.hasSize || !box.attached) continue;
+        final end = box.localToGlobal(Offset(0, box.size.height)).dy;
+        if (end > top && end <= bottom + 1) {
+          unawaited(ref
+              .read(mobileControllerProvider.notifier)
+              .acknowledgeVisibleMessage(message.channelRef, message.ref));
+          return;
+        }
+      }
+    });
   }
 
   @override
   void dispose() {
+    _readTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _draftTimer?.cancel();
     _slowModeTimer?.cancel();
     for (final request in _autocompleteRequests.values) {
@@ -1077,10 +1132,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _autocompleteRequests.clear();
     _highlightTimer?.cancel();
     if (_composerChannel case final channel?) {
-      ref.read(mobileControllerProvider.notifier).setDraft(
-            channel,
-            _composer.text,
-          );
+      final draft = _composer.text;
+      // Riverpod removes this view's listeners after State.dispose returns.
+      scheduleMicrotask(() {
+        if (_controller.mounted) _controller.setDraft(channel, draft);
+      });
     }
     for (final upload in _uploads) {
       unawaited(upload.deleteIfTemporary());
@@ -1162,16 +1218,21 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     if (channelChanged) {
       _highlightedMessage = null;
       _showJumpToPresent = false;
-      _initialScrollPending = !_savedOffsets.containsKey(channel.ref);
-      _scheduleRestore(channel.ref);
+      _initialScrollPending = true;
     } else if (_initialScrollPending &&
         lastMessage != null &&
         !state.loadingMessages) {
       _initialScrollPending = false;
-      _scheduleScrollToBottom();
+      if (jump == null &&
+          !state.channelsWithNewerMessages.contains(channel.ref)) {
+        _scheduleScrollToBottom();
+      }
     } else if (_renderedLastMessage != null &&
         _renderedLastMessage != lastMessage &&
-        _isNearBottom) {
+        _isNearBottom &&
+        !_loadingNewer &&
+        jump == null &&
+        !state.channelsWithNewerMessages.contains(channel.ref)) {
       _scheduleScrollToBottom(animated: true);
     }
     _renderedLastMessage = lastMessage;
@@ -1190,6 +1251,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         state.error == null) {
       _scheduleAutomaticHistoryCheck();
     }
+    _scheduleVisibleRead();
     final historySyncWarning = _guildHistorySyncWarning(state.activeGuild);
     // Per-build lookup indexes for the lazy list. Building them once here
     // keeps the itemBuilder and the moved-child callback below O(1); without
@@ -1272,8 +1334,22 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                       .loadMessages(older: true)
                   : ref.read(mobileControllerProvider.notifier).loadMessages,
             ),
+          if (canReadHistory && state.visitReadPosition != null)
+            SizedBox(
+              width: double.infinity,
+              child: TextButton.icon(
+                icon: const Icon(Icons.history_rounded),
+                label: Text(L10n.of(context).chat_jump_to_read),
+                onPressed: state.loadingMessages || _revealingMessage
+                    ? null
+                    : () => ref
+                        .read(mobileControllerProvider.notifier)
+                        .jumpToReadPosition(),
+              ),
+            ),
           Expanded(
             child: Stack(
+              key: _historyViewportKey,
               children: [
                 Positioned.fill(
                   child: messages.isEmpty &&
@@ -1378,7 +1454,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                     ));
                             final detached =
                                 message.ref == detachedStarter?.ref;
-                            final compact = !detached &&
+                            final newMessages =
+                                state.visitReadPosition != null &&
+                                    compareReadPositions(message.ref,
+                                            state.visitReadPosition!) >=
+                                        (state.visitReadInclusive ? 0 : 1) &&
+                                    (previous == null ||
+                                        compareReadPositions(previous.ref,
+                                                state.visitReadPosition!) <
+                                            (state.visitReadInclusive ? 0 : 1));
+                            final compact = !newMessages &&
+                                !detached &&
                                 previous != null &&
                                 previous.ref != detachedStarter?.ref &&
                                 previous.createdAtAvailable &&
@@ -1467,6 +1553,21 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                   children: [
                                     if (startsNewDay)
                                       _DayDivider(day: message.createdAt),
+                                    if (newMessages)
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 16, vertical: 8),
+                                        child: Row(children: [
+                                          const Expanded(child: Divider()),
+                                          Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 8),
+                                              child: Text(L10n.of(context)
+                                                  .chat_new_messages)),
+                                          const Expanded(child: Divider()),
+                                        ]),
+                                      ),
                                     AnimatedContainer(
                                       duration: Duration(milliseconds: 240),
                                       curve: Curves.easeOut,
@@ -1482,6 +1583,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                         child: tile,
                                       ),
                                     ),
+                                    if (messageIndex == messages.length - 1 &&
+                                        state.channelsWithNewerMessages
+                                            .contains(channel.ref))
+                                      TextButton.icon(
+                                        onPressed: state.loadingMessages
+                                            ? null
+                                            : _loadNewer,
+                                        icon: const Icon(Icons.expand_more),
+                                        label: Text(
+                                            L10n.of(context).chat_load_newer),
+                                      ),
                                   ],
                                 ),
                               ),
@@ -1493,11 +1605,20 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   right: 12,
                   bottom: 10,
                   child: _JumpToPresentButton(
-                    visible: _showJumpToPresent,
+                    visible: _controller.isManuallyUnread(channel.ref) ||
+                        _showJumpToPresent ||
+                        state.channelsWithNewerMessages.contains(channel.ref),
                     unread: state.unreadCounts[channel.ref] ?? 0,
                     onTap: () {
-                      setState(() => _showJumpToPresent = false);
-                      _scheduleScrollToBottom(animated: true);
+                      if (_controller.isManuallyUnread(channel.ref) ||
+                          state.channelsWithNewerMessages
+                              .contains(channel.ref)) {
+                        unawaited(ref
+                            .read(mobileControllerProvider.notifier)
+                            .jumpToLatest());
+                      } else {
+                        _scheduleScrollToBottom(animated: true);
+                      }
                     },
                   ),
                 ),
@@ -2299,15 +2420,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     });
   }
 
-  void _rememberOffset() {
-    final channel = _renderedChannel;
-    if (channel != null && _scroll.hasClients) {
-      _savedOffsets[channel] = _scroll.offset;
-    }
-  }
-
   void _handleScroll() {
-    _rememberOffset();
+    _readTimer?.cancel();
+    _scheduleVisibleRead();
     _maybeAutomaticallyLoadEarlier();
     // The reversed list starts at the newest message, so being scrolled away
     // from the minimum extent means older history is on screen.
@@ -2323,12 +2438,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _automaticHistoryCheckScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _automaticHistoryCheckScheduled = false;
-      if (mounted) _maybeAutomaticallyLoadEarlier();
+      if (mounted && !_revealingMessage && !_loadingNewer) {
+        _maybeAutomaticallyLoadEarlier();
+      }
     });
   }
 
   void _maybeAutomaticallyLoadEarlier() {
-    if (!_scroll.hasClients || _automaticHistoryLoadInFlight) return;
+    if (!_scroll.hasClients ||
+        _automaticHistoryLoadInFlight ||
+        _revealingMessage ||
+        _loadingNewer) {
+      return;
+    }
     final state = ref.read(mobileControllerProvider);
     final channel = state.activeChannel;
     if (channel == null ||
@@ -2350,17 +2472,6 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         if (mounted) _scheduleAutomaticHistoryCheck();
       }
     }());
-  }
-
-  void _scheduleRestore(EntityRef channel) {
-    final offset = _savedOffsets[channel];
-    if (offset == null) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _renderedChannel != channel || !_scroll.hasClients) {
-        return;
-      }
-      _scroll.jumpTo(offset.clamp(0.0, _scroll.position.maxScrollExtent));
-    });
   }
 
   void _scheduleScrollToBottom({bool animated = false}) {
@@ -2387,6 +2498,52 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     // the visible content and offset without a compensating jump.
   }
 
+  Future<void> _loadNewer() async {
+    if (_loadingNewer || !_scroll.hasClients) return;
+    final state = ref.read(mobileControllerProvider);
+    final channel = state.selectedChannel;
+    if (channel == null || state.loadingMessages) return;
+    final viewport =
+        _historyViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (viewport == null) return;
+    final top = viewport.localToGlobal(Offset.zero).dy;
+    String? anchor;
+    double? anchorY;
+    for (final message in state.messages) {
+      final box =
+          _messageKeys[message.ref.wire]?.currentContext?.findRenderObject();
+      if (box is RenderBox && box.hasSize) {
+        final y = box.localToGlobal(Offset.zero).dy;
+        if (y >= top && y < top + viewport.size.height) {
+          anchor = message.ref.wire;
+          anchorY = y;
+          break;
+        }
+      }
+    }
+    _loadingNewer = true;
+    try {
+      await ref
+          .read(mobileControllerProvider.notifier)
+          .loadMessages(newer: true);
+      if (!mounted || _renderedChannel != channel) return;
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || _renderedChannel != channel || !_scroll.hasClients) {
+        return;
+      }
+      final box = _messageKeys[anchor]?.currentContext?.findRenderObject();
+      if (box is RenderBox && box.hasSize && anchorY != null) {
+        final delta = anchorY - box.localToGlobal(Offset.zero).dy;
+        _scroll.jumpTo((_scroll.offset + delta).clamp(
+            _scroll.position.minScrollExtent,
+            _scroll.position.maxScrollExtent));
+      }
+    } finally {
+      _loadingNewer = false;
+      if (mounted) _scheduleVisibleRead();
+    }
+  }
+
   Future<void> _jumpTo(EntityRef reference) async {
     await ref.read(mobileControllerProvider.notifier).jumpToMessage(
           reference,
@@ -2403,20 +2560,84 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         )) {
       return;
     }
-    ref
-        .read(mobileControllerProvider.notifier)
-        .consumeMessageJump(request.generation);
-    // The reversed lazy list may not have built an around-page's middle row.
-    // Start with a proportional estimate, then walk by viewports until the
-    // requested row has a BuildContext that ensureVisible can target exactly.
-    for (var attempt = 0; attempt < 60; attempt++) {
-      final targetContext = _messageKeys[request.message.wire]?.currentContext;
-      if (targetContext != null && targetContext.mounted) {
-        await Scrollable.ensureVisible(
-          targetContext,
-          duration: Duration(milliseconds: 320),
-          alignment: .35,
+    _revealingMessage = true;
+    try {
+      ref
+          .read(mobileControllerProvider.notifier)
+          .consumeMessageJump(request.generation);
+      // The reversed lazy list may not have built an around-page's middle row.
+      // Start with a proportional estimate, then walk by viewports until the
+      // requested row has a BuildContext that ensureVisible can target exactly.
+      for (var attempt = 0; attempt < 60; attempt++) {
+        final targetContext =
+            _messageKeys[request.message.wire]?.currentContext;
+        if (targetContext != null && targetContext.mounted) {
+          await Scrollable.ensureVisible(
+            targetContext,
+            duration: Duration(milliseconds: 320),
+            alignment: .35,
+          );
+          if (!mounted ||
+              !messageJumpRevealIsCurrent(
+                request: request,
+                renderedChannel: _renderedChannel,
+                handledGeneration: _handledJumpGeneration,
+              )) {
+            return;
+          }
+          _highlightTimer?.cancel();
+          setState(() => _highlightedMessage = request.message);
+          _highlightTimer = Timer(Duration(seconds: 2), () {
+            if (mounted && _highlightedMessage == request.message) {
+              setState(() => _highlightedMessage = null);
+            }
+          });
+          return;
+        }
+        if (!_scroll.hasClients) {
+          await WidgetsBinding.instance.endOfFrame;
+          continue;
+        }
+        final state = ref.read(mobileControllerProvider);
+        final targetIndex = state.messages.indexWhere(
+          (message) => message.ref == request.message,
         );
+        if (targetIndex < 0) return;
+        final targetItem = messageListItemIndex(
+          messageCount: state.messages.length,
+          messageIndex: targetIndex,
+          pendingCount: state.pendingMessages.length,
+        );
+        final builtItems = <int>[];
+        for (var index = 0; index < state.messages.length; index++) {
+          final message = state.messages[index];
+          if (_messageKeys[message.ref.wire]?.currentContext != null) {
+            builtItems.add(messageListItemIndex(
+              messageCount: state.messages.length,
+              messageIndex: index,
+              pendingCount: state.pendingMessages.length,
+            ));
+          }
+        }
+        final position = _scroll.position;
+        double next;
+        if (builtItems.isEmpty || attempt == 0) {
+          final totalItems =
+              state.messages.length + state.pendingMessages.length;
+          next = totalItems <= 1
+              ? position.minScrollExtent
+              : position.maxScrollExtent * targetItem / (totalItems - 1);
+        } else if (targetItem > builtItems.reduce((a, b) => a > b ? a : b)) {
+          next = position.pixels + position.viewportDimension * .8;
+        } else {
+          next = position.pixels - position.viewportDimension * .8;
+        }
+        _scroll.jumpTo(
+          next
+              .clamp(position.minScrollExtent, position.maxScrollExtent)
+              .toDouble(),
+        );
+        await WidgetsBinding.instance.endOfFrame;
         if (!mounted ||
             !messageJumpRevealIsCurrent(
               request: request,
@@ -2425,65 +2646,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             )) {
           return;
         }
-        _highlightTimer?.cancel();
-        setState(() => _highlightedMessage = request.message);
-        _highlightTimer = Timer(Duration(seconds: 2), () {
-          if (mounted && _highlightedMessage == request.message) {
-            setState(() => _highlightedMessage = null);
-          }
-        });
-        return;
       }
-      if (!_scroll.hasClients) {
-        await WidgetsBinding.instance.endOfFrame;
-        continue;
-      }
-      final state = ref.read(mobileControllerProvider);
-      final targetIndex = state.messages.indexWhere(
-        (message) => message.ref == request.message,
-      );
-      if (targetIndex < 0) return;
-      final targetItem = messageListItemIndex(
-        messageCount: state.messages.length,
-        messageIndex: targetIndex,
-        pendingCount: state.pendingMessages.length,
-      );
-      final builtItems = <int>[];
-      for (var index = 0; index < state.messages.length; index++) {
-        final message = state.messages[index];
-        if (_messageKeys[message.ref.wire]?.currentContext != null) {
-          builtItems.add(messageListItemIndex(
-            messageCount: state.messages.length,
-            messageIndex: index,
-            pendingCount: state.pendingMessages.length,
-          ));
-        }
-      }
-      final position = _scroll.position;
-      double next;
-      if (builtItems.isEmpty || attempt == 0) {
-        final totalItems = state.messages.length + state.pendingMessages.length;
-        next = totalItems <= 1
-            ? position.minScrollExtent
-            : position.maxScrollExtent * targetItem / (totalItems - 1);
-      } else if (targetItem > builtItems.reduce((a, b) => a > b ? a : b)) {
-        next = position.pixels + position.viewportDimension * .8;
-      } else {
-        next = position.pixels - position.viewportDimension * .8;
-      }
-      _scroll.jumpTo(
-        next
-            .clamp(position.minScrollExtent, position.maxScrollExtent)
-            .toDouble(),
-      );
-      await WidgetsBinding.instance.endOfFrame;
-      if (!mounted ||
-          !messageJumpRevealIsCurrent(
-            request: request,
-            renderedChannel: _renderedChannel,
-            handledGeneration: _handledJumpGeneration,
-          )) {
-        return;
+    } finally {
+      if (mounted) {
+        setState(() => _revealingMessage = false);
+        _scheduleVisibleRead();
       }
     }
   }
@@ -4276,6 +4443,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   ),
                 ),
               ],
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.mark_chat_unread_outlined),
+                title: Text(L10n.of(context).chat_mark_unread),
+                onTap: () => Navigator.pop(context, 'mark-unread'),
+              ),
               if (!channelFollowNotice)
                 ListTile(
                     leading: Icon(Icons.reply_rounded),
@@ -4422,6 +4595,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final controller = ref.read(mobileControllerProvider.notifier);
     try {
       switch (action) {
+        case 'mark-unread':
+          await controller.markMessageUnread(message);
+          break;
         case 'reply':
           setState(() {
             _reply = message;

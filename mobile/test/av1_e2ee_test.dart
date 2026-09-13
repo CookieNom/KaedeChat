@@ -100,7 +100,8 @@ void main() {
     when(() => backup.senderId).thenReturn('backup');
     when(() => backup.peerConnectionId).thenReturn('pc');
     await manager.addRtpSender(sender: backup, identity: 'alice', sid: 'video');
-    expect((calls.last.arguments as Map)['keyIndex'], 3); // Late backup uses the rotated key.
+    expect((calls.last.arguments as Map)['keyIndex'],
+        3); // Late backup uses the rotated key.
 
     final remote = _RemoteParticipant();
     when(() => remote.identity).thenReturn('bob');

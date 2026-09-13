@@ -18,15 +18,17 @@ function dayKey(value: string): string {
 
 function isAfterRead(
   message: Message,
-  readRef: { id: string; origin_domain: string } | null
+  readRef: { id: string; origin_domain: string } | null,
+  inclusive: boolean
 ): boolean {
   if (!readRef || message.id.startsWith('pending-')) return false;
-  return compareEntityRefs(message, readRef) > 0;
+  return compareEntityRefs(message, readRef) >= (inclusive ? 0 : 1);
 }
 
 export function buildTimeline(
   messages: Message[],
-  readRef: { id: string; origin_domain: string } | null = null
+  readRef: { id: string; origin_domain: string } | null = null,
+  inclusive = false
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
   let previous: Message | null = null;
@@ -54,7 +56,7 @@ export function buildTimeline(
       previous = null;
       previousDay = currentDay;
     }
-    if (!addedNewDivider && isAfterRead(message, readRef)) {
+    if (!addedNewDivider && isAfterRead(message, readRef, inclusive)) {
       items.push({ kind: 'new', key: `new:${entityKey(message)}`, label: 'New messages' });
       addedNewDivider = true;
       previous = null;

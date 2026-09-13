@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from redis.asyncio import Redis
 from sqlalchemy import and_, exists, func, or_, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -24,19 +27,22 @@ from app.chat.payloads import user_payload
 from app.chat.permissions import get_permissions
 from app.chat.presence import broadcast_presence_preference
 from app.chat.privacy import lock_dm_privacy
-from app.chat.schemas import ProfilePatch
+from app.chat.schemas import ProfilePatch, ReadStateUpdate
 from app.core.guild_navigation import normalize_guild_navigation, parse_stored_guild_navigation
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
-from app.core.types import EntityReference, validate_entity_reference
+from app.core.types import EntityRef, EntityReference, validate_entity_reference
 from app.db.models import (
     Channel,
     DMParticipant,
     Guild,
     GuildMember,
+    GuildNotificationSetting,
+    InboxDismissal,
     Message,
+    MessageProjection,
     ReadState,
     User,
     UserSettings,
@@ -111,6 +117,7 @@ async def patch_me(
                         select(Guild.id, Guild.origin_domain)
                         .join(
                             GuildMember,
+                            GuildNotificationSetting,
                             (GuildMember.guild_id == Guild.id)
                             & (GuildMember.guild_domain == Guild.origin_domain),
                         )
@@ -209,6 +216,7 @@ async def accessible_guild_navigation_refs(
             select(Guild.id, Guild.origin_domain)
             .join(
                 GuildMember,
+                GuildNotificationSetting,
                 (GuildMember.guild_id == Guild.id)
                 & (GuildMember.guild_domain == Guild.origin_domain),
             )
@@ -406,10 +414,12 @@ async def list_read_states(
         else []
     )
     guild_by_ref = {(guild.id, guild.origin_domain): guild for guild in guilds}
+    history_access: dict[tuple[int, str], bool] = {}
     visible_channels: list[Channel] = []
     for channel in channels:
         if channel.guild_id is None or channel.guild_domain is None:
             visible_channels.append(channel)
+            history_access[(channel.id, channel.origin_domain)] = True
             continue
         guild = guild_by_ref.get((channel.guild_id, channel.guild_domain))
         if guild is None:
@@ -417,7 +427,20 @@ async def list_read_states(
         permissions = await get_permissions(session, redis, guild, auth.user, channel=channel)
         if permissions & Permission.VIEW_CHANNEL:
             visible_channels.append(channel)
+            history_access[(channel.id, channel.origin_domain)] = bool(
+                permissions & Permission.READ_MESSAGE_HISTORY
+            )
     channels = visible_channels
+    muted_guilds = {
+        (row.guild_id, row.guild_domain)
+        for row in await session.scalars(
+            select(GuildNotificationSetting).where(
+                GuildNotificationSetting.user_id == auth.user.id,
+                GuildNotificationSetting.user_domain == auth.user.origin_domain,
+                GuildNotificationSetting.level == "none",
+            )
+        )
+    }
     states = list(
         await session.scalars(
             select(ReadState).where(
@@ -462,6 +485,31 @@ async def list_read_states(
         if channel_refs
         else {}
     )
+    first_unread = {}
+    if channel_refs:
+        rows = await session.execute(
+            select(Message.channel_id, Message.channel_domain, Message.id, Message.origin_domain)
+            .outerjoin(
+                ReadState,
+                and_(
+                    ReadState.user_id == auth.user.id,
+                    ReadState.user_domain == auth.user.origin_domain,
+                    ReadState.channel_id == Message.channel_id,
+                    ReadState.channel_domain == Message.channel_domain,
+                ),
+            )
+            .where(
+                tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs),
+                or_(
+                    ReadState.last_message_id.is_(None),
+                    tuple_(Message.id, Message.origin_domain)
+                    > tuple_(ReadState.last_message_id, ReadState.last_message_domain),
+                ),
+            )
+            .distinct(Message.channel_id, Message.channel_domain)
+            .order_by(Message.channel_id, Message.channel_domain, Message.id, Message.origin_domain)
+        )
+        first_unread = {(row[0], row[1]): (str(row[2]), row[3]) for row in rows}
     keys = [f"channel:last_message:{channel.origin_domain}:{channel.id}" for channel in channels]
     cached = await redis.mget(keys) if keys else []
     result: list[dict[str, object]] = []
@@ -486,15 +534,153 @@ async def list_read_states(
             {
                 "channel_id": str(channel.id),
                 "channel_domain": channel.origin_domain,
+                "channel_name": channel.name,
+                "can_read_history": history_access.get((channel.id, channel.origin_domain), False),
+                "muted": (channel.guild_id, channel.guild_domain) in muted_guilds,
                 "guild_id": str(channel.guild_id) if channel.guild_id is not None else None,
                 "guild_domain": channel.guild_domain,
                 "last_message_id": str(latest.id) if latest is not None else None,
                 "last_message_domain": latest.domain if latest is not None else None,
+                "first_unread_message_id": first_unread.get(
+                    (channel.id, channel.origin_domain), (None, None)
+                )[0],
+                "first_unread_message_domain": first_unread.get(
+                    (channel.id, channel.origin_domain), (None, None)
+                )[1],
                 "read_message_id": str(read.id) if read is not None else None,
                 "read_message_domain": read.domain if read is not None else None,
+                "read_version": state.read_version if state is not None else 0,
                 "mention_count": state.mention_count if state is not None else 0,
                 "unread_count": unread_count,
                 "unread": unread_count > 0,
             }
         )
     return result
+
+
+@router.get("/@me/inbox/mentions")
+async def inbox_mentions(
+    before: EntityRef | None = None,
+    guild: EntityRef | None = None,
+    include_everyone: bool = True,
+    include_roles: bool = True,
+    limit: int = Query(default=50, ge=1, le=100),
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> list[dict[str, object]]:
+    states = await list_read_states(auth, session, redis)
+    visible = {}
+    for state in states:
+        if guild is not None and (state["guild_id"], state["guild_domain"]) != (
+            str(guild.id),
+            guild.domain,
+        ):
+            continue
+        if not state.get("can_read_history"):
+            continue
+        reference = EntityReference(int(str(state["channel_id"])), str(state["channel_domain"]))
+        visible[(reference.id, reference.domain)] = state
+    if not visible:
+        return []
+    dismissed = exists().where(
+        InboxDismissal.user_id == auth.user.id,
+        InboxDismissal.user_domain == auth.user.origin_domain,
+        InboxDismissal.message_id == Message.id,
+        InboxDismissal.message_domain == Message.origin_domain,
+    )
+    statement = (
+        select(Message)
+        .join(
+            MessageProjection,
+            and_(
+                MessageProjection.message_id == Message.id,
+                MessageProjection.message_domain == Message.origin_domain,
+            ),
+        )
+        .where(
+            tuple_(Message.channel_id, Message.channel_domain).in_(visible),
+            MessageProjection.mention_user_refs.contains(
+                [{"id": str(auth.user.id), "origin_domain": auth.user.origin_domain}]
+            ),
+            Message.created_at >= datetime.now(UTC) - timedelta(days=7),
+            Message.deleted_at.is_(None),
+            tuple_(Message.author_id, Message.author_domain)
+            != (auth.user.id, auth.user.origin_domain),
+            ~dismissed,
+        )
+    )
+    if before is not None:
+        statement = statement.where(
+            tuple_(Message.id, Message.origin_domain) < (before.id, before.domain)
+        )
+    if not include_everyone:
+        statement = statement.where(Message.mention_everyone.is_(False))
+    if not include_roles:
+        statement = statement.where(Message.mention_role_refs == [])
+    messages = await session.scalars(
+        statement.order_by(Message.id.desc(), Message.origin_domain.desc()).limit(limit)
+    )
+    return [
+        {
+            **visible[(message.channel_id, message.channel_domain)],
+            "message_id": str(message.id),
+            "message_domain": message.origin_domain,
+            "created_at": message.created_at.isoformat(),
+        }
+        for message in messages
+    ]
+
+
+@router.post("/@me/inbox/dismiss", status_code=204)
+async def dismiss_inbox_mention(
+    payload: ReadStateUpdate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    # Only a message that actually mentions this account can create a dismissal.
+    message = await session.scalar(
+        select(MessageProjection).where(
+            MessageProjection.message_id == payload.message_id.id,
+            MessageProjection.message_domain == payload.message_id.domain,
+            MessageProjection.mention_user_refs.contains(
+                [{"id": str(auth.user.id), "origin_domain": auth.user.origin_domain}]
+            ),
+        )
+    )
+    if message is None:
+        raise HTTPException(status_code=404, detail="Mention not found")
+    from app.chat.channel_access import load_channel_access
+
+    access = await load_channel_access(
+        session, settings, auth.user, EntityReference(message.channel_id, message.channel_domain)
+    )
+    if access.guild is not None:
+        permissions = await get_permissions(
+            session, redis, access.guild, auth.user, channel=access.channel
+        )
+        required = Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
+        if permissions & required != required:
+            raise HTTPException(status_code=404, detail="Mention not found")
+    await session.execute(
+        pg_insert(InboxDismissal)
+        .values(
+            user_id=auth.user.id,
+            user_domain=auth.user.origin_domain,
+            user_is_local=True,
+            message_id=message.message_id,
+            message_domain=message.message_domain,
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.commit()
+    await publish_dispatch(
+        redis,
+        user_topic(auth.user.origin_domain, auth.user.id),
+        "INBOX_MENTION_DISMISS",
+        {"message_id": str(message.message_id), "message_domain": message.message_domain},
+    )
+    return Response(status_code=204)

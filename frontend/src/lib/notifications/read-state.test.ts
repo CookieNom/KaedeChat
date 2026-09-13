@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Channel, Message, ReadStateStatus, UserSummary } from '$lib/chat/types';
 import { directMessageUnreadCount } from './counts';
+import { buildTimeline } from '$lib/chat/timeline';
 import { applyIncomingMessage, applyReadStateDispatch } from './read-state';
 
 const currentUser = {
@@ -186,4 +187,66 @@ describe('realtime read-state reduction', () => {
   it('absent channel metadata', () => {
     expect(applyIncomingMessage([], message(), currentUser, null)).toEqual([]);
   });
+});
+
+it('ignores an older cross-device read update without losing newer mentions', () => {
+  const state = {
+    ...initial,
+    read_message_id: '20',
+    last_message_id: '30',
+    mention_count: 2,
+    unread: true
+  };
+  expect(
+    applyReadStateDispatch([state], {
+      channel_id: state.channel_id,
+      channel_domain: state.channel_domain,
+      last_message_id: '15',
+      last_message_domain: state.channel_domain,
+      mention_count: 0
+    })
+  ).toEqual([state]);
+});
+
+it('accepts a versioned manual rewind and rejects acknowledgements from before it', () => {
+  const reset = applyReadStateDispatch([initial], {
+    channel_id: initial.channel_id,
+    channel_domain: initial.channel_domain,
+    last_message_id: null,
+    last_message_domain: null,
+    mention_count: 1,
+    read_version: 1,
+    manual_unread: true
+  });
+  expect(reset[0]).toMatchObject({ read_version: 1, read_message_id: null, unread: true });
+  expect(
+    applyReadStateDispatch(reset, {
+      channel_id: initial.channel_id,
+      channel_domain: initial.channel_domain,
+      last_message_id: '19',
+      last_message_domain: 'home.test',
+      mention_count: 0,
+      read_version: 0
+    })
+  ).toEqual(reset);
+  expect(
+    applyReadStateDispatch(reset, {
+      channel_id: initial.channel_id,
+      channel_domain: initial.channel_domain,
+      last_message_id: '19',
+      last_message_domain: 'home.test',
+      mention_count: 0,
+      read_version: 1
+    })[0].unread
+  ).toBe(false);
+});
+
+it('places an inclusive unread boundary before the first retained message', () => {
+  const first = message();
+  const items = buildTimeline([first], first, true);
+  expect(items.findIndex((item) => item.kind === 'new')).toBeLessThan(
+    items.findIndex((item) => item.kind === 'message')
+  );
+  expect(items.some((item) => item.kind === 'new')).toBe(true);
+  expect(buildTimeline([first], first).some((item) => item.kind === 'new')).toBe(false);
 });

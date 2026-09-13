@@ -755,11 +755,7 @@ async def test_bot_live_permissions_reapply_text_and_voice_dependencies() -> Non
     )
     voice_permissions = await voice_grant.apply(
         SimpleNamespace(),
-        int(
-            Permission.VIEW_CHANNEL
-            | Permission.STREAM
-            | Permission.MOVE_MEMBERS
-        ),
+        int(Permission.VIEW_CHANNEL | Permission.STREAM | Permission.MOVE_MEMBERS),
         voice_channel,
     )
 

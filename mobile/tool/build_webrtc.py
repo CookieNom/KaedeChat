@@ -71,7 +71,9 @@ def main():
         os.environ["PATH"] = str(build / "_source/apple/depot_tools") + os.pathsep + os.environ["PATH"]
         run(sys.executable, str(source / "tools_webrtc/ios/build_ios_libs.py"),
             "--build_config", "release", "--arch", "device:arm64", "simulator:arm64", "simulator:x64",
-            "--extra-gn-args", gn_args + " ios_deployment_target=\"15.0\"",
+            # Unlike run.py's Android builder, this direct entry point does
+            # not inherit COMMON_GN_ARGS. The SDK's audio module needs RTTI.
+            "--extra-gn-args", gn_args + " use_rtti=true ios_deployment_target=\"15.0\"",
             "-o", str(work / "ios"), cwd=source)
         destination = OUTPUT / "WebRTC.xcframework"
         if destination.exists():

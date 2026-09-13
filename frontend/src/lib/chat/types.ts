@@ -408,6 +408,11 @@ export interface Attachment {
 }
 
 export interface ReadStateStatus {
+  can_read_history?: boolean;
+  muted?: boolean;
+  read_version?: number;
+  first_unread_message_id?: string | null;
+  first_unread_message_domain?: string | null;
   channel_id: string;
   channel_domain: string;
   guild_id: string | null;

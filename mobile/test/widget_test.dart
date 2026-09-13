@@ -454,15 +454,15 @@ void main() {
     test('ranks frequently used emoji and breaks ties by recency', () {
       expect(
         rankRecentReactions(<String>['👍', '🔥', '👍', '😂', '🔥', '🔥']),
-        <String>['🔥', '👍', '😂'],
+        <String>['🔥', '👍', '😂', '❤'],
       );
       expect(
         rankRecentReactions(<String>['👍', '😂', '🔥']),
-        <String>['🔥', '😂', '👍'],
+        <String>['🔥', '😂', '👍', '❤'],
       );
       expect(
         rankRecentReactions(<String>['❤️', '❤', '🔥']),
-        <String>['❤', '🔥'],
+        <String>['❤', '🔥', '😂', '👍'],
       );
     });
 

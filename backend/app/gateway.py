@@ -1066,6 +1066,7 @@ def ready_payload(
                     str(state.last_message_id) if state.last_message_id is not None else None
                 ),
                 "last_message_domain": state.last_message_domain,
+                "read_version": state.read_version if state is not None else 0,
                 "mention_count": state.mention_count,
             }
             for state in states

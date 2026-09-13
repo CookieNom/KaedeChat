@@ -7,7 +7,7 @@ use std::{
 use livekit::webrtc::{
     MediaType,
     media_stream_track::MediaStreamTrack,
-    peer_connection::PeerConnection,
+    peer_connection::{AnswerOptions, OfferOptions, PeerConnection},
     peer_connection_factory::RtcConfiguration,
     rtp_parameters::{Priority, RtpEncodingParameters},
     rtp_sender::VideoEncoderBackend,
@@ -83,6 +83,7 @@ pub async fn hardware_codec(
     .unwrap_or(false)
 }
 
+#[allow(clippy::too_many_lines)] // One local peer setup/probe; LocalPeers owns cleanup on every exit.
 async fn probe(
     codec: &str,
     width: u32,
@@ -152,10 +153,10 @@ async fn probe(
     transceiver
         .sender()
         .set_video_encoder_backend(VideoEncoderBackend::Hardware);
-    let offer = peers.0.create_offer(Default::default()).await.ok()?;
+    let offer = peers.0.create_offer(OfferOptions::default()).await.ok()?;
     peers.0.set_local_description(offer.clone()).await.ok()?;
     peers.1.set_remote_description(offer).await.ok()?;
-    let answer = peers.1.create_answer(Default::default()).await.ok()?;
+    let answer = peers.1.create_answer(AnswerOptions::default()).await.ok()?;
     peers.1.set_local_description(answer.clone()).await.ok()?;
     peers.0.set_remote_description(answer).await.ok()?;
     let mut tick = tokio::time::interval(Duration::from_secs_f64(
@@ -174,15 +175,15 @@ async fn probe(
             _ = tick.tick() => {
                 let mut buffer = I420Buffer::new(width, height);
                 let (y, u, v) = buffer.data_mut();
-                y.fill((samples % 200 + 20) as u8); u.fill(128); v.fill(128);
+                y.fill(u8::try_from(samples % 200 + 20).ok()?); u.fill(128); v.fill(128);
                 source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
                 samples += 1;
-                if samples >= (encoding.max_framerate * 2.0) as u32 {
+                if f64::from(samples) >= (encoding.max_framerate * 2.0).floor() {
                     let stats = transceiver.sender().get_stats().await.ok()?;
                     return Some(stats.into_iter().any(|stat| match stat {
                         RtcStats::OutboundRtp(stat) => hardware_encoder(stat.outbound.power_efficient_encoder, &stat.outbound.encoder_implementation)
                             && stat.outbound.frame_width >= width && stat.outbound.frame_height >= height
-                            && stat.outbound.frames_encoded >= (encoding.max_framerate * 0.8) as u32
+                            && f64::from(stat.outbound.frames_encoded) >= (encoding.max_framerate * 0.8).floor()
                             && stat.outbound.frames_per_second >= encoding.max_framerate * 0.8,
                         _ => false,
                     }));
@@ -275,10 +276,10 @@ mod tests {
             I420Buffer::new(64, 64),
         ));
         for stream in [&mut first_frames, &mut second_frames] {
-            let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap();
+            let Ok(Some(frame)) = tokio::time::timeout(Duration::from_secs(2), stream.next()).await
+            else {
+                panic!("both tracks must receive the shared source frame within two seconds");
+            };
             assert_eq!((frame.buffer.width(), frame.buffer.height()), (64, 64));
         }
     }

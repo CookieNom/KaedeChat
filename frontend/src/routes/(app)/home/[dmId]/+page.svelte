@@ -120,6 +120,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
+  import { markConversationsRead } from '$lib/notifications/read-actions';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
   import NewMessageDialog from '$lib/components/NewMessageDialog.svelte';
@@ -226,6 +227,12 @@
   let completionActive = $state(0);
   let completionOpen = $state(false);
   let timelineAtBottom = $state(false);
+  // Keep the visit's starting point even as acknowledgements advance on other devices.
+  let visitReadInclusive = $state(false);
+  let visitReadRef = $state<{ id: string; origin_domain: string } | null>(null);
+  let historyTarget = $state<string | null>(null);
+  let historyRevision = $state(0);
+  let jumpingHistory = $state(false);
   let callBusy = $state(false);
   let callRevision = 0;
   let mobileNavigationOpen = $state(false);
@@ -257,15 +264,30 @@
   );
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const deliveryRecoveries = new SvelteSet<string>();
-  const readAcknowledgements = new ReadAcknowledgementQueue<Message>({
-    send: (message) =>
-      api(
-        `/channels/${encodeURIComponent(entityRef({ id: message.channel_id, origin_domain: message.channel_domain }))}/ack`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ message_id: entityRef(message) })
+  let manualUnreadPaused = $state(false);
+  const readAcknowledgements = new ReadAcknowledgementQueue<Message & { read_version?: number }>({
+    send: async (message) => {
+      try {
+        await api(
+          `/channels/${encodeURIComponent(`${message.channel_id}@${message.channel_domain}`)}/ack`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              message_id: entityRef(message),
+              read_version: message.read_version ?? 0
+            })
+          }
+        );
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.status === 409) {
+          readAcknowledgements.reset();
+          manualUnreadPaused = true;
+          setReadStates(await api<ReadStateStatus[]>('/users/@me/read-states'));
+          return;
         }
-      ),
+        throw caught;
+      }
+    },
     acknowledged: markMessageAcknowledged,
     warningChanged: (message) => (readStateWarning = message)
   });
@@ -360,26 +382,20 @@
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
   const timeline = $derived(
     withInteractionResponses(
-      buildTimeline(
-        messages,
-        currentReadState?.read_message_id && currentReadState.read_message_domain
-          ? {
-              id: currentReadState.read_message_id,
-              origin_domain: currentReadState.read_message_domain
-            }
-          : null
-      ),
+      buildTimeline(messages, visitReadRef, visitReadInclusive),
       Object.values(interactionResponses.byResponse),
       channel ? entityRef(channel) : ''
     )
   );
   const aroundMessage = $derived(page.url.searchParams.get('around'));
   const targetTimelineKey = $derived.by(() => {
-    if (!aroundMessage) return null;
-    const target = messages.find((message) =>
-      matchesEntityRef(aroundMessage, message, localDomain)
-    );
-    return target ? `message:${entityKey(target)}` : null;
+    const reference = historyTarget;
+    if (!reference) return null;
+    const target = messages.find((message) => matchesEntityRef(reference, message, localDomain));
+    // Deleted/expired anchors still have a valid ordered history window.
+    return target
+      ? `message:${entityKey(target)}`
+      : (timeline.find((item) => item.kind === 'new')?.key ?? timeline.at(-1)?.key ?? null);
   });
 
   function referencedMessage(message: Message): Message | null {
@@ -593,13 +609,20 @@
         if (message.e2ee && channel && e2eeClient) {
           void decryptConversationMessages(e2eeClient, channel, [message]).then(([decrypted]) => {
             speakTtsMessage(decrypted, entityRef(channel));
-            reconcile(decrypted);
+            if (!hasLater && !jumpingHistory) reconcile(decrypted);
           });
         } else {
           speakTtsMessage(message, channel ? entityRef(channel) : null);
-          reconcile(message);
+          if (!hasLater && !jumpingHistory) reconcile(message);
         }
-        if (document.visibilityState === 'visible' && timelineAtBottom) void acknowledge(message);
+        if (
+          document.visibilityState === 'visible' &&
+          document.hasFocus() &&
+          timelineAtBottom &&
+          !hasLater &&
+          !jumpingHistory
+        )
+          void acknowledge(message);
       } else {
         const target = entities.channels.values.find(
           (candidate) =>
@@ -784,6 +807,30 @@
         registerTyping(started.user_id ?? recipient?.id ?? 'unknown', started.user_domain);
       }
     } else if (dispatch.t === 'READ_STATE_UPDATE') {
+      const update = dispatch.d as ReadStateDispatch;
+      if (
+        (update.read_version ?? 0) >
+          (readStates.find(
+            (s) => s.channel_id === update.channel_id && s.channel_domain === update.channel_domain
+          )?.read_version ?? 0) &&
+        update.manual_unread &&
+        channel &&
+        update.channel_id === channel.id &&
+        update.channel_domain === channel.origin_domain
+      ) {
+        readAcknowledgements.reset();
+        manualUnreadPaused = true;
+        visitReadRef =
+          update.last_message_id && update.last_message_domain
+            ? { id: update.last_message_id, origin_domain: update.last_message_domain }
+            : null;
+        visitReadInclusive = !visitReadRef;
+        if (!visitReadRef && update.unread_message_id && update.unread_message_domain)
+          visitReadRef = {
+            id: update.unread_message_id,
+            origin_domain: update.unread_message_domain
+          };
+      }
       setReadStates(applyReadStateDispatch(readStates, dispatch.d as ReadStateDispatch));
     } else if (dispatch.t === 'CALL_CREATE' || dispatch.t === 'CALL_RING') {
       const call = dispatch.d as CallState;
@@ -965,6 +1012,9 @@
       error = '';
       busy = false;
       channelReady = false;
+      jumpingHistory = false;
+      visitReadRef = null;
+      historyTarget = null;
       timelineAtBottom = false;
       callRevision += 1;
       activeCall = null;
@@ -987,7 +1037,7 @@
 
   function recoverCurrentRoute() {
     const targetRef = dmId;
-    const targetAround = aroundMessage;
+    const targetAround = historyTarget;
     const routeGeneration = loadGeneration;
     const snapshot = ++snapshotGeneration;
     const buffered: Dispatch[] = [];
@@ -1054,6 +1104,48 @@
         return;
       setDirectMessages(loadedDms);
       setGuilds(loadedGuilds);
+      if (!preserveMessages) {
+        const state = loadedReadStates.find((item) =>
+          matchesEntityRef(
+            targetRef,
+            {
+              id: item.channel_id,
+              origin_domain: item.channel_domain
+            },
+            localDomain
+          )
+        );
+        visitReadRef =
+          state?.read_message_id && state.read_message_domain
+            ? { id: state.read_message_id, origin_domain: state.read_message_domain }
+            : null;
+        visitReadInclusive = !visitReadRef && Boolean(state?.first_unread_message_id);
+        if (
+          visitReadInclusive &&
+          state?.first_unread_message_id &&
+          state.first_unread_message_domain
+        )
+          visitReadRef = {
+            id: state.first_unread_message_id,
+            origin_domain: state.first_unread_message_domain
+          };
+        manualUnreadPaused = false;
+        historyTarget = targetAround;
+        if (!targetAround && state?.unread && visitReadRef) {
+          targetAround = entityRef(visitReadRef);
+          const history = await api<Message[]>(
+            `/channels/${encodeURIComponent(targetRef)}/messages?around=${encodeURIComponent(targetAround)}`
+          );
+          if (
+            routeGeneration !== loadGeneration ||
+            snapshot !== snapshotGeneration ||
+            targetRef !== dmId
+          )
+            return;
+          loadedMessages.splice(0, loadedMessages.length, ...history);
+          historyTarget = targetAround;
+        }
+      }
       setReadStates(loadedReadStates);
       availableEmojis = loadedEmojis;
       availableStickers = loadedStickers;
@@ -1267,16 +1359,74 @@
                 ...state,
                 read_message_id: message.id,
                 read_message_domain: message.origin_domain,
-                mention_count: 0,
-                unread: false
+                mention_count:
+                  state.last_message_id === message.id &&
+                  state.last_message_domain === message.origin_domain
+                    ? 0
+                    : state.mention_count,
+                unread: Boolean(
+                  state.last_message_id &&
+                  state.last_message_domain &&
+                  compareEntityRefs(
+                    { id: state.last_message_id, origin_domain: state.last_message_domain },
+                    message
+                  ) > 0
+                )
               }
           : state
       )
     );
   }
 
+  async function markMessageUnread(message: Message) {
+    const generation = loadGeneration;
+    manualUnreadPaused = true;
+    readAcknowledgements.reset();
+    try {
+      const states = await api<ReadStateStatus[]>('/users/@me/read-states');
+      if (generation !== loadGeneration) return;
+      const current = states.find(
+        (s) => s.channel_id === message.channel_id && s.channel_domain === message.channel_domain
+      );
+      await api(
+        `/channels/${encodeURIComponent(`${message.channel_id}@${message.channel_domain}`)}/ack`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            message_id: entityRef(message),
+            mark_unread: true,
+            read_version: current?.read_version ?? 0
+          })
+        }
+      );
+      if (generation !== loadGeneration) return;
+      const refreshed = await api<ReadStateStatus[]>('/users/@me/read-states');
+      if (generation !== loadGeneration) return;
+      setReadStates(refreshed);
+      const saved = refreshed.find(
+        (s) => s.channel_id === message.channel_id && s.channel_domain === message.channel_domain
+      );
+      visitReadRef =
+        saved?.read_message_id && saved.read_message_domain
+          ? { id: saved.read_message_id, origin_domain: saved.read_message_domain }
+          : null;
+      visitReadInclusive = !visitReadRef;
+      if (!visitReadRef) visitReadRef = { id: message.id, origin_domain: message.origin_domain };
+    } catch (caught) {
+      manualUnreadPaused = false;
+      readStateWarning = userErrorMessage(caught, 'Could not mark the message unread. Try again.');
+    }
+  }
+
   function acknowledge(message: Message): Promise<void> {
-    return readAcknowledgements.acknowledge(message);
+    if (manualUnreadPaused || document.querySelector('dialog[open]')) return Promise.resolve();
+    return readAcknowledgements.acknowledge({
+      ...message,
+      read_version:
+        readStates.find(
+          (s) => s.channel_id === message.channel_id && s.channel_domain === message.channel_domain
+        )?.read_version ?? 0
+    });
   }
 
   function reconcile(message: Message) {
@@ -1325,7 +1475,16 @@
   }
 
   function acknowledgeLatestIfVisible() {
-    if (document.visibilityState !== 'visible' || !timelineAtBottom) return;
+    if (document.querySelector('dialog[open]')) return;
+    if (manualUnreadPaused) return;
+    if (
+      document.visibilityState !== 'visible' ||
+      !document.hasFocus() ||
+      !timelineAtBottom ||
+      hasLater ||
+      jumpingHistory
+    )
+      return;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
       if (!message.id.startsWith('pending-')) {
@@ -2437,6 +2596,65 @@
     );
   }
 
+  async function jumpHistory(reference: string | null) {
+    manualUnreadPaused = false;
+    if (!channel || jumpingHistory || loadingEarlier || loadingLater) return;
+    const targetChannel = channel;
+    const generation = loadGeneration;
+    jumpingHistory = true;
+    try {
+      let history = await api<Message[]>(
+        `/channels/${encodeURIComponent(entityRef(targetChannel))}/messages${reference ? `?around=${encodeURIComponent(reference)}` : ''}`
+      );
+      if (generation !== loadGeneration) return;
+      if (targetChannel.encryption_mode === 'e2ee' && e2eeClient)
+        history = await decryptConversationMessages(e2eeClient, targetChannel, history);
+      if (generation !== loadGeneration) return;
+      historyTarget = reference;
+      timelineAtBottom = false;
+      hasEarlier = reference ? history.length > 0 : history.length === 50;
+      const oldest = history.at(-1);
+      authorityHistoryComplete = oldest?.history_page_complete === true;
+      hasEarlier &&=
+        !authorityHistoryComplete && !reachesRetainedHistoryStart(targetChannel, oldest);
+      if (oldest?.history_page_error_code === 'FEDERATED_DM_HISTORY_UNAVAILABLE')
+        error = $t('ui_older_messages_are_temporarily_unavailable_fr_1936e561');
+      hasLater = Boolean(reference && history.length);
+      setMessages(history.sort(compareMessages));
+      historyRevision += 1;
+    } catch (caught) {
+      if (generation === loadGeneration)
+        error = userErrorMessage(caught, 'Could not load message history. Try again.');
+    } finally {
+      if (generation === loadGeneration) jumpingHistory = false;
+    }
+  }
+
+  function acknowledgeVisible(key: string) {
+    if (document.querySelector('dialog[open]')) return;
+    if (manualUnreadPaused) return;
+    if (
+      !channelReady ||
+      jumpingHistory ||
+      document.visibilityState !== 'visible' ||
+      !document.hasFocus()
+    )
+      return;
+    const message = messages.find((item) => `message:${entityKey(item)}` === key);
+    if (!message || message.id.startsWith('pending-')) return;
+    const state = currentReadState;
+    if (
+      state?.read_message_id &&
+      state.read_message_domain &&
+      compareEntityRefs(message, {
+        id: state.read_message_id,
+        origin_domain: state.read_message_domain
+      }) <= 0
+    )
+      return;
+    void acknowledge(message);
+  }
+
   function timelineBottomChanged(value: boolean) {
     timelineAtBottom = value;
     if (value) acknowledgeLatestIfVisible();
@@ -2632,6 +2850,23 @@
         </div>
       </div>
       <div class="channel-header-actions">
+        <button
+          class="icon-button"
+          title={$t('chat_mark_read')}
+          aria-label={$t('chat_mark_read')}
+          onclick={async () => {
+            if (!channel) return;
+            try {
+              await markConversationsRead({ channel: entityRef(channel) });
+              manualUnreadPaused = false;
+            } catch (caught) {
+              readStateWarning = userErrorMessage(
+                caught,
+                'Could not mark conversation read. Try again.'
+              );
+            }
+          }}>✓</button
+        >
         {#if channel && (channel.encryption_mode === 'e2ee' || (!groupConversation && e2eeActivationEnabled))}
           <button
             class:active={channel.encryption_mode === 'e2ee'}
@@ -2773,7 +3008,7 @@
             {/if}
           {/if}
         {/snippet}
-        {#key dmId}
+        {#key `${dmId}:${historyRevision}`}
           <VirtualMessageList
             items={timeline}
             empty={emptyTimeline}
@@ -2784,6 +3019,12 @@
             onLoadEarlier={loadEarlier}
             onLoadLater={loadLater}
             targetKey={targetTimelineKey}
+            onRead={acknowledgeVisible}
+            canJumpToRead={Boolean(visitReadRef)}
+            forceJumpToLatest={manualUnreadPaused}
+            onJumpToRead={() => visitReadRef && jumpHistory(entityRef(visitReadRef))}
+            onJumpToLatest={() => jumpHistory(null)}
+            {jumpingHistory}
             onBottomChange={timelineBottomChanged}
             label={$t('ui_direct_messages_95e66705')}
           >
@@ -2811,6 +3052,7 @@
                 <div class="timeline-divider new" role="separator"><span>{item.label}</span></div>
               {:else}
                 <MessageRow
+                  onMarkUnread={markMessageUnread}
                   message={item.message}
                   compact={item.compact}
                   mentionUsers={entities.users.values}

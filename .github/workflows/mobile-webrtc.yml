@@ -2,25 +2,34 @@ name: Mobile WebRTC
 
 on:
   workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      platform:
+        required: true
+        type: choice
+        options: [android, ios]
+        default: android
 
 permissions:
   contents: read
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: android
-            runner: ubuntu-24.04
-          - platform: ios
-            runner: macos-15
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ inputs.platform == 'ios' && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate platform
+        shell: bash
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: '[[ "$PLATFORM" == android || "$PLATFORM" == ios ]]'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: "3.13.15" }
       - name: Restore patched native binaries
         id: native
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -29,7 +38,8 @@ jobs:
             mobile/native/webrtc/android
             mobile/native/webrtc/WebRTC.xcframework
             mobile/native/webrtc/*-build.json
-          key: kaede-av1-${{ matrix.platform }}-${{ hashFiles('mobile/tool/build_webrtc.py', 'docs/av1-e2ee/webrtc-build.patch', '.github/workflows/mobile-webrtc.yml') }}
+          # Bump v2 when build tooling changes; unrelated workflow edits should not rebuild WebRTC.
+          key: kaede-av1-v2-${{ inputs.platform }}-${{ runner.arch }}-${{ hashFiles('mobile/tool/build_webrtc.py', 'docs/av1-e2ee/webrtc-build.patch') }}
       - name: Linux build dependencies
         if: steps.native.outputs.cache-hit != 'true' && runner.os == 'Linux'
         run: |
@@ -42,11 +52,11 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
       - name: Build encrypted AV1 WebRTC
         if: steps.native.outputs.cache-hit != 'true'
-        run: python3 mobile/tool/build_webrtc.py "${{ matrix.platform }}" --work-dir "$RUNNER_TEMP/kaede-webrtc"
+        run: python3 mobile/tool/build_webrtc.py "${{ inputs.platform }}" --work-dir "$RUNNER_TEMP/kaede-webrtc"
       - name: Preserve framework symlinks
-        run: tar -cf "$RUNNER_TEMP/webrtc-${{ matrix.platform }}.tar" -C mobile/native/webrtc .
+        run: tar -cf "$RUNNER_TEMP/webrtc-${{ inputs.platform }}.tar" -C mobile/native/webrtc .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: kaede-webrtc-${{ matrix.platform }}
-          path: ${{ runner.temp }}/webrtc-${{ matrix.platform }}.tar
+          name: kaede-webrtc-${{ inputs.platform }}
+          path: ${{ runner.temp }}/webrtc-${{ inputs.platform }}.tar
           if-no-files-found: error

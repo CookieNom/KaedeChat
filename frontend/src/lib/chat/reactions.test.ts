@@ -98,6 +98,20 @@ describe('reaction toggle state', () => {
   });
 });
 
+describe('reaction shortcut ranking', () => {
+  it('shows each user’s four most-used emoji, breaking ties by latest use', () => {
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => ++now);
+    for (const emoji of ['🎉', '🎉', '🎉', '😎', '😎', '🚀', '👀', '💯']) {
+      rememberReaction('7@chat.example', emoji);
+    }
+    rememberReaction('8@chat.example', '😂');
+
+    expect(recentReactions('7@chat.example')).toEqual(['🎉', '😎', '💯', '👀']);
+    expect(recentReactions('8@chat.example')).toEqual(['😂', '❤', '👍', '🔥']);
+  });
+});
+
 describe('reaction recents migration', () => {
   it('canonicalizes and deduplicates legacy values while preserving usage rank', () => {
     storage.setItem(

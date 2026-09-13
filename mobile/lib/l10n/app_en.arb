@@ -1,4 +1,7 @@
 {
+  "chat_jump_to_read": "Jump to where you left off",
+  "chat_load_newer": "Load newer messages",
+  "chat_new_messages": "New messages",
   "@@locale": "en",
   "language_name": "English",
   "@language_name": {
@@ -9071,5 +9074,23 @@
         "type": "String"
       }
     }
-  }
+  },
+  "chat_mark_unread": "Mark unread",
+  "chat_inbox": "Inbox",
+  "chat_close": "Close",
+  "chat_unreads": "Unreads",
+  "chat_mentions": "Mentions",
+  "chat_inbox_filter": "Filter conversations",
+  "chat_all_conversations": "All conversations",
+  "chat_mark_all_read": "Mark all as read",
+  "chat_refresh": "Refresh",
+  "chat_direct_message": "Direct message",
+  "chat_jump_to_mention": "Jump to mention",
+  "chat_dismiss": "Dismiss",
+  "chat_mark_read": "Mark as read",
+  "chat_loading": "Loading…",
+  "chat_caught_up": "You’re all caught up",
+  "chat_load_more": "Load more",
+  "chat_mark_server_read": "Mark server as read",
+  "chat_show_muted": "Show muted servers"
 }
