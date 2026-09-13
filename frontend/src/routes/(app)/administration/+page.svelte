@@ -4,6 +4,7 @@
   import { resolve } from '$app/paths';
   import { hasAdminCapability } from '$lib/admin/capabilities';
   import { api, userErrorMessage } from '$lib/api/client';
+  import ReportExternal from '$lib/components/ReportExternal.svelte';
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
   import { authenticatedMedia, downloadAuthenticatedMedia } from '$lib/media/authenticated';
   import { onMount } from 'svelte';
@@ -1720,6 +1721,9 @@
                       </span>
                     </div>
                   {/if}
+                {/if}
+                {#if report.source === 'photodna' || typeof report.evidence.photodna === 'object'}
+                  <ReportExternal {report} canManage={can('reports.manage')} />
                 {/if}
                 <footer class="case-actions">
                   {#if can('reports.manage')}

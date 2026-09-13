@@ -450,6 +450,11 @@ async def test_remote_photodna_match_is_reported_and_never_cached(
     assert "ON CONFLICT" in str(statement)
     assert statement.compile().params["source"] == "photodna"  # type: ignore[attr-defined]
     assert statement.compile().params["target_ref"] == "7@beta.localhost"  # type: ignore[attr-defined]
+    evidence = statement.compile().params["evidence"]
+    assert evidence["origin_domain"] == "beta.localhost"
+    assert evidence["source_url"] == "https://beta.localhost/_kaede/v1/media/7/original"
+    assert evidence["size_bytes"] == len(body)
+    assert evidence["bytes_retained"] is False
     increment.assert_awaited_once_with(redis, "media_photodna_matches")
 
 

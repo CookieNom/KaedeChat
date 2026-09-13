@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import tempfile
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path as FilePath
@@ -2322,6 +2322,22 @@ async def cache_remote_media(
                         content_sha256=digest_builder.hexdigest(),
                         remote_variant=variant,
                     )
+                    report_values["evidence"].update(
+                        {
+                            "origin_domain": origin_domain,
+                            "source_url": (
+                                f"https://{origin_domain}/_kaede/v1/media/{attachment_id}/{variant}"
+                            ),
+                            "observed_at": datetime.now(UTC).isoformat(),
+                            "size_bytes": received,
+                            "identity_source": "federated_origin_assertion",
+                            "conversation_ref": (
+                                f"{dm_history_scope[0][0]}@{dm_history_scope[0][1]}"
+                                if dm_history_scope
+                                else None
+                            ),
+                        }
+                    )
                     # A clean representation may be finishing in another API
                     # worker. Sharing this transaction lock with final cache
                     # admission ensures it either lands before this report and
@@ -2839,6 +2855,25 @@ async def authorized_attachment(
     return response
 
 
+def remote_history_uploader(
+    headers: Mapping[str, str], origin_domain: str
+) -> tuple[int, str] | None:
+    """Read an optional, origin-asserted identity from history authorization."""
+    # Older peers may omit identity. Never invent an uploader from the media origin.
+    history_uploader = None
+    if raw_uploader := headers.get("X-Kaede-Media-Uploader"):
+        try:
+            identity = EntityRef(raw_uploader)
+            if identity.domain is None:
+                raise ValueError("uploader must include its home domain")
+            history_uploader = identity.resolve(origin_domain)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503, detail={"code": "REMOTE_MEDIA_UNAVAILABLE"}
+            ) from exc
+    return history_uploader
+
+
 @router.get("/api/v1/dms/{conversation_ref}/history-media/{message_ref}/{attachment_ref}/{variant}")
 async def authorized_dm_history_media(
     conversation_ref: EntityRef,
@@ -2925,6 +2960,7 @@ async def authorized_dm_history_media(
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     if authorization.status_code != 204:
         raise HTTPException(status_code=503, detail={"code": "REMOTE_MEDIA_UNAVAILABLE"})
+    history_uploader = remote_history_uploader(authorization.headers, origin_domain)
     if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     cached = await session.get(RemoteMediaCache, (origin_domain, attachment_id, variant))
@@ -2966,6 +3002,7 @@ async def authorized_dm_history_media(
                         ),
                         snowflake=snowflake,
                         message_ref=message_key,
+                        uploader_ref=history_uploader,
                     )
     if cached is None:
         raise RuntimeError("remote history media cache write did not converge")
