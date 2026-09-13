@@ -1817,7 +1817,7 @@ async def export_report(
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
     users = await report_identity_lookup(session, [report], settings.domain)
-    package = {
+    package: dict[str, object] = {
         "schema": "kaede.safety-report.v1",
         "exported_at": datetime.now(UTC).isoformat(),
         "reporting_instance": settings.domain,
