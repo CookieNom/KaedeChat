@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { preparePrivateLinks } from '$lib/chat/link-privacy';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -1568,7 +1569,7 @@
         return;
       }
     }
-    const outgoingText = tts ? (retry?.content ?? ttsInvocation.content) : text;
+    let outgoingText = tts ? (retry?.content ?? ttsInvocation.content) : text;
     const commandResolution =
       !retry && !tts
         ? resolveCommandInvocation(text, applicationCommands)
@@ -1615,6 +1616,17 @@
       }
       return;
     }
+    const privacyGeneration = loadGeneration;
+    busy = true;
+    try {
+      outgoingText = await preparePrivateLinks(
+        retry ? (retry.content ?? '') : outgoingText,
+        currentUser ? entityRef(currentUser) : 'anonymous'
+      );
+    } finally {
+      if (privacyGeneration === loadGeneration) busy = false;
+    }
+    if (privacyGeneration !== loadGeneration) return;
     const attachmentIds = retry
       ? retry.attachmentIds
       : uploads
@@ -1679,7 +1691,7 @@
     }
     if (!retry && !outgoingText && !attachmentIds.length) return;
     const draft = retry
-      ? { ...retry, encryptedAllowedMentions, repliedUserRef }
+      ? { ...retry, content: outgoingText || null, encryptedAllowedMentions, repliedUserRef }
       : pendingMessageSend(
           outgoingText || null,
           attachmentIds,

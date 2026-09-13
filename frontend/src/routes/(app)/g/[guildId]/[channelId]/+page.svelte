@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { preparePrivateLinks } from '$lib/chat/link-privacy';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -4288,6 +4289,14 @@
     }
     forumPostBusy = true;
     try {
+      draft = {
+        ...draft,
+        content: await preparePrivateLinks(
+          draft.content,
+          currentUser ? entityRef(currentUser) : 'anonymous'
+        )
+      };
+      if (generation !== loadGeneration) return;
       if (encryptedStarter) {
         const forumKey = entityKey(forum);
         const draftKey = JSON.stringify({
@@ -4702,6 +4711,14 @@
     threadDirectoryBusy = true;
     error = '';
     try {
+      draft = {
+        ...draft,
+        message: await preparePrivateLinks(
+          draft.message,
+          currentUser ? entityRef(currentUser) : 'anonymous'
+        )
+      };
+      if (generation !== loadGeneration) return;
       const created = await createThread(parent, {
         name: draft.name,
         content: parent.encryption_mode === 'e2ee' ? undefined : draft.message || undefined,
@@ -4746,6 +4763,11 @@
     busy = true;
     error = '';
     try {
+      message = await preparePrivateLinks(
+        message,
+        currentUser ? entityRef(currentUser) : 'anonymous'
+      );
+      if (generation !== loadGeneration) return;
       const created = await createThread(channel, {
         name,
         content: encryptedParent ? undefined : message,
@@ -5168,7 +5190,7 @@
         return;
       }
     }
-    const outgoingText = tts ? (retry?.content ?? ttsInvocation.content) : text;
+    let outgoingText = tts ? (retry?.content ?? ttsInvocation.content) : text;
     const commandResolution =
       !retry && !tts
         ? resolveCommandInvocation(text, usableApplicationCommands)
@@ -5236,6 +5258,17 @@
     }
     if (!editingMessage && slowmodeRemaining > 0) return;
     if (busy || !channelReady || !channel) return;
+    const privacyGeneration = loadGeneration;
+    busy = true;
+    try {
+      outgoingText = await preparePrivateLinks(
+        retry ? (retry.content ?? '') : outgoingText,
+        currentUser ? entityRef(currentUser) : 'anonymous'
+      );
+    } finally {
+      if (privacyGeneration === loadGeneration) busy = false;
+    }
+    if (privacyGeneration !== loadGeneration) return;
     const attachmentIds = retry
       ? retry.attachmentIds
       : uploads
@@ -5305,7 +5338,7 @@
     }
     if (!retry && !outgoingText && !attachmentIds.length) return;
     const draft = retry
-      ? { ...retry, encryptedAllowedMentions, repliedUserRef }
+      ? { ...retry, content: outgoingText || null, encryptedAllowedMentions, repliedUserRef }
       : pendingMessageSend(
           outgoingText || null,
           attachmentIds,

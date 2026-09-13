@@ -35,6 +35,7 @@ import 'package:kaede_mobile/src/features/chat/application_launcher.dart';
 import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/invite_card.dart';
+import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/chat/voice_message_recorder.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
@@ -3077,13 +3078,26 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     if (channel == null || _composerChannel != channel.ref) return;
     if (_slowModeRemaining(channel) > Duration.zero) return;
     unawaited(HapticFeedback.lightImpact());
-    final content = _composer.text;
+    var content = _composer.text;
     final reply = _reply;
     final notifyReply = _notifyReply;
     final pendingUploads = List<_PendingUpload>.of(_uploads);
     setState(() => _sending = true);
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
+      final privacyAccount = controller.api.tokens!.accountKey;
+      final privateContent = await preparePrivateLinks(
+        context,
+        content,
+        privacyAccount,
+      );
+      if (privateContent == null ||
+          !mounted ||
+          _composerChannel != channel.ref ||
+          controller.api.tokens?.accountKey != privacyAccount) {
+        return;
+      }
+      content = privateContent;
       final ttsCommand = parseTtsCommand(content);
       final tts = ttsCommand.matched;
       if (tts) {

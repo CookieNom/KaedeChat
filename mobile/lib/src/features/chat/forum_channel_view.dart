@@ -15,6 +15,7 @@ import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -835,7 +836,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       return;
     }
     final title = _title.text.trim();
-    final message = _message.text.trim();
+    var message = _message.text.trim();
     if (!canSubmitForumPost(
       title: title,
       content: message,
@@ -878,6 +879,14 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
       _error = null;
     });
     try {
+      final privateContent = await preparePrivateLinks(
+        context,
+        message,
+        ref.read(mobileControllerProvider.notifier).api.tokens!.accountKey,
+      );
+      if (privateContent == null || !mounted || !_authorized) return;
+      message = privateContent;
+
       final controller = ref.read(mobileControllerProvider.notifier);
       if (!_authorized) return;
       if (encryptedStarter) {
