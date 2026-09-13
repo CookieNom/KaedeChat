@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
 
   import { resolve } from '$app/paths';
@@ -734,21 +735,7 @@
       {/each}
     </nav>
     <div class="sidebar-user-dock">
-      <span class="avatar avatar-small">
-        {#if currentUser?.avatar_hash}
-          <img src={assetUrl(currentUser.avatar_hash, 'thumbnail_128', currentUser)} alt="" />
-        {:else}
-          {currentUser?.username.slice(0, 1).toUpperCase() ?? 'K'}
-        {/if}
-      </span>
-      <span>
-        <strong
-          >{currentUser?.display_name ??
-            currentUser?.username ??
-            $t('ui_your_account_dbb5f637')}</strong
-        >
-        <small>{currentUser?.handle ?? $t('ui_loading_ba3bbbe1')}</small>
-      </span>
+      <AccountPanel user={currentUser} />
       <a
         class="icon-button"
         href={resolve('/settings')}

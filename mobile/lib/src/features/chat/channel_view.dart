@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
@@ -4931,6 +4932,56 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     Map<String, Object?>? attachmentManifest,
     File? decryptedAttachment,
   }) async {
+    final cached = ref.read(mobileControllerProvider).messages;
+    var surrounding = <KaedeMessage>[];
+    var contextError = '';
+    try {
+      final rows = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .messages(message.channelRef, around: message.ref, limit: 21);
+      surrounding = rows.where((item) => item.deletedAt == null).map((item) {
+        final local = cached
+            .where((entry) =>
+                entry.ref == item.ref &&
+                jsonEncode(entry.e2ee) == jsonEncode(item.e2ee))
+            .firstOrNull;
+        return item.e2ee != null && local != null ? local : item;
+      }).toList()
+        ..sort((a, b) {
+          final id = BigInt.parse(a.ref.id.value)
+              .compareTo(BigInt.parse(b.ref.id.value));
+          return id != 0
+              ? id
+              : a.ref.domain.value.compareTo(b.ref.domain.value);
+        });
+    } catch (_) {
+      contextError =
+          'Could not load surrounding messages. You can still report this message without context.';
+    }
+    if (!mounted) return;
+    final anchor = surrounding.indexWhere((item) => item.ref == message.ref);
+    if (anchor < 0 && contextError.isEmpty) {
+      contextError = "Surrounding messages are no longer available.";
+    }
+    final candidates = anchor < 0
+        ? [message]
+        : surrounding.sublist((anchor - 10).clamp(0, surrounding.length),
+            (anchor + 11).clamp(0, surrounding.length));
+    final center = candidates.indexWhere((item) => item.ref == message.ref);
+    var includeContext = false;
+    var contextConsent = false;
+    var before = 0;
+    var after = 0;
+    List<KaedeMessage> selectedContext() => includeContext
+        ? candidates
+            .sublist(center - before, center + after + 1)
+            .where((item) => item.ref != message.ref)
+            .toList()
+        : [];
+    bool contextBlocked() => selectedContext().any((item) =>
+        item.e2ee != null &&
+        (!encryptedReportEvidenceAvailable(item) || !contextConsent));
     const categories = <String, String>{
       'spam': 'Spam',
       'harassment': 'Harassment',
@@ -4979,6 +5030,85 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Include surrounding messages'),
+                    subtitle: const Text(
+                        'Optional · up to 10 available messages on each side'),
+                    value: includeContext,
+                    onChanged: submitting ||
+                            createdReportId != null ||
+                            contextError.isNotEmpty
+                        ? null
+                        : (value) =>
+                            setDialogState(() => includeContext = value),
+                  ),
+                  if (contextError.isNotEmpty) Text(contextError),
+                  if (includeContext) ...[
+                    const Text(
+                        'Select a boundary before or after the reported message. Every message in between is included.'),
+                    TextButton(
+                        onPressed: submitting || createdReportId != null
+                            ? null
+                            : () => setDialogState(() {
+                                  before = 0;
+                                  after = 0;
+                                }),
+                        child: const Text('Clear context')),
+                    for (var index = 0; index < candidates.length; index++)
+                      Card(
+                        shape: index == center
+                            ? RoundedRectangleBorder(
+                                side: BorderSide(
+                                    color: Theme.of(context).colorScheme.error,
+                                    width: 2),
+                                borderRadius: BorderRadius.circular(12))
+                            : null,
+                        child: CheckboxListTile(
+                          value: index >= center - before &&
+                              index <= center + after,
+                          onChanged: submitting ||
+                                  createdReportId != null ||
+                                  index == center
+                              ? null
+                              : (_) => setDialogState(() {
+                                    if (index < center) {
+                                      before = before == center - index
+                                          ? before - 1
+                                          : center - index;
+                                    }
+                                    if (index > center) {
+                                      after = after == index - center
+                                          ? after - 1
+                                          : index - center;
+                                    }
+                                  }),
+                          title: Text(
+                              index == center ? 'Reported message' : 'Context'),
+                          subtitle: Text(
+                              '${candidates[index].authorRef.wire} · ${candidates[index].createdAt.toLocal()}\n${candidates[index].content ?? "No text / unavailable message"}'),
+                          isThreeLine: false,
+                        ),
+                      ),
+                    Text(
+                        '${selectedContext().length} context messages selected'),
+                    if (selectedContext().any((item) => item.e2ee != null))
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                            'I agree to share the selected decrypted context with moderators.'),
+                        value: contextConsent,
+                        onChanged: submitting || createdReportId != null
+                            ? null
+                            : (value) => setDialogState(
+                                () => contextConsent = value == true),
+                      ),
+                    if (selectedContext().any((item) =>
+                        item.e2ee != null &&
+                        !encryptedReportEvidenceAvailable(item)))
+                      const Text(
+                          'Some selected messages cannot be decrypted. Reduce the range to submit.'),
+                  ],
                   if (focusedAttachment) ...[
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -5111,6 +5241,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
               ),
               FilledButton(
                 onPressed: submitting ||
+                        contextBlocked() ||
                         !canSubmitMessageReport(
                           message,
                           disclosureAcknowledged: disclose,
@@ -5147,6 +5278,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                             final created = await repository.reportMessage(
                               message.ref,
                               category: category,
+                              contextMessages: [
+                                for (final item in selectedContext())
+                                  {
+                                    'message_ref': item.ref.wire,
+                                    if (item.e2ee != null)
+                                      'disclosed_content': item.content,
+                                    if (item.e2ee != null)
+                                      'disclosure_acknowledged': contextConsent,
+                                  }
+                              ],
                               focusedAttachment: attachment?.ref,
                               description: description.text,
                               disclosedContent:

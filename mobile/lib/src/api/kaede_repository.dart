@@ -167,6 +167,7 @@ Map<String, Object?> messageReportRequestData(
   String? description,
   String? disclosedContent,
   bool disclosureAcknowledged = false,
+  List<Map<String, Object?>> contextMessages = const [],
 }) =>
     <String, Object?>{
       'target_type': 'message',
@@ -175,6 +176,7 @@ Map<String, Object?> messageReportRequestData(
       if (focusedAttachment != null)
         'focused_attachment_ref': focusedAttachment.wire,
       'category': category,
+      if (contextMessages.isNotEmpty) 'context_messages': contextMessages,
       if (description?.trim().isNotEmpty == true)
         'description': description!.trim(),
       // Preserve exact empty text: it represents successful decryption of an
@@ -1310,6 +1312,7 @@ final class KaedeRepository {
     String? description,
     String? disclosedContent,
     bool disclosureAcknowledged = false,
+    List<Map<String, Object?>> contextMessages = const [],
   }) =>
       api.sendJson(
         'POST',
@@ -1317,6 +1320,7 @@ final class KaedeRepository {
         data: messageReportRequestData(
           message,
           category: category,
+          contextMessages: contextMessages,
           focusedAttachment: focusedAttachment,
           description: description,
           disclosedContent: disclosedContent,

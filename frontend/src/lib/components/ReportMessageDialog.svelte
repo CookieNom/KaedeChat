@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
@@ -67,9 +69,71 @@
   );
   const disclosure = $derived(encryptedReportDisclosure(message));
 
+  let candidates = $state<Message[]>([]);
+  let contextLoading = $state(true);
+  let contextError = $state('');
+  const center = $derived(candidates.findIndex((item) => entityRef(item) === entityRef(message)));
+  onMount(() => {
+    candidates = [message];
+    let cancelled = false;
+    void api<Message[]>(
+      `/channels/${encodeURIComponent(`${message.channel_id}@${message.channel_domain}`)}/messages?around=${encodeURIComponent(entityRef(message))}&limit=21`
+    )
+      .then((rows) => {
+        if (cancelled) return;
+        const cached = chatEntities.messagesFor(message.channel_id, message.channel_domain);
+        candidates = rows
+          .filter((item) => !item.deleted_at)
+          .map((item) => {
+            const local = cached.find((entry) => entityRef(entry) === entityRef(item));
+            return local && item.e2ee && JSON.stringify(local.e2ee) === JSON.stringify(item.e2ee)
+              ? local
+              : item;
+          })
+          .sort((a, b) =>
+            BigInt(a.id) === BigInt(b.id)
+              ? a.origin_domain.localeCompare(b.origin_domain)
+              : BigInt(a.id) < BigInt(b.id)
+                ? -1
+                : 1
+          );
+        if (!candidates.some((item) => entityRef(item) === entityRef(message))) {
+          candidates = [message];
+          contextError = 'Surrounding messages are no longer available.';
+        }
+      })
+      .catch(() => {
+        if (!cancelled)
+          contextError =
+            'Could not load surrounding messages. You can still report this message without context.';
+      })
+      .finally(() => {
+        if (!cancelled) contextLoading = false;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+  let before = $state(0);
+  let after = $state(0);
+  let includeContext = $state(false);
+  let contextConsent = $state(false);
+  const selectedContext = $derived(
+    includeContext
+      ? candidates
+          .slice(center - before, center + after + 1)
+          .filter((item) => entityRef(item) !== entityRef(message))
+      : []
+  );
+  const contextBlocked = $derived(
+    selectedContext.some(
+      (item) => item.e2ee && (!encryptedReportDisclosure(item).available || !contextConsent)
+    )
+  );
+
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || contextBlocked) return;
     if (
       (requiresMessageDisclosure && (!disclosure.available || !disclosureAcknowledged)) ||
       (requiresAttachmentDisclosure && (!attachmentDisclosureAvailable || !disclosureAcknowledged))
@@ -95,6 +159,15 @@
             target_ref: ref,
             message_ref: ref,
             ...(focusedAttachment ? { focused_attachment_ref: entityRef(attachment!) } : {}),
+            context_messages: selectedContext.map((item) => ({
+              message_ref: entityRef(item),
+              ...(item.e2ee
+                ? {
+                    disclosed_content: encryptedReportDisclosure(item).content,
+                    disclosure_acknowledged: contextConsent
+                  }
+                : {})
+            })),
             category,
             description: description.trim() || null,
             ...(encrypted
@@ -207,6 +280,71 @@
       <p>{$t('ui_the_message_text_basic_context_and_metadata_f_7c11101a')}</p>
     {/if}
     <form onsubmit={submit}>
+      <fieldset disabled={busy || Boolean(createdReportId)} class="context-picker">
+        <label class="disclosure-consent"
+          ><input
+            type="checkbox"
+            bind:checked={includeContext}
+            disabled={contextLoading || Boolean(contextError)}
+          /> Include surrounding messages (optional)</label
+        >
+        {#if contextLoading}<small>Loading surrounding messages…</small>{/if}
+        {#if contextError}<p role="status">{contextError}</p>{/if}
+        {#if includeContext}
+          <p>
+            Select a boundary before or after the reported message. All messages in between are
+            included. Up to 10 available messages on each side are shown.
+          </p>
+          <button
+            type="button"
+            onclick={() => {
+              before = 0;
+              after = 0;
+            }}>Clear context</button
+          >
+          <div class="context-list">
+            {#each candidates as item, index (entityRef(item))}
+              <button
+                type="button"
+                class:target={index === center}
+                class:selected={index >= center - before && index <= center + after}
+                aria-pressed={index >= center - before && index <= center + after}
+                onclick={() => {
+                  if (index < center)
+                    before = before === center - index ? before - 1 : center - index;
+                  if (index > center) after = after === index - center ? after - 1 : index - center;
+                }}
+              >
+                <strong
+                  >{index === center ? 'Reported message' : 'Context'} · {item.author
+                    ?.display_name ??
+                    item.author?.username ??
+                    item.author_id}</strong
+                >
+                <small>{new Date(item.created_at).toLocaleString()}</small>
+                <span
+                  >{item.e2ee
+                    ? (encryptedReportDisclosure(item).content ??
+                      'Message unavailable on this device')
+                    : item.content || 'No text / attachment message'}</span
+                >
+              </button>
+            {/each}
+          </div>
+          <small>{selectedContext.length} context messages selected</small>
+          {#if selectedContext.some((item) => item.e2ee)}
+            <label class="disclosure-consent"
+              ><input type="checkbox" bind:checked={contextConsent} /> I agree to share the selected decrypted
+              context with moderators.</label
+            >
+          {/if}
+          {#if selectedContext.some((item) => item.e2ee && !encryptedReportDisclosure(item).available)}<p
+              role="alert"
+            >
+              Some selected messages cannot be decrypted. Reduce the range to submit.
+            </p>{/if}
+        {/if}
+      </fieldset>
       <label>
         {$t('ui_reason_f81ab834')}
         <select bind:value={category} disabled={busy || Boolean(createdReportId)}>
@@ -256,6 +394,7 @@
           type="submit"
           class="danger"
           disabled={busy ||
+            contextBlocked ||
             (requiresMessageDisclosure && (!disclosure.available || !disclosureAcknowledged)) ||
             (requiresAttachmentDisclosure &&
               (!attachmentDisclosureAvailable || !disclosureAcknowledged))}
@@ -267,6 +406,42 @@
 </div>
 
 <style>
+  .context-picker {
+    min-width: 0;
+    margin: 0;
+    padding: 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .context-list {
+    display: grid;
+    gap: 0.4rem;
+    max-height: 320px;
+    overflow-y: auto;
+    margin: 0.7rem 0;
+  }
+  .context-list button {
+    display: grid;
+    gap: 0.3rem;
+    padding: 0.75rem;
+    text-align: left;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .context-list button.selected {
+    background: var(--surface-hover);
+    border-color: var(--text-muted);
+  }
+  .context-list button.target {
+    border: 2px solid var(--danger, #d84a4a);
+  }
+  .context-list span {
+    white-space: pre-wrap;
+  }
+
   .report-backdrop {
     position: fixed;
     inset: 0;
@@ -278,7 +453,9 @@
   }
   .report-dialog {
     box-sizing: border-box;
-    width: min(480px, 100%);
+    width: min(600px, 100%);
+    max-height: 90dvh;
+    overflow-y: auto;
     border: 1px solid var(--line);
     border-radius: 14px;
     padding: 1.2rem;

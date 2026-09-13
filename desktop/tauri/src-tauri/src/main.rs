@@ -22,7 +22,7 @@ use kaede_audio::{
 use kaede_auth::{AuthError, LoginOutcome, SessionManager};
 use kaede_gateway::{GatewayCommand, GatewayHandle};
 use kaede_platform::{
-    AccountRegistry, AudioQualityPreference, DesktopPreferences, DevicePreference,
+    AccountRegistry, AudioQualityPreference, CredentialVault, DesktopPreferences, DevicePreference,
     InputModePreference, KnownAccount, PlatformError, PlatformPaths, ScreenShareProfilePreference,
     SystemCredentialVault,
 };
@@ -52,7 +52,7 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "windows")]
 use tokio::sync::oneshot;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 
 type NativeSession = SessionManager<SystemCredentialVault, EmbeddedTurnstile>;
 
@@ -83,8 +83,10 @@ struct NativeState {
     restore_lock: Mutex<()>,
     pending_mfa: Mutex<Option<PendingMfa>>,
     gateway_commands: RwLock<Option<mpsc::Sender<GatewayCommand>>>,
-    gateway_events_tx: mpsc::UnboundedSender<Value>,
-    gateway_events_rx: Mutex<mpsc::UnboundedReceiver<Value>>,
+    gateway_generation: AtomicU64,
+    gateway_changed: Notify,
+    gateway_events_tx: mpsc::UnboundedSender<(u64, Value)>,
+    gateway_events_rx: Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     voice: Mutex<Option<VoiceHandle>>,
     voice_target: RwLock<Option<InstalledVoiceTarget>>,
     voice_video: Mutex<Option<mpsc::Receiver<kaede_voice::RemoteVideoFrame>>>,
@@ -828,6 +830,140 @@ async fn native_restore_session(
     })
 }
 
+/// Only non-secret account metadata crosses the WebView boundary.
+#[tauri::command]
+async fn native_saved_accounts(state: State<'_, NativeState>) -> Result<Value, NativeError> {
+    let registry = AccountRegistry::load(&state.paths).await.map_err(|error| {
+        NativeError::operation(
+            "ACCOUNT_REGISTRY_FAILED",
+            "Could not read saved accounts.",
+            error,
+        )
+    })?;
+    let active = state
+        .account
+        .read()
+        .await
+        .as_ref()
+        .map(|account| account.account_key.clone());
+    Ok(json!({ "accounts": registry.accounts, "active": active }))
+}
+
+#[tauri::command]
+async fn native_switch_account(
+    state: State<'_, NativeState>,
+    account_key: String,
+) -> Result<String, NativeError> {
+    let _restore = state.restore_lock.lock().await;
+    let registry = AccountRegistry::load(&state.paths).await.map_err(|error| {
+        NativeError::operation(
+            "ACCOUNT_REGISTRY_FAILED",
+            "Could not read saved accounts.",
+            error,
+        )
+    })?;
+    let known = registry
+        .accounts
+        .iter()
+        .find(|account| account.account_key == account_key)
+        .ok_or_else(|| {
+            NativeError::local(
+                "ACCOUNT_NOT_FOUND",
+                "This saved account is no longer available. Sign in again.",
+            )
+        })?;
+    let domain = Domain::parse(known.instance.clone()).map_err(|error| {
+        NativeError::operation(
+            "INVALID_STORED_INSTANCE",
+            "This saved account has an invalid instance address.",
+            error,
+        )
+    })?;
+    let active = state.account.read().await.clone();
+    let (api, session) =
+        if let Some(active) = active.filter(|account| account.account_key == account_key) {
+            // Reuse the active rotation lock; a second manager could reuse its token.
+            (active.api.clone(), active.session.clone())
+        } else {
+            let api = ApiClient::new(
+                InstanceEndpoint::production(domain.clone()).map_err(NativeError::from)?,
+            )
+            .map_err(NativeError::from)?;
+            let session = new_session(api.clone(), known.account_key.clone());
+            if !session.restore().await.map_err(NativeError::from)? {
+                return Err(NativeError::local(
+                    "ACCOUNT_SESSION_EXPIRED",
+                    "This account needs to sign in again.",
+                ));
+            }
+            (api, session)
+        };
+    // Validate and rotate before replacing the working account. Network failures
+    // leave the current account and the saved credential available for retry.
+    session.refresh().await.map_err(NativeError::from)?;
+    remember_account(&state, &domain, &known.account_key, &known.label).await?;
+    *state.pending_mfa.lock().await = None;
+    activate_account(
+        NativeAccount {
+            api,
+            session,
+            account_key,
+        },
+        &state,
+    )
+    .await?;
+    *state.instance.write().await = Some(domain.clone());
+    Ok(domain.to_string())
+}
+
+#[tauri::command]
+async fn native_forget_account(
+    state: State<'_, NativeState>,
+    account_key: String,
+) -> Result<(), NativeError> {
+    let _restore = state.restore_lock.lock().await;
+    if state
+        .account
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|account| account.account_key == account_key)
+    {
+        return Err(NativeError::local(
+            "ACCOUNT_ACTIVE",
+            "Sign out of the active account in Settings.",
+        ));
+    }
+    let registry = AccountRegistry::load(&state.paths).await.map_err(|error| {
+        NativeError::operation(
+            "ACCOUNT_REGISTRY_FAILED",
+            "Could not read saved accounts.",
+            error,
+        )
+    })?;
+    if !registry
+        .accounts
+        .iter()
+        .any(|account| account.account_key == account_key)
+    {
+        return Err(NativeError::local(
+            "ACCOUNT_NOT_FOUND",
+            "This saved account is no longer available.",
+        ));
+    }
+    SystemCredentialVault
+        .delete(&account_key)
+        .await
+        .map_err(|error| {
+            NativeError::operation(
+                "ACCOUNT_REMOVE_FAILED",
+                "Could not remove the saved sign-in.",
+                error,
+            )
+        })?;
+    forget_account(&state, &account_key).await
+}
+
 /// Restore a known account without relying on `WebView` storage. The account
 /// index contains no secrets; refresh credentials remain in the platform vault.
 async fn restore_known_account(
@@ -971,6 +1107,7 @@ async fn challenge_token(
 }
 
 async fn activate_account(account: NativeAccount, state: &NativeState) -> Result<(), NativeError> {
+    leave_active_voice(state).await;
     if let Some(commands) = state.gateway_commands.write().await.take() {
         let _ = commands.send(GatewayCommand::Shutdown).await;
     }
@@ -988,11 +1125,13 @@ async fn activate_account(account: NativeAccount, state: &NativeState) -> Result
 async fn start_gateway_forwarder(gateway: GatewayHandle, state: &NativeState) {
     *state.gateway_commands.write().await = Some(gateway.commands.clone());
     let mut events = gateway.events;
+    let generation = state.gateway_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    state.gateway_changed.notify_waiters();
     let sender = state.gateway_events_tx.clone();
     tokio::spawn(async move {
         while let Some(envelope) = events.recv().await {
             if let Ok(value) = serde_json::to_value(envelope) {
-                let _ = sender.send(value);
+                let _ = sender.send((generation, value));
             }
         }
     });
@@ -1789,13 +1928,40 @@ async fn native_upload_object(
 
 #[tauri::command]
 async fn native_gateway_next(state: State<'_, NativeState>) -> Result<Option<Value>, NativeError> {
-    let mut receiver = state.gateway_events_rx.lock().await;
-    Ok(
-        tokio::time::timeout(Duration::from_secs(25), receiver.recv())
-            .await
-            .ok()
-            .flatten(),
+    Ok(next_account_gateway_event(
+        &state.gateway_events_rx,
+        &state.gateway_generation,
+        &state.gateway_changed,
     )
+    .await)
+}
+
+async fn next_account_gateway_event(
+    receiver: &Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
+    current_generation: &AtomicU64,
+    account_changed: &Notify,
+) -> Option<Value> {
+    let generation = current_generation.load(Ordering::SeqCst);
+    let changed = account_changed.notified();
+    let mut receiver = receiver.lock().await;
+    if generation != current_generation.load(Ordering::SeqCst) {
+        return None;
+    }
+    // Events queued by the previous account must never enter the new UI.
+    let next = async {
+        while let Some((generation, value)) = receiver.recv().await {
+            if generation == current_generation.load(Ordering::SeqCst) {
+                return Some(value);
+            }
+        }
+        None
+    };
+    // Cancel old WebView polls before they can consume the new account's READY.
+    tokio::select! {
+        biased;
+        () = changed => None,
+        result = tokio::time::timeout(Duration::from_secs(25), next) => result.ok().flatten(),
+    }
 }
 
 #[tauri::command]
@@ -3139,6 +3305,8 @@ fn main() {
         restore_lock: Mutex::new(()),
         pending_mfa: Mutex::new(None),
         gateway_commands: RwLock::new(None),
+        gateway_generation: AtomicU64::new(0),
+        gateway_changed: Notify::new(),
         gateway_events_tx,
         gateway_events_rx: Mutex::new(gateway_events_rx),
         voice: Mutex::new(None),
@@ -3341,6 +3509,9 @@ fn main() {
             native_taskbar_pin_request,
             native_set_instance,
             native_restore_session,
+            native_saved_accounts,
+            native_switch_account,
+            native_forget_account,
             native_api_request,
             native_media_request,
             native_soundboard_media,
@@ -3490,6 +3661,33 @@ mod tests {
 
     fn derived_password() -> String {
         "A".repeat(43)
+    }
+
+    #[tokio::test]
+    async fn account_switch_cancels_old_poll_and_preserves_new_ready() {
+        use super::next_account_gateway_event;
+        use serde_json::json;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::sync::{Mutex, Notify, mpsc};
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let receiver = Mutex::new(receiver);
+        let generation = AtomicU64::new(1);
+        let changed = Notify::new();
+        let old_poll = next_account_gateway_event(&receiver, &generation, &changed);
+        let switch = async {
+            tokio::task::yield_now().await;
+            generation.store(2, Ordering::SeqCst);
+            changed.notify_waiters();
+            sender.send((1, json!({"t": "MESSAGE_CREATE"}))).unwrap();
+            sender.send((2, json!({"t": "READY"}))).unwrap();
+        };
+        let (result, ()) = tokio::join!(old_poll, switch);
+        assert_eq!(result, None);
+        assert_eq!(
+            next_account_gateway_event(&receiver, &generation, &changed).await,
+            Some(json!({"t": "READY"}))
+        );
     }
 
     #[tokio::test]

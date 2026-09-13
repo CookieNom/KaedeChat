@@ -36,6 +36,7 @@
     void initializeNativeInstance()
       .then((restored) => {
         if (!restored.authenticated || !isNativeDesktop()) return;
+        if (page.url.searchParams.has('add-account')) return;
         const current = window.location.pathname;
         if (
           current === resolve('/') ||

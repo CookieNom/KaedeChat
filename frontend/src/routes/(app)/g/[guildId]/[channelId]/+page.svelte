@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
 
   import { createUploadQueue } from '$lib/media/upload-queue';
@@ -206,7 +207,6 @@
   import MessageRow from '$lib/components/MessageRow.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
-  import PresencePicker from '$lib/components/PresencePicker.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
   import ThreadHeader from '$lib/components/ThreadHeader.svelte';
   import ThreadsPanel from '$lib/components/ThreadsPanel.svelte';
@@ -2063,27 +2063,6 @@
 
   function presenceFor(user: UserSummary) {
     return entities.presenceFor(user);
-  }
-
-  function setMyPresence(status: 'online' | 'idle' | 'dnd' | 'invisible') {
-    presencePreference = status;
-    try {
-      localStorage.setItem('kaede.presence', status);
-    } catch {
-      // Presence still applies to this connection when persistent storage is unavailable.
-    }
-    gateway?.setPresence(status);
-    void api('/users/@me/settings', {
-      method: 'PATCH',
-      body: JSON.stringify({ presence_preference: status })
-    }).catch((caught) => {
-      if (presencePreference !== status) return;
-      error = `Presence changed for this session, but it could not sync to your other devices. ${userErrorMessage(
-        caught,
-        $t('ui_the_server_could_not_save_the_presence_settin_0b553172')
-      )}`;
-    });
-    if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
   }
 
   function myPresencePreference(): 'online' | 'idle' | 'dnd' | 'invisible' {
@@ -6851,24 +6830,13 @@
       {/each}
     </nav>
     <div class="sidebar-user-dock">
-      <span class="avatar avatar-small">
-        {#if currentUser?.avatar_hash}
-          <img src={assetUrl(currentUser.avatar_hash, 'thumbnail_128', currentUser)} alt="" />
-        {:else}
-          {currentUser?.username.slice(0, 1).toUpperCase() ?? 'K'}
-        {/if}
-      </span>
-      <div class="sidebar-user-identity">
-        <strong
-          >{currentUser?.display_name ??
-            currentUser?.username ??
-            $t('ui_your_account_dbb5f637')}</strong
-        >
-        {#if currentUser?.custom_status?.trim()}
-          <small title={currentUser.custom_status}>{currentUser.custom_status}</small>
-        {/if}
-        <PresencePicker value={presencePreference} onChange={setMyPresence} />
-      </div>
+      <AccountPanel
+        user={currentUser}
+        presence={presencePreference}
+        onPresenceChange={(value) => {
+          presencePreference = value;
+        }}
+      />
       <a
         class="icon-button"
         href={resolve('/settings')}

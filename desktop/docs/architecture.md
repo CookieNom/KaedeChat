@@ -14,6 +14,16 @@ rotating session, and gateway resume state. Secrets live in the platform
 credential vault. The client never talks directly to federation peer
 endpoints. All entity keys retain both snowflake and origin domain.
 
+The bottom-left account panel opens the saved-account chooser at `/accounts`.
+Multiple sign-ins on the same instance or different instances use the existing
+account registry; only labels and account keys enter the WebView. Switching
+validates the saved session before activation, disconnects voice, and reloads
+the chat UI. Gateway events carry an account generation so old queued events
+are discarded. Adding an account preserves existing sign-ins; removing an
+inactive account deletes its local credential without revoking other devices.
+Web has the same profile panel, but saved-account switching is desktop-only:
+web sessions currently use a single pair of shared HttpOnly cookies.
+
 ## Voice and media
 
 Desktop voice has one owner. CPAL captures the chosen input into a bounded

@@ -295,11 +295,85 @@ final class _InstanceAdministrationScreenState
                         ),
                       const SizedBox(height: 10),
                     ],
-                    SelectableText(
-                      const JsonEncoder.withIndent('  ')
-                          .convert(report.evidence),
-                      style: const TextStyle(fontFamily: 'monospace'),
+                    for (final entry in <Map<String, Object?>>[
+                      if (report.evidence['content'] is String)
+                        {
+                          ...report.evidence,
+                          'reported': true,
+                          'message_ref': report.targetRef
+                        },
+                      if (report.evidence['context_messages'] is List)
+                        for (final item
+                            in report.evidence['context_messages'] as List)
+                          if (item is Map) Map<String, Object?>.from(item),
+                    ]..sort((a, b) => '${a['created_at']}'
+                                .compareTo('${b['created_at']}') !=
+                            0
+                        ? '${a['created_at']}'.compareTo('${b['created_at']}')
+                        : '${a['message_ref']}'
+                            .split('@')
+                            .first
+                            .padLeft(20, '0')
+                            .compareTo('${b['message_ref']}'
+                                .split('@')
+                                .first
+                                .padLeft(20, '0'))))
+                      Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(top: 8),
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: entry['reported'] == true
+                              ? Theme.of(context).colorScheme.errorContainer
+                              : Theme.of(context).colorScheme.surfaceContainer,
+                          borderRadius: BorderRadius.circular(12),
+                          border: entry['reported'] == true
+                              ? Border.all(
+                                  color: Theme.of(context).colorScheme.error,
+                                  width: 2)
+                              : null,
+                        ),
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                  entry['reported'] == true
+                                      ? 'Reported message'
+                                      : 'Context message',
+                                  style:
+                                      Theme.of(context).textTheme.titleSmall),
+                              const SizedBox(height: 4),
+                              Text(
+                                  '${entry['author_ref']} · ${entry['created_at']}',
+                                  style: Theme.of(context).textTheme.bodySmall),
+                              const SizedBox(height: 12),
+                              SelectableText(
+                                  '${entry['content'] ?? "No text / attachment message"}'),
+                              if (entry['reported'] != true &&
+                                  entry['attachments'] is List)
+                                for (final attachment
+                                    in entry['attachments'] as List)
+                                  if (attachment is Map)
+                                    Text(
+                                        'Attachment: ${attachment['filename'] ?? "Encrypted attachment"}'),
+                              if (entry['disclosure'] != null)
+                                const Padding(
+                                    padding: EdgeInsets.only(top: 8),
+                                    child: Text(
+                                        'Reporter-disclosed encrypted text · not verified by the server')),
+                            ]),
+                      ),
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: const Text('Technical evidence'),
+                      children: [
+                        SelectableText(
+                            const JsonEncoder.withIndent('  ')
+                                .convert(report.evidence),
+                            style: const TextStyle(fontFamily: 'monospace'))
+                      ],
                     ),
+                    const SizedBox(height: 16),
                     if (can('reports.manage')) ...[
                       DropdownButtonFormField<String>(
                         initialValue: status,

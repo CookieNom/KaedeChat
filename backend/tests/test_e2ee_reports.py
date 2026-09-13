@@ -1335,3 +1335,78 @@ def test_admin_report_payload_identifies_user_and_automated_sources(
         else None
     )
     assert cast(dict[str, object], payload["subject_user"])["display_name"] == "Reported User"
+
+
+@pytest.mark.asyncio
+async def test_report_context_is_optional() -> None:
+    session = AsyncMock()
+    assert await admin_portal.report_context_evidence(session, None, None, []) == []
+    session.scalars.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["gap", "missing", "duplicate", "target", "consent", "none"])
+async def test_report_context_requires_complete_range_and_disclosure(invalid: str) -> None:
+    def row(identifier: int, encrypted: bool = False) -> Message:
+        return cast(
+            Message,
+            SimpleNamespace(
+                id=identifier,
+                origin_domain="alpha.localhost",
+                author_id=7,
+                author_domain="alpha.localhost",
+                channel_id=11,
+                channel_domain="beta.localhost",
+                created_at=datetime(2026, 8, 17, tzinfo=UTC),
+                content="server text",
+                e2ee={"ciphertext": "opaque"} if encrypted else None,
+            ),
+        )
+
+    before, middle, target, after = row(1, True), row(2), row(3), row(4)
+    context = [
+        admin_portal.ReportContextMessage(
+            message_ref=EntityRef("1@alpha.localhost"),
+            disclosed_content="decrypted context",
+            disclosure_acknowledged=invalid != "consent",
+        ),
+        admin_portal.ReportContextMessage(message_ref=EntityRef("2@alpha.localhost")),
+        admin_portal.ReportContextMessage(message_ref=EntityRef("4@alpha.localhost")),
+    ]
+    if invalid == "duplicate":
+        context.append(context[0])
+    if invalid == "target":
+        context.append(
+            admin_portal.ReportContextMessage(message_ref=EntityRef("3@alpha.localhost"))
+        )
+    if invalid == "gap":
+        context.pop(1)
+    requested = [before, after] if invalid in {"missing", "gap"} else [before, middle, after]
+    session = AsyncMock()
+    session.scalars.side_effect = [requested, [before, middle, target, after], []]
+    settings = SimpleNamespace(domain="alpha.localhost")
+    if invalid != "none":
+        with pytest.raises(HTTPException) as raised:
+            await admin_portal.report_context_evidence(session, settings, target, context)
+        assert raised.value.status_code == 422
+    else:
+        evidence = await admin_portal.report_context_evidence(session, settings, target, context)
+        assert [item["message_ref"] for item in evidence] == [
+            "1@alpha.localhost",
+            "2@alpha.localhost",
+            "4@alpha.localhost",
+        ]
+        assert evidence[0]["content"] == "decrypted context"
+        assert evidence[0]["disclosure"]["server_verified"] is False
+        assert evidence[1]["content"] == "server text"
+        assert "e2ee" not in evidence[0]
+
+
+def test_report_context_is_bounded_and_message_only() -> None:
+    context = {"message_ref": "1@alpha.localhost"}
+    for fields in [
+        {"target_type": "user", "context_messages": [context]},
+        {"target_type": "message", "context_messages": [context] * 21},
+    ]:
+        with pytest.raises(ValidationError):
+            ReportCreate(target_ref="3@alpha.localhost", category="spam", **fields)

@@ -191,6 +191,12 @@ class ApplicationDirectoryApprovalPatch(UnambiguousInputModel):
         return self
 
 
+class ReportContextMessage(UnambiguousInputModel):
+    message_ref: EntityRef
+    disclosed_content: str | None = Field(default=None, max_length=4000)
+    disclosure_acknowledged: bool = False
+
+
 class ReportCreate(UnambiguousInputModel):
     target_type: Literal[
         "message", "attachment", "user", "bot", "application", "guild", "instance", "invite"
@@ -210,6 +216,7 @@ class ReportCreate(UnambiguousInputModel):
         "other",
     ]
     description: str | None = Field(default=None, max_length=2000)
+    context_messages: list[ReportContextMessage] = Field(default_factory=list, max_length=20)
     message_ref: EntityRef | None = None
     focused_attachment_ref: EntityRef | None = None
     disclosed_content: str | None = Field(default=None, max_length=4000)
@@ -227,6 +234,8 @@ class ReportCreate(UnambiguousInputModel):
 
     @model_validator(mode="after")
     def _focused_attachment_requires_message_target(self) -> ReportCreate:
+        if self.context_messages and self.target_type != "message":
+            raise ValueError("context requires a message report")
         if self.focused_attachment_ref is not None and self.target_type != "message":
             raise ValueError("focused attachment context requires a message report")
         return self
@@ -527,6 +536,84 @@ def report_message_evidence(
         }
     )
     return evidence, "e2ee_user_disclosed"
+
+
+async def report_context_evidence(
+    session: AsyncSession,
+    settings: Settings,
+    message: Message,
+    context: list[ReportContextMessage],
+    created_floor_id: int = 0,
+) -> list[dict[str, object]]:
+    if not context:
+        return []
+    requested = {item.message_ref.resolve(settings.domain): item for item in context}
+    target = (message.id, message.origin_domain)
+    if len(requested) != len(context) or target in requested:
+        raise HTTPException(422, detail={"code": "REPORT_CONTEXT_INVALID"})
+    rows = list(
+        await session.scalars(
+            select(Message).where(
+                tuple_(Message.id, Message.origin_domain).in_(requested),
+                Message.channel_id == message.channel_id,
+                Message.channel_domain == message.channel_domain,
+                Message.deleted_at.is_(None),
+                Message.id >= created_floor_id,
+            )
+        )
+    )
+    if len(rows) != len(requested):
+        raise HTTPException(422, detail={"code": "REPORT_CONTEXT_INVALID"})
+
+    def key(row: Message) -> tuple[int, str]:
+        return row.id, row.origin_domain
+
+    bounds = sorted([message, *rows], key=key)
+    sequence = list(
+        await session.scalars(
+            select(Message)
+            .where(
+                Message.channel_id == message.channel_id,
+                Message.channel_domain == message.channel_domain,
+                Message.deleted_at.is_(None),
+                tuple_(Message.id, Message.origin_domain) >= key(bounds[0]),
+                tuple_(Message.id, Message.origin_domain) <= key(bounds[-1]),
+            )
+            .order_by(Message.id, Message.origin_domain)
+            .limit(22)
+        )
+    )
+    if {(row.id, row.origin_domain) for row in sequence} != {*requested, target}:
+        raise HTTPException(422, detail={"code": "REPORT_CONTEXT_MUST_BE_CONTIGUOUS"})
+    attachments = list(
+        await session.scalars(
+            select(Attachment)
+            .where(
+                tuple_(Attachment.message_id, Attachment.message_domain).in_(requested),
+                Attachment.purpose == "attachment",
+                Attachment.deleted_at.is_(None),
+            )
+            .order_by(Attachment.created_at, Attachment.origin_domain, Attachment.id)
+        )
+    )
+    evidence = []
+    for row in sequence:
+        if (row.id, row.origin_domain) == target:
+            continue
+        item = requested[(row.id, row.origin_domain)]
+        snapshot, mode = report_message_evidence(
+            row,
+            disclosed_content=item.disclosed_content,
+            disclosure_acknowledged=item.disclosure_acknowledged,
+            attachments=[
+                attachment
+                for attachment in attachments
+                if (attachment.message_id, attachment.message_domain) == (row.id, row.origin_domain)
+            ],
+        )
+        snapshot.update(message_ref=f"{row.id}@{row.origin_domain}", encryption_mode=mode)
+        evidence.append(snapshot)
+    return evidence
 
 
 def report_attachment_evidence(
@@ -1030,6 +1117,14 @@ async def create_report(
                 attachments=attachments,
                 focused_attachment=focused_attachment,
             )
+            if payload.context_messages:
+                evidence["context_messages"] = await report_context_evidence(
+                    session,
+                    settings,
+                    message,
+                    payload.context_messages,
+                    access.channel.created_floor_id,
+                )
         else:
             try:
                 attachment_id, attachment_domain = EntityRef(payload.target_ref).resolve(
@@ -1218,6 +1313,10 @@ async def create_federated_report(
         attachments=attachments,
         focused_attachment=focused_attachment,
     )
+    if payload.context_messages:
+        evidence["context_messages"] = await report_context_evidence(
+            session, settings, message, payload.context_messages, access.channel.created_floor_id
+        )
     evidence["source_report_ref"] = source_report_ref
     report = AbuseReport(
         id=await snowflake.mint(),

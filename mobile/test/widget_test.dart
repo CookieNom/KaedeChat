@@ -368,6 +368,23 @@ void main() {
   });
 
   group('message report evidence', () {
+    test('context is omitted by default and preserves explicit disclosure', () {
+      final message = EntityRef.parse('3@alpha.example');
+      expect(messageReportRequestData(message, category: 'spam'),
+          isNot(contains('context_messages')));
+      final context = <Map<String, Object?>>[
+        {
+          'message_ref': '2@alpha.example',
+          'disclosed_content': '',
+          'disclosure_acknowledged': true,
+        }
+      ];
+      expect(
+          messageReportRequestData(message,
+              category: 'spam', contextMessages: context),
+          containsPair('context_messages', context));
+    });
+
     KaedeMessage encryptedMessage(String? content) => KaedeMessage.fromJson(
           <String, Object?>{
             'id': '11',

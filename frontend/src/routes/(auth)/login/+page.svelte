@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '$lib/ui/locale';
 
+  import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
@@ -171,6 +172,10 @@
 
 <svelte:head><title>{$t('ui_sign_in_kaede_chat_52b8ba2a')}</title></svelte:head>
 
+{#if page.url.searchParams.has('add-account')}
+  <p class="field-note">Sign in to another account. Your existing sign-ins stay saved.</p>
+  <a href={resolve('/accounts')}>Back to saved accounts</a>
+{/if}
 <p class="eyebrow">{$t('ui_welcome_back_66212495')}</p>
 <h1 class="auth-title">{$t('ui_pick_up_the_thread_767b206c')}</h1>
 <p class="auth-intro">{$t('ui_sign_in_with_your_local_username_email_addres_2bbde8e4')}</p>

@@ -1576,34 +1576,41 @@
                       {/if}
                     {/if}
                     {#if typeof report.evidence.content === 'string'}
-                      <blockquote>
-                        <small
-                          >{$t('ui_message_by_value0_value1_in_value2_8e17e75d', {
-                            value0: String(
-                              identityName(
-                                report.subject_user,
-                                report.evidence.author_ref ?? 'unknown'
-                              )
-                            ),
-                            value1: String(
-                              identityContext(
-                                report.subject_user,
-                                report.evidence.author_ref ?? 'unknown'
-                              )
-                            ),
-                            value2: String(report.evidence.channel_ref ?? 'unknown')
-                          })}</small
-                        >
-                        <p>
-                          {report.evidence.content ||
-                            $t('ui_no_message_text_this_was_an_attachment_only_e_b7aa3e2d')}
-                        </p>
-                        {#if report.evidence.disclosure}<small class="disclosure-note"
-                            >{$t(
-                              'ui_reporter_disclosed_e2ee_evidence_the_server_c_cb260edd'
-                            )}</small
-                          >{/if}
-                      </blockquote>
+                      <section class="evidence-timeline" aria-label="Reported message and context">
+                        {#each [{ ...report.evidence, message_ref: report.message_ref, reported: true }, ...(Array.isArray(report.evidence.context_messages) ? report.evidence.context_messages : [])].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.message_ref ?? '')
+                              .split('@')[0]
+                              .padStart(20, '0')
+                              .localeCompare(String(b.message_ref ?? '')
+                                  .split('@')[0]
+                                  .padStart(20, '0'))) as entry (entry.message_ref ?? 'reported')}
+                          <blockquote class:reported-message={entry.reported === true}>
+                            <strong
+                              >{entry.reported ? 'Reported message' : 'Context message'}</strong
+                            >
+                            <small
+                              >{entry.reported
+                                ? identityName(
+                                    report.subject_user,
+                                    entry.author_ref ?? 'Unknown author'
+                                  )
+                                : String(entry.author_ref ?? 'Unknown author')} · {entry.created_at
+                                ? new Date(String(entry.created_at)).toLocaleString()
+                                : ''}</small
+                            >
+                            <p>{String(entry.content || 'No text / attachment message')}</p>
+                            {#if !entry.reported && Array.isArray(entry.attachments)}
+                              {#each entry.attachments as attachment (attachment.attachment_ref)}<small
+                                  >Attachment: {String(
+                                    attachment.filename ?? 'Encrypted attachment'
+                                  )}</small
+                                >{/each}
+                            {/if}
+                            {#if entry.disclosure}<small class="disclosure-note"
+                                >Reporter-disclosed encrypted text · not verified by the server</small
+                              >{/if}
+                          </blockquote>
+                        {/each}
+                      </section>
                     {:else if report.source === 'photodna'}
                       <div class="safety-note">
                         <Icon name="image" size={19} /><span
@@ -1959,6 +1966,33 @@
 </main>
 
 <style>
+  .evidence-timeline {
+    display: grid;
+    gap: 0.75rem;
+    min-width: 0;
+  }
+  .evidence-timeline blockquote {
+    margin: 0;
+    padding: 1rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-subtle);
+    overflow-wrap: anywhere;
+  }
+  .evidence-timeline blockquote.reported-message {
+    border: 2px solid var(--danger);
+    background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+  }
+  .evidence-timeline strong,
+  .evidence-timeline small {
+    display: block;
+    margin-bottom: 0.35rem;
+  }
+  .evidence-timeline p {
+    white-space: pre-wrap;
+    margin: 0.75rem 0 0;
+  }
+
   :global(body) {
     overflow: auto;
   }
@@ -2606,9 +2640,9 @@
 
   .report-grid {
     display: grid;
-    grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1.35fr);
-    gap: 1.25rem;
-    padding: 1.15rem;
+    grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1fr);
+    gap: 1.5rem;
+    padding: 1.5rem;
   }
 
   .report-card dl {
