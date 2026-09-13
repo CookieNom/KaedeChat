@@ -8,7 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('video codecs prefer AV1 and H264 while preserving encrypted VP8', () {
+  test('video codecs prefer AV1 and H264 for plaintext and encrypted calls',
+      () {
     const quality = MobileMediaQuality();
     final av1 = quality.videoPublishOptionsForCameraMode(1,
         supportedCodecs: ['video/AV1', 'video/H264']);
@@ -24,8 +25,13 @@ void main() {
     expect(h264.backupVideoCodec.enabled, isFalse);
     final encrypted = quality.videoPublishOptionsForCameraMode(1,
         encrypted: true, supportedCodecs: ['video/AV1', 'video/H264']);
-    expect(encrypted.videoCodec, 'vp8');
-    expect(encrypted.backupVideoCodec.enabled, isFalse);
+    expect(encrypted.videoCodec, 'av1');
+    expect(encrypted.backupVideoCodec.codec, 'vp8');
+    expect(encrypted.backupVideoCodec.enabled, isTrue);
+    final encryptedLimited = quality.videoPublishOptionsForCameraMode(1,
+        encrypted: true, supportedCodecs: ['video/H264']);
+    expect(encryptedLimited.videoCodec, 'vp8');
+    expect(encryptedLimited.backupVideoCodec.enabled, isFalse);
     expect(quality.videoPublishOptions.videoCodec, 'vp8');
   });
 

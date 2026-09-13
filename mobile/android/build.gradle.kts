@@ -1,7 +1,18 @@
 allprojects {
     repositories {
+        exclusiveContent {
+            forRepository { maven { url = uri(rootProject.file("../native/webrtc/android")) } }
+            filter { includeGroup("chat.kaede") }
+        }
         google()
         mavenCentral()
+    }
+    configurations.configureEach {
+        resolutionStrategy.dependencySubstitution {
+            substitute(module("io.github.webrtc-sdk:android"))
+                .using(module("chat.kaede:webrtc:137.7151.04-kaede-av1.1"))
+                .because("Encrypted AV1 requires Kaede's patched native cryptor")
+        }
     }
 }
 

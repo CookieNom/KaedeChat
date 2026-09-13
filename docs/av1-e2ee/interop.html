@@ -16,6 +16,7 @@ window.start = async (url, token, role, backup = false) => {
       }
     },100);
   });
+  room.on(RoomEvent.EncryptionError, error => console.error('encryption', error.message));
   await room.connect(url,token);
   await room.setE2EEEnabled(true);
   if (role === 'publisher') {

@@ -179,6 +179,18 @@ credentials never enter the browser flow. A remote guild selected from a local
 replica sends the install request to the authoritative guild home for the final
 permission check and commit.
 
+The install template initializes the bot's managed role permissions. After installation,
+server administrators edit that role under **Guild settings → Roles**. Current roles
+and channel overwrites determine guild permissions; the original installation bits
+are retained as a record of the initial grant, not a permanent permission ceiling.
+Managed bot roles cannot be manually assigned, unassigned, or deleted. Uninstalling
+the integration removes its role. Other roles can still be assigned to the bot.
+
+API scopes, event intents, installation channel restrictions, and encrypted-channel
+consent remain independent requirements. Enabling a role permission does not add a
+missing API scope or authorize encrypted participation. **Integrations** displays
+initial permissions and lets administrators change channel restrictions.
+
 Uninstall is authoritative and immediate. It marks the installation revoked,
 revokes target tokens, removes the managed role and bot membership, and
 publishes the guild changes. It does not wait for the application home to be
@@ -398,10 +410,11 @@ at or above its own highest role (and cannot act on the guild owner).
 
 Like Discord's Default Install Settings, an application's
 `default_permissions` value is the permission request used to seed a new install
-link; it is not a permanent application-wide cap. The exact permissions approved
-from a portable install template become that installation's immutable-at-revision
-ceiling. Later role or overwrite changes may narrow the bot further, but cannot
-raise it above the approved installation grant without a new grant revision.
+link; it is not a permanent application-wide cap. The template's approved
+permissions initialize the managed bot role. Later role and overwrite changes
+can grant or revoke guild permissions without reinstalling or changing the
+installation revision. Scopes, intents, and other installation restrictions
+continue to apply independently.
 
 Supported scopes:
 

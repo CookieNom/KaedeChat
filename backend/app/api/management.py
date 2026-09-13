@@ -40,6 +40,7 @@ from app.chat.hierarchy import (
     highest_role,
     require_can_assign_member_role,
     require_can_manage_role,
+    require_unmanaged_role,
     role_reorder_allowed,
 )
 from app.chat.payloads import channel_payload, guild_payload, member_payload, role_payload
@@ -1158,6 +1159,7 @@ async def delete_role(
     role = await guild_role(session, guild, role_number)
     if role.id == guild.id:
         raise HTTPException(status_code=400, detail={"code": "EVERYONE_ROLE_IMMUTABLE"})
+    require_unmanaged_role(role)
     await require_can_manage_role(session, guild, auth.user, role)
     await add_audit_entry(
         session,
@@ -1263,6 +1265,7 @@ async def assign_role(
     role = await guild_role(session, guild, role_number)
     if role.id == guild.id:
         raise HTTPException(status_code=400, detail={"code": "EVERYONE_ROLE_IMPLICIT"})
+    require_unmanaged_role(role)
     await require_can_manage_role(session, guild, auth.user, role)
     inserted = await session.scalar(
         pg_insert(MemberRole)
@@ -1407,6 +1410,7 @@ async def replace_member_roles(
             raise HTTPException(status_code=409, detail={"code": "ROLE_STATE_CHANGED"})
         changed_roles[(existing_role.id, existing_role.origin_domain)] = existing_role
     for changed_role_ref in sorted(added | removed):
+        require_unmanaged_role(changed_roles[changed_role_ref])
         await require_can_manage_role(session, guild, auth.user, changed_roles[changed_role_ref])
 
     if removed:
@@ -1527,6 +1531,7 @@ async def remove_role(
         session, guild, auth.user, user_number, user_domain
     )
     role = await guild_role(session, guild, role_number)
+    require_unmanaged_role(role)
     await require_can_manage_role(session, guild, auth.user, role)
     result = await session.execute(
         delete(MemberRole)

@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.instance_restrictions import require_remote_user_creation_allowed
 from app.bots.installations import (
     bot_actor_active_installations_statement,
-    installation_grants_permissions,
 )
 from app.core.model_validation import UnambiguousInputModel
 from app.core.permissions import Permission
@@ -1871,32 +1870,18 @@ async def authorize_guild_management_request(
                     "scopes": list(missing),
                 },
             )
-        permission_options = contract.permission_options
         if request.operation in {"stage_voice_state.get", "stage_voice_state.self"}:
             try:
-                permission_options = (
-                    federated_stage_voice_state_permissions(
-                        request.operation,
-                        request.payload,
-                        actor_id=actor.id,
-                        actor_domain=actor.origin_domain,
-                        default_domain=request.requesting_instance,
-                    ),
+                federated_stage_voice_state_permissions(
+                    request.operation,
+                    request.payload,
+                    actor_id=actor.id,
+                    actor_domain=actor.origin_domain,
+                    default_domain=request.requesting_instance,
                 )
             except ValueError:
                 raise HTTPException(
-                    status_code=400,
-                    detail={"code": "KAED_FED_BAD_REQUEST"},
+                    status_code=400, detail={"code": "KAED_FED_BAD_REQUEST"}
                 ) from None
-        if not any(
-            installation_grants_permissions(installation.granted_permissions, required)
-            for required in permission_options
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "MISSING_PERMISSIONS",
-                    "permissions": [str(int(item)) for item in permission_options],
-                },
-            )
+        # The dispatched route checks live roles and channel overwrites at this authority.
     return guild, actor

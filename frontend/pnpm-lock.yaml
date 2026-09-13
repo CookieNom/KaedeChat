@@ -31,7 +31,7 @@ importers:
         specifier: ^11.2.15
         version: 11.2.15
       livekit-client:
-        specifier: ^2.20.1
+        specifier: 2.20.1
         version: 2.20.1(patch_hash=6f657702e80823884fb342d5295e7893841dc82833ff7339c7ce95d0b6c0fd26)(@types/dom-mediacapture-record@1.0.22)
       marked:
         specifier: 18.0.6

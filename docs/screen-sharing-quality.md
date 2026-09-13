@@ -141,7 +141,7 @@ publish a backup codec on demand; web and Flutter follow their SDK fallback
 behavior. CPU load and thermal throttling do not trigger an application-level
 codec switch.
 
-Encrypted calls keep VP8. AV1 decoding support alone does not establish
-compatibility with Kaede's experimental encrypted AV1 format. Keep encryption
-enabled and use the supported codec; [the AV1 notes](av1-e2ee/README.md)
-record the separate interoperability investigation.
+Encrypted calls prefer AV1 with encrypted VP8 backup, or VP8 alone when the
+sender lacks AV1. All clients must run the coordinated update containing Kaede's
+AV1 cryptor; codec support alone does not establish compatibility. The
+[AV1 notes](av1-e2ee/README.md) describe native builds and rollout validation.

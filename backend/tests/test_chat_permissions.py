@@ -683,7 +683,7 @@ def test_voice_text_chat_masks_text_dependencies_without_send_messages(
 
 
 @pytest.mark.asyncio
-async def test_bot_installation_ceiling_caps_live_role_permissions() -> None:
+async def test_bot_live_roles_can_grant_and_revoke_permissions_beyond_install_defaults() -> None:
     guild = SimpleNamespace(
         id=10,
         origin_domain=DOMAIN,
@@ -719,11 +719,15 @@ async def test_bot_installation_ceiling_caps_live_role_permissions() -> None:
 
     assert resolved_member is member
     assert permissions & Permission.CHANGE_NICKNAME
+    assert permissions & Permission.MANAGE_NICKNAMES
+    live_role.permissions = int(Permission.VIEW_CHANNEL)
+    permissions, _ = await calculate_permissions(session, guild, actor, bot_grant=own_nickname_only)
+    assert not permissions & Permission.CHANGE_NICKNAME
     assert not permissions & Permission.MANAGE_NICKNAMES
 
 
 @pytest.mark.asyncio
-async def test_bot_installation_ceiling_reapplies_text_and_voice_dependencies() -> None:
+async def test_bot_live_permissions_reapply_text_and_voice_dependencies() -> None:
     text_channel = SimpleNamespace(type=0)
     text_grant = BotGuildPermissionGrant(
         installation_id=70,
@@ -733,7 +737,7 @@ async def test_bot_installation_ceiling_reapplies_text_and_voice_dependencies() 
     )
     text_permissions = await text_grant.apply(
         SimpleNamespace(),
-        int(Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES | Permission.ATTACH_FILES),
+        int(Permission.VIEW_CHANNEL | Permission.ATTACH_FILES),
         text_channel,
     )
 
@@ -753,7 +757,6 @@ async def test_bot_installation_ceiling_reapplies_text_and_voice_dependencies() 
         SimpleNamespace(),
         int(
             Permission.VIEW_CHANNEL
-            | Permission.CONNECT
             | Permission.STREAM
             | Permission.MOVE_MEMBERS
         ),

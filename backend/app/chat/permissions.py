@@ -48,7 +48,7 @@ class PermissionOverwrite:
 
 @dataclass(frozen=True, slots=True)
 class BotGuildPermissionGrant:
-    """Active installation state that caps one bot member's live permissions."""
+    """Active installation state and channel restrictions for one bot member."""
 
     installation_id: int | None
     grant_revision: int
@@ -77,15 +77,12 @@ class BotGuildPermissionGrant:
     ) -> int:
         if self.installation_id is None:
             return 0
-        from app.bots.installations import effective_installation_permissions
-
         if channel is not None and not await self.allows_channel(session, channel):
             return 0
-        effective = effective_installation_permissions(self.granted_permissions, live_permissions)
         if channel is None:
-            return effective
+            return live_permissions
         return normalize_permission_dependencies(
-            effective,
+            live_permissions,
             channel_type=channel.type,
             timed_out=False,
         )

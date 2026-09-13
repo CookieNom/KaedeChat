@@ -47,3 +47,8 @@ app.*.map.json
 # Generated from Weblate ARB catalogs by flutter gen-l10n.
 /lib/l10n/generated/
 /untranslated-messages.json
+
+# Built from the pinned sources by tool/build_webrtc.py.
+/native/webrtc/android/
+/native/webrtc/WebRTC.xcframework/
+/native/webrtc/*-build.json

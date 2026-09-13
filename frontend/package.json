@@ -33,7 +33,7 @@
     "dompurify": "3.4.13",
     "emojibase-data": "17.0.0",
     "intl-messageformat": "^11.2.15",
-    "livekit-client": "^2.20.1",
+    "livekit-client": "2.20.1",
     "marked": "18.0.6"
   },
   "devDependencies": {

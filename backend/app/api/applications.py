@@ -2694,6 +2694,7 @@ async def install_bot(
         guild_domain=guild.origin_domain,
         name=app.name,
         permissions=template.permissions,
+        managed=True,
         position=1,
     )
     session.add(role)

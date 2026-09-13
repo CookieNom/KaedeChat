@@ -173,7 +173,10 @@ describe('video codec defaults', () => {
       videoCodec: 'av1',
       backupCodec: { codec: 'h264' }
     });
-    expect(webVideoCodecOptions(true)).toEqual({ videoCodec: 'vp8', backupCodec: false });
+    expect(webVideoCodecOptions(true)).toEqual({
+      videoCodec: 'av1',
+      backupCodec: { codec: 'vp8' }
+    });
     getCapabilities.mockReturnValue({ codecs: [{ mimeType: 'video/AV1' }] });
     expect(webVideoCodecOptions(false)).toEqual({
       videoCodec: 'av1',
@@ -181,6 +184,7 @@ describe('video codec defaults', () => {
     });
     getCapabilities.mockReturnValue({ codecs: [{ mimeType: 'video/H264' }] });
     expect(webVideoCodecOptions(false)).toEqual({ videoCodec: 'h264', backupCodec: false });
+    expect(webVideoCodecOptions(true)).toEqual({ videoCodec: 'vp8', backupCodec: false });
     vi.stubGlobal('RTCRtpSender', undefined);
     expect(webVideoCodecOptions(false)).toEqual({ videoCodec: 'vp8', backupCodec: false });
   });

@@ -1,7 +1,8 @@
 # Encrypted AV1 validation
 
-These are development validation notes for the experimental AV1 encryption
-format. Production encrypted video still uses VP8. Current Rust dependency
+Encrypted camera and screen sharing now prefer AV1 when the sender supports it,
+with an encrypted VP8 backup. This rollout requires coordinated updates of all
+desktop, browser and mobile installations. Current Rust dependency
 pins are in [desktop/Cargo.toml](../../desktop/Cargo.toml); the browser patch is
 [the LiveKit patch](../../frontend/patches/livekit-client@2.20.1.patch), and the
 mobile build changes are in [webrtc-build.patch](webrtc-build.patch).
@@ -17,8 +18,30 @@ remaining bytes using the existing AES-GCM implementation, and carries the IV/ta
 in a versioned metadata OBU. This is a Kaede-specific experimental wire format.
 See the Rust fork's `webrtc-sys/src/av1_e2ee/README.md` for details and ABI limits.
 An upstream client advertising AV1 does not imply support for this encryption
-format. Encrypted publishing therefore remains VP8 until matching mobile binaries
-are integrated and compatibility with older clients is addressed.
+format. Kaede ships matching native mobile binaries and patched Flutter packages
+from `mobile/vendor/livekit_client` and `mobile/vendor/flutter_webrtc`. The latter
+forwards the HKDF setting through the Android/iOS native bridges.
+Older clients must update before joining
+this rollout; there is no version-negotiation layer.
+
+## Current rollout checks
+
+The codec-selection tests, Flutter encryption lifecycle test (including a backup
+created after key rotation and a failed native cryptor setup), browser cryptor
+suite, and app/SDK static checks pass. A fresh local SFU run passed encrypted
+Rust -> Chromium, Chromium -> Rust, and Chromium -> a late VP8-only Rust receiver
+using Playwright 1.62's Chromium 151. Native plaintext/encrypted AV1 L3T3_KEY
+controls also pass. A separately cached Chromium 153 binary failed both plaintext
+and encrypted AV1 receive in this environment. Validate the browsers used for the
+rollout; these checks also do not establish Android/iOS device behavior.
+
+The patched Android AAR builds for ARMv7, ARM64, x86 and x86_64 and passes archive
+integrity checks. The Android debug APK builds successfully and contains the
+exact patched WebRTC binaries for its three supported ABIs. Gradle resolves both
+Flutter plugins to that local artifact. The full Flutter suite passes (517
+passed, one skipped), and the eight focused AV1 tests pass after the native bridge
+update. The iOS native build
+and real-device calls remain pending.
 
 ## Recorded investigation results
 
@@ -80,10 +103,35 @@ To rebuild the browser patch, create a pnpm patch workspace for livekit-client
 from `frontend` and `pnpm patch-commit /path/to/workspace`. Re-run both cryptor and
 interop tests. The rebuild script uses the existing Vite/esbuild dependency.
 
-## Remaining integration
+## Mobile native builds and rollout
 
-Build the mobile WebRTC patch on Android and Apple CI,
-then pin those artifacts in Flutter's native plugin and test actual devices.
-Validate Windows/macOS Rust builds, and H264 publishing in a browser with an H264
-encoder. Only then change the encrypted default, with a way to handle old clients
-that support AV1 decoding but do not understand this encrypted frame format.
+The mobile WebRTC CI workflow builds and caches the patched Android AAR and iOS
+XCFramework from pinned source revisions. Main CI consumes those artifacts before
+building either app. Gradle substitutes the hosted Android library with the local
+Maven artifact; CocoaPods resolves both plugins' WebRTC dependency to the local
+framework. Missing artifacts fail the build instead of using the stock cryptor.
+
+For local builds, run from the repository root (Linux for Android, macOS for iOS):
+
+```sh
+python3 mobile/tool/build_webrtc.py android --work-dir /tmp/kaede-webrtc-android
+python3 mobile/tool/build_webrtc.py ios --work-dir /tmp/kaede-webrtc-ios
+```
+
+These are substantial Chromium/WebRTC source builds requiring native build tools,
+network access and ample disk space. Alternatively, download the matching
+`kaede-webrtc-android` or `kaede-webrtc-ios` artifact from this revision's CI and
+extract its tar file into `mobile/native/webrtc`. Rebuild after changing the source
+pins or native patch. The generated build manifest records both pins and patch hash.
+
+Flutter queries sender codec capabilities for encrypted calls as well as plaintext
+calls. Encrypted publishing selects AV1 with VP8 backup, or VP8 alone if AV1 is
+unavailable. Encryption remains enabled in either case. The vendored SDK installs
+video encryptors before negotiation, attaches AV1 receiver decryptors, and covers
+backup senders in key rotation and unpublish cleanup.
+
+Before distributing the coordinated update, validate Android/iOS device calls,
+Windows/macOS native builds, mixed AV1/VP8 receivers, camera and screen sharing,
+late joins and reconnects. The historical results above do not replace those
+platform checks. Refresh existing browser tabs and replace older test builds;
+ordinary AV1 capability does not make those older builds compatible.

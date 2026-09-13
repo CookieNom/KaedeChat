@@ -78,7 +78,6 @@ from app.api.bot_gateway import (
     encrypted_message_event,
     filtered_event,
     gateway_authorization_fingerprint,
-    gateway_effective_permissions,
     gateway_ready_event,
     gateway_topic_grants,
     guild_context_from_topic,
@@ -1351,16 +1350,6 @@ def test_gateway_resume_cursors_are_strict_bounded_integers() -> None:
         assert denied.value.code == 4400
 
 
-def test_gateway_live_permissions_are_bounded_by_install_and_current_role_authority() -> None:
-    installed = int(Permission.VIEW_AUDIT_LOG | Permission.MANAGE_WEBHOOKS)
-
-    assert gateway_effective_permissions(installed, 0) == 0
-    assert gateway_effective_permissions(
-        installed,
-        int(Permission.VIEW_AUDIT_LOG),
-    ) == int(Permission.VIEW_AUDIT_LOG)
-
-
 @pytest.mark.asyncio
 async def test_gateway_authorization_loads_current_bot_member_permissions(postgres_schema) -> None:
     bot = principal(scopes={"audit_logs.read"}, intents={"guild_moderation"})
@@ -1375,7 +1364,7 @@ async def test_gateway_authorization_loads_current_bot_member_permissions(postgr
     bot.worker.revoked_at = None
     bot.token.revoked_at = None
     installed = installation(scopes={"audit_logs.read"})
-    installed.granted_permissions = int(Permission.VIEW_AUDIT_LOG)
+    installed.granted_permissions = 0
     guild, _, member, _ = moderation_fixture()
     guild.permission_generation = 3
     member.member_version = 7
@@ -1442,7 +1431,7 @@ async def test_gateway_authorization_loads_current_bot_member_permissions(postgr
                 guild_domain="guild.example",
                 permission_generation=3,
                 member_version=7,
-                effective_permissions=int(Permission.VIEW_AUDIT_LOG),
+                effective_permissions=int(Permission.VIEW_CHANNEL | Permission.VIEW_AUDIT_LOG),
             ),
         )
         role.permissions = 0
@@ -1640,10 +1629,6 @@ async def test_bot_guild_listing_requires_the_scope_on_each_installation() -> No
     assert "bot_installations.granted_scopes" in query
     assert ["guilds.read"] in statement.compile().params.values()
     assert "guild_members" in query
-    assert gateway_effective_permissions(
-        int(Permission.ADMINISTRATOR),
-        int(Permission.VIEW_AUDIT_LOG),
-    ) == int(Permission.VIEW_AUDIT_LOG)
 
 
 @pytest.mark.asyncio

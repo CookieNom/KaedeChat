@@ -52,6 +52,7 @@ async def invite_roles(session: AsyncSession, guild: Guild, invite: Invite) -> l
                 Role.guild_id == guild.id,
                 Role.guild_domain == guild.origin_domain,
                 Role.id.in_(role_ids),
+                Role.managed.is_(False),
                 Role.origin_domain == guild.origin_domain,
             )
         )

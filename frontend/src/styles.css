@@ -4773,8 +4773,7 @@ progress {
   gap: 0.6rem;
   align-items: stretch;
 }
-.role-color-default,
-.role-color-custom {
+.role-color-default {
   position: relative;
   display: grid;
   height: 70px;
@@ -4796,28 +4795,11 @@ progress {
   background: #a9b7c2;
   font-size: 1.15rem;
 }
-.role-color-default small,
-.role-color-custom small {
+.role-color-default small {
   font-size: 0.6rem;
   font-weight: 700;
 }
-.role-color-custom input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-}
-.role-color-custom > span {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  background: var(--selected-role-color);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 20%);
-}
 .role-color-default.selected,
-.role-color-custom.selected,
 .role-color-swatches button.selected {
   outline: 2px solid var(--accent);
   outline-offset: 1px;

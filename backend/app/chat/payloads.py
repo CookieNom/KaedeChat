@@ -379,6 +379,7 @@ def role_payload(role: Role) -> dict[str, object]:
         "permissions": str(role.permissions),
         "position": role.position,
         "hoist": role.hoist,
+        "managed": bool(role.managed),
         "mentionable": role.mentionable,
         "version": resource_version(role),
     }

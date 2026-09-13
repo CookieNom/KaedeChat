@@ -653,6 +653,7 @@ final class VoiceSession extends ChangeNotifier {
             ratchetSalt: Uint8List.fromList(utf8.encode('kaede-livekit-v1')),
             ratchetWindowSize: 16,
             keyDerivationAlgorithm: rtc.KeyDerivationAlgorithm.kHKDF,
+            discardFrameWhenCryptorNotReady: true,
           );
           final provider = BaseKeyProvider(
             await rtc.frameCryptorFactory.createDefaultKeyProvider(keyOptions),
@@ -668,14 +669,12 @@ final class VoiceSession extends ChangeNotifier {
 
       // Query the actual WebRTC build, not the device's file playback support.
       Iterable<String> videoCodecs = const [];
-      if (!encryptedGrant) {
-        try {
-          final capabilities = await rtc.getRtpSenderCapabilities('video');
-          videoCodecs =
-              capabilities.codecs?.map((codec) => codec.mimeType) ?? const [];
-        } catch (_) {
-          // Older WebRTC builds may not expose capabilities; keep VP8 usable.
-        }
+      try {
+        final capabilities = await rtc.getRtpSenderCapabilities('video');
+        videoCodecs =
+            capabilities.codecs?.map((codec) => codec.mimeType) ?? const [];
+      } catch (_) {
+        // Older WebRTC builds may not expose capabilities; keep VP8 usable.
       }
       if (generation != _generation) return;
       final room = candidate = Room(

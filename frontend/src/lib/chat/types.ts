@@ -193,6 +193,7 @@ export interface Role {
   permissions: string;
   position: number;
   hoist: boolean;
+  managed?: boolean;
   mentionable: boolean;
   version?: string | null;
 }

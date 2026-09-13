@@ -26,7 +26,6 @@ from app.bots.dm_capability import (
     usable_dm_capability,
 )
 from app.bots.installations import (
-    effective_installation_permissions,
     installation_allows_channel,
     usable_guild_installation,
     usable_user_installation,
@@ -100,15 +99,6 @@ if current > tonumber(ARGV[1]) then
 end
 return current
 """
-
-
-def gateway_effective_permissions(
-    installed_permissions: int,
-    live_permissions: int,
-) -> int:
-    """Compatibility helper for the Gateway's installation/live intersection."""
-
-    return effective_installation_permissions(installed_permissions, live_permissions)
 
 
 RELEASE_SCRIPT = """

@@ -178,6 +178,7 @@ DEPENDENCIES:
   - sqflite_darwin (from `.symlinks/plugins/sqflite_darwin/darwin`)
   - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
   - video_player_avfoundation (from `.symlinks/plugins/video_player_avfoundation/darwin`)
+  - WebRTC-SDK (from `../native/webrtc`)
   - webview_flutter_wkwebview (from `.symlinks/plugins/webview_flutter_wkwebview/darwin`)
 
 SPEC REPOS:
@@ -195,7 +196,6 @@ SPEC REPOS:
     - PromisesObjC
     - SDWebImage
     - SwiftyGif
-    - WebRTC-SDK
 
 EXTERNAL SOURCES:
   audioplayers_darwin:
@@ -244,6 +244,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/url_launcher_ios/ios"
   video_player_avfoundation:
     :path: ".symlinks/plugins/video_player_avfoundation/darwin"
+  WebRTC-SDK:
+    :path: "../native/webrtc"
   webview_flutter_wkwebview:
     :path: ".symlinks/plugins/webview_flutter_wkwebview/darwin"
 
@@ -284,9 +286,9 @@ SPEC CHECKSUMS:
   SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
   url_launcher_ios: bb13df5870e8c4234ca12609d04010a21be43dfa
   video_player_avfoundation: e54d03b3b19f64f2c557354f72ce538387541ba6
-  WebRTC-SDK: 40d4f5ba05cadff14e4db5614aec402a633f007e
+  WebRTC-SDK: 5dfc9030defa8ecd937354118110a4911b5e1f5d
   webview_flutter_wkwebview: 29eb20d43355b48fe7d07113835b9128f84e3af4
 
-PODFILE CHECKSUM: bddc7d3f982d8ae92ad4613dc047ec0fb432036a
+PODFILE CHECKSUM: 3264c09ee932338eb81d353838f1afc12eb172bf
 
 COCOAPODS: 1.16.2

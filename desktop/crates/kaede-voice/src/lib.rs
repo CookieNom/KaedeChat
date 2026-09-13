@@ -1273,15 +1273,12 @@ struct PublishedVideo {
     capture_thread: Option<thread::JoinHandle<()>>,
 }
 
-// Keep encrypted publishing on VP8 until all clients ship matching AV1 cryptors.
+// Coordinated clients ship the AV1 cryptor; VP8 remains the encrypted backup.
 fn video_publish_options(encrypted: bool, encoding: VideoEncoding) -> TrackPublishOptions {
     let mut options = TrackPublishOptions {
         video_encoding: Some(encoding.clone()),
         ..Default::default()
     };
-    if encrypted {
-        return options;
-    }
     let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
         .pc_factory()
         .get_rtp_sender_capabilities(livekit::webrtc::MediaType::Video);
@@ -1291,7 +1288,7 @@ fn video_publish_options(encrypted: bool, encoding: VideoEncoding) -> TrackPubli
             .iter()
             .any(|c| c.mime_type.eq_ignore_ascii_case(mime))
     };
-    let fallback = if supports("video/h264") {
+    let fallback = if !encrypted && supports("video/h264") {
         VideoCodec::H264
     } else {
         VideoCodec::VP8
@@ -2034,8 +2031,6 @@ mod tests {
             max_framerate: 30.0,
         };
         let encrypted = video_publish_options(true, encoding.clone());
-        assert_eq!(encrypted.video_codec, VideoCodec::VP8);
-        assert!(encrypted.backup_codec.is_none());
         let plain = video_publish_options(false, encoding);
         let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
             .pc_factory()
@@ -2052,6 +2047,11 @@ mod tests {
             VideoCodec::VP8
         };
         if supports("video/av1") {
+            assert_eq!(encrypted.video_codec, VideoCodec::AV1);
+            assert_eq!(
+                encrypted.backup_codec.as_ref().map(|c| c.codec),
+                Some(VideoCodec::VP8)
+            );
             assert_eq!(plain.video_codec, VideoCodec::AV1);
             let backup = plain.backup_codec.ok_or("missing compatibility backup")?;
             assert_eq!(backup.codec, fallback);
@@ -2060,6 +2060,8 @@ mod tests {
                 Some(2_500_000)
             );
         } else {
+            assert_eq!(encrypted.video_codec, VideoCodec::VP8);
+            assert!(encrypted.backup_codec.is_none());
             assert_eq!(plain.video_codec, fallback);
             assert!(plain.backup_codec.is_none());
         }

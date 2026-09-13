@@ -3544,6 +3544,7 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
   final actorHighestRole = guildActorHighestRole(guild);
   final assignableRoles = guild.roles
       .where((role) =>
+          !role.managed &&
           role.position != 0 &&
           role.ref != guild.ref &&
           canManageRoles &&
@@ -10449,7 +10450,7 @@ final class _RoleEditorState extends State<_RoleEditor> {
                 : L10n.of(context)
                     .ui_edit_value0_8e92dac2((widget.role!.name).toString())),
             actions: [
-              if (widget.role != null)
+              if (widget.role != null && !widget.role!.managed)
                 IconButton(
                     tooltip: L10n.of(context).ui_delete_role_bdde90c6,
                     style: IconButton.styleFrom(
@@ -10459,6 +10460,13 @@ final class _RoleEditorState extends State<_RoleEditor> {
                     icon: Icon(Icons.delete_outline_rounded))
             ]),
         body: ListView(padding: EdgeInsets.all(16), children: [
+          if (widget.role?.managed ?? false)
+            SettingsInfo(
+              'This role is managed by a bot integration. Its permissions are editable, '
+              'but its membership cannot be changed manually. Remove the integration '
+              'to remove this role. API scopes, event access, channel restrictions, '
+              'and encrypted-channel consent also apply.',
+            ),
           TextField(
               controller: _name,
               decoration: InputDecoration(
@@ -10768,11 +10776,13 @@ final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
                   CheckboxListTile(
                       title: Text(role.name),
                       value: selected.contains(role.ref.id.value),
-                      onChanged: (value) => setState(() {
-                            value == true
-                                ? selected.add(role.ref.id.value)
-                                : selected.remove(role.ref.id.value);
-                          }))
+                      onChanged: role.managed
+                          ? null
+                          : (value) => setState(() {
+                                value == true
+                                    ? selected.add(role.ref.id.value)
+                                    : selected.remove(role.ref.id.value);
+                              }))
               ])),
           actions: [
             TextButton(

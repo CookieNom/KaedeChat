@@ -80,6 +80,7 @@
   const availableRoles = $derived(
     manageableRoles.filter(
       (role) =>
+        !role.managed &&
         !roleIds.includes(role.id) &&
         role.name.toLowerCase().includes(roleSearch.trim().toLowerCase())
     )
@@ -87,8 +88,11 @@
   const appContextCommands = $derived(userAppContextCommands(applicationCommands, user));
 
   function roleIsManageable(role: Role): boolean {
-    return manageableRoles.some(
-      (candidate) => candidate.id === role.id && candidate.origin_domain === role.origin_domain
+    return (
+      !role.managed &&
+      manageableRoles.some(
+        (candidate) => candidate.id === role.id && candidate.origin_domain === role.origin_domain
+      )
     );
   }
   const statusLabel = $derived(

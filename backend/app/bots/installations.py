@@ -13,7 +13,6 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import queue_guild_mutation
 from app.chat.postcommit import queue_postcommit_dispatch
-from app.core.permissions import ALL_PERMISSIONS, Permission
 from app.core.settings import Settings
 from app.core.types import EntityRef
 from app.db.bot_models import (
@@ -23,32 +22,6 @@ from app.db.bot_models import (
     BotUserInstallation,
 )
 from app.db.models import Channel, ChannelOverwrite, Guild, GuildMember, MemberRole, Role, User
-
-
-def effective_installation_permissions(
-    granted_permissions: int,
-    live_permissions: int,
-) -> int:
-    """Intersect an installation ceiling with the bot member's live authority."""
-
-    ceiling = (
-        ALL_PERMISSIONS if granted_permissions & Permission.ADMINISTRATOR else granted_permissions
-    )
-    return int(ceiling & live_permissions)
-
-
-def installation_grants_permissions(
-    granted_permissions: int,
-    required_permissions: int | Permission,
-) -> bool:
-    """Return whether an installation ceiling contains one complete mask."""
-
-    required = Permission(required_permissions)
-    return (
-        Permission(effective_installation_permissions(granted_permissions, int(required)))
-        & required
-        == required
-    )
 
 
 def normalize_channel_restrictions(restrictions: Iterable[object]) -> tuple[str, ...]:

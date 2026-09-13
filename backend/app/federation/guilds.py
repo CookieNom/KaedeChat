@@ -3988,6 +3988,8 @@ async def apply_guild_mutation_event(
             not isinstance(icon_hash, str) or not valid_content_digest(icon_hash)
         ):
             raise ValueError("role mutation icon hash is invalid")
+        if not isinstance(raw.get("managed", False), bool):
+            raise ValueError("role managed flag is invalid")
         if not isinstance(raw.get("hoist"), bool) or not isinstance(raw.get("mentionable"), bool):
             raise ValueError("role mutation flags are invalid")
         role = await session.get(Role, role_ref)
@@ -4004,6 +4006,7 @@ async def apply_guild_mutation_event(
                 position=position,
                 hoist=bool(raw["hoist"]),
                 mentionable=bool(raw["mentionable"]),
+                managed=raw.get("managed", False),
             )
             session.add(role)
         elif (role.guild_id, role.guild_domain) != (locked.id, locked.origin_domain):
@@ -4016,6 +4019,7 @@ async def apply_guild_mutation_event(
             role.position = position
             role.hoist = bool(raw["hoist"])
             role.mentionable = bool(raw["mentionable"])
+            role.managed = raw.get("managed", False)
         role_version = _apply_event_resource_version(role, raw, "role")
         if role_version is not None:
             versioned_resources.append((role, role_version))
@@ -5528,6 +5532,8 @@ def validate_guild_snapshot(
             not isinstance(icon_hash, str) or not valid_content_digest(icon_hash)
         ):
             raise ValueError("guild snapshot role icon hash is invalid")
+        if not isinstance(raw.get("managed", False), bool):
+            raise ValueError("role managed flag is invalid")
         if not isinstance(raw.get("hoist"), bool) or not isinstance(raw.get("mentionable"), bool):
             raise ValueError("guild snapshot role flags are invalid")
         _event_resource_version(raw, "role")
@@ -6207,6 +6213,7 @@ def guild_snapshot_payload(
                 "position": role.position,
                 "hoist": role.hoist,
                 "mentionable": role.mentionable,
+                "managed": bool(role.managed),
                 "version": role.updated_at.isoformat(),
             }
             for role in roles
@@ -6599,6 +6606,7 @@ async def apply_guild_snapshot(
         loaded_role.position = int(raw["position"])
         loaded_role.hoist = bool(raw["hoist"])
         loaded_role.mentionable = bool(raw["mentionable"])
+        loaded_role.managed = raw.get("managed", False)
         role_version = _apply_event_resource_version(loaded_role, raw, "role")
         if role_version is not None:
             versioned_resources.append((loaded_role, role_version))

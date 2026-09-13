@@ -1471,6 +1471,7 @@ class Role(Base, FederatedIdMixin, TimestampMixin):
     permissions: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     hoist: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    managed: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     mentionable: Mapped[bool] = mapped_column(Boolean, server_default=false())
     __table_args__ = (
         PrimaryKeyConstraint("id", "origin_domain"),

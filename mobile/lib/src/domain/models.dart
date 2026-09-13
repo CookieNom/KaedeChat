@@ -1176,6 +1176,7 @@ final class KaedeRole {
     required this.hoist,
     required this.mentionable,
     this.version,
+    this.managed = false,
   });
 
   factory KaedeRole.fromJson(Json json) => KaedeRole(
@@ -1190,6 +1191,7 @@ final class KaedeRole {
         position: _integer(json['position']),
         hoist: _boolean(json['hoist']),
         mentionable: _boolean(json['mentionable']),
+        managed: _boolean(json['managed']),
         version: _string(json['version']),
       );
 
@@ -1202,6 +1204,7 @@ final class KaedeRole {
   final int position;
   final bool hoist;
   final bool mentionable;
+  final bool managed;
   final String? version;
 
   Json toJson() => <String, Object?>{
@@ -1216,6 +1219,7 @@ final class KaedeRole {
         'position': position,
         'hoist': hoist,
         'mentionable': mentionable,
+        'managed': managed,
         'version': version,
       };
 }

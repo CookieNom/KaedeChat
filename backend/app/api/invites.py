@@ -41,7 +41,7 @@ from app.chat.guild_revision import (
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
-from app.chat.hierarchy import guild_role, require_can_manage_role
+from app.chat.hierarchy import guild_role, require_can_manage_role, require_unmanaged_role
 from app.chat.invites import (
     grant_invite_roles,
     invite_allows_user,
@@ -574,6 +574,7 @@ async def validate_community_invite(
             if role_domain != guild.origin_domain or role_id == guild.id:
                 raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
             role = await guild_role(session, guild, role_id)
+            require_unmanaged_role(role)
             await require_can_manage_role(session, guild, actor, role)
             role_refs.append((role.id, role.origin_domain))
 

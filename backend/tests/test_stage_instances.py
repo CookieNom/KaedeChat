@@ -299,9 +299,10 @@ def test_stage_bot_contracts_share_the_local_permission_masks() -> None:
         ("78@alpha.localhost", Permission(0), True),
         ("90@people.example", Permission(0), False),
         ("90@people.example", Permission.CONNECT, True),
+        ("90@people.example", Permission(0), True),
     ],
 )
-async def test_direct_bot_stage_reads_apply_the_dynamic_installation_ceiling(
+async def test_direct_bot_stage_reads_use_authority_decision(
     monkeypatch: pytest.MonkeyPatch,
     target_ref: str,
     granted: Permission,
@@ -315,6 +316,8 @@ async def test_direct_bot_stage_reads_apply_the_dynamic_installation_ceiling(
         AsyncMock(return_value=(guild, installation)),
     )
     proxy = AsyncMock(return_value=SimpleNamespace(body={"user_id": target_ref.split("@")[0]}))
+    if not allowed:
+        proxy.side_effect = HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
     monkeypatch.setattr("app.api.stage_instances.proxy_stage_voice_state", proxy)
 
     call = bot_get_stage_voice_state(
@@ -329,7 +332,7 @@ async def test_direct_bot_stage_reads_apply_the_dynamic_installation_ceiling(
         with pytest.raises(HTTPException) as caught:
             await call
         assert caught.value.status_code == 403
-        proxy.assert_not_awaited()
+        proxy.assert_awaited_once()
     else:
         rendered = await call
         assert rendered["user_id"] == target_ref.split("@")[0]
@@ -342,6 +345,7 @@ async def test_direct_bot_stage_reads_apply_the_dynamic_installation_ceiling(
         (CurrentUserVoiceStateUpdate(suppress=True), Permission(0), True),
         (CurrentUserVoiceStateUpdate(suppress=False), Permission(0), False),
         (CurrentUserVoiceStateUpdate(suppress=False), Permission.MUTE_MEMBERS, True),
+        (CurrentUserVoiceStateUpdate(suppress=False), Permission(0), True),
         (
             CurrentUserVoiceStateUpdate(request_to_speak_timestamp="2026-08-29T14:00:00+00:00"),
             Permission.REQUEST_TO_SPEAK,
@@ -357,7 +361,7 @@ async def test_direct_bot_stage_reads_apply_the_dynamic_installation_ceiling(
         ),
     ],
 )
-async def test_direct_bot_stage_self_updates_apply_the_dynamic_installation_ceiling(
+async def test_direct_bot_stage_self_updates_use_authority_decision(
     monkeypatch: pytest.MonkeyPatch,
     payload: CurrentUserVoiceStateUpdate,
     granted: Permission,
@@ -371,6 +375,8 @@ async def test_direct_bot_stage_self_updates_apply_the_dynamic_installation_ceil
         AsyncMock(return_value=(guild, installation)),
     )
     proxy = AsyncMock(return_value=SimpleNamespace(body={}))
+    if not allowed:
+        proxy.side_effect = HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
     monkeypatch.setattr("app.api.stage_instances.proxy_stage_voice_state", proxy)
 
     call = bot_update_current_stage_voice_state(
@@ -386,14 +392,14 @@ async def test_direct_bot_stage_self_updates_apply_the_dynamic_installation_ceil
         with pytest.raises(HTTPException) as caught:
             await call
         assert caught.value.status_code == 403
-        proxy.assert_not_awaited()
+        proxy.assert_awaited_once()
     else:
         response = await call
         assert response.status_code == 204
 
 
 @pytest.mark.asyncio
-async def test_direct_bot_stage_other_update_requires_mute_installation_grant(
+async def test_direct_bot_stage_other_update_propagates_live_permission_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = SimpleNamespace(id=78, origin_domain="alpha.localhost", account_type="bot")
@@ -403,7 +409,9 @@ async def test_direct_bot_stage_other_update_requires_mute_installation_grant(
         "app.api.stage_instances.installation_for_guild",
         AsyncMock(return_value=(guild, installation)),
     )
-    proxy = AsyncMock(return_value=SimpleNamespace(body={}))
+    proxy = AsyncMock(
+        side_effect=HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    )
     monkeypatch.setattr("app.api.stage_instances.proxy_stage_voice_state", proxy)
 
     with pytest.raises(HTTPException) as caught:
@@ -419,7 +427,7 @@ async def test_direct_bot_stage_other_update_requires_mute_installation_grant(
         )
 
     assert caught.value.status_code == 403
-    proxy.assert_not_awaited()
+    proxy.assert_awaited_once()
 
 
 @pytest.mark.asyncio

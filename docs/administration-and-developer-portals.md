@@ -105,7 +105,16 @@ A foreign instance administrator can enforce local target policy, but cannot
 activate or suspend the remote application record; remote targets converge from
 the home authority's signed runtime snapshot.
 
-**Instances** manages exact-domain `silence` and `suspend` rules using Kaede's
+**Instances** shows each known remote peer’s locally retained users and authored
+messages, guild replicas, federated DM conversations, cached media, inbound event
+accounting, last contact, software version, and delivery backlog. Expand a peer
+for storage categories; search and sort to compare peers. Storage totals combine
+quota-accounted database data and cached media bytes, not physical database size
+or remote server totals. Guild usage belongs to the guild origin, DM usage to its
+quota origin, and media usage to the attachment origin. Counts follow retention
+and exclude logically deleted messages. The endpoint requires `admin.read`.
+
+It also manages exact-domain `silence` and `suspend` rules using Kaede's
 existing `InstanceBlock` enforcement. Subdomains are included only when the
 operator selects that option. Policy changes go through the existing lock and
 reconciliation path, so queues and replicas observe the new rule consistently.
@@ -164,6 +173,7 @@ no action, mark duplicates, and reopen cases. Report creation is rate limited to
 | `GET` | `/api/v1/administration/applications` | List bot applications |
 | `PATCH` | `/api/v1/administration/applications/{app}` | Activate or suspend an app |
 | `GET/PATCH` | `/api/v1/administration/reports[/{report}]` | Review and update reports |
+| `GET` | `/api/v1/administration/instances/statistics` | Local footprint and delivery statistics for remote peers |
 | `GET/PUT` | `/api/v1/administration/instances/blocks` | List or create instance rules |
 | `DELETE` | `/api/v1/administration/instances/blocks/{domain}` | Remove an instance rule |
 | `GET` | `/api/v1/administration/audit` | Read recent audit events |

@@ -395,7 +395,8 @@
               <div class="pills">
                 {#each installation.intents as intent (intent)}<span>{intent}</span>{/each}
               </div>
-              <h3>{$t('ui_guild_permissions_325aaf39')}</h3>
+              <h3>{$t('ui_bot_initial_permissions')}</h3>
+              <p>{$t('ui_bot_edit_role_permissions')}</p>
               {#if selectedPermissionMetadata(installation.permissions).length}
                 <div class="pills">
                   {#each selectedPermissionMetadata(installation.permissions) as permission (permission.permission)}

@@ -1401,56 +1401,48 @@ async def test_remote_bot_management_revalidates_exact_active_installation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("operation", "payload", "permissions", "expected_code"),
+    ("operation", "payload", "permissions"),
     [
-        ("stage_voice_state.get", {"user_ref": "8@remote.example"}, Permission(0), None),
+        ("stage_voice_state.get", {"user_ref": "8@remote.example"}, Permission(0)),
         (
             "stage_voice_state.get",
             {"user_ref": "9@people.example"},
             Permission(0),
-            "MISSING_PERMISSIONS",
         ),
         (
             "stage_voice_state.get",
             {"user_ref": "9@people.example"},
             Permission.CONNECT,
-            None,
         ),
         (
             "stage_voice_state.self",
             {"data": {"suppress": True}},
             Permission(0),
-            None,
         ),
         (
             "stage_voice_state.self",
             {"data": {"suppress": False}},
             Permission(0),
-            "MISSING_PERMISSIONS",
         ),
         (
             "stage_voice_state.self",
             {"data": {"suppress": False}},
             Permission.MUTE_MEMBERS,
-            None,
         ),
         (
             "stage_voice_state.self",
             {"data": {"request_to_speak_timestamp": None}},
             Permission(0),
-            None,
         ),
         (
             "stage_voice_state.self",
             {"data": {"request_to_speak_timestamp": "2026-08-29T14:00:00+00:00"}},
             Permission(0),
-            "MISSING_PERMISSIONS",
         ),
         (
             "stage_voice_state.self",
             {"data": {"request_to_speak_timestamp": "2026-08-29T14:00:00+00:00"}},
             Permission.REQUEST_TO_SPEAK,
-            None,
         ),
         (
             "stage_voice_state.self",
@@ -1461,17 +1453,15 @@ async def test_remote_bot_management_revalidates_exact_active_installation(
                 }
             },
             Permission.MUTE_MEMBERS,
-            "MISSING_PERMISSIONS",
         ),
     ],
 )
-async def test_signed_stage_voice_bot_grants_follow_exact_payload(
+async def test_signed_stage_voice_defers_permissions_to_dispatched_route(
     monkeypatch: pytest.MonkeyPatch,
     allow_remote_management_mutation: AsyncMock,
     operation: str,
     payload: dict[str, object],
     permissions: Permission,
-    expected_code: str | None,
 ) -> None:
     guild = Guild(
         id=10,
@@ -1503,28 +1493,15 @@ async def test_signed_stage_voice_bot_grants_follow_exact_payload(
     )
     request = management_request(operation, payload)
 
-    if expected_code is None:
-        resolved = await authorize_guild_management_request(
-            cast(Any, session),
-            cast(Any, SimpleNamespace()),
-            cast(Any, SimpleNamespace(domain="home.example")),
-            FederationPrincipal(origin="remote.example", key_id="main"),
-            10,
-            request,
-        )
-        assert resolved == (guild, actor)
-    else:
-        with pytest.raises(HTTPException) as caught:
-            await authorize_guild_management_request(
-                cast(Any, session),
-                cast(Any, SimpleNamespace()),
-                cast(Any, SimpleNamespace(domain="home.example")),
-                FederationPrincipal(origin="remote.example", key_id="main"),
-                10,
-                request,
-            )
-        assert caught.value.status_code == 403
-        assert caught.value.detail["code"] == expected_code
+    resolved = await authorize_guild_management_request(
+        cast(Any, session),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace(domain="home.example")),
+        FederationPrincipal(origin="remote.example", key_id="main"),
+        10,
+        request,
+    )
+    assert resolved == (guild, actor)
 
 
 @pytest.mark.asyncio
@@ -1650,7 +1627,6 @@ def test_bot_management_contract_covers_every_operation_exactly_once() -> None:
     ("operation", "scopes", "permissions", "code"),
     [
         ("scheduled_event.create", [], Permission.CREATE_EVENTS, "BOT_SCOPE_REQUIRED"),
-        ("scheduled_event.create", ["events.manage"], Permission(0), "MISSING_PERMISSIONS"),
         ("guild.delete", ["guilds.manage"], Permission.ADMINISTRATOR, "BOT_OPERATION_UNSUPPORTED"),
     ],
 )

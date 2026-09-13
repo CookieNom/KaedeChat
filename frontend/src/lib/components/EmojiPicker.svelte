@@ -12,12 +12,14 @@
   import { onMount } from 'svelte';
 
   let {
+    inline = false,
     customEmojis = [],
     stickers = [],
     onSelect,
     onStickerSelect,
     onClose
   }: {
+    inline?: boolean;
     customEmojis?: CustomEmojiOption[];
     stickers?: StickerOption[];
     onSelect: (value: string) => void;
@@ -109,6 +111,7 @@
 
 <div
   class="emoji-picker"
+  class:inline
   role="dialog"
   aria-modal="false"
   aria-label={onStickerSelect
@@ -298,6 +301,11 @@
     border-radius: 18px;
     background: var(--surface-raised);
     box-shadow: 0 22px 55px rgb(0 0 0 / 38%);
+  }
+  .emoji-picker.inline {
+    position: static;
+    width: min(390px, calc(100vw - 28px));
+    height: min(520px, 65dvh);
   }
   header,
   footer {

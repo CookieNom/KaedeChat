@@ -25,7 +25,6 @@ from app.automod.service import require_member_interactions_allowed
 from app.bots.auth import BotPrincipal, require_bot
 from app.bots.installations import (
     installation_allows_channel,
-    installation_grants_permissions,
 )
 from app.chat.audit import add_audit_entry
 from app.chat.events import guild_topic, publish_ephemeral
@@ -61,7 +60,6 @@ from app.voice.permissions import (
     STAGE_INSTANCE_MODERATOR_PERMISSIONS,
     STAGE_INSTANCE_VIEW_PERMISSIONS,
     STAGE_VOICE_STATE_MODERATOR_PERMISSIONS,
-    current_stage_voice_state_permissions,
     stage_voice_state_read_permissions,
 )
 from app.voice.rooms import guild_room_name, parse_room_name, participant_identity
@@ -1203,23 +1201,6 @@ async def update_user_stage_voice_state(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def require_stage_installation_permissions(
-    installation: BotInstallation,
-    required: Permission,
-) -> None:
-    """Enforce the selected bot installation's Stage permission ceiling."""
-
-    if installation_grants_permissions(installation.granted_permissions, required):
-        return
-    raise HTTPException(
-        status_code=403,
-        detail={
-            "code": "MISSING_PERMISSIONS",
-            "permissions": str(int(required)),
-        },
-    )
-
-
 async def bot_stage_context(
     session: AsyncSession,
     settings: Settings,
@@ -1297,15 +1278,7 @@ async def bot_get_stage_voice_state(
     )
     user_id, user_domain = user_ref.resolve(settings.domain)
     qualified_user_ref = EntityRef(f"{user_id}@{user_domain}")
-    require_stage_installation_permissions(
-        installation,
-        stage_voice_state_read_permissions(
-            actor_id=principal.user.id,
-            actor_domain=principal.user.origin_domain,
-            target_ref=qualified_user_ref,
-            default_domain=settings.domain,
-        ),
-    )
+
     proxied = await proxy_stage_voice_state(
         session,
         settings,
@@ -1347,10 +1320,7 @@ async def bot_update_current_stage_voice_state(
         guild_ref,
         "voice.connect",
     )
-    require_stage_installation_permissions(
-        installation,
-        current_stage_voice_state_permissions(payload),
-    )
+
     target_ref = EntityRef(f"{principal.user.id}@{principal.user.origin_domain}")
     proxied = await proxy_stage_voice_state(
         session,
@@ -1397,10 +1367,7 @@ async def bot_update_stage_voice_state(
         guild_ref,
         "voice.moderate",
     )
-    require_stage_installation_permissions(
-        installation,
-        STAGE_VOICE_STATE_MODERATOR_PERMISSIONS,
-    )
+
     user_id, user_domain = user_ref.resolve(settings.domain)
     qualified_user_ref = EntityRef(f"{user_id}@{user_domain}")
     proxied = await proxy_stage_voice_state(

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import ForumEmojiField from '$lib/components/ForumEmojiField.svelte';
+  import { customEmojiToken } from '$lib/chat/emojis';
+  import ColorPicker from '$lib/components/ColorPicker.svelte';
   import { t } from '$lib/ui/locale';
 
   import { trapDialogFocus } from '$lib/ui/focus';
@@ -330,6 +333,17 @@
   let channelForumLayout = $state<0 | 1 | 2>(0);
   let channelForumArchive = $state<60 | 1440 | 4320 | 10080>(1440);
   let channelForumSlowmode = $state(0);
+  const forumEmojis = $derived(
+    (guild?.emojis ?? [])
+      .filter((emoji) => emoji.media_hash && emoji.available !== false)
+      .map((emoji) => ({
+        ...emoji,
+        guild_name: guild?.name,
+        url: assetUrl(emoji.media_hash ?? '', 'thumbnail_128', emoji.origin_domain),
+        value: customEmojiToken(emoji)
+      }))
+      .filter((emoji) => Boolean(emoji.url && emoji.value))
+  );
   let channelForumReaction = $state('');
   let channelForumReactionId = $state<string | null>(null);
   let channelForumE2EE = $state(false);
@@ -1019,11 +1033,6 @@
     channelForumTags = channelForumTags.filter((_, tagIndex) => tagIndex !== index);
   }
 
-  function editForumDefaultReaction(event: Event) {
-    channelForumReaction = (event.currentTarget as HTMLInputElement).value;
-    channelForumReactionId = null;
-  }
-
   function changeForumEncryptionRequirement(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     if (!input.checked) {
@@ -1392,7 +1401,11 @@
           if (generation === loadGeneration) scheduledEvents = value;
         })
       );
-      if (allows(Permission.CREATE_GUILD_EXPRESSIONS | Permission.MANAGE_GUILD_EXPRESSIONS)) {
+      if (
+        allows(Permission.CREATE_GUILD_EXPRESSIONS | Permission.MANAGE_GUILD_EXPRESSIONS) ||
+        (!channelOnly && allows(Permission.MANAGE_CHANNELS)) ||
+        (requestedChannel?.type === 15 && requestedChannelAllows(Permission.MANAGE_CHANNELS))
+      ) {
         optional.push(
           Promise.all([
             api<CustomEmoji[]>(`/guilds/${encodeURIComponent(targetGuild)}/emojis`, { signal }),
@@ -3980,17 +3993,14 @@
                           >
                           {#each channelForumTags as tag, index (`${tag.id ?? 'new'}:${index}`)}
                             <div class="forum-tag-editor">
-                              <input
-                                value={tag.emoji_name ?? ''}
-                                maxlength="64"
-                                aria-label={`Emoji for ${tag.name}`}
-                                placeholder={$t('ui_emoji_61ad8976')}
+                              <ForumEmojiField
+                                emojiId={tag.emoji_id}
+                                emojiName={tag.emoji_name}
+                                guildDomain={guild?.origin_domain ?? ''}
+                                customEmojis={forumEmojis}
+                                label={`Emoji for ${tag.name}`}
                                 disabled={busy}
-                                oninput={(event) =>
-                                  updateForumTag(index, {
-                                    emoji_id: null,
-                                    emoji_name: event.currentTarget.value.trim() || null
-                                  })}
+                                onChange={(emoji) => updateForumTag(index, emoji)}
                               />
                               <input
                                 value={tag.name}
@@ -4040,16 +4050,21 @@
                             </div>
                           {/if}
                         </fieldset>
-                        <label class="form-field compact-field">
+                        <div class="form-field compact-field">
                           <span>{$t('ui_default_reaction_emoji_cfae845e')}</span>
-                          <input
-                            value={channelForumReaction}
-                            maxlength="64"
-                            placeholder={$t('ui_none_dc937b59')}
+                          <ForumEmojiField
+                            emojiId={channelForumReactionId}
+                            emojiName={channelForumReaction}
+                            guildDomain={guild?.origin_domain ?? ''}
+                            customEmojis={forumEmojis}
+                            label={$t('ui_default_reaction_emoji_cfae845e')}
                             disabled={busy}
-                            oninput={editForumDefaultReaction}
+                            onChange={(emoji) => {
+                              channelForumReactionId = emoji.emoji_id;
+                              channelForumReaction = emoji.emoji_name ?? '';
+                            }}
                           />
-                        </label>
+                        </div>
                         <label class="form-field compact-field">
                           <span>{$t('ui_default_sort_order_91ca6695')}</span>
                           <select bind:value={channelForumSort} disabled={busy}>
@@ -5399,6 +5414,10 @@
                     </svg>
                   {/if}
                 </div>
+                {#if selectedRole.managed}
+                  <p class="field-hint" role="note">{$t('ui_managed_bot_role_notice')}</p>
+                  <p class="field-hint">{$t('ui_bot_role_scope_notice')}</p>
+                {/if}
                 <div
                   class="editor-tabs role-editor-tabs"
                   role="tablist"
@@ -5513,19 +5532,13 @@
                           onclick={() => setRoleColor('#000000')}
                           ><span>✓</span><small>{$t('ui_default_21b111cb')}</small></button
                         >
-                        <label
-                          class="role-color-custom"
-                          class:selected={!roleColorPalette.includes(roleColor) &&
+                        <ColorPicker
+                          bind:value={roleColor}
+                          label={$t('ui_choose_a_custom_role_color_fc7cd895')}
+                          caption={$t('ui_custom_494ca78f')}
+                          selected={!roleColorPalette.includes(roleColor) &&
                             roleColor !== '#000000'}
-                        >
-                          <input
-                            bind:value={roleColor}
-                            type="color"
-                            aria-label={$t('ui_choose_a_custom_role_color_fc7cd895')}
-                          />
-                          <span style={`--selected-role-color: ${roleColor}`}></span>
-                          <small>{$t('ui_custom_494ca78f')}</small>
-                        </label>
+                        />
                         <div class="role-color-swatches">
                           {#each roleColorPalette as color (color)}
                             <button
@@ -5670,6 +5683,7 @@
                             checked={member.role_ids.includes(selectedRole.id)}
                             disabled={busy ||
                               selectedRole.id === guild.id ||
+                              selectedRole.managed ||
                               !canManageSelectedRole ||
                               !canManageMember(member)}
                             onchange={(event) =>
@@ -5703,7 +5717,7 @@
                     </div>
                   {/if}
                   <div class="form-actions spread-actions">
-                    {#if selectedRole.id !== guild.id && canManageSelectedRole}
+                    {#if selectedRole.id !== guild.id && !selectedRole.managed && canManageSelectedRole}
                       <button
                         class="danger-text-button"
                         type="button"
@@ -5712,7 +5726,7 @@
                       >
                         <Icon name="trash" size={16} />{$t('ui_delete_role_ac18d11a')}
                       </button>
-                    {:else}
+                    {:else if !selectedRole.managed}
                       <span class="field-hint"
                         >{$t('ui_the_default_role_cannot_be_deleted_f09efff5')}</span
                       >
@@ -6048,7 +6062,7 @@
                     <label class="form-field compact-field">
                       <span>{$t('ui_roles_optional_4eff2966')}</span>
                       <select multiple bind:value={inviteRoleIds} size="5" disabled={busy}>
-                        {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id && canManageRole(role)) as role (entityKey(role))}
+                        {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id && canManageRole(role) && !role.managed) as role (entityKey(role))}
                           <option value={entityRef(role)}>{role.name}</option>
                         {/each}
                       </select>

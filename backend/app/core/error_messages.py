@@ -104,6 +104,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "CUSTOM_EMOJI_UNAVAILABLE": "That emoji is currently unavailable.",
     "E2EE_CROSSPOST_UNSUPPORTED": "Announcements cannot be published from an end-to-end encrypted channel.",
     "AGE_RESTRICTED_FORWARD_UNSUPPORTED": "Messages from an age-restricted channel can only be forwarded to another age-restricted channel.",
+    "MANAGED_ROLE_IMMUTABLE": "This role belongs to a bot integration. Remove the integration to remove the role; its membership cannot be changed manually.",
     "EMOJI_ROLE_INVALID": "One of the selected emoji roles is not part of this guild or cannot be managed by you.",
     "FEDERATED_ANNOUNCEMENT_FOLLOW_DELETE_FAILED": "The remote server could not remove this announcement follow. Try again shortly.",
     "FEDERATED_ANNOUNCEMENT_FOLLOW_FAILED": "The remote server could not create this announcement follow. Check both channels and try again.",

@@ -231,13 +231,13 @@ export function webCameraDefaults(videoQualityMode: 1 | 2): {
   };
 }
 
-/** Prefer AV1 with a broadly supported backup; preserve the encrypted VP8 path. */
+/** Prefer AV1 with encrypted VP8 backup for the coordinated client rollout. */
 export function webVideoCodecOptions(encrypted: boolean): TrackPublishOptions {
-  if (encrypted) return { videoCodec: 'vp8', backupCodec: false };
   const codecs = globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? [];
-  const fallback = codecs.some((codec) => codec.mimeType.toLowerCase() === 'video/h264')
-    ? 'h264'
-    : 'vp8';
+  const fallback =
+    !encrypted && codecs.some((codec) => codec.mimeType.toLowerCase() === 'video/h264')
+      ? 'h264'
+      : 'vp8';
   const av1 = typeof RTCRtpSender !== 'undefined' && supportsAV1();
   return {
     videoCodec: av1 ? 'av1' : fallback,

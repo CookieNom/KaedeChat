@@ -4,6 +4,9 @@
   import { resolve } from '$app/paths';
   import { hasAdminCapability } from '$lib/admin/capabilities';
   import { api, userErrorMessage } from '$lib/api/client';
+  import InstanceStatistics, {
+    type InstanceStats
+  } from '$lib/components/InstanceStatistics.svelte';
   import ReportExternal from '$lib/components/ReportExternal.svelte';
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
   import { authenticatedMedia, downloadAuthenticatedMedia } from '$lib/media/authenticated';
@@ -273,6 +276,7 @@
   let reportDrafts = $state<Record<string, ReportDraft>>({});
   let enforcementDrafts = $state<Record<string, EnforcementDraft>>({});
   let reportedAttachmentErrors = $state<Record<string, string>>({});
+  let instanceStats = $state<InstanceStats[]>([]);
   let blocks = $state<Block[]>([]);
   let operators = $state<Operator[]>([]);
   let audits = $state<Audit[]>([]);
@@ -605,8 +609,12 @@
         const nextReports = await api<Report[]>('/administration/reports');
         reports = nextReports;
         syncReportDrafts(nextReports);
-      } else if (section === 'instances') blocks = await api('/administration/instances/blocks');
-      else if (section === 'operators') operators = await api('/administration/operators');
+      } else if (section === 'instances') {
+        [blocks, instanceStats] = await Promise.all([
+          api<Block[]>('/administration/instances/blocks'),
+          api<InstanceStats[]>('/administration/instances/statistics')
+        ]);
+      } else if (section === 'operators') operators = await api('/administration/operators');
       else audits = await api('/administration/audit');
       loaded[section] = true;
     } catch (caught) {
@@ -1763,6 +1771,7 @@
           </div>
         {/if}
       {:else if view === 'instances'}
+        <InstanceStatistics instances={instanceStats} />
         <section class="panel">
           <div class="panel-intro">
             <Icon name="globe" size={22} />

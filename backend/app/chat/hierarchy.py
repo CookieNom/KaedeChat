@@ -78,6 +78,11 @@ async def highest_role(session: AsyncSession, guild: Guild, user_id: int, user_d
     return max(roles, key=role_rank)
 
 
+def require_unmanaged_role(role: Role) -> None:
+    if role.managed:
+        raise HTTPException(status_code=400, detail={"code": "MANAGED_ROLE_IMMUTABLE"})
+
+
 async def require_can_manage_role(
     session: AsyncSession, guild: Guild, actor: User, role: Role
 ) -> None:

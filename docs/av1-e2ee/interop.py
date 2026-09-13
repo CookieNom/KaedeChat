@@ -20,7 +20,7 @@ def jwt(room):
  return (data+b'.'+base64.urlsafe_b64encode(hmac.new(b'secret',data,hashlib.sha256).digest()).rstrip(b'=')).decode()
 try:
  with sync_playwright() as p:
-  browser=p.chromium.launch(args=['--no-sandbox','--autoplay-policy=no-user-gesture-required'])
+  browser=p.chromium.launch(executable_path=os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE'),args=['--no-sandbox','--autoplay-policy=no-user-gesture-required'])
   for role,backup in [('publisher',None),('receiver',None),('receiver','vp8')]:
    room='av1-interop-'+uuid.uuid4().hex
    env=dict(os.environ,INTEROP_ROLE=role,INTEROP_ROOM=room,LIVEKIT_URL=URL,RUST_LOG='info')

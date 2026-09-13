@@ -35,6 +35,8 @@ require File.expand_path(
 flutter_ios_podfile_setup
 
 target 'Runner' do
+  # Both Flutter plugins resolve to this locally built, patched framework.
+  pod 'WebRTC-SDK', :path => '../native/webrtc'
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
   target 'RunnerTests' do

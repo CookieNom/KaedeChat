@@ -14,6 +14,7 @@ from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.auth import AdminPrincipal, require_admin
+from app.admin.instance_statistics import instance_statistics_statement
 from app.admin.report_enforcement import (
     publish_message_purge,
     publish_remote_user_guild_removals,
@@ -2105,6 +2106,16 @@ async def enforce_report(
     if purge_result is not None:
         await publish_message_purge(redis, purge_result)
     return {"report": report_payload(report), "enforcement": enforcement}
+
+
+@router.get("/administration/instances/statistics")
+async def administration_instance_statistics(
+    principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[dict[str, Any]]:
+    principal.require("admin.read")
+    rows = await session.execute(instance_statistics_statement())
+    return [dict(row) for row in rows.mappings()]
 
 
 @router.get("/administration/instances/blocks")

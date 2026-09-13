@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ColorPicker from './ColorPicker.svelte';
   import { t } from '$lib/ui/locale';
 
   import { entityKey } from '$lib/chat/refs';
@@ -56,7 +57,7 @@
   let dialog = $state<HTMLElement | null>(null);
   let prefixInput = $state<HTMLInputElement | null>(null);
 
-  $effect(() => {
+  $effect.pre(() => {
     for (const lane of lanes) {
       const key = entityKey(lane);
       if (!(key in names)) names = { ...names, [key]: lane.name };
@@ -197,11 +198,9 @@
             {@const key = entityKey(lane)}
             {@const deleteBlocked = deleteLaneBlockReason(lane)}
             <article>
-              <input
-                class="lane-color"
+              <ColorPicker
                 bind:value={colors[key]}
-                type="color"
-                aria-label={`Color for ${lane.name}`}
+                label={`Color for ${lane.name}`}
                 disabled={busy}
               />
               <label class="lane-name">
@@ -265,11 +264,9 @@
             addLane();
           }}
         >
-          <input
+          <ColorPicker
             bind:value={laneColor}
-            class="lane-color"
-            type="color"
-            aria-label={$t('ui_new_status_color_c6d17406')}
+            label={$t('ui_new_status_color_c6d17406')}
             disabled={busy}
           />
           <label>
@@ -430,7 +427,7 @@
     font-weight: 500;
   }
 
-  input:not([type='checkbox']):not([type='color']) {
+  input:not([type='checkbox']) {
     width: 100%;
     min-height: 40px;
     border: 1px solid var(--line);
@@ -476,17 +473,6 @@
     border-radius: 10px;
     padding: 0.65rem;
     background: var(--surface-subtle);
-  }
-
-  .lane-color {
-    width: 38px;
-    height: 38px;
-    flex: 0 0 auto;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    padding: 3px;
-    background: var(--surface-raised);
-    cursor: pointer;
   }
 
   .lane-name {

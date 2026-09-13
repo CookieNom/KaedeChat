@@ -173,10 +173,11 @@ final class MobileMediaQuality {
     Iterable<String> supportedCodecs = const [],
   }) {
     final codecs = supportedCodecs.map((codec) => codec.toLowerCase()).toSet();
-    final fallback = codecs.contains('video/h264') ? 'h264' : 'vp8';
-    final av1 = !encrypted && codecs.contains('video/av1');
+    final fallback =
+        !encrypted && codecs.contains('video/h264') ? 'h264' : 'vp8';
+    final av1 = codecs.contains('video/av1');
     return VideoPublishOptions(
-      videoCodec: encrypted ? 'vp8' : (av1 ? 'av1' : fallback),
+      videoCodec: av1 ? 'av1' : fallback,
       backupVideoCodec: BackupVideoCodec(enabled: av1, codec: fallback),
       videoEncoding:
           cameraCaptureOptionsForMode(videoQualityMode).params.encoding,
