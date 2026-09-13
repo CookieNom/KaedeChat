@@ -1,253 +1,3691 @@
 {
-  "@@locale": "ja",
-  "language_name": "日本語",
-  "language_settings": "言語",
-  "language_description": "Kaedeの画面、日付、数値に使用する言語を選択します。",
-  "language_system": "システム設定に従う",
-  "language_suggestion": "お使いの端末の言語は{language}です。Kaedeでもこの言語を使用しますか？後から「設定 → 言語」で変更できます。",
-  "language_accept": "{language}を使用する",
-  "language_decline": "現在の言語を使い続ける",
-  "language_save_error": "言語を保存できませんでした。もう一度お試しください。",
-  "language_contribute": "Kaedeの翻訳に協力する",
-  "unknown_date": "不明な日時",
-  "ui_invalid_link_a17f6d80": "無効なリンク",
-  "ui_this_kaede_link_is_incomplete_or_malformed_2386e315": "このKaedeリンクは不完全か、形式が正しくありません。",
-  "ui_open_kaede_7ab69d15": "Kaedeを開く",
-  "ui_kaede_is_locked_e4be9cb9": "Kaedeはロックされています",
-  "ui_use_your_biometrics_or_device_passcode_to_con_5503db9b": "生体認証または端末のパスコードで続行してください。",
-  "ui_unlock_9c799975": "ロックを解除",
-  "ui_sign_out_instead_044cad9a": "ログアウトする",
-  "ui_status_005ef20f": "ステータス",
-  "ui_resolution_aee818af": "解像度",
-  "ui_cancel_35afca3b": "キャンセル",
-  "ui_save_4d2d5d68": "保存",
-  "ui_role_902b7e39": "ロール",
-  "ui_administration_8fd91fef": "管理",
-  "ui_refresh_0815aad4": "更新",
-  "ui_search_c646a2c9": "検索",
-  "ui_applications_2f7f7f22": "アプリケーション",
-  "ui_name_0fe07306": "名前",
-  "ui_description_66de7a09": "説明",
-  "ui_create_990de47d": "作成",
-  "ui_add_9dc3aa14": "追加",
-  "ui_copy_658f3664": "コピー",
-  "ui_done_8dd31791": "完了",
-  "ui_commands_971550f3": "コマンド",
-  "ui_revoke_2219c453": "無効にする",
-  "ui_copy_invite_link_a7c3b223": "招待リンクをコピー",
-  "ui_retry_8036af59": "再試行",
-  "ui_try_again_213e90fa": "もう一度試す",
-  "ui_continue_ab43d664": "続ける",
-  "ui_profile_cd17328e": "プロフィール",
-  "ui_about_me_974d6f90": "自己紹介",
-  "ui_account_59f8a2fc": "アカウント",
-  "ui_security_c2fe21db": "セキュリティ",
-  "ui_activity_status_6b197d4e": "アクティビティの表示",
-  "ui_online_bc3b88aa": "オンライン",
-  "ui_idle_45aa17b3": "退席中",
-  "ui_do_not_disturb_816d809a": "取り込み中",
-  "ui_invisible_bab31830": "オンライン状態を隠す",
-  "ui_appearance_31018b9f": "外観",
-  "ui_theme_4eaf7c92": "テーマ",
-  "ui_sync_with_device_f98594c0": "端末の設定に合わせる",
-  "ui_light_8ad2f8cf": "ライト",
-  "ui_dark_45570065": "ダーク",
-  "ui_notifications_381d190f": "通知",
-  "ui_direct_messages_0db1f240": "ダイレクトメッセージ",
-  "ui_friend_requests_48c86d61": "フレンド申請",
-  "ui_never_b2ff2b29": "無期限",
-  "ui_accessibility_84b3d09f": "アクセシビリティ",
-  "ui_privacy_ebfa87e7": "プライバシー",
-  "ui_everyone_25219998": "全員",
-  "ui_friends_only_ca1a5d18": "フレンドのみ",
-  "ui_advanced_60f3de7b": "詳細設定",
-  "ui_developer_mode_80d8dbd0": "開発者モード",
-  "ui_instance_administration_9c3dd778": "インスタンス管理",
-  "ui_devices_27acf320": "デバイス",
-  "ui_current_session_d49af382": "現在のセッション",
-  "ui_sign_out_8b4f3c70": "ログアウト",
-  "ui_log_out_88c6d8b5": "ログアウト",
-  "ui_remove_21a5901d": "削除",
-  "ui_change_email_d4ae86d5": "メールアドレスを変更",
-  "ui_verification_code_cb8e95b7": "確認コード",
-  "ui_could_not_save_that_setting_0e78d469": "設定を保存できませんでした",
-  "ui_remove_banner_74d33021": "バナーを削除",
-  "ui_remove_avatar_d6403a8e": "アバターを削除",
-  "ui_delete_5797ea6a": "削除",
-  "ui_unavailable_da4baaa9": "利用できません",
-  "ui_edit_c2c76cb1": "編集",
-  "ui_apps_53d91aad": "アプリ",
-  "ui_apply_ca77bbdb": "適用",
-  "ui_search_channels_79842fc3": "チャンネルを検索",
-  "ui_search_messages_7bf8a493": "メッセージを検索",
-  "ui_sort_8459a7f1": "並べ替え",
-  "ui_newest_324b6d0b": "新しい順",
-  "ui_oldest_4aa405ee": "古い順",
-  "ui_bots_48630a97": "ボット",
-  "ui_webhooks_b7853def": "Webhook",
-  "ui_mentions_43e4fe52": "メンション",
-  "ui_clear_04a57fc2": "クリア",
-  "ui_forward_message_b328e70d": "メッセージを転送",
-  "ui_thread_ea904991": "スレッド",
-  "ui_send_f28e14cf": "送信",
-  "ui_reply_d1ca83c7": "返信",
-  "ui_copy_text_6426ce4b": "テキストをコピー",
-  "ui_copy_message_link_09495605": "メッセージのリンクをコピー",
-  "ui_forward_e50883ba": "転送",
-  "ui_add_reaction_7583c0e7": "リアクションを追加",
-  "ui_end_poll_b892c63f": "投票を終了",
-  "ui_pin_message_6e68281b": "メッセージをピン留め",
-  "ui_edit_message_bfeb2eea": "メッセージを編集",
-  "ui_report_message_52f7cf88": "メッセージを報告",
-  "ui_delete_message_595ff4fd": "メッセージを削除",
-  "ui_message_ae0ed984": "メッセージ",
-  "ui_pin_d4479a34": "ピン留め",
-  "ui_reason_41314139": "理由",
-  "ui_submitting_d14d93eb": "送信中…",
-  "ui_jump_to_present_7f4a86d9": "最新のメッセージに移動",
-  "ui_sending_e946e7bf": "送信中…",
-  "ui_reactions_2aa367bb": "リアクション",
-  "ui_loading_c4e2f181": "読み込み中…",
-  "ui_spoiler_69958ef9": "ネタバレ",
-  "ui_edited_ee60fcc9": "（編集済み）",
-  "ui_submit_4078e545": "送信",
-  "ui_question_00a70065": "質問",
-  "ui_answers_02c6bc64": "回答",
-  "ui_add_answer_b61078fe": "回答を追加",
-  "ui_duration_d4c7492d": "期間",
-  "ui_create_poll_7c4af1be": "投票を作成",
-  "ui_open_link_173a8def": "リンクを開く",
-  "ui_open_538b10e9": "開く",
-  "ui_frequently_used_4949bbc1": "よく使う項目",
-  "ui_send_message_d97db31c": "メッセージを送信",
-  "ui_list_8d2937a1": "一覧",
-  "ui_close_cd86acc3": "閉じる",
-  "ui_title_24d471a9": "タイトル",
-  "ui_tags_76bda0c0": "タグ",
-  "ui_gifs_a5648696": "GIF",
-  "ui_stickers_1609e2dd": "スタンプ",
-  "ui_emoji_033ebcdd": "絵文字",
-  "ui_remove_from_favorites_c23fbb86": "お気に入りから削除",
-  "ui_add_to_favorites_09c13814": "お気に入りに追加",
-  "ui_removing_be3af276": "削除中…",
-  "ui_reset_password_679a51e9": "パスワードをリセット",
-  "ui_sign_in_744be623": "ログイン",
-  "ui_create_account_50dc6622": "アカウントを作成",
-  "ui_forgot_password_e2619568": "パスワードを忘れた場合",
-  "ui_verify_2d5c0c44": "確認",
-  "ui_two_factor_authentication_68cad341": "二要素認証",
-  "ui_new_password_6a3aaab2": "新しいパスワード",
-  "ui_confirm_password_5ad9dc20": "パスワードの確認",
-  "ui_accept_invitation_968c52bc": "招待を承認",
-  "ui_server_6d7302f2": "サーバー",
-  "ui_not_now_2c3d6fce": "今はしない",
-  "ui_enable_notifications_456c745e": "通知を有効にする",
-  "ui_about_me_683da950": "自己紹介",
-  "ui_copy_user_id_b36e9128": "ユーザーIDをコピー",
-  "ui_user_e0a63e12": "ユーザー",
-  "ui_data_saver_2e98ac08": "データ節約",
-  "ui_smooth_4a02d9cf": "滑らか",
-  "ui_sharp_64858ee7": "鮮明",
-  "ui_source_61e2a3f8": "ソース",
-  "ui_voice_channel_d243a4f2": "ボイスチャンネル",
-  "ui_connecting_4d2cf951": "接続中…",
-  "ui_join_voice_f86abe8f": "ボイスチャンネルに参加",
-  "ui_topic_68501b64": "トピック",
-  "ui_push_to_talk_40dec4c0": "プッシュ・トゥ・トーク",
-  "ui_voice_activity_88bfed22": "音声検出",
-  "ui_speaker_6c7955e2": "スピーカー",
-  "ui_task_76ef3d8c": "タスク",
-  "ui_priority_e68d9f29": "優先度",
-  "ui_assignee_2a64a64a": "担当者",
-  "ui_create_task_ae7443ee": "タスクを作成",
-  "ui_edit_value0_8e92dac2": "{value0}を編集",
-  "ui_actions_e65fb504": "操作",
-  "ui_1_minute_983277c4": "1分",
-  "ui_10_minutes_5da9f7ad": "10分",
-  "ui_1_hour_0c43fb4a": "1時間",
-  "ui_1_day_db83588e": "1日",
-  "ui_7_days_ba4b8279": "7日",
-  "ui_28_days_ddd98ada": "28日",
-  "ui_none_304ff7fb": "なし",
-  "ui_channel_655d8a44": "チャンネル",
-  "ui_revoke_access_0dd14817": "アクセス権を取り消す",
-  "ui_guild_settings_33e2baed": "サーバー設定",
-  "ui_overview_6a494fba": "概要",
-  "ui_channels_c9409495": "チャンネル",
-  "ui_roles_3e77ce7e": "ロール",
-  "ui_members_ed3c96b0": "メンバー",
-  "ui_bans_aa74d24f": "BAN一覧",
-  "ui_invites_4f9d0a79": "招待",
-  "ui_disabled_bfce9925": "無効",
-  "ui_save_changes_61efb279": "変更を保存",
-  "ui_all_messages_a6bb8868": "すべてのメッセージ",
-  "ui_nothing_2cea492a": "通知しない",
-  "ui_leave_guild_a37329a3": "サーバーから退出",
-  "ui_create_channel_fd2226d6": "チャンネルを作成",
-  "ui_edit_channel_dfb3900a": "チャンネルを編集",
-  "ui_permissions_8700fd83": "権限",
-  "ui_end_to_end_encryption_21f71771": "エンドツーエンド暗号化",
-  "ui_verify_safety_number_070dce0b": "セーフティナンバーを確認",
-  "ui_enable_8614a9ee": "有効にする",
-  "ui_create_role_b4d57cd3": "ロールを作成",
-  "ui_manage_roles_de7a2fe3": "ロールを管理",
-  "ui_timeout_82d97e28": "タイムアウト",
-  "ui_kick_2cfbaa3f": "キック",
-  "ui_ban_bfbc51a6": "BAN",
-  "ui_unban_84c561ff": "BANを解除",
-  "ui_create_invite_918a1372": "招待を作成",
-  "ui_30_minutes_80e4b47f": "30分",
-  "ui_6_hours_27b1b222": "6時間",
-  "ui_creating_01fcd896": "作成中…",
-  "ui_reset_0ac8a560": "リセット",
-  "ui_category_afb3e591": "カテゴリー",
-  "ui_upload_avatar_5c00299d": "アバターをアップロード",
-  "ui_webhook_name_d1cff1d9": "Webhook名",
-  "ui_audit_log_cb83f9ca": "監査ログ",
-  "ui_saving_bd79b37d": "保存中…",
-  "ui_text_channel_58162d0d": "テキストチャンネル",
-  "ui_channel_name_0700b8a7": "チャンネル名",
-  "ui_automatic_616a6784": "自動",
-  "ui_24_hours_42929680": "24時間",
-  "ui_3_days_2d8e0d65": "3日",
-  "ui_1_week_d0d53158": "1週間",
-  "ui_role_name_275452c0": "ロール名",
-  "ui_30_days_7a572af9": "30日",
-  "ui_confirm_a183c9ef": "確認",
-  "ui_follow_8aad7d90": "フォロー",
-  "ui_command_c67c8f52": "コマンド",
-  "ui_member_fef5fce3": "メンバー",
-  "ui_create_event_d0c67bc5": "イベントを作成",
-  "ui_edit_event_041c41b1": "イベントを編集",
-  "ui_friends_63cc7b7a": "フレンド",
-  "ui_settings_4b058728": "設定",
-  "ui_incoming_call_6927a8fb": "着信",
-  "ui_decline_58eaef39": "拒否",
-  "ui_answer_f94ea0ff": "回答",
-  "ui_pinned_messages_c56c8a9d": "ピン留めしたメッセージ",
-  "ui_start_call_29ddf6b1": "通話を開始",
-  "ui_threads_23244ec6": "スレッド",
-  "ui_channel_settings_635bf631": "チャンネル設定",
-  "ui_more_options_bff24c7e": "その他のオプション",
-  "ui_unfollow_f4a8c527": "フォローを解除",
-  "ui_lock_71b42d62": "ロック",
-  "ui_custom_emoji_317ed9c4": "カスタム絵文字",
-  "ui_end_call_25446c02": "通話を終了",
-  "ui_offline_c47c37c8": "オフライン",
-  "ui_messages_f8611fd5": "メッセージ",
-  "ui_new_conversation_90d5317c": "新しい会話",
-  "ui_invite_people_a3ce4cb3": "メンバーを招待",
-  "ui_events_003420a4": "イベント",
-  "ui_unmute_bb6972bb": "ミュートを解除",
-  "ui_mute_3f609f74": "ミュート",
-  "ui_account_settings_358e8719": "アカウント設定",
-  "ui_leave_voice_dc19c17a": "ボイスチャンネルから退出",
-  "ui_copy_link_23f990dc": "リンクをコピー",
-  "ui_add_friend_6a7bbb34": "フレンドを追加",
-  "ui_blocked_e378ac53": "ブロック中",
-  "ui_accept_50b26149": "承認",
-  "ui_unblock_987c7d5f": "ブロックを解除",
-  "ui_send_friend_request_719d5c00": "フレンド申請を送信",
-  "ui_remove_friend_1b6055cb": "フレンドを解除",
-  "ui_optional_fdd15019": "任意"
+    "@@locale": "ja",
+    "language_name": "日本語",
+    "language_settings": "言語",
+    "language_description": "Kaedeの画面、日付、数値に使用する言語を選択します。",
+    "language_system": "システム設定に従う",
+    "language_suggestion": "お使いの端末の言語は{language}です。Kaedeでもこの言語を使用しますか？後から「設定 → 言語」で変更できます。",
+    "language_accept": "{language}を使用する",
+    "language_decline": "現在の言語を使い続ける",
+    "language_save_error": "言語を保存できませんでした。もう一度お試しください。",
+    "language_contribute": "Kaedeの翻訳に協力する",
+    "unknown_date": "不明な日時",
+    "ui_invalid_link_a17f6d80": "無効なリンク",
+    "ui_this_kaede_link_is_incomplete_or_malformed_2386e315": "このKaedeリンクは不完全か、形式が正しくありません。",
+    "ui_open_kaede_7ab69d15": "Kaedeを開く",
+    "ui_kaede_is_locked_e4be9cb9": "Kaedeはロックされています",
+    "ui_use_your_biometrics_or_device_passcode_to_con_5503db9b": "生体認証または端末のパスコードで続行してください。",
+    "ui_unlock_9c799975": "ロックを解除",
+    "ui_sign_out_instead_044cad9a": "ログアウトする",
+    "ui_status_005ef20f": "ステータス",
+    "ui_resolution_aee818af": "解像度",
+    "ui_cancel_35afca3b": "キャンセル",
+    "ui_save_4d2d5d68": "保存",
+    "ui_role_902b7e39": "ロール",
+    "ui_administration_8fd91fef": "管理",
+    "ui_refresh_0815aad4": "更新",
+    "ui_search_c646a2c9": "検索",
+    "ui_applications_2f7f7f22": "アプリケーション",
+    "ui_name_0fe07306": "名前",
+    "ui_description_66de7a09": "説明",
+    "ui_create_990de47d": "作成",
+    "ui_add_9dc3aa14": "追加",
+    "ui_copy_658f3664": "コピー",
+    "ui_done_8dd31791": "完了",
+    "ui_commands_971550f3": "コマンド",
+    "ui_revoke_2219c453": "無効にする",
+    "ui_copy_invite_link_a7c3b223": "招待リンクをコピー",
+    "ui_retry_8036af59": "再試行",
+    "ui_try_again_213e90fa": "もう一度試す",
+    "ui_continue_ab43d664": "続ける",
+    "ui_profile_cd17328e": "プロフィール",
+    "ui_about_me_974d6f90": "自己紹介",
+    "ui_account_59f8a2fc": "アカウント",
+    "ui_security_c2fe21db": "セキュリティ",
+    "ui_activity_status_6b197d4e": "アクティビティの表示",
+    "ui_online_bc3b88aa": "オンライン",
+    "ui_idle_45aa17b3": "退席中",
+    "ui_do_not_disturb_816d809a": "取り込み中",
+    "ui_invisible_bab31830": "オンライン状態を隠す",
+    "ui_appearance_31018b9f": "外観",
+    "ui_theme_4eaf7c92": "テーマ",
+    "ui_sync_with_device_f98594c0": "端末の設定に合わせる",
+    "ui_light_8ad2f8cf": "ライト",
+    "ui_dark_45570065": "ダーク",
+    "ui_notifications_381d190f": "通知",
+    "ui_direct_messages_0db1f240": "ダイレクトメッセージ",
+    "ui_friend_requests_48c86d61": "フレンド申請",
+    "ui_never_b2ff2b29": "無期限",
+    "ui_accessibility_84b3d09f": "アクセシビリティ",
+    "ui_privacy_ebfa87e7": "プライバシー",
+    "ui_everyone_25219998": "全員",
+    "ui_friends_only_ca1a5d18": "フレンドのみ",
+    "ui_advanced_60f3de7b": "詳細設定",
+    "ui_developer_mode_80d8dbd0": "開発者モード",
+    "ui_instance_administration_9c3dd778": "インスタンス管理",
+    "ui_devices_27acf320": "デバイス",
+    "ui_current_session_d49af382": "現在のセッション",
+    "ui_sign_out_8b4f3c70": "ログアウト",
+    "ui_log_out_88c6d8b5": "ログアウト",
+    "ui_remove_21a5901d": "削除",
+    "ui_change_email_d4ae86d5": "メールアドレスを変更",
+    "ui_verification_code_cb8e95b7": "確認コード",
+    "ui_could_not_save_that_setting_0e78d469": "設定を保存できませんでした",
+    "ui_remove_banner_74d33021": "バナーを削除",
+    "ui_remove_avatar_d6403a8e": "アバターを削除",
+    "ui_delete_5797ea6a": "削除",
+    "ui_unavailable_da4baaa9": "利用できません",
+    "ui_edit_c2c76cb1": "編集",
+    "ui_apps_53d91aad": "アプリ",
+    "ui_apply_ca77bbdb": "適用",
+    "ui_search_channels_79842fc3": "チャンネルを検索",
+    "ui_search_messages_7bf8a493": "メッセージを検索",
+    "ui_sort_8459a7f1": "並べ替え",
+    "ui_newest_324b6d0b": "新しい順",
+    "ui_oldest_4aa405ee": "古い順",
+    "ui_bots_48630a97": "ボット",
+    "ui_webhooks_b7853def": "Webhook",
+    "ui_mentions_43e4fe52": "メンション",
+    "ui_clear_04a57fc2": "クリア",
+    "ui_forward_message_b328e70d": "メッセージを転送",
+    "ui_thread_ea904991": "スレッド",
+    "ui_send_f28e14cf": "送信",
+    "ui_reply_d1ca83c7": "返信",
+    "ui_copy_text_6426ce4b": "テキストをコピー",
+    "ui_copy_message_link_09495605": "メッセージのリンクをコピー",
+    "ui_forward_e50883ba": "転送",
+    "ui_add_reaction_7583c0e7": "リアクションを追加",
+    "ui_end_poll_b892c63f": "投票を終了",
+    "ui_pin_message_6e68281b": "メッセージをピン留め",
+    "ui_edit_message_bfeb2eea": "メッセージを編集",
+    "ui_report_message_52f7cf88": "メッセージを報告",
+    "ui_delete_message_595ff4fd": "メッセージを削除",
+    "ui_message_ae0ed984": "メッセージ",
+    "ui_pin_d4479a34": "ピン留め",
+    "ui_reason_41314139": "理由",
+    "ui_submitting_d14d93eb": "送信中…",
+    "ui_jump_to_present_7f4a86d9": "最新のメッセージに移動",
+    "ui_sending_e946e7bf": "送信中…",
+    "ui_reactions_2aa367bb": "リアクション",
+    "ui_loading_c4e2f181": "読み込み中…",
+    "ui_spoiler_69958ef9": "ネタバレ",
+    "ui_edited_ee60fcc9": "（編集済み）",
+    "ui_submit_4078e545": "送信",
+    "ui_question_00a70065": "質問",
+    "ui_answers_02c6bc64": "回答",
+    "ui_add_answer_b61078fe": "回答を追加",
+    "ui_duration_d4c7492d": "期間",
+    "ui_create_poll_7c4af1be": "投票を作成",
+    "ui_open_link_173a8def": "リンクを開く",
+    "ui_open_538b10e9": "開く",
+    "ui_frequently_used_4949bbc1": "よく使う項目",
+    "ui_send_message_d97db31c": "メッセージを送信",
+    "ui_list_8d2937a1": "一覧",
+    "ui_close_cd86acc3": "閉じる",
+    "ui_title_24d471a9": "タイトル",
+    "ui_tags_76bda0c0": "タグ",
+    "ui_gifs_a5648696": "GIF",
+    "ui_stickers_1609e2dd": "スタンプ",
+    "ui_emoji_033ebcdd": "絵文字",
+    "ui_remove_from_favorites_c23fbb86": "お気に入りから削除",
+    "ui_add_to_favorites_09c13814": "お気に入りに追加",
+    "ui_removing_be3af276": "削除中…",
+    "ui_reset_password_679a51e9": "パスワードをリセット",
+    "ui_sign_in_744be623": "ログイン",
+    "ui_create_account_50dc6622": "アカウントを作成",
+    "ui_forgot_password_e2619568": "パスワードを忘れた場合",
+    "ui_verify_2d5c0c44": "確認",
+    "ui_two_factor_authentication_68cad341": "二要素認証",
+    "ui_new_password_6a3aaab2": "新しいパスワード",
+    "ui_confirm_password_5ad9dc20": "パスワードの確認",
+    "ui_accept_invitation_968c52bc": "招待を承認",
+    "ui_server_6d7302f2": "サーバー",
+    "ui_not_now_2c3d6fce": "今はしない",
+    "ui_enable_notifications_456c745e": "通知を有効にする",
+    "ui_about_me_683da950": "自己紹介",
+    "ui_copy_user_id_b36e9128": "ユーザーIDをコピー",
+    "ui_user_e0a63e12": "ユーザー",
+    "ui_data_saver_2e98ac08": "データ節約",
+    "ui_smooth_4a02d9cf": "滑らか",
+    "ui_sharp_64858ee7": "鮮明",
+    "ui_source_61e2a3f8": "ソース",
+    "ui_voice_channel_d243a4f2": "ボイスチャンネル",
+    "ui_connecting_4d2cf951": "接続中…",
+    "ui_join_voice_f86abe8f": "ボイスチャンネルに参加",
+    "ui_topic_68501b64": "トピック",
+    "ui_push_to_talk_40dec4c0": "プッシュ・トゥ・トーク",
+    "ui_voice_activity_88bfed22": "音声検出",
+    "ui_speaker_6c7955e2": "スピーカー",
+    "ui_task_76ef3d8c": "タスク",
+    "ui_priority_e68d9f29": "優先度",
+    "ui_assignee_2a64a64a": "担当者",
+    "ui_create_task_ae7443ee": "タスクを作成",
+    "ui_edit_value0_8e92dac2": "{value0}を編集",
+    "ui_actions_e65fb504": "操作",
+    "ui_1_minute_983277c4": "1分",
+    "ui_10_minutes_5da9f7ad": "10分",
+    "ui_1_hour_0c43fb4a": "1時間",
+    "ui_1_day_db83588e": "1日",
+    "ui_7_days_ba4b8279": "7日",
+    "ui_28_days_ddd98ada": "28日",
+    "ui_none_304ff7fb": "なし",
+    "ui_channel_655d8a44": "チャンネル",
+    "ui_revoke_access_0dd14817": "アクセス権を取り消す",
+    "ui_guild_settings_33e2baed": "サーバー設定",
+    "ui_overview_6a494fba": "概要",
+    "ui_channels_c9409495": "チャンネル",
+    "ui_roles_3e77ce7e": "ロール",
+    "ui_members_ed3c96b0": "メンバー",
+    "ui_bans_aa74d24f": "BAN一覧",
+    "ui_invites_4f9d0a79": "招待",
+    "ui_disabled_bfce9925": "無効",
+    "ui_save_changes_61efb279": "変更を保存",
+    "ui_all_messages_a6bb8868": "すべてのメッセージ",
+    "ui_nothing_2cea492a": "通知しない",
+    "ui_leave_guild_a37329a3": "サーバーから退出",
+    "ui_create_channel_fd2226d6": "チャンネルを作成",
+    "ui_edit_channel_dfb3900a": "チャンネルを編集",
+    "ui_permissions_8700fd83": "権限",
+    "ui_end_to_end_encryption_21f71771": "エンドツーエンド暗号化",
+    "ui_verify_safety_number_070dce0b": "セーフティナンバーを確認",
+    "ui_enable_8614a9ee": "有効にする",
+    "ui_create_role_b4d57cd3": "ロールを作成",
+    "ui_manage_roles_de7a2fe3": "ロールを管理",
+    "ui_timeout_82d97e28": "タイムアウト",
+    "ui_kick_2cfbaa3f": "キック",
+    "ui_ban_bfbc51a6": "BAN",
+    "ui_unban_84c561ff": "BANを解除",
+    "ui_create_invite_918a1372": "招待を作成",
+    "ui_30_minutes_80e4b47f": "30分",
+    "ui_6_hours_27b1b222": "6時間",
+    "ui_creating_01fcd896": "作成中…",
+    "ui_reset_0ac8a560": "リセット",
+    "ui_category_afb3e591": "カテゴリー",
+    "ui_upload_avatar_5c00299d": "アバターをアップロード",
+    "ui_webhook_name_d1cff1d9": "Webhook名",
+    "ui_audit_log_cb83f9ca": "監査ログ",
+    "ui_saving_bd79b37d": "保存中…",
+    "ui_text_channel_58162d0d": "テキストチャンネル",
+    "ui_channel_name_0700b8a7": "チャンネル名",
+    "ui_automatic_616a6784": "自動",
+    "ui_24_hours_42929680": "24時間",
+    "ui_3_days_2d8e0d65": "3日",
+    "ui_1_week_d0d53158": "1週間",
+    "ui_role_name_275452c0": "ロール名",
+    "ui_30_days_7a572af9": "30日",
+    "ui_confirm_a183c9ef": "確認",
+    "ui_follow_8aad7d90": "フォロー",
+    "ui_command_c67c8f52": "コマンド",
+    "ui_member_fef5fce3": "メンバー",
+    "ui_create_event_d0c67bc5": "イベントを作成",
+    "ui_edit_event_041c41b1": "イベントを編集",
+    "ui_friends_63cc7b7a": "フレンド",
+    "ui_settings_4b058728": "設定",
+    "ui_incoming_call_6927a8fb": "着信",
+    "ui_decline_58eaef39": "拒否",
+    "ui_answer_f94ea0ff": "回答",
+    "ui_pinned_messages_c56c8a9d": "ピン留めしたメッセージ",
+    "ui_start_call_29ddf6b1": "通話を開始",
+    "ui_threads_23244ec6": "スレッド",
+    "ui_channel_settings_635bf631": "チャンネル設定",
+    "ui_more_options_bff24c7e": "その他のオプション",
+    "ui_unfollow_f4a8c527": "フォローを解除",
+    "ui_lock_71b42d62": "ロック",
+    "ui_custom_emoji_317ed9c4": "カスタム絵文字",
+    "ui_end_call_25446c02": "通話を終了",
+    "ui_offline_c47c37c8": "オフライン",
+    "ui_messages_f8611fd5": "メッセージ",
+    "ui_new_conversation_90d5317c": "新しい会話",
+    "ui_invite_people_a3ce4cb3": "メンバーを招待",
+    "ui_events_003420a4": "イベント",
+    "ui_unmute_bb6972bb": "ミュートを解除",
+    "ui_mute_3f609f74": "ミュート",
+    "ui_account_settings_358e8719": "アカウント設定",
+    "ui_leave_voice_dc19c17a": "ボイスチャンネルから退出",
+    "ui_copy_link_23f990dc": "リンクをコピー",
+    "ui_add_friend_6a7bbb34": "フレンドを追加",
+    "ui_blocked_e378ac53": "ブロック中",
+    "ui_accept_50b26149": "承認",
+    "ui_unblock_987c7d5f": "ブロックを解除",
+    "ui_send_friend_request_719d5c00": "フレンド申請を送信",
+    "ui_remove_friend_1b6055cb": "フレンドを解除",
+    "ui_optional_fdd15019": "任意",
+    "ui_kaede_chat_9c0fb33b": "Kaede Chat",
+    "@ui_kaede_chat_9c0fb33b": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_kaede_771d2cd7": "Kaede",
+    "@ui_kaede_771d2cd7": {
+        "description": "Interface text in lib/src/app.dart"
+    },
+    "ui_value0_value1_947523d9": "{value0} · {value1}",
+    "@ui_value0_value1_947523d9": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_26e9163c": "{value0}",
+    "@ui_value0_26e9163c": {
+        "description": "Interface text in lib/src/domain/guild_admin.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_developer_portal_f5349d3d": "開発者ポータル",
+    "@ui_developer_portal_f5349d3d": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_value0_members_174769cf": "{value0}人のメンバー",
+    "@ui_value0_members_174769cf": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_add_member_fa100f0e": "メンバーを追加",
+    "@ui_add_member_fa100f0e": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_revoke_value0_8d1f4335": "{value0}の認可を取り消しますか？",
+    "@ui_revoke_value0_8d1f4335": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_allow_546d19d2": "許可",
+    "@ui_allow_546d19d2": {
+        "description": "Interface text in lib/src/features/guild/application_command_permissions_screen.dart"
+    },
+    "ui_deny_07d5fa87": "拒否",
+    "@ui_deny_07d5fa87": {
+        "description": "Interface text in lib/src/features/guild/application_command_permissions_screen.dart"
+    },
+    "ui_invite_link_copied_b511318e": "招待リンクをコピーしました。",
+    "@ui_invite_link_copied_b511318e": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_my_reports_78d941fc": "自分の通報",
+    "@ui_my_reports_78d941fc": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_initialize_encryption_a5f503e0": "暗号化を初期化できませんでした",
+    "@ui_could_not_initialize_encryption_a5f503e0": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_save_your_encrypted_recovery_backup_4c2d4594": "暗号化された復旧用バックアップを保存してください",
+    "@ui_save_your_encrypted_recovery_backup_4c2d4594": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_anyone_with_this_backup_and_its_passphrase_ca_164a07d9": "このバックアップとパスフレーズを持つ人は、暗号化された履歴を読むことができます。それぞれ別の場所に保管してください。復旧時にのみ復元してください。Kaedeが共有アカウント保管庫との整合性を調整します。持ち運び可能な平文キャッシュには、最近のメッセージ最大2,000件または8 MiBまでしか保持されないため、古い履歴には別の信頼済みクライアントが必要な場合があります。",
+    "@ui_anyone_with_this_backup_and_its_passphrase_ca_164a07d9": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_recovery_backup_copied_fcef8632": "復旧用バックアップをコピーしました。",
+    "@ui_recovery_backup_copied_fcef8632": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_i_saved_it_f0b83580": "保存しました",
+    "@ui_i_saved_it_f0b83580": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_create_the_recovery_backup_59c7f841": "復旧用バックアップを作成できませんでした",
+    "@ui_could_not_create_the_recovery_backup_59c7f841": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_restore_encrypted_history_b4785055": "暗号化された履歴を復元",
+    "@ui_restore_encrypted_history_b4785055": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_use_a_recovery_backup_when_automatic_account__3b508c42": "アカウント保管庫の自動復旧が利用できない場合は、復旧用バックアップを使用してください。復元すると、このクライアントのキャッシュ状態を置き換え、同じ持ち運び可能なアカウントIDの使用を再開します。バックアップには、最近の復号済みメッセージ最大2,000件、または平文キャッシュ8 MiBまでが含まれます。",
+    "@ui_use_a_recovery_backup_when_automatic_account__3b508c42": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_recovery_backup_12b7e994": "復旧用バックアップ",
+    "@ui_recovery_backup_12b7e994": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_passphrase_191a2dc5": "パスフレーズ",
+    "@ui_passphrase_191a2dc5": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_replace_and_restore_6453a4d4": "置き換えて復元",
+    "@ui_replace_and_restore_6453a4d4": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_restore_encrypted_history_639bcbd5": "暗号化された履歴を復元できませんでした",
+    "@ui_could_not_restore_encrypted_history_639bcbd5": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_encryption_identity_d4a088ae": "暗号化ID",
+    "@ui_encryption_identity_d4a088ae": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_your_signed_in_clients_share_one_portable_mls_43e16efa": "ログイン中のクライアントは、持ち運び可能な1つのMLS IDを共有します。更新すると、利用できない暗号化履歴を放棄し、メンバーが鍵を更新するまで影響するルームを一時停止します。",
+    "@ui_your_signed_in_clients_share_one_portable_mls_43e16efa": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_portable_account_identity_9267709d": "持ち運び可能なアカウントID",
+    "@ui_portable_account_identity_9267709d": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_last_enrolled_from_value0_value1_value2_value_e534a826": "最終登録元: {value0}（{value1}） · {value2}{value3}",
+    "@ui_last_enrolled_from_value0_value1_value2_value_e534a826": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            },
+            "value2": {
+                "type": "String"
+            },
+            "value3": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_revoked_e58fe295": "取り消し済み",
+    "@ui_revoked_e58fe295": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_rotate_encryption_identity_4aeaf1f7": "暗号化IDを更新",
+    "@ui_rotate_encryption_identity_4aeaf1f7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_start_a_new_encryption_identity_17f1a378": "新しい暗号化IDを作成しますか？",
+    "@ui_start_a_new_encryption_identity_17f1a378": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_this_abandons_encrypted_history_that_is_unava_00029ea3": "登録済みクライアントや復旧用バックアップから取得できない暗号化履歴を放棄します。ログイン中のすべてのクライアントで新しいIDを読み込む必要があり、影響するルームは鍵が更新されるまで一時停止します。",
+    "@ui_this_abandons_encrypted_history_that_is_unava_00029ea3": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_start_fresh_2eca7af7": "新しく開始",
+    "@ui_start_fresh_2eca7af7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_create_a_new_encryption_identity_12f87665": "新しい暗号化IDを作成できませんでした",
+    "@ui_could_not_create_a_new_encryption_identity_12f87665": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_load_encryption_identity_42c0a2c8": "暗号化IDを読み込めませんでした",
+    "@ui_could_not_load_encryption_identity_42c0a2c8": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_account_settings_could_not_be_loaded_some_con_84593b02": "アカウント設定を読み込めませんでした。一部の設定には一時的な既定値が表示される場合があります。",
+    "@ui_account_settings_could_not_be_loaded_some_con_84593b02": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_suspended_unavailable_ac856ef7": "一時停止中 · 利用不可",
+    "@ui_suspended_unavailable_ac856ef7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_revoked_unavailable_19ed49ea": "取り消し済み · 利用不可",
+    "@ui_revoked_unavailable_19ed49ea": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_commands_unavailable_38116645": "コマンドを利用できません",
+    "@ui_commands_unavailable_38116645": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_guild_channels_fcb4d8c8": "サーバーのチャンネル",
+    "@ui_guild_channels_fcb4d8c8": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_private_conversations_0de4d400": "非公開の会話",
+    "@ui_private_conversations_0de4d400": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_direct_messages_with_bots_f733fcd2": "ボットとのダイレクトメッセージ",
+    "@ui_direct_messages_with_bots_f733fcd2": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_save_command_access_f73dfe79": "コマンドのアクセス権を保存",
+    "@ui_save_command_access_f73dfe79": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_revoke_app_d6963c78": "アプリの認可を取り消す",
+    "@ui_revoke_app_d6963c78": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_its_user_installed_commands_will_disappear_th_697aae80": "アカウントにインストールされたコマンドが表示されなくなります。アプリは以前に送信した情報を保持している場合があります。",
+    "@ui_its_user_installed_commands_will_disappear_th_697aae80": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_update_that_authorized_app_4846bf2d": "認可済みアプリを更新できませんでした",
+    "@ui_could_not_update_that_authorized_app_4846bf2d": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_how_people_see_you_across_the_federation_3df0bdc7": "連合ネットワークでほかの人に表示される情報です。",
+    "@ui_how_people_see_you_across_the_federation_3df0bdc7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_display_name_698fa38c": "表示名",
+    "@ui_display_name_698fa38c": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_custom_status_91dc0394": "カスタムステータス",
+    "@ui_custom_status_91dc0394": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_save_profile_9bf48ffd": "プロフィールを保存",
+    "@ui_save_profile_9bf48ffd": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_the_identity_hosted_by_your_home_instance_a17941b7": "ホームインスタンスで管理されるアカウント情報です。",
+    "@ui_the_identity_hosted_by_your_home_instance_a17941b7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_this_instance_does_not_require_email_d20dc6bb": "このインスタンスはメールを必要としません。",
+    "@ui_this_instance_does_not_require_email_d20dc6bb": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_verified_email_51a616ad": "確認済みメールアドレス",
+    "@ui_verified_email_51a616ad": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_email_verification_is_pending_e54cd06d": "メールアドレスは確認待ちです",
+    "@ui_email_verification_is_pending_e54cd06d": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_confirm_email_change_a2e3e285": "メールアドレスの変更を確定",
+    "@ui_confirm_email_change_a2e3e285": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enter_the_token_from_your_confirmation_email_748811c1": "確認メールに記載されたトークンを入力してください。",
+    "@ui_enter_the_token_from_your_confirmation_email_748811c1": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_authenticator_app_744f34d3": "認証アプリ",
+    "@ui_authenticator_app_744f34d3": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_two_factor_authentication_is_enabled_4de40010": "二要素認証を有効にしました。",
+    "@ui_two_factor_authentication_is_enabled_4de40010": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_require_a_code_in_addition_to_your_password_81056d3c": "パスワードに加えてコードを必須にします。",
+    "@ui_require_a_code_in_addition_to_your_password_81056d3c": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_encryption_keys_unlock_your_account_vault_on__2f7938f9": "暗号鍵は、各信頼済みデバイスでアカウント保管庫を開くために使われます。インスタンスに保存されるのは暗号文のみです。",
+    "@ui_encryption_keys_unlock_your_account_vault_on__2f7938f9": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_encryption_enabled_71075035": "暗号化は有効です",
+    "@ui_encryption_enabled_71075035": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_setting_up_encryption_dbb11da3": "暗号化を設定中…",
+    "@ui_setting_up_encryption_dbb11da3": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_set_up_this_device_56bd05ba": "このデバイスを設定",
+    "@ui_set_up_this_device_56bd05ba": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_this_device_is_ready_for_end_to_end_encryptio_351bb719": "このデバイスでエンドツーエンド暗号化を利用できます。",
+    "@ui_this_device_is_ready_for_end_to_end_encryptio_351bb719": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enable_end_to_end_encryption_on_this_phone_a50338f3": "この端末でエンドツーエンド暗号化を有効にします。",
+    "@ui_enable_end_to_end_encryption_on_this_phone_a50338f3": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_devices_sharing_this_account_s_mls_identity_c285170f": "このアカウントのMLS IDを共有しているデバイスです。",
+    "@ui_devices_sharing_this_account_s_mls_identity_c285170f": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_create_recovery_backup_42d961da": "復旧用バックアップを作成",
+    "@ui_create_recovery_backup_42d961da": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_restore_recovery_backup_8f057af6": "復旧用バックアップを復元",
+    "@ui_restore_recovery_backup_8f057af6": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_your_availability_follows_you_between_mobile__1aa8ef75": "オンライン状態はモバイル、デスクトップ、ウェブの間で同期されます。",
+    "@ui_your_availability_follows_you_between_mobile__1aa8ef75": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_theme_and_regional_formatting_follow_your_acc_81232c35": "テーマと地域別の書式は、アカウントを通じてクライアント間で同期されます。",
+    "@ui_theme_and_regional_formatting_follow_your_acc_81232c35": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_sync_with_device_follows_the_operating_system_d3766500": "「デバイスと同期」では、OSのライトまたはダークの外観に合わせます。",
+    "@ui_sync_with_device_follows_the_operating_system_d3766500": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_closed_app_delivery_runs_through_kaede_push_r_573433c8": "アプリを閉じているときの通知にはKaede Push Relay（{value0}）を使用します。リレーにはホームインスタンスと内容を読み取れないデバイス登録情報が見えますが、メッセージ本文、送信者名、ルーム、暗号鍵が渡されることはありません。",
+    "@ui_closed_app_delivery_runs_through_kaede_push_r_573433c8": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_this_community_build_uses_its_own_firebase_pr_192d5ff4": "このコミュニティビルドでは、アプリ終了時の通知に独自のFirebaseプロバイダーを使用します。Firebaseが受け取るのはメッセージ内容を含まない起動通知のみで、ロック画面のプライバシー設定も引き続き適用されます。",
+    "@ui_this_community_build_uses_its_own_firebase_pr_192d5ff4": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enabling_notifications_59c4bd6b": "通知を有効化中…",
+    "@ui_enabling_notifications_59c4bd6b": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enable_background_notifications_dfa12bd2": "バックグラウンド通知を有効にする",
+    "@ui_enable_background_notifications_dfa12bd2": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_background_notifications_are_enabled_697fbaac": "バックグラウンド通知は有効です。",
+    "@ui_background_notifications_are_enabled_697fbaac": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_notifications_could_not_be_enabled_check_syst_7a08d801": "通知を有効にできませんでした。システムの通知権限を確認して、もう一度お試しください。",
+    "@ui_notifications_could_not_be_enabled_check_syst_7a08d801": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_enable_background_notifications_76cccb52": "バックグラウンド通知を有効にできませんでした",
+    "@ui_could_not_enable_background_notifications_76cccb52": {
+        "description": "Interface text in lib/src/features/auth/push_onboarding.dart"
+    },
+    "ui_disable_background_notifications_c89499e5": "バックグラウンド通知を無効にする",
+    "@ui_disable_background_notifications_c89499e5": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_background_notifications_are_disabled_for_thi_40f8fd45": "このアカウントのバックグラウンド通知は無効です。",
+    "@ui_background_notifications_are_disabled_for_thi_40f8fd45": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_notification_delivery_needs_attention_51e3d429": "通知の配信に対応が必要です",
+    "@ui_notification_delivery_needs_attention_51e3d429": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_mentions_and_replies_b5a93c57": "メンションと返信",
+    "@ui_mentions_and_replies_b5a93c57": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_show_message_previews_1c24a210": "メッセージのプレビューを表示",
+    "@ui_show_message_previews_1c24a210": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_shows_the_sender_text_and_profile_picture_aft_9bf1a906": "非公開の起動通知後に、送信者、本文、プロフィール画像を表示します。これらの情報がFCMに送られることはありません。",
+    "@ui_shows_the_sender_text_and_profile_picture_aft_9bf1a906": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_text_to_speech_29f0c859": "テキスト読み上げ",
+    "@ui_text_to_speech_29f0c859": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_choose_which_incoming_tts_messages_this_phone_146aaf9a": "受信したどの読み上げメッセージを、この端末で読み上げるか選んでください。",
+    "@ui_choose_which_incoming_tts_messages_this_phone_146aaf9a": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_text_to_speech_playback_3a07a07e": "テキスト読み上げの再生",
+    "@ui_text_to_speech_playback_3a07a07e": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_this_only_affects_messages_marked_as_tts_ordi_ee2a809c": "読み上げ指定のあるメッセージにのみ適用します。通常のメッセージを読み上げることはありません。",
+    "@ui_this_only_affects_messages_marked_as_tts_ordi_ee2a809c": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_for_all_channels_205ed599": "すべてのチャンネル",
+    "@ui_for_all_channels_205ed599": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_for_current_selected_channel_d1ebe50d": "現在選択中のチャンネル",
+    "@ui_for_current_selected_channel_d1ebe50d": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_control_text_to_speech_playback_and_reading_s_4a9f8831": "テキスト読み上げの再生と読み上げ速度を設定します。",
+    "@ui_control_text_to_speech_playback_and_reading_s_4a9f8831": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_allow_playback_and_usage_of_tts_command_c481110d": "読み上げの再生と/ttsコマンドの使用を許可",
+    "@ui_allow_playback_and_usage_of_tts_command_c481110d": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_when_off_kaede_will_not_send_or_speak_text_to_a599b70f": "無効にすると、このデバイスでは読み上げメッセージの送信も読み上げも行いません。",
+    "@ui_when_off_kaede_will_not_send_or_speak_text_to_a599b70f": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_text_to_speech_rate_value0_e3574f53": "読み上げ速度 · {value0}倍",
+    "@ui_text_to_speech_rate_value0_e3574f53": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_review_reports_submitted_to_trust_safety_694bd7dc": "Trust & Safetyに送信した通報を確認します。",
+    "@ui_review_reports_submitted_to_trust_safety_694bd7dc": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_who_can_message_you_823607fd": "メッセージを送信できる相手",
+    "@ui_who_can_message_you_823607fd": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_friends_and_shared_guilds_982b0f0c": "フレンドと同じサーバーのメンバー",
+    "@ui_friends_and_shared_guilds_982b0f0c": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_age_restricted_commands_in_direct_messages_8d888b5c": "ダイレクトメッセージの年齢制限付きコマンド",
+    "@ui_age_restricted_commands_in_direct_messages_8d888b5c": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_allow_age_restricted_application_commands_in__c887d5aa": "DMとグループDMで年齢制限付きアプリコマンドを許可します。",
+    "@ui_allow_age_restricted_application_commands_in__c887d5aa": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_unavailable_because_this_account_is_age_assur_427fc165": "このアカウントは未成年として年齢確認されているため利用できません。",
+    "@ui_unavailable_because_this_account_is_age_assur_427fc165": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_unavailable_until_your_instance_completes_age_406a4411": "インスタンスでこのアカウントの年齢確認が完了するまで利用できません。",
+    "@ui_unavailable_until_your_instance_completes_age_406a4411": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_lock_kaede_when_you_leave_4a987862": "離れたときにKaedeをロック",
+    "@ui_lock_kaede_when_you_leave_4a987862": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_unlock_with_biometrics_your_device_passcode_o_7d5ba4f0": "生体認証、デバイスのパスコード、またはPINでロックを解除します。",
+    "@ui_unlock_with_biometrics_your_device_passcode_o_7d5ba4f0": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_lock_after_leaving_c08241ac": "離れてからロックするまで",
+    "@ui_lock_after_leaving_c08241ac": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_authorized_apps_d0c4597c": "認可済みアプリ",
+    "@ui_authorized_apps_d0c4597c": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_apps_installed_for_your_account_and_the_conte_f8363698": "アカウントにインストールされたアプリと、コマンドを利用できる場所です。",
+    "@ui_apps_installed_for_your_account_and_the_conte_f8363698": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_optional_media_and_troubleshooting_controls_f826ddce": "メディアとトラブルシューティング用の任意の設定です。",
+    "@ui_optional_media_and_troubleshooting_controls_f826ddce": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_opus_discontinuous_transmission_d4983843": "Opusの不連続送信",
+    "@ui_opus_discontinuous_transmission_d4983843": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_reduce_outgoing_bandwidth_while_you_are_not_s_05b24382": "話していない間の送信帯域を減らします。推奨設定です。",
+    "@ui_reduce_outgoing_bandwidth_while_you_are_not_s_05b24382": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_developer_34a3d9ed": "開発者向け",
+    "@ui_developer_34a3d9ed": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_build_applications_and_reveal_qualified_techn_7d88b2dd": "アプリの開発や、コンテキストメニューでの完全な技術IDの表示を有効にします。",
+    "@ui_build_applications_and_reveal_qualified_techn_7d88b2dd": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_adds_copy_id_actions_for_users_servers_channe_bc7fcbd7": "ユーザー、サーバー、チャンネル、メッセージ、アプリに「IDをコピー」を追加します。",
+    "@ui_adds_copy_id_actions_for_users_servers_channe_bc7fcbd7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_copy_my_user_id_fc4a926a": "自分のユーザーIDをコピー",
+    "@ui_copy_my_user_id_fc4a926a": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_applications_teams_commands_credentials_worke_6e318370": "アプリ、チーム、コマンド、認証情報、ワーカー、インストール、メディア。",
+    "@ui_applications_teams_commands_credentials_worke_6e318370": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_capability_gated_instance_operations_and_trus_473df8f1": "権限に応じたインスタンスの操作とTrust & Safety。",
+    "@ui_capability_gated_instance_operations_and_trus_473df8f1": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_users_applications_reports_federation_blocks__2241f659": "ユーザー、アプリ、通報、連合ブロック、運営者、監査ログ。",
+    "@ui_users_applications_reports_federation_blocks__2241f659": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_signed_in_devices_on_this_account_1300d8d2": "このアカウントでログインしているデバイスです。",
+    "@ui_signed_in_devices_on_this_account_1300d8d2": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_this_device_8fc5c8b9": "このデバイス",
+    "@ui_this_device_8fc5c8b9": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_open_source_licences_e93031eb": "オープンソースライセンス",
+    "@ui_open_source_licences_e93031eb": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_log_out_of_kaede_3fa5e517": "Kaedeからログアウトしますか？",
+    "@ui_log_out_of_kaede_3fa5e517": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_saved_conversations_on_this_device_stay_encry_1d8e1080": "このデバイスに保存された会話は暗号化して保管され、ログアウト時に削除されます。",
+    "@ui_saved_conversations_on_this_device_stay_encry_1d8e1080": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_stay_signed_in_767385f7": "ログインを続ける",
+    "@ui_stay_signed_in_767385f7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_save_the_profile_01ac475a": "プロフィールを保存できませんでした",
+    "@ui_could_not_save_the_profile_01ac475a": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_choose_a_png_jpeg_gif_or_webp_image_07065ce2": "PNG、JPEG、GIF、またはWebP画像を選んでください。",
+    "@ui_choose_a_png_jpeg_gif_or_webp_image_07065ce2": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_update_the_value0_a2c8df24": "{value0}を更新できませんでした",
+    "@ui_could_not_update_the_value0_a2c8df24": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_remove_your_value0_0cb49922": "自分の{value0}を削除しますか？",
+    "@ui_remove_your_value0_0cb49922": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_you_can_upload_a_new_value0_at_any_time_818cafff": "新しい{value0}はいつでもアップロードできます。",
+    "@ui_you_can_upload_a_new_value0_at_any_time_818cafff": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_remove_your_value0_cca01e29": "自分の{value0}を削除できませんでした",
+    "@ui_could_not_remove_your_value0_cca01e29": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_set_up_authenticator_663ba1cb": "認証アプリを設定",
+    "@ui_set_up_authenticator_663ba1cb": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_disable_two_factor_authentication_e4b58a45": "二要素認証を無効にする",
+    "@ui_disable_two_factor_authentication_e4b58a45": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_complete_every_field_before_continuing_27efd3e0": "続行する前に、すべての項目を入力してください。",
+    "@ui_complete_every_field_before_continuing_27efd3e0": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_add_kaede_to_your_authenticator_d07ff1f7": "認証アプリにKaedeを追加",
+    "@ui_add_kaede_to_your_authenticator_d07ff1f7": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enter_this_setup_key_in_your_authenticator_ap_b81703ff": "この設定キーを認証アプリに入力し、6桁のコードを確認してください。",
+    "@ui_enter_this_setup_key_in_your_authenticator_ap_b81703ff": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_advanced_setup_uri_f9f13308": "詳細設定用URI",
+    "@ui_advanced_setup_uri_f9f13308": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enter_the_full_verification_code_ec2d5c93": "確認コードをすべて入力してください。",
+    "@ui_enter_the_full_verification_code_ec2d5c93": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_verify_and_enable_eba13f60": "確認して有効にする",
+    "@ui_verify_and_enable_eba13f60": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_save_your_recovery_codes_155a83d0": "リカバリーコードを保存してください",
+    "@ui_save_your_recovery_codes_155a83d0": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_each_code_can_be_used_once_if_you_lose_your_a_5e78a307": "認証アプリを使えなくなった場合に、各コードを1回ずつ使用できます。Kaedeで再表示することはできません。",
+    "@ui_each_code_can_be_used_once_if_you_lose_your_a_5e78a307": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_i_saved_them_a4929513": "保存しました",
+    "@ui_i_saved_them_a4929513": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_enable_device_lock_for_kaede_chat_60093c1e": "Kaede Chatのデバイスロックを有効にする",
+    "@ui_enable_device_lock_for_kaede_chat_60093c1e": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_enable_the_app_lock_317a7765": "アプリロックを有効にできませんでした",
+    "@ui_could_not_enable_the_app_lock_317a7765": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_save_the_app_lock_setting_29561c23": "アプリロックの設定を保存できませんでした",
+    "@ui_could_not_save_the_app_lock_setting_29561c23": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_save_the_opus_dtx_setting_2a28595e": "Opus DTXの設定を保存できませんでした",
+    "@ui_could_not_save_the_opus_dtx_setting_2a28595e": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_save_the_app_lock_timeout_5aa1cd90": "アプリがロックするまでの時間を保存できませんでした",
+    "@ui_could_not_save_the_app_lock_timeout_5aa1cd90": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_could_not_sign_out_that_device_47a81c51": "そのデバイスをログアウトできませんでした",
+    "@ui_could_not_sign_out_that_device_47a81c51": {
+        "description": "Interface text in lib/src/features/settings/settings_screen.dart"
+    },
+    "ui_change_banner_ae718a61": "バナーを変更",
+    "@ui_change_banner_ae718a61": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_change_avatar_7b892dce": "アバターを変更",
+    "@ui_change_avatar_7b892dce": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_delete_value0_5861e774": "{value0}を削除しますか？",
+    "@ui_delete_value0_5861e774": {
+        "description": "Interface text in lib/src/features/settings/application_media_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_add_emoji_a3203c4a": "絵文字を追加",
+    "@ui_add_emoji_a3203c4a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_2397634a": ":{value0}:",
+    "@ui_value0_2397634a": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_available_72402638": "利用可能",
+    "@ui_available_72402638": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_spoiler_ea48d139": "ネタバレ",
+    "@ui_spoiler_ea48d139": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_close_apps_0b6e16a1": "アプリを閉じる",
+    "@ui_close_apps_0b6e16a1": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_search_apps_and_commands_0d58e860": "アプリとコマンドを検索",
+    "@ui_search_apps_and_commands_0d58e860": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_no_apps_or_commands_match_your_search_16615cbb": "検索に一致するアプリやコマンドはありません。",
+    "@ui_no_apps_or_commands_match_your_search_16615cbb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_0345d263": "/{value0}",
+    "@ui_value0_0345d263": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_run_command_45581e4f": "コマンドを実行",
+    "@ui_run_command_45581e4f": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_ea2f080f": "#{value0}",
+    "@ui_value0_ea2f080f": {
+        "description": "Interface text in lib/src/features/guild/application_command_permissions_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_message_history_is_unavailable_in_this_channe_088d854e": "このチャンネルではメッセージ履歴を利用できません。",
+    "@ui_message_history_is_unavailable_in_this_channe_088d854e": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_people_8390060e": "ユーザー",
+    "@ui_people_8390060e": {
+        "description": "Interface text in lib/src/features/chat/message_search_screen.dart"
+    },
+    "ui_load_more_2b7b053e": "さらに読み込む",
+    "@ui_load_more_2b7b053e": {
+        "description": "Interface text in lib/src/features/guild/scheduled_events_tab.dart"
+    },
+    "ui_no_matching_members_d9decbf6": "一致するメンバーはいません",
+    "@ui_no_matching_members_d9decbf6": {
+        "description": "Interface text in lib/src/features/chat/message_search_screen.dart"
+    },
+    "ui_search_members_d6e1fdce": "メンバーを検索",
+    "@ui_search_members_d6e1fdce": {
+        "description": "Interface text in lib/src/features/guild/application_command_permissions_screen.dart"
+    },
+    "ui_sticker_value0_af3f912b": "スタンプ: {value0}",
+    "@ui_sticker_value0_af3f912b": {
+        "description": "Interface text in lib/src/features/chat/composer_pickers.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_choose_a_conversation_c864a504": "会話を選んでください。",
+    "@ui_choose_a_conversation_c864a504": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_guild_updates_are_paused_on_this_instance_972443be": "このインスタンスではサーバーの更新が一時停止しています。",
+    "@ui_guild_updates_are_paused_on_this_instance_972443be": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_instance_cannot_cache_another_remote_acc_92af2fdd": "このインスタンスは、サーバーに必要な追加のリモートアカウントをキャッシュできません。インスタンスの管理者にお問い合わせください。自分のメッセージを削除する必要はありません。",
+    "@ui_this_instance_cannot_cache_another_remote_acc_92af2fdd": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_instance_cannot_cache_another_remote_ser_64038111": "このインスタンスは、サーバーに必要な追加のリモートサーバーをキャッシュできません。インスタンスの管理者にお問い合わせください。自分のメッセージを削除する必要はありません。",
+    "@ui_this_instance_cannot_cache_another_remote_ser_64038111": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_its_remote_guild_cache_is_full_so_recent_mess_86aad479": "リモートサーバーのキャッシュが満杯のため、最近のメッセージや変更が表示されない場合があります。インスタンスの管理者にお問い合わせください。自分のメッセージを削除する必要はありません。",
+    "@ui_its_remote_guild_cache_is_full_so_recent_mess_86aad479": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_message_history_is_unavailable_c0d9de88": "メッセージ履歴は利用できません。",
+    "@ui_message_history_is_unavailable_c0d9de88": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_new_messages_will_appear_here_while_you_are_c_ef353033": "接続中に届いた新しいメッセージはここに表示されます。",
+    "@ui_new_messages_will_appear_here_while_you_are_c_ef353033": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_you_are_timed_out_in_this_guild_f627dacb": "このサーバーでタイムアウトされています。",
+    "@ui_you_are_timed_out_in_this_guild_f627dacb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_you_are_timed_out_until_value0_692480e8": "{value0}までタイムアウトされています。",
+    "@ui_you_are_timed_out_until_value0_692480e8": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_reason_value0_f78e586a": "理由: {value0}",
+    "@ui_reason_value0_f78e586a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_the_guild_s_home_instance_did_not_provide_a_r_7f1d8403": "サーバーのホームインスタンスから理由が提供されていません。",
+    "@ui_the_guild_s_home_instance_did_not_provide_a_r_7f1d8403": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_kaede_is_retrieving_the_reason_from_the_guild_7a5e6727": "Kaedeがサーバーのホームインスタンスから理由を取得しています。",
+    "@ui_kaede_is_retrieving_the_reason_from_the_guild_7a5e6727": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_loading_earlier_messages_1afc1067": "以前のメッセージを読み込み中…",
+    "@ui_loading_earlier_messages_1afc1067": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_load_earlier_messages_1d3e3ff7": "以前のメッセージを読み込む",
+    "@ui_load_earlier_messages_1d3e3ff7": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_encrypted_messaging_is_paused_while_participa_812e00c5": "参加者のデバイス鍵を確立する間、暗号化メッセージを一時停止しています。平文で送信されることはありません。",
+    "@ui_encrypted_messaging_is_paused_while_participa_812e00c5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_thread_is_locked_only_moderators_can_sen_723dfceb": "このスレッドはロックされています。モデレーターのみがメッセージを送信できます。",
+    "@ui_this_thread_is_locked_only_moderators_can_sen_723dfceb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_you_do_not_have_permission_to_send_messages_h_af698d70": "ここにメッセージを送信する権限がありません。",
+    "@ui_you_do_not_have_permission_to_send_messages_h_af698d70": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_you_cannot_send_messages_while_timed_out_481f2aaf": "タイムアウト中はメッセージを送信できません。",
+    "@ui_you_cannot_send_messages_while_timed_out_481f2aaf": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_1b34e556": "@{value0}",
+    "@ui_value0_1b34e556": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_sent_to_value1_bbbfabaa": "/{value0}を{value1}に送信しました。",
+    "@ui_value0_sent_to_value1_bbbfabaa": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_you_cannot_attach_files_in_this_channel_8ac6abc5": "このチャンネルではファイルを添付できません。",
+    "@ui_you_cannot_attach_files_in_this_channel_8ac6abc5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_send_or_clear_the_current_draft_attachments_a_a37b62fb": "投票を作成する前に、現在の下書き、添付ファイル、返信を送信またはクリアしてください。",
+    "@ui_send_or_clear_the_current_draft_attachments_a_a37b62fb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_created_7db54462": "投票を作成しました。",
+    "@ui_poll_created_7db54462": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_create_the_poll_57023a37": "投票を作成できませんでした",
+    "@ui_could_not_create_the_poll_57023a37": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_messages_can_contain_at_most_4_000_characters_779f2f0d": "メッセージは4,000文字以内にしてください。",
+    "@ui_messages_can_contain_at_most_4_000_characters_779f2f0d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_gif_search_is_unavailable_in_end_to_end_encry_c8976737": "エンドツーエンド暗号化された会話ではGIF検索を利用できません。",
+    "@ui_gif_search_is_unavailable_in_end_to_end_encry_c8976737": {
+        "description": "Interface text in lib/src/features/chat/composer_pickers.dart"
+    },
+    "ui_slow_mode_is_active_try_again_in_value0_secon_07ff2f45": "低速モードが有効です。{value0}秒後に再試行してください。",
+    "@ui_slow_mode_is_active_try_again_in_value0_secon_07ff2f45": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_send_this_voice_message_3f28f87c": "この音声メッセージを送信できませんでした",
+    "@ui_could_not_send_this_voice_message_3f28f87c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_choose_command_options_in_the_typed_fields_fr_39830bbc": "コマンドのオプションは専用の入力欄で指定してください。自由形式の引数は送信されません。",
+    "@ui_choose_command_options_in_the_typed_fields_fr_39830bbc": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_send_the_message_8cf961bb": "メッセージを送信できませんでした",
+    "@ui_could_not_send_the_message_8cf961bb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_update_that_reaction_793f9cec": "そのリアクションを更新できませんでした",
+    "@ui_could_not_update_that_reaction_793f9cec": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_control_is_no_longer_connected_to_its_ap_f0347339": "この操作項目はアプリと接続されていません。",
+    "@ui_this_control_is_no_longer_connected_to_its_ap_f0347339": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_bot_did_not_receive_that_interaction_7b2b55a9": "ボットにその操作が届きませんでした",
+    "@ui_the_bot_did_not_receive_that_interaction_7b2b55a9": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_bot_is_thinking_f8062c5a": "ボットが応答を準備中…",
+    "@ui_bot_is_thinking_f8062c5a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_bot_did_not_receive_that_private_interact_cb10783a": "ボットにその非公開の操作が届きませんでした",
+    "@ui_the_bot_did_not_receive_that_private_interact_cb10783a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_update_your_vote_918e29a5": "投票を更新できませんでした",
+    "@ui_could_not_update_your_vote_918e29a5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_update_your_private_poll_vote_c43dfc83": "非公開の投票を更新できませんでした",
+    "@ui_could_not_update_your_private_poll_vote_c43dfc83": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_choose_up_to_5_destinations_value0_5_the_snap_42f7b8f0": "送信先は最大5件まで · {value0}/5。スナップショットに元の投稿者は含まれません。",
+    "@ui_choose_up_to_5_destinations_value0_5_the_snap_42f7b8f0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_current_conversation_85ea25c5": "現在の会話",
+    "@ui_current_conversation_85ea25c5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_add_a_note_optional_7cca8138": "メモを追加（任意）",
+    "@ui_add_a_note_optional_7cca8138": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_send_value0_6ed7a9dd": "送信（{value0}）",
+    "@ui_send_value0_6ed7a9dd": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_sent_to_value1_8c0321c9": "{value0}を{value1}に送信しました。",
+    "@ui_value0_sent_to_value1_8c0321c9": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_the_app_command_could_not_be_delivered_35789e23": "アプリコマンドを送信できませんでした",
+    "@ui_the_app_command_could_not_be_delivered_35789e23": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_more_emoji_6fa68e3e": "ほかの絵文字",
+    "@ui_more_emoji_6fa68e3e": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_copy_media_link_39bd84b0": "メディアリンクをコピー",
+    "@ui_copy_media_link_39bd84b0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_create_thread_e32ec947": "スレッドを作成",
+    "@ui_create_thread_e32ec947": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_share_an_author_free_snapshot_copy_534647d6": "投稿者情報を含まないスナップショットを共有",
+    "@ui_share_an_author_free_snapshot_copy_534647d6": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_publish_message_f3a6022f": "メッセージを公開",
+    "@ui_publish_message_f3a6022f": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_send_to_this_announcement_channel_s_followers_b0a9ca11": "このお知らせチャンネルのフォロー先に送信",
+    "@ui_send_to_this_announcement_channel_s_followers_b0a9ca11": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_remove_from_gif_favorites_31005464": "GIFのお気に入りから削除",
+    "@ui_remove_from_gif_favorites_31005464": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_add_to_gif_favorites_fc8eb732": "GIFのお気に入りに追加",
+    "@ui_add_to_gif_favorites_fc8eb732": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_view_reactions_fa9f26b0": "リアクションを表示",
+    "@ui_view_reactions_fa9f26b0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_view_poll_voters_e312aa04": "投票者を表示",
+    "@ui_view_poll_voters_e312aa04": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_unpin_message_122b93fa": "メッセージのピン留めを解除",
+    "@ui_unpin_message_122b93fa": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_include_value0_as_context_c3633c5f": "{value0}を文脈として含める",
+    "@ui_include_value0_as_context_c3633c5f": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_copy_message_id_2d579ac4": "メッセージIDをコピー",
+    "@ui_copy_message_id_2d579ac4": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_message_link_copied_43be494a": "メッセージリンクをコピーしました。",
+    "@ui_message_link_copied_43be494a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_share_decrypted_snapshot_d5d82a91": "復号済みのスナップショットを共有しますか？",
+    "@ui_share_decrypted_snapshot_d5d82a91": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_at_least_one_destination_is_not_end_to_end_en_ec79fe19": "少なくとも1つの送信先はエンドツーエンド暗号化されていません。Kaedeは、その会話に投稿者情報を含まないメッセージとファイルのコピーを開示します。",
+    "@ui_at_least_one_destination_is_not_end_to_end_en_ec79fe19": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_share_snapshot_5a5c8a0c": "スナップショットを共有",
+    "@ui_share_snapshot_5a5c8a0c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_forwarded_to_value0_destination_value1_5db9ce6d": "{value0}件の送信先に転送しました{value1, select, other {}}。",
+    "@ui_forwarded_to_value0_destination_value1_5db9ce6d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_forwarded_to_value0_value1_destination_value2_9471c0ac": "{value0}件に転送しました。{value1}件の送信先で失敗しました{value2, select, other {}}。",
+    "@ui_forwarded_to_value0_value1_destination_value2_9471c0ac": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            },
+            "value2": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_message_published_to_this_announcement_channe_b400bae0": "このお知らせチャンネルのフォロー先にメッセージを公開しました。",
+    "@ui_message_published_to_this_announcement_channe_b400bae0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_gif_removed_from_favorites_66b66be4": "GIFをお気に入りから削除しました。",
+    "@ui_gif_removed_from_favorites_66b66be4": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_gif_added_to_favorites_aaff0fb5": "GIFをお気に入りに追加しました。",
+    "@ui_gif_added_to_favorites_aaff0fb5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_end_this_poll_4bce305c": "この投票を終了しますか？",
+    "@ui_end_this_poll_4bce305c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_voting_will_close_immediately_and_the_final_r_15bbf55c": "投票を直ちに締め切り、最終結果を引き続き表示します。",
+    "@ui_voting_will_close_immediately_and_the_final_r_15bbf55c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_keep_open_74cbd680": "終了しない",
+    "@ui_keep_open_74cbd680": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_ended_c1f4f22e": "投票を終了しました。",
+    "@ui_poll_ended_c1f4f22e": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_pin_this_message_bdd6c5a0": "このメッセージをピン留めしますか？",
+    "@ui_pin_this_message_bdd6c5a0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_remove_this_pin_09a4d331": "このピン留めを解除しますか？",
+    "@ui_remove_this_pin_09a4d331": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_everyone_in_this_conversation_will_be_able_to_43233c79": "この会話の全員が、ピン留め一覧から見つけられるようになります。",
+    "@ui_everyone_in_this_conversation_will_be_able_to_43233c79": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_message_will_remain_in_the_conversation_59e103da": "メッセージ自体は会話に残ります。",
+    "@ui_the_message_will_remain_in_the_conversation_59e103da": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_remove_pin_49a985ee": "ピン留めを解除",
+    "@ui_remove_pin_49a985ee": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_complete_that_message_action_5031d556": "そのメッセージ操作を完了できませんでした",
+    "@ui_could_not_complete_that_message_action_5031d556": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_thread_name_f63426e8": "スレッド名",
+    "@ui_thread_name_f63426e8": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_this_encrypted_attachment_is_not_available_on_2212b096": "この暗号化された添付ファイルは、このデバイスではまだ利用できません。復号されるまで待ってから、再試行してください。",
+    "@ui_this_encrypted_attachment_is_not_available_on_2212b096": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_selected_attachment_is_available_but_the__d3388cc2": "選択した添付ファイルは利用できますが、このデバイスでは暗号化されたメッセージ本文がまだ復号されていません。復号されるまで待ってから、再試行してください。",
+    "@ui_the_selected_attachment_is_available_but_the__d3388cc2": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_reporting_shares_the_complete_message_and_upl_062868f8": "通報すると、メッセージ全体を共有し、{value0}の暗号化されていないコピーをチャンネルのモデレーション管理元にアップロードします。暗号鍵やほかのメッセージが送信されることはありません。",
+    "@ui_reporting_shares_the_complete_message_and_upl_062868f8": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_this_message_is_end_to_end_encrypted_reportin_f9388951": "このメッセージはエンドツーエンド暗号化されています。通報すると、このデバイスに表示された復号済みの本文と、すべての添付ファイルのメタデータをチャンネルのモデレーション管理元に共有します。添付ファイルのみのメッセージも、開示する本文を空として通報できます。添付ファイルを直接選択しない限り、暗号鍵や復号済みのファイル内容は送信されません。",
+    "@ui_this_message_is_end_to_end_encrypted_reportin_f9388951": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_encrypted_message_has_not_decrypted_on_t_7d960381": "この暗号化されたメッセージは、このデバイスではまだ復号されていません。認証済みのメッセージ証拠が復号されるまで待ってから、再試行してください。",
+    "@ui_this_encrypted_message_has_not_decrypted_on_t_7d960381": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_reports_the_complete_message_and_all_of__2495a870": "メッセージ全体とすべての添付ファイルを通報します。選択した添付ファイルはモデレーター向けに強調表示されます。",
+    "@ui_this_reports_the_complete_message_and_all_of__2495a870": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_message_text_and_metadata_for_all_of_its__b26d976c": "メッセージ本文とすべての添付ファイルのメタデータが、チャンネルのモデレーション管理元に送信されます。",
+    "@ui_the_message_text_and_metadata_for_all_of_its__b26d976c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_i_understand_the_decrypted_message_and_select_2bc2b10c": "復号済みのメッセージと選択したファイルが、暗号化されずに開示されることを理解しました。",
+    "@ui_i_understand_the_decrypted_message_and_select_2bc2b10c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_i_understand_the_decrypted_message_text_will__10ce50ee": "復号済みのメッセージ本文が開示されることを理解しました。",
+    "@ui_i_understand_the_decrypted_message_text_will__10ce50ee": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_additional_details_optional_3fd8fff1": "追加の詳細（任意）",
+    "@ui_additional_details_optional_3fd8fff1": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_report_submitted_7c567658": "通報を送信しました。",
+    "@ui_report_submitted_7c567658": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_submit_the_report_b7c750dc": "通報を送信できませんでした",
+    "@ui_could_not_submit_the_report_b7c750dc": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_report_was_submitted_but_its_decrypted_at_a6a196dc": "通報は送信されましたが、復号済みの添付ファイルの証拠を追加できませんでした",
+    "@ui_the_report_was_submitted_but_its_decrypted_at_a6a196dc": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_submit_report_6912cf41": "通報を送信",
+    "@ui_submit_report_6912cf41": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_new_message_value1_0d55cd61": "新しいメッセージ{value0}件{value1, select, other {}}",
+    "@ui_value0_new_message_value1_0d55cd61": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_beginning_of_conversation_22f2ea44": "会話の始まり",
+    "@ui_beginning_of_conversation_22f2ea44": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_recent_history_starts_here_d0d289cb": "最近の履歴はここからです",
+    "@ui_recent_history_starts_here_d0d289cb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_you_have_reached_the_oldest_message_available_7008908b": "会話のホームインスタンスから取得できる最も古いメッセージに到達しました。",
+    "@ui_you_have_reached_the_oldest_message_available_7008908b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_instance_keeps_a_rolling_cache_of_this_r_5cc01f36": "このインスタンスは、このリモートの会話の直近のキャッシュを保持しています。古いメッセージは必要に応じてホームインスタンスから読み込みます。一時的に利用できない場合は、再試行してください。",
+    "@ui_this_instance_keeps_a_rolling_cache_of_this_r_5cc01f36": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_discard_message_d502239a": "メッセージを破棄",
+    "@ui_discard_message_d502239a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_load_the_people_who_reacted_78c558cf": "リアクションした人を読み込めませんでした",
+    "@ui_could_not_load_the_people_who_reacted_78c558cf": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_clear_every_reaction_836c9b29": "すべてのリアクションを削除しますか？",
+    "@ui_clear_every_reaction_836c9b29": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_clear_all_value0_reactions_4f4029b7": "{value0}のリアクションをすべて削除しますか？",
+    "@ui_clear_all_value0_reactions_4f4029b7": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_all_value0_reactions_will_be_removed_from_thi_4a8c8e72": "このメッセージから{value0}のリアクションをすべて削除します。この操作は取り消せません。",
+    "@ui_all_value0_reactions_will_be_removed_from_thi_4a8c8e72": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_value1_will_be_removed_from_this_messa_b72f4443": "このメッセージから{value0} {value1}を削除します。この操作は取り消せません。",
+    "@ui_value0_value1_will_be_removed_from_this_messa_b72f4443": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_clear_all_reactions_af2e8add": "すべてのリアクションを削除",
+    "@ui_clear_all_reactions_af2e8add": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_clear_value0_0996e7fb": "{value0}をクリア",
+    "@ui_clear_value0_0996e7fb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_all_reactions_cleared_c1073f7a": "すべてのリアクションを削除しました。",
+    "@ui_all_reactions_cleared_c1073f7a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_reaction_group_cleared_eb58adc9": "リアクションのグループを削除しました。",
+    "@ui_reaction_group_cleared_eb58adc9": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_reactions_cleared_a481d1d2": "{value0}のリアクションを削除しました。",
+    "@ui_value0_reactions_cleared_a481d1d2": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_clear_reactions_from_this_message_8f6f4c5d": "このメッセージのリアクションを削除できませんでした",
+    "@ui_could_not_clear_reactions_from_this_message_8f6f4c5d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_clear_the_value0_reactions_8ae61f4a": "{value0}のリアクションを削除できませんでした",
+    "@ui_could_not_clear_the_value0_reactions_8ae61f4a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_close_reactions_12be55a7": "リアクションを閉じる",
+    "@ui_close_reactions_12be55a7": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_clear_all_797a9445": "すべてクリア",
+    "@ui_clear_all_797a9445": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_no_reactions_to_show_771ed656": "表示するリアクションはありません。",
+    "@ui_no_reactions_to_show_771ed656": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_profile_unavailable_refreshes_automatically_9ef31289": "プロフィールを利用できません · 自動で再読み込みします",
+    "@ui_profile_unavailable_refreshes_automatically_9ef31289": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_replying_to_0a78ca6a": "返信先: ",
+    "@ui_replying_to_0a78ca6a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_author_will_be_notified_a8f4335e": "投稿者に通知します",
+    "@ui_the_author_will_be_notified_a8f4335e": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_reply_without_notifying_the_author_1d3e78c2": "投稿者に通知せずに返信",
+    "@ui_reply_without_notifying_the_author_1d3e78c2": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_on_80e4b050": "有効",
+    "@ui_on_80e4b050": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_off_2e1505ea": "無効",
+    "@ui_off_2e1505ea": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_cancel_reply_d14b578b": "返信をキャンセル",
+    "@ui_cancel_reply_d14b578b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_edit_attachment_value0_5029a877": "添付ファイル{value0}を編集",
+    "@ui_edit_attachment_value0_5029a877": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_started_a_thread_7ac19294": "{value0}がスレッドを開始しました: ",
+    "@ui_value0_started_a_thread_7ac19294": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_message_value1_2baf272f": "{value0}件のメッセージ{value1, select, other {}}",
+    "@ui_value0_message_value1_2baf272f": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_published_19c90329": "公開済み",
+    "@ui_published_19c90329": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_message_deleted_edcce219": "メッセージは削除されました",
+    "@ui_message_deleted_edcce219": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_message_unavailable_f45ec49e": "メッセージを利用できません",
+    "@ui_message_unavailable_f45ec49e": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_is_required_9cd2a309": "{value0}は必須です。",
+    "@ui_value0_is_required_9cd2a309": {
+        "description": "Interface text in lib/src/domain/application_commands.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_choose_between_value0_and_value1_items_for_va_426ab4e0": "{value2}は{value0}～{value1}個選んでください。",
+    "@ui_choose_between_value0_and_value1_items_for_va_426ab4e0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            },
+            "value2": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_the_bot_did_not_receive_this_form_4c4694b2": "ボットにこのフォームが届きませんでした",
+    "@ui_the_bot_did_not_receive_this_form_4c4694b2": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_one_or_more_files_could_not_be_uploaded_f176510d": "一部のファイルをアップロードできませんでした",
+    "@ui_one_or_more_files_could_not_be_uploaded_f176510d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_choose_value0_value1_value2_selected_5a3959cf": "{value0}～{value1}個選択 · {value2}個選択済み",
+    "@ui_choose_value0_value1_value2_selected_5a3959cf": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            },
+            "value2": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_no_matching_items_are_available_in_this_chann_c53c70ec": "このチャンネルには一致する項目がありません。",
+    "@ui_no_matching_items_are_available_in_this_chann_c53c70ec": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_choose_value0_value1_85494b8c": "{value0}～{value1}個選択",
+    "@ui_choose_value0_value1_85494b8c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_only_you_can_see_this_5044e8bf": "自分にのみ表示されます",
+    "@ui_only_you_can_see_this_5044e8bf": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_these_private_bot_controls_expired_run_the_co_85b4904c": "この非公開のボット操作は有効期限が切れました。コマンドを再実行してください。",
+    "@ui_these_private_bot_controls_expired_run_the_co_85b4904c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_results_are_unavailable_because_they_cou_8b6cff3b": "検証できなかったため、投票結果を利用できません。",
+    "@ui_poll_results_are_unavailable_because_they_cou_8b6cff3b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_results_9d47b786": "投票結果",
+    "@ui_poll_results_9d47b786": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_ended_99aad9f4": "投票は終了しました",
+    "@ui_poll_ended_99aad9f4": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_open_external_image_6334ed35": "外部の画像を開く",
+    "@ui_open_external_image_6334ed35": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_open_external_embed_image_dfe08af4": "外部の埋め込み画像を開く",
+    "@ui_open_external_embed_image_dfe08af4": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_create_a_poll_b010ece7": "投票を作成",
+    "@ui_create_a_poll_b010ece7": {
+        "description": "Interface text in lib/src/features/chat/composer_pickers.dart"
+    },
+    "ui_change_emoji_c01c255b": "絵文字を変更",
+    "@ui_change_emoji_c01c255b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_answer_value0_364b0d14": "回答{value0}",
+    "@ui_answer_value0_364b0d14": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_remove_emoji_8bc8171b": "絵文字を削除",
+    "@ui_remove_emoji_8bc8171b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_remove_answer_7307a041": "回答を削除",
+    "@ui_remove_answer_7307a041": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_allow_multiple_answers_908e13d9": "複数回答を許可",
+    "@ui_allow_multiple_answers_908e13d9": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_load_poll_voters_17cf4c49": "投票者を読み込めませんでした",
+    "@ui_could_not_load_poll_voters_17cf4c49": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_voters_6b1c994b": "投票者",
+    "@ui_poll_voters_6b1c994b": {
+        "description": "Interface text in lib/src/api/kaede_repository.dart"
+    },
+    "ui_select_an_answer_to_see_who_voted_for_it_acf3ccf2": "回答を選ぶと、その回答に投票した人を表示します。",
+    "@ui_select_an_answer_to_see_who_voted_for_it_acf3ccf2": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_2bc42655": "（{value0}）",
+    "@ui_value0_2bc42655": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_value1_votes_value2_percent_4fcdcd6b": "{value0}、{value1}票、{value2}パーセント",
+    "@ui_value0_value1_votes_value2_percent_4fcdcd6b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            },
+            "value2": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_value1_b067a5b4": "{value0} · {value1}%",
+    "@ui_value0_value1_b067a5b4": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_vote_value1_91ad7e18": "{value0}票{value1, select, other {}}",
+    "@ui_value0_vote_value1_91ad7e18": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_choose_one_or_more_cb7ab636": "1つ以上選択",
+    "@ui_choose_one_or_more_cb7ab636": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_choose_one_f1c20b64": "1つ選択",
+    "@ui_choose_one_f1c20b64": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_poll_closed_b5446568": "投票は締め切られました",
+    "@ui_poll_closed_b5446568": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_end_time_unavailable_ba2a0fd9": "終了時刻を取得できません",
+    "@ui_end_time_unavailable_ba2a0fd9": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_ends_value0_f39e7a90": "終了: {value0}",
+    "@ui_ends_value0_f39e7a90": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_view_voters_0c66578b": "投票者を表示",
+    "@ui_view_voters_0c66578b": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_button_33881a91": "ボタン",
+    "@ui_button_33881a91": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_description_346f3b69": "説明",
+    "@ui_description_346f3b69": {
+        "description": "Interface text in lib/src/domain/instance_administration.dart"
+    },
+    "ui_file_unavailable_f3d838f5": "ファイルを利用できません",
+    "@ui_file_unavailable_f3d838f5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_unavailable_3073f696": "{value0}を利用できません",
+    "@ui_value0_unavailable_3073f696": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_open_external_component_media_319f6973": "外部コンポーネントのメディアを開く",
+    "@ui_open_external_component_media_319f6973": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_media_unavailable_c5521ab5": "メディアを利用できません",
+    "@ui_media_unavailable_c5521ab5": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_loading_the_forwarded_snapshot_554aa920": "転送されたスナップショットを読み込み中…",
+    "@ui_loading_the_forwarded_snapshot_554aa920": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_forwarded_snapshot_is_unavailable_66577cd0": "転送されたスナップショットは利用できません。",
+    "@ui_the_forwarded_snapshot_is_unavailable_66577cd0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_forwarded_9c10a7cb": "転送済み",
+    "@ui_forwarded_9c10a7cb": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_snapshot_value0_dc56822d": "スナップショット · {value0}",
+    "@ui_snapshot_value0_dc56822d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_earlier_forwarded_snapshot_2e939275": "以前に転送されたスナップショット",
+    "@ui_earlier_forwarded_snapshot_2e939275": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_link_preview_unavailable_3a9b0893": "リンクのプレビューを利用できません",
+    "@ui_link_preview_unavailable_3a9b0893": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_can_t_decrypt_this_message_on_this_device_ver_e91bb2f0": "このデバイスではこのメッセージを復号できません。デバイスの暗号化設定を確認、復旧、または更新してください。",
+    "@ui_can_t_decrypt_this_message_on_this_device_ver_e91bb2f0": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_load_the_media_preview_647f8942": "メディアのプレビューを読み込めませんでした",
+    "@ui_could_not_load_the_media_preview_647f8942": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_spoiler_value0_hide_spoiler_361536ee": "ネタバレ: {value0}。ネタバレを隠す",
+    "@ui_spoiler_value0_hide_spoiler_361536ee": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_reveal_spoiler_53e9c862": "ネタバレを表示",
+    "@ui_reveal_spoiler_53e9c862": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_check_the_attachment_status_f2780e05": "添付ファイルの状態を確認できませんでした",
+    "@ui_could_not_check_the_attachment_status_f2780e05": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_preparing_value0_9e048a90": "{value0}を準備中…",
+    "@ui_preparing_value0_9e048a90": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_was_rejected_during_server_processing_9708547a": "{value0}はサーバーの処理中に拒否されました。",
+    "@ui_value0_was_rejected_during_server_processing_9708547a": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_value0_could_not_be_processed_by_the_server_u_befcb186": "サーバーで{value0}を処理できませんでした。後でファイルをもう一度アップロードしてください。",
+    "@ui_value0_could_not_be_processed_by_the_server_u_befcb186": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_load_the_attachment_1f609417": "添付ファイルを読み込めませんでした",
+    "@ui_could_not_load_the_attachment_1f609417": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_open_image_value0_c2940755": "画像{value0}を開く",
+    "@ui_open_image_value0_c2940755": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_close_image_viewer_909f8c30": "画像ビューアーを閉じる",
+    "@ui_close_image_viewer_909f8c30": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_pause_voice_message_08a22788": "音声メッセージを一時停止",
+    "@ui_pause_voice_message_08a22788": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_play_voice_message_99160c06": "音声メッセージを再生",
+    "@ui_play_voice_message_99160c06": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_voice_message_3e8e0f42": "音声メッセージ",
+    "@ui_voice_message_3e8e0f42": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_display_this_value0_the_file_may_be_23e60533": "この{value0}を表示できませんでした。ファイルが破損しているか、形式が非対応の可能性があります。",
+    "@ui_could_not_display_this_value0_the_file_may_be_23e60533": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_load_suggestions_a4bcae70": "候補を読み込めませんでした",
+    "@ui_could_not_load_suggestions_a4bcae70": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_could_not_add_that_file_0b187501": "そのファイルを追加できませんでした",
+    "@ui_could_not_add_that_file_0b187501": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_review_the_highlighted_command_options_70e976ba": "強調表示されたコマンドのオプションを確認してください。",
+    "@ui_review_the_highlighted_command_options_70e976ba": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_the_bot_command_could_not_be_delivered_95f4e409": "ボットコマンドを送信できませんでした",
+    "@ui_the_bot_command_could_not_be_delivered_95f4e409": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_cancel_command_f383c6ae": "コマンドをキャンセル",
+    "@ui_cancel_command_f383c6ae": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_choose_the_command_path_to_see_its_options_2bf1700d": "コマンドのパスを選ぶと、オプションを表示します。",
+    "@ui_choose_the_command_path_to_see_its_options_2bf1700d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_this_command_has_no_options_66e232f1": "このコマンドにオプションはありません。",
+    "@ui_this_command_has_no_options_66e232f1": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_not_set_d7958fc6": "未設定",
+    "@ui_not_set_d7958fc6": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_true_cdde5e05": "真",
+    "@ui_true_cdde5e05": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_false_977555f8": "偽",
+    "@ui_false_977555f8": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_no_file_f2c54d48": "ファイルなし",
+    "@ui_no_file_f2c54d48": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_ten_files_already_selected_6e7417c8": "すでに10個のファイルが選択されています",
+    "@ui_ten_files_already_selected_6e7417c8": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_add_a_file_33c0e163": "ファイルを追加",
+    "@ui_add_a_file_33c0e163": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_value0_value1_07eda8d4": "{value0}{value1}",
+    "@ui_value0_value1_07eda8d4": {
+        "description": "Interface text in lib/src/features/guild/announcement_management_tab.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_message_command_d7d6af25": "メッセージコマンド",
+    "@ui_message_command_d7d6af25": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_user_command_2cec5497": "ユーザーコマンド",
+    "@ui_user_command_2cec5497": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_create_a_thread_with_a_first_message_80d1e9e8": "最初のメッセージ付きでスレッドを作成",
+    "@ui_create_a_thread_with_a_first_message_80d1e9e8": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_slow_mode_value0_s_remaining_65bfa54c": "低速モード · 残り{value0}秒",
+    "@ui_slow_mode_value0_s_remaining_65bfa54c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_add_files_emoji_stickers_or_gif_76e061dc": "ファイル、絵文字、スタンプ、GIFを追加",
+    "@ui_add_files_emoji_stickers_or_gif_76e061dc": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_add_files_media_or_a_poll_74a1da28": "ファイル、メディア、投票を追加",
+    "@ui_add_files_media_or_a_poll_74a1da28": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_gifs_stickers_and_emoji_eba59fbd": "GIF、スタンプ、絵文字",
+    "@ui_gifs_stickers_and_emoji_eba59fbd": {
+        "description": "Interface text in lib/src/features/chat/composer_pickers.dart"
+    },
+    "ui_welcome_to_value0_5a07d89d": "{value0}へようこそ",
+    "@ui_welcome_to_value0_5a07d89d": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_this_is_the_start_of_value0_say_hello_54ade90c": "ここから#{value0}が始まります。挨拶してみましょう。",
+    "@ui_this_is_the_start_of_value0_say_hello_54ade90c": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_this_is_the_beginning_of_your_conversation_518bb598": "ここから会話が始まります。",
+    "@ui_this_is_the_beginning_of_your_conversation_518bb598": {
+        "description": "Interface text in lib/src/features/chat/channel_view.dart"
+    },
+    "ui_recently_active_58db5e19": "最近のアクティビティ",
+    "@ui_recently_active_58db5e19": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_date_posted_1e479eb4": "投稿日",
+    "@ui_date_posted_1e479eb4": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_finish_retrying_the_pending_encrypted_post_be_dd042599": "最初のメッセージを変更する前に、保留中の暗号化された投稿の再送を完了してください。",
+    "@ui_finish_retrying_the_pending_encrypted_post_be_dd042599": {
+        "description": "Interface text in lib/src/features/chat/forum_channel_view.dart"
+    },
+    "ui_post_guidelines_8554f4d6": "投稿ガイドライン",
+    "@ui_post_guidelines_8554f4d6": {
+        "description": "Interface text in lib/src/features/chat/forum_channel_view.dart"
+    },
+    "ui_gif_e90554a1": "GIF",
+    "@ui_gif_e90554a1": {
+        "description": "Interface text in lib/src/features/chat/composer_pickers.dart"
+    },
+    "ui_powered_by_klipy_90677a11": "KLIPYを使用",
+    "@ui_powered_by_klipy_90677a11": {
+        "description": "Interface text in lib/src/features/chat/composer_pickers.dart"
+    },
+    "ui_apps_in_this_conversation_9f084fd7": "この会話のアプリ",
+    "@ui_apps_in_this_conversation_9f084fd7": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_the_security_check_could_not_be_loaded_0f314c52": "セキュリティチェックを読み込めませんでした。",
+    "@ui_the_security_check_could_not_be_loaded_0f314c52": {
+        "description": "Interface text in lib/src/features/auth/turnstile_challenge.dart"
+    },
+    "ui_the_security_check_returned_an_invalid_result_bfe78026": "セキュリティチェックから無効な結果が返されました。",
+    "@ui_the_security_check_returned_an_invalid_result_bfe78026": {
+        "description": "Interface text in lib/src/features/auth/turnstile_challenge.dart"
+    },
+    "ui_verification_expired_please_try_again_459bfd28": "確認の有効期限が切れました。もう一度お試しください。",
+    "@ui_verification_expired_please_try_again_459bfd28": {
+        "description": "Interface text in lib/src/features/auth/turnstile_challenge.dart"
+    },
+    "ui_security_check_12ffab43": "セキュリティチェック",
+    "@ui_security_check_12ffab43": {
+        "description": "Interface text in lib/src/features/auth/turnstile_challenge.dart"
+    },
+    "ui_account_created_you_can_sign_in_now_dd70b063": "アカウントを作成しました。ログインできます。",
+    "@ui_account_created_you_can_sign_in_now_dd70b063": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_could_not_verify_the_authentication_code_eeb4b672": "認証コードを確認できませんでした",
+    "@ui_could_not_verify_the_authentication_code_eeb4b672": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_could_not_create_the_account_c1e984f9": "アカウントを作成できませんでした",
+    "@ui_could_not_create_the_account_c1e984f9": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_could_not_sign_in_273e35a3": "ログインできませんでした",
+    "@ui_could_not_sign_in_273e35a3": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_reset_password_and_encryption_vault_c5f58a22": "パスワードと暗号化保管庫をリセットしますか？",
+    "@ui_reset_password_and_encryption_vault_c5f58a22": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_resetting_your_password_rotates_the_account_v_58928b2a": "パスワードをリセットすると、アカウント保管庫の鍵が更新され、リモートの暗号化保管庫が削除されます。暗号化された履歴は、履歴が残っている登録済みクライアント、または復旧用バックアップからしか復旧できない場合があります。",
+    "@ui_resetting_your_password_rotates_the_account_v_58928b2a": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_password_updated_and_the_remote_encryption_va_b50282d3": "パスワードを更新し、リモートの暗号化保管庫をリセットしました。ログイン後、この端末にある信頼済みの暗号化状態から保管庫を再構築します。",
+    "@ui_password_updated_and_the_remote_encryption_va_b50282d3": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_password_updated_and_the_remote_encryption_va_c1e3c1cd": "パスワードを更新し、リモートの暗号化保管庫をリセットしました。ログイン後、登録済みクライアントまたは復旧用バックアップから暗号化された履歴を復元してください。",
+    "@ui_password_updated_and_the_remote_encryption_va_c1e3c1cd": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_could_not_reset_the_password_120654bc": "パスワードをリセットできませんでした",
+    "@ui_could_not_reset_the_password_120654bc": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_enter_value0_49bbb7b0": "{value0}を入力してください。",
+    "@ui_enter_value0_49bbb7b0": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_create_your_account_660a9fe7": "アカウントを作成しましょう。",
+    "@ui_create_your_account_660a9fe7": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_welcome_back_c27e9c98": "おかえりなさい。",
+    "@ui_welcome_back_c27e9c98": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_choose_the_server_that_will_own_your_identity_425cf24d": "アカウントを管理するサーバーを選んでください。フェディバース全体のコミュニティに参加できます。",
+    "@ui_choose_the_server_that_will_own_your_identity_425cf24d": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_sign_in_through_your_home_server_the_server_w_91ad7397": "アカウントを作成したホームサーバーからログインしてください。",
+    "@ui_sign_in_through_your_home_server_the_server_w_91ad7397": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_not_sure_kaede_chat_is_the_recommended_public_347c0eb6": "迷った場合は、公開サーバーのkaede.chatをおすすめします。",
+    "@ui_not_sure_kaede_chat_is_the_recommended_public_347c0eb6": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_could_not_verify_the_email_address_5cb841bb": "メールアドレスを確認できませんでした",
+    "@ui_could_not_verify_the_email_address_5cb841bb": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_verification_email_requested_a75bb6b0": "確認メールをリクエストしました。",
+    "@ui_verification_email_requested_a75bb6b0": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_verify_your_email_50ec3767": "メールアドレスを確認してください",
+    "@ui_verify_your_email_50ec3767": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_we_sent_a_verification_link_to_your_email_ope_284a8624": "確認用リンクをメールで送信しました。リンクを開くか、そのトークンを以下に貼り付けてください。",
+    "@ui_we_sent_a_verification_link_to_your_email_ope_284a8624": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_verification_token_0c70a2ef": "確認用トークン",
+    "@ui_verification_token_0c70a2ef": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_resend_121c8c1e": "再送信",
+    "@ui_resend_121c8c1e": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_verify_later_2b8bfe56": "後で確認",
+    "@ui_verify_later_2b8bfe56": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_6_digit_code_or_recovery_code_c66a2083": "6桁のコードまたはリカバリーコード",
+    "@ui_6_digit_code_or_recovery_code_c66a2083": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_enter_an_authentication_or_recovery_code_740e843d": "認証コードまたはリカバリーコードを入力してください。",
+    "@ui_enter_an_authentication_or_recovery_code_740e843d": {
+        "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+    },
+    "ui_use_a_password_with_at_least_10_characters_e92a08df": "10文字以上のパスワードを使用してください。",
+    "@ui_use_a_password_with_at_least_10_characters_e92a08df": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_passwords_do_not_match_fd207588": "パスワードが一致しません。",
+    "@ui_passwords_do_not_match_fd207588": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_a_guild_invite_link_with_a_code_is_required_588ca9dd": "コードを含むサーバー招待リンクが必要です。",
+    "@ui_a_guild_invite_link_with_a_code_is_required_588ca9dd": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_this_application_invitation_is_unavailable_6876cc30": "このアプリの招待は利用できません",
+    "@ui_this_application_invitation_is_unavailable_6876cc30": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_choose_at_least_one_place_for_this_app_cc13afa3": "このアプリを利用する場所を1つ以上選んでください。",
+    "@ui_choose_at_least_one_place_for_this_app_cc13afa3": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_could_not_authorize_this_app_for_your_account_aaa20c98": "このアプリをアカウントで認可できませんでした",
+    "@ui_could_not_authorize_this_app_for_your_account_aaa20c98": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_could_not_add_this_app_to_the_server_e6821d4e": "このアプリをサーバーに追加できませんでした",
+    "@ui_could_not_add_this_app_to_the_server_e6821d4e": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_add_app_57813d5f": "アプリを追加",
+    "@ui_add_app_57813d5f": {
+        "description": "Interface text in lib/src/features/shared/remote_media.dart"
+    },
+    "ui_add_to_a_server_eca6de19": "サーバーに追加",
+    "@ui_add_to_a_server_eca6de19": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_you_need_manage_server_in_a_server_to_add_thi_42ac4a66": "このアプリを追加するには、サーバーで「サーバーを管理」の権限が必要です。",
+    "@ui_you_need_manage_server_in_a_server_to_add_thi_42ac4a66": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_adding_2060c750": "追加中…",
+    "@ui_adding_2060c750": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_authorize_and_add_app_c6da0429": "認可してアプリを追加",
+    "@ui_authorize_and_add_app_c6da0429": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_install_for_your_account_d367e7f9": "自分のアカウントにインストール",
+    "@ui_install_for_your_account_d367e7f9": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_the_app_receives_only_command_interactions_yo_f341864d": "このアプリが受け取るのは、あなたが明示的に開始したコマンドの操作だけです。サーバーのメンバーにはなりません。",
+    "@ui_the_app_receives_only_command_interactions_yo_f341864d": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_authorizing_14b71d35": "認可中…",
+    "@ui_authorizing_14b71d35": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_authorize_for_my_account_b07cd520": "自分のアカウントで認可",
+    "@ui_authorize_for_my_account_b07cd520": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_back_to_kaede_e4c68b03": "Kaedeに戻る",
+    "@ui_back_to_kaede_e4c68b03": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_app_authorization_748f85d5": "アプリの認可",
+    "@ui_app_authorization_748f85d5": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_authorized_for_your_account_33a340ad": "アカウントで認可しました",
+    "@ui_authorized_for_your_account_33a340ad": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_value0_can_now_offer_commands_in_the_contexts_2fa598df": "{value0}のコマンドを、選択した場所で利用できるようになりました。「設定 → 認可済みアプリ」で管理や認可の取り消しができます。",
+    "@ui_value0_can_now_offer_commands_in_the_contexts_2fa598df": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_app_added_to_the_server_06ec620f": "アプリをサーバーに追加しました",
+    "@ui_app_added_to_the_server_06ec620f": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_access_review_451257ad": "アクセス権限の確認",
+    "@ui_access_review_451257ad": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_account_installation_requests_159bac48": "アカウントへのインストールで要求される権限:",
+    "@ui_account_installation_requests_159bac48": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_server_installation_requests_588f5c6a": "サーバーへのインストールで要求される権限:",
+    "@ui_server_installation_requests_588f5c6a": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_interactions_intent_bdae144e": "インタラクションインテント",
+    "@ui_interactions_intent_bdae144e": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_guild_install_template_not_granted_by_persona_b99ca78f": "サーバー用インストールテンプレート（個人の認可では付与されません）:",
+    "@ui_guild_install_template_not_granted_by_persona_b99ca78f": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_value0_intent_955fc082": "{value0}インテント",
+    "@ui_value0_intent_955fc082": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_opening_this_link_never_grants_encrypted_room_b05baaef": "このリンクを開くだけで暗号化されたルームへのアクセスが自動的に許可されることはありません。参加者モードのアプリは、サーバー管理者が暗号化されたサーバーチャンネルごとに承認する必要があります。暗号化された非公開の会話では、参加者全員の同意が必要です。アプリの確認済みデバイスが承認され、ルームの鍵が更新されるまで、アプリの操作は利用できません。",
+    "@ui_opening_this_link_never_grants_encrypted_room_b05baaef": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_server_permissions_19d984ac": "サーバーの権限:",
+    "@ui_server_permissions_19d984ac": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_no_server_permissions_requested_3b5377f5": "サーバーの権限は要求されていません。",
+    "@ui_no_server_permissions_requested_3b5377f5": {
+        "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
+    },
+    "ui_enable_notifications_aabb34b3": "通知を有効にしますか？",
+    "@ui_enable_notifications_aabb34b3": {
+        "description": "Interface text in lib/src/features/auth/push_onboarding.dart"
+    },
+    "ui_get_messages_mentions_and_incoming_calls_whil_b2d7822c": "Kaedeを閉じている間も、メッセージ、メンション、着信の通知を受け取れます。後から設定で変更できます。",
+    "@ui_get_messages_mentions_and_incoming_calls_whil_b2d7822c": {
+        "description": "Interface text in lib/src/features/auth/push_onboarding.dart"
+    },
+    "ui_notifications_for_value0_use_kaede_push_relay_d039f851": "{value0}の通知にはKaede Push Relay（{value1}）を使用します。メッセージの内容がリレーに送信されることはありません。",
+    "@ui_notifications_for_value0_use_kaede_push_relay_d039f851": {
+        "description": "Interface text in lib/src/features/auth/push_onboarding.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_please_wait_ad7e2c40": "お待ちください…",
+    "@ui_please_wait_ad7e2c40": {
+        "description": "Interface text in lib/src/features/auth/push_onboarding.dart"
+    },
+    "ui_search_permissions_6eb9399d": "権限を検索",
+    "@ui_search_permissions_6eb9399d": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_copy_value0_id_b3fee256": "{value0}のIDをコピー",
+    "@ui_copy_value0_id_b3fee256": {
+        "description": "Interface text in lib/src/features/shared/developer_mode.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_app_61a6c98c": "アプリ",
+    "@ui_app_61a6c98c": {
+        "description": "Interface text in lib/src/features/shared/remote_media.dart"
+    },
+    "ui_discord_sounds_e639de1d": "Discordのサウンド",
+    "@ui_discord_sounds_e639de1d": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_value0_current_server_cbb9b711": "{value0} · 現在のサーバー",
+    "@ui_value0_current_server_cbb9b711": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_call_341dd0c9": "通話",
+    "@ui_call_341dd0c9": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_set_voice_channel_status_ee4e27cc": "音声チャンネルのステータスを設定",
+    "@ui_set_voice_channel_status_ee4e27cc": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_join_audience_49b9c9c9": "聴衆として参加",
+    "@ui_join_audience_49b9c9c9": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_restoring_voice_connection_7ca9f98c": "音声接続を復元中…",
+    "@ui_restoring_voice_connection_7ca9f98c": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_voice_channel_status_7c33c678": "音声チャンネルのステータス",
+    "@ui_voice_channel_status_7c33c678": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_more_06a440fc": "その他…",
+    "@ui_more_06a440fc": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_what_is_happening_here_4bc6e776": "ここでは何をしていますか？",
+    "@ui_what_is_happening_here_4bc6e776": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_this_stage_hasn_t_started_yet_4fb4ee3f": "このステージはまだ始まっていません。",
+    "@ui_this_stage_hasn_t_started_yet_4fb4ee3f": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_start_stage_1d128645": "ステージを開始",
+    "@ui_start_stage_1d128645": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_cancel_request_28568fb6": "リクエストをキャンセル",
+    "@ui_cancel_request_28568fb6": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_request_to_speak_1e2c1da5": "発言をリクエスト",
+    "@ui_request_to_speak_1e2c1da5": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_move_to_audience_de051085": "聴衆に移動",
+    "@ui_move_to_audience_de051085": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_edit_topic_93089e9e": "トピックを編集",
+    "@ui_edit_topic_93089e9e": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_end_stage_2bd54b88": "ステージを終了",
+    "@ui_end_stage_2bd54b88": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_what_is_this_stage_about_d623a541": "このステージのテーマは何ですか？",
+    "@ui_what_is_this_stage_about_d623a541": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_start_the_stage_3d1e5c4a": "ステージを開始",
+    "@ui_start_the_stage_3d1e5c4a": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_notify_everyone_bb085da5": "全員に通知",
+    "@ui_notify_everyone_bb085da5": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_send_a_server_wide_stage_start_notification_47396c88": "ステージの開始をサーバー全体に通知します。",
+    "@ui_send_a_server_wide_stage_start_notification_47396c88": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_stage_started_value0_9fecc0d3": "ステージが始まりました: {value0}",
+    "@ui_stage_started_value0_9fecc0d3": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_edit_stage_topic_b450a62c": "ステージのトピックを編集",
+    "@ui_edit_stage_topic_b450a62c": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_end_stage_b7c63115": "ステージを終了しますか？",
+    "@ui_end_stage_b7c63115": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_the_live_stage_will_end_for_everyone_7d77ab3b": "全員に対して進行中のステージが終了します。",
+    "@ui_the_live_stage_will_end_for_everyone_7d77ab3b": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_transmitting_release_to_stop_a7501aad": "送信中…離すと停止",
+    "@ui_transmitting_release_to_stop_a7501aad": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_hold_to_talk_957f6511": "押している間だけ話す",
+    "@ui_hold_to_talk_957f6511": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_could_not_play_that_sound_cb8dc1ff": "そのサウンドを再生できませんでした",
+    "@ui_could_not_play_that_sound_cb8dc1ff": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_share_your_screen_2fbd40bd": "画面を共有",
+    "@ui_share_your_screen_2fbd40bd": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_choose_quality_before_the_system_asks_what_to_29e0d348": "システムが共有対象を尋ねる前に、品質を選んでください。",
+    "@ui_choose_quality_before_the_system_asks_what_to_29e0d348": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_video_quality_7fef5a25": "映像の品質",
+    "@ui_video_quality_7fef5a25": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_outgoing_audio_4b8c2905": "送信する音声",
+    "@ui_outgoing_audio_4b8c2905": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_value0_value1_kbps_278fa6b3": "{value0} · {value1} kbps",
+    "@ui_value0_value1_kbps_278fa6b3": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_bitrate_is_an_upper_target_opus_automatically_3a7120a2": "ビットレートは目標の上限です。無音時や通信が混雑しているときには、Opusが自動的に使用帯域を減らします。",
+    "@ui_bitrate_is_an_upper_target_opus_automatically_3a7120a2": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_android_and_ios_always_use_a_protected_system_4a3f370f": "AndroidとiOSでは、常に保護されたシステムの選択画面を使用します。共有を許可するまで、Kaedeがほかのアプリや画面を見ることはできません。",
+    "@ui_android_and_ios_always_use_a_protected_system_4a3f370f": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_could_not_start_screen_sharing_a459a6a5": "画面共有を開始できませんでした",
+    "@ui_could_not_start_screen_sharing_a459a6a5": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_starting_73727cef": "開始中…",
+    "@ui_starting_73727cef": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_choose_what_to_share_66a4c034": "共有する対象を選択",
+    "@ui_choose_what_to_share_66a4c034": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_select_audio_output_a5576730": "音声の出力先を選択",
+    "@ui_select_audio_output_a5576730": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_phone_4930944f": "端末",
+    "@ui_phone_4930944f": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_bluetooth_headset_a4c74b8b": "Bluetoothヘッドセット",
+    "@ui_bluetooth_headset_a4c74b8b": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_could_not_complete_the_voice_action_eafa3403": "音声の操作を完了できませんでした",
+    "@ui_could_not_complete_the_voice_action_eafa3403": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_stage_participants_will_appear_here_as_they_j_aad90d2e": "参加者が入ると、ここに表示されます。",
+    "@ui_stage_participants_will_appear_here_as_they_j_aad90d2e": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_value0_value1_c34e3562": "{value0} — {value1}",
+    "@ui_value0_value1_c34e3562": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_user_volume_value0_8788daaf": "ユーザーの音量 · {value0}%",
+    "@ui_user_volume_value0_8788daaf": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_suppressed_087253d7": "発言制限中",
+    "@ui_suppressed_087253d7": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_invite_to_speak_1cee4bdb": "発言者に招待",
+    "@ui_invite_to_speak_1cee4bdb": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_server_mute_8c8094fe": "サーバーミュート",
+    "@ui_server_mute_8c8094fe": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_remove_server_mute_a9a2d0ad": "サーバーミュートを解除",
+    "@ui_remove_server_mute_a9a2d0ad": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_server_mute_5de99007": "サーバーミュート",
+    "@ui_server_mute_5de99007": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_server_deaf_513c8fbb": "サーバースピーカーミュート",
+    "@ui_server_deaf_513c8fbb": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_remove_server_deafen_37df1a67": "サーバースピーカーミュートを解除",
+    "@ui_remove_server_deafen_37df1a67": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_server_deafen_5b9a5cf9": "サーバースピーカーミュート",
+    "@ui_server_deafen_5b9a5cf9": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_move_to_value0_5addb086": "{value0}に移動",
+    "@ui_move_to_value0_5addb086": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_disconnect_from_voice_a6e0e11f": "音声接続を切断",
+    "@ui_disconnect_from_voice_a6e0e11f": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_could_not_update_the_voice_state_3f129c64": "音声の状態を更新できませんでした",
+    "@ui_could_not_update_the_voice_state_3f129c64": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_no_soundboard_sounds_are_available_45e14a9e": "利用できるサウンドボードの音はありません。",
+    "@ui_no_soundboard_sounds_are_available_45e14a9e": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_soundboard_5a91f77c": "サウンドボード",
+    "@ui_soundboard_5a91f77c": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_ready_when_you_are_28e0532d": "いつでも始められます",
+    "@ui_ready_when_you_are_28e0532d": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_voice_unavailable_d810746f": "音声を利用できません",
+    "@ui_voice_unavailable_d810746f": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_join_the_room_to_see_and_hear_everyone_alread_69de4235": "ルームに参加すると、ほかの参加者の姿や声が届きます。",
+    "@ui_join_the_room_to_see_and_hear_everyone_alread_69de4235": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_a_guild_role_or_channel_permission_is_prevent_3514b22a": "サーバーのロールまたはチャンネルの権限により、アクセスが制限されています。",
+    "@ui_a_guild_role_or_channel_permission_is_prevent_3514b22a": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_voice_is_active_on_value0_0e7eda95": "{value0}で音声接続中です",
+    "@ui_voice_is_active_on_value0_0e7eda95": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_moving_voice_here_will_disconnect_that_device_f30aa710": "音声接続をここに移すと、そのデバイスは切断されます。自動的には再接続されません。",
+    "@ui_moving_voice_here_will_disconnect_that_device_f30aa710": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_moving_voice_c3ab6c0f": "音声接続を移動中…",
+    "@ui_moving_voice_c3ab6c0f": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_move_voice_here_0c2d2f54": "音声接続をここに移す",
+    "@ui_move_voice_here_0c2d2f54": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_keep_it_there_3cd7dd37": "そのままにする",
+    "@ui_keep_it_there_3cd7dd37": {
+        "description": "Interface text in lib/src/features/voice/voice_room.dart"
+    },
+    "ui_task_key_prefix_37585bcd": "タスクキーの接頭辞",
+    "@ui_task_key_prefix_37585bcd": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_task_tracker_869b2138": "タスク管理",
+    "@ui_task_tracker_869b2138": {
+        "description": "Interface text in lib/src/features/tracker/tracker_channel_view.dart"
+    },
+    "ui_move_up_e6379e41": "上に移動",
+    "@ui_move_up_e6379e41": {
+        "description": "Interface text in lib/src/features/tracker/tracker_channel_view.dart"
+    },
+    "ui_move_down_2b87faa8": "下に移動",
+    "@ui_move_down_2b87faa8": {
+        "description": "Interface text in lib/src/features/tracker/tracker_channel_view.dart"
+    },
+    "ui_checking_87f62cb7": "確認中…",
+    "@ui_checking_87f62cb7": {
+        "description": "Interface text in lib/src/features/guild/guild_admin_advanced.dart"
+    },
+    "ui_previous_hour_3c77cb2e": "過去1時間",
+    "@ui_previous_hour_3c77cb2e": {
+        "description": "Interface text in lib/src/features/guild/guild_admin_advanced.dart"
+    },
+    "ui_previous_day_dfd421a2": "過去1日",
+    "@ui_previous_day_dfd421a2": {
+        "description": "Interface text in lib/src/features/guild/guild_admin_advanced.dart"
+    },
+    "ui_previous_7_days_ee76f450": "過去7日間",
+    "@ui_previous_7_days_ee76f450": {
+        "description": "Interface text in lib/src/features/guild/guild_admin_advanced.dart"
+    },
+    "ui_processing_a38b68a6": "処理中…",
+    "@ui_processing_a38b68a6": {
+        "description": "Interface text in lib/src/features/guild/guild_admin_advanced.dart"
+    },
+    "ui_automod_d65d27ea": "自動モデレーション",
+    "@ui_automod_d65d27ea": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_bulk_moderation_08152917": "一括モデレーション",
+    "@ui_bulk_moderation_08152917": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_federated_message_history_298c1048": "連合先へのメッセージ履歴の共有",
+    "@ui_federated_message_history_298c1048": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_change_icon_ca1b1c46": "アイコンを変更",
+    "@ui_change_icon_ca1b1c46": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_remove_icon_bca65d06": "アイコンを削除",
+    "@ui_remove_icon_bca65d06": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_transfer_ownership_0b7722a7": "所有権を譲渡",
+    "@ui_transfer_ownership_0b7722a7": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_delete_guild_260ee9b1": "サーバーを削除",
+    "@ui_delete_guild_260ee9b1": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_enable_encryption_a0595627": "暗号化を有効にする",
+    "@ui_enable_encryption_a0595627": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_category_44662d06": "カテゴリーなし",
+    "@ui_no_category_44662d06": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_could_not_update_end_to_end_encryption_8cd06684": "エンドツーエンド暗号化を更新できませんでした。",
+    "@ui_could_not_update_end_to_end_encryption_8cd06684": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_rotate_keys_014b6162": "鍵を更新",
+    "@ui_rotate_keys_014b6162": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_active_invites_4ee55886": "有効な招待はありません",
+    "@ui_no_active_invites_4ee55886": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_expires_after_9311682d": "有効期間",
+    "@ui_expires_after_9311682d": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_maximum_uses_e65fe543": "使用回数の上限",
+    "@ui_maximum_uses_e65fe543": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_unlimited_2d283a80": "無制限",
+    "@ui_unlimited_2d283a80": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_voice_invite_target_bca51f73": "音声招待の対象",
+    "@ui_voice_invite_target_bca51f73": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_member_s_go_live_stream_685000f6": "メンバーのライブ配信",
+    "@ui_member_s_go_live_stream_685000f6": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_streaming_member_b3703b3f": "配信中のメンバー",
+    "@ui_streaming_member_b3703b3f": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_the_member_must_currently_be_able_to_stream_i_95147817": "そのメンバーは、現在その移動先で配信できる必要があります。",
+    "@ui_the_member_must_currently_be_able_to_stream_i_95147817": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_scheduled_event_ff96a250": "予定イベント",
+    "@ui_scheduled_event_ff96a250": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_no_event_association_874e0e99": "イベントとの関連付けなし",
+    "@ui_no_event_association_874e0e99": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_roles_optional_5359fafd": "ロール（任意）",
+    "@ui_roles_optional_5359fafd": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_temporary_membership_4f72bf5c": "一時的なメンバーシップ",
+    "@ui_temporary_membership_4f72bf5c": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_upload_emoji_1e4ec752": "絵文字をアップロード",
+    "@ui_upload_emoji_1e4ec752": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_create_sticker_80b5cb0a": "スタンプを作成",
+    "@ui_create_sticker_80b5cb0a": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_selection_value0_value1_a3be5c32": "選択範囲: {value0}% × {value1}%",
+    "@ui_selection_value0_value1_a3be5c32": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_remove_background_a47feceb": "背景を削除",
+    "@ui_remove_background_a47feceb": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_channel_access_b7959e86": "チャンネルへのアクセス",
+    "@ui_channel_access_b7959e86": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_copy_webhook_url_60c3b358": "Webhook URLをコピー",
+    "@ui_copy_webhook_url_60c3b358": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_rotate_token_9c8fb5eb": "トークンを更新",
+    "@ui_rotate_token_9c8fb5eb": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_webhook_url_copied_62a2ee15": "Webhook URLをコピーしました。",
+    "@ui_webhook_url_copied_62a2ee15": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_webhook_avatar_updated_a553b36e": "Webhookのアバターを更新しました。",
+    "@ui_webhook_avatar_updated_a553b36e": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_webhook_names_cannot_be_blank_83327c5e": "Webhook名は空にできません。",
+    "@ui_webhook_names_cannot_be_blank_83327c5e": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_load_more_members_01d2c605": "メンバーをさらに読み込む",
+    "@ui_load_more_members_01d2c605": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_choose_a_role_or_member_a7e7d77c": "ロールまたはメンバーを選択",
+    "@ui_choose_a_role_or_member_a7e7d77c": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_inherit_e1611680": "継承",
+    "@ui_inherit_e1611680": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_also_requires_value0_7f2e23b9": "追加で必要な権限: {value0}",
+    "@ui_also_requires_value0_7f2e23b9": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_announcement_channel_ec8b9fb9": "お知らせチャンネル",
+    "@ui_announcement_channel_ec8b9fb9": {
+        "description": "Interface text in lib/src/features/guild/announcement_management_tab.dart"
+    },
+    "ui_create_a_channel_fa787131": "チャンネルを作成",
+    "@ui_create_a_channel_fa787131": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_channel_type_151683a4": "チャンネルの種類",
+    "@ui_channel_type_151683a4": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_region_override_0f60d437": "リージョンを指定",
+    "@ui_region_override_0f60d437": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_value0_unavailable_b6c9188d": "{value0}（利用不可）",
+    "@ui_value0_unavailable_b6c9188d": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_age_restricted_channel_9dfeba31": "年齢制限付きチャンネル",
+    "@ui_age_restricted_channel_9dfeba31": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_hide_posts_after_inactivity_d29b91de": "一定期間活動のない投稿を非表示にする",
+    "@ui_hide_posts_after_inactivity_d29b91de": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_default_sort_order_d01cf9d6": "既定の並び順",
+    "@ui_default_sort_order_d01cf9d6": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_default_layout_04af82c4": "既定のレイアウト",
+    "@ui_default_layout_04af82c4": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_federated_history_3e086dab": "連合先への履歴共有",
+    "@ui_federated_history_3e086dab": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_tag_name_e96325c2": "タグ名",
+    "@ui_tag_name_e96325c2": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_delete_role_bdde90c6": "ロールを削除",
+    "@ui_delete_role_bdde90c6": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_role_icon_73cd9e0a": "ロールアイコン",
+    "@ui_role_icon_73cd9e0a": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_display_5a05d9b5": "表示",
+    "@ui_display_5a05d9b5": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_administrator_bypasses_every_channel_restrict_35ffa5ee": "管理者はすべてのチャンネル制限を回避できます。",
+    "@ui_administrator_bypasses_every_channel_restrict_35ffa5ee": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_only_grant_it_to_people_who_should_have_unres_56724462": "このサーバーを制限なく管理できるべき人にのみ付与してください。",
+    "@ui_only_grant_it_to_people_who_should_have_unres_56724462": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_save_role_c76e36e8": "ロールを保存",
+    "@ui_save_role_c76e36e8": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_indefinite_cc65e072": "無期限",
+    "@ui_indefinite_cc65e072": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_apply_timeout_9a1bf1bc": "タイムアウトを適用",
+    "@ui_apply_timeout_9a1bf1bc": {
+        "description": "Interface text in lib/src/features/guild/guild_management_screen.dart"
+    },
+    "ui_publish_into_b1c4c262": "公開先",
+    "@ui_publish_into_b1c4c262": {
+        "description": "Interface text in lib/src/features/guild/announcement_management_tab.dart"
+    },
+    "ui_following_9fa2c938": "フォロー中",
+    "@ui_following_9fa2c938": {
+        "description": "Interface text in lib/src/features/guild/scheduled_events_tab.dart"
+    },
+    "ui_encryption_is_active_for_microphone_camera_sc_5cc5adf0": "マイク、カメラ、画面の映像と音声が暗号化されています。",
+    "@ui_encryption_is_active_for_microphone_camera_sc_5cc5adf0": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_encryption_is_active_for_new_messages_files_a_c1a9f72a": "このチャンネルの新しいメッセージ、ファイル、対応する通話が暗号化されています。",
+    "@ui_encryption_is_active_for_new_messages_files_a_c1a9f72a": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_encrypted_activity_is_paused_until_a_member_r_71e7684f": "メンバーがルームの鍵を更新するまで、暗号化された操作は一時停止しています。",
+    "@ui_encrypted_activity_is_paused_until_a_member_r_71e7684f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_encryption_is_being_prepared_messaging_remain_1ff9f908": "暗号化を準備しています。設定が完了するまで、メッセージは一時停止されます。",
+    "@ui_encryption_is_being_prepared_messaging_remain_1ff9f908": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_encryption_is_optional_and_cannot_be_turned_o_0a0475ce": "暗号化は任意ですが、この音声チャンネルで有効にすると解除できません。",
+    "@ui_encryption_is_optional_and_cannot_be_turned_o_0a0475ce": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": "暗号化は任意ですが、この会話で有効にすると解除できません。",
+    "@ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_identity_verification_62bbdbca": "身元の確認",
+    "@ui_identity_verification_62bbdbca": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_until_participants_compare_the_safety_number__4f3c114b": "参加者が別の信頼できる経路でセーフティナンバーを照合するまで、内容は暗号化されていても身元は未確認です。照合することで、初回接続時や悪意のあるインスタンスによる鍵のすり替えを検知できます。",
+    "@ui_until_participants_compare_the_safety_number__4f3c114b": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_before_enabling_75d41f20": "有効にする前に:",
+    "@ui_before_enabling_75d41f20": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_server_recording_transcription_and_media_mode_ba4c3058": "• サーバーでの録音、文字起こし、メディアのモデレーションは利用できなくなります。\n• 非対応のクライアントは参加できません。\n• 参加者、時刻、トラックの種類、通信量のメタデータは引き続き見えます。\n• 参加者が自分のデバイスでメディアを記録することは防げません。",
+    "@ui_server_recording_transcription_and_media_mode_ba4c3058": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_server_message_search_link_previews_server_si_725febb3": "• サーバーでのメッセージ検索、リンクのプレビュー、サーバー側のファイルプレビュー、マルウェアスキャンは利用できなくなります。Webhookにアクセス権が自動で付与されることはありません。確認済みWebhookデバイスは、明示的な許可、鍵の更新、履歴の参照可能範囲の設定後の内容のみ受け取れます。確認済みの参加者モードのアプリにも、同じ「許可後のみ」の参加ルールを適用します。\n• 起動用の通知にはメッセージ内容を含めません。\n• 既存の履歴は平文のまま残り、新しい内容を暗号化します。\n• 参加者、時刻、メッセージサイズなどのメタデータは引き続き見えます。\n• 同期された暗号化保管庫、すべての信頼済みクライアントのローカル状態、復旧用バックアップを失うと、暗号化された履歴は永久に失われます。\n• 削除されたメンバー、アプリ、Webhookは、受け取り済みの内容を保持します。",
+    "@ui_server_message_search_link_previews_server_si_725febb3": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_conversation_safety_number_ac78c3e9": "会話のセーフティナンバー",
+    "@ui_conversation_safety_number_ac78c3e9": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_compare_this_number_with_the_other_participan_16d9c070": "信頼できる経路で、この番号をほかの参加者と照合してください。メンバーやデバイスが変わると番号も変わります。",
+    "@ui_compare_this_number_with_the_other_participan_16d9c070": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_encrypted_room_263e6916": "暗号化されたルーム",
+    "@ui_encrypted_room_263e6916": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_go_back_628e5a9e": "戻る",
+    "@ui_go_back_628e5a9e": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_join_call_a0c061ab": "通話に参加",
+    "@ui_join_call_a0c061ab": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_member_list_8190cf45": "メンバー一覧",
+    "@ui_member_list_8190cf45": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_thread_settings_122d2eee": "スレッド設定",
+    "@ui_thread_settings_122d2eee": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_group_settings_f4ca53a9": "グループ設定",
+    "@ui_group_settings_f4ca53a9": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_conversation_settings_7d66c7d7": "会話の設定",
+    "@ui_conversation_settings_7d66c7d7": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_follow_announcements_6b55eefc": "お知らせをフォロー",
+    "@ui_follow_announcements_6b55eefc": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_archived_threads_cannot_be_followed_bf519f3e": "アーカイブされたスレッドはフォローできません",
+    "@ui_archived_threads_cannot_be_followed_bf519f3e": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_unfollow_thread_37f433b1": "スレッドのフォローを解除",
+    "@ui_unfollow_thread_37f433b1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_follow_thread_889dfc80": "スレッドをフォロー",
+    "@ui_follow_thread_889dfc80": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_search_this_conversation_3abf7012": "この会話を検索",
+    "@ui_search_this_conversation_3abf7012": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_thread_members_b6d96a16": "スレッドのメンバー",
+    "@ui_thread_members_b6d96a16": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_private_thread_ac8a0e9c": "非公開スレッド",
+    "@ui_private_thread_ac8a0e9c": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_only_invited_members_can_view_it_f640098f": "招待されたメンバーのみ閲覧できます。",
+    "@ui_only_invited_members_can_view_it_f640098f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_active_threads_76595eb1": "進行中のスレッドはありません",
+    "@ui_no_active_threads_76595eb1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_archived_threads_383ff4c1": "アーカイブされたスレッドはありません",
+    "@ui_no_archived_threads_383ff4c1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_messages_44ded9c0": "{value0}件のメッセージ",
+    "@ui_value0_messages_44ded9c0": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_edit_thread_d2cf424b": "スレッドを編集",
+    "@ui_edit_thread_d2cf424b": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_hide_after_inactivity_04436fdb": "一定期間活動がない場合に非表示",
+    "@ui_hide_after_inactivity_04436fdb": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_tags_value0_5_2157bb60": "タグ（{value0}/5）",
+    "@ui_tags_value0_5_2157bb60": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_use_default_4b479d31": "既定値を使用",
+    "@ui_use_default_4b479d31": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_all_messages_dd382488": "すべてのメッセージ",
+    "@ui_all_messages_dd382488": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_only_mentions_7876db1c": "メンションのみ",
+    "@ui_only_mentions_7876db1c": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_delete_thread_9f21116f": "スレッドを削除しますか？",
+    "@ui_delete_thread_9f21116f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_this_cannot_be_undone_f97155ee": "この操作は取り消せません。",
+    "@ui_this_cannot_be_undone_f97155ee": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_post_settings_09813008": "投稿の設定",
+    "@ui_post_settings_09813008": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_pins_73b7ddc5": "ピン留め",
+    "@ui_pins_73b7ddc5": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_messages_saved_in_this_conversation_b345454a": "この会話に保存されたメッセージ",
+    "@ui_messages_saved_in_this_conversation_b345454a": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_edit_post_d6d25d05": "投稿を編集",
+    "@ui_edit_post_d6d25d05": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_reopen_before_editing_67d5aa33": "編集する前に再開してください",
+    "@ui_reopen_before_editing_67d5aa33": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_name_and_auto_archive_duration_98eff6a3": "名前と自動アーカイブまでの期間",
+    "@ui_name_and_auto_archive_duration_98eff6a3": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_archived_threads_cannot_be_joined_or_followed_3ad2e048": "アーカイブされたスレッドには参加もフォローもできません",
+    "@ui_archived_threads_cannot_be_joined_or_followed_3ad2e048": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_get_updates_from_this_value0_bbdc4cde": "この{value0}の更新を受け取る",
+    "@ui_get_updates_from_this_value0_bbdc4cde": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_reopen_post_bbc3bea2": "投稿を再開",
+    "@ui_reopen_post_bbc3bea2": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_unarchive_thread_03dc2e50": "スレッドのアーカイブを解除",
+    "@ui_unarchive_thread_03dc2e50": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_close_post_976debdb": "投稿を閉じる",
+    "@ui_close_post_976debdb": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_archive_thread_2c39724f": "スレッドをアーカイブ",
+    "@ui_archive_thread_2c39724f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_only_a_moderator_can_reopen_this_locked_threa_9d8814d8": "このロックされたスレッドを再開できるのはモデレーターのみです",
+    "@ui_only_a_moderator_can_reopen_this_locked_threa_9d8814d8": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_allow_members_to_send_after_reopening_3e1052a9": "再開後にメンバーの送信を許可",
+    "@ui_allow_members_to_send_after_reopening_3e1052a9": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_only_moderators_can_send_or_reopen_799bf41d": "モデレーターのみ送信または再開できます",
+    "@ui_only_moderators_can_send_or_reopen_799bf41d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_unpin_post_c181bc75": "投稿のピン留めを解除",
+    "@ui_unpin_post_c181bc75": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_pin_post_89204e56": "投稿をピン留め",
+    "@ui_pin_post_89204e56": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_reopen_the_post_before_pinning_it_50e13048": "ピン留めする前に投稿を再開してください",
+    "@ui_reopen_the_post_before_pinning_it_50e13048": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_only_one_post_can_be_pinned_in_this_forum_a7b74c08": "このフォーラムでピン留めできる投稿は1件のみです",
+    "@ui_only_one_post_can_be_pinned_in_this_forum_a7b74c08": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_allow_members_to_invite_850ce963": "メンバーによる招待を許可",
+    "@ui_allow_members_to_invite_850ce963": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_active_verify_the_safety_number_4ec52ac7": "有効 · セーフティナンバーを確認してください",
+    "@ui_active_verify_the_safety_number_4ec52ac7": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_paused_until_keys_are_activated_68f95d70": "鍵が有効になるまで一時停止",
+    "@ui_paused_until_keys_are_activated_68f95d70": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_off_permanent_once_enabled_9ad29d71": "無効 · 有効にすると解除できません",
+    "@ui_off_permanent_once_enabled_9ad29d71": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_delete_post_67a10810": "投稿を削除",
+    "@ui_delete_post_67a10810": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_delete_thread_76378fea": "スレッドを削除",
+    "@ui_delete_thread_76378fea": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_permanently_delete_all_messages_f3028cc2": "すべてのメッセージを完全に削除",
+    "@ui_permanently_delete_all_messages_f3028cc2": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_friend_example_net_40f1e54c": "@friend@example.net",
+    "@ui_friend_example_net_40f1e54c": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_joined_members_35b9cdae": "参加済みのメンバーはいません。",
+    "@ui_no_joined_members_35b9cdae": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_remove_member_89834045": "メンバーを削除",
+    "@ui_remove_member_89834045": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_react_to_post_339537a9": "投稿にリアクション",
+    "@ui_react_to_post_339537a9": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_channel_permissions_changed_try_again_dfa2520f": "チャンネルの権限が変更されました。もう一度お試しください。",
+    "@ui_channel_permissions_changed_try_again_dfa2520f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_channel_saved_abc0dbb7": "チャンネルを保存しました",
+    "@ui_channel_saved_abc0dbb7": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_save_the_channel_03e95f40": "チャンネルを保存できませんでした",
+    "@ui_could_not_save_the_channel_03e95f40": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_messages_saved_in_this_channel_92ad60e8": "このチャンネルに保存されたメッセージ",
+    "@ui_messages_saved_in_this_channel_92ad60e8": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_name_category_topic_and_slow_mode_906bd7bc": "名前、カテゴリー、トピック、低速モード",
+    "@ui_name_category_topic_and_slow_mode_906bd7bc": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_paused_until_a_member_rotates_the_keys_47fd4b5f": "メンバーが鍵を更新するまで一時停止",
+    "@ui_paused_until_a_member_rotates_the_keys_47fd4b5f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_you_do_not_have_permission_to_change_this_cha_8a12d339": "このチャンネルを変更する権限がありません。",
+    "@ui_you_do_not_have_permission_to_change_this_cha_8a12d339": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_roles_members_and_every_channel_d86dbc40": "ロール、メンバー、すべてのチャンネル",
+    "@ui_roles_members_and_every_channel_d86dbc40": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_copy_channel_id_8e258228": "チャンネルIDをコピー",
+    "@ui_copy_channel_id_8e258228": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_copy_server_id_d51c0888": "サーバーIDをコピー",
+    "@ui_copy_server_id_d51c0888": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_paused_until_keys_rotate_a126d4c8": "鍵が更新されるまで一時停止",
+    "@ui_paused_until_keys_rotate_a126d4c8": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_review_consent_devices_and_history_access_4c180a43": "同意、デバイス、履歴へのアクセスを確認",
+    "@ui_review_consent_devices_and_history_access_4c180a43": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_load_pinned_messages_a7b04fe7": "ピン留めしたメッセージを読み込めませんでした",
+    "@ui_could_not_load_pinned_messages_a7b04fe7": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_unpin_that_message_6b3dae65": "そのメッセージのピン留めを解除できませんでした",
+    "@ui_could_not_unpin_that_message_6b3dae65": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_pinned_messages_are_unavailable_right_now_f7c1934b": "現在、ピン留めしたメッセージを利用できません。",
+    "@ui_pinned_messages_are_unavailable_right_now_f7c1934b": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_pinned_messages_yet_e7f59500": "ピン留めしたメッセージはまだありません。",
+    "@ui_no_pinned_messages_yet_e7f59500": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_pinned_messages_stay_easy_to_find_here_714814f4": "ピン留めしたメッセージをここで簡単に見つけられます。",
+    "@ui_pinned_messages_stay_easy_to_find_here_714814f4": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_conversation_call_74d80636": "会話の通話",
+    "@ui_conversation_call_74d80636": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_members_anyone_can_add_a_friend_6278ff7a": "メンバー{value0}人 · 誰でもフレンドを追加できます",
+    "@ui_value0_members_anyone_can_add_a_friend_6278ff7a": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_group_name_1f8de81f": "グループ名",
+    "@ui_group_name_1f8de81f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_save_name_7692acbb": "名前を保存",
+    "@ui_save_name_7692acbb": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_add_a_friend_829f4dad": "フレンドを追加",
+    "@ui_add_a_friend_829f4dad": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_active_1f89134f": "有効",
+    "@ui_active_1f89134f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_optional_review_the_tradeoffs_before_enabling_d453c0a6": "任意 · 有効にする前に利点と制約を確認してください",
+    "@ui_optional_review_the_tradeoffs_before_enabling_d453c0a6": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_review_each_member_s_consent_and_app_devices_db108ab1": "各メンバーの同意とアプリのデバイスを確認",
+    "@ui_review_each_member_s_consent_and_app_devices_db108ab1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_members_4ffd31b0": "メンバー",
+    "@ui_members_4ffd31b0": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_you_b5bdd13c": "自分",
+    "@ui_you_b5bdd13c": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_owner_9b22be74": "所有者",
+    "@ui_owner_9b22be74": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_leave_group_f299bc23": "グループから退出",
+    "@ui_leave_group_f299bc23": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_the_member_list_is_no_longer_available_5902875d": "メンバー一覧は利用できなくなりました。",
+    "@ui_the_member_list_is_no_longer_available_5902875d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_load_the_member_list_a01b2ed4": "メンバー一覧を読み込めませんでした",
+    "@ui_could_not_load_the_member_list_a01b2ed4": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_in_value1_f7d9cad5": "{value1}の{value0}",
+    "@ui_value0_in_value1_f7d9cad5": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            },
+            "value1": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_partial_member_list_bc6e6a10": "一部のメンバー一覧",
+    "@ui_partial_member_list_bc6e6a10": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_only_members_seen_in_cached_messages_are_show_cce21c8d": "キャッシュされたメッセージで確認できたメンバーのみを表示しています。下に引いて再試行してください。",
+    "@ui_only_members_seen_in_cached_messages_are_show_cce21c8d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_add_a_guild_d81da1e0": "サーバーを追加",
+    "@ui_add_a_guild_d81da1e0": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_organize_guilds_ce4e5c64": "サーバーを整理",
+    "@ui_organize_guilds_ce4e5c64": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_create_guild_group_04069761": "サーバーグループを作成",
+    "@ui_create_guild_group_04069761": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_edit_guild_group_7f3f192d": "サーバーグループを編集",
+    "@ui_edit_guild_group_7f3f192d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_save_group_71c0db3b": "グループを保存",
+    "@ui_save_group_71c0db3b": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_press_and_hold_a_row_then_drag_it_groups_and__6148d229": "行を長押ししてドラッグしてください。グループと順序はウェブとデスクトップに同期されます。",
+    "@ui_press_and_hold_a_row_then_drag_it_groups_and__6148d229": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_edit_group_42453e5a": "グループを編集",
+    "@ui_edit_group_42453e5a": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_ungroup_guilds_499385bb": "サーバーのグループ化を解除",
+    "@ui_ungroup_guilds_499385bb": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_create_group_12e0eaee": "グループを作成",
+    "@ui_create_group_12e0eaee": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_waiting_on_you_b2263797": "{value0}件があなたの対応待ちです",
+    "@ui_value0_waiting_on_you_b2263797": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_no_conversations_yet_fc94ca24": "会話はまだありません",
+    "@ui_no_conversations_yet_fc94ca24": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_direct_message_6e16acb3": "ダイレクトメッセージ",
+    "@ui_direct_message_6e16acb3": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_events_617caa6d": "{value0}のイベント",
+    "@ui_value0_events_617caa6d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_you_do_not_have_permission_to_create_an_invit_4d051f96": "どのチャンネルにも招待を作成する権限がありません。",
+    "@ui_you_do_not_have_permission_to_create_an_invit_4d051f96": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_invite_people_to_ad3fae84": "招待先…",
+    "@ui_invite_people_to_ad3fae84": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_server_menu_7435ca49": "サーバーメニュー",
+    "@ui_server_menu_7435ca49": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_create_event_2890a125": "イベントを作成",
+    "@ui_create_event_2890a125": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_server_settings_29034fa3": "サーバー設定",
+    "@ui_server_settings_29034fa3": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_add_channel_786ad81f": "チャンネルを追加",
+    "@ui_add_channel_786ad81f": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_created_fd624aa3": "#{value0}を作成しました",
+    "@ui_value0_created_fd624aa3": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_create_the_channel_4ce6aac1": "チャンネルを作成できませんでした",
+    "@ui_could_not_create_the_channel_4ce6aac1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_notifications_stay_silent_19e683d1": "通知を鳴らしません",
+    "@ui_notifications_stay_silent_19e683d1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_appear_offline_to_everyone_68d50fb1": "全員にオフラインとして表示",
+    "@ui_appear_offline_to_everyone_68d50fb1": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_offline_showing_saved_conversations_78e86edb": "オフライン · 保存済みの会話を表示中",
+    "@ui_offline_showing_saved_conversations_78e86edb": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_account_areas_need_to_resync_297d62f4": "アカウントの{value0}項目を再同期する必要があります。",
+    "@ui_value0_account_areas_need_to_resync_297d62f4": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_reconnecting_keeping_your_place_08ff5426": "再接続中 · 表示位置を保持しています",
+    "@ui_reconnecting_keeping_your_place_08ff5426": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_connected_ac41549b": "{value0}に接続済み",
+    "@ui_value0_connected_ac41549b": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_no_conversation_open_446fd523": "会話が開かれていません",
+    "@ui_no_conversation_open_446fd523": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_pick_a_channel_or_direct_message_to_start_rea_68a66fec": "チャンネルまたはダイレクトメッセージを選んで、読み始めましょう。",
+    "@ui_pick_a_channel_or_direct_message_to_start_rea_68a66fec": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_guilds_are_communities_create_your_own_or_joi_3654bae9": "サーバーはコミュニティです。自分で作ることも、どのKaedeサーバーの招待でも参加することもできます。",
+    "@ui_guilds_are_communities_create_your_own_or_joi_3654bae9": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_create_a_guild_cbd46599": "サーバーを作成",
+    "@ui_create_a_guild_cbd46599": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_join_with_an_invite_f089d967": "招待で参加",
+    "@ui_join_with_an_invite_f089d967": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_invite_permissions_changed_before_the_invite__47558fce": "招待を作成する前に、招待の権限が変更されました。",
+    "@ui_invite_permissions_changed_before_the_invite__47558fce": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_anyone_with_this_link_can_join_value0_2f28645d": "このリンクを知っている誰でも#{value0}に参加できます。",
+    "@ui_anyone_with_this_link_can_join_value0_2f28645d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_invite_created_17733c5a": "招待を作成しました。",
+    "@ui_invite_created_17733c5a": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_create_the_invite_3b4edd17": "招待を作成できませんでした",
+    "@ui_could_not_create_the_invite_3b4edd17": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_friends_live_on_their_own_home_server_use_the_ac7f516d": "フレンドのアカウントは、それぞれのホームサーバーにあります。@maple@kaede.chatのような完全なアドレスを使用してください。",
+    "@ui_friends_live_on_their_own_home_server_use_the_ac7f516d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_no_friends_yet_07ad5fe9": "フレンドはまだいません",
+    "@ui_no_friends_yet_07ad5fe9": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_incoming_requests_8955d605": "受信したリクエスト",
+    "@ui_incoming_requests_8955d605": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_sent_requests_cfdb71db": "送信したリクエスト",
+    "@ui_sent_requests_cfdb71db": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_friends_value0_af4de1cd": "フレンド — {value0}",
+    "@ui_friends_value0_af4de1cd": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_update_the_relationship_61b322b3": "つながりを更新できませんでした",
+    "@ui_could_not_update_the_relationship_61b322b3": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_could_not_open_the_direct_message_0370d958": "ダイレクトメッセージを開けませんでした",
+    "@ui_could_not_open_the_direct_message_0370d958": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_start_a_private_conversation_with_one_person_c51df8ab": "1人の相手と非公開の会話を開始",
+    "@ui_start_a_private_conversation_with_one_person_c51df8ab": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_create_group_dm_f99283c5": "グループDMを作成",
+    "@ui_create_group_dm_f99283c5": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_choose_two_or_more_friends_b5c6938d": "フレンドを2人以上選択",
+    "@ui_choose_two_or_more_friends_b5c6938d": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart"
+    },
+    "ui_value0_of_9_friends_selected_3c57a378": "9人中{value0}人のフレンドを選択済み",
+    "@ui_value0_of_9_friends_selected_3c57a378": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    },
+    "ui_could_not_complete_value0_5e6e6ede": "「{value0}」を完了できませんでした",
+    "@ui_could_not_complete_value0_5e6e6ede": {
+        "description": "Interface text in lib/src/features/home/mobile_shell.dart",
+        "placeholders": {
+            "value0": {
+                "type": "String"
+            }
+        }
+    }
 }
