@@ -9,6 +9,7 @@ import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 void main() {
   test('Stage lifecycle messages use Discord timeline wording', () {
@@ -265,46 +266,53 @@ void main() {
     );
   });
 
-  test('modal submissions include their exact response correlation', () async {
-    final adapter = _ActionAdapter(<_Reply>[const _Reply('{}')]);
-    final repository = KaedeRepository(
-      KaedeApiClient(
-        vault: const SessionVault(),
-        httpClient: Dio()..httpClientAdapter = adapter,
-      ),
-    );
-    final components = <Map<String, Object?>>[
-      <String, Object?>{
-        'type': 1,
-        'components': <Object?>[
-          <String, Object?>{
-            'type': 3,
-            'custom_id': 'environment',
-            'values': <String>['production'],
-          },
-        ],
-      },
-    ];
+  for (final locale in ['en-US', 'ja-JP']) {
+    test('modal submissions preserve response correlation and locale ($locale)',
+        () async {
+      final previousLanguage = appLanguage.value;
+      addTearDown(() => appLanguage.value = previousLanguage);
+      appLanguage.value = locale;
+      final adapter = _ActionAdapter(<_Reply>[const _Reply('{}')]);
+      final repository = KaedeRepository(
+        KaedeApiClient(
+          vault: const SessionVault(),
+          httpClient: Dio()..httpClientAdapter = adapter,
+        ),
+      );
+      final components = <Map<String, Object?>>[
+        <String, Object?>{
+          'type': 1,
+          'components': <Object?>[
+            <String, Object?>{
+              'type': 3,
+              'custom_id': 'environment',
+              'values': <String>['production'],
+            },
+          ],
+        },
+      ];
 
-    await repository.submitInteractionModal(
-      channel: EntityRef.parse('2@chat.example'),
-      application: EntityRef.parse('40@chat.example'),
-      responseId: '71',
-      customId: 'deploy_details',
-      components: components,
-    );
+      await repository.submitInteractionModal(
+        channel: EntityRef.parse('2@chat.example'),
+        application: EntityRef.parse('40@chat.example'),
+        responseId: '71',
+        customId: 'deploy_details',
+        components: components,
+      );
 
-    expect(adapter.requests.single.method, 'POST');
-    expect(adapter.requests.single.path,
-        '/api/v1/channels/2@chat.example/interactions');
-    expect(adapter.requests.single.data, <String, Object?>{
-      'application_ref': '40@chat.example',
-      'interaction_type': 'modal_submit',
-      'response_id': '71',
-      'custom_id': 'deploy_details',
-      'components': components,
+      expect(adapter.requests.single.method, 'POST');
+      expect(adapter.requests.single.path,
+          '/api/v1/channels/2@chat.example/interactions');
+      expect(adapter.requests.single.data, <String, Object?>{
+        'application_ref': '40@chat.example',
+        'interaction_type': 'modal_submit',
+        'response_id': '71',
+        'custom_id': 'deploy_details',
+        'components': components,
+        'locale': locale,
+      });
     });
-  });
+  }
 }
 
 Map<String, Object?> _messageJson({

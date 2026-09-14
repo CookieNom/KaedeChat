@@ -47,6 +47,13 @@ jobs:
       - name: Validate workflow syntax
         if: runner.os == 'Linux'
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color -shellcheck= -pyflakes=
+      - name: Check vendored iOS podspec lock entries
+        if: runner.os == 'macOS'
+        run: |
+          gem_home="$RUNNER_TEMP/podspec-gems"
+          export GEM_HOME="$gem_home" GEM_PATH="$gem_home"
+          gem install cocoapods-core --version 1.16.2 --no-document
+          ruby .github/scripts/check-podspecs.rb
 
   backend:
     needs: release-inputs
