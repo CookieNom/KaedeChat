@@ -34,6 +34,7 @@
   import type {
     CreateTrackerTaskRequest,
     TrackerBoard,
+    TrackerField,
     TrackerFilters,
     TrackerLane,
     TrackerPriority,
@@ -458,14 +459,14 @@
     }
   }
 
-  async function savePrefix(prefix: string) {
+  async function saveSettings(patch: { key_prefix?: string; custom_fields?: TrackerField[] }) {
     if (!board || actionBusy) return;
     actionBusy = true;
     actionError = '';
     try {
-      board = await updateTracker(channel, board.version, { key_prefix: prefix });
+      board = await updateTracker(channel, board.version, patch);
     } catch (caught) {
-      actionError = await actionFailure(caught, 'Could not update the task key prefix. Try again.');
+      actionError = await actionFailure(caught, 'Could not update the board settings. Try again.');
     } finally {
       actionBusy = false;
     }
@@ -936,6 +937,7 @@
 {#if taskDialogOpen && taskDialogLane}
   {#key editingTask ? `${entityKey(editingTask)}:${editingTask.version}` : `new:${taskCreateNonce}`}
     <TaskTrackerTaskDialog
+      fields={board?.custom_fields ?? []}
       task={editingTask}
       initialLane={taskDialogLane}
       {lanes}
@@ -963,7 +965,8 @@
     {lanes}
     busy={actionBusy}
     error={actionError}
-    onPrefix={savePrefix}
+    onPrefix={(prefix) => saveSettings({ key_prefix: prefix })}
+    onFields={(fields) => saveSettings({ custom_fields: fields })}
     onCreateLane={addLane}
     onUpdateLane={saveLane}
     onMoveLane={moveLane}

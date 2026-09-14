@@ -164,6 +164,9 @@ GuildManagementOperation = Literal[
     "voice_member.disconnect",
     "voice_member.move",
     "voice_message.capability",
+    "tracker.attachment.ticket",
+    "tracker.attachment.commit",
+    "tracker.attachment.read",
     "tracker.board.update",
     "tracker.lane.create",
     "tracker.lane.update",
@@ -185,6 +188,7 @@ GuildManagementOperation = Literal[
 # not listed here therefore fails closed as content creation/change.
 GUILD_MANAGEMENT_ADMISSION_EXEMPT_OPERATIONS: frozenset[GuildManagementOperation] = frozenset(
     {
+        "tracker.attachment.read",
         # Read-only operations.
         "channel.overwrite.list",
         "member.ban.list",
@@ -561,6 +565,14 @@ _BOT_GUILD_MANAGEMENT_GROUPS: tuple[
             "tasks.manage",
             Permission.VIEW_CHANNEL | Permission.MANAGE_TRACKER,
         ),
+    ),
+    (
+        ("tracker.attachment.ticket", "tracker.attachment.commit"),
+        _bot_contract("tasks.write", Permission.VIEW_CHANNEL | Permission.CREATE_TRACKER_TASKS),
+    ),
+    (
+        ("tracker.attachment.read",),
+        _bot_contract("tasks.read", Permission.VIEW_CHANNEL),
     ),
     (
         ("tracker.task.create",),
@@ -941,6 +953,9 @@ _IDENTITY_CHANNEL_OVERWRITES = frozenset({"channel.overwrite.list"})
 # deliberately not treated as guild-owned resources.
 _IDENTITY_ENVELOPE = frozenset(
     {
+        "tracker.attachment.ticket",
+        "tracker.attachment.commit",
+        "tracker.attachment.read",
         "guild.delete",
         "channel.reorder",
         "channel.overwrite.put",

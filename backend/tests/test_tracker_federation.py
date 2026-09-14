@@ -126,6 +126,8 @@ def tracker_rows(
 
 def test_tracker_snapshot_validates_historical_creator_and_current_assignee() -> None:
     board, lane, task, creator, assignee = tracker_rows()
+    board.custom_fields = [{"id": "reviewer", "name": "Reviewer", "type": "users", "options": []}]
+    task.custom_values = {"reviewer": [f"{assignee.id}@{assignee.origin_domain}"]}
     snapshot = tracker_snapshot_page_payload(
         settings(),
         board,
@@ -141,6 +143,16 @@ def test_tracker_snapshot_validates_historical_creator_and_current_assignee() ->
         expected_channel=(20, "remote.example"),
     )
 
+    assert snapshot["board"]["custom_fields"] == board.custom_fields
+    assert snapshot["tasks"][0]["custom_values"] == task.custom_values
+    invalid = {
+        **snapshot,
+        "tasks": [{**snapshot["tasks"][0], "custom_values": {"unknown": "Oops"}}],
+    }
+    with pytest.raises(ValueError, match="no longer exists"):
+        validate_tracker_snapshot(
+            invalid, expected_guild=(10, "remote.example"), expected_channel=(20, "remote.example")
+        )
     without_creator = {**snapshot, "users": snapshot["users"][1:]}
     with pytest.raises(ValueError, match="user profiles"):
         validate_tracker_snapshot(

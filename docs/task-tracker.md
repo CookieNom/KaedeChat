@@ -53,6 +53,40 @@ attribution even after leaving. Creation accepts an optional 1–64 character
 request returns the original task; reusing it for different input fails with a
 conflict.
 
+## Custom task fields
+
+Open **Board settings → Add custom field** to define fields for every task in
+that channel. Fields support short or long text, dropdowns, multiple choices,
+numbers, dates, checkboxes, links, people, channels, and attachments. People
+fields can hold additional assignments such as reviewers without replacing the
+main assignee. Channel fields select channels from the same guild.
+
+On mobile, open **Tracker settings → Add field**. Custom fields are available
+when creating or editing a task and in its read-only details. Tap an image or
+video attachment to preview it; use **Search all members** to find an assignee
+outside the currently loaded member list.
+
+Each channel supports up to 50 fields. Field order controls the task editor's
+order. Managers can rename fields, edit choices, and remove fields; removal
+requires confirmation and deletes the field's values from all tasks. A field's
+type cannot change, and choices still used by tasks cannot be removed.
+
+Edit custom values in the task details dialog. People fields use the existing
+assignment permissions: adding or removing another person requires
+`ASSIGN_TRACKER_TASKS`. Custom assignments do not grant task edit permissions.
+Normal membership removal also clears custom assignments.
+
+Attachment fields accept up to ten uploaded files or external links each, with
+image and video previews. Uploads use the existing storage quotas and scanning
+pipeline. Uploaded files are private to channel viewers while referenced by a
+task; their uploader can also preview unattached uploads. External links retain
+the permissions of the site hosting them. Unreferenced uploads are eligible for
+the installation's configured media retention cleanup.
+
+Custom values have a combined 32 KB limit per task; field definitions have a
+64 KB limit per board. The database migration must be applied before deploying
+the updated backend.
+
 ## Permissions
 
 Tracker authorization is evaluated from the actor's live guild roles plus the
@@ -151,6 +185,28 @@ input.
 The Python SDK exposes `Channel.is_tracker`, `Channel.tracker()`, typed
 `TrackerBoard`, `TrackerLane`, and `TrackerTask` resources, convenience CRUD
 methods, typed delete and board-update events, and the `guild_tasks` intent.
+
+Developer applications and bots configure fields with
+`PATCH /api/v1/bots/channels/{channel_ref}/tracker` (`custom_fields`) and set
+values with task POST/PATCH requests (`custom_values`). These use the same
+schemas, version checks, guild membership rules, and field validation as human
+clients. Configuring fields requires `tasks.manage` and `tasks.read`; task
+writes require `tasks.write`, in addition to the corresponding role permissions.
+
+Task media uses
+`POST /api/v1/bots/channels/{channel_ref}/tracker/attachments/{action}`:
+
+| Action | Payload | Required scopes | Result |
+| --- | --- | --- | --- |
+| `ticket` | `filename`, `content_type`, `size` | `tasks.write`, `attachments.write` | Existing upload-ticket shape; PUT file bytes to `upload_url` |
+| `commit` | Qualified `attachment_id` | `tasks.write`, `attachments.write` | Pending attachment scan status, or `{id, name, type}` ready for a task field |
+| `read` | Qualified `attachment_id` | `tasks.read`, `attachments.read` | Short-lived private `{url}` |
+
+Ticket requests share the existing upload rate limit. All three responses use
+`Cache-Control: private, no-store`. Media remains subject to channel access,
+file ownership/reference checks, quotas, and scanning. See the
+[SDK automation examples](bot-api-quickstart.md#task-tracker-automation) for
+custom fields, explicit clears, and resumable attachment commits.
 
 ## Authority and federation
 

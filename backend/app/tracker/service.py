@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
@@ -40,6 +40,7 @@ from app.federation.guild_management import (
 )
 from app.federation.tracker import hydrate_replicated_tracker
 from app.tracker.federation import queue_tracker_federation_invalidation
+from app.tracker.fields import validate_values
 from app.tracker.outbox import queue_tracker_dispatch, wake_tracker_dispatch_outbox
 from app.tracker.payloads import (
     UserKey,
@@ -200,8 +201,11 @@ def default_key_prefix(name: str, channel_id: int) -> str:
 def task_request_fingerprint(payload: TrackerTaskCreate) -> str:
     """Return the stable semantic fingerprint bound to a task client nonce."""
 
+    data = payload.model_dump(mode="json")
+    if not data.get("custom_values"):
+        data.pop("custom_values", None)
     canonical = json.dumps(
-        payload.model_dump(mode="json"),
+        data,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -513,8 +517,33 @@ async def update_board(
         needed=required_permissions("tracker.settings.manage"),
     )
     require_tracker_version(context.board.updated_at, if_match)
-    if context.board.key_prefix != payload.key_prefix:
-        context.board.key_prefix = payload.key_prefix
+    changes = payload.model_dump(exclude_unset=True)
+    if payload.custom_fields is not None:
+        changes["custom_fields"] = [field.model_dump() for field in payload.custom_fields]
+        old_fields = {field["id"]: field for field in context.board.custom_fields or []}
+        for field in changes["custom_fields"]:
+            old = old_fields.get(field["id"])
+            if old and old["type"] != field["type"]:
+                raise HTTPException(400, detail={"code": "TRACKER_FIELD_TYPE_IMMUTABLE"})
+        tasks = await ordered_tasks(session, context.board, lock=True)
+        retained = {field["id"] for field in changes["custom_fields"]}
+        for task in tasks:
+            values = {
+                key: value for key, value in (task.custom_values or {}).items() if key in retained
+            }
+            try:
+                validate_values(changes["custom_fields"], values)
+            except ValueError as exc:
+                raise HTTPException(
+                    409, detail={"code": "TRACKER_FIELD_IN_USE", "message": str(exc)}
+                ) from exc
+            if values != (task.custom_values or {}):
+                task.custom_values = values
+                task.updated_at = next_tracker_version(task.updated_at)
+    changed = any((getattr(context.board, key) or []) != value for key, value in changes.items())
+    if changed:
+        for key, value in changes.items():
+            setattr(context.board, key, value)
         context.board.updated_at = next_tracker_version(context.board.updated_at)
         await queue_context_federation(
             session, settings, context, auth.user, reason="settings_updated"
@@ -1040,6 +1069,87 @@ async def require_assignment_permission(
     )
 
 
+async def validated_custom_values(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    context: TrackerContext,
+    actor: User,
+    values: object,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fields = context.board.custom_fields or []
+    previous = previous or {}
+    try:
+        normalized = validate_values(fields, values)
+    except ValueError as exc:
+        raise HTTPException(
+            400, detail={"code": "TRACKER_FIELD_INVALID", "message": str(exc)}
+        ) from exc
+    for field in fields:
+        key, kind = field["id"], field["type"]
+        old, new = previous.get(key, []), normalized.get(key, [])
+        if old == new:
+            continue
+        if kind == "users":
+            for ref in set(old) ^ set(new):
+                identity = EntityRef(ref).resolve(settings.domain)
+                if ref in new:
+                    await member_user(session, context.board, EntityRef(ref), settings)
+                await require_assignment_permission(
+                    session,
+                    redis,
+                    context,
+                    actor,
+                    old=identity if ref in old else (None, None),
+                    new=identity if ref in new else (None, None),
+                )
+        elif kind == "attachments":
+            from app.db.models import Attachment
+            from app.tracker.media import file_value
+
+            for item in new:
+                if "id" not in item or item in old:
+                    continue
+                attachment = await session.get(
+                    Attachment,
+                    EntityRef(item["id"]).resolve(settings.domain),
+                    with_for_update={"read": True},
+                    populate_existing=True,
+                )
+                if (
+                    attachment is None
+                    or attachment.deleted_at is not None
+                    or attachment.purpose != "tracker_attachment"
+                    or attachment.scan_status != "clean"
+                    or (attachment.upload_channel_id, attachment.upload_channel_domain)
+                    != (context.board.channel_id, context.board.channel_domain)
+                    or (attachment.uploader_id, attachment.uploader_domain)
+                    != (actor.id, actor.origin_domain)
+                    or file_value(attachment) != item
+                ):
+                    raise HTTPException(400, detail={"code": "TRACKER_ATTACHMENT_INVALID"})
+        elif kind == "channels":
+            for ref in set(new) - set(old):
+                access = await load_channel_access(session, settings, actor, EntityRef(ref))
+                if (access.channel.guild_id, access.channel.guild_domain) != (
+                    context.board.guild_id,
+                    context.board.guild_domain,
+                ):
+                    raise HTTPException(400, detail={"code": "TRACKER_FIELD_CHANNEL_INVALID"})
+                if access.guild is None:
+                    raise HTTPException(400, detail={"code": "TRACKER_FIELD_CHANNEL_INVALID"})
+                await require_permissions(
+                    session,
+                    redis,
+                    access.guild,
+                    actor,
+                    required_permissions("tracker.read"),
+                    channel=access.channel,
+                )
+    return normalized
+
+
 async def create_task(
     session: AsyncSession,
     redis: Redis,
@@ -1108,6 +1218,14 @@ async def create_task(
             old=(None, None),
             new=(assignee.id, assignee.origin_domain),
         )
+    custom_values = await validated_custom_values(
+        session,
+        redis,
+        settings,
+        context,
+        auth.user,
+        payload.custom_values,
+    )
     now = next_tracker_version(context.board.updated_at)
     task = TrackerTask(
         id=await snowflake.mint(),
@@ -1120,6 +1238,7 @@ async def create_task(
         lane_domain=lane.origin_domain,
         number=context.board.next_task_number,
         title=payload.title,
+        custom_values=custom_values,
         description=payload.description,
         priority=payload.priority,
         position=position,
@@ -1230,6 +1349,16 @@ async def update_task(
         values.pop("assignee_id", None)
         if assignee is not None:
             users[(assignee.id, assignee.origin_domain)] = assignee
+    if "custom_values" in values:
+        values["custom_values"] = await validated_custom_values(
+            session,
+            redis,
+            settings,
+            context,
+            auth.user,
+            values["custom_values"],
+            task.custom_values,
+        )
     changed = False
     for field, value in values.items():
         if getattr(task, field) != value:

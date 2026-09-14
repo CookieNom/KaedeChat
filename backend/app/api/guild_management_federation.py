@@ -1491,7 +1491,22 @@ async def _dispatch_tracker(
     settings: Settings,
 ) -> GuildManagementResult:
     body: object
-    if request.operation == "tracker.board.update":
+    if request.operation.startswith("tracker.attachment."):
+        from app.tracker.media import tracker_media
+
+        payload = _TrackerData.model_validate(request.payload)
+        body = await tracker_media(
+            session,
+            redis,
+            snowflake,
+            settings,
+            _auth(actor),
+            EntityRef(payload.channel_ref),
+            request.operation.rsplit(".", 1)[1],
+            payload.data,
+        )
+        status_code = 200
+    elif request.operation == "tracker.board.update":
         from app.tracker.schemas import TrackerBoardUpdate
         from app.tracker.service import update_board
 

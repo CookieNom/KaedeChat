@@ -834,6 +834,8 @@ async def purge_local_attachment(
 async def retention_sweep(session: AsyncSession, settings: Settings) -> int:
     if settings.media_retention_days is None:
         return 0
+    from app.tracker.media import task_references_attachment
+
     cutoff = datetime.now(UTC) - timedelta(days=settings.media_retention_days)
     rows = list(
         await session.scalars(
@@ -842,7 +844,11 @@ async def retention_sweep(session: AsyncSession, settings: Settings) -> int:
                 Attachment.finalized_at < cutoff,
                 Attachment.message_id.is_(None),
                 Attachment.report_id.is_(None),
-                Attachment.purpose == "attachment",
+                or_(
+                    Attachment.purpose == "attachment",
+                    (Attachment.purpose == "tracker_attachment")
+                    & ~task_references_attachment(Attachment),
+                ),
                 Attachment.deleted_at.is_(None),
             )
             .limit(100)

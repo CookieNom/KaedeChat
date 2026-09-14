@@ -38,6 +38,7 @@ MEDIA_ORIGIN_HEADER = "X-Kaede-Media-Origin"
 # one place so ticket and finalize accounting cannot drift apart as new
 # federated guild assets are added.
 FEDERATED_GUILD_UPLOAD_PURPOSES = (
+    "tracker_attachment",
     "emoji",
     "guild_banner",
     "guild_icon",

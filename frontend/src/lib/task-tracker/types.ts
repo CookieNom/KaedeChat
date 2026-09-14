@@ -5,6 +5,7 @@ export const TRACKER_CHANNEL_TYPE = 17 as const;
 export type TrackerPriority = 'none' | 'low' | 'medium' | 'high' | 'urgent';
 
 export interface TrackerBoard {
+  custom_fields?: TrackerField[];
   channel_id: string;
   channel_domain: string;
   key_prefix: string;
@@ -30,6 +31,7 @@ export interface TrackerLane {
 }
 
 export interface TrackerTask {
+  custom_values?: TrackerValues;
   id: string;
   origin_domain: string;
   channel_id: string;
@@ -50,6 +52,7 @@ export interface TrackerTask {
 }
 
 export interface CreateTrackerTaskRequest {
+  custom_values?: TrackerValues;
   lane_id: string;
   title: string;
   description?: string | null;
@@ -60,6 +63,7 @@ export interface CreateTrackerTaskRequest {
 }
 
 export interface UpdateTrackerTaskRequest {
+  custom_values?: TrackerValues;
   title?: string;
   description?: string | null;
   priority?: TrackerPriority;
@@ -90,3 +94,31 @@ export interface TrackerGatewayDispatch {
   t: string;
   d: unknown;
 }
+
+export const trackerFieldTypes = {
+  text: 'Short text',
+  textarea: 'Long text',
+  select: 'Dropdown',
+  multiselect: 'Multiple choice',
+  number: 'Number',
+  date: 'Date',
+  checkbox: 'Checkbox',
+  url: 'Link',
+  users: 'People',
+  channels: 'Channels',
+  attachments: 'Attachments'
+} as const;
+export interface TrackerField {
+  id: string;
+  name: string;
+  type: keyof typeof trackerFieldTypes;
+  options: string[];
+}
+export interface TrackerAttachment {
+  id?: string;
+  name: string;
+  url?: string;
+  type: 'file' | 'image' | 'video';
+}
+export type TrackerFieldValue = string | number | boolean | string[] | TrackerAttachment[] | null;
+export type TrackerValues = Record<string, TrackerFieldValue>;

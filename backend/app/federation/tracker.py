@@ -244,6 +244,7 @@ def tracker_board_snapshot_payload(
         "channel_domain": board.channel_domain,
         "guild_id": str(board.guild_id),
         "guild_domain": board.guild_domain,
+        "custom_fields": board.custom_fields or [],
         "key_prefix": board.key_prefix,
         "next_task_number": str(board.next_task_number),
         "task_count": str(task_count),
@@ -282,6 +283,7 @@ def tracker_task_snapshot_payload(task: TrackerTask) -> dict[str, object]:
         "lane_id": str(task.lane_id),
         "lane_domain": task.lane_domain,
         "number": str(task.number),
+        "custom_values": task.custom_values or {},
         "title": task.title,
         "description": task.description,
         "priority": task.priority,
@@ -459,6 +461,9 @@ def validate_tracker_snapshot(
         or key_prefix != key_prefix.upper()
     ):
         raise ValueError("tracker snapshot key prefix is invalid")
+    from app.tracker.fields import field_definitions, validate_values
+
+    custom_fields = field_definitions(raw_board.get("custom_fields", []))
     next_task_number = database_snowflake(
         raw_board.get("next_task_number"), "tracker next task number"
     )
@@ -561,6 +566,7 @@ def validate_tracker_snapshot(
         )
         if lane_ref not in lane_refs:
             raise ValueError("tracker snapshot task references an unknown lane")
+        validate_values(custom_fields, raw.get("custom_values", {}))
         number = database_snowflake(raw.get("number"), "tracker task number")
         title = raw.get("title")
         description = raw.get("description")
@@ -820,6 +826,7 @@ async def apply_tracker_snapshot(
             next_task_number=int(raw_board["next_task_number"]),
         )
         session.add(board)
+    board.custom_fields = raw_board.get("custom_fields", [])
     board.key_prefix = str(raw_board["key_prefix"])
     board.next_task_number = int(raw_board["next_task_number"])
     board.created_at = datetime.fromisoformat(str(raw_board["created_at"]))
@@ -877,6 +884,7 @@ async def apply_tracker_snapshot(
                 lane_domain=str(raw["lane_domain"]),
                 number=int(raw["number"]),
                 title=str(raw["title"]),
+                custom_values=raw.get("custom_values", {}),
                 description=raw.get("description"),
                 priority=str(raw["priority"]),
                 position=int(raw["position"]),

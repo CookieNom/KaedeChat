@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -6,12 +7,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/tracker_media_repository.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/tracker/tracker_channel_view.dart';
+import 'package:kaede_mobile/src/features/tracker/tracker_custom_fields.dart';
+import 'package:kaede_mobile/src/features/tracker/tracker_field_settings.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -611,6 +615,11 @@ void main() {
           task: task,
           lane: lane,
           canEdit: false,
+          customFields: TrackerCustomFields(fields: const [
+            TrackerField(id: 'notes', name: 'Review notes', type: 'textarea')
+          ], values: const {
+            'notes': 'Approved for release'
+          }, channel: task.channelRef),
         ),
       ),
     ));
@@ -619,6 +628,8 @@ void main() {
         findsOneWidget);
     expect(find.text('Planned'), findsOneWidget);
     expect(find.text('Edit task'), findsNothing);
+    expect(find.text('Approved for release'), findsOneWidget);
+    expect(find.byType(TextFormField), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -680,6 +691,420 @@ void main() {
 
     expect(result?.lane, lane.ref);
     expect(result?.position, 0);
+    expect(tester.takeException(), isNull);
+  });
+  test(
+      'custom field definitions and task values survive projection and API updates',
+      () async {
+    const fields = [
+      TrackerField(id: 'reviewer', name: 'Reviewer', type: 'users'),
+      TrackerField(
+          id: 'stage',
+          name: 'Stage',
+          type: 'select',
+          options: ['Ready', 'Blocked'])
+    ];
+    final board = TrackerBoard.fromJson({
+      ..._boardJson(),
+      'custom_fields': fields.map((f) => f.toJson()).toList()
+    });
+    expect(TrackerBoard.fromJson(board.toJson()).customFields.last.options,
+        ['Ready', 'Blocked']);
+    final values = <String, Object?>{
+      'reviewer': ['43@chat.example'],
+      'stage': 'Ready',
+      'files': [
+        {'id': '91@chat.example', 'name': 'Design.png', 'type': 'image'}
+      ]
+    };
+    final task = TrackerTask.fromJson({
+      ..._taskJson(
+          id: '23', laneId: '10', position: 0, key: 'LOU-23', title: 'Review'),
+      'custom_values': values
+    });
+    expect(TrackerTask.fromJson(task.toJson()).customValues, values);
+    final boardAdapter = _RecordingJsonAdapter(jsonEncode(board.toJson()));
+    await _repository(boardAdapter).updateTrackerBoard(
+        board.channelRef, board.version,
+        customFields: fields);
+    expect(boardAdapter.requests.single.data,
+        {'custom_fields': fields.map((f) => f.toJson()).toList()});
+    expect(boardAdapter.requests.single.headers['If-Match'], board.version);
+    final taskAdapter = _RecordingJsonAdapter(jsonEncode(task.toJson()));
+    final repo = _repository(taskAdapter);
+    await repo.createTrackerTask(board.channelRef,
+        lane: board.lanes.first.ref, title: 'Review', customValues: values);
+    await repo.updateTrackerTask(board.channelRef, task.ref, task.version,
+        customValues: {});
+    expect(taskAdapter.requests.first.data['custom_values'], values);
+    expect(taskAdapter.requests.last.data['custom_values'], isEmpty);
+    expect(taskAdapter.requests.last.headers['If-Match'], task.version);
+  });
+
+  test(
+      'tracker media uses channel-scoped capabilities and qualified attachment IDs',
+      () async {
+    final adapter = _RecordingJsonAdapter(
+        jsonEncode({'url': 'https://storage.example/private'}));
+    final repo = _repository(adapter);
+    await repo.trackerMedia(EntityRef.parse('3@chat.example'), 'read',
+        {'attachment_id': '91@remote.example'});
+    expect(adapter.requests.single.path,
+        '/api/v1/channels/3@chat.example/tracker/attachments/read');
+    expect(
+        adapter.requests.single.data, {'attachment_id': '91@remote.example'});
+    for (final invalid in [
+      'javascript:alert(1)',
+      'https://user:secret@example.org/file',
+      'https://example.org/a b',
+      '//example.org/image'
+    ]) {
+      expect(trackerSafeUrl(invalid), isFalse);
+    }
+    expect(trackerSafeUrl('https://example.org/file?token=abc'), isTrue);
+    await expectLater(
+        repo.uploadTrackerFile(EntityRef.parse('3@chat.example'),
+            File('/unused-cancelled-upload'), 'draft.png',
+            contentType: 'image/png', isActive: () => false),
+        throwsA(isA<UserInputException>()));
+    expect(adapter.requests, hasLength(1));
+  });
+
+  testWidgets(
+      'failed saves preserve custom values and nonce until a successful retry',
+      (tester) async {
+    final board = TrackerBoard.fromJson(_boardJson());
+    final drafts = <TrackerTaskDraft>[];
+    await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Builder(
+            builder: (context) => Scaffold(
+                    body: TextButton(
+                  child: const Text('Open'),
+                  onPressed: () => showModalBottomSheet<void>(
+                      context: context,
+                      isScrollControlled: true,
+                      builder: (_) => TrackerTaskEditorSheet(
+                          lanes: board.lanes,
+                          initialLane: board.lanes.first,
+                          members: const [],
+                          canAssignOthers: true,
+                          channel: board.channelRef,
+                          fields: const [
+                            TrackerField(
+                                id: 'note',
+                                name: 'Review notes',
+                                type: 'textarea')
+                          ],
+                          onSave: (draft) async {
+                            drafts.add(draft);
+                            if (drafts.length == 1) {
+                              throw const UserInputException(
+                                  'Connection lost. Try again.');
+                            }
+                          })),
+                )))));
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const ValueKey('tracker-task-title')), 'Release checklist');
+    final note = find.descendant(
+        of: find.byKey(const ValueKey('custom-field-note')),
+        matching: find.byType(TextFormField));
+    await tester.ensureVisible(note);
+    await tester.enterText(note, 'Keep this draft');
+    await tester.tap(find.byKey(const ValueKey('tracker-task-save')));
+    await tester.pumpAndSettle();
+    expect(find.byType(TrackerTaskEditorSheet), findsOneWidget);
+    expect(drafts.single.customValues, {'note': 'Keep this draft'});
+    expect(find.text('Keep this draft'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('tracker-task-save')));
+    await tester.pumpAndSettle();
+    expect(drafts.last.clientNonce, drafts.first.clientNonce);
+    expect(drafts.last.customValues, drafts.first.customValues);
+    expect(find.byType(TrackerTaskEditorSheet), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'all field types render at narrow, wide and landscape sizes with large text',
+      (tester) async {
+    final fields = [
+      for (final entry in trackerFieldTypes.entries)
+        TrackerField(
+            id: entry.key,
+            name: entry.value,
+            type: entry.key,
+            options: entry.key == 'select' || entry.key == 'multiselect'
+                ? ['Ready', 'Blocked']
+                : const [])
+    ];
+    final actor = KaedeUser.fromJson(_userJson('42', 'Alex'));
+    final channel = KaedeChannel.fromJson(_channelJson());
+    var values = <String, Object?>{
+      'text': 'Launch notes',
+      'textarea': 'Review copy and accessibility before release.',
+      'select': 'Ready',
+      'multiselect': ['Ready'],
+      'number': 12.5,
+      'date': '2026-09-14',
+      'checkbox': true,
+      'url': 'https://example.org/design',
+      'users': [actor.ref.wire],
+      'channels': [channel.ref.wire],
+      'attachments': [
+        {
+          'name': 'Design walkthrough.mp4',
+          'url': 'https://example.org/design.mp4',
+          'type': 'video'
+        },
+        {
+          'name': 'Mobile design.png',
+          'url': 'https://example.org/design.png',
+          'type': 'image'
+        }
+      ],
+    };
+    for (final size in [
+      const Size(320, 640),
+      const Size(800, 1000),
+      const Size(740, 360)
+    ]) {
+      tester.view.reset();
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      await tester.pumpWidget(MaterialApp(
+          theme: kaedeTheme(),
+          home: MediaQuery(
+              data: MediaQueryData(
+                  size: size, textScaler: TextScaler.linear(1.3)),
+              child: Scaffold(
+                  body: StatefulBuilder(
+                      builder: (context, setState) => Form(
+                          child: SingleChildScrollView(
+                              padding: const EdgeInsets.all(20),
+                              child: TrackerCustomFields(
+                                  fields: fields,
+                                  values: values,
+                                  channel: channel.ref,
+                                  channels: [channel],
+                                  actor: actor,
+                                  canAssignOthers: true,
+                                  onChanged: (v) =>
+                                      setState(() => values = v)))))))));
+      await tester.pumpAndSettle();
+      for (final f in fields) {
+        await tester
+            .ensureVisible(find.byKey(ValueKey('custom-field-${f.id}')));
+        await tester.pump();
+        expect(tester.takeException(), isNull, reason: '${f.type} at $size');
+      }
+      expect(find.text('Tap to preview'), findsNWidgets(2));
+    }
+    tester.view.reset();
+  });
+
+  testWidgets(
+      'people picker preserves locked assignments while adding yourself',
+      (tester) async {
+    List<String>? selected;
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+            builder: (context) => Scaffold(
+                body: TextButton(
+                    child: const Text('Open'),
+                    onPressed: () async {
+                      selected = await showModalBottomSheet<List<String>>(
+                          context: context,
+                          isScrollControlled: true,
+                          builder: (_) => TrackerReferencePicker(
+                              title: 'Reviewers',
+                              labels: const {
+                                '42@chat.example': 'Alex',
+                                '43@chat.example': 'Casey'
+                              },
+                              selected: const ['43@chat.example'],
+                              canChange: (id) => id == '42@chat.example'));
+                    })))));
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    final locked = tester.widget<CheckboxListTile>(
+        find.widgetWithText(CheckboxListTile, 'Casey'));
+    expect(locked.onChanged, isNull);
+    await tester.tap(find.text('Alex'));
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+    expect(selected, containsAll(['43@chat.example', '42@chat.example']));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'field settings validate names and choices on a phone keyboard layout',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 800);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Scaffold(
+            body: MediaQuery(
+                data: const MediaQueryData(
+                    size: Size(360, 800),
+                    viewInsets: EdgeInsets.only(bottom: 280)),
+                child: const TrackerFieldEditorSheet(fields: [
+                  TrackerField(id: 'reviewer', name: 'Reviewer', type: 'users')
+                ])))));
+    await tester.enterText(
+        find.byKey(const ValueKey('tracker-field-name')), 'Reviewer');
+    await tester.tap(find.text('Add field'));
+    await tester.pumpAndSettle();
+    expect(find.text('A field already has this name'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.enterText(
+        find.byKey(const ValueKey('tracker-field-name')), 'Status');
+    await tester.tap(find.byType(DropdownButtonFormField<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dropdown').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add field'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add 1–100 choices, each up to 100 characters'),
+        findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets(
+      'attachment links validate before adding and retain preview metadata',
+      (tester) async {
+    var values = <String, Object?>{};
+    await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Scaffold(
+            body: StatefulBuilder(
+                builder: (context, setState) => TrackerCustomFields(
+                        fields: const [
+                          TrackerField(
+                              id: 'files', name: 'Files', type: 'attachments')
+                        ],
+                        values: values,
+                        channel: EntityRef.parse('3@chat.example'),
+                        onChanged: (next) => setState(() => values = next))))));
+    await tester.tap(find.text('Add link'));
+    await tester.pumpAndSettle();
+    final dialog = find.byType(AlertDialog);
+    await tester
+        .tap(find.descendant(of: dialog, matching: find.text('Add link')));
+    await tester.pumpAndSettle();
+    expect(find.text('Enter a name'), findsOneWidget);
+    final inputs =
+        find.descendant(of: dialog, matching: find.byType(TextFormField));
+    await tester.enterText(inputs.first, 'Design review');
+    await tester.enterText(inputs.last, 'https://example.org/design.mp4');
+    await tester.tap(find.byType(DropdownButtonFormField<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Video').last);
+    await tester.pumpAndSettle();
+    await tester
+        .tap(find.descendant(of: dialog, matching: find.text('Add link')));
+    await tester.pumpAndSettle();
+    expect(values['files'], [
+      {
+        'name': 'Design review',
+        'url': 'https://example.org/design.mp4',
+        'type': 'video'
+      }
+    ]);
+    expect(find.text('Tap to preview'), findsOneWidget);
+    await tester.tap(find.byTooltip('Remove attachment'));
+    await tester.pumpAndSettle();
+    expect(values, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'settings require removal confirmation and save the ordered field definitions',
+      (tester) async {
+    final board = TrackerBoard.fromJson({
+      ..._boardJson(),
+      'custom_fields': [
+        const TrackerField(id: 'a', name: 'Effort', type: 'number').toJson(),
+        const TrackerField(id: 'b', name: 'Approved', type: 'checkbox')
+            .toJson(),
+      ]
+    });
+    final adapter = _RecordingJsonAdapter(jsonEncode(board.toJson()));
+    await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Builder(
+            builder: (context) => Scaffold(
+                body: TextButton(
+                    child: const Text('Settings'),
+                    onPressed: () => showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        builder: (_) => TrackerFieldSettingsSheet(
+                            board: board,
+                            channel: board.channelRef,
+                            repository: _repository(adapter))))))));
+    await tester.tap(find.text('Settings'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Move field down').first);
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widgetList<ListTile>(find.byType(ListTile))
+            .where((w) => w.title is Text)
+            .map((w) => (w.title! as Text).data)
+            .where((title) => title != 'Tracker settings')
+            .first,
+        'Approved');
+    await tester.tap(find.text('Remove').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Remove Approved?'), findsOneWidget);
+    expect(adapter.requests, isEmpty);
+    await tester.tap(find.text('Remove field'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save settings'));
+    await tester.pumpAndSettle();
+    expect(adapter.requests.single.data['custom_fields'],
+        [const TrackerField(id: 'a', name: 'Effort', type: 'number').toJson()]);
+    expect(adapter.requests.single.headers['If-Match'], board.version);
+    expect(find.byType(TrackerFieldSettingsSheet), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'numeric and checkbox edits preserve JSON types and validate invalid numbers',
+      (tester) async {
+    var values = <String, Object?>{};
+    final form = GlobalKey<FormState>();
+    await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme(),
+        home: Scaffold(
+            body: StatefulBuilder(
+                builder: (context, setState) => Form(
+                    key: form,
+                    child: TrackerCustomFields(
+                        fields: const [
+                          TrackerField(
+                              id: 'hours', name: 'Hours', type: 'number'),
+                          TrackerField(
+                              id: 'approved',
+                              name: 'Approved',
+                              type: 'checkbox')
+                        ],
+                        values: values,
+                        channel: EntityRef.parse('3@chat.example'),
+                        onChanged: (next) =>
+                            setState(() => values = next)))))));
+    await tester.enterText(find.byType(TextFormField), 'NaN');
+    expect(form.currentState!.validate(), isFalse);
+    await tester.enterText(find.byType(TextFormField), '3.5');
+    await tester.tap(find.text('Approved'));
+    await tester.pumpAndSettle();
+    expect(form.currentState!.validate(), isTrue);
+    expect(values, {'hours': 3.5, 'approved': true});
+    await tester.enterText(find.byType(TextFormField), '');
+    expect(values, {'approved': true});
     expect(tester.takeException(), isNull);
   });
 }

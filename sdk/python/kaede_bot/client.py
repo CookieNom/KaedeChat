@@ -152,6 +152,7 @@ from .polls import Poll
 from .refs import EntityRef, User, canonical_federation_domain
 from .soundboard import SoundboardSound
 from .state import WorkerState, canonical_application_home, canonical_target_origin
+from .tracker import TrackerField, TrackerUploadedAttachment
 from .ui import View
 from .voice import (
     LiveKitTransport,
@@ -4097,19 +4098,144 @@ class Client:
         self,
         channel: EntityRef,
         *,
-        key_prefix: str,
+        key_prefix: str | MissingType = MISSING,
+        custom_fields: Sequence[TrackerField] | MissingType = MISSING,
         target: str | None = None,
         version: str | None,
     ) -> TrackerBoard:
+        body = _provided_fields(key_prefix=key_prefix, custom_fields=custom_fields)
+        if not body:
+            raise ValueError("at least one tracker board field is required")
         origin = self._authority_target(channel, target)
         raw = await self.request(
             "PATCH",
             f"/api/v1/bots/channels/{channel}/tracker",
             target=origin,
-            json={"key_prefix": key_prefix},
+            json=body,
             headers=_version_headers(version),
         )
         return _tracker_board_response(self, origin, channel, raw)
+
+    async def upload_tracker_attachment(
+        self,
+        channel: EntityRef,
+        data: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        target: str | None = None,
+    ) -> Attachment:
+        """Upload task media; commit it before placing its value on a task."""
+        if not data:
+            raise ValueError("tracker attachments cannot be empty")
+        origin = self._authority_target(channel, target)
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/tracker/attachments/ticket",
+            target=origin,
+            json={
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(data),
+            },
+        )
+        attachment = Attachment.from_payload(self, origin, raw).bind_runtime(
+            channel_ref=channel
+        )
+        self._require_same_authority(
+            channel, attachment.ref, label="tracker attachment"
+        )
+        await self._put_upload_ticket(attachment, data, content_type=content_type)
+        return attachment
+
+    async def commit_tracker_attachment(
+        self,
+        channel: EntityRef,
+        attachment: EntityRef,
+        *,
+        target: str | None = None,
+        scan_attempts: int = 45,
+    ) -> TrackerUploadedAttachment:
+        """Wait for scanning and return the JSON value for an attachments field.
+
+        A timeout can be retried with the same attachment reference, without
+        uploading the file again.
+        """
+        if scan_attempts < 1:
+            raise ValueError("scan_attempts must be positive")
+        self._require_same_authority(channel, attachment, label="tracker attachment")
+        origin = self._authority_target(channel, target)
+        for attempt in range(scan_attempts):
+            raw = await self.request(
+                "POST",
+                f"/api/v1/bots/channels/{channel}/tracker/attachments/commit",
+                target=origin,
+                json={"attachment_id": str(attachment)},
+            )
+            if raw.get("type") in {"file", "image", "video"}:
+                if raw.get("id") != str(attachment) or not isinstance(
+                    raw.get("name"), str
+                ):
+                    raise ValueError("tracker attachment response changed its identity")
+                return cast(
+                    TrackerUploadedAttachment,
+                    {
+                        "id": raw["id"],
+                        "name": raw["name"],
+                        "type": raw["type"],
+                    },
+                )
+            pending = Attachment.from_payload(self, origin, raw)
+            if pending.ref != attachment:
+                raise ValueError("tracker attachment response changed its identity")
+            if pending.scan_status in {"infected", "rejected", "failed"}:
+                raise ApiError(
+                    422,
+                    "TRACKER_ATTACHMENT_REJECTED",
+                    "The attachment failed media processing",
+                )
+            if pending.scan_status != "pending":
+                raise ApiError(
+                    502,
+                    "TRACKER_ATTACHMENT_INVALID",
+                    "Invalid attachment processing response",
+                )
+            if attempt + 1 < scan_attempts:
+                await asyncio.sleep(1)
+        raise ApiError(
+            504,
+            "TRACKER_ATTACHMENT_PROCESSING_TIMEOUT",
+            "Attachment processing is taking longer than expected; retry the commit",
+        )
+
+    async def fetch_tracker_attachment_url(
+        self,
+        channel: EntityRef,
+        attachment: EntityRef,
+        *,
+        target: str | None = None,
+    ) -> str:
+        """Get a short-lived private URL. Never send bot credentials to this URL."""
+        from .media_urls import MediaURLValidationError, media_url_origin
+
+        self._require_same_authority(channel, attachment, label="tracker attachment")
+        origin = self._authority_target(channel, target)
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/tracker/attachments/read",
+            target=origin,
+            json={"attachment_id": str(attachment)},
+        )
+        url = raw.get("url")
+        try:
+            if not isinstance(url, str):
+                raise MediaURLValidationError("missing media URL")
+            media_url_origin(url)
+        except MediaURLValidationError:
+            raise ApiError(
+                502, "TRACKER_ATTACHMENT_INVALID", "Invalid attachment download URL"
+            ) from None
+        return url
 
     async def create_tracker_lane(
         self,
@@ -4232,6 +4358,7 @@ class Client:
         due_at: datetime | None = None,
         assignee: EntityRef | None = None,
         client_nonce: str | None = None,
+        custom_values: Mapping[str, Any] | MissingType = MISSING,
     ) -> TrackerTask:
         self._require_same_authority(channel, lane, label="tracker lane")
         origin = self._authority_target(channel, target)
@@ -4243,6 +4370,8 @@ class Client:
             "due_at": due_at.isoformat() if due_at is not None else None,
             "assignee_id": str(assignee) if assignee is not None else None,
         }
+        if custom_values is not MISSING:
+            body["custom_values"] = custom_values
         if position is not None:
             body["position"] = position
         if client_nonce is not None:
@@ -4268,6 +4397,7 @@ class Client:
         *,
         target: str | None = None,
         version: str | None,
+        custom_values: Mapping[str, Any] | MissingType = MISSING,
         title: str | MissingType = MISSING,
         description: str | None | MissingType = MISSING,
         priority: str | MissingType = MISSING,
@@ -4276,6 +4406,7 @@ class Client:
     ) -> TrackerTask:
         self._require_same_authority(channel, task, label="tracker task")
         body = _provided_fields(
+            custom_values=custom_values,
             title=title,
             description=description,
             priority=priority,

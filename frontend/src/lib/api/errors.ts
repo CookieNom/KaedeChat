@@ -215,6 +215,11 @@ const ERROR_MESSAGES: Record<string, string> = {
   TRACKER_TASK_NOT_FOUND: 'That task no longer exists. The tracker may have changed elsewhere.',
   TRACKER_VERSION_CONFLICT:
     'This tracker changed somewhere else. The latest version will be loaded before you retry.',
+  TRACKER_FIELD_INVALID: 'A custom field value is invalid. Check the fields and try again.',
+  TRACKER_FIELD_TYPE_IMMUTABLE: 'Create a new field to use a different field type.',
+  TRACKER_FIELD_IN_USE: 'A choice you removed is still used by a task. Update those tasks first.',
+  TRACKER_FIELD_CHANNEL_INVALID: 'Choose a channel from this server.',
+  TRACKER_ATTACHMENT_INVALID: 'An attachment is unavailable. Upload it again and retry.',
   TRACKER_VERSION_REQUIRED: 'Reload this tracker before changing it.',
   TARGET_CANNOT_CONNECT: "That member doesn't have permission to join this voice channel.",
   VOICE_NOT_CONNECTED: 'That member is no longer connected to voice.',

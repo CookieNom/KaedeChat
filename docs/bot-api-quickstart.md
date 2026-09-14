@@ -819,6 +819,54 @@ Every existing-resource mutation sends the fetched resource's version through
 creation's `client_nonce` is safe to reuse only for the identical request. See
 [Task tracker channels](task-tracker.md) for permissions and route details.
 
+Custom fields use the same API for installed developer applications and bots.
+To configure them, grant `tasks.manage` and `tasks.read` plus the bot role's
+`MANAGE_TRACKER` permission. Field IDs are stable, channel-local keys:
+
+```python
+board = await board.edit(custom_fields=[
+    *board.custom_fields,
+    {"id": "reviewers", "name": "Reviewers", "type": "users"},
+    {"id": "related", "name": "Related channels", "type": "channels"},
+    {"id": "evidence", "name": "Evidence", "type": "attachments"},
+])
+task = await board.create_task(
+    planned.ref,
+    "Review the release",
+    custom_values={
+        "reviewers": ["5@users.example"],
+        "related": [str(tracker_channel.ref)],
+    },
+)
+```
+
+People fields can hold extra reviewers independently of the main assignee.
+Assigning other people also requires `ASSIGN_TRACKER_TASKS`. All eleven field
+types are available through the exported `kaede.TrackerField` wire type.
+`board.custom_fields` and `task.custom_values` expose the saved data, including
+custom values in task gateway events. A supplied `custom_fields` list or
+`custom_values` map replaces that entire collection; omit it to preserve it,
+or pass `[]` / `{}` to clear it. Preserve the other entries when editing one.
+
+Uploaded task attachments additionally require `attachments.write`; reading
+private media requires both `tasks.read` and `attachments.read`:
+
+```python
+upload = await bot.upload_tracker_attachment(
+    tracker_channel.ref, image_bytes,
+    filename="review.png", content_type="image/png",
+)
+evidence = await bot.commit_tracker_attachment(tracker_channel.ref, upload.ref)
+task = await task.edit(custom_values={**task.custom_values, "evidence": [evidence]})
+url = await bot.fetch_tracker_attachment_url(tracker_channel.ref, upload.ref)
+```
+
+The commit waits for media scanning. If it times out, retry the commit with the
+same upload reference. Its return value is ready to put in an attachments
+field. Read URLs are short-lived private capabilities: do not log them or send
+bot credentials when fetching them. External attachment links can instead use
+`{"name": "Design", "url": "https://example.org/design.png", "type": "image"}`.
+
 ## Upload and download files
 
 File uploads need `attachments.write`; downloads need `attachments.read`.

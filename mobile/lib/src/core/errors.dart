@@ -259,7 +259,16 @@ final class KaedeException implements Exception {
           'These settings changed somewhere else. Reload them and try again.',
       'TRACKER_VERSION_REQUIRED': 'Refresh this tracker before changing it.',
       'TRACKER_VERSION_CONFLICT':
-          'This tracker changed somewhere else. It has been refreshed; try again.',
+          'This tracker changed somewhere else. Reload the latest version before trying again.',
+      'TRACKER_FIELD_INVALID': 'Check the custom field values and try again.',
+      'TRACKER_FIELD_TYPE_IMMUTABLE':
+          'To use another field type, add a new field.',
+      'TRACKER_FIELD_IN_USE':
+          'A removed choice is still used by tasks. Update those tasks first.',
+      'TRACKER_FIELD_CHANNEL_INVALID':
+          'Choose a channel you can access in this guild.',
+      'TRACKER_ATTACHMENT_INVALID':
+          'An attachment is unavailable or still being checked. Add it again and retry.',
       'TRACKER_CAPACITY_INVALID':
           'This tracker exceeds the server’s supported size. Contact an administrator.',
       'TRACKER_LANE_LIMIT_REACHED':

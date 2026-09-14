@@ -942,6 +942,40 @@ final class TrackerLane {
       };
 }
 
+const trackerFieldTypes = <String, String>{
+  'text': 'Short text',
+  'textarea': 'Long text',
+  'select': 'Dropdown',
+  'multiselect': 'Multiple choice',
+  'number': 'Number',
+  'date': 'Date',
+  'checkbox': 'Checkbox',
+  'url': 'Link',
+  'users': 'People',
+  'channels': 'Channels',
+  'attachments': 'Attachments',
+};
+
+final class TrackerField {
+  const TrackerField(
+      {required this.id,
+      required this.name,
+      required this.type,
+      this.options = const []});
+  factory TrackerField.fromJson(Json json) => TrackerField(
+        id: '${json['id']}',
+        name: '${json['name']}',
+        type: '${json['type']}',
+        options: List<String>.unmodifiable(
+            (json['options'] as List? ?? []).whereType<String>()),
+      );
+  final String id;
+  final String name;
+  final String type;
+  final List<String> options;
+  Json toJson() => {'id': id, 'name': name, 'type': type, 'options': options};
+}
+
 final class TrackerTask {
   const TrackerTask({
     required this.ref,
@@ -954,6 +988,7 @@ final class TrackerTask {
     required this.position,
     required this.creator,
     required this.version,
+    this.customValues = const {},
     this.description,
     this.dueAt,
     this.completedAt,
@@ -990,9 +1025,14 @@ final class TrackerTask {
                 Map<String, Object?>.from(json['assignee']! as Map),
               )
             : null,
+        customValues: Map<String, Object?>.unmodifiable(
+            json['custom_values'] is Map
+                ? Map<String, Object?>.from(json['custom_values'] as Map)
+                : const {}),
         version: _string(json['version']) ?? '',
       );
 
+  final Json customValues;
   final EntityRef ref;
   final EntityRef channelRef;
   final EntityRef laneRef;
@@ -1019,6 +1059,7 @@ final class TrackerTask {
         'lane_domain': laneRef.domain.value,
         'number': '$number',
         'key': key,
+        'custom_values': customValues,
         'title': title,
         'description': description,
         'priority': priority.name,
@@ -1040,6 +1081,7 @@ final class TrackerBoard {
     required this.permissions,
     required this.lanes,
     required this.tasks,
+    this.customFields = const [],
   });
 
   factory TrackerBoard.fromJson(Json json) {
@@ -1070,6 +1112,8 @@ final class TrackerBoard {
           BigInt.tryParse(_string(json['permissions']) ?? '0') ?? BigInt.zero,
       lanes: List.unmodifiable(lanes),
       tasks: List.unmodifiable(tasks),
+      customFields: List.unmodifiable(
+          _objects(json['custom_fields']).map(TrackerField.fromJson)),
     );
   }
 
@@ -1080,6 +1124,7 @@ final class TrackerBoard {
   final BigInt permissions;
   final List<TrackerLane> lanes;
   final List<TrackerTask> tasks;
+  final List<TrackerField> customFields;
 
   bool allows(BigInt permission) => permissions & permission == permission;
 
@@ -1091,6 +1136,7 @@ final class TrackerBoard {
   Json toJson() => <String, Object?>{
         'channel_id': channelRef.id.value,
         'channel_domain': channelRef.domain.value,
+        'custom_fields': customFields.map((field) => field.toJson()).toList(),
         'key_prefix': keyPrefix,
         'next_task_number': '$nextTaskNumber',
         'version': version,

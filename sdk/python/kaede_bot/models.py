@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from ._encoding import encode_base64url
 from .polls import PollResult
 from .refs import EntityRef, User
+from .tracker import TrackerField
 from .wire import (
     strict_payload_bool as _strict_payload_bool,
     strict_payload_string as _strict_payload_string,
@@ -2036,6 +2037,7 @@ class TrackerTask:
     completed_at: datetime | None = None
     version: str | None = None
     board_version: str | None = None
+    custom_values: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(
@@ -2044,6 +2046,9 @@ class TrackerTask:
         creator = payload.get("creator")
         if not isinstance(creator, dict):
             raise ValueError("tracker task payload is missing its creator")
+        values = payload.get("custom_values", {})
+        if not isinstance(values, dict):
+            raise ValueError("tracker custom values must be an object")
         assignee = payload.get("assignee")
         return cls(
             client=client,
@@ -2067,6 +2072,7 @@ class TrackerTask:
             priority=str(payload.get("priority", "none")),
             position=int(payload.get("position", 0)),
             creator=User.from_payload(creator),
+            custom_values=dict(values),
             assignee=(
                 User.from_payload(assignee) if isinstance(assignee, dict) else None
             ),
@@ -2085,6 +2091,7 @@ class TrackerTask:
     async def edit(
         self,
         *,
+        custom_values: Mapping[str, Any] | MissingType = MISSING,
         title: str | MissingType = MISSING,
         description: str | None | MissingType = MISSING,
         priority: str | MissingType = MISSING,
@@ -2096,6 +2103,7 @@ class TrackerTask:
             self.ref,
             target=self.target,
             version=self.version,
+            custom_values=custom_values,
             title=title,
             description=description,
             priority=priority,
@@ -2133,11 +2141,17 @@ class TrackerBoard:
     lanes: list[TrackerLane]
     tasks: list[TrackerTask]
     version: str | None = None
+    custom_fields: list[TrackerField] = field(default_factory=list)
 
     @classmethod
     def from_payload(
         cls, client: Client, target: str, payload: dict[str, Any]
     ) -> TrackerBoard:
+        fields = payload.get("custom_fields", [])
+        if not isinstance(fields, list) or any(
+            not isinstance(item, dict) for item in fields
+        ):
+            raise ValueError("tracker custom fields must be a list of objects")
         channel_ref = EntityRef.from_wire(
             payload["channel_id"], payload["channel_domain"]
         )
@@ -2146,6 +2160,7 @@ class TrackerBoard:
             target=target,
             channel_ref=channel_ref,
             key_prefix=str(payload["key_prefix"]),
+            custom_fields=[cast(TrackerField, dict(item)) for item in fields],
             next_task_number=int(payload.get("next_task_number", 1)),
             permissions=int(payload.get("permissions", 0)),
             lanes=[
@@ -2163,10 +2178,16 @@ class TrackerBoard:
             ),
         )
 
-    async def edit(self, *, key_prefix: str) -> TrackerBoard:
+    async def edit(
+        self,
+        *,
+        key_prefix: str | MissingType = MISSING,
+        custom_fields: Sequence[TrackerField] | MissingType = MISSING,
+    ) -> TrackerBoard:
         return await self.client.edit_tracker(
             self.channel_ref,
             key_prefix=key_prefix,
+            custom_fields=custom_fields,
             target=self.target,
             version=self.version,
         )
@@ -2201,6 +2222,7 @@ class TrackerBoard:
         due_at: datetime | None = None,
         assignee: EntityRef | None = None,
         client_nonce: str | None = None,
+        custom_values: Mapping[str, Any] | MissingType = MISSING,
     ) -> TrackerTask:
         return await self.client.create_tracker_task(
             self.channel_ref,
@@ -2213,6 +2235,7 @@ class TrackerBoard:
             due_at=due_at,
             assignee=assignee,
             client_nonce=client_nonce,
+            custom_values=custom_values,
         )
 
 

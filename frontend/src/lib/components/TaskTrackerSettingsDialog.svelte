@@ -1,4 +1,6 @@
 <script lang="ts">
+  import TaskTrackerFieldSettings from './TaskTrackerFieldSettings.svelte';
+  import type { TrackerField } from '$lib/task-tracker/types';
   import ColorPicker from './ColorPicker.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -20,6 +22,7 @@
     busy = false,
     error = '',
     onPrefix,
+    onFields,
     onCreateLane,
     onUpdateLane,
     onMoveLane,
@@ -30,6 +33,7 @@
     lanes: TrackerLane[];
     busy?: boolean;
     error?: string;
+    onFields?: (fields: TrackerField[]) => Promise<void> | void;
     onPrefix: (prefix: string) => Promise<void> | void;
     onCreateLane: (request: CreateTrackerLaneRequest) => Promise<void> | void;
     onUpdateLane: (lane: TrackerLane, patch: UpdateTrackerLaneRequest) => Promise<void> | void;
@@ -185,6 +189,7 @@
         >
       </form>
 
+      <TaskTrackerFieldSettings fields={board.custom_fields ?? []} {busy} onSave={onFields} />
       <section class="lane-settings" aria-labelledby="lane-settings-title">
         <div class="section-heading">
           <div>

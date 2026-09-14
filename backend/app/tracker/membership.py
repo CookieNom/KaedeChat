@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, tuple_, update
+from sqlalchemy import cast, func, or_, select, tuple_, update
+from sqlalchemy.dialects.postgresql import JSONPATH
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.guild_revision import wake_queued_guild_federation
@@ -72,7 +73,19 @@ async def clear_tracker_assignees(
                 .where(
                     TrackerTask.guild_id == guild.id,
                     TrackerTask.guild_domain == guild.origin_domain,
-                    tuple_(TrackerTask.assignee_id, TrackerTask.assignee_domain).in_(exact_refs),
+                    or_(
+                        tuple_(TrackerTask.assignee_id, TrackerTask.assignee_domain).in_(
+                            exact_refs
+                        ),
+                        *[
+                            func.jsonb_path_exists(
+                                TrackerTask.custom_values,
+                                cast("$.*[*] ? (@ == $ref)", JSONPATH),
+                                func.jsonb_build_object("ref", f"{user_id}@{domain}"),
+                            )
+                            for user_id, domain in exact_refs
+                        ],
+                    ),
                 )
                 .distinct()
             )
@@ -120,7 +133,29 @@ async def clear_tracker_assignees(
         .values(assignee_id=None, assignee_domain=None, updated_at=now)
     )
     refreshes: list[TrackerBoardRefresh] = []
+    removed = {f"{user_id}@{domain}" for user_id, domain in exact_refs}
     for board, channel in board_rows:
+        user_fields = {
+            field["id"] for field in board.custom_fields or [] if field["type"] == "users"
+        }
+        if user_fields:
+            tasks = await session.scalars(
+                select(TrackerTask)
+                .where(
+                    TrackerTask.channel_id == board.channel_id,
+                    TrackerTask.channel_domain == board.channel_domain,
+                )
+                .with_for_update()
+            )
+            for task in tasks:
+                values = dict(task.custom_values or {})
+                for key in user_fields & values.keys():
+                    values[key] = [ref for ref in values[key] if ref not in removed]
+                    if not values[key]:
+                        del values[key]
+                if values != task.custom_values:
+                    task.custom_values = values
+                    task.updated_at = now
         board.updated_at = now
         refresh = TrackerBoardRefresh.from_board(board)
         queue_tracker_dispatch(

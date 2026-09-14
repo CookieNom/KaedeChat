@@ -4,6 +4,7 @@ import type {
   CreateTrackerLaneRequest,
   CreateTrackerTaskRequest,
   TrackerBoard,
+  TrackerField,
   TrackerLane,
   TrackerTask,
   UpdateTrackerLaneRequest,
@@ -28,7 +29,7 @@ export function fetchTracker(
 export function updateTracker(
   channel: FederatedIdentity,
   version: string,
-  patch: { key_prefix: string }
+  patch: { key_prefix?: string; custom_fields?: TrackerField[] }
 ): Promise<TrackerBoard> {
   return api<TrackerBoard>(trackerPath(channel), {
     method: 'PATCH',

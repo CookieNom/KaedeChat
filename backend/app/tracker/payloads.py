@@ -48,6 +48,7 @@ def tracker_task_payload(
         "lane_domain": task.lane_domain,
         "number": str(task.number),
         "key": f"{board.key_prefix}-{task.number}",
+        "custom_values": task.custom_values or {},
         "title": task.title,
         "description": task.description,
         "priority": task.priority,
@@ -75,6 +76,7 @@ def tracker_board_payload(
     return {
         "channel_id": str(board.channel_id),
         "channel_domain": board.channel_domain,
+        "custom_fields": board.custom_fields or [],
         "key_prefix": board.key_prefix,
         "next_task_number": str(board.next_task_number),
         "version": resource_version(board),

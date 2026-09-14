@@ -684,12 +684,18 @@ final class KaedeRepository {
   Future<TrackerBoard> updateTrackerBoard(
     EntityRef channel,
     String version, {
-    required String keyPrefix,
+    String? keyPrefix,
+    List<TrackerField>? customFields,
   }) async =>
       TrackerBoard.fromJson(await api.sendJson(
         'PATCH',
         '/api/v1/channels/${channel.wire}/tracker',
-        data: <String, Object?>{'key_prefix': keyPrefix.trim().toUpperCase()},
+        data: <String, Object?>{
+          if (keyPrefix != null) 'key_prefix': keyPrefix.trim().toUpperCase(),
+          if (customFields != null)
+            'custom_fields':
+                customFields.map((field) => field.toJson()).toList(),
+        },
         headers: <String, String>{'If-Match': version},
       ));
 
@@ -769,11 +775,13 @@ final class KaedeRepository {
     DateTime? dueAt,
     EntityRef? assignee,
     String? clientNonce,
+    Json? customValues,
   }) async =>
       TrackerTask.fromJson(await api.sendJson(
         'POST',
         '/api/v1/channels/${channel.wire}/tracker/tasks',
         data: <String, Object?>{
+          if (customValues != null) 'custom_values': customValues,
           'lane_id': lane.wire,
           'title': title.trim(),
           if (description != null) 'description': description,
@@ -789,6 +797,7 @@ final class KaedeRepository {
     EntityRef channel,
     EntityRef task,
     String version, {
+    Json? customValues,
     String? title,
     String? description,
     bool clearDescription = false,
@@ -802,6 +811,7 @@ final class KaedeRepository {
         'PATCH',
         '/api/v1/channels/${channel.wire}/tracker/tasks/${task.wire}',
         data: <String, Object?>{
+          if (customValues != null) 'custom_values': customValues,
           if (title != null) 'title': title.trim(),
           if (clearDescription)
             'description': null

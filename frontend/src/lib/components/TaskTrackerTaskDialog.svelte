@@ -1,4 +1,6 @@
 <script lang="ts">
+  import TaskTrackerFields from './TaskTrackerFields.svelte';
+  import type { TrackerField, TrackerValues } from '$lib/task-tracker/types';
   import { t } from '$lib/ui/locale';
 
   import { entityKey, entityRef } from '$lib/chat/refs';
@@ -17,6 +19,7 @@
   import GuildMemberPicker from './GuildMemberPicker.svelte';
 
   let {
+    fields = [],
     task = null,
     initialLane,
     lanes,
@@ -33,6 +36,7 @@
     onDelete,
     onClose
   }: {
+    fields?: TrackerField[];
     task?: TrackerTask | null;
     initialLane: TrackerLane;
     lanes: TrackerLane[];
@@ -55,6 +59,7 @@
 
   const initialTask = untrack(() => task);
   const initialTargetLane = untrack(() => initialLane);
+  let customValues = $state<TrackerValues>($state.snapshot(initialTask?.custom_values ?? {}));
   let title = $state(initialTask?.title ?? '');
   let description = $state(initialTask?.description ?? '');
   let priority = $state<TrackerPriority>(initialTask?.priority ?? 'none');
@@ -63,6 +68,7 @@
   );
   let assigneeKey = $state(initialTask?.assignee ? entityKey(initialTask.assignee) : '');
   let due = $state(toLocalDateTime(initialTask?.due_at ?? null));
+  let uploading = $state(false);
   let confirmDelete = $state(false);
   let dialog = $state<HTMLElement | null>(null);
   let titleInput = $state<HTMLInputElement | null>(null);
@@ -127,12 +133,17 @@
   }
 
   function submit() {
-    if (busy || readOnly || (!assignmentOnly && !title.trim())) return;
+    if (busy || uploading || readOnly || (!assignmentOnly && !title.trim())) return;
     if (assignmentOnly) {
       void onSave({ assignee_id: assigneeKey || null }, initialLane);
       return;
     }
     const common = {
+      custom_values: Object.fromEntries(
+        fields
+          .filter((field) => field.id in customValues)
+          .map((field) => [field.id, customValues[field.id]])
+      ),
       title: title.trim(),
       description: description.trim() || null,
       priority,
@@ -146,7 +157,7 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && !busy) {
+    if (event.key === 'Escape' && !busy && !uploading) {
       event.preventDefault();
       onClose();
       return;
@@ -177,7 +188,7 @@
     class="task-dialog-backdrop"
     type="button"
     aria-label={$t('ui_close_task_editor_989707d4')}
-    disabled={busy}
+    disabled={busy || uploading}
     onclick={onClose}
   ></button>
   <div
@@ -202,7 +213,12 @@
                 : $t('ui_create_task_6f541e1b')}
         </h2>
       </div>
-      <button type="button" disabled={busy} aria-label={$t('ui_close_7d9eb7ac')} onclick={onClose}>
+      <button
+        type="button"
+        disabled={busy || uploading}
+        aria-label={$t('ui_close_7d9eb7ac')}
+        onclick={onClose}
+      >
         <Icon name="x" size={20} />
       </button>
     </header>
@@ -280,6 +296,19 @@
         {/if}
       </label>
 
+      <div class="wide-field">
+        <TaskTrackerFields
+          {fields}
+          bind:uploading
+          channelRef={`${initialLane.channel_id}@${initialLane.channel_domain}`}
+          bind:values={customValues}
+          {guildRef}
+          {members}
+          {currentUser}
+          {canAssign}
+          disabled={busy || readOnly || assignmentOnly}
+        />
+      </div>
       {#if error}<p class="task-dialog-error wide-field" role="alert">{error}</p>{/if}
 
       <footer class="wide-field">
@@ -290,17 +319,19 @@
               <button
                 class="danger-button"
                 type="button"
-                disabled={busy}
+                disabled={busy || uploading}
                 onclick={() => void onDelete?.()}>{$t('ui_confirm_delete_da00fa96')}</button
               >
-              <button type="button" disabled={busy} onclick={() => (confirmDelete = false)}
-                >{$t('ui_keep_task_c9edd2f0')}</button
+              <button
+                type="button"
+                disabled={busy || uploading}
+                onclick={() => (confirmDelete = false)}>{$t('ui_keep_task_c9edd2f0')}</button
               >
             {:else}
               <button
                 class="delete-button"
                 type="button"
-                disabled={busy}
+                disabled={busy || uploading}
                 onclick={() => (confirmDelete = true)}
               >
                 <Icon name="trash" size={16} />{$t('ui_delete_e2d0a549')}
@@ -309,11 +340,14 @@
           {/if}
         </div>
         <div>
-          <button type="button" disabled={busy} onclick={onClose}
+          <button type="button" disabled={busy || uploading} onclick={onClose}
             >{readOnly ? $t('ui_close_7d9eb7ac') : $t('ui_cancel_19766ed6')}</button
           >
           {#if !readOnly}
-            <button class="save-button" disabled={busy || (!assignmentOnly && !title.trim())}>
+            <button
+              class="save-button"
+              disabled={busy || uploading || (!assignmentOnly && !title.trim())}
+            >
               {busy
                 ? $t('ui_saving_23e39291')
                 : assignmentOnly

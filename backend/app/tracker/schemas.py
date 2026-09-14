@@ -7,6 +7,7 @@ from pydantic import Field, field_validator, model_validator
 
 from app.chat.schemas import RequestModel, cleaned_nonempty
 from app.core.types import EntityRef
+from app.tracker.fields import TrackerField, field_definitions
 
 TrackerLaneKind = Literal["backlog", "planned", "in_progress", "completed", "custom"]
 TrackerPriority = Literal["none", "low", "medium", "high", "urgent"]
@@ -33,12 +34,23 @@ def require_aware(value: datetime | None) -> datetime | None:
 
 
 class TrackerBoardUpdate(RequestModel):
-    key_prefix: str = Field(min_length=2, max_length=10)
+    key_prefix: str | None = Field(default=None, min_length=2, max_length=10)
+    custom_fields: list[TrackerField] | None = Field(default=None, max_length=50)
 
     @field_validator("key_prefix")
     @classmethod
-    def valid_key_prefix(cls, value: str) -> str:
-        return normalize_key_prefix(value)
+    def valid_key_prefix(cls, value: str | None) -> str | None:
+        return normalize_key_prefix(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def valid_changes(self) -> TrackerBoardUpdate:
+        if not self.model_fields_set or any(
+            getattr(self, key) is None for key in self.model_fields_set
+        ):
+            raise ValueError("provide non-null board settings")
+        if self.custom_fields is not None:
+            field_definitions([field.model_dump() for field in self.custom_fields])
+        return self
 
 
 class TrackerLaneCreate(RequestModel):
@@ -86,6 +98,7 @@ class TrackerTaskCreate(RequestModel):
     position: int | None = Field(default=None, ge=0, le=4_999)
     due_at: datetime | None = None
     assignee_id: EntityRef | None = None
+    custom_values: dict[str, object] = Field(default_factory=dict, max_length=50)
     client_nonce: str | None = Field(
         default=None,
         min_length=1,
@@ -110,6 +123,7 @@ class TrackerTaskUpdate(RequestModel):
     priority: TrackerPriority | None = None
     due_at: datetime | None = None
     assignee_id: EntityRef | None = None
+    custom_values: dict[str, object] = Field(default_factory=dict, max_length=50)
 
     @field_validator("title")
     @classmethod

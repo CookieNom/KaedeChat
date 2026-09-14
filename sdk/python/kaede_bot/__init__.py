@@ -235,6 +235,13 @@ from .voice import (
     VoiceTransport,
 )
 
+from .tracker import (
+    TrackerField,
+    TrackerFieldType,
+    TrackerLinkedAttachment,
+    TrackerUploadedAttachment,
+)
+
 __all__ = [
     "ApiError",
     "ALL_PERMISSIONS",
@@ -412,6 +419,10 @@ __all__ = [
     "TextInputStyle",
     "TextDisplay",
     "Thumbnail",
+    "TrackerField",
+    "TrackerFieldType",
+    "TrackerLinkedAttachment",
+    "TrackerUploadedAttachment",
     "TrackerBoard",
     "TrackerBoardUpdateEvent",
     "TrackerLane",

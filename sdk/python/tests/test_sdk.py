@@ -4276,7 +4276,10 @@ async def test_tracker_gateway_events_are_typed() -> None:
         {
             "channel_id": "20",
             "channel_domain": "guild.example",
-            "task": tracker_task_payload(),
+            "task": {
+                **tracker_task_payload(),
+                "custom_values": {"reviewers": ["5@users.example"]},
+            },
             "board_version": "board-v5",
         },
         target="https://guild.example",
@@ -4303,9 +4306,133 @@ async def test_tracker_gateway_events_are_typed() -> None:
     assert seen[2].board_version == "board-v4"
     assert isinstance(seen[3], TrackerTask)
     assert seen[3].board_version == "board-v5"
+    assert seen[3].custom_values == {"reviewers": ["5@users.example"]}
     assert isinstance(seen[4], TrackerTaskDeleteEvent)
     assert seen[4].board_version == "board-v6"
 
 
 async def _record_event(seen: list[object], event: object) -> None:
     seen.append(event)
+
+
+@pytest.mark.asyncio
+async def test_tracker_custom_fields_round_trip_and_explicit_clear() -> None:
+    from kaede_bot import TrackerField
+
+    bot = client()
+    fields: list[TrackerField] = [
+        {"id": "reviewers", "name": "Reviewers", "type": "users"},
+        {
+            "id": "status",
+            "name": "Status",
+            "type": "select",
+            "options": ["Ready", "Blocked"],
+        },
+    ]
+    values = {"reviewers": ["5@users.example"], "status": "Ready"}
+    payload = {
+        **tracker_board_payload(),
+        "custom_fields": fields,
+        "tasks": [{**tracker_task_payload(), "custom_values": values}],
+    }
+    bot.request = AsyncMock(return_value=payload)  # type: ignore[method-assign]
+    board = await bot.fetch_tracker(
+        EntityRef(20, "guild.example"), target="https://guild.example"
+    )
+    assert board.custom_fields == fields
+    assert board.tasks[0].custom_values == values
+    await board.edit(custom_fields=fields)
+    assert bot.request.await_args.kwargs["json"] == {"custom_fields": fields}
+    assert bot.request.await_args.kwargs["headers"] == {"If-Match": "board-v1"}
+    await board.edit(custom_fields=[])
+    assert bot.request.await_args.kwargs["json"] == {"custom_fields": []}
+    bot.request = AsyncMock(
+        return_value={**tracker_task_payload(), "custom_values": values}
+    )  # type: ignore[method-assign]
+    task = await board.create_task(board.lanes[0].ref, "Review", custom_values=values)
+    assert bot.request.await_args.kwargs["json"]["custom_values"] == values
+    assert task.custom_values == values
+    await task.edit(custom_values={})
+    assert bot.request.await_args.kwargs["json"] == {"custom_values": {}}
+    assert bot.request.await_args.kwargs["headers"] == {"If-Match": "task-v1"}
+
+
+@pytest.mark.asyncio
+async def test_tracker_attachment_upload_commit_and_private_read(monkeypatch) -> None:
+    bot = client()
+    channel = EntityRef(20, "guild.example")
+    ref = EntityRef(901, "guild.example")
+    pending = {
+        "id": "901",
+        "origin_domain": "guild.example",
+        "filename": "review.png",
+        "content_type": "image/png",
+        "size": 3,
+        "scan_status": "pending",
+        "upload_url": "https://media.guild.example/upload",
+        "media_origin": "https://media.guild.example",
+    }
+    value = {"id": str(ref), "name": "review.png", "type": "image"}
+    bot.request = AsyncMock(return_value=pending)  # type: ignore[method-assign]
+    put = AsyncMock()
+    monkeypatch.setattr(bot, "_put_upload_ticket", put)
+    ticket = await bot.upload_tracker_attachment(
+        channel,
+        b"png",
+        filename="review.png",
+        content_type="image/png",
+        target="https://guild.example",
+    )
+    assert ticket.ref == ref
+    put.assert_awaited_once_with(ticket, b"png", content_type="image/png")
+    assert bot.request.await_args.args[1].endswith("/tracker/attachments/ticket")
+    assert bot.request.await_args.kwargs["json"]["size"] == 3
+    monkeypatch.setattr("kaede_bot.client.asyncio.sleep", AsyncMock())
+    bot.request = AsyncMock(side_effect=[pending, value])  # type: ignore[method-assign]
+    assert (
+        await bot.commit_tracker_attachment(
+            channel, ref, target="https://guild.example", scan_attempts=2
+        )
+        == value
+    )
+    assert bot.request.await_count == 2
+    assert bot.request.await_args.kwargs["json"] == {"attachment_id": str(ref)}
+    bot.request = AsyncMock(return_value={**pending, "scan_status": "rejected"})  # type: ignore[method-assign]
+    with pytest.raises(ApiError) as rejected:
+        await bot.commit_tracker_attachment(
+            channel, ref, target="https://guild.example"
+        )
+    assert rejected.value.status == 422
+    bot.request = AsyncMock(return_value=pending)  # type: ignore[method-assign]
+    with pytest.raises(ApiError) as timeout:
+        await bot.commit_tracker_attachment(
+            channel, ref, target="https://guild.example", scan_attempts=1
+        )
+    assert timeout.value.status == 504
+    bot.request = AsyncMock(return_value={**value, "id": "999@guild.example"})  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="identity"):
+        await bot.commit_tracker_attachment(
+            channel, ref, target="https://guild.example"
+        )
+    bot.request = AsyncMock(
+        return_value={"url": "https://storage.example/private?signature=abc"}
+    )  # type: ignore[method-assign]
+    assert (
+        await bot.fetch_tracker_attachment_url(
+            channel, ref, target="https://guild.example"
+        )
+        == "https://storage.example/private?signature=abc"
+    )
+    bot.request = AsyncMock(
+        return_value={"url": "https://user:secret@storage.example/file"}
+    )  # type: ignore[method-assign]
+    with pytest.raises(ApiError):
+        await bot.fetch_tracker_attachment_url(
+            channel, ref, target="https://guild.example"
+        )
+    bot.request.reset_mock()
+    with pytest.raises(ValueError):
+        await bot.commit_tracker_attachment(
+            channel, EntityRef(901, "other.example"), target="https://guild.example"
+        )
+    bot.request.assert_not_awaited()

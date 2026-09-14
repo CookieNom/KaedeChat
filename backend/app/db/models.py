@@ -2021,6 +2021,9 @@ class TrackerBoard(Base, TimestampMixin):
     channel_type: Mapped[int] = mapped_column(Integer, server_default="17", nullable=False)
     guild_id: Mapped[int] = mapped_column(BigInteger)
     guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    custom_fields: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
     key_prefix: Mapped[str] = mapped_column(String(10), nullable=False)
     next_task_number: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
     __table_args__ = (
@@ -2150,6 +2153,9 @@ class TrackerLane(Base, FederatedIdMixin, TimestampMixin):
 
 
 class TrackerTask(Base, FederatedIdMixin, TimestampMixin):
+    custom_values: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
     __tablename__ = "tracker_tasks"
     channel_id: Mapped[int] = mapped_column(BigInteger)
     channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
@@ -3122,7 +3128,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             "purpose IN ('attachment','avatar','banner','guild_icon',"
             "'guild_banner','emoji','sticker','webhook_avatar','role_icon',"
             "'soundboard','scheduled_event_image','application_asset','application_emoji',"
-            "'webhook_attachment')",
+            "'webhook_attachment','tracker_attachment')",
             name="purpose_value",
         ),
         CheckConstraint(

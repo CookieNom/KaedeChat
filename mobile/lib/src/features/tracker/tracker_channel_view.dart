@@ -13,6 +13,9 @@ import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
 
+import 'tracker_custom_fields.dart';
+import 'tracker_field_settings.dart';
+
 const _trackerEvents = <String>{
   'CHANNEL_ACCESS_REVOKED',
   'CHANNEL_PERMISSION_UPDATE',
@@ -309,25 +312,25 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         actor: state.user,
         members: state.activeGuildMembers,
         canAssignOthers: board.allows(TrackerPermission.assignTasks),
+        fields: board.customFields,
+        channel: widget.channel.ref,
+        guild: widget.channel.guildRef,
+        channels: state.activeGuild?.channels ?? const [],
+        repository: _repository,
+        onSave: (draft) async {
+          await _repository.createTrackerTask(widget.channel.ref,
+              lane: draft.lane,
+              title: draft.title,
+              description: draft.description,
+              priority: draft.priority,
+              dueAt: draft.dueAt,
+              assignee: draft.assignee,
+              clientNonce: draft.clientNonce,
+              customValues: draft.customValues);
+        },
       ),
     );
-    if (draft == null) return;
-    await _submitCreateTask(draft);
-  }
-
-  Future<void> _submitCreateTask(TrackerTaskDraft draft) async {
-    await _mutate('Could not create the task', () async {
-      await _repository.createTrackerTask(
-        widget.channel.ref,
-        lane: draft.lane,
-        title: draft.title,
-        description: draft.description,
-        priority: draft.priority,
-        dueAt: draft.dueAt,
-        assignee: draft.assignee,
-        clientNonce: draft.clientNonce,
-      );
-    }, success: 'Task created', retry: () => _submitCreateTask(draft));
+    if (draft != null) await _load(background: true);
   }
 
   Future<void> _editTask(TrackerTask task) async {
@@ -343,6 +346,7 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         .where((candidate) => candidate.ref == task.laneRef)
         .firstOrNull;
     if (lane == null) return;
+    var savedTask = task;
     final draft = await _showTrackerOverlay<TrackerTaskDraft>(
       show: (builder) => showModalBottomSheet<TrackerTaskDraft>(
         context: context,
@@ -359,73 +363,47 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         members: state.activeGuildMembers,
         canAssignOthers: board.allows(TrackerPermission.assignTasks),
         canEditDetails: canEditDetails,
+        fields: board.customFields,
+        channel: widget.channel.ref,
+        guild: widget.channel.guildRef,
+        channels: state.activeGuild?.channels ?? const [],
+        repository: _repository,
+        onReload: () async {
+          final latest = await _repository.trackerBoard(widget.channel.ref);
+          savedTask = latest.tasks.firstWhere((t) => t.ref == task.ref,
+              orElse: () => throw const UserInputException(
+                  'This task no longer exists.'));
+          return latest;
+        },
+        onSave: (draft) async {
+          savedTask = await _repository.updateTrackerTask(
+              widget.channel.ref, savedTask.ref, savedTask.version,
+              title: canEditDetails ? draft.title : null,
+              description: canEditDetails ? draft.description : null,
+              clearDescription: canEditDetails && draft.description == null,
+              priority: canEditDetails ? draft.priority : null,
+              dueAt: canEditDetails ? draft.dueAt : null,
+              clearDueAt: canEditDetails && draft.dueAt == null,
+              assignee: draft.assignee,
+              clearAssignee: draft.assignee == null,
+              customValues: canEditDetails ? draft.customValues : null);
+          if (canEditDetails && draft.lane != savedTask.laneRef) {
+            try {
+              savedTask = await _repository.moveTrackerTask(
+                  widget.channel.ref, savedTask.ref, savedTask.version,
+                  lane: draft.lane,
+                  position:
+                      board.tasks.where((t) => t.laneRef == draft.lane).length);
+            } on Object catch (e) {
+              throw UserInputException(userFacingError(e,
+                  summary:
+                      'Details saved, but the lane could not be changed. Retry saving or reload the latest task'));
+            }
+          }
+        },
       ),
     );
-    if (draft == null) return;
-    if (!canEditDetails && draft.assignee == task.assignee?.ref) return;
-    if (_mutating) return;
-    setState(() => _mutating = true);
-    var detailsSaved = false;
-    try {
-      final updated = canEditDetails
-          ? await _repository.updateTrackerTask(
-              widget.channel.ref,
-              task.ref,
-              task.version,
-              title: draft.title,
-              description: draft.description,
-              clearDescription: draft.description == null,
-              priority: draft.priority,
-              dueAt: draft.dueAt,
-              clearDueAt: draft.dueAt == null,
-              assignee: draft.assignee,
-              clearAssignee: draft.assignee == null,
-            )
-          : await _repository.updateTrackerTask(
-              widget.channel.ref,
-              task.ref,
-              task.version,
-              assignee: draft.assignee,
-              clearAssignee: draft.assignee == null,
-            );
-      detailsSaved = true;
-      if (canEditDetails && draft.lane != task.laneRef) {
-        await _repository.moveTrackerTask(
-          widget.channel.ref,
-          task.ref,
-          updated.version,
-          lane: draft.lane,
-          position: board.tasks
-              .where((candidate) => candidate.laneRef == draft.lane)
-              .length,
-        );
-      }
-      await _load(background: true);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(L10n.of(context).ui_task_saved_1330065f)),
-        );
-      }
-    } on Object catch (error) {
-      final conflict = error is KaedeException &&
-          (error.status == 412 || error.status == 428);
-      await _load(background: true);
-      if (mounted) {
-        final message = detailsSaved
-            ? 'Task details were saved, but its lane could not be changed. The tracker has been refreshed.'
-            : conflict
-                ? 'This task changed on another client. It has been refreshed; review it before trying again.'
-                : userFacingError(error,
-                    summary:
-                        L10n.of(context).ui_could_not_save_the_task_d23de4e8);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(message),
-          backgroundColor: context.kaede.dangerSoft,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _mutating = false);
-    }
+    if (draft != null) await _load(background: true);
   }
 
   Future<void> _moveTask(TrackerTask task) async {
@@ -482,6 +460,17 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         lane: lane,
         canEdit: canEdit || trackerTaskCanAssign(board, task, actor),
         assignmentOnly: !canEdit,
+        customFields: TrackerCustomFields(
+            fields: board.customFields,
+            values: task.customValues,
+            channel: widget.channel.ref,
+            guild: widget.channel.guildRef,
+            repository: _repository,
+            channels:
+                ref.read(mobileControllerProvider).activeGuild?.channels ??
+                    const [],
+            members: ref.read(mobileControllerProvider).activeGuildMembers,
+            actor: ref.read(mobileControllerProvider).user),
       ),
     );
     if (shouldEdit == true && mounted) {
@@ -620,61 +609,17 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
   Future<void> _editBoard() async {
     final board = _board;
     if (board == null) return;
-    final controller = TextEditingController(text: board.keyPrefix);
-    final formKey = GlobalKey<FormState>();
-    final prefix = await _showTrackerOverlay<String>(
-      show: (builder) => showDialog<String>(
-        context: context,
-        builder: builder,
-      ),
-      builder: (dialogContext) => AlertDialog(
-        title: Text(L10n.of(context).ui_tracker_settings_1b415d9c),
-        content: Form(
-          key: formKey,
-          child: TextFormField(
-            key: ValueKey('tracker-prefix-field'),
-            controller: controller,
-            autofocus: true,
-            maxLength: 10,
-            textCapitalization: TextCapitalization.characters,
-            decoration: InputDecoration(
-              labelText: L10n.of(context).ui_task_key_prefix_37585bcd,
-              helperText: L10n.of(context)
-                  .ui_2_10_letters_or_digits_starts_with_a_letter_953e54d4,
-              prefixIcon: Icon(Icons.tag_rounded),
-            ),
-            validator: (value) => RegExp(r'^[A-Za-z][A-Za-z0-9]{1,9}$')
-                    .hasMatch(value?.trim() ?? '')
-                ? null
-                : 'Enter a valid key prefix',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: Text(L10n.of(context).ui_cancel_35afca3b),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (formKey.currentState?.validate() == true) {
-                Navigator.pop(
-                    dialogContext, controller.text.trim().toUpperCase());
-              }
-            },
-            child: Text(L10n.of(context).ui_save_4d2d5d68),
-          ),
-        ],
-      ),
+    await _showTrackerOverlay<bool>(
+      show: (builder) => showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          showDragHandle: true,
+          builder: builder),
+      builder: (_) => TrackerFieldSettingsSheet(
+          board: board, channel: widget.channel.ref, repository: _repository),
     );
-    controller.dispose();
-    if (prefix == null || prefix == board.keyPrefix) return;
-    await _mutate('Could not update tracker settings', () async {
-      await _repository.updateTrackerBoard(
-        widget.channel.ref,
-        board.version,
-        keyPrefix: prefix,
-      );
-    }, success: 'Tracker settings saved');
+    await _load(background: true);
   }
 
   Future<bool> _confirm(
@@ -1390,6 +1335,7 @@ final class TrackerTaskDraft {
     required this.title,
     required this.priority,
     required this.clientNonce,
+    this.customValues = const {},
     this.description,
     this.dueAt,
     this.assignee,
@@ -1400,6 +1346,7 @@ final class TrackerTaskDraft {
   final String? description;
   final TrackerPriority priority;
   final String clientNonce;
+  final Json customValues;
   final DateTime? dueAt;
   final EntityRef? assignee;
 }
@@ -1418,12 +1365,14 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
     required this.lane,
     required this.canEdit,
     this.assignmentOnly = false,
+    this.customFields,
   });
 
   final TrackerTask task;
   final TrackerLane lane;
   final bool canEdit;
   final bool assignmentOnly;
+  final Widget? customFields;
 
   @override
   Widget build(BuildContext context) {
@@ -1484,6 +1433,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                             : context.kaede.muted,
                       ),
                     ),
+                    if (customFields != null) customFields!,
                     SizedBox(height: 20),
                     _TaskDetailRow(
                       icon: _laneIcon(lane),
@@ -1712,6 +1662,13 @@ final class TrackerTaskEditorSheet extends StatefulWidget {
     this.canEditDetails = true,
     this.task,
     this.actor,
+    this.fields = const [],
+    this.channels = const [],
+    this.channel,
+    this.guild,
+    this.repository,
+    this.onSave,
+    this.onReload,
   });
 
   final List<TrackerLane> lanes;
@@ -1721,6 +1678,12 @@ final class TrackerTaskEditorSheet extends StatefulWidget {
   final List<GuildMember> members;
   final bool canAssignOthers;
   final bool canEditDetails;
+  final List<TrackerField> fields;
+  final List<KaedeChannel> channels;
+  final EntityRef? channel, guild;
+  final KaedeRepository? repository;
+  final Future<void> Function(TrackerTaskDraft)? onSave;
+  final Future<TrackerBoard> Function()? onReload;
 
   @override
   State<TrackerTaskEditorSheet> createState() => _TrackerTaskEditorSheetState();
@@ -1735,6 +1698,15 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
   late DateTime? _dueAt;
   late EntityRef? _assignee;
   late final String _clientNonce;
+  late Json _customValues = {...?widget.task?.customValues};
+  late List<TrackerField> _fields = widget.fields;
+  late List<TrackerLane> _lanes = widget.lanes;
+  final _extraUsers = <EntityRef, KaedeUser>{};
+  final _busyFields = <String>{};
+  bool _saving = false, _conflict = false;
+  int _draftGeneration = 0;
+  String? _saveError;
+  bool get _busy => _saving || _busyFields.isNotEmpty;
 
   @override
   void initState() {
@@ -1758,7 +1730,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
   }
 
   List<KaedeUser> get _assignableUsers {
-    final users = <EntityRef, KaedeUser>{};
+    final users = <EntityRef, KaedeUser>{..._extraUsers};
     if (widget.actor case final actor?) users[actor.ref] = actor;
     if (widget.task?.assignee case final assignee?) {
       users[assignee.ref] = assignee;
@@ -1788,12 +1760,10 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
     }
   }
 
-  void _save() {
-    if (_formKey.currentState?.validate() != true) return;
+  Future<void> _save() async {
+    if (_busy || _formKey.currentState?.validate() != true) return;
     final description = _description.text.trim();
-    Navigator.pop(
-      context,
-      TrackerTaskDraft(
+    final draft = TrackerTaskDraft(
         lane: _lane,
         title: _title.text.trim(),
         description: description.isEmpty ? null : description,
@@ -1801,8 +1771,81 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
         clientNonce: _clientNonce,
         dueAt: _dueAt,
         assignee: _assignee,
-      ),
-    );
+        customValues: _customValues);
+    if (widget.onSave == null) {
+      Navigator.pop(context, draft);
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _saveError = null;
+    });
+    try {
+      await widget.onSave!(draft);
+      if (mounted) {
+        setState(() => _saving = false);
+        Navigator.pop(context, draft);
+      }
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() {
+          _saveError = userFacingError(e, summary: 'Could not save the task');
+          _conflict =
+              e is KaedeException && (e.status == 412 || e.status == 428);
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _reloadDraft() async {
+    final discard = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+                title: const Text('Reload latest task?'),
+                content: const Text(
+                    'This replaces your unsaved changes with the latest saved task.'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Keep editing')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Reload'))
+                ]));
+    if (discard != true || !mounted || widget.onReload == null) return;
+    setState(() => _saving = true);
+    try {
+      final board = await widget.onReload!();
+      final task = board.tasks.firstWhere((t) => t.ref == widget.task!.ref);
+      if (mounted) {
+        setState(() {
+          _title.text = task.title;
+          _description.text = task.description ?? '';
+          _lane = task.laneRef;
+          _priority = task.priority;
+          _dueAt = task.dueAt;
+          _assignee = task.assignee?.ref;
+          if (task.assignee != null) {
+            _extraUsers[task.assignee!.ref] = task.assignee!;
+          }
+          _customValues = {...task.customValues};
+          _fields = board.customFields;
+          _lanes = board.lanes;
+          _draftGeneration++;
+          _saveError = null;
+          _conflict = false;
+        });
+      }
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() =>
+            _saveError = userFacingError(e, summary: 'Could not reload task'));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -1813,205 +1856,355 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
         widget.task == null ||
         widget.task?.assignee == null ||
         widget.task?.assignee?.ref == widget.actor?.ref;
-    return AnimatedPadding(
-      duration: Duration(milliseconds: 180),
-      padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: media.size.height * .9),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 12, 12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        widget.task == null
+    return PopScope(
+        canPop: !_busy,
+        child: AnimatedPadding(
+          duration: Duration(milliseconds: 180),
+          padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: media.size.height * .9),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(20, 0, 12, 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            widget.task == null
+                                ? L10n.of(context).ui_create_task_ae7443ee
+                                : !widget.canEditDetails
+                                    ? L10n.of(context)
+                                        .ui_assign_value0_b2ffa1c1(
+                                            (widget.task!.key).toString())
+                                    : L10n.of(context).ui_edit_value0_8e92dac2(
+                                        (widget.task!.key).toString()),
+                            style: Theme.of(context).textTheme.headlineSmall,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: L10n.of(context).ui_close_cd86acc3,
+                          onPressed:
+                              _busy ? null : () => Navigator.pop(context),
+                          icon: Icon(Icons.close_rounded),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Divider(height: 1),
+                  Flexible(
+                    child: AbsorbPointer(
+                        absorbing: _saving,
+                        child: SingleChildScrollView(
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
+                          padding: EdgeInsets.fromLTRB(20, 18, 20, 14),
+                          child: Column(
+                            key: ValueKey('tracker-draft-$_draftGeneration'),
+                            children: [
+                              TextFormField(
+                                key: ValueKey('tracker-task-title'),
+                                controller: _title,
+                                enabled: widget.canEditDetails,
+                                autofocus: widget.task == null,
+                                maxLength: 200,
+                                textCapitalization:
+                                    TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                                  labelText: L10n.of(context).ui_title_24d471a9,
+                                  prefixIcon: Icon(Icons.task_alt_rounded),
+                                ),
+                                validator: (value) =>
+                                    value?.trim().isEmpty == true
+                                        ? 'Enter a task title'
+                                        : null,
+                              ),
+                              SizedBox(height: 10),
+                              TextFormField(
+                                controller: _description,
+                                enabled: widget.canEditDetails,
+                                minLines: 3,
+                                maxLines: 7,
+                                maxLength: 10000,
+                                textCapitalization:
+                                    TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                                  labelText: L10n.of(context)
+                                      .ui_description_optional_31e71764,
+                                  alignLabelWithHint: true,
+                                ),
+                              ),
+                              SizedBox(height: 10),
+                              DropdownButtonFormField<EntityRef>(
+                                key: ValueKey('tracker-task-lane'),
+                                isExpanded: true,
+                                initialValue: _lane,
+                                decoration: InputDecoration(
+                                  labelText: L10n.of(context).ui_lane_ef16844f,
+                                  prefixIcon: Icon(Icons.view_week_outlined),
+                                ),
+                                items: [
+                                  for (final lane in _lanes)
+                                    DropdownMenuItem(
+                                        value: lane.ref,
+                                        child: Text(lane.name)),
+                                ],
+                                onChanged: !widget.canEditDetails
+                                    ? null
+                                    : (value) =>
+                                        setState(() => _lane = value ?? _lane),
+                              ),
+                              SizedBox(height: 14),
+                              DropdownButtonFormField<TrackerPriority>(
+                                initialValue: _priority,
+                                decoration: InputDecoration(
+                                  labelText:
+                                      L10n.of(context).ui_priority_e68d9f29,
+                                  prefixIcon: Icon(Icons.flag_outlined),
+                                ),
+                                items: [
+                                  for (final priority in TrackerPriority.values)
+                                    DropdownMenuItem(
+                                      value: priority,
+                                      child:
+                                          Text(trackerPriorityLabel(priority)),
+                                    ),
+                                ],
+                                onChanged: !widget.canEditDetails
+                                    ? null
+                                    : (value) => setState(
+                                        () => _priority = value ?? _priority),
+                              ),
+                              SizedBox(height: 14),
+                              DropdownButtonFormField<String>(
+                                key: ValueKey('tracker-task-assignee'),
+                                isExpanded: true,
+                                initialValue: _assignee?.wire ?? '',
+                                decoration: InputDecoration(
+                                  labelText:
+                                      L10n.of(context).ui_assignee_2a64a64a,
+                                  helperText: assigneeEditable
+                                      ? L10n.of(context)
+                                          .ui_one_member_can_own_a_task_cbbdd467
+                                      : L10n.of(context)
+                                          .ui_you_do_not_have_permission_to_reassign_this_t_0a1a97ab,
+                                  prefixIcon:
+                                      Icon(Icons.person_outline_rounded),
+                                ),
+                                items: [
+                                  DropdownMenuItem(
+                                      value: '',
+                                      child: Text(L10n.of(context)
+                                          .ui_unassigned_36c5f782)),
+                                  if (_assignee != null &&
+                                      !users.any((u) => u.ref == _assignee))
+                                    DropdownMenuItem(
+                                        value: _assignee!.wire,
+                                        child: Text(_assignee!.wire)),
+                                  for (final user in users)
+                                    DropdownMenuItem(
+                                        value: user.ref.wire,
+                                        child: Text(user.name)),
+                                ],
+                                onChanged: !assigneeEditable
+                                    ? null
+                                    : (value) => setState(() {
+                                          _assignee = value?.isNotEmpty == true
+                                              ? EntityRef.parse(value!)
+                                              : null;
+                                        }),
+                              ),
+                              if (assigneeEditable &&
+                                  widget.canAssignOthers &&
+                                  widget.repository != null)
+                                Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: TextButton.icon(
+                                        icon: const Icon(Icons.person_search),
+                                        label: const Text('Search all members'),
+                                        onPressed: _busy
+                                            ? null
+                                            : () async {
+                                                final selected = await showModalBottomSheet<
+                                                        List<String>>(
+                                                    context: context,
+                                                    isScrollControlled: true,
+                                                    useSafeArea: true,
+                                                    showDragHandle: true,
+                                                    builder: (_) =>
+                                                        TrackerReferencePicker(
+                                                            title:
+                                                                'Assign task',
+                                                            onMembersLoaded:
+                                                                (members) {
+                                                              if (mounted) {
+                                                                setState(() {
+                                                                  for (final m
+                                                                      in members) {
+                                                                    _extraUsers[m
+                                                                            .user
+                                                                            .ref] =
+                                                                        m.user;
+                                                                  }
+                                                                });
+                                                              }
+                                                            },
+                                                            labels: {
+                                                              for (final u
+                                                                  in users)
+                                                                u.ref.wire:
+                                                                    u.name
+                                                            },
+                                                            selected: [
+                                                              if (_assignee !=
+                                                                  null)
+                                                                _assignee!.wire
+                                                            ],
+                                                            canChange: (_) =>
+                                                                true,
+                                                            single: true,
+                                                            repository: widget
+                                                                .repository,
+                                                            guild:
+                                                                widget.guild));
+                                                if (!mounted ||
+                                                    selected == null) {
+                                                  return;
+                                                }
+                                                final assignee =
+                                                    selected.isEmpty
+                                                        ? null
+                                                        : EntityRef.parse(
+                                                            selected.first);
+                                                if (!mounted) return;
+                                                setState(() {
+                                                  _assignee = assignee;
+                                                  _draftGeneration++;
+                                                });
+                                              })),
+                              SizedBox(height: 14),
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.event_outlined),
+                                title: Text(_dueAt == null
+                                    ? L10n.of(context).ui_no_due_date_744e7e70
+                                    : DateFormat.yMMMd()
+                                        .format(_dueAt!.toLocal())),
+                                subtitle: Text(L10n.of(context)
+                                    .ui_due_at_5_00_pm_local_time_27b20294),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (_dueAt != null)
+                                      IconButton(
+                                        tooltip: L10n.of(context)
+                                            .ui_clear_due_date_2d797d28,
+                                        onPressed: !widget.canEditDetails
+                                            ? null
+                                            : () =>
+                                                setState(() => _dueAt = null),
+                                        icon: Icon(Icons.clear_rounded),
+                                      ),
+                                    IconButton(
+                                      tooltip: _dueAt == null
+                                          ? L10n.of(context)
+                                              .ui_set_due_date_3951051f
+                                          : L10n.of(context)
+                                              .ui_change_due_date_ca8ae385,
+                                      onPressed: widget.canEditDetails
+                                          ? _pickDate
+                                          : null,
+                                      icon: Icon(Icons.edit_calendar_outlined),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (widget.channel != null)
+                                for (final field in _fields)
+                                  TrackerCustomFields(
+                                      fields: [field],
+                                      values: _customValues,
+                                      channel: widget.channel!,
+                                      guild: widget.guild,
+                                      repository: widget.repository,
+                                      members: widget.members,
+                                      channels: widget.channels,
+                                      actor: widget.actor,
+                                      canAssignOthers: widget.canAssignOthers,
+                                      onChanged: widget.canEditDetails
+                                          ? (values) => setState(() {
+                                                _customValues = {
+                                                  ..._customValues
+                                                };
+                                                if (values
+                                                    .containsKey(field.id)) {
+                                                  _customValues[field.id] =
+                                                      values[field.id];
+                                                } else {
+                                                  _customValues
+                                                      .remove(field.id);
+                                                }
+                                              })
+                                          : null,
+                                      onBusyChanged: (busy) => setState(() {
+                                            if (busy) {
+                                              _busyFields.add(field.id);
+                                            } else {
+                                              _busyFields.remove(field.id);
+                                            }
+                                          })),
+                            ],
+                          ),
+                        )),
+                  ),
+                  if (_saveError != null)
+                    ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 120),
+                        child: SingleChildScrollView(
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            child: Column(children: [
+                              if (_saveError != null)
+                                Padding(
+                                    padding: const EdgeInsets.only(top: 16),
+                                    child: Text(_saveError!,
+                                        style: TextStyle(
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .error))),
+                              if (widget.onReload != null && _saveError != null)
+                                TextButton(
+                                    onPressed: _busy ? null : _reloadDraft,
+                                    child: const Text('Reload latest task')),
+                            ]))),
+                  if (_saving) const LinearProgressIndicator(),
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        key: ValueKey('tracker-task-save'),
+                        onPressed: _busy || _conflict ? null : _save,
+                        icon: Icon(widget.task == null
+                            ? Icons.add_rounded
+                            : !widget.canEditDetails
+                                ? Icons.person_add_alt_1_rounded
+                                : Icons.save_outlined),
+                        label: Text(widget.task == null
                             ? L10n.of(context).ui_create_task_ae7443ee
                             : !widget.canEditDetails
-                                ? L10n.of(context).ui_assign_value0_b2ffa1c1(
-                                    (widget.task!.key).toString())
-                                : L10n.of(context).ui_edit_value0_8e92dac2(
-                                    (widget.task!.key).toString()),
-                        style: Theme.of(context).textTheme.headlineSmall,
+                                ? L10n.of(context).ui_save_assignment_e9d5e291
+                                : L10n.of(context).ui_save_task_9bfaf3dd),
                       ),
                     ),
-                    IconButton(
-                      tooltip: L10n.of(context).ui_close_cd86acc3,
-                      onPressed: () => Navigator.pop(context),
-                      icon: Icon(Icons.close_rounded),
-                    ),
-                  ],
-                ),
-              ),
-              Divider(height: 1),
-              Flexible(
-                child: SingleChildScrollView(
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: EdgeInsets.fromLTRB(20, 18, 20, 14),
-                  child: Column(
-                    children: [
-                      TextFormField(
-                        key: ValueKey('tracker-task-title'),
-                        controller: _title,
-                        enabled: widget.canEditDetails,
-                        autofocus: widget.task == null,
-                        maxLength: 200,
-                        textCapitalization: TextCapitalization.sentences,
-                        decoration: InputDecoration(
-                          labelText: L10n.of(context).ui_title_24d471a9,
-                          prefixIcon: Icon(Icons.task_alt_rounded),
-                        ),
-                        validator: (value) => value?.trim().isEmpty == true
-                            ? 'Enter a task title'
-                            : null,
-                      ),
-                      SizedBox(height: 10),
-                      TextFormField(
-                        controller: _description,
-                        enabled: widget.canEditDetails,
-                        minLines: 3,
-                        maxLines: 7,
-                        maxLength: 10000,
-                        textCapitalization: TextCapitalization.sentences,
-                        decoration: InputDecoration(
-                          labelText:
-                              L10n.of(context).ui_description_optional_31e71764,
-                          alignLabelWithHint: true,
-                        ),
-                      ),
-                      SizedBox(height: 10),
-                      DropdownButtonFormField<EntityRef>(
-                        key: ValueKey('tracker-task-lane'),
-                        initialValue: _lane,
-                        decoration: InputDecoration(
-                          labelText: L10n.of(context).ui_lane_ef16844f,
-                          prefixIcon: Icon(Icons.view_week_outlined),
-                        ),
-                        items: [
-                          for (final lane in widget.lanes)
-                            DropdownMenuItem(
-                                value: lane.ref, child: Text(lane.name)),
-                        ],
-                        onChanged: !widget.canEditDetails
-                            ? null
-                            : (value) => setState(() => _lane = value ?? _lane),
-                      ),
-                      SizedBox(height: 14),
-                      DropdownButtonFormField<TrackerPriority>(
-                        initialValue: _priority,
-                        decoration: InputDecoration(
-                          labelText: L10n.of(context).ui_priority_e68d9f29,
-                          prefixIcon: Icon(Icons.flag_outlined),
-                        ),
-                        items: [
-                          for (final priority in TrackerPriority.values)
-                            DropdownMenuItem(
-                              value: priority,
-                              child: Text(trackerPriorityLabel(priority)),
-                            ),
-                        ],
-                        onChanged: !widget.canEditDetails
-                            ? null
-                            : (value) =>
-                                setState(() => _priority = value ?? _priority),
-                      ),
-                      SizedBox(height: 14),
-                      DropdownButtonFormField<String>(
-                        key: ValueKey('tracker-task-assignee'),
-                        initialValue: _assignee?.wire ?? '',
-                        decoration: InputDecoration(
-                          labelText: L10n.of(context).ui_assignee_2a64a64a,
-                          helperText: assigneeEditable
-                              ? L10n.of(context)
-                                  .ui_one_member_can_own_a_task_cbbdd467
-                              : L10n.of(context)
-                                  .ui_you_do_not_have_permission_to_reassign_this_t_0a1a97ab,
-                          prefixIcon: Icon(Icons.person_outline_rounded),
-                        ),
-                        items: [
-                          DropdownMenuItem(
-                              value: '',
-                              child: Text(
-                                  L10n.of(context).ui_unassigned_36c5f782)),
-                          for (final user in users)
-                            DropdownMenuItem(
-                                value: user.ref.wire, child: Text(user.name)),
-                        ],
-                        onChanged: !assigneeEditable
-                            ? null
-                            : (value) => setState(() {
-                                  _assignee = value?.isNotEmpty == true
-                                      ? EntityRef.parse(value!)
-                                      : null;
-                                }),
-                      ),
-                      SizedBox(height: 14),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.event_outlined),
-                        title: Text(_dueAt == null
-                            ? L10n.of(context).ui_no_due_date_744e7e70
-                            : DateFormat.yMMMd().format(_dueAt!.toLocal())),
-                        subtitle: Text(L10n.of(context)
-                            .ui_due_at_5_00_pm_local_time_27b20294),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (_dueAt != null)
-                              IconButton(
-                                tooltip:
-                                    L10n.of(context).ui_clear_due_date_2d797d28,
-                                onPressed: !widget.canEditDetails
-                                    ? null
-                                    : () => setState(() => _dueAt = null),
-                                icon: Icon(Icons.clear_rounded),
-                              ),
-                            IconButton(
-                              tooltip: _dueAt == null
-                                  ? L10n.of(context).ui_set_due_date_3951051f
-                                  : L10n.of(context)
-                                      .ui_change_due_date_ca8ae385,
-                              onPressed:
-                                  widget.canEditDetails ? _pickDate : null,
-                              icon: Icon(Icons.edit_calendar_outlined),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
                   ),
-                ),
+                ],
               ),
-              Padding(
-                padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    key: ValueKey('tracker-task-save'),
-                    onPressed: _save,
-                    icon: Icon(widget.task == null
-                        ? Icons.add_rounded
-                        : !widget.canEditDetails
-                            ? Icons.person_add_alt_1_rounded
-                            : Icons.save_outlined),
-                    label: Text(widget.task == null
-                        ? L10n.of(context).ui_create_task_ae7443ee
-                        : !widget.canEditDetails
-                            ? L10n.of(context).ui_save_assignment_e9d5e291
-                            : L10n.of(context).ui_save_task_9bfaf3dd),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
-    );
+        ));
   }
 }
 

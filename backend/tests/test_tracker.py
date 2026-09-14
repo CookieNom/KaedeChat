@@ -278,13 +278,16 @@ async def test_tracker_mutation_queues_dispatch_before_commit(
     monkeypatch.setattr(tracker_service, "queue_context_federation", AsyncMock())
     monkeypatch.setattr(tracker_service, "wake_context_outboxes", AsyncMock())
 
+    monkeypatch.setattr(tracker_service, "ordered_tasks", AsyncMock(return_value=[]))
     await tracker_service.update_board(
         cast(Any, session),
         cast(Any, SimpleNamespace()),
         settings(),
         auth(user()),
         EntityRef("50"),
-        TrackerBoardUpdate(key_prefix="NEW"),
+        TrackerBoardUpdate(
+            key_prefix="NEW", custom_fields=[{"id": "notes", "name": "Notes", "type": "text"}]
+        ),
         now.isoformat(),
     )
 
@@ -319,6 +322,8 @@ async def test_tracker_mutation_queues_dispatch_before_commit(
             payload={},
         )
     assert added == [row]
+
+    assert board.custom_fields == [{"id": "notes", "name": "Notes", "type": "text", "options": []}]
 
 
 @pytest.mark.asyncio
@@ -470,6 +475,7 @@ async def test_member_removal_clears_assignments_and_versions_the_whole_board(
         guild_id=10,
         guild_domain="home.example",
         key_prefix="RAID",
+        custom_fields=[{"id": "reviewer", "name": "Reviewer", "type": "users", "options": []}],
         next_task_number=2,
         created_at=now,
         updated_at=now,
@@ -490,7 +496,10 @@ async def test_member_removal_clears_assignments_and_versions_the_whole_board(
             [
                 {},
                 {},
-                {"assignee_id": 8},
+                {
+                    "assignee_id": 8,
+                    "custom_values": {"reviewer": ["9@remote.example", "8@home.example"]},
+                },
                 {"assignee_domain": "other.example"},
                 {"guild_id": 11, "channel_id": 51},
                 {"guild_domain": "other.example", "channel_domain": "other.example"},
@@ -540,11 +549,13 @@ async def test_member_removal_clears_assignments_and_versions_the_whole_board(
         ).all()
         assert rows[:2] == [(1, None, None, board.updated_at), (2, None, None, board.updated_at)]
         assert rows[2:] == [
-            (3, 8, "remote.example", now),
+            (3, 8, "remote.example", board.updated_at),
             (4, 9, "other.example", now),
             (5, 9, "remote.example", now),
             (6, 9, "remote.example", now),
         ]
+        reviewed = await session.get(TrackerTask, (3, "home.example"))
+        assert reviewed.custom_values == {"reviewer": ["8@home.example"]}
         queue_federation.assert_awaited_once()
         assert queue_federation.await_args.kwargs == {"reason": "assignee_membership_removed"}
         queued = (await session.scalars(select(TrackerDispatchOutbox))).one()
@@ -1421,7 +1432,9 @@ async def test_bot_tracker_routes_enforce_read_write_and_manage_scopes(
     await tracker_api.bot_get_tracker_board(channel_ref, dummy, dummy, dummy, config)
     await tracker_api.bot_post_tracker_task(
         channel_ref,
-        TrackerTaskCreate(lane_id="51", title="Bot task"),
+        TrackerTaskCreate(
+            lane_id="51", title="Bot task", custom_values={"reviewer": ["1@home.example"]}
+        ),
         dummy,
         dummy,
         dummy,
@@ -1430,7 +1443,10 @@ async def test_bot_tracker_routes_enforce_read_write_and_manage_scopes(
     )
     await tracker_api.bot_patch_tracker_board(
         channel_ref,
-        TrackerBoardUpdate(key_prefix="BOT"),
+        TrackerBoardUpdate(
+            key_prefix="BOT",
+            custom_fields=[{"id": "reviewer", "name": "Reviewer", "type": "users"}],
+        ),
         dummy,
         dummy,
         dummy,
@@ -1443,5 +1459,274 @@ async def test_bot_tracker_routes_enforce_read_write_and_manage_scopes(
         ("tasks.write",),
         ("tasks.manage", "tasks.read"),
     ]
+    assert tracker_api.create_task.await_args.args[6].custom_values == {
+        "reviewer": ["1@home.example"]
+    }
+    assert tracker_api.update_board.await_args.args[5].custom_fields[0].id == "reviewer"
     assert event_intent("TRACKER_TASK_CREATE") == "guild_tasks"
     assert event_scope("TRACKER_TASK_CREATE") == "tasks.read"
+
+
+def test_custom_field_definitions_values_and_nonce_compatibility() -> None:
+    from app.tracker.fields import field_definitions, validate_values
+
+    definitions = field_definitions(
+        [
+            {"id": "reviewer", "name": "Reviewer", "type": "users"},
+            {"id": "channel", "name": "Related channels", "type": "channels"},
+            {"id": "size", "name": "Size", "type": "select", "options": ["Small", "Large"]},
+            {"id": "estimate", "name": "Estimate", "type": "number"},
+            {"id": "done", "name": "Approved", "type": "checkbox"},
+            {"id": "files", "name": "Files", "type": "attachments"},
+            {"id": "notes", "name": "Notes", "type": "textarea"},
+            {"id": "date", "name": "Review date", "type": "date"},
+        ]
+    )
+    values = {
+        "reviewer": ["8@home.example"],
+        "channel": ["50@home.example"],
+        "size": "Large",
+        "estimate": 1.5,
+        "done": False,
+        "notes": "More context\nNext step",
+        "date": "2026-09-14",
+        "files": [{"id": "99@home.example", "name": "Demo", "type": "video"}],
+    }
+    assert validate_values(definitions, values) == values
+    assert TrackerBoardUpdate(custom_fields=definitions).custom_fields is not None
+    with pytest.raises(ValueError, match="unique"):
+        field_definitions([definitions[0], definitions[0]])
+    for invalid in (
+        {"unknown": "value"},
+        {"reviewer": ["8"]},
+        {"size": "Medium"},
+        {"estimate": True},
+        {"estimate": float("inf")},
+        {"estimate": 10**400},
+        {"date": "2026-02-30"},
+        {"files": [{"name": "Oops", "url": "javascript:alert(1)", "type": "image"}]},
+        {"files": [{"name": "Oops", "url": "https://example.com/file", "type": []}]},
+        {"notes": "x" * 10001},
+    ):
+        with pytest.raises(ValueError):
+            validate_values(definitions, invalid)
+    with pytest.raises(ValidationError):
+        TrackerTaskUpdate(custom_values=None)
+    payload = TrackerTaskCreate(lane_id="7@home.example", title="Task")
+    import hashlib
+    import json
+
+    old_data = payload.model_dump(mode="json", exclude={"custom_values"})
+    assert (
+        task_request_fingerprint(payload)
+        == hashlib.sha256(
+            json.dumps(old_data, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    assert task_request_fingerprint(payload) != task_request_fingerprint(
+        payload.model_copy(update={"custom_values": values})
+    )
+
+
+@pytest.mark.asyncio
+async def test_custom_users_enforce_assignment_permissions_and_channels_stay_in_guild(monkeypatch):
+    from app.tracker.service import validated_custom_values
+
+    actor = user()
+    board = TrackerBoard(
+        channel_id=50,
+        channel_domain="home.example",
+        guild_id=10,
+        guild_domain="home.example",
+        key_prefix="OPS",
+        custom_fields=[
+            {"id": "reviewer", "name": "Reviewer", "type": "users", "options": []},
+            {"id": "channel", "name": "Channel", "type": "channels", "options": []},
+        ],
+    )
+    context = SimpleNamespace(board=board)
+    assignment = AsyncMock()
+    member = AsyncMock(return_value=actor)
+    monkeypatch.setattr(tracker_service, "require_assignment_permission", assignment)
+    monkeypatch.setattr(tracker_service, "member_user", member)
+    await validated_custom_values(
+        None,
+        None,
+        settings(),
+        context,
+        actor,
+        {"reviewer": ["8@home.example", "9@home.example"]},
+        {"reviewer": ["8@home.example"]},
+    )
+    member.assert_awaited_once()
+    assert assignment.await_args.kwargs == {"old": (None, None), "new": (9, "home.example")}
+    assignment.side_effect = HTTPException(403)
+    with pytest.raises(HTTPException) as caught:
+        await validated_custom_values(
+            None, None, settings(), context, actor, {}, {"reviewer": ["9@home.example"]}
+        )
+    assert caught.value.status_code == 403
+    monkeypatch.setattr(
+        tracker_service,
+        "load_channel_access",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                channel=SimpleNamespace(guild_id=11, guild_domain="home.example")
+            )
+        ),
+    )
+    with pytest.raises(HTTPException) as caught:
+        await validated_custom_values(
+            None, None, settings(), context, actor, {"channel": ["2@home.example"]}
+        )
+    assert caught.value.detail["code"] == "TRACKER_FIELD_CHANNEL_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_tracker_attachment_read_requires_board_access_and_a_task_reference(monkeypatch):
+    from app.api import media as media_api
+    from app.db.models import Attachment
+    from app.tracker import media
+
+    actor = user()
+    attachment = Attachment(
+        id=99,
+        origin_domain="home.example",
+        uploader_id=9,
+        uploader_domain="home.example",
+        upload_channel_id=50,
+        upload_channel_domain="home.example",
+        purpose="tracker_attachment",
+        filename="Demo.mp4",
+        content_type="video/mp4",
+        detected_content_type="video/mp4",
+        scan_status="clean",
+    )
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=attachment), scalar=AsyncMock(return_value=False)
+    )
+    context = SimpleNamespace(board=SimpleNamespace(channel_id=50, channel_domain="home.example"))
+    monkeypatch.setattr(media, "proxy_remote_tracker_mutation", AsyncMock(return_value=(False, {})))
+    access = AsyncMock(return_value=context)
+    monkeypatch.setattr(media, "tracker_context", access)
+    redirect = Mock(
+        return_value=SimpleNamespace(headers={"location": "https://storage.example/private"})
+    )
+    monkeypatch.setattr(media_api, "redirect_to_object", redirect)
+    with pytest.raises(HTTPException) as caught:
+        await media.tracker_media(
+            session,
+            None,
+            None,
+            settings(),
+            auth(actor),
+            EntityRef("50@home.example"),
+            "read",
+            {"attachment_id": "99@home.example"},
+        )
+    assert caught.value.status_code == 404
+    redirect.assert_not_called()
+    assert access.await_args.kwargs["mutation"] is False
+    session.scalar.return_value = True
+    result = await media.tracker_media(
+        session,
+        None,
+        None,
+        settings(),
+        auth(actor),
+        EntityRef("50@home.example"),
+        "read",
+        {"attachment_id": "99@home.example"},
+    )
+    assert result == {"url": "https://storage.example/private"}
+    attachment.upload_channel_id = 51
+    with pytest.raises(HTTPException) as caught:
+        await media.tracker_media(
+            session,
+            None,
+            None,
+            settings(),
+            auth(actor),
+            EntityRef("50@home.example"),
+            "read",
+            {"attachment_id": "99@home.example"},
+        )
+    assert caught.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_custom_attachment_reference_query_tracks_removal_and_channel_identity(
+    postgres_schema,
+):
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import Attachment
+    from app.tracker.media import task_references_attachment
+
+    for table in ("tracker_tasks", "attachments"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        task = TrackerTask(
+            id=1,
+            origin_domain="home.example",
+            channel_id=50,
+            channel_domain="home.example",
+            custom_values={"files": [{"id": "99@home.example", "name": "Demo", "type": "video"}]},
+        )
+        attachment = Attachment(
+            id=99,
+            origin_domain="home.example",
+            upload_channel_id=50,
+            upload_channel_domain="home.example",
+            purpose="tracker_attachment",
+        )
+        wrong_channel = Attachment(
+            id=98,
+            origin_domain="home.example",
+            upload_channel_id=51,
+            upload_channel_domain="home.example",
+            purpose="tracker_attachment",
+        )
+        session.add_all([task, attachment, wrong_channel])
+        await session.flush()
+        query = select(Attachment.id).where(task_references_attachment(Attachment))
+        assert list(await session.scalars(query)) == [99]
+        assert await session.scalar(select(task_references_attachment(attachment))) is True
+        task.custom_values = {}
+        await session.flush()
+        assert list(await session.scalars(query)) == []
+
+
+@pytest.mark.asyncio
+async def test_bot_tracker_media_requires_task_and_attachment_scopes(monkeypatch):
+    from fastapi import Response
+
+    authorized = AsyncMock(return_value=SimpleNamespace(user=user()))
+    action = AsyncMock(return_value={"id": "901@home.example"})
+    monkeypatch.setattr(tracker_api, "bot_auth_for_channel", authorized)
+    monkeypatch.setattr(tracker_api, "tracker_attachment_action", action)
+    dummy = cast(Any, SimpleNamespace())
+    for operation in ("ticket", "commit", "read"):
+        response = Response()
+        payload = {"attachment_id": "901@home.example"}
+        await tracker_api.bot_tracker_attachment_action(
+            EntityRef("50"), operation, response, payload, dummy, dummy, dummy, dummy, settings()
+        )
+        scopes = (
+            ("tasks.read", "attachments.read")
+            if operation == "read"
+            else ("tasks.write", "attachments.write")
+        )
+        assert authorized.await_args.args[4:] == scopes
+        assert action.await_args.args[1:4] == (operation, response, payload)
+    authorized.side_effect = HTTPException(403, detail={"code": "MISSING_SCOPE"})
+    action.reset_mock()
+    with pytest.raises(HTTPException) as denied:
+        await tracker_api.bot_tracker_attachment_action(
+            EntityRef("50"), "read", Response(), {}, dummy, dummy, dummy, dummy, settings()
+        )
+    assert denied.value.status_code == 403
+    action.assert_not_awaited()

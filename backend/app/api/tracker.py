@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Header, Response, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -349,3 +351,58 @@ async def bot_post_tracker_task_move(
 ) -> dict[str, object]:
     auth = await bot_auth_for_channel(session, settings, principal, channel_ref, "tasks.write")
     return await move_task(session, redis, settings, auth, channel_ref, task_ref, payload, if_match)
+
+
+@router.post("/{channel_ref}/tracker/attachments/{action}")
+async def tracker_attachment_action(
+    channel_ref: EntityRef,
+    action: Literal["ticket", "commit", "read"],
+    response: Response,
+    payload: dict[str, object],
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
+    from app.tracker.media import tracker_media
+
+    if action == "ticket":
+        await enforce_client_rate_limit(
+            redis,
+            response,
+            CLIENT_RATE_LIMITS["upload_ticket"],
+            user_id=auth.user.id,
+            user_domain=auth.user.origin_domain,
+        )
+    response.headers["Cache-Control"] = "private, no-store"
+    return await tracker_media(
+        session, redis, snowflake, settings, auth, channel_ref, action, payload
+    )
+
+
+@bot_router.post("/{channel_ref}/tracker/attachments/{action}")
+async def bot_tracker_attachment_action(
+    channel_ref: EntityRef,
+    action: Literal["ticket", "commit", "read"],
+    response: Response,
+    payload: dict[str, object],
+    principal: BotPrincipal = Depends(require_bot),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    reading = action == "read"
+    auth = await bot_auth_for_channel(
+        session,
+        settings,
+        principal,
+        channel_ref,
+        "tasks.read" if reading else "tasks.write",
+        "attachments.read" if reading else "attachments.write",
+    )
+    return await tracker_attachment_action(
+        channel_ref, action, response, payload, auth, session, redis, snowflake, settings
+    )
