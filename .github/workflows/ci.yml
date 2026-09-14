@@ -219,6 +219,15 @@ jobs:
         run: |
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cocoapods/repos
+            ~/Library/Caches/CocoaPods
+          key: cocoapods-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.COCOAPODS_VERSION }}-${{ hashFiles('mobile/ios/Podfile.lock') }}
+          restore-keys: |
+            cocoapods-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.COCOAPODS_VERSION }}-
       - name: Install pinned CocoaPods
         run: |
           gem_home="$RUNNER_TEMP/cocoapods-gems"
@@ -239,7 +248,7 @@ jobs:
           flutter pub get --enforce-lockfile
           flutter precache --ios
           ./tool/build_e2ee_native.sh --ios
-          pod install --deployment --project-directory=ios
+          bash tool/install_pods.sh
           # The Xcode project bundles this file. CI needs a resource, not Firebase credentials.
           python3 - <<'PYTHON'
           import plistlib
