@@ -220,14 +220,15 @@ jobs:
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
       - name: Cache CocoaPods downloads
+        timeout-minutes: 5
+        continue-on-error: true
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            ~/.cocoapods/repos
             ~/Library/Caches/CocoaPods
-          key: cocoapods-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.COCOAPODS_VERSION }}-${{ hashFiles('mobile/ios/Podfile.lock') }}
+          key: cocoapods-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.COCOAPODS_VERSION }}-${{ hashFiles('mobile/ios/Podfile.lock') }}
           restore-keys: |
-            cocoapods-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.COCOAPODS_VERSION }}-
+            cocoapods-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.COCOAPODS_VERSION }}-
       - name: Install pinned CocoaPods
         run: |
           gem_home="$RUNNER_TEMP/cocoapods-gems"
