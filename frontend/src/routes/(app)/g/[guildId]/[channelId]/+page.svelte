@@ -429,6 +429,10 @@
   let completionOpen = $state(false);
   let timelineAtBottom = $state(false);
   // Keep the visit's starting point even as acknowledgements advance on other devices.
+  let visitUnreadCount = $state<number | null>(0);
+  let visitUnreadSince = $state<string | null>(null);
+  let visitReadVersion = 0;
+  let markingRead = $state(false);
   let visitReadInclusive = $state(false);
   let visitReadRef = $state<{ id: string; origin_domain: string } | null>(null);
   let historyTarget = $state<string | null>(null);
@@ -546,6 +550,8 @@
         if (caught instanceof ApiError && caught.status === 409) {
           readAcknowledgements.reset();
           manualUnreadPaused = true;
+          visitUnreadCount = null;
+          visitUnreadSince = null;
           setReadStates(await api<ReadStateStatus[]>('/users/@me/read-states'));
           return;
         }
@@ -676,6 +682,24 @@
     );
   });
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
+
+  async function markVisibleConversationRead() {
+    if (!channel || markingRead) return;
+    markingRead = true;
+    readStateWarning = '';
+    try {
+      await markConversationsRead({ channel: entityRef(channel) });
+      manualUnreadPaused = false;
+    } catch (caught) {
+      readStateWarning = userErrorMessage(
+        caught,
+        $t('ui_could_not_mark_the_channel_as_read_try_again_a173f51d')
+      );
+    } finally {
+      markingRead = false;
+    }
+  }
+
   const channelGroups = $derived(groupChannels(guild?.channels ?? []));
   const dynamicPermission = (name: string, fallback: bigint): bigint =>
     (Permission as Record<string, bigint>)[name] ?? fallback;
@@ -1040,9 +1064,11 @@
     if (!reference) return null;
     const target = messages.find((message) => matchesEntityRef(reference, message, localDomain));
     // Deleted/expired anchors still have a valid ordered history window.
-    return target
+    return target && timeline.some((item) => item.key === `message:${entityKey(target)}`)
       ? `message:${entityKey(target)}`
-      : (timeline.find((item) => item.kind === 'new')?.key ?? timeline.at(-1)?.key ?? null);
+      : (timeline.find((item) => item.kind === 'new')?.key ??
+          timeline.find((item) => item.kind === 'message')?.key ??
+          null);
   });
 
   function referencedMessage(message: Message): Message | null {
@@ -3032,7 +3058,8 @@
     } else if (dispatch.t === 'READ_STATE_UPDATE') {
       const update = dispatch.d as ReadStateDispatch;
       if (
-        (update.read_version ?? 0) >
+        (update.read_version ?? 0) > visitReadVersion &&
+        (update.read_version ?? 0) >=
           (readStates.find(
             (s) => s.channel_id === update.channel_id && s.channel_domain === update.channel_domain
           )?.read_version ?? 0) &&
@@ -3047,6 +3074,9 @@
           update.last_message_id && update.last_message_domain
             ? { id: update.last_message_id, origin_domain: update.last_message_domain }
             : null;
+        visitUnreadCount = null;
+        visitUnreadSince = update.first_unread_at ?? null;
+        visitReadVersion = update.read_version ?? 0;
         visitReadInclusive = !visitReadRef;
         if (!visitReadRef && update.unread_message_id && update.unread_message_domain)
           visitReadRef = {
@@ -3055,6 +3085,15 @@
           };
       }
       setReadStates(applyReadStateDispatch(readStates, dispatch.d as ReadStateDispatch));
+      if (
+        channel &&
+        update.channel_id === channel.id &&
+        update.channel_domain === channel.origin_domain &&
+        !unreadFor(channel)?.unread
+      ) {
+        manualUnreadPaused = false;
+        visitUnreadCount = 0;
+      }
     } else if (dispatch.t === 'CHANNEL_CREATE' || dispatch.t === 'CHANNEL_ACCESS_GRANTED') {
       const created = dispatch.d as Channel;
       if (
@@ -3830,6 +3869,9 @@
             origin_domain: state.first_unread_message_domain
           };
         manualUnreadPaused = false;
+        visitUnreadCount = state?.unread ? (state.unread_count ?? null) : 0;
+        visitUnreadSince = state?.first_unread_at ?? null;
+        visitReadVersion = state?.read_version ?? 0;
         historyTarget = targetAround;
         if (!targetAround && state?.unread && visitReadRef && historyAccessible && !trackerRoute) {
           targetAround = entityRef(visitReadRef);
@@ -4162,6 +4204,9 @@
       const saved = refreshed.find(
         (s) => s.channel_id === message.channel_id && s.channel_domain === message.channel_domain
       );
+      visitUnreadCount = saved?.unread_count ?? null;
+      visitUnreadSince = saved?.first_unread_at ?? null;
+      visitReadVersion = saved?.read_version ?? 0;
       visitReadRef =
         saved?.read_message_id && saved.read_message_domain
           ? { id: saved.read_message_id, origin_domain: saved.read_message_domain }
@@ -7290,7 +7335,13 @@
                 onLoadLater={loadLater}
                 targetKey={targetTimelineKey}
                 onRead={acknowledgeVisible}
-                canJumpToRead={Boolean(visitReadRef)}
+                canJumpToRead={Boolean(visitReadRef) &&
+                  visitUnreadCount !== 0 &&
+                  currentReadState?.unread !== false}
+                unreadCount={visitUnreadCount}
+                unreadSince={visitUnreadSince ?? currentReadState?.first_unread_at}
+                {markingRead}
+                onMarkRead={markVisibleConversationRead}
                 forceJumpToLatest={manualUnreadPaused}
                 onJumpToRead={() => visitReadRef && jumpHistory(entityRef(visitReadRef))}
                 onJumpToLatest={() => jumpHistory(null)}

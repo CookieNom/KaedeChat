@@ -3020,5 +3020,12 @@
   "chat_show_muted": "Show muted servers",
   "share_locale_with_bots": "Share my language with bots and apps",
   "share_locale_with_bots_description": "Let bots and apps use your language when you interact with them. Turn this off to keep your language private on all devices.",
-  "privacy_description": "Choose who can message you and what you share with bots and apps."
+  "privacy_description": "Choose who can message you and what you share with bots and apps.",
+  "chat_unread_count": "{count, plural, one {# new message} other {# new messages}}",
+  "chat_unread_new": "New messages",
+  "chat_unread_since": "since {time}",
+  "chat_inbox_preview_failed": "Preview unavailable. Open the conversation to try again.",
+  "chat_inbox_preview_empty": "No messages to preview.",
+  "chat_inbox_expand": "Expand message previews",
+  "chat_inbox_collapse": "Collapse message previews"
 }

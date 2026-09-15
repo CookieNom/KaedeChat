@@ -14316,6 +14316,7 @@ async def acknowledge_channel(
             else None,
             "read_version": state.read_version,
             "manual_unread": payload.mark_unread,
+            "first_unread_at": acknowledged.created_at.isoformat() if payload.mark_unread else None,
             "unread_message_id": str(payload.message_id.id) if payload.mark_unread else None,
             "unread_message_domain": payload.message_id.domain if payload.mark_unread else None,
             "last_message_domain": state.last_message_domain,

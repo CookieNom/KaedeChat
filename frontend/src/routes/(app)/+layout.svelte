@@ -4,6 +4,7 @@
   import { api, userErrorMessage } from '$lib/api/client';
   import { applyTtsPreferences } from '$lib/chat/tts';
   import LanguageSuggestion from '$lib/components/LanguageSuggestion.svelte';
+  import AppInbox from '$lib/components/AppInbox.svelte';
   import CommandSwitcher from '$lib/components/CommandSwitcher.svelte';
   import InteractionOverlay from '$lib/components/InteractionOverlay.svelte';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
@@ -216,7 +217,10 @@
   }
 </script>
 
-{@render children()}
+<div class="authenticated-workspace">
+  <AppInbox />
+  {@render children()}
+</div>
 <CommandSwitcher />
 {#if notificationSettingsLoaded}<LanguageSuggestion />{/if}
 <InteractionOverlay />

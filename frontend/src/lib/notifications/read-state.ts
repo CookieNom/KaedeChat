@@ -4,6 +4,7 @@ import type { Channel, Message, ReadStateStatus, UserSummary } from '$lib/chat/t
 type ReadStateChannel = Pick<Channel, 'id' | 'origin_domain' | 'guild_id' | 'guild_domain'>;
 
 export interface ReadStateDispatch {
+  first_unread_at?: string | null;
   read_version?: number;
   manual_unread?: boolean;
   unread_message_id?: string | null;
@@ -123,6 +124,7 @@ export function applyReadStateDispatch(
       return state;
     return {
       ...state,
+      ...(reset ? { first_unread_at: update.first_unread_at ?? null } : {}),
       read_version: update.read_version ?? 0,
       read_message_id: update.last_message_id,
       read_message_domain: update.last_message_domain,

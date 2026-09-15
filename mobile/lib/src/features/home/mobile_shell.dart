@@ -425,26 +425,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     );
     return ValueListenableBuilder<int>(
       valueListenable: _messagePage,
-      child: Scaffold(
-          body: body,
-          floatingActionButton: ValueListenableBuilder<int>(
-              valueListenable: _messagePage,
-              builder: (context, page, _) =>
-                  page != 0 || _section != _ShellSection.messages
-                      ? const SizedBox.shrink()
-                      : FloatingActionButton.small(
-                          tooltip: L10n.of(context).chat_inbox,
-                          child: const Icon(Icons.inbox_outlined),
-                          onPressed: () async {
-                            final opened = await Navigator.of(context)
-                                .push<bool>(MaterialPageRoute(
-                                    builder: (_) => const ReadInboxScreen()));
-                            if (mounted && opened == true) {
-                              _showSection(_ShellSection.messages);
-                              _openConversation();
-                            }
-                          },
-                        ))),
+      child: Scaffold(body: body),
       builder: (context, page, child) => PopScope(
         canPop: _section == _ShellSection.messages && page == 0,
         onPopInvokedWithResult: (didPop, _) {
@@ -4762,6 +4743,7 @@ final class _DirectMessageBrowser extends ConsumerWidget {
             user: state.user,
             presence: state.presencePreference,
             onTap: onOpenSettings,
+            onOpenChannel: onOpenChannel,
           ),
         ],
       ),
@@ -5135,6 +5117,7 @@ final class _GuildBrowser extends ConsumerWidget {
             user: state.user,
             presence: state.presencePreference,
             onTap: onOpenSettings,
+            onOpenChannel: onOpenChannel,
           ),
         ],
       ),
@@ -5742,11 +5725,15 @@ final class _SquareAction extends StatelessWidget {
 
 final class _AccountBar extends ConsumerWidget {
   const _AccountBar(
-      {required this.user, required this.presence, required this.onTap});
+      {required this.user,
+      required this.presence,
+      required this.onTap,
+      required this.onOpenChannel});
 
   final KaedeUser? user;
   final PresenceStatus presence;
   final VoidCallback onTap;
+  final VoidCallback onOpenChannel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -5839,8 +5826,20 @@ final class _AccountBar extends ConsumerWidget {
                 ),
               ),
             IconButton(
+              tooltip: L10n.of(context).chat_inbox,
+              visualDensity: VisualDensity.standard,
+              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+              onPressed: () async {
+                final opened = await Navigator.of(context).push<bool>(
+                    MaterialPageRoute(builder: (_) => const ReadInboxScreen()));
+                if (context.mounted && opened == true) onOpenChannel();
+              },
+              icon: const Icon(Icons.inbox_outlined, size: 19),
+            ),
+            IconButton(
               tooltip: L10n.of(context).ui_settings_4b058728,
-              visualDensity: VisualDensity.compact,
+              visualDensity: VisualDensity.standard,
+              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
               onPressed: onTap,
               icon: Icon(Icons.settings_rounded, size: 19),
             ),

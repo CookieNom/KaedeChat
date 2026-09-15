@@ -22,7 +22,6 @@
   import { tick } from 'svelte';
   import CreateGuildDialog from './CreateGuildDialog.svelte';
   import Icon from './Icon.svelte';
-  import ReadInbox from './ReadInbox.svelte';
   import { markConversationsRead } from '$lib/notifications/read-actions';
   import { userErrorMessage } from '$lib/api/client';
   let readError = $state('');
@@ -36,7 +35,6 @@
       readError = userErrorMessage(caught, 'Could not mark server read. Try again.');
     }
   }
-  let inboxOpen = $state(false);
 
   let {
     guilds,
@@ -342,12 +340,6 @@
       <small class="rail-unread">{compactBadge(homeUnreadCount)}</small>
     {/if}
   </a>
-  <button
-    class="spine-home"
-    title={$t('chat_inbox')}
-    aria-label={$t('chat_inbox')}
-    onclick={() => (inboxOpen = true)}>☷</button
-  >
   <div class="spine-separator" aria-hidden="true"></div>
 
   {#each navigation.items as item, itemIndex (item.kind === 'guild' ? item.guild : item.id)}
@@ -587,8 +579,6 @@
     </section>
   </dialog>
 {/if}
-
-{#if inboxOpen}<ReadInbox onClose={() => (inboxOpen = false)} />{/if}
 
 <style>
   .guild-context-menu,

@@ -487,7 +487,13 @@ async def list_read_states(
     first_unread = {}
     if channel_refs:
         rows = await session.execute(
-            select(Message.channel_id, Message.channel_domain, Message.id, Message.origin_domain)
+            select(
+                Message.channel_id,
+                Message.channel_domain,
+                Message.id,
+                Message.origin_domain,
+                Message.created_at,
+            )
             .outerjoin(
                 ReadState,
                 and_(
@@ -508,7 +514,7 @@ async def list_read_states(
             .distinct(Message.channel_id, Message.channel_domain)
             .order_by(Message.channel_id, Message.channel_domain, Message.id, Message.origin_domain)
         )
-        first_unread = {(row[0], row[1]): (str(row[2]), row[3]) for row in rows}
+        first_unread = {(row[0], row[1]): (str(row[2]), row[3], row[4].isoformat()) for row in rows}
     keys = [f"channel:last_message:{channel.origin_domain}:{channel.id}" for channel in channels]
     cached = await redis.mget(keys) if keys else []
     result: list[dict[str, object]] = []
@@ -546,6 +552,9 @@ async def list_read_states(
                 "first_unread_message_domain": first_unread.get(
                     (channel.id, channel.origin_domain), (None, None)
                 )[1],
+                "first_unread_at": first_unread.get(
+                    (channel.id, channel.origin_domain), (None, None, None)
+                )[2],
                 "read_message_id": str(read.id) if read is not None else None,
                 "read_message_domain": read.domain if read is not None else None,
                 "read_version": state.read_version if state is not None else 0,

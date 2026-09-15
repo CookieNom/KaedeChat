@@ -16,6 +16,7 @@
     | 'home'
     | 'image'
     | 'image-plus'
+    | 'inbox'
     | 'kanban'
     | 'key'
     | 'lock'
@@ -104,6 +105,9 @@
     />
   {:else if name === 'home'}
     <path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z" />
+  {:else if name === 'inbox'}
+    <path d="M4 4h16l2 10v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-5L4 4Z" />
+    <path d="M2 14h6l2 3h4l2-3h6" />
   {:else if name === 'image'}
     <rect x="3" y="4" width="18" height="16" rx="2" />
     <circle cx="8.5" cy="9" r="1.5" />

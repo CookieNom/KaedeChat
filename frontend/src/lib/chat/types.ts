@@ -408,6 +408,8 @@ export interface Attachment {
 }
 
 export interface ReadStateStatus {
+  unread_count?: number;
+  first_unread_at?: string | null;
   can_read_history?: boolean;
   muted?: boolean;
   read_version?: number;

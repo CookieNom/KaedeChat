@@ -1,5 +1,5 @@
 <script lang="ts" generics="T extends { key: string }">
-  import { t } from '$lib/ui/locale';
+  import { t, preferredLocale } from '$lib/ui/locale';
 
   import { onMount, tick, untrack, type Snippet } from 'svelte';
 
@@ -18,6 +18,10 @@
     onBottomChange,
     onRead,
     canJumpToRead = false,
+    unreadCount = null,
+    unreadSince = null,
+    markingRead = false,
+    onMarkRead,
     forceJumpToLatest = false,
     onJumpToRead,
     onJumpToLatest,
@@ -41,6 +45,10 @@
     onBottomChange?: (atBottom: boolean) => void;
     onRead?: (key: string) => void;
     canJumpToRead?: boolean;
+    unreadCount?: number | null;
+    unreadSince?: string | null;
+    markingRead?: boolean;
+    onMarkRead?: () => Promise<unknown> | unknown;
     forceJumpToLatest?: boolean;
     onJumpToRead?: () => Promise<unknown> | unknown;
     onJumpToLatest?: () => Promise<unknown> | unknown;
@@ -49,6 +57,19 @@
     label?: string;
   } = $props();
 
+  const sinceLabel = $derived.by(() => {
+    if (!unreadSince) return '';
+    const date = new Date(unreadSince);
+    if (!Number.isFinite(date.getTime())) return '';
+    return new Intl.DateTimeFormat(preferredLocale(), {
+      ...(date.toDateString() === new Date().toDateString()
+        ? {}
+        : { month: 'short', day: 'numeric', year: 'numeric' }),
+      hour: 'numeric',
+      minute: '2-digit'
+    }).format(date);
+  });
+
   let viewport = $state<HTMLDivElement | null>(null);
   let atBottom = $state(false);
   let unseen = $state(0);
@@ -56,6 +77,7 @@
   let initialized = $state(false);
   let contentElement = $state<HTMLDivElement | null>(null);
   let resizeFrame = 0;
+  let userScrolling = false;
   let readTimer: ReturnType<typeof setTimeout> | undefined;
 
   function scheduleRead() {
@@ -87,6 +109,7 @@
   }
 
   function historyKeydown(event: KeyboardEvent) {
+    userScrolling = true;
     if (event.shiftKey && event.key === 'PageUp' && canJumpToRead) {
       event.preventDefault();
       void onJumpToRead?.();
@@ -111,7 +134,7 @@
   }
 
   function pinViewportToBottom() {
-    if (!viewport || !items.length) return;
+    if (!viewport || !items.length || !atBottom || hasLater) return;
     viewport.scrollTop = viewport.scrollHeight;
     updateBottom(!hasLater);
     unseen = 0;
@@ -123,10 +146,10 @@
     updateBottom(nextAtBottom && !hasLater);
     scheduleRead();
     if (nextAtBottom) unseen = 0;
-    if (initialized && viewport.scrollTop <= 24 && hasEarlier && !loadingEarlier) {
+    if (userScrolling && initialized && viewport.scrollTop <= 24 && hasEarlier && !loadingEarlier) {
       void loadEarlierAnchored();
     }
-    if (initialized && nextAtBottom && hasLater && !loadingLater && onLoadLater) {
+    if (userScrolling && initialized && nextAtBottom && hasLater && !loadingLater && onLoadLater) {
       void onLoadLater();
     }
   }
@@ -163,10 +186,16 @@
     const index = items.findIndex((item) => item.key === key);
     if (index < 0 || !viewport) return false;
     await tick();
-    viewport.querySelector<HTMLElement>(`[data-virtual-key="${CSS.escape(key)}"]`)?.scrollIntoView({
-      block: 'center'
-    });
+    if (!viewport) return false;
+    const target = viewport.querySelector<HTMLElement>(`[data-virtual-key="${CSS.escape(key)}"]`);
+    if (!target) return false;
+    // Move only the history viewport; scrollIntoView can move its ancestors too.
+    const bounds = viewport.getBoundingClientRect();
+    viewport.scrollTop +=
+      target.getBoundingClientRect().top - bounds.top - viewport.clientHeight * 0.2;
     initialized = true;
+    userScrolling = false;
+    window.cancelAnimationFrame(resizeFrame);
     updateBottom(false);
     scheduleRead();
     return true;
@@ -184,10 +213,6 @@
     currentViewport.addEventListener('scroll', viewportScrolled);
     window.addEventListener('focus', scheduleRead);
     document.addEventListener('visibilitychange', scheduleRead);
-    if (items.length && !initialized) {
-      if (targetKey) void tick().then(() => scrollToTarget(targetKey));
-      else void tick().then(scrollToBottom);
-    }
     return () => {
       clearTimeout(readTimer);
       window.removeEventListener('focus', scheduleRead);
@@ -232,9 +257,29 @@
 
 <div class="virtual-message-shell">
   {#if canJumpToRead}
-    <button class="read-position-banner" disabled={jumpingHistory} onclick={onJumpToRead}>
-      {$t('chat_jump_to_read')}
-    </button>
+    <div class="read-position-banner">
+      <button
+        class="unread-jump"
+        disabled={jumpingHistory || loadingEarlier || loadingLater}
+        onclick={onJumpToRead}
+        title={$t('chat_jump_to_read')}
+      >
+        <span class="unread-summary">
+          <span class="unread-count"
+            >{unreadCount === null
+              ? $t('chat_unread_new')
+              : $t('chat_unread_count', { count: unreadCount })}</span
+          >
+          {#if sinceLabel}<span class="unread-since"
+              >{$t('chat_unread_since', { time: sinceLabel })}</span
+            >{/if}
+        </span>
+      </button>
+      <button class="unread-mark-read" disabled={markingRead} onclick={onMarkRead}>
+        {$t('chat_mark_read')}
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>
+      </button>
+    </div>
   {/if}
   <span id="message-history-keyboard-help" class="visually-hidden">
     {$t('ui_scroll_this_region_with_page_up_and_page_down_7fffc5aa')}
@@ -248,6 +293,9 @@
     aria-label={`${label} history`}
     aria-describedby="message-history-keyboard-help"
     onkeydown={historyKeydown}
+    onwheel={() => (userScrolling = true)}
+    onpointerdown={() => (userScrolling = true)}
+    ontouchstart={() => (userScrolling = true)}
     aria-busy={loadingEarlier || loadingLater || jumpingHistory}
   >
     <div bind:this={contentElement} class="virtual-message-content">

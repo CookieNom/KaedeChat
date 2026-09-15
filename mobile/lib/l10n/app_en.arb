@@ -9094,5 +9094,22 @@
   "chat_mark_server_read": "Mark server as read",
   "chat_show_muted": "Show muted servers",
   "share_locale_with_bots": "Share my language with bots and apps",
-  "share_locale_with_bots_description": "Let bots and apps use your language when you interact with them. Turn this off to keep your language private on all devices."
+  "share_locale_with_bots_description": "Let bots and apps use your language when you interact with them. Turn this off to keep your language private on all devices.",
+  "chat_unread_count": "{count, plural, one {{count} new message} other {{count} new messages}}",
+  "@chat_unread_count": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chat_unread_since": "since {time}",
+  "@chat_unread_since": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "chat_mark_read_failed": "Could not mark the conversation as read. Try again."
 }

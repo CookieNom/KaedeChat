@@ -421,3 +421,101 @@ describe('channel menus and voice actions', () => {
     });
   });
 });
+
+describe('saved unread navigation', () => {
+  it.each([
+    [0, false],
+    [120, false],
+    [120, true]
+  ] as const)(
+    'marks unread history read locally or on another device (%s, %s)',
+    async (count, remote) => {
+      let marked = false;
+      let failAck = true;
+      const base = network.api.getMockImplementation()!;
+      const saved = {
+        ...message,
+        id: '9007199254741010',
+        origin_domain: 'remote.example',
+        content: 'Saved remote message'
+      };
+      const latest = {
+        ...message,
+        id: '9007199254741130',
+        origin_domain: 'remote.example',
+        content: 'Latest remote message'
+      };
+      network.api.mockImplementation(async (path: string) => {
+        if (path === `${room}/ack`) {
+          if (failAck) throw new Error('Connection lost');
+          marked = true;
+          return;
+        }
+        if (path === '/users/@me/read-states')
+          return [
+            {
+              channel_id: '2',
+              channel_domain: 'chat.example',
+              guild_id: '1',
+              guild_domain: 'chat.example',
+              last_message_id: latest.id,
+              last_message_domain: latest.origin_domain,
+              read_message_id: count && !marked ? saved.id : latest.id,
+              read_message_domain: 'remote.example',
+              unread: count > 0 && !marked,
+              unread_count: marked ? 0 : count,
+              first_unread_at: '2026-09-14T15:32:00Z',
+              mention_count: 0
+            }
+          ];
+        if (path === `${room}/messages`) return [latest];
+        if (path.startsWith(`${room}/messages?around=`)) return [saved];
+        if (path.startsWith(`${room}/messages?`)) return [];
+        return base(path);
+      });
+      await render();
+      if (!count) {
+        expect(document.querySelector('.read-position-banner')).toBeNull();
+        return;
+      }
+      expect(document.querySelector('.unread-count')?.textContent).toBe('120 new messages');
+      document.querySelector<HTMLButtonElement>('.new-message-pill')!.click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain('Latest remote message'));
+      document.querySelector<HTMLButtonElement>('.unread-jump')!.click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain('Saved remote message'));
+      expect(network.api).toHaveBeenCalledWith(
+        `${room}/messages?around=9007199254741010%40remote.example`
+      );
+      expect(document.querySelector('.unread-since')?.textContent).toContain('since ');
+      if (remote) {
+        dispatch('READ_STATE_UPDATE', {
+          channel_id: '2',
+          channel_domain: 'chat.example',
+          last_message_id: latest.id,
+          last_message_domain: latest.origin_domain,
+          mention_count: 0,
+          read_version: 0,
+          unread: false
+        });
+      } else {
+        document.querySelector<HTMLButtonElement>('.unread-mark-read')!.click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain('Connection lost'));
+        expect(document.querySelector('.read-position-banner')).not.toBeNull();
+        failAck = false;
+        document.querySelector<HTMLButtonElement>('.unread-mark-read')!.click();
+        await vi.waitFor(() => expect(marked).toBe(true));
+        expect(network.api).toHaveBeenCalledWith(
+          `${room}/ack`,
+          expect.objectContaining({
+            body: JSON.stringify({ message_id: `${latest.id}@remote.example`, read_version: 0 })
+          })
+        );
+      }
+      await vi.waitFor(() => expect(document.querySelector('.read-position-banner')).toBeNull());
+      // Remounting the history window must not restore a read banner.
+      document.querySelector<HTMLButtonElement>('.new-message-pill')!.click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain('Latest remote message'));
+      expect(document.querySelector('.read-position-banner')).toBeNull();
+    }
+  );
+});

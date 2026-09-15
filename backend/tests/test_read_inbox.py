@@ -103,3 +103,44 @@ async def test_mentions_are_permission_filtered_and_cursor_paginated(monkeypatch
     assert any(value == [(10, "home.test")] for value in compiled.params.values())
     assert 10 in compiled.params.values()
     assert "home.test" in compiled.params.values()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unread", [False, True])
+async def test_read_snapshot_returns_first_unread_time_from_message(unread):
+    first_time = datetime(2026, 9, 14, 15, 32, tzinfo=UTC)
+    channel = SimpleNamespace(
+        id=10,
+        origin_domain="remote.test",
+        guild_id=None,
+        guild_domain=None,
+        name="DM",
+        last_message_id=30,
+        last_message_domain="remote.test",
+    )
+    state = SimpleNamespace(
+        channel_id=10,
+        channel_domain="remote.test",
+        last_message_id=20 if unread else 30,
+        last_message_domain="remote.test",
+        read_version=2,
+        mention_count=0,
+    )
+    session = SimpleNamespace(
+        scalars=AsyncMock(side_effect=[[channel], [], [state]]),
+        execute=AsyncMock(
+            side_effect=[
+                Mock(tuples=Mock(return_value=[(10, "remote.test", 10)] if unread else [])),
+                [(10, "remote.test", 21, "remote.test", first_time)] if unread else [],
+            ]
+        ),
+    )
+    result = await users.list_read_states(
+        SimpleNamespace(user=SimpleNamespace(id=1, origin_domain="home.test")),
+        session,
+        SimpleNamespace(mget=AsyncMock(return_value=[None])),
+    )
+    assert result[0]["first_unread_at"] == (first_time.isoformat() if unread else None)
+    assert result[0]["unread_count"] == (10 if unread else 0)
+    assert result[0]["read_message_id"] == ("20" if unread else "30")
+    assert result[0]["read_version"] == 2

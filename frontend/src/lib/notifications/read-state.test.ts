@@ -216,9 +216,15 @@ it('accepts a versioned manual rewind and rejects acknowledgements from before i
     last_message_domain: null,
     mention_count: 1,
     read_version: 1,
-    manual_unread: true
+    manual_unread: true,
+    first_unread_at: '2026-09-14T15:32:00Z'
   });
-  expect(reset[0]).toMatchObject({ read_version: 1, read_message_id: null, unread: true });
+  expect(reset[0]).toMatchObject({
+    read_version: 1,
+    read_message_id: null,
+    unread: true,
+    first_unread_at: '2026-09-14T15:32:00Z'
+  });
   expect(
     applyReadStateDispatch(reset, {
       channel_id: initial.channel_id,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,6 +13,8 @@ import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
+import 'package:kaede_mobile/src/features/chat/read_inbox_screen.dart';
+import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -113,6 +116,9 @@ Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
             'last_message_domain': 'chat.example',
             'first_unread_message_id': '${cursor + 1}',
             'first_unread_message_domain': 'chat.example',
+            'first_unread_at': cursor < 200
+                ? messages[cursor].createdAt.toIso8601String()
+                : null,
             'read_message_id': cursor == 0 ? null : '$cursor',
             'read_message_domain': cursor == 0 ? null : 'chat.example',
             'unread_count': 200 - cursor,
@@ -161,6 +167,93 @@ Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
 }
 
 void main() {
+  testWidgets('Inbox opens from the account bar immediately left of Settings',
+      (tester) async {
+    final fonts = FontLoader('Inter');
+    for (final weight in [
+      'Regular',
+      'Medium',
+      'SemiBold',
+      'Bold',
+      'ExtraBold'
+    ]) {
+      fonts.addFont(rootBundle.load('assets/fonts/Inter-$weight.ttf'));
+    }
+    await fonts.load();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final audioChannels = <String>{
+      'xyz.luan/audioplayers.global',
+      'xyz.luan/audioplayers.global/events',
+      'xyz.luan/audioplayers'
+    };
+    for (final channel in audioChannels.toList()) {
+      messenger.setMockMethodCallHandler(MethodChannel(channel), (call) async {
+        if (call.method == 'create') {
+          final events =
+              'xyz.luan/audioplayers/events/${(call.arguments as Map)['playerId']}';
+          audioChannels.add(events);
+          messenger.setMockMethodCallHandler(
+              MethodChannel(events), (_) async => null);
+        }
+        return null;
+      });
+    }
+    addTearDown(() {
+      for (final channel in audioChannels) {
+        messenger.setMockMethodCallHandler(MethodChannel(channel), null);
+      }
+    });
+    final result = await tester.runAsync(() => fixture());
+    final controller = result!.$1;
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pumpWidget(ProviderScope(
+      overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+      child: MaterialApp(theme: kaedeTheme(), home: const MobileShell()),
+    ));
+    await tester.pumpAndSettle();
+    for (final width in [390.0, 320.0]) {
+      if (width == 320) {
+        final guildRef = messageRef(700);
+        controller.state = controller.state.copyWith(
+          selectedGuild: guildRef,
+          guilds: [
+            KaedeGuild(
+                ref: guildRef,
+                name: 'Kaede Chat Official',
+                ownerRef: controller.state.user!.ref,
+                permissions: BigInt.zero,
+                unavailable: false)
+          ],
+        );
+      }
+      await tester.binding.setSurfaceSize(Size(width, 844));
+      await tester.pumpAndSettle();
+      final inbox = tester.getRect(find.byTooltip('Inbox'));
+      final settings = tester.getRect(find.byTooltip('Settings'));
+      expect(inbox.center.dy, closeTo(settings.center.dy, 1));
+      expect(inbox.right, lessThanOrEqualTo(settings.left));
+      expect(inbox.width, greaterThanOrEqualTo(44));
+      expect(inbox.bottom, greaterThan(750));
+      expect(find.byType(FloatingActionButton), findsNothing);
+      expect(tester.takeException(), isNull);
+    }
+    await tester.tap(find.byTooltip('Inbox'));
+    await tester
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.pumpAndSettle();
+    expect(find.byType(ReadInboxScreen), findsOneWidget);
+    expect(result.$2.where((request) => request.path.endsWith('/read-states')),
+        isNotEmpty);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Inbox'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+  });
+
   test(
       'manual unread survives visible reads, including the first message, and bulk read clears it',
       () async {
@@ -310,7 +403,20 @@ void main() {
           theme: kaedeTheme(), home: const Scaffold(body: ChannelView())),
     ));
     await tester.pumpAndSettle();
-    expect(find.text('Jump to where you left off'), findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey('unread-history-bar')),
+            matching: find.text('180 new messages')),
+        findsOneWidget);
+    expect(
+        tester
+            .getSize(find.ancestor(
+                of: find.text('180 new messages').first,
+                matching: find.byType(TextButton)))
+            .height,
+        lessThanOrEqualTo(44));
+    expect(find.text('Mark as read'), findsOneWidget);
+    expect(find.textContaining('since '), findsOneWidget);
     expect(find.text('New messages'), findsOneWidget);
     expect(find.byIcon(Icons.arrow_downward_rounded), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -318,12 +424,17 @@ void main() {
     expect(controller.state.messages.last.ref, isNot(messageRef(200)));
     await tester.tap(find.byIcon(Icons.arrow_downward_rounded));
     for (var attempt = 0;
-        attempt < 10 && controller.state.messages.last.ref != messageRef(200);
+        attempt < 50 &&
+            (controller.state.messages.last.ref != messageRef(200) ||
+                controller.state.loadingMessages);
         attempt++) {
       await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)));
-      await tester.pump();
+          () => Future<void>.delayed(const Duration(milliseconds: 30)));
+      // The SQLite isolate and the widget clock must both advance during a jump.
+      await tester.pump(const Duration(milliseconds: 100));
     }
+    expect(controller.state.loadingMessages, isFalse);
+    expect(controller.state.messages.last.ref, messageRef(200));
     await tester.pumpAndSettle();
     expect(controller.state.error, isNull);
     expect(
@@ -335,6 +446,30 @@ void main() {
         ['limit']);
     expect(controller.state.messages.last.ref, messageRef(200));
     expect(controller.state.visitReadPosition, messageRef(20));
+    result.$3(true);
+    await tester.tap(find.text('Mark as read'));
+    await tester
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('unread-history-bar')), findsOneWidget);
+    expect(controller.state.readPositions[channelRef], messageRef(20));
+    result.$3(false);
+    await tester.tap(find.text('Mark as read'));
+    await tester
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.pumpAndSettle();
+    expect(controller.state.readPositions[channelRef], messageRef(200));
+    expect(controller.state.unreadCounts[channelRef] ?? 0, 0);
+    expect(find.byKey(const ValueKey('unread-history-bar')), findsNothing);
+    expect(controller.state.visitReadPosition, messageRef(20));
+    // A server snapshot from another device must also remove an open banner.
+    controller.state =
+        controller.state.copyWith(unreadCounts: {channelRef: 180});
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('unread-history-bar')), findsOneWidget);
+    controller.state = controller.state.copyWith(unreadCounts: {});
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('unread-history-bar')), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester
         .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));

@@ -8,6 +8,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1033,6 +1034,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
   final _historyViewportKey = GlobalKey();
   Timer? _readTimer;
   bool _revealingMessage = false;
+  bool _markingRead = false;
+  DateTime? _visitUnreadSince;
+  bool _userScrolledHistory = false;
+  int _visitUnreadCount = 0;
+  EntityRef? _unreadBarAnchor;
   bool _loadingNewer = false;
   var _showJumpToPresent = false;
   final _messageKeys = <String, GlobalKey>{};
@@ -1216,8 +1222,25 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     final jump = state.messageJump;
     final channelChanged = _renderedChannel != channel.ref;
     final lastMessage = messages.isEmpty ? null : messages.last.ref;
+    if (channelChanged || _unreadBarAnchor != state.visitReadPosition) {
+      _unreadBarAnchor = state.visitReadPosition;
+      _visitUnreadCount = state.unreadCounts[channel.ref] ?? 0;
+      _visitUnreadSince = _controller.firstUnreadTime(channel.ref);
+    }
+    if (_visitUnreadSince == null && state.visitReadPosition != null) {
+      for (final message in messages) {
+        final comparison =
+            compareReadPositions(message.ref, state.visitReadPosition!);
+        if ((comparison > 0 || (comparison == 0 && state.visitReadInclusive)) &&
+            message.createdAtAvailable) {
+          _visitUnreadSince = message.createdAt;
+          break;
+        }
+      }
+    }
     _renderedChannel = channel.ref;
     if (channelChanged) {
+      _userScrolledHistory = false;
       _highlightedMessage = null;
       _showJumpToPresent = false;
       _initialScrollPending = true;
@@ -1242,6 +1265,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         jump.channel == channel.ref &&
         jump.generation != _handledJumpGeneration &&
         !state.loadingMessages) {
+      _userScrolledHistory = false;
       _handledJumpGeneration = jump.generation;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_revealRequestedMessage(jump));
@@ -1336,17 +1360,86 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                       .loadMessages(older: true)
                   : ref.read(mobileControllerProvider.notifier).loadMessages,
             ),
-          if (canReadHistory && state.visitReadPosition != null)
-            SizedBox(
-              width: double.infinity,
-              child: TextButton.icon(
-                icon: const Icon(Icons.history_rounded),
-                label: Text(L10n.of(context).chat_jump_to_read),
-                onPressed: state.loadingMessages || _revealingMessage
-                    ? null
-                    : () => ref
-                        .read(mobileControllerProvider.notifier)
-                        .jumpToReadPosition(),
+          if (canReadHistory &&
+              state.visitReadPosition != null &&
+              _visitUnreadCount > 0 &&
+              (state.unreadCounts[channel.ref] ?? 0) > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+              child: Container(
+                key: const ValueKey('unread-history-bar'),
+                height: 44,
+                decoration: BoxDecoration(
+                    color: context.kaede.panel,
+                    border: Border.all(color: context.kaede.border),
+                    borderRadius: BorderRadius.circular(6)),
+                child: Row(children: [
+                  Expanded(
+                      child: TextButton(
+                    style: TextButton.styleFrom(
+                        side: BorderSide.none,
+                        foregroundColor: context.kaede.textSoft,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(6))),
+                    onPressed: state.loadingMessages || _revealingMessage
+                        ? null
+                        : () => _controller.jumpToReadPosition(),
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                                L10n.of(context)
+                                    .chat_unread_count(_visitUnreadCount),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 12, fontWeight: FontWeight.w600)),
+                            if (_visitUnreadSince != null)
+                              Text(
+                                  L10n.of(context).chat_unread_since(
+                                      _formatUnreadTime(
+                                          context, _visitUnreadSince!)),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 11)),
+                          ]),
+                    ),
+                  )),
+                  VerticalDivider(
+                      width: 1, thickness: 1, color: context.kaede.border),
+                  TextButton(
+                    style: TextButton.styleFrom(
+                        side: BorderSide.none,
+                        foregroundColor: context.kaede.coralText,
+                        minimumSize: const Size(0, 44),
+                        padding: const EdgeInsets.symmetric(horizontal: 10)),
+                    onPressed: _markingRead
+                        ? null
+                        : () async {
+                            setState(() => _markingRead = true);
+                            try {
+                              await _controller.markChannelsRead(
+                                  channel: channel.ref);
+                            } on Object {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                        content: Text(L10n.of(context)
+                                            .chat_mark_read_failed)));
+                              }
+                            } finally {
+                              if (mounted) setState(() => _markingRead = false);
+                            }
+                          },
+                    child: Text(L10n.of(context).chat_mark_read,
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600)),
+                  ),
+                ]),
               ),
             ),
           Expanded(
@@ -1717,6 +1810,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       profiled?.finish();
     }
     return content;
+  }
+
+  String _formatUnreadTime(BuildContext context, DateTime value) {
+    final local = value.toLocal();
+    final material = MaterialLocalizations.of(context);
+    final time = material.formatTimeOfDay(TimeOfDay.fromDateTime(local),
+        alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context));
+    return DateUtils.isSameDay(local, DateTime.now())
+        ? time
+        : '${material.formatShortDate(local)} $time';
   }
 
   String _formatTimeout(BuildContext context, DateTime value) {
@@ -2423,6 +2526,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
   }
 
   void _handleScroll() {
+    if (_scroll.hasClients &&
+        _scroll.position.userScrollDirection != ScrollDirection.idle) {
+      _userScrolledHistory = true;
+    }
     _readTimer?.cancel();
     _scheduleVisibleRead();
     _maybeAutomaticallyLoadEarlier();
@@ -2447,7 +2554,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
   }
 
   void _maybeAutomaticallyLoadEarlier() {
-    if (!_scroll.hasClients ||
+    if (!_userScrolledHistory ||
+        !_scroll.hasClients ||
         _automaticHistoryLoadInFlight ||
         _revealingMessage ||
         _loadingNewer) {
@@ -2480,6 +2588,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     final channel = _renderedChannel;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || channel != _renderedChannel || !_scroll.hasClients) {
+        return;
+      }
+      final current = ref.read(mobileControllerProvider);
+      if (_revealingMessage ||
+          current.messageJump != null ||
+          current.loadingMessages ||
+          current.channelsWithNewerMessages.contains(channel)) {
         return;
       }
       final target = _scroll.position.minScrollExtent;

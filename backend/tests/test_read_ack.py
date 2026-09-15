@@ -1,5 +1,6 @@
 """Read acknowledgements retain mentions beyond a partial-history cursor."""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -25,7 +26,11 @@ async def test_ack_broadcasts_durable_state_after_partial_or_stale_ack(
     monkeypatch.setattr(
         channels,
         "channel_message",
-        AsyncMock(return_value=SimpleNamespace(id=20, origin_domain="home.test")),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id=20, origin_domain="home.test", created_at=datetime(2026, 9, 14, tzinfo=UTC)
+            )
+        ),
     )
     publish = AsyncMock()
     monkeypatch.setattr(channels, "publish_dispatch", publish)
@@ -69,7 +74,11 @@ async def test_manual_unread_rewinds_and_versions_cursor(monkeypatch, first_mess
     monkeypatch.setattr(
         channels,
         "channel_message",
-        AsyncMock(return_value=SimpleNamespace(id=20, origin_domain="home.test")),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id=20, origin_domain="home.test", created_at=datetime(2026, 9, 14, tzinfo=UTC)
+            )
+        ),
     )
     publish = AsyncMock()
     monkeypatch.setattr(channels, "publish_dispatch", publish)
@@ -96,6 +105,7 @@ async def test_manual_unread_rewinds_and_versions_cursor(monkeypatch, first_mess
     )
     assert response.status_code == 204
     event = publish.call_args.args[-1]
+    assert event["first_unread_at"] == "2026-09-14T00:00:00+00:00"
     assert event["manual_unread"] is True
     assert event["read_version"] == 1
     assert event["last_message_id"] == (None if first_message else "19")

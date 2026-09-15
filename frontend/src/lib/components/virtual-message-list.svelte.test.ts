@@ -59,6 +59,7 @@ it.each([true, false])(
 it('jumps directly to latest history and keeps the saved-position control available', async () => {
   const latest = vi.fn();
   const saved = vi.fn();
+  const markRead = vi.fn();
   const bottom = vi.fn();
   vi.stubGlobal(
     'ResizeObserver',
@@ -75,6 +76,9 @@ it('jumps directly to latest history and keeps the saved-position control availa
       canJumpToRead: true,
       onJumpToLatest: latest,
       onJumpToRead: saved,
+      onMarkRead: markRead,
+      unreadCount: 852,
+      unreadSince: '2026-09-14T15:32:00Z',
       onBottomChange: bottom,
       renderItem: createRawSnippet(() => ({ render: () => '<p>Old message</p>' }))
     }
@@ -83,9 +87,13 @@ it('jumps directly to latest history and keeps the saved-position control availa
   await tick();
   await tick();
   document.querySelector<HTMLButtonElement>('.new-message-pill')!.click();
-  document.querySelector<HTMLButtonElement>('.read-position-banner')!.click();
+  document.querySelector<HTMLButtonElement>('.unread-jump')!.click();
   expect(latest).toHaveBeenCalledOnce();
   expect(saved).toHaveBeenCalledOnce();
+  expect(document.querySelector('.unread-count')?.textContent).toBe('852 new messages');
+  expect(document.querySelector('.unread-since')?.textContent).toContain('since ');
+  document.querySelector<HTMLButtonElement>('.unread-mark-read')!.click();
+  expect(markRead).toHaveBeenCalledOnce();
   expect(bottom).not.toHaveBeenCalledWith(true);
   const viewport = document.querySelector<HTMLElement>('.virtual-message-viewport')!;
   viewport.dispatchEvent(
@@ -135,4 +143,34 @@ it('acknowledges only visible messages in a focused tab while catching up', asyn
   expect(read).toHaveBeenCalledExactlyOnceWith('message:10@chat.example');
   focused.mockRestore();
   vi.useRealTimers();
+});
+
+it('does not paginate from a programmatic target scroll at the end of a short history page', async () => {
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      disconnect() {}
+    }
+  );
+  const newer = vi.fn();
+  component = mount(VirtualMessageList, {
+    target: document.body,
+    props: {
+      items: [{ key: 'message:9007199254741010@remote.example' }],
+      targetKey: 'message:9007199254741010@remote.example',
+      hasLater: true,
+      onLoadLater: newer,
+      renderItem: createRawSnippet(() => ({ render: () => '<p>Remote saved message</p>' }))
+    }
+  });
+  flushSync();
+  await tick();
+  await tick();
+  const viewport = document.querySelector<HTMLElement>('.virtual-message-viewport')!;
+  viewport.dispatchEvent(new Event('scroll'));
+  expect(newer).not.toHaveBeenCalled();
+  viewport.dispatchEvent(new Event('wheel'));
+  viewport.dispatchEvent(new Event('scroll'));
+  expect(newer).toHaveBeenCalledOnce();
 });

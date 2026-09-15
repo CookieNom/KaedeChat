@@ -1618,6 +1618,9 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   final _readVersions = <EntityRef, int>{};
+  final _firstUnreadTimes = <EntityRef, DateTime>{};
+  DateTime? firstUnreadTime(EntityRef channel) => _firstUnreadTimes[channel];
+
   final _firstUnreadPositions = <EntityRef, EntityRef>{};
   final _manualUnreadPaused = <EntityRef>{};
   bool isManuallyUnread(EntityRef channel) =>
@@ -1637,6 +1640,12 @@ final class MobileController extends StateNotifier<MobileState> {
         data['unread_count'] = state.unreadCounts[channel] ?? 0;
         data['mention_count'] = state.mentionCounts[channel] ?? 0;
         continue;
+      }
+      if (data.containsKey('first_unread_at')) {
+        _firstUnreadTimes.remove(channel);
+        final time =
+            DateTime.tryParse(data['first_unread_at']?.toString() ?? '');
+        if (time != null) _firstUnreadTimes[channel] = time;
       }
       final first = readPositionFromPayload({
         'read_message_id': data['first_unread_message_id'],
@@ -1948,6 +1957,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _latestReceivedMessages.clear();
     _readVersions.clear();
     _firstUnreadPositions.clear();
+    _firstUnreadTimes.clear();
     _manualUnreadPaused.clear();
     _removedGuilds.clear();
     _removedGuildChannels.clear();
@@ -3897,6 +3907,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _latestReceivedMessages.clear();
     _readVersions.clear();
     _firstUnreadPositions.clear();
+    _firstUnreadTimes.clear();
     _manualUnreadPaused.clear();
     _removedGuilds.clear();
     _removedGuildChannels.clear();
@@ -4070,6 +4081,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _latestReceivedMessages.clear();
     _readVersions.clear();
     _firstUnreadPositions.clear();
+    _firstUnreadTimes.clear();
     _manualUnreadPaused.clear();
     _removedGuilds.clear();
     _removedGuildChannels.clear();
@@ -4702,6 +4714,10 @@ final class MobileController extends StateNotifier<MobileState> {
           final reset = version > (_readVersions[channel] ?? 0);
           _readVersions[channel] = version;
           if (reset) {
+            _firstUnreadTimes.remove(channel);
+            final time = DateTime.tryParse(
+                event.data['first_unread_at']?.toString() ?? '');
+            if (time != null) _firstUnreadTimes[channel] = time;
             final first = readPositionFromPayload({
               'read_message_id': event.data['unread_message_id'],
               'read_message_domain': event.data['unread_message_domain']
@@ -4761,6 +4777,7 @@ final class MobileController extends StateNotifier<MobileState> {
             unread.remove(channel);
           }
 
+          if (!unread.containsKey(channel)) _manualUnreadPaused.remove(channel);
           state = state.copyWith(
             readPositions: cursor == null
                 ? state.readPositions
@@ -7089,6 +7106,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _latestReceivedMessages.clear();
     _readVersions.clear();
     _firstUnreadPositions.clear();
+    _firstUnreadTimes.clear();
     _manualUnreadPaused.clear();
     _removedGuilds.clear();
     _removedGuildChannels.clear();
