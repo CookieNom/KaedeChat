@@ -37,6 +37,9 @@ const framePolicy = normalizedPolicy
   .map((directive) => directive.trim())
   .find((directive) => directive === 'frame-src' || directive.startsWith('frame-src '));
 const frameTokens = new Set(framePolicy?.split(/\s+/).slice(1) ?? []);
+if (!frameTokens.has('https://open.spotify.com')) {
+  throw new Error('generated frame-src does not authorize the Spotify player');
+}
 if (!frameTokens.has('https://www.youtube-nocookie.com')) {
   throw new Error('generated frame-src does not authorize the privacy-enhanced YouTube player');
 }
@@ -138,8 +141,12 @@ const tauriFramePolicy = tauriPolicy
   .map((directive) => directive.trim())
   .find((directive) => directive === 'frame-src' || directive.startsWith('frame-src '));
 const tauriFrameTokens = new Set(tauriFramePolicy?.split(/\s+/).slice(1) ?? []);
-if (tauriFrameTokens.size !== 1 || !tauriFrameTokens.has('https://www.youtube-nocookie.com')) {
-  throw new Error('Tauri frame-src must allow only the privacy-enhanced YouTube player');
+if (
+  tauriFrameTokens.size !== 2 ||
+  !tauriFrameTokens.has('https://www.youtube-nocookie.com') ||
+  !tauriFrameTokens.has('https://open.spotify.com')
+) {
+  throw new Error('Tauri frame-src must allow only the YouTube and Spotify players');
 }
 
 process.stdout.write(`CSP verification passed (${inlineScripts.length} inline script hash)\n`);

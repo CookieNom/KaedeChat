@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { linksInMessage, previewableLink } from './links';
+import { linksInMessage, previewableLink, spotifyEmbedUrl } from './links';
+
+describe('Spotify player URLs', () => {
+  const id = '11dFghVXANMlKmJXsNCbNl';
+  it('accepts supported Spotify links and drops tracking and theme parameters', () => {
+    for (const type of ['track', 'album', 'playlist', 'artist', 'episode', 'show']) {
+      expect(
+        spotifyEmbedUrl(`https://open.spotify.com/intl-de/${type}/${id}?si=abc&theme=0#x`)
+      ).toBe(`https://open.spotify.com/embed/${type}/${id}`);
+    }
+  });
+  it('rejects other origins, credentials, ports, and unsupported paths', () => {
+    for (const url of [
+      `http://open.spotify.com/track/${id}`,
+      `https://open.spotify.com.evil.test/track/${id}`,
+      `https://user@open.spotify.com/track/${id}`,
+      `https://open.spotify.com:8443/track/${id}`,
+      `https://open.spotify.com/embed/track/${id}`,
+      `https://open.spotify.com/user/${id}`,
+      'https://open.spotify.com/track/invalid',
+      'not a URL'
+    ])
+      expect(spotifyEmbedUrl(url)).toBeNull();
+  });
+});
 
 describe('message links', () => {
   it('extracts safe web URLs and removes sentence punctuation', () => {

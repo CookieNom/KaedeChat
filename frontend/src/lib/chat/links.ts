@@ -4,6 +4,26 @@ import { normalizeBotInvite } from './bot-invites';
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 const TRAILING_PUNCTUATION = /[),.!?:;\]}]+$/;
 
+export function spotifyEmbedUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'https:' ||
+      url.hostname !== 'open.spotify.com' ||
+      url.port ||
+      url.username ||
+      url.password
+    )
+      return null;
+    const match = url.pathname.match(
+      /^\/(?:intl-[a-zA-Z-]+\/)?(track|album|playlist|artist|episode|show)\/([a-zA-Z0-9]{22})\/?$/
+    );
+    return match ? `https://open.spotify.com/embed/${match[1]}/${match[2]}` : null;
+  } catch {
+    return null;
+  }
+}
+
 export function linksInMessage(content: string | null): string[] {
   if (!content) return [];
   const links: string[] = [];

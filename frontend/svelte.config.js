@@ -44,7 +44,11 @@ const config = {
         // Directory videos use YouTube's privacy-enhanced player. Product-page
         // code constructs this origin from a validated 11-character video ID;
         // arbitrary publisher iframe origins are never accepted.
-        'frame-src': ['https://challenges.cloudflare.com', 'https://www.youtube-nocookie.com'],
+        'frame-src': [
+          'https://challenges.cloudflare.com',
+          'https://www.youtube-nocookie.com',
+          'https://open.spotify.com'
+        ],
         'font-src': ['self', 'data:']
       }
     }

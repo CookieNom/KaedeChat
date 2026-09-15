@@ -84,11 +84,35 @@ afterEach(() => {
 });
 const noExternalActivity = () => {
   expect(previews()).toEqual([]);
-  expect(document.querySelector('img[src], video[src], audio[src]')).toBeNull();
+  expect(document.querySelector('img[src], video[src], audio[src], iframe[src]')).toBeNull();
   expect(calls.media).not.toHaveBeenCalled();
   expect(calls.decrypt).not.toHaveBeenCalled();
 };
 describe('encrypted rich media privacy', () => {
+  it('shows Spotify only for unencrypted messages with previews enabled', async () => {
+    const content = 'https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl?si=tracking';
+    const spotifyMessage = { ...message, content, embeds: [], components: [] };
+    component = createClassComponent({
+      component: MessageRow,
+      target: document.body,
+      props: { message: spotifyMessage }
+    });
+    flushSync();
+    await tick();
+    expect(document.querySelector('iframe')?.src).toBe(
+      'https://open.spotify.com/embed/track/11dFghVXANMlKmJXsNCbNl'
+    );
+    expect(previews()).toEqual([]);
+    component.$set({ message: { ...spotifyMessage, flags: 4 } });
+    await tick();
+    noExternalActivity();
+    component.$set({
+      message: { ...spotifyMessage, e2ee: {}, e2ee_verified: true, decrypted_content: content }
+    });
+    await tick();
+    expect(document.body.textContent).toContain(content);
+    noExternalActivity();
+  });
   it('gates every automatic embed preview behind the external-media policy', async () => {
     component = createClassComponent({
       component: RichEmbed,

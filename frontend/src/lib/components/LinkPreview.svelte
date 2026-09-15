@@ -2,6 +2,7 @@
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
+  import { spotifyEmbedUrl } from '$lib/chat/links';
 
   interface Preview {
     url: string;
@@ -20,6 +21,10 @@
   let preview = $state<Preview | null>(null);
   let loadError = $state('');
   let loadAttempt = $state(0);
+  const spotifyUrl = $derived(!mediaOnly && !compactMedia ? spotifyEmbedUrl(url) : null);
+  const playerUrl = $derived(
+    spotifyUrl || (!mediaOnly && !compactMedia && preview ? spotifyEmbedUrl(preview.url) : null)
+  );
 
   $effect(() => {
     const target = url;
@@ -27,6 +32,7 @@
     const controller = new AbortController();
     preview = null;
     loadError = '';
+    if (spotifyUrl) return () => controller.abort();
     void api<Preview>('/link-previews', {
       method: 'POST',
       body: JSON.stringify({ url: target }),
@@ -48,7 +54,18 @@
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- preview destinations are external URLs returned by the API -->
-{#if loadError && !mediaOnly && !compactMedia}
+{#if playerUrl}
+  <iframe
+    class="spotify-player"
+    src={playerUrl}
+    title="Spotify"
+    width="100%"
+    height="152"
+    loading="lazy"
+    allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+    allowfullscreen
+  ></iframe>
+{:else if loadError && !mediaOnly && !compactMedia}
   <aside class="link-preview link-preview-error" role="alert">
     <p>{loadError}</p>
     <div>
@@ -93,6 +110,14 @@
 {/if}
 
 <style>
+  .spotify-player {
+    display: block;
+    width: min(520px, 100%);
+    height: 152px;
+    margin-top: 9px;
+    border: 0;
+    border-radius: 12px;
+  }
   .link-preview {
     display: grid;
     width: min(520px, 100%);
