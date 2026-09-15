@@ -2204,6 +2204,13 @@ void main() {
       );
       expect(automaticMessageMediaPreview(media, encrypted: true), isNull);
       expect(automaticMessageLinkPreview(link, encrypted: true), isNull);
+      expect(
+        automaticMessageLinkPreview(
+          'https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl',
+          encrypted: true,
+        ),
+        isNull,
+      );
     });
   });
 
