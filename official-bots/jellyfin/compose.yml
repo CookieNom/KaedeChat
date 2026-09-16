@@ -1,0 +1,19 @@
+services:
+  jellyfin:
+    build:
+      context: ../..
+      dockerfile: official-bots/jellyfin/Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    volumes:
+      - jellyfin-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  jellyfin-data:
