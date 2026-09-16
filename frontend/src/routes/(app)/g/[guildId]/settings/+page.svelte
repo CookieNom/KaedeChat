@@ -1,4 +1,5 @@
 <script lang="ts">
+  import GuildOnboarding from '$lib/components/GuildOnboarding.svelte';
   import ForumEmojiField from '$lib/components/ForumEmojiField.svelte';
   import { customEmojiToken } from '$lib/chat/emojis';
   import ColorPicker from '$lib/components/ColorPicker.svelte';
@@ -3494,6 +3495,9 @@
             ><Icon name="sparkles" size={18} />{$t('ui_app_directory_a9c3e633')}</a
           >
         {/if}
+        {#if canManageGuild && canManageRoles}<a href="#onboarding"
+            ><Icon name="users" size={18} />Rules &amp; onboarding</a
+          >{/if}
         {#if canManageRoles}
           <a href="#roles"><Icon name="shield" size={18} />{$t('ui_roles_c2533705')}</a>
         {/if}
@@ -3652,6 +3656,7 @@
           </div>
         </section>
 
+        {#if guild && canManageGuild && canManageRoles}<GuildOnboarding {guild} admin />{/if}
         <section id="overview" class="settings-section">
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="server" /></span>

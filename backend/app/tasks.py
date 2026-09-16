@@ -3995,6 +3995,7 @@ async def purge_unverified_accounts_in_session(
                     User.is_local.is_(True),
                     User.email.is_not(None),
                     User.email_verified_at.is_(None),
+                    User.deleted_at.is_(None),
                     User.created_at < cutoff,
                     ~active_verification,
                 )
@@ -4096,4 +4097,74 @@ async def retention_prune() -> dict[str, int]:
             cleaned.update(history_cleanup)
             return cleaned
     finally:
+        await engine.dispose()
+
+
+@broker.task(task_name="accounts.delete_content", schedule=[{"cron": "* * * * *"}])
+@observed_job("accounts.delete_content")
+async def delete_account_content() -> int:
+    from app.auth.deletion import erase_content_batch, log
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    processed = 0
+    try:
+        async with sessionmaker() as session:
+            refs = list(
+                (
+                    await session.execute(
+                        select(User.id, User.origin_domain)
+                        .where(
+                            User.is_local.is_(True),
+                            or_(
+                                User.content_deletion["status"].astext == "pending",
+                                and_(
+                                    User.deleted_at.is_not(None),
+                                    exists().where(
+                                        Message.author_id == User.id,
+                                        Message.author_domain == User.origin_domain,
+                                        Message.deleted_at.is_(None),
+                                    ),
+                                ),
+                            ),
+                        )
+                        .order_by(User.id)
+                        .limit(100)
+                    )
+                ).tuples()
+            )
+        for user_id, domain in refs:
+            # A pinned connection holds the account fence across the existing
+            # per-message commits. Worker crashes release this lock automatically.
+            async with engine.connect() as connection:
+                lock_key = f"account-content-deletion:{domain}:{user_id}"
+                locked = await connection.scalar(
+                    select(func.pg_try_advisory_lock(func.hashtextextended(lock_key, 0)))
+                )
+                await connection.commit()
+                if not locked:
+                    continue
+                try:
+                    async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+                        user = await session.get(User, (user_id, domain))
+                        if user is not None and (
+                            (user.content_deletion or {}).get("status") == "pending"
+                            or user.deleted_at is not None
+                        ):
+                            await erase_content_batch(session, redis, settings, user)
+                            processed += 1
+                except Exception:
+                    log.exception("account_content_deletion_failed", user_id=user_id, domain=domain)
+                finally:
+                    await connection.rollback()
+                    await connection.execute(
+                        select(func.pg_advisory_unlock(func.hashtextextended(lock_key, 0)))
+                    )
+                    await connection.commit()
+        if processed:
+            await enqueue_best_effort(delete_account_content)
+        return processed
+    finally:
+        await redis.aclose()
         await engine.dispose()

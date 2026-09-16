@@ -433,6 +433,16 @@ async def calculate_permissions(
         bot_grant = await bot_guild_permission_grant(session, guild, actor)
     if bot_grant is not None:
         permissions = await bot_grant.apply(session, permissions, channel)
+    from app.chat.onboarding import needs_rules
+
+    if (
+        actor.account_type != "bot"
+        and not permissions & Permission.ADMINISTRATOR
+        and needs_rules(
+            getattr(guild, "onboarding", None), getattr(member, "onboarding_state", None)
+        )
+    ):
+        permissions &= TIMEOUT_ALLOWED
     return permissions, member
 
 
@@ -561,6 +571,22 @@ async def require_permissions(
             GuildMember,
             (guild.id, guild.origin_domain, actor.id, actor.origin_domain),
         )
+        from app.chat.onboarding import needs_rules
+
+        if (
+            member is not None
+            and needs_rules(
+                getattr(guild, "onboarding", None), getattr(member, "onboarding_state", None)
+            )
+            and int(needed) & ~TIMEOUT_ALLOWED
+        ):
+            raise HTTPException(
+                403,
+                detail={
+                    "code": "RULES_ACCEPTANCE_REQUIRED",
+                    "message": "Read and accept this server's rules before participating.",
+                },
+            )
         timeout_detail = (
             member_timeout_error_detail(member, now=datetime.now(UTC))
             if member is not None

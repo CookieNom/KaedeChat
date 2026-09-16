@@ -8,6 +8,7 @@
   import { onMount, tick } from 'svelte';
   import EmojiPicker from './EmojiPicker.svelte';
   import PartialEmojiView from './PartialEmoji.svelte';
+  import Icon from './Icon.svelte';
 
   let {
     customEmojis = [],
@@ -141,9 +142,10 @@
         <div class="poll-answer-field">
           <button
             class="answer-emoji"
-            class:selected={Boolean(answer.emoji)}
             type="button"
             aria-label={`Choose emoji for answer ${index + 1}`}
+            title={$t('ui_choose_an_emoji_54bc3777')}
+            aria-haspopup="dialog"
             aria-expanded={emojiAnswerIndex === index}
             onclick={() => (emojiAnswerIndex = emojiAnswerIndex === index ? null : index)}
           >
@@ -152,6 +154,7 @@
             {:else}
               <span aria-hidden="true">☺</span>
             {/if}
+            <Icon name="chevron-down" size={14} />
           </button>
           <input
             value={answer.text}
@@ -296,8 +299,19 @@
     min-width: 38px;
     padding: 0.45rem;
   }
-  .answer-emoji.selected {
+  .answer-emoji {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
     border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .answer-emoji:hover,
+  .answer-emoji[aria-expanded='true'] {
+    background: var(--accent);
+    color: var(--on-accent);
   }
   .poll-emoji-picker {
     position: relative;

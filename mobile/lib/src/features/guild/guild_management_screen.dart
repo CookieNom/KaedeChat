@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
@@ -27,6 +28,7 @@ import 'package:kaede_mobile/src/features/guild/announcement_management_tab.dart
 import 'package:kaede_mobile/src/features/guild/application_command_permissions_screen.dart';
 import 'package:kaede_mobile/src/features/guild/bot_e2ee_participation_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_admin_advanced.dart';
+import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -342,6 +344,14 @@ final class _GuildManagementScreenState
           isOwner: isOwner,
         ),
       ),
+      if (canManageGuild && canManageRoles)
+        (
+          label: 'Rules & onboarding',
+          description:
+              'Welcome members, set rules, and offer channels and roles.',
+          icon: Icons.auto_awesome_outlined,
+          page: OnboardingScreen(guild: _guild, admin: true)
+        ),
       if (canManageChannels ||
           hasChannelManagement ||
           hasChannelPermissionManagement)

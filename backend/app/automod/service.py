@@ -1186,6 +1186,20 @@ async def require_member_interactions_allowed(
     )
     if member is None:
         return
+    from app.chat.onboarding import needs_rules
+
+    if needs_rules(getattr(guild, "onboarding", None), getattr(member, "onboarding_state", None)):
+        from app.chat.permissions import calculate_permissions
+
+        permissions, _ = await calculate_permissions(session, guild, actor)
+        if not permissions & Permission.ADMINISTRATOR:
+            raise HTTPException(
+                403,
+                detail={
+                    "code": "RULES_ACCEPTANCE_REQUIRED",
+                    "message": "Accept this server's rules before participating.",
+                },
+            )
     timeout_detail = member_timeout_error_detail(member)
     if timeout_detail is not None:
         raise HTTPException(status_code=403, detail=timeout_detail)

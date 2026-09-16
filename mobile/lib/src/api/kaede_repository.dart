@@ -510,6 +510,16 @@ final class KaedeRepository {
     return accountRef;
   }
 
+  Future<void> requestDeletion(
+      {required bool account, required String password, String? code}) async {
+    final passwordPayload = await _currentPasswordPayload(password);
+    await api.sendJson(
+      'DELETE',
+      account ? '/api/v1/users/@me' : '/api/v1/users/@me/content',
+      data: <String, Object?>{...passwordPayload, 'current_code': code},
+    );
+  }
+
   Future<void> requestEmailChange(String email, String password) async {
     final passwordPayload = await _currentPasswordPayload(password);
     await api.sendJson(

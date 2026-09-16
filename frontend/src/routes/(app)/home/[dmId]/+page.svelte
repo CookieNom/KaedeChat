@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { draftKey, readDraft, writeDraft } from '$lib/chat/local-drafts';
   import { preparePrivateLinks } from '$lib/chat/link-privacy';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
@@ -170,6 +171,10 @@
   const currentUser = $derived(entities.currentUser);
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
+  let activeDraftKey = $state<string | null>(null);
+  $effect(() => {
+    if (activeDraftKey && !editingMessage) writeDraft(activeDraftKey, content);
+  });
   let gifPickerEnabled = $state(false);
   let e2eeActivationEnabled = $state(false);
   let gifPickerOpen = $state(false);
@@ -1007,6 +1012,7 @@
   $effect(() => {
     const targetRef = dmId;
     const targetAround = aroundMessage;
+    const draftAccount = currentUser ? entityRef(currentUser) : null;
     untrack(() => {
       const routeGeneration = ++loadGeneration;
       const snapshot = ++snapshotGeneration;
@@ -1016,7 +1022,8 @@
       resetUploads();
       editingMessage = null;
       composerDraftBeforeEdit = null;
-      content = '';
+      activeDraftKey = draftAccount ? draftKey(draftAccount, targetRef) : null;
+      content = activeDraftKey ? readDraft(activeDraftKey) : '';
       composerCursor = 0;
       applicationCommands = [];
       selectedApplicationCommand = null;

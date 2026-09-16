@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { activeVoice } from './active.svelte';
+  import ListeningVolume from './ListeningVolume.svelte';
+  import ListeningVolumeMenu from './ListeningVolumeMenu.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -53,6 +56,17 @@
   const voice = new VoiceSession(undefined, (state) =>
     authenticatedGateway.client.setSelfVoiceState(state.self_mute, state.self_deaf)
   );
+  onMount(() => {
+    activeVoice.session = voice;
+    const changed = () => {
+      activeVoice.revision += 1;
+    };
+    voice.addEventListener('change', changed);
+    return () => {
+      voice.removeEventListener('change', changed);
+      if (activeVoice.session === voice) activeVoice.session = null;
+    };
+  });
   let revision = $state(0);
   let elapsedClock = $state(Date.now());
   let error = $state('');
@@ -214,6 +228,8 @@
     // changes visible to the template.
     void revision;
     return {
+      listeningVolume: (identity: string, stream = false) =>
+        voice.listeningVolume(identity, stream),
       connected: voice.connected,
       connecting: voice.connecting,
       encrypted: voice.encrypted,
@@ -1028,6 +1044,16 @@
               <strong>{stageOccupantName(occupant)}</strong>
               {#if self}<small>{$t('ui_you_08b04193')}</small>{/if}
             </div>
+            {#if !self && view.connected}<ListeningVolume
+                label="Voice volume"
+                value={view.listeningVolume(`${occupant.user_id}@${occupant.user_domain}`)}
+                onChange={(value) =>
+                  voice.setListeningVolume(
+                    `${occupant.user_id}@${occupant.user_domain}`,
+                    false,
+                    value
+                  )}
+              />{/if}
             {#if !self && canModerateStageOccupant(occupant)}
               <button
                 class="secondary"
@@ -1187,6 +1213,16 @@
                 </span>
               {/if}
               <div class="video-host" use:attachVideo={tile}></div>
+              {#if !tile.local}
+                <ListeningVolumeMenu
+                  name={tile.name}
+                  voice={view.listeningVolume(tile.identity)}
+                  stream={view.listeningVolume(tile.identity, true)}
+                  hasStream={tile.source === 'screen_share'}
+                  onChange={(stream, value) =>
+                    voice.setListeningVolume(tile.identity, stream, value)}
+                />
+              {/if}
               <span class="video-tile-name"
                 >{tile.name}{tile.local ? $t('ui_you_9d84cd48') : ''}</span
               >
@@ -1217,6 +1253,13 @@
                 <strong>{participant.name}</strong>
                 {#if participant.local}<span>{$t('ui_you_08b04193')}</span>{/if}
               </div>
+              {#if !participant.local}
+                <ListeningVolume
+                  label="Voice volume"
+                  value={view.listeningVolume(participant.identity)}
+                  onChange={(value) => voice.setListeningVolume(participant.identity, false, value)}
+                />
+              {/if}
               <span
                 class:muted={!participant.microphone}
                 class="participant-mic"

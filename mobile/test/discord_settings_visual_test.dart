@@ -5,6 +5,7 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,6 +18,7 @@ import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
+import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
@@ -325,6 +327,7 @@ Dio _cannedClient(
   KaedeUser user,
   List<Map<String, Object?>> log, {
   List<Map<String, Object?>> applicationInstallations = const [],
+  Map<String, Object?>? onboarding,
 }) {
   final dio = Dio(BaseOptions(baseUrl: 'https://chat.example'));
   dio.interceptors.add(InterceptorsWrapper(
@@ -338,7 +341,9 @@ Dio _cannedClient(
         'query': Map<String, Object?>.from(options.queryParameters),
       });
       Object? data;
-      if (path == '/api/v1/users/@me/push-devices') {
+      if (onboarding != null && path.endsWith('/onboarding')) {
+        data = onboarding;
+      } else if (path == '/api/v1/users/@me/push-devices') {
         data = <Object?>[];
       } else if (path == '/api/v1/users/@me/settings') {
         data = _settingsPayload;
@@ -411,6 +416,7 @@ Future<MobileController> fixtureController(
   KaedeUser user,
   List<Map<String, Object?>> requestLog, {
   List<Map<String, Object?>> applicationInstallations = const [],
+  Map<String, Object?>? onboarding,
   PushService? pushService,
 }) async {
   final api = KaedeApiClient(
@@ -420,6 +426,7 @@ Future<MobileController> fixtureController(
       user,
       requestLog,
       applicationInstallations: applicationInstallations,
+      onboarding: onboarding,
     ),
   );
   final repository = KaedeRepository(api);
@@ -682,6 +689,23 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
+    expect(find.text('Delete all content'), findsOneWidget);
+    expect(find.text('Delete account'), findsOneWidget);
+    await tester.tap(find.text('Delete account'));
+    await tester.pumpAndSettle();
+    expect(find.text('Permanently delete account?'), findsOneWidget);
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(find.text('Type DELETE to confirm'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(
+        requestLog.where((request) =>
+            request['method'] == 'DELETE' &&
+            request['path'] == '/api/v1/users/@me'),
+        isEmpty);
+
     // Sessions load through the repository and expose their sign-out actions.
     await tester.scrollUntilVisible(find.text('Kaede Desktop'), 400,
         scrollable: find.byType(Scrollable).first);
@@ -806,6 +830,110 @@ void main() {
           request['path'] == '/api/v1/users/@me/application-installations/10'),
       isEmpty,
     );
+  });
+
+  testWidgets('onboarding requires rules and answers at phone and tablet sizes',
+      (tester) async {
+    final fontLoader = FontLoader('Inter')
+      ..addFont(rootBundle.load('assets/fonts/Inter-Regular.ttf'));
+    await fontLoader.load();
+    final iconLoader = FontLoader('MaterialIcons')
+      ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
+    await iconLoader.load();
+    final user = fixtureUser();
+    final guild = fixtureGuild(user);
+    final log = <Map<String, Object?>>[];
+    final controller = await fixtureController(guild, user, log, onboarding: {
+      'can_manage': true,
+      'needs_rules': true,
+      'needs_onboarding': true,
+      'state': <String, Object?>{},
+      'config': {
+        'enabled': true,
+        'revision': 1,
+        'rules_revision': 1,
+        'welcome': 'Find your people and make yourself at home.',
+        'rules': ['Be kind and respect everyone.'],
+        'default_channel_ids': <String>[],
+        'questions': [
+          {
+            'id': 'interests',
+            'title': 'What brings you here?',
+            'description': 'Choose a place to start.',
+            'required': true,
+            'multiple': false,
+            'before_join': true,
+            'options': [
+              {
+                'id': 'games',
+                'title': 'Gaming',
+                'description': 'Find your next party.',
+                'emoji': '',
+                'role_ids': <String>[],
+                'channel_ids': <String>[]
+              }
+            ]
+          }
+        ],
+        'guide': <Object?>[]
+      }
+    });
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(ProviderScope(
+        overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+        child: MaterialApp(
+            theme: kaedeTheme(), home: OnboardingScreen(guild: guild))));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Continue'))
+            .onPressed,
+        isNull);
+    await tester.tap(find.byType(CheckboxListTile));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Continue'))
+            .onPressed,
+        isNull);
+    await tester.tap(find.text('Gaming'));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Continue'))
+            .onPressed,
+        isNotNull);
+    for (final size in [const Size(320, 640), const Size(1000, 900)]) {
+      tester.view.physicalSize = size;
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    }
+    expect(log.where((request) => request['method'] == 'PUT'), isEmpty);
+    tester.view.physicalSize = const Size(390, 844);
+    await tester.pumpWidget(ProviderScope(
+        overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+        child: MaterialApp(
+            theme: kaedeTheme(),
+            home: OnboardingScreen(
+                key: const ValueKey('admin'), guild: guild, admin: true))));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ChoiceChip, '3. Questions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Customization questions'), findsOneWidget);
+    expect(find.text('Server rules'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Preview'));
+    await tester.pumpAndSettle();
+    expect(find.text('Welcome to Kaede Guild'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('guild settings renders Discord-style list and tabs',

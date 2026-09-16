@@ -9,6 +9,7 @@ from sqlalchemy import and_, exists, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.account_deletion import router as account_deletion_router
 from app.api.dependencies import (
     AuthenticatedUser,
     get_redis,
@@ -16,6 +17,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.auth.account_status import account_is_banned
 from app.auth.schemas import (
     GuildNavigationGuildItem,
     GuildNavigationUpdate,
@@ -52,6 +54,7 @@ from app.federation.users import resolve_handle
 from app.tasks import federation_deliver, federation_presence_fanout
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
+router.include_router(account_deletion_router)
 log = structlog.get_logger()
 
 
@@ -104,8 +107,9 @@ async def patch_me(
             User.origin_domain == auth.user.origin_domain,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
-    if user is None:
+    if user is None or account_is_banned(user):
         raise HTTPException(status_code=401, detail={"code": "AUTHENTICATION_REQUIRED"})
     values = payload.model_dump(exclude_unset=True)
     if any(getattr(user, field) != value for field, value in values.items()):

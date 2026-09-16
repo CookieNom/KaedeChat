@@ -262,6 +262,11 @@ pub struct RemoteVideoFrame {
 
 #[derive(Clone, Debug)]
 pub enum VoiceCommand {
+    SetVolume {
+        identity: String,
+        stream: bool,
+        volume: f32,
+    },
     SetMuted(bool),
     SetVideoVisible(bool),
     SetDeafened(bool),
@@ -1065,6 +1070,9 @@ async fn run_room(
             }
             command = commands.recv() => {
                 match command {
+                    Some(VoiceCommand::SetVolume { identity, stream, volume }) => {
+                        playback_mixer.set_volume(&identity, stream, volume);
+                    }
                     Some(VoiceCommand::SetVideoVisible(visible)) => {
                         if video_visible == visible { continue; }
                         video_visible = visible;

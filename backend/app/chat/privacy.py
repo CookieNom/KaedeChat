@@ -7,7 +7,7 @@ from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.db.models import GuildMember, Relationship, User, UserSettings
+from app.db.models import Guild, GuildMember, Relationship, User, UserSettings
 
 
 def relationship_pair_lock_id(first: User, second: User) -> int:
@@ -132,6 +132,44 @@ async def can_direct_message(session: AsyncSession, sender: User, recipient: Use
     )
     if settings is None:
         return False
+    from app.chat.onboarding import needs_rules
+
+    sender_member, recipient_member = aliased(GuildMember), aliased(GuildMember)
+    shared = (
+        await session.execute(
+            select(Guild, sender_member)
+            .join(
+                sender_member,
+                (sender_member.guild_id == Guild.id)
+                & (sender_member.guild_domain == Guild.origin_domain),
+            )
+            .join(
+                recipient_member,
+                (recipient_member.guild_id == Guild.id)
+                & (recipient_member.guild_domain == Guild.origin_domain),
+            )
+            .where(
+                sender_member.user_id == sender.id,
+                sender_member.user_domain == sender.origin_domain,
+                recipient_member.user_id == recipient.id,
+                recipient_member.user_domain == recipient.origin_domain,
+            )
+        )
+    ).all()
+    if shared and all(
+        needs_rules(guild.onboarding, member.onboarding_state) for guild, member in shared
+    ):
+        friend = await relationship(session, recipient, sender)
+        if friend is None or friend.type != "friend":
+            from app.chat.permissions import calculate_permissions
+            from app.core.permissions import Permission
+
+            for guild, _member in shared:
+                permissions, _ = await calculate_permissions(session, guild, sender)
+                if permissions & Permission.ADMINISTRATOR:
+                    break
+            else:
+                return False
     if settings.dm_privacy == "everyone":
         return True
     relation = await relationship(session, recipient, sender)

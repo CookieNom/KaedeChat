@@ -3005,7 +3005,7 @@ progress {
 
 .sidebar-user-dock {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 0.6rem;
   margin-top: auto;
@@ -4445,7 +4445,7 @@ progress {
 .forum-tag-editor,
 .forum-tag-add {
   display: grid;
-  grid-template-columns: 74px minmax(110px, 1fr) auto auto;
+  grid-template-columns: 96px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 0.45rem;
 }
@@ -4460,6 +4460,20 @@ progress {
   gap: 0.3rem;
   color: var(--text-muted);
   font-size: 0.68rem;
+}
+
+@media (max-width: 620px) {
+  .forum-tag-editor {
+    grid-template-columns: 96px minmax(0, 1fr) auto;
+  }
+
+  .forum-tag-editor > input {
+    grid-column: 2 / -1;
+  }
+
+  .forum-tag-editor > label {
+    grid-column: 1 / 3;
+  }
 }
 
 .forum-tag-editor input:not([type='checkbox']),

@@ -16,6 +16,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.auth.account_status import account_is_banned
 from app.chat.audit import add_audit_entry
 from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
@@ -328,6 +329,15 @@ async def create_guild(
         user_id=auth.user.id,
         user_domain=auth.user.origin_domain,
     )
+    # Serialize new ownership with account deletion's User lock.
+    owner = await session.get(
+        User,
+        (auth.user.id, auth.user.origin_domain),
+        with_for_update=True,
+        populate_existing=True,
+    )
+    if owner is None or account_is_banned(owner):
+        raise HTTPException(401, detail={"code": "AUTHENTICATION_REQUIRED"})
     guild_id = await snowflake.mint()
     channel_id = await snowflake.mint()
     now = datetime.now(UTC)

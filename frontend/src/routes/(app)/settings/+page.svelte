@@ -6,6 +6,7 @@
   import { loadPasswordKdfContext, preparePassword } from '$lib/auth/password-kdf';
   import type { UserSummary } from '$lib/chat/types';
   import Icon from '$lib/components/Icon.svelte';
+  import AccountDeletion from '$lib/components/AccountDeletion.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
   import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
@@ -1524,6 +1525,19 @@
             </div>
             <Icon name="mail" />
           </div>
+        {/if}
+        {#if profile}
+          <AccountDeletion
+            handle={profile.handle}
+            mfaEnabled={profile.mfa_enabled}
+            onDeleted={async () => {
+              try {
+                await clearActiveE2EEState();
+              } finally {
+                expireBrowserSession();
+              }
+            }}
+          />
         {/if}
       </section>
     {/if}

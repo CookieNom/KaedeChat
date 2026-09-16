@@ -61,6 +61,9 @@ _GUILD_MANAGEMENT_ERRORS = ManagementRPCErrorContract(
 )
 
 GuildManagementOperation = Literal[
+    "onboarding.get",
+    "onboarding.update",
+    "onboarding.complete",
     "guild.update",
     "guild.owner.transfer",
     "guild.delete",
@@ -607,6 +610,9 @@ def _build_bot_guild_management_contracts() -> dict[
 BOT_GUILD_MANAGEMENT_CONTRACTS = _build_bot_guild_management_contracts()
 BOT_GUILD_MANAGEMENT_HUMAN_ONLY_OPERATIONS: frozenset[GuildManagementOperation] = frozenset(
     {
+        "onboarding.get",
+        "onboarding.update",
+        "onboarding.complete",
         "guild.owner.transfer",
         "guild.delete",
         "bot_e2ee.list",
@@ -867,6 +873,9 @@ _IDENTITY_GUILD = frozenset(
 )
 _IDENTITY_GUILD_DICT = frozenset(
     {
+        "onboarding.get",
+        "onboarding.update",
+        "onboarding.complete",
         "channel.create",
         "channel.update",
         "channel.delete",

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import GuildOnboarding from '$lib/components/GuildOnboarding.svelte';
+  import { draftKey, readDraft, writeDraft } from '$lib/chat/local-drafts';
   import { preparePrivateLinks } from '$lib/chat/link-privacy';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
@@ -328,6 +330,10 @@
   });
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
+  let activeDraftKey = $state<string | null>(null);
+  $effect(() => {
+    if (activeDraftKey && !editingMessage) writeDraft(activeDraftKey, content);
+  });
   let applicationCommands = $state<ApplicationCommand[]>([]);
   let applicationLauncherOpen = $state(false);
   let selectedApplicationCommand = $state<ApplicationCommand | null>(null);
@@ -700,7 +706,20 @@
     }
   }
 
-  const channelGroups = $derived(groupChannels(guild?.channels ?? []));
+  let onboardingChannels = $state<string[] | null>(null);
+  let showAllOnboardingChannels = $state(false);
+  const channelGroups = $derived(
+    groupChannels(
+      (guild?.channels ?? []).filter(
+        (item) =>
+          showAllOnboardingChannels ||
+          !onboardingChannels?.length ||
+          item.type === 4 ||
+          onboardingChannels.includes(entityRef(item)) ||
+          item.id === channel?.id
+      )
+    )
+  );
   const dynamicPermission = (name: string, fallback: bigint): bigint =>
     (Permission as Record<string, bigint>)[name] ?? fallback;
   const CREATE_PUBLIC_THREADS = dynamicPermission('CREATE_PUBLIC_THREADS', 1n << 35n);
@@ -3572,6 +3591,7 @@
     const targetGuild = guildId;
     const targetChannel = channelId;
     const targetAround = aroundMessage;
+    const draftAccount = currentUser ? entityRef(currentUser) : null;
     untrack(() => {
       const routeGeneration = ++loadGeneration;
       const snapshot = ++snapshotGeneration;
@@ -3590,7 +3610,8 @@
       setMembers([]);
       resetUploads();
       resetForumUploads();
-      content = '';
+      activeDraftKey = draftAccount ? draftKey(draftAccount, targetChannel) : null;
+      content = activeDraftKey ? readDraft(activeDraftKey) : '';
       applicationCommands = [];
       applicationLauncherOpen = false;
       selectedApplicationCommand = null;
@@ -6668,6 +6689,14 @@
       aria-busy={reorderingChannels}
       oncontextmenu={(event) => showChannelMenu(event, null)}
     >
+      {#if guild}<GuildOnboarding
+          {guild}
+          onChannels={(values) => (onboardingChannels = values)}
+          onComplete={() => recoverCurrentRoute()}
+        />
+        {#if onboardingChannels?.length}<label class="show-all-channels"
+            ><input type="checkbox" bind:checked={showAllOnboardingChannels} />Show all channels</label
+          >{/if}{/if}
       {#each channelGroups as group (group.key)}
         {#if group.category}
           <section class="channel-category">

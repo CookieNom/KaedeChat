@@ -43,6 +43,8 @@ export interface NativePreferences {
   vad_threshold: number;
   push_to_talk_hotkey: string | null;
   priority_push_to_talk_hotkey: string | null;
+  toggle_mute_hotkey?: string | null;
+  toggle_deafen_hotkey?: string | null;
   noise_suppression: 'off' | 'standard' | 'voice_isolation';
   echo_cancellation: boolean;
   automatic_gain_control: boolean;
@@ -78,6 +80,7 @@ export interface NativeVoiceStatus {
   deafened?: boolean;
   input_level?: number;
   priority_speakers?: string[];
+  listening_volumes?: Record<string, [number, number]>;
 }
 
 export function nativePrioritySpeakerIdentities(value: unknown): Set<string> {

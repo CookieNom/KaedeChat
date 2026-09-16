@@ -46,6 +46,7 @@ from app.chat.message_references import (
     validate_channel_follow_message_fields,
     validate_message_reference_projection,
 )
+from app.chat.onboarding import OnboardingConfig
 from app.chat.payloads import member_payload, render_message_payload, rich_thread_member_payload
 from app.chat.permissions import calculate_permissions
 from app.chat.pins import (
@@ -3513,6 +3514,10 @@ async def apply_guild_mutation_event(
             if value is not None and (not isinstance(value, str) or len(value) > maximum):
                 raise ValueError(f"guild update {field} is invalid")
             setattr(locked, field, value)
+        if "onboarding" in raw:
+            locked.onboarding = OnboardingConfig.model_validate(raw["onboarding"]).model_dump(
+                mode="json"
+            )
         if "federated_history_policy" in raw:
             history_policy = raw.get("federated_history_policy")
             if history_policy not in {"disabled", "full_retained"}:
@@ -4357,6 +4362,7 @@ async def apply_guild_mutation_event(
         if member_version < member.member_version:
             raise ValueError("member version regressed")
         member.member_version = member_version
+        member.onboarding_state = {"rules_revision": raw.get("rules_accepted_revision")}
         dispatch_type = "GUILD_MEMBER_UPDATE"
         dispatch = {
             "user": {"id": str(user_ref[0]), "origin_domain": user_ref[1]},
@@ -6199,6 +6205,7 @@ def guild_snapshot_payload(
             "owner_domain": guild.owner_domain,
             "permission_generation": str(guild.permission_generation),
             "federated_history_policy": guild.federated_history_policy,
+            "onboarding": guild.onboarding or {},
             "history_policy_generation": str(guild.history_policy_generation),
             "version": guild.updated_at.isoformat(),
         },
@@ -6310,6 +6317,7 @@ def guild_snapshot_payload(
                 ),
                 "timeout_indefinite": member.timeout_indefinite,
                 "member_version": str(member.member_version),
+                "rules_accepted_revision": (member.onboarding_state or {}).get("rules_revision"),
             }
             for member, user in members
         ],
@@ -6492,6 +6500,9 @@ async def apply_guild_snapshot(
     guild.banner_hash = raw_guild.get("banner_hash")
     guild.permission_generation = int(raw_guild.get("permission_generation", 1))
     guild.snapshot_generation = int(snapshot.get("snapshot_generation", 1))
+    guild.onboarding = OnboardingConfig.model_validate(raw_guild.get("onboarding", {})).model_dump(
+        mode="json"
+    )
     guild.federated_history_policy = str(raw_guild.get("federated_history_policy", "disabled"))
     guild.history_policy_generation = int(raw_guild.get("history_policy_generation", 1))
     guild.last_event_seq = int(snapshot["snapshot_seq"])
@@ -6764,6 +6775,7 @@ async def apply_guild_snapshot(
         loaded_member.timeout_reason = None
         loaded_member.voice_flags = 0
         loaded_member.member_version = int(raw.get("member_version", 1))
+        loaded_member.onboarding_state = {"rules_revision": raw.get("rules_accepted_revision")}
     await session.flush()
     if member_refs:
         incoming_thread_member_refs = {

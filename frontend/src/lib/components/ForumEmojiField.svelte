@@ -2,6 +2,7 @@
   import { customEmojiUrl, type CustomEmojiOption } from '$lib/chat/emojis';
   import { t } from '$lib/ui/locale';
   import EmojiPicker from './EmojiPicker.svelte';
+  import Icon from './Icon.svelte';
 
   let {
     emojiId,
@@ -48,6 +49,7 @@
     aria-haspopup="dialog"
     aria-expanded={open}
     popovertarget={id}
+    title={$t('ui_choose_an_emoji_54bc3777')}
     {disabled}
   >
     {#if emojiId}
@@ -55,6 +57,7 @@
     {:else}
       {emojiName || $t('ui_emoji_61ad8976')}
     {/if}
+    <Icon name="chevron-down" size={14} />
   </button>
   {#if emojiId || emojiName}
     <button
@@ -94,19 +97,33 @@
     display: flex;
     align-items: center;
     min-width: 0;
+    width: fit-content;
+    gap: 4px;
   }
   .emoji-trigger {
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 4px;
     min-width: 0;
     min-height: 36px;
     flex: 1;
-    padding: 4px;
-    border: 1px solid var(--line);
+    padding: 4px 8px;
+    border: 1px solid var(--accent);
     border-radius: 8px;
-    background: var(--surface-subtle);
-    color: var(--text);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .emoji-trigger:hover:not(:disabled),
+  .emoji-trigger[aria-expanded='true'] {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .emoji-trigger:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
   .emoji-trigger img {
     width: 24px;

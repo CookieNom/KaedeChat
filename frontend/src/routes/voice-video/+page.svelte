@@ -1,13 +1,22 @@
 <script lang="ts">
+  import ListeningVolumeMenu from '$lib/voice/ListeningVolumeMenu.svelte';
   import { onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
+  import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
   import { attachVideo, decodeNativeVideoFrame, type VoiceTile } from '$lib/voice/session';
 
   const tiles = new SvelteMap<string, VoiceTile>();
+  let volumes = $state<Record<string, [number, number]>>({});
   onMount(() => {
     if (!isNativeDesktop()) return;
     let stopped = false;
+    const volumePoll = setInterval(() => {
+      void nativeInvoke<NativeVoiceStatus>('native_voice_status')
+        .then((status) => {
+          if (!stopped) volumes = status.listening_volumes ?? {};
+        })
+        .catch(() => {});
+    }, 500);
     void (async () => {
       while (!stopped) {
         try {
@@ -37,6 +46,7 @@
     })();
     return () => {
       stopped = true;
+      clearInterval(volumePoll);
     };
   });
 </script>
@@ -47,6 +57,14 @@
     <div class="tile">
       <div class="video" use:attachVideo={tile}></div>
       <span>{tile.name}</span>
+      <ListeningVolumeMenu
+        name={tile.name}
+        voice={volumes[tile.identity]?.[0] ?? 1}
+        stream={volumes[tile.identity]?.[1] ?? 1}
+        hasStream={tile.source === 'screen_share'}
+        onChange={(stream, volume) =>
+          nativeInvoke('native_voice_volume', { identity: tile.identity, stream, volume })}
+      />
     </div>
   {:else}
     <p>

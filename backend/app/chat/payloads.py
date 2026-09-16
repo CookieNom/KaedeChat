@@ -95,6 +95,7 @@ def guild_payload(guild: Guild) -> dict[str, object]:
         "owner_domain": guild.owner_domain,
         "permission_generation": str(guild.permission_generation),
         "federated_history_policy": guild.federated_history_policy,
+        "onboarding": getattr(guild, "onboarding", None) or {},
         "history_policy_generation": str(guild.history_policy_generation),
         "unavailable": guild.unavailable,
         # Replica health is safe client state. Expose the stable code only;
@@ -405,6 +406,9 @@ def member_payload(
         # expose them from a remote guild; zero retains old-client shape.
         "voice_flags": member.voice_flags if include_private_authority_state else 0,
         "member_version": str(member.member_version),
+        "rules_accepted_revision": (getattr(member, "onboarding_state", None) or {}).get(
+            "rules_revision"
+        ),
         "role_ids": [str(role_id) for role_id in (role_ids or [])],
     }
 

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import ForumView from './ForumView.svelte';
 import type { Channel, Guild } from '$lib/chat/types';
@@ -10,9 +10,10 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-describe('ForumView Sort & View popover', () => {
-  it('dismisses on outside pointer presses and Escape', () => {
-    const target = document.createElement('div');
+describe('ForumView popovers', () => {
+  let target: HTMLDivElement;
+  beforeEach(() => {
+    target = document.createElement('div');
     document.body.append(target);
     component = mount(ForumView, {
       target,
@@ -27,10 +28,14 @@ describe('ForumView Sort & View popover', () => {
           name: 'Forum'
         } as Channel,
         posts: [],
+        canCreate: true,
         onCreate: vi.fn()
       }
     });
     flushSync();
+  });
+
+  it('dismisses Sort & View on outside pointer presses and Escape', () => {
     const summary = Array.from(target.querySelectorAll('summary')).find((item) =>
       item.textContent?.includes('Sort')
     )!;
@@ -45,5 +50,36 @@ describe('ForumView Sort & View popover', () => {
     expect(menu.open).toBe(true);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(menu.open).toBe(false);
+  });
+
+  it('opens the composer emoji picker in a popover and inserts a selection', async () => {
+    const showPopover = vi.fn();
+    const original = HTMLElement.prototype.showPopover;
+    HTMLElement.prototype.showPopover = showPopover;
+    try {
+      flushSync(() => target.querySelector<HTMLButtonElement>('.new-post')!.click());
+      const trigger = target.querySelector<HTMLButtonElement>('.forum-emoji-control button')!;
+      flushSync(() => trigger.click());
+      const panel = target.querySelector<HTMLElement>('[popover="auto"]')!;
+      expect(showPopover).toHaveBeenCalledOnce();
+      expect(panel.closest('form')).toBeNull();
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      await vi.waitFor(() => expect(panel.querySelector('.emoji-grid button')).not.toBeNull());
+      const emoji = panel.querySelector<HTMLButtonElement>('.emoji-grid button')!;
+      const value = emoji.textContent;
+      flushSync(() => emoji.click());
+      expect(target.querySelector('textarea')!.value).toBe(value);
+      expect(target.querySelector('[popover]')).toBeNull();
+      flushSync(() => trigger.click());
+      flushSync(() =>
+        target
+          .querySelector('[popover]')!
+          .dispatchEvent(Object.assign(new Event('toggle'), { newState: 'closed' }))
+      );
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      expect(target.querySelector('[popover]')).toBeNull();
+    } finally {
+      HTMLElement.prototype.showPopover = original;
+    }
   });
 });

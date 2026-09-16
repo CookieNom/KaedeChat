@@ -393,6 +393,7 @@ final class VoiceSession extends ChangeNotifier {
   String? get videoNotice => _videoNotice;
   final Map<String, Map<String, Object?>> _occupants =
       <String, Map<String, Object?>>{};
+  final Map<String, double> _streamVolumes = <String, double>{};
   final Map<String, double> _participantVolumes = <String, double>{};
   String? _error;
 
@@ -427,6 +428,8 @@ final class VoiceSession extends ChangeNotifier {
   String? get error => _error;
   String? get activeElsewhereClient => _activeElsewhereClient;
   Map<String, Object?>? occupant(String identity) => _occupants[identity];
+  double streamVolume(String identity) => _streamVolumes[identity] ?? 1;
+
   double participantVolume(String identity) =>
       _participantVolumes[identity] ?? 1;
 
@@ -763,6 +766,7 @@ final class VoiceSession extends ChangeNotifier {
             unawaited(_applyVolume(
               event.participant.identity,
               event.track as RemoteAudioTrack,
+              event.publication.source,
             ));
           }
           notifyListeners();
@@ -1368,14 +1372,16 @@ final class VoiceSession extends ChangeNotifier {
     }
   }
 
-  Future<void> setParticipantVolume(String identity, double volume) async {
+  Future<void> setParticipantVolume(String identity, double volume,
+      {bool stream = false}) async {
+    if (!volume.isFinite) return;
     final bounded = volume.clamp(0, 1).toDouble();
-    _participantVolumes[identity] = bounded;
+    (stream ? _streamVolumes : _participantVolumes)[identity] = bounded;
     final participant = _room?.remoteParticipants[identity];
     if (participant != null) {
       for (final publication in participant.audioTrackPublications) {
         if (publication.track case final RemoteAudioTrack track) {
-          await _applyVolume(identity, track);
+          await _applyVolume(identity, track, publication.source);
         }
       }
     }
@@ -1385,8 +1391,13 @@ final class VoiceSession extends ChangeNotifier {
   Future<void> _applyVolume(
     String identity,
     RemoteAudioTrack track,
+    TrackSource source,
   ) =>
-      rtc.Helper.setVolume(participantVolume(identity), track.mediaStreamTrack);
+      rtc.Helper.setVolume(
+          source == TrackSource.screenShareAudio
+              ? streamVolume(identity)
+              : participantVolume(identity),
+          track.mediaStreamTrack);
 
   Future<void> setServerMute(
     EntityRef guild,
@@ -1702,6 +1713,7 @@ final class VoiceSession extends ChangeNotifier {
     _occupancyTimer = null;
     _occupants.clear();
     _participantVolumes.clear();
+    _streamVolumes.clear();
     _channel = null;
     _callRef = null;
     _connecting = false;

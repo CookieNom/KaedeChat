@@ -774,6 +774,20 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             divider: true,
             onTap: user?.mfaEnabled == true ? _disableMfa : _enableMfa,
           ),
+          const SizedBox(height: 16),
+          SettingsRow.chevron(
+            title: 'Delete all content',
+            subtitle:
+                'Permanently remove your messages, uploads, and profile content',
+            leading: _LeadingIcon(Icons.delete_sweep_outlined),
+            onTap: _saving ? null : () => _deleteContentOrAccount(false),
+          ),
+          SettingsRow.chevron(
+            title: 'Delete account',
+            subtitle: 'Your email and username will stay reserved',
+            leading: _LeadingIcon(Icons.person_remove_outlined),
+            onTap: _saving ? null : () => _deleteContentOrAccount(true),
+          ),
           SettingsSectionHeader(L10n.of(context).ui_security_c2fe21db,
               subheading: L10n.of(context)
                   .ui_encryption_keys_unlock_your_account_vault_on__2f7938f9),
@@ -1639,6 +1653,60 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     });
   }
 
+  Future<void> _deleteContentOrAccount(bool account) async {
+    if (_saving) return;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: Text(account
+            ? 'Permanently delete account?'
+            : 'Permanently delete all content?'),
+        content: Text(account
+            ? 'Your account, messages, uploads, and profile will be deleted. Your email and username stay reserved so nobody can recreate your account. Transfer or delete guilds you own first. Deletion on other servers is best effort. This cannot be undone.'
+            : 'Your messages, uploads, and profile content will be deleted. Your account stays active. Deletion on other servers is best effort. This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Continue')),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    final values = await _credentialsDialog(
+      title: account ? 'Delete account' : 'Delete all content',
+      fields: [
+        const _DialogField('password', 'Current password', obscure: true),
+        if (ref.read(mobileControllerProvider).user?.mfaEnabled == true)
+          const _DialogField('code', 'Authenticator or recovery code'),
+        const _DialogField('confirmation', 'Type DELETE to confirm'),
+      ],
+      action: 'Permanently delete',
+      destructive: true,
+    );
+    if (values == null || !mounted) return;
+    if (values['confirmation'] != 'DELETE') {
+      _showSuccess('Nothing deleted. Type DELETE to confirm.');
+      return;
+    }
+    await _runSecurityAction('Could not start deletion', () async {
+      final controller = ref.read(mobileControllerProvider.notifier);
+      await controller.repository.requestDeletion(
+          account: account,
+          password: values['password']!,
+          code: values['code']);
+      if (account) {
+        await controller.logout();
+      } else {
+        _showSuccess(
+            'Content deletion started. Cleanup continues if you close the app. Remote deletion is best effort.');
+      }
+    });
+  }
+
   Future<void> _disableMfa() async {
     final values = await _credentialsDialog(
       title: L10n.of(context).ui_disable_two_factor_authentication_e4b58a45,
@@ -1688,6 +1756,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       return await showDialog<Map<String, String>>(
         context: context,
         builder: (dialogContext) => AlertDialog(
+          scrollable: true,
           title: Text(title),
           content: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: 460),

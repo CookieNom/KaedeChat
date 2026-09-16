@@ -529,6 +529,7 @@ pub struct PlaybackSink {
 /// far-end signal supplied to echo cancellation.
 #[derive(Default)]
 struct VoiceMixState {
+    volumes: HashMap<(String, bool), f32>,
     tracks: HashMap<VoiceMixKey, VoiceMixQueue>,
     priority_capable: HashSet<String>,
     priority_active: HashSet<String>,
@@ -541,6 +542,7 @@ struct VoiceMixKey {
 }
 
 struct VoiceMixQueue {
+    volume: f32,
     priority_eligible: bool,
     samples: VecDeque<f32>,
 }
@@ -551,6 +553,21 @@ pub struct VoiceMixer {
 }
 
 impl VoiceMixer {
+    pub fn set_volume(&self, participant: &str, stream: bool, volume: f32) {
+        if volume.is_finite() {
+            let volume = volume.clamp(0.0, 1.0);
+            let mut state = self.state.lock();
+            state
+                .volumes
+                .insert((participant.to_owned(), stream), volume);
+            for (key, queue) in &mut state.tracks {
+                if key.participant == participant && !queue.priority_eligible == stream {
+                    queue.volume = volume;
+                }
+            }
+        }
+    }
+
     pub fn push(&self, participant: &str, samples: &[f32], source_rate: u32, source_channels: u16) {
         self.push_track(
             participant,
@@ -653,12 +670,13 @@ impl VoiceMixer {
             tracks,
             priority_capable,
             priority_active,
+            ..
         } = &mut *state;
         let mut mixed = vec![0.0; samples];
         for sample in &mut mixed {
             let active = tracks
-                .values()
-                .filter(|queue| !queue.samples.is_empty())
+                .iter()
+                .filter(|(_, queue)| !queue.samples.is_empty() && queue.volume > 0.0)
                 .count();
             let normalization = if active > 1 {
                 1.0 / (active as f32).sqrt()
@@ -667,6 +685,7 @@ impl VoiceMixer {
             };
             let priority_audio = tracks.iter().any(|(key, queue)| {
                 queue.priority_eligible
+                    && queue.volume > 0.0
                     && !queue.samples.is_empty()
                     && priority_active.contains(&key.participant)
                     && priority_capable.contains(&key.participant)
@@ -681,7 +700,10 @@ impl VoiceMixer {
                 } else {
                     1.0
                 };
-                *sample += queue.samples.pop_front().unwrap_or(0.0) * normalization * attenuation;
+                *sample += queue.samples.pop_front().unwrap_or(0.0)
+                    * normalization
+                    * attenuation
+                    * queue.volume;
             }
             *sample = sample.clamp(-1.0, 1.0);
         }
@@ -695,6 +717,11 @@ fn register_voice_mix_track<'a>(
     track: &str,
     priority_eligible: bool,
 ) -> &'a mut VoiceMixQueue {
+    let volume = state
+        .volumes
+        .get(&(participant.to_owned(), !priority_eligible))
+        .copied()
+        .unwrap_or(1.0);
     state
         .tracks
         .entry(VoiceMixKey {
@@ -702,6 +729,7 @@ fn register_voice_mix_track<'a>(
             track: track.to_owned(),
         })
         .or_insert_with(|| VoiceMixQueue {
+            volume,
             priority_eligible,
             samples: VecDeque::new(),
         })
@@ -1119,6 +1147,22 @@ mod tests {
 
         let scale = 1.0 / 2.0_f32.sqrt();
         assert!((mixer.drain(1)[0] - (0.5 + 0.1) * scale).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn listening_volumes_separate_voice_and_stream_and_survive_republication() {
+        let mixer = VoiceMixer::default();
+        mixer.set_volume("alice", false, 0.0);
+        mixer.set_volume("alice", true, 0.5);
+        mixer.push_track("alice", "mic", true, &[0.8], VOICE_SAMPLE_RATE, 1);
+        mixer.push_track("alice", "stream", false, &[0.8], VOICE_SAMPLE_RATE, 1);
+        assert!((mixer.drain(1)[0] - 0.4).abs() < 0.000_01);
+        let _ = mixer.remove_track("alice", "stream");
+        mixer.push_track("alice", "new-stream", false, &[0.6], VOICE_SAMPLE_RATE, 1);
+        assert!((mixer.drain(1)[0] - 0.3).abs() < 0.000_01);
+        mixer.set_volume("alice", true, f32::NAN);
+        mixer.push_track("bob", "mic", true, &[0.4], VOICE_SAMPLE_RATE, 1);
+        assert!((mixer.drain(1)[0] - 0.4).abs() < 0.000_01);
     }
 
     #[test]

@@ -362,7 +362,9 @@ async def transfer_guild_ownership(
     target_id, target_domain = payload.owner_id.resolve(settings.domain)
     if (target_id, target_domain) == (guild.owner_id, guild.owner_domain):
         raise HTTPException(status_code=409, detail={"code": "ALREADY_GUILD_OWNER"})
-    target = await session.get(User, (target_id, target_domain))
+    target = await session.get(
+        User, (target_id, target_domain), with_for_update=True, populate_existing=True
+    )
     member = await session.get(
         GuildMember,
         (guild.id, guild.origin_domain, target_id, target_domain),

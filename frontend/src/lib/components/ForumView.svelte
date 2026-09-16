@@ -86,6 +86,7 @@
   let postTags = $state<string[]>([]);
   let guidelinesVisible = $state(true);
   let emojiPickerOpen = $state(false);
+  let emojiTrigger = $state<HTMLButtonElement | null>(null);
   let fileInput = $state<HTMLInputElement | null>(null);
   let messageInput = $state<HTMLTextAreaElement | null>(null);
   let sortViewMenu = $state<HTMLDetailsElement | null>(null);
@@ -172,6 +173,10 @@
       messageInput?.focus();
       messageInput?.setSelectionRange(start + value.length, start + value.length);
     });
+  }
+
+  function showEmojiPopover(panel: HTMLDivElement) {
+    panel.showPopover();
   }
 
   function preview(post: Channel): string {
@@ -410,20 +415,15 @@
       <footer>
         <div class="forum-emoji-control">
           <button
+            bind:this={emojiTrigger}
             class:active={emojiPickerOpen}
             type="button"
             disabled={busy}
             aria-label={$t('ui_choose_an_emoji_54bc3777')}
+            aria-haspopup="dialog"
             aria-expanded={emojiPickerOpen}
             onclick={() => (emojiPickerOpen = !emojiPickerOpen)}>☺</button
           >
-          {#if emojiPickerOpen}
-            <EmojiPicker
-              {customEmojis}
-              onSelect={insertEmoji}
-              onClose={() => (emojiPickerOpen = false)}
-            />
-          {/if}
         </div>
         <span></span>
         {#if forum.topic}
@@ -452,6 +452,26 @@
         </button>
       </footer>
     </form>
+    {#if emojiPickerOpen}
+      <div
+        class="forum-emoji-popover"
+        popover="auto"
+        use:showEmojiPopover
+        ontoggle={(event) => {
+          if (event.newState === 'closed') emojiPickerOpen = false;
+        }}
+      >
+        <EmojiPicker
+          inline
+          {customEmojis}
+          onSelect={insertEmoji}
+          onClose={() => {
+            emojiPickerOpen = false;
+            emojiTrigger?.focus();
+          }}
+        />
+      </div>
+    {/if}
     {#if forum.topic && guidelinesVisible}
       <aside class="post-guidelines">
         <div>
@@ -919,10 +939,13 @@
     background: var(--surface-hover);
   }
 
-  .forum-emoji-control :global(.emoji-picker) {
-    right: auto;
-    left: 0;
-    bottom: calc(100% + 10px);
+  .forum-emoji-popover {
+    padding: 0;
+    border: 0;
+    border-radius: 18px;
+    background: transparent;
+    color: var(--text);
+    overflow: visible;
   }
 
   .forum-composer footer .submit-post {

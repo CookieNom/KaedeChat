@@ -2386,7 +2386,41 @@ _EXACT_MANAGEMENT_DISPATCHERS: dict[str, ManagementDispatcher] = {
     **dict.fromkeys(_INVITE_OPERATIONS, _dispatch_invites),
     **dict.fromkeys(_EXPRESSION_METADATA_OPERATIONS, _dispatch_expression_metadata),
 }
+
+
+async def _dispatch_onboarding(
+    request: GuildManagementRequest,
+    actor: object,
+    session: AsyncSession,
+    redis: Redis,
+    snowflake: SnowflakeGenerator,
+    settings: Settings,
+) -> GuildManagementResult:
+    from app.api.onboarding import complete_onboarding, get_onboarding, update_onboarding
+    from app.chat.onboarding import OnboardingAnswers, OnboardingConfig
+
+    ref, auth = _guild_ref(int(request.guild.id)), _auth(actor)
+    if request.operation == "onboarding.get":
+        body = await get_onboarding(ref, auth, session, redis, settings)
+    elif request.operation == "onboarding.update":
+        body = await update_onboarding(
+            ref,
+            OnboardingConfig.model_validate(request.payload),
+            auth,
+            session,
+            redis,
+            snowflake,
+            settings,
+        )
+    else:
+        body = await complete_onboarding(
+            ref, OnboardingAnswers.model_validate(request.payload), auth, session, redis, settings
+        )
+    return _result(request, 200, body)
+
+
 _PREFIX_MANAGEMENT_DISPATCHERS: tuple[tuple[str, ManagementDispatcher], ...] = (
+    ("onboarding.", _dispatch_onboarding),
     ("automod.", _dispatch_automod),
     ("moderation.", _dispatch_bulk_moderation),
     ("emoji.", _dispatch_expression_media),

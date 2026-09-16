@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ShortcutRecorder from './ShortcutRecorder.svelte';
   import { t } from '$lib/ui/locale';
 
   import { userErrorMessage } from '$lib/api/client';
@@ -324,6 +325,15 @@
             <small>{hotkeyStatus}</small>
           </label>
         {/if}
+        <fieldset class="native-device-grid">
+          <legend>Global shortcuts</legend>
+          <ShortcutRecorder label="Toggle mute" bind:value={preferences.toggle_mute_hotkey} />
+          <ShortcutRecorder label="Toggle deafen" bind:value={preferences.toggle_deafen_hotkey} />
+          <small
+            >Works while another app is focused. Clear a shortcut to disable it. Some Wayland
+            desktops restrict global shortcuts.</small
+          >
+        </fieldset>
         <div class="native-device-grid">
           <label class="form-field">
             <span>{$t('ui_noise_suppression_a5c124c1')}</span>

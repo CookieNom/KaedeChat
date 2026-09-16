@@ -1791,6 +1791,19 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
     );
   }
 
+  Future<void> _runVolumeChange(String identity, double value,
+      {bool stream = false}) async {
+    try {
+      await widget.session
+          .setParticipantVolume(identity, value, stream: stream);
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Could not change volume. Try again.')));
+      }
+    }
+  }
+
   Future<void> _showParticipantControls(
     BuildContext context,
     String identity,
@@ -1808,11 +1821,19 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
     final occupancy = widget.session.occupant(identity);
     final canModerate = user != null && _canModerateTarget(user);
     var volume = widget.session.participantVolume(identity);
+    var streamVolume = widget.session.streamVolume(identity);
+    final hasStream = widget.participant.audioTrackPublications
+            .any((p) => p.source == TrackSource.screenShareAudio) ||
+        widget.source == TrackSource.screenShareVideo;
     if (!context.mounted) return;
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (sheetContext) => StatefulBuilder(
+      isScrollControlled: true,
+      constraints:
+          BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * .85),
+      builder: (sheetContext) => SingleChildScrollView(
+          child: StatefulBuilder(
         builder: (context, setModalState) => SafeArea(
           child: Padding(
             padding: EdgeInsets.fromLTRB(20, 4, 20, 20),
@@ -1820,17 +1841,61 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(name, style: Theme.of(context).textTheme.titleLarge),
-                SizedBox(height: 16),
-                Text(L10n.of(context).ui_user_volume_value0_8788daaf(
-                    ((volume * 100).round()).toString())),
+                Row(children: [
+                  CircleAvatar(
+                      radius: 24,
+                      child: Text(name.isEmpty
+                          ? '?'
+                          : name.characters.first.toUpperCase())),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                        Text(name,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text('Only changes what you hear',
+                            style: Theme.of(context).textTheme.bodySmall)
+                      ]))
+                ]),
+                const SizedBox(height: 24),
+                Row(children: [
+                  const Icon(Icons.mic_none_outlined, size: 20),
+                  const SizedBox(width: 8),
+                  const Expanded(child: Text('User volume')),
+                  Text('${(volume * 100).round()}%',
+                      style: Theme.of(context).textTheme.labelLarge)
+                ]),
                 Slider(
                   value: volume,
                   onChanged: (value) {
                     setModalState(() => volume = value);
-                    widget.session.setParticipantVolume(identity, value);
+                    _runVolumeChange(identity, value);
                   },
                 ),
+                if (hasStream) ...[
+                  const SizedBox(height: 12),
+                  Row(children: [
+                    const Icon(Icons.screen_share_outlined, size: 20),
+                    const SizedBox(width: 8),
+                    const Expanded(child: Text('Stream volume')),
+                    Text('${(streamVolume * 100).round()}%',
+                        style: Theme.of(context).textTheme.labelLarge)
+                  ]),
+                  Slider(
+                    value: streamVolume,
+                    semanticFormatterCallback: (value) =>
+                        'Stream volume ${(value * 100).round()}%',
+                    onChanged: (value) {
+                      setModalState(() => streamVolume = value);
+                      _runVolumeChange(identity, value, stream: true);
+                    },
+                  ),
+                ],
                 if (guild != null && user != null && canModerate) ...[
                   Divider(),
                   if (canManageStageChannel(widget.channel))
@@ -1943,7 +2008,7 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
             ),
           ),
         ),
-      ),
+      )),
     );
   }
 

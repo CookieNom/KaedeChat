@@ -61,6 +61,7 @@ from app.api.media import router as media_router
 from app.api.mobile_links import router as mobile_links_router
 from app.api.moderation import federation_router as audit_log_federation_router
 from app.api.moderation import router as moderation_router
+from app.api.onboarding import router as onboarding_router
 from app.api.push import relay_router as push_relay_router
 from app.api.push import router as push_router
 from app.api.relationships import router as relationships_router
@@ -206,6 +207,7 @@ app.include_router(push_relay_router)
 app.include_router(relationships_router)
 app.include_router(search_router)
 app.include_router(scheduled_events_router)
+app.include_router(onboarding_router)
 app.include_router(webhooks_router)
 app.include_router(webhook_e2ee_router)
 

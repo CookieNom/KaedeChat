@@ -95,6 +95,7 @@ struct NativeState {
     voice_install: VoiceInstallFence,
     voice_restart: mpsc::UnboundedSender<VoiceRestartRequest>,
     voice_ui: RwLock<VoiceUiState>,
+    voice_volumes: RwLock<BTreeMap<String, [f32; 2]>>,
     push_to_talk_sender: Arc<SyncMutex<Option<mpsc::UnboundedSender<VoiceCommand>>>>,
     hotkey: Arc<SyncMutex<HotkeyRegistration>>,
     preferences: RwLock<DesktopPreferences>,
@@ -205,8 +206,11 @@ struct RegisteredHotkey {
 
 #[derive(Clone)]
 struct HotkeyRegistration {
+    pressed: BTreeSet<u32>,
     push_to_talk: Option<RegisteredHotkey>,
     priority_push_to_talk: Option<RegisteredHotkey>,
+    toggle_mute: Option<RegisteredHotkey>,
+    toggle_deafen: Option<RegisteredHotkey>,
     status: String,
 }
 
@@ -2242,9 +2246,11 @@ fn hotkey_status(registration: &HotkeyRegistration) -> String {
         )
     };
     format!(
-        "Push to talk is {}; priority push to talk is {}.",
+        "Push to talk is {}; priority push to talk is {}; toggle mute is {}; toggle deafen is {}.",
         status(registration.push_to_talk.as_ref()),
-        status(registration.priority_push_to_talk.as_ref())
+        status(registration.priority_push_to_talk.as_ref()),
+        status(registration.toggle_mute.as_ref()),
+        status(registration.toggle_deafen.as_ref())
     )
 }
 
@@ -2262,90 +2268,124 @@ fn replace_global_hotkeys(
     registration: &mut HotkeyRegistration,
     push_to_talk: Option<&str>,
     priority_push_to_talk: Option<&str>,
+    toggle_mute: Option<&str>,
+    toggle_deafen: Option<&str>,
 ) -> Result<bool, NativeError> {
-    let next_push_to_talk =
-        configured_hotkey(push_to_talk, "INVALID_PUSH_TO_TALK_HOTKEY", "push-to-talk")?;
-    let next_priority = configured_hotkey(
-        priority_push_to_talk,
-        "INVALID_PRIORITY_PUSH_TO_TALK_HOTKEY",
-        "priority push-to-talk",
-    )?;
-    if hotkeys_conflict(next_push_to_talk.as_ref(), next_priority.as_ref()) {
-        return Err(NativeError::local(
-            "PUSH_TO_TALK_HOTKEY_CONFLICT",
-            "Normal and priority push to talk need different shortcuts.",
-        ));
-    }
-    let same_shortcuts = |left: Option<&RegisteredHotkey>, right: Option<&RegisteredHotkey>| {
-        left.map(|value| value.shortcut) == right.map(|value| value.shortcut)
-    };
-    if same_shortcuts(
-        registration.push_to_talk.as_ref(),
-        next_push_to_talk.as_ref(),
-    ) && same_shortcuts(
-        registration.priority_push_to_talk.as_ref(),
-        next_priority.as_ref(),
-    ) {
-        registration.push_to_talk = next_push_to_talk;
-        registration.priority_push_to_talk = next_priority;
-        registration.status = hotkey_status(registration);
-        return Ok(false);
-    }
-
-    let manager = app.global_shortcut();
-    let previous = registration.clone();
-    let mut removed = Vec::<Shortcut>::new();
-    for registered in [
-        previous.push_to_talk.as_ref(),
-        previous.priority_push_to_talk.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Err(error) = manager.unregister(registered.shortcut) {
-            for shortcut in removed {
-                let _ = manager.register(shortcut);
-            }
-            return Err(NativeError::operation(
-                "GLOBAL_HOTKEY_UNAVAILABLE",
-                "Kaede could not replace the existing voice shortcuts. The previous shortcuts remain selected; try again.",
-                error,
+    let next = [
+        configured_hotkey(push_to_talk, "INVALID_PUSH_TO_TALK_HOTKEY", "push-to-talk")?,
+        configured_hotkey(
+            priority_push_to_talk,
+            "INVALID_PRIORITY_PUSH_TO_TALK_HOTKEY",
+            "priority push-to-talk",
+        )?,
+        configured_hotkey(toggle_mute, "INVALID_MUTE_HOTKEY", "toggle mute")?,
+        configured_hotkey(toggle_deafen, "INVALID_DEAFEN_HOTKEY", "toggle deafen")?,
+    ];
+    for (index, binding) in next.iter().enumerate() {
+        if next[..index]
+            .iter()
+            .any(|other| hotkeys_conflict(binding.as_ref(), other.as_ref()))
+        {
+            return Err(NativeError::local(
+                "PUSH_TO_TALK_HOTKEY_CONFLICT",
+                "Each voice action needs a different shortcut.",
             ));
         }
-        removed.push(registered.shortcut);
     }
-
-    let mut installed = Vec::<Shortcut>::new();
-    for registered in [next_push_to_talk.as_ref(), next_priority.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if let Err(error) = manager.register(registered.shortcut) {
-            for shortcut in installed {
-                let _ = manager.unregister(shortcut);
+    let previous = [
+        registration.push_to_talk.clone(),
+        registration.priority_push_to_talk.clone(),
+        registration.toggle_mute.clone(),
+        registration.toggle_deafen.clone(),
+    ];
+    let changed = previous
+        .iter()
+        .zip(&next)
+        .any(|(a, b)| a.as_ref().map(|v| v.shortcut) != b.as_ref().map(|v| v.shortcut));
+    if changed {
+        let manager = app.global_shortcut();
+        let mut removed = Vec::new();
+        for binding in previous.iter().flatten() {
+            if let Err(error) = manager.unregister(binding.shortcut) {
+                for shortcut in removed {
+                    let _ = manager.register(shortcut);
+                }
+                return Err(NativeError::operation(
+                    "GLOBAL_HOTKEY_UNAVAILABLE",
+                    "Could not replace shortcuts. Previous bindings were retained.",
+                    error,
+                ));
             }
-            for registered in [
-                previous.push_to_talk.as_ref(),
-                previous.priority_push_to_talk.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let _ = manager.register(registered.shortcut);
-            }
-            return Err(NativeError::operation(
-                "GLOBAL_HOTKEY_UNAVAILABLE",
-                "One of those voice shortcuts is unavailable. The previous shortcuts were restored; choose a different combination and try again.",
-                error,
-            ));
+            removed.push(binding.shortcut);
         }
-        installed.push(registered.shortcut);
+        let mut installed = Vec::new();
+        for binding in next.iter().flatten() {
+            if let Err(error) = manager.register(binding.shortcut) {
+                for shortcut in installed {
+                    let _ = manager.unregister(shortcut);
+                }
+                for binding in previous.iter().flatten() {
+                    let _ = manager.register(binding.shortcut);
+                }
+                return Err(NativeError::operation(
+                    "GLOBAL_HOTKEY_UNAVAILABLE",
+                    "That shortcut is unavailable. Previous bindings were restored.",
+                    error,
+                ));
+            }
+            installed.push(binding.shortcut);
+        }
     }
-
-    registration.push_to_talk = next_push_to_talk;
-    registration.priority_push_to_talk = next_priority;
+    let [ptt, priority, mute, deafen] = next;
+    registration.pressed.clear();
+    registration.push_to_talk = ptt;
+    registration.priority_push_to_talk = priority;
+    registration.toggle_mute = mute;
+    registration.toggle_deafen = deafen;
     registration.status = hotkey_status(registration);
-    Ok(true)
+    Ok(changed)
+}
+
+async fn toggle_global_voice(app: AppHandle, deafen: bool) {
+    let state = app.state::<NativeState>();
+    let voice = state.voice.lock().await;
+    let Some(handle) = voice.as_ref() else {
+        return;
+    };
+    let mut ui = state.voice_ui.write().await;
+    let (muted, deafened) = if deafen {
+        (ui.muted || !ui.deafened, !ui.deafened)
+    } else {
+        (!ui.muted, if ui.muted { false } else { ui.deafened })
+    };
+    let gateway = state.gateway_commands.read().await;
+    let published = if let Some(sender) = gateway.as_ref() {
+        sender
+            .send(GatewayCommand::VoiceState {
+                self_mute: muted,
+                self_deaf: deafened,
+            })
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+    // Closing capture remains possible during an outage; opening it requires signaling.
+    if !published && (!muted || (!deafened && ui.deafened)) {
+        return;
+    }
+    if handle.commands.send(VoiceCommand::SetMuted(muted)).is_err() {
+        return;
+    }
+    if handle
+        .commands
+        .send(VoiceCommand::SetDeafened(deafened))
+        .is_err()
+    {
+        return;
+    }
+    ui.muted = muted;
+    ui.deafened = deafened;
 }
 
 fn release_voice_hotkeys(sender: Option<&mpsc::UnboundedSender<VoiceCommand>>) {
@@ -2735,6 +2775,15 @@ async fn join_native_voice_reserved(
     if let Some(gate) = handle.input_level.as_ref() {
         gate.set_muted(voice_ui.muted || voice_ui.deafened);
     }
+    for (identity, volumes) in state.voice_volumes.read().await.iter() {
+        for (index, volume) in volumes.iter().enumerate() {
+            let _ = handle.commands.send(VoiceCommand::SetVolume {
+                identity: identity.clone(),
+                stream: index == 1,
+                volume: *volume,
+            });
+        }
+    }
     let _ = handle.commands.send(VoiceCommand::SetMuted(voice_ui.muted));
     let _ = handle
         .commands
@@ -2770,6 +2819,40 @@ async fn forward_voice_restart(
             return;
         }
     }
+}
+
+#[tauri::command]
+async fn native_voice_volume(
+    identity: String,
+    stream: bool,
+    volume: f32,
+    state: State<'_, NativeState>,
+) -> Result<(), NativeError> {
+    if !volume.is_finite() || !(0.0..=1.0).contains(&volume) || identity.len() > 512 {
+        return Err(NativeError::local(
+            "INVALID_VOLUME",
+            "Choose a volume between 0 and 100%.",
+        ));
+    }
+    let voice = state.voice.lock().await;
+    let handle = voice
+        .as_ref()
+        .ok_or_else(|| NativeError::local("VOICE_NOT_CONNECTED", "Join a call first."))?;
+    handle
+        .commands
+        .send(VoiceCommand::SetVolume {
+            identity: identity.clone(),
+            stream,
+            volume,
+        })
+        .map_err(|_| NativeError::local("VOICE_DISCONNECTED", "The call has ended."))?;
+    state
+        .voice_volumes
+        .write()
+        .await
+        .entry(identity)
+        .or_insert([1.0, 1.0])[usize::from(stream)] = volume;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2910,6 +2993,7 @@ async fn leave_active_voice(state: &NativeState) {
     let voice = state.voice.lock().await.take();
     *state.voice_target.write().await = None;
     *state.voice_ui.write().await = VoiceUiState::default();
+    state.voice_volumes.write().await.clear();
     drop(install_guard);
     if let Some(voice) = voice {
         voice.leave().await;
@@ -2961,6 +3045,10 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
                     .video_degraded
                     .load(std::sync::atomic::Ordering::Acquire),
             ),
+        );
+        map.insert(
+            "listening_volumes".to_owned(),
+            json!(*state.voice_volumes.read().await),
         );
         map.insert("muted".to_owned(), Value::Bool(ui.muted));
         map.insert("deafened".to_owned(), Value::Bool(ui.deafened));
@@ -3151,6 +3239,8 @@ async fn native_preferences_set(
             &mut hotkey,
             preferences.push_to_talk_hotkey.as_deref(),
             preferences.priority_push_to_talk_hotkey.as_deref(),
+            preferences.toggle_mute_hotkey.as_deref(),
+            preferences.toggle_deafen_hotkey.as_deref(),
         )
     };
     let hotkeys_changed = match hotkey_result {
@@ -3170,6 +3260,8 @@ async fn native_preferences_set(
             &mut hotkey,
             previous.push_to_talk_hotkey.as_deref(),
             previous.priority_push_to_talk_hotkey.as_deref(),
+            previous.toggle_mute_hotkey.as_deref(),
+            previous.toggle_deafen_hotkey.as_deref(),
         ) {
             tracing::error!(
                 ?rollback_error,
@@ -3360,8 +3452,11 @@ fn main() {
     let push_to_talk_sender = Arc::new(SyncMutex::new(None::<mpsc::UnboundedSender<VoiceCommand>>));
     let event_sender = push_to_talk_sender.clone();
     let hotkey = Arc::new(SyncMutex::new(HotkeyRegistration {
+        pressed: BTreeSet::new(),
         push_to_talk: None,
         priority_push_to_talk: None,
+        toggle_mute: None,
+        toggle_deafen: None,
         status: "Push to talk is disabled; priority push to talk is disabled.".to_owned(),
     }));
     let event_hotkey = hotkey.clone();
@@ -3381,6 +3476,7 @@ fn main() {
         voice_install: VoiceInstallFence::new(),
         voice_restart: voice_restart_tx,
         voice_ui: RwLock::new(VoiceUiState::default()),
+        voice_volumes: RwLock::new(BTreeMap::new()),
         push_to_talk_sender,
         hotkey,
         preferences: RwLock::new(preferences),
@@ -3396,8 +3492,24 @@ fn main() {
         ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |_app, shortcut, event| {
+                .with_handler(move |app, shortcut, event| {
                     let pressed = event.state == ShortcutState::Pressed;
+                    let toggle = {
+                        let mut hotkey = event_hotkey.lock();
+                        if pressed {
+                            if !hotkey.pressed.insert(shortcut.id()) { return; }
+                        } else {
+                            hotkey.pressed.remove(&shortcut.id());
+                        }
+                        if !pressed { None }
+                        else if hotkey.toggle_mute.as_ref().is_some_and(|key| key.shortcut == *shortcut) { Some(false) }
+                        else if hotkey.toggle_deafen.as_ref().is_some_and(|key| key.shortcut == *shortcut) { Some(true) }
+                        else { None }
+                    };
+                    if let Some(deafen) = toggle {
+                        tauri::async_runtime::spawn(toggle_global_voice(app.clone(), deafen));
+                        return;
+                    }
                     let command = {
                         let hotkey = event_hotkey.lock();
                         if hotkey
@@ -3495,6 +3607,8 @@ fn main() {
                     &mut hotkey,
                     preferences.push_to_talk_hotkey.as_deref(),
                     preferences.priority_push_to_talk_hotkey.as_deref(),
+            preferences.toggle_mute_hotkey.as_deref(),
+            preferences.toggle_deafen_hotkey.as_deref(),
                 ) {
                     hotkey.status = error.message;
                 }
@@ -3593,6 +3707,7 @@ fn main() {
             native_test_output,
             native_voice_join,
             native_voice_control,
+            native_voice_volume,
             native_media_quality_set,
             native_voice_leave,
             native_voice_status,
@@ -3669,8 +3784,11 @@ mod tests {
         };
         assert!(!hotkeys_conflict(normal.as_ref(), priority.as_ref()));
         let registration = HotkeyRegistration {
+            pressed: BTreeSet::new(),
             push_to_talk: normal,
             priority_push_to_talk: priority,
+            toggle_mute: None,
+            toggle_deafen: None,
             status: String::new(),
         };
         let status = hotkey_status(&registration);

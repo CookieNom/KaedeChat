@@ -1,4 +1,5 @@
 <script lang="ts">
+  import VoiceQuickControls from '$lib/voice/VoiceQuickControls.svelte';
   import { tick } from 'svelte';
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
@@ -247,9 +248,11 @@
   </div>
 </div>
 
+<VoiceQuickControls />
+
 <style>
   .account-trigger {
-    grid-column: 1 / 3;
+    grid-column: 1;
     display: flex;
     align-items: center;
     gap: 10px;

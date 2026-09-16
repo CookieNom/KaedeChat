@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' show max;
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -25,6 +26,7 @@ import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/chat/read_inbox_screen.dart';
 import 'package:kaede_mobile/src/features/guild/announcement_management_tab.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
+import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
 import 'package:kaede_mobile/src/features/guild/scheduled_events_tab.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
@@ -4837,7 +4839,19 @@ final class _GuildBrowser extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = ref.read(mobileControllerProvider.notifier);
-    final channels = [...guild.channels]
+    final chosenChannels =
+        ref.watch(onboardingChannelsProvider(guild.ref.wire));
+    final showAll =
+        ref.watch(showAllOnboardingChannelsProvider(guild.ref.wire));
+    final channels = guild.channels
+        .where((channel) =>
+            showAll ||
+            chosenChannels == null ||
+            chosenChannels.isEmpty ||
+            channel.type == ChannelType.category ||
+            chosenChannels.contains(channel.ref.wire) ||
+            channel.ref == state.activeChannel?.ref)
+        .toList()
       ..sort((left, right) => left.position.compareTo(right.position));
     final isOwner = state.user?.ref == guild.ownerRef;
     final canManageChannels =
@@ -4945,6 +4959,15 @@ final class _GuildBrowser extends ConsumerWidget {
                     )
                 : null,
           ),
+          if (chosenChannels?.isNotEmpty == true)
+            SwitchListTile(
+                dense: true,
+                title: const Text('Show all channels'),
+                value: showAll,
+                onChanged: (value) => ref
+                    .read(showAllOnboardingChannelsProvider(guild.ref.wire)
+                        .notifier)
+                    .state = value),
           Padding(
             padding: EdgeInsets.fromLTRB(12, 10, 12, 2),
             child: Row(
@@ -5961,6 +5984,7 @@ final class _ShellBanners extends ConsumerWidget {
     // the previous instance of every field it does not replace, so the tuple
     // below is stable across message, cache, and composer updates.
     ref.watch(mobileControllerProvider.select((state) => (
+          state.activeGuild,
           state.offline,
           state.phase,
           state.gatewayHealth,
@@ -5972,6 +5996,8 @@ final class _ShellBanners extends ConsumerWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (state.activeGuild case final guild?)
+          OnboardingEntry(key: ValueKey(guild.ref), guild: guild),
         if (state.offline)
           _StatusBanner(
             icon: Icons.cloud_off_rounded,

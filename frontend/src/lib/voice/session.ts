@@ -381,6 +381,8 @@ export class VoiceSession extends EventTarget {
   #nativePrioritySpeakers = new Set<string>();
   #activeSpeakers = new Set<string>();
   #remoteAudio = new Set<HTMLMediaElement>();
+  #listeningVolumes = new Map<string, number>();
+  #audioOwners = new Map<HTMLMediaElement, { identity: string; stream: boolean }>();
   #connectGeneration = 0;
   #pushToTalkDesired = false;
   #pushToTalkQueue: Promise<void> = Promise.resolve();
@@ -673,6 +675,10 @@ export class VoiceSession extends EventTarget {
       this.camera = status.camera ?? false;
       this.screen = status.screen ?? false;
       this.videoDegraded = status.video_degraded ?? false;
+      for (const [identity, volumes] of Object.entries(status.listening_volumes ?? {})) {
+        this.#listeningVolumes.set(JSON.stringify([identity, false]), volumes[0]);
+        this.#listeningVolumes.set(JSON.stringify([identity, true]), volumes[1]);
+      }
       this.#nativeMuted = status.muted ?? this.#nativeMuted;
       this.#nativeDeafened = status.deafened ?? this.#nativeDeafened;
       this.#nativePrioritySpeakers = nativePrioritySpeakerIdentities(status.priority_speakers);
@@ -1242,15 +1248,36 @@ export class VoiceSession extends EventTarget {
     return this.#nativePrioritySpeakers;
   }
 
+  listeningVolume(identity: string, stream = false): number {
+    return this.#listeningVolumes.get(JSON.stringify([identity, stream])) ?? 1;
+  }
+
+  async setListeningVolume(identity: string, stream: boolean, value: number): Promise<void> {
+    if (!Number.isFinite(value)) return;
+    const volume = Math.min(1, Math.max(0, value));
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_voice_volume', { identity, stream, volume });
+    }
+    this.#listeningVolumes.set(JSON.stringify([identity, stream]), volume);
+    for (const [media, owner] of this.#audioOwners) {
+      if (owner.identity === identity && owner.stream === stream) media.volume = volume;
+    }
+    this.#changed();
+  }
+
   attachAudio(element: HTMLElement): () => void {
     if (isNativeDesktop()) return () => undefined;
     const attached: HTMLMediaElement[] = [];
     const attachPublication = (
-      publication: RemoteTrackPublication | LocalTrackPublication
+      publication: RemoteTrackPublication | LocalTrackPublication,
+      identity: string
     ): void => {
       if (!publication.track || publication.track.kind !== Track.Kind.Audio) return;
       const media = publication.track.attach();
       media.autoplay = true;
+      const stream = publication.source === Track.Source.ScreenShareAudio;
+      media.volume = this.listeningVolume(identity, stream);
+      this.#audioOwners.set(media, { identity, stream });
       media.muted = this.deafened;
       element.append(media);
       attached.push(media);
@@ -1258,23 +1285,22 @@ export class VoiceSession extends EventTarget {
     };
     for (const participant of this.room.remoteParticipants.values()) {
       for (const publication of participant.audioTrackPublications.values()) {
-        attachPublication(publication);
+        attachPublication(publication, participant.identity);
       }
     }
-    const onSubscribed = (track: RemoteTrack) => {
-      if (track.kind !== Track.Kind.Audio) return;
-      const media = track.attach();
-      media.autoplay = true;
-      media.muted = this.deafened;
-      element.append(media);
-      attached.push(media);
-      this.#remoteAudio.add(media);
+    const onSubscribed = (
+      _track: RemoteTrack,
+      publication: RemoteTrackPublication,
+      participant: Participant
+    ) => {
+      attachPublication(publication, participant.identity);
     };
     this.room.on(RoomEvent.TrackSubscribed, onSubscribed);
     return () => {
       this.room.off(RoomEvent.TrackSubscribed, onSubscribed);
       for (const media of attached) {
         this.#remoteAudio.delete(media);
+        this.#audioOwners.delete(media);
         media.remove();
       }
     };

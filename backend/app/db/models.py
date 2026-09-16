@@ -165,6 +165,8 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    content_deletion: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Private authority state. It is never included in federated profiles;
     # remote authorities receive only a signed, request-scoped adult attestation.
@@ -208,7 +210,8 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             name="age_assurance_local_human_only",
         ),
         CheckConstraint(
-            "NOT is_local OR account_type = 'bot' OR password_hash IS NOT NULL",
+            "deleted_at IS NOT NULL OR NOT is_local OR account_type = 'bot' "
+            "OR password_hash IS NOT NULL",
             name="local_auth_fields",
         ),
         CheckConstraint(
@@ -256,6 +259,8 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             name="e2ee_vault_salt_length",
         ),
         CheckConstraint(
+            "(deleted_at IS NOT NULL AND password_kdf_version IS NULL "
+            "AND password_auth_salt IS NULL AND e2ee_vault_salt IS NULL) OR "
             "(is_local AND account_type = 'human' AND password_kdf_version = 2 "
             "AND password_auth_salt IS NOT NULL AND e2ee_vault_salt IS NOT NULL) OR "
             "(NOT (is_local AND account_type = 'human') AND password_kdf_version IS NULL "
@@ -1065,6 +1070,9 @@ class AuthEvent(Base, LocalUserMixin):
 
 
 class Guild(Base, FederatedIdMixin, TimestampMixin):
+    onboarding: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
     __tablename__ = "guilds"
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500))
@@ -1375,6 +1383,9 @@ class GuildHistoryExportChannel(Base):
 
 
 class GuildMember(Base, TimestampMixin):
+    onboarding_state: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
     __tablename__ = "guild_members"
     guild_id: Mapped[int] = mapped_column(BigInteger)
     guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))

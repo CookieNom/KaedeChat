@@ -5,9 +5,9 @@ from typing import Any
 
 
 def account_is_banned(user: Any) -> bool:
-    """Return whether this instance has permanently banned a local account."""
+    """Return whether an account is permanently disabled or deleted."""
 
-    return user.disabled_at is not None
+    return user.disabled_at is not None or getattr(user, "deleted_at", None) is not None
 
 
 def account_is_temporarily_suspended(user: Any, *, now: datetime | None = None) -> bool:
@@ -36,4 +36,4 @@ def account_active_clause(user_model: Any, *, now: datetime | None = None) -> An
     """
 
     del now
-    return user_model.disabled_at.is_(None)
+    return user_model.disabled_at.is_(None) & user_model.deleted_at.is_(None)

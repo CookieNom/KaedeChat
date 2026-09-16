@@ -109,6 +109,7 @@ export interface Channel {
 }
 
 export interface Guild {
+  banner_hash?: string | null;
   id: string;
   origin_domain: string;
   name: string;

@@ -1535,6 +1535,18 @@ async def delete_task(
         raise HTTPException(status_code=404, detail={"code": "TRACKER_TASK_NOT_FOUND"})
     require_tracker_version(task.updated_at, if_match)
     await require_task_edit(session, redis, context, auth.user, task)
+    await commit_task_deletion(session, settings, context, auth.user, task, tasks)
+
+
+async def commit_task_deletion(
+    session: AsyncSession,
+    settings: Settings,
+    context: TrackerContext,
+    actor: User,
+    task: TrackerTask,
+    tasks: list[TrackerTask],
+) -> None:
+    """Delete an already-authorized task under the board/ordered-task locks."""
     lane_tasks = [
         item
         for item in tasks
@@ -1556,7 +1568,7 @@ async def delete_task(
         session,
         settings,
         context,
-        auth.user,
+        actor,
         reason="task_order_updated" if positions_shifted else "task_deleted",
     )
     if positions_shifted:
