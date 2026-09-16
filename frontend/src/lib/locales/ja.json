@@ -3000,5 +3000,11 @@
   "ui_bot_edit_role_permissions": "サーバー設定 → ロールでBotのロールを編集できます。以下はインストール時の初期権限であり、その後のロール変更の上限ではありません。",
   "share_locale_with_bots": "言語をボットやアプリと共有する",
   "share_locale_with_bots_description": "操作時にボットやアプリがあなたの言語を使用できるようにします。オフにすると、すべてのデバイスで言語を非公開にします。",
-  "privacy_description": "メッセージを送信できる相手と、ボットやアプリに共有する情報を選択します。"
+  "privacy_description": "メッセージを送信できる相手と、ボットやアプリに共有する情報を選択します。",
+  "screen_audio_share_app": "アプリの音声を共有",
+  "screen_audio_follows_source": "画面全体ではパソコンの音声を、ウィンドウではそのアプリの音声のみを共有します。Kaede通話の音声は除外されます。",
+  "screen_audio_source": "共有する音声",
+  "screen_audio_choose": "共有する音声を選択",
+  "screen_audio_all": "パソコンのすべての音声",
+  "screen_audio_wayland_hint": "ウィンドウを共有する場合はそのアプリを、画面全体を共有する場合はすべての音声を選択してください。音声を再生中のアプリが表示されます。"
 }

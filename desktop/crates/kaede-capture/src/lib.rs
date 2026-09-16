@@ -4,6 +4,8 @@
 //! Keeping the conversion here makes the native screen and camera backends
 //! replaceable without coupling either one to the room transport.
 
+pub mod system_audio;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct I420Frame {
     pub width: u32,

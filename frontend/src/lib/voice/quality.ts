@@ -31,6 +31,8 @@ export interface MediaQualityPreferences {
   screenProfile: ScreenShareProfileId;
   audioQuality: AudioQualityId;
   shareAudio: boolean;
+  /** Current share only; process IDs are never restored from preferences. */
+  audioProcess?: number;
   dtx: boolean;
 }
 
@@ -156,7 +158,8 @@ export function saveMediaQuality(
 ): void {
   try {
     const target = storage ?? globalThis.localStorage;
-    target?.setItem(STORAGE_KEY, JSON.stringify(preferences));
+    const { screenProfile, audioQuality, shareAudio, dtx } = preferences;
+    target?.setItem(STORAGE_KEY, JSON.stringify({ screenProfile, audioQuality, shareAudio, dtx }));
   } catch {
     // Private browsing and hardened WebViews can reject storage writes. The
     // active session still uses the selected values.

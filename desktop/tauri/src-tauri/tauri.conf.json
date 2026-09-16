@@ -41,6 +41,12 @@
       "infoPlist": "Info.plist"
     },
     "linux": {
+      "deb": {
+        "depends": ["libpulse0", "libxcb1"]
+      },
+      "rpm": {
+        "depends": ["pulseaudio-libs", "libxcb"]
+      },
       "appimage": {
         "bundleMediaFramework": true
       }

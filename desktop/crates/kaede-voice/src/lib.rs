@@ -1,6 +1,10 @@
 //! `LiveKit` transport backed exclusively by Kaede's `CPAL` audio graph.
 
 mod native_video_probe;
+mod screen_audio;
+pub use kaede_capture::system_audio::{
+    AudioApplication, applications as screen_audio_applications,
+};
 
 use std::{
     borrow::Cow,
@@ -310,6 +314,9 @@ impl Default for MediaPublishSettings {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenShareSettings {
+    pub share_audio: bool,
+    /// Explicit Linux portal audio choice: zero for desktop, otherwise an app PID.
+    pub audio_process: Option<u32>,
     pub width: u32,
     pub height: u32,
     pub frame_rate: u32,
@@ -349,6 +356,8 @@ fn effective_microphone_bitrate(preferred: u64, channel_bitrate: u64) -> u64 {
 impl Default for ScreenShareSettings {
     fn default() -> Self {
         Self {
+            share_audio: false,
+            audio_process: None,
             width: 1280,
             height: 720,
             frame_rate: 30,
@@ -1023,6 +1032,12 @@ async fn run_room(
                 });
             }
             _ = video_tick.tick() => {
+                if screen_share.as_ref().is_some_and(|share| share.stop.load(Ordering::Acquire)) {
+                    let message = screen_share.as_ref().and_then(|share| share.capture_failure.lock().ok()?.clone())
+                        .unwrap_or_else(|| "Screen sharing ended.".to_owned());
+                    let _ = stop_published_video(&room, screen_share.take()).await;
+                    send_media_error(&status, &room, can_speak, can_stream, None, camera.as_ref(), message);
+                }
                 reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
             }
             _ = playback_tick.tick() => {
@@ -1911,6 +1926,9 @@ fn reconcile_video_subscriptions(
 }
 
 struct PublishedVideo {
+    audio: Option<screen_audio::PublishedAudio>,
+    audio_capture_thread: Option<thread::JoinHandle<()>>,
+    capture_failure: screen_audio::CaptureFailure,
     track: LocalVideoTrack,
     source: TrackSource,
     encoding: VideoEncoding,
@@ -1936,6 +1954,7 @@ fn video_publish_options(_encrypted: bool, encoding: VideoEncoding) -> TrackPubl
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keep capture startup and rollback in one transaction.
 async fn publish_screen_share(
     room: &Room,
     source_id: Option<&str>,
@@ -1946,6 +1965,7 @@ async fn publish_screen_share(
         height: settings.height.clamp(360, 2160),
         frame_rate: settings.frame_rate.clamp(5, 60),
         max_bitrate: settings.max_bitrate.clamp(300_000, 12_000_000),
+        ..settings
     };
     let source = NativeVideoSource::new(
         VideoResolution {
@@ -1959,6 +1979,10 @@ async fn publish_screen_share(
         RtcVideoSource::Native(source.clone()),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let failure = Arc::new(Mutex::new(None));
+    let thread_failure = failure.clone();
+    let (audio_sender, audio_receiver) = mpsc::channel(10);
+    let thread_audio = audio_sender.clone();
     let capture_level = Arc::new(AtomicU32::new(0));
     let thread_level = capture_level.clone();
     let thread_stop = stop.clone();
@@ -1975,6 +1999,8 @@ async fn publish_screen_share(
                     source_id.as_deref(),
                     settings,
                     ready_tx,
+                    thread_audio,
+                    thread_failure,
                 );
             }
         })
@@ -1984,7 +2010,11 @@ async fn publish_screen_share(
         Ok(Ok(Err(error))) => {
             stop.store(true, Ordering::Release);
             let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
-            return Err(VoiceError::ScreenWorker(error));
+            return Err(if settings.share_audio {
+                VoiceError::ScreenAudio(error)
+            } else {
+                VoiceError::ScreenWorker(error)
+            });
         }
         Ok(Err(error)) => {
             stop.store(true, Ordering::Release);
@@ -1999,6 +2029,29 @@ async fn publish_screen_share(
             ));
         }
     }
+    #[cfg(not(target_os = "macos"))]
+    let audio_capture_thread = if settings.share_audio {
+        match screen_audio::start_capture(
+            source_id,
+            settings,
+            audio_sender,
+            stop.clone(),
+            failure.clone(),
+        )
+        .await
+        {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                stop.store(true, Ordering::Release);
+                let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let audio_capture_thread = None;
     if let Err(error) = room
         .local_participant()
         .publish_track(
@@ -2018,9 +2071,31 @@ async fn publish_screen_share(
     {
         stop.store(true, Ordering::Release);
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+        if let Some(worker) = audio_capture_thread {
+            let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+        }
         return Err(error.into());
     }
+    let audio = if settings.share_audio {
+        match screen_audio::publish(room, audio_receiver, stop.clone(), failure.clone()).await {
+            Ok(audio) => Some(audio),
+            Err(error) => {
+                stop.store(true, Ordering::Release);
+                let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+                if let Some(worker) = audio_capture_thread {
+                    let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+                }
+                let _ = room.local_participant().unpublish_track(&track.sid()).await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let video = PublishedVideo {
+        audio,
+        audio_capture_thread,
+        capture_failure: failure,
         source: TrackSource::Screenshare,
         encoding: VideoEncoding {
             max_bitrate: settings.max_bitrate,
@@ -2286,6 +2361,9 @@ async fn publish_camera(
         return Err(error.into());
     }
     let video = PublishedVideo {
+        audio: None,
+        audio_capture_thread: None,
+        capture_failure: Arc::new(Mutex::new(None)),
         source: TrackSource::Camera,
         encoding: VideoEncoding {
             max_bitrate: settings.max_bitrate,
@@ -2421,6 +2499,17 @@ async fn stop_published_video(
         return Ok(());
     };
     publication.stop.store(true, Ordering::Release);
+    if let Some(audio) = publication.audio.take() {
+        audio.publisher.abort();
+        let _ = audio.publisher.await;
+        let _ = room
+            .local_participant()
+            .unpublish_track(&audio.track.sid())
+            .await;
+    }
+    if let Some(worker) = publication.audio_capture_thread.take() {
+        let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+    }
     if let Some(adjustment) = publication.adjustment.take() {
         let _ = adjustment.await;
     }
@@ -2445,7 +2534,7 @@ async fn stop_published_video(
     Ok(())
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn run_screen_capture(
     source: NativeVideoSource,
     stop: Arc<AtomicBool>,
@@ -2453,7 +2542,15 @@ fn run_screen_capture(
     requested: Option<&str>,
     settings: ScreenShareSettings,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+    audio: mpsc::Sender<Vec<i16>>,
+    failure: screen_audio::CaptureFailure,
 ) {
+    #[cfg(target_os = "macos")]
+    if settings.share_audio {
+        run_macos_share(source, stop, capture_level, settings, ready, audio, failure);
+        return;
+    }
+    let _ = audio;
     let (kind, requested_id) = requested
         .and_then(|value| value.split_once(':'))
         .and_then(|(kind, id)| id.parse::<u64>().ok().map(|id| (kind, id)))
@@ -2508,6 +2605,7 @@ fn run_screen_capture(
 
     let mut ready = Some(ready);
     let frame_level = capture_level.clone();
+    let frame_stop = stop.clone();
     capturer.start_capture(selected, move |result| match result {
         Ok(frame) => {
             let level = frame_level.load(Ordering::Acquire).min(3);
@@ -2532,12 +2630,13 @@ fn run_screen_capture(
             }
         }
         Err(error) => {
-            if error == CaptureError::Permanent
-                && let Some(ready) = ready.take()
-            {
-                let _ = ready.send(Err(
-                    "screen capture permission was denied or the selected source closed".to_owned(),
-                ));
+            if error == CaptureError::Permanent {
+                let message = "Screen capture permission was denied or the selected source closed."
+                    .to_owned();
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(Err(message.clone()));
+                }
+                screen_audio::fail(&frame_stop, &failure, message);
             }
             tracing::warn!(?error, "screen capture frame failed");
         }
@@ -2554,17 +2653,81 @@ fn run_screen_capture(
     }
 }
 
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+fn run_macos_share(
+    source: NativeVideoSource,
+    stop: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+    settings: ScreenShareSettings,
+    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+    audio: mpsc::Sender<Vec<i16>>,
+    failure: screen_audio::CaptureFailure,
+) {
+    let ready = Mutex::new(Some(ready));
+    kaede_capture::system_audio::run(
+        kaede_capture::system_audio::CaptureOptions {
+            window: 0,
+            process: 0,
+            width: settings.width,
+            height: settings.height,
+            fps: settings.frame_rate,
+            audio: settings.share_audio,
+        },
+        &|| stop.load(Ordering::Acquire),
+        &|samples| {
+            let _ = audio.try_send(samples.to_vec());
+        },
+        &|frame| {
+            let shift = level.load(Ordering::Acquire).min(3);
+            let adapted = ScreenShareSettings {
+                width: (settings.width >> shift).max(640),
+                height: (settings.height >> shift).max(360),
+                ..settings
+            };
+            if let Some(buffer) = prepare_packed_screen_frame(frame, adapted) {
+                source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
+                if let Ok(mut ready) = ready.lock()
+                    && let Some(ready) = ready.take()
+                {
+                    let _ = ready.send(Ok(()));
+                }
+            }
+        },
+        &|result| {
+            if let Err(message) = result {
+                screen_audio::fail(&stop, &failure, message.clone());
+                if let Ok(mut ready) = ready.lock()
+                    && let Some(ready) = ready.take()
+                {
+                    let _ = ready.send(Err(message));
+                }
+            }
+        },
+    );
+}
+
 fn prepare_screen_frame(frame: &DesktopFrame, settings: ScreenShareSettings) -> Option<I420Buffer> {
     let width = u32::try_from(frame.width()).ok()?;
     let height = u32::try_from(frame.height()).ok()?;
-    let converted = (PackedFrame {
-        width,
-        height,
-        stride: usize::try_from(frame.stride()).ok()?,
-        format: PackedPixelFormat::Bgra,
-        data: frame.data(),
-    })
-    .to_i420();
+    prepare_packed_screen_frame(
+        PackedFrame {
+            width,
+            height,
+            stride: usize::try_from(frame.stride()).ok()?,
+            format: PackedPixelFormat::Bgra,
+            data: frame.data(),
+        },
+        settings,
+    )
+}
+
+fn prepare_packed_screen_frame(
+    frame: PackedFrame<'_>,
+    settings: ScreenShareSettings,
+) -> Option<I420Buffer> {
+    let (width, height) = (frame.width, frame.height);
+    let converted = frame.to_i420();
     let Some(converted) = converted else {
         tracing::warn!(width, height, "screen capture produced an invalid frame");
         return None;
@@ -2634,6 +2797,8 @@ pub enum VoiceError {
     CameraWorker(String),
     #[error("screen capture worker failed: {0}")]
     ScreenWorker(String),
+    #[error("screen audio: {0}")]
+    ScreenAudio(String),
     #[error("voice activity is disabled in this channel; select push to talk")]
     VoiceActivityDenied,
     #[error("the voice grant did not match the current channel policy")]
@@ -2671,6 +2836,8 @@ impl VoiceError {
             Self::ScreenWorker(_) =>
                 "Screen sharing did not start. Approve the system chooser and screen-recording permission, then try again."
                     .to_owned(),
+            Self::ScreenAudio(message) =>
+                format!("{message} You can also share with audio disabled."),
             Self::VoiceActivityDenied =>
                 "Voice activity is not allowed in this channel. Switch your input mode to push to talk and try again."
                     .to_owned(),
@@ -2927,6 +3094,9 @@ mod tests {
 
     #[test]
     fn voice_errors_explain_the_recovery_action() {
+        let audio_error =
+            VoiceError::ScreenAudio("The selected audio app has closed.".to_owned()).user_message();
+        assert!(audio_error.contains("app has closed") && audio_error.contains("audio disabled"));
         let message = VoiceError::Audio(kaede_audio::AudioError::DeviceNotFound).user_message();
         assert!(message.contains("another audio device") && message.contains("try again"));
         assert!(

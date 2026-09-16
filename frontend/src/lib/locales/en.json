@@ -3035,5 +3035,11 @@
   "desktop_themes_auto_reload": "Drop .theme.css files into this folder. New themes and saved edits appear automatically.",
   "desktop_themes_missing": "This theme is missing or unreadable. Using the default appearance until it is available again.",
   "desktop_themes_skipped": "Could not load: {files}. Use readable .theme.css files under 256 KB with a light, dark, or system base.",
-  "desktop_themes_folder_error": "Could not open the themes folder."
+  "desktop_themes_folder_error": "Could not open the themes folder.",
+  "screen_audio_share_app": "Share app audio",
+  "screen_audio_follows_source": "A display shares computer audio. A window shares only its app’s audio. Kaede call audio is excluded.",
+  "screen_audio_source": "Audio to share",
+  "screen_audio_choose": "Choose the audio to share",
+  "screen_audio_all": "All computer audio",
+  "screen_audio_wayland_hint": "For a window, choose its app here. For a whole display, choose all computer audio. Apps appear while playing sound."
 }

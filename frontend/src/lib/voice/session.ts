@@ -944,7 +944,8 @@ export class VoiceSession extends EventTarget {
         sourceId
       });
       await nativeInvoke('native_voice_control', {
-        control: 'screen_on'
+        control: 'screen_on',
+        audioProcess: preferences.shareAudio ? (preferences.audioProcess ?? null) : null
       });
       this.screen = true;
       this.#changed();

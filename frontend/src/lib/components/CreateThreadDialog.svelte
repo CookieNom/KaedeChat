@@ -177,7 +177,7 @@
     min-height: 38px;
     border: 0;
     border-radius: 7px;
-    padding: 0 0.9rem;
+    padding: 0.5rem 0.9rem;
     color: var(--text-soft);
     background: transparent;
     font-weight: 750;

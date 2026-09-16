@@ -628,7 +628,7 @@
     gap: 0.4rem;
     border: 1px solid var(--line);
     border-radius: 9px;
-    padding: 0 0.8rem;
+    padding: 0.55rem 0.8rem;
     color: var(--text-soft);
     background: var(--surface-subtle);
     font-size: 0.76rem;
@@ -710,7 +710,7 @@
 
   .tag-filters button {
     min-height: 32px;
-    padding: 0 0.65rem;
+    padding: 0.35rem 0.65rem;
   }
 
   .tag-filters button.active,
@@ -884,7 +884,7 @@
     min-height: 34px;
     border: 0;
     border-radius: 7px;
-    padding: 0 0.7rem;
+    padding: 0.4rem 0.7rem;
     color: var(--text-soft);
     background: transparent;
     font-weight: 750;

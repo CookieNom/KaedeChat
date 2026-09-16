@@ -8,5 +8,7 @@
   <string>Kaede uses your camera only when you enable video.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>Kaede captures a screen or window only when you start sharing it.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Kaede captures computer or app audio only when you enable audio for a screen share.</string>
 </dict>
 </plist>

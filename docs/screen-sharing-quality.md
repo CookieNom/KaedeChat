@@ -45,10 +45,21 @@ bounded, one-frame thumbnails for at most 24 listed sources with three capture
 workers; full-resolution frames are not retained or persisted. The selected
 source ID is checked against a fresh trusted enumeration before it is stored.
 
-Native desktop system-audio loopback is disabled in the chooser
-until the Windows WASAPI, macOS ScreenCaptureKit audio, and Linux PipeWire
-paths have a tested common mixer contract. This does not affect microphone
-bitrate selection.
+Enable **Share computer audio** (or **Share app audio** for a window) in the
+share options. A display shares output from other apps; a window shares its
+owning app's output, including that app's other windows and child processes.
+Kaede's own call playback is excluded to avoid sending callers their voices back.
+Screen audio is a separate 48 kHz stereo track and is independent of microphone
+mute, voice activation, and microphone processing. Stopping the share or losing
+the selected app stops both screen tracks. A capture error never falls back
+from app audio to whole-computer audio.
+
+Windows uses process-loopback capture and requires Windows build 20348 or
+later (including Windows 11) for shared audio. Earlier Windows versions can
+share video with audio disabled. Linux uses individual playback-stream monitors
+through PipeWire-Pulse or PulseAudio; ALSA-only sessions cannot share output
+audio. X11 matches the window's process ID and its children. Apps that do not
+expose a usable local process ID cannot be matched automatically.
 
 ### macOS desktop
 
@@ -57,7 +68,9 @@ does not enumerate windows or produce application-owned thumbnails on macOS.
 The first share prompts for Screen Recording access; denial or cancellation is
 reported and no blank LiveKit publication is left behind. A production build
 must be signed with the screen-recording usage/signing configuration expected
-by the target macOS release.
+by the target macOS release. Audio sharing requires macOS 14 or later and uses
+the same ScreenCaptureKit filter for video and audio. Disable shared audio to
+use the existing video-only capture path on older supported systems.
 
 ### Wayland desktop
 
@@ -65,7 +78,11 @@ When `WAYLAND_DISPLAY` is set or `XDG_SESSION_TYPE=wayland`, Kaede uses the
 generic PipeWire/XDG Desktop Portal capturer. It returns no
 XWayland source list, previews, or cached IDs, leaving disclosure and consent
 to the compositor's portal. X11 sessions continue to use explicit source
-enumeration.
+enumeration. When sharing audio under Wayland, explicitly select **All computer
+audio** for a display or the app's name for a window before opening the portal.
+The portal does not reliably disclose the window's owning process to Kaede.
+Only apps currently producing output appear in the audio list; start playback
+and refresh the chooser if necessary. The audio choice is not saved across shares.
 
 ### Android
 
@@ -108,6 +125,18 @@ native PiP is visible. Audio, signaling, and outgoing media continue. Restoring
 visibility resumes incoming video subscriptions.
 
 ## Release validation
+
+For desktop audio, play different sounds in two apps. Confirm a display sends
+both and an app window sends only its owning app (including child audio
+processes), with no Kaede call echo. Test mic mute independently, app closure,
+new playback streams, output-device changes, capture denial, and stopping or
+leaving a call. Check both encrypted and plaintext calls with a remote receiver.
+On Wayland test both explicit audio choices. Protected media may refuse capture.
+
+Linux's automated isolation test uses its own temporary PulseAudio server and
+never changes the desktop's routing: install `pulseaudio`, `libpulse-dev`,
+`libxcb1-dev`, a C++ compiler, and `pkg-config`, then run
+`bash desktop/test-screen-audio.sh` from the repository root.
 
 Before a store or desktop release, validate every preset on a physical receiver
 and verify permission denial, chooser cancellation, source closure, orientation

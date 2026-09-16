@@ -544,6 +544,7 @@ progress {
 }
 
 .form-actions {
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -2496,6 +2497,7 @@ progress {
 }
 
 .action-dialog footer {
+  flex-wrap: wrap;
   justify-content: flex-end;
   padding-top: 4px;
 }
@@ -3946,7 +3948,7 @@ progress {
   gap: 0.65rem;
   border: 1px solid var(--line);
   border-radius: 13px;
-  padding: 0 0.85rem;
+  padding: 0.65rem 0.85rem;
   color: var(--text-soft);
   background: var(--surface-sunken, var(--background));
   font-size: 0.78rem;
@@ -6079,7 +6081,7 @@ progress {
   gap: 0.35rem;
   border: 1px solid var(--line);
   border-radius: 7px;
-  padding: 0 0.55rem;
+  padding: 0.35rem 0.55rem;
   color: var(--text-soft);
   background: var(--surface-subtle);
   font-size: 0.72rem;
@@ -8715,6 +8717,7 @@ body.media-viewer-open {
 }
 
 .channel-dialog footer {
+  flex-wrap: wrap;
   display: flex;
   justify-content: flex-end;
   gap: 0.6rem;

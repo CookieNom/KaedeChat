@@ -382,7 +382,7 @@
     min-height: 38px;
     border: 1px solid var(--danger);
     border-radius: 10px;
-    padding: 0 13px;
+    padding: 8px 13px;
     color: var(--text);
     background: transparent;
     font: inherit;
@@ -431,7 +431,7 @@
     min-height: 38px;
     border: 1px solid var(--line);
     border-radius: 10px;
-    padding: 0 14px;
+    padding: 8px 14px;
     color: var(--text-soft);
     background: transparent;
     font: inherit;

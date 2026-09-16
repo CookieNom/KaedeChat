@@ -57,7 +57,10 @@ describe('media quality preferences', () => {
       shareAudio: false,
       dtx: false
     };
-    saveMediaQuality(preferences, storage);
+    saveMediaQuality({ ...preferences, audioProcess: 1234 }, storage);
+    expect(storage.value).not.toContain('audioProcess');
+    expect(loadMediaQuality(storage)).toEqual(preferences);
+    storage.value = JSON.stringify({ ...preferences, audioProcess: 1234 });
     expect(loadMediaQuality(storage)).toEqual(preferences);
   });
 

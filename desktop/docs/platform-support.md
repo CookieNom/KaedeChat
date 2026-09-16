@@ -3,6 +3,8 @@
 ## Windows
 
 Windows 10 and later use WASAPI through CPAL and Windows Credential Manager.
+Screen audio requires Windows build 20348 or later (including Windows 11);
+older builds support video-only sharing.
 Native camera capture, desktop capture, global shortcuts, tray integration, and
 Windows notifications are all supported. Signed NSIS packages are produced
 on Windows runners. Production releases ship a per-user NSIS installer. It
@@ -16,14 +18,16 @@ Kaede's foreground UI.
 macOS 11 and later use CoreAudio, Keychain, ScreenCaptureKit-compatible LiveKit
 capture, notifications, and global shortcuts. The bundle contains microphone,
 camera, and screen-capture usage descriptions. Distribution builds require a
-Developer ID, hardened runtime, notarization, and stapling.
+Developer ID, hardened runtime, notarization, and stapling. Screen audio uses
+the system picker and requires macOS 14 or later.
 
 ## Linux
 
 Linux supports PipeWire/PulseAudio/ALSA as exposed through CPAL and the desktop
 session, plus Secret Service credentials, notifications, tray integration, and
 portal-compatible screen capture. Building requires WebKitGTK 4.1, GTK 3,
-Ayatana AppIndicator, ALSA, udev, D-Bus, OpenSSL, and Clang 21 or newer for
+Ayatana AppIndicator, ALSA, PulseAudio client headers (`libpulse-dev`), XCB
+headers (`libxcb1-dev`), udev, D-Bus, OpenSSL, and Clang 21 or newer for
 libwebrtc's bundled libc++. On Debian/Ubuntu, run `sudo sh desktop/install-clang.sh`
 from the repository root, then build with `CC=clang-21 CXX=clang++-21`.
 The tooling image and Linux CI jobs configure this automatically.

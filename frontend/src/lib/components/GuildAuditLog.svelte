@@ -330,7 +330,7 @@
     border-radius: 0.6rem;
     background: var(--surface-raised);
     color: var(--text);
-    padding: 0 0.75rem;
+    padding: 0.5rem 0.75rem;
   }
   .exact-actor-row {
     display: grid;

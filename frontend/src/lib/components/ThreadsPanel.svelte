@@ -255,7 +255,7 @@
     min-height: 34px;
     border: 0;
     border-radius: 7px;
-    padding: 0 0.65rem;
+    padding: 0.4rem 0.65rem;
     color: var(--text-soft);
     background: var(--surface-subtle);
     font-weight: 750;

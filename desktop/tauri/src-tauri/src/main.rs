@@ -334,6 +334,7 @@ impl From<VoiceError> for NativeError {
                     VoiceError::CaptureThread(_) | VoiceError::ScreenWorker(_) => {
                         "SCREEN_CAPTURE_UNAVAILABLE"
                     }
+                    VoiceError::ScreenAudio(_) => "SCREEN_AUDIO_UNAVAILABLE",
                     VoiceError::Api(_) => unreachable!("API voice errors returned above"),
                 };
                 Self::operation(code, message, error)
@@ -2360,6 +2361,13 @@ fn native_hotkey_status(state: State<'_, NativeState>) -> String {
 }
 
 #[tauri::command]
+async fn native_screen_audio_apps() -> Vec<kaede_voice::AudioApplication> {
+    tokio::task::spawn_blocking(kaede_voice::screen_audio_applications)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 async fn native_audio_devices() -> Result<Value, NativeError> {
     let inputs = tokio::task::spawn_blocking(input_devices)
         .await
@@ -2479,12 +2487,13 @@ fn media_publish_settings(preferences: &DesktopPreferences) -> MediaPublishSetti
 }
 
 fn screen_share_settings(preferences: &DesktopPreferences) -> ScreenShareSettings {
-    match preferences.screen_share_profile {
+    let mut settings = match preferences.screen_share_profile {
         ScreenShareProfilePreference::DataSaver => ScreenShareSettings {
             width: 1280,
             height: 720,
             frame_rate: 15,
             max_bitrate: 1_200_000,
+            ..ScreenShareSettings::default()
         },
         ScreenShareProfilePreference::Smooth => ScreenShareSettings::default(),
         ScreenShareProfilePreference::Sharp => ScreenShareSettings {
@@ -2492,14 +2501,18 @@ fn screen_share_settings(preferences: &DesktopPreferences) -> ScreenShareSetting
             height: 1080,
             frame_rate: 30,
             max_bitrate: 4_500_000,
+            ..ScreenShareSettings::default()
         },
         ScreenShareProfilePreference::Source => ScreenShareSettings {
             width: 3840,
             height: 2160,
             frame_rate: 30,
             max_bitrate: 8_000_000,
+            ..ScreenShareSettings::default()
         },
-    }
+    };
+    settings.share_audio = preferences.share_system_audio;
+    settings
 }
 
 #[tauri::command]
@@ -2762,6 +2775,7 @@ async fn forward_voice_restart(
 #[tauri::command]
 async fn native_voice_control(
     control: VoiceControl,
+    audio_process: Option<u32>,
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
     let mut voice = state.voice.lock().await;
@@ -2789,7 +2803,10 @@ async fn native_voice_control(
                 .screen_source
                 .as_ref()
                 .map(|device| device.id.clone()),
-            settings: screen_share_settings(&preferences),
+            settings: ScreenShareSettings {
+                audio_process,
+                ..screen_share_settings(&preferences)
+            },
         },
         VoiceControl::ScreenOff => VoiceCommand::SetScreenShare {
             enabled: false,
@@ -3570,6 +3587,7 @@ fn main() {
             native_gateway_next,
             native_gateway_command,
             native_audio_devices,
+            native_screen_audio_apps,
             native_screen_thumbnail,
             native_test_input,
             native_test_output,

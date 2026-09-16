@@ -123,7 +123,7 @@
 
   .desktop-action button {
     min-height: 42px;
-    padding: 0 16px;
+    padding: 10px 16px;
     border: 1px solid var(--line-strong);
     border-radius: 12px;
     color: var(--text);

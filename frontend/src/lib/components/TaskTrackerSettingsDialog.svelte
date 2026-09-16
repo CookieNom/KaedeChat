@@ -384,7 +384,7 @@
     gap: 0.35rem;
     border: 0;
     border-radius: 8px;
-    padding: 0 0.7rem;
+    padding: 0.5rem 0.7rem;
     color: var(--text-soft);
     background: var(--surface-subtle);
     font: inherit;

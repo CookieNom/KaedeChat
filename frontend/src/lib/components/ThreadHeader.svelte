@@ -519,7 +519,7 @@
     min-height: 38px;
     border: 0;
     border-radius: 7px;
-    padding: 0 0.9rem;
+    padding: 0.5rem 0.9rem;
     color: var(--text-soft);
     background: transparent;
     font-weight: 750;
@@ -588,7 +588,7 @@
     gap: 0.35rem;
     border: 1px solid var(--line);
     border-radius: 7px;
-    padding: 0 0.55rem;
+    padding: 0.4rem 0.55rem;
     color: var(--text-soft);
     background: var(--surface-subtle);
     font-size: 0.72rem;
@@ -651,7 +651,7 @@
     justify-content: space-between;
     border: 0;
     border-radius: 6px;
-    padding: 0 0.5rem;
+    padding: 0.4rem 0.5rem;
     color: var(--text-soft);
     background: transparent;
     text-align: left;

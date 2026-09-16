@@ -960,7 +960,7 @@
     gap: 7px;
     border: 1px solid var(--line);
     border-radius: 9px;
-    padding: 0 12px;
+    padding: 8px 12px;
     color: var(--text);
     background: var(--surface-subtle);
     font-size: 0.7rem;

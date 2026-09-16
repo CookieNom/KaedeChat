@@ -364,7 +364,7 @@ ThemeData kaedeTheme({Brightness brightness = Brightness.dark}) {
         disabledBackgroundColor: KaedeColors.raised,
         disabledForegroundColor: KaedeColors.muted,
         minimumSize: const Size(0, 46),
-        padding: const EdgeInsets.symmetric(horizontal: 18),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(KaedeRadius.medium)),
         textStyle: textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
@@ -377,7 +377,7 @@ ThemeData kaedeTheme({Brightness brightness = Brightness.dark}) {
         foregroundColor: KaedeColors.text,
         disabledForegroundColor: KaedeColors.muted,
         minimumSize: const Size(0, 46),
-        padding: const EdgeInsets.symmetric(horizontal: 18),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
         side: const BorderSide(color: KaedeColors.borderStrong),
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(KaedeRadius.medium)),
@@ -391,7 +391,7 @@ ThemeData kaedeTheme({Brightness brightness = Brightness.dark}) {
         foregroundColor: KaedeColors.coralText,
         disabledForegroundColor: KaedeColors.muted,
         minimumSize: const Size(0, 44),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(KaedeRadius.small)),
         textStyle: textTheme.labelLarge,

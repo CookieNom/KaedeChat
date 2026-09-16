@@ -26,6 +26,7 @@ frontend/coverage/
 deploy/data/
 deploy/compose.generated.yml
 deploy/generated/
+.codex/
 .kaede-backups/
 .kaede-setup.in-progress
 .kaede-setup.lock

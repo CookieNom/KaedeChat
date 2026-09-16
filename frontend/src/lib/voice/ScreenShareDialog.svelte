@@ -39,6 +39,7 @@
   let thumbnails = $state<Record<string, string>>({});
   let selectedSourceId = $state<string | null>(null);
   let nativeOs = $state('');
+  let audioApps = $state<{ process_id: number; label: string }[]>([]);
   let preferences = $state<MediaQualityPreferences>({ ...DEFAULT_MEDIA_QUALITY });
   let loadGeneration = 0;
 
@@ -53,6 +54,7 @@
   );
   const selectedProfile = $derived(screenShareProfile(preferences.screenProfile));
   const securePicker = $derived(native && sources.length === 0);
+  const chooseAudioApp = $derived(native && nativeOs === 'linux' && securePicker);
   const selectedSource = $derived(
     visibleSources.find((source) => source.id === selectedSourceId) ?? null
   );
@@ -60,7 +62,8 @@
   $effect(() => {
     if (!dialog) return;
     if (open && !dialog.open) {
-      preferences = { ...loadMediaQuality(), ...(native ? { shareAudio: false } : {}) };
+      preferences = { ...loadMediaQuality() };
+      audioApps = [];
       error = '';
       selectedSourceId = null;
       sourceTab = 'application';
@@ -84,6 +87,13 @@
       if (generation !== loadGeneration || !open) return;
       sources = devices.screens.slice(0, 48);
       nativeOs = platform.os;
+      if (nativeOs === 'linux' && sources.length === 0) {
+        const apps = await nativeInvoke<{ process_id: number; label: string }[]>(
+          'native_screen_audio_apps'
+        );
+        if (generation !== loadGeneration || !open) return;
+        audioApps = apps;
+      }
       const applications = sources.filter((source) => source.id.startsWith('window:'));
       const displays = sources.filter((source) => !source.id.startsWith('window:'));
       sourceTab = applications.length > 0 ? 'application' : 'screen';
@@ -176,6 +186,10 @@
 
   async function share() {
     if (sharing) return;
+    if (chooseAudioApp && preferences.shareAudio && preferences.audioProcess === undefined) {
+      error = $t('screen_audio_choose');
+      return;
+    }
     if (native && !securePicker && !selectedSource) {
       error = $t('ui_choose_a_window_or_display_to_share_4b145a46');
       return;
@@ -254,6 +268,20 @@
           {$t('ui_displays_5a3452eb')}
         </button>
       </nav>
+    {/if}
+
+    {#if chooseAudioApp && preferences.shareAudio}
+      <label class="audio-source">
+        <strong>{$t('screen_audio_source')}</strong>
+        <select bind:value={preferences.audioProcess}>
+          <option value={undefined} disabled>{$t('screen_audio_choose')}</option>
+          <option value={0}>{$t('screen_audio_all')}</option>
+          {#each audioApps as app (app.process_id)}
+            <option value={app.process_id}>{app.label}</option>
+          {/each}
+        </select>
+        <small>{$t('screen_audio_wayland_hint')}</small>
+      </label>
     {/if}
 
     <main class="source-region" aria-live="polite">
@@ -447,14 +475,18 @@
 
             <label class="audio-toggle">
               <span>
-                <strong>{$t('ui_share_computer_audio_fabf3c5f')}</strong>
+                <strong
+                  >{native && selectedSource?.kind === 'application'
+                    ? $t('screen_audio_share_app')
+                    : $t('ui_share_computer_audio_fabf3c5f')}</strong
+                >
                 <small>
                   {native
-                    ? $t('ui_unavailable_in_the_native_desktop_capture_pip_5d55170a')
+                    ? $t('screen_audio_follows_source')
                     : $t('ui_availability_depends_on_your_browser_and_sele_06836add')}
                 </small>
               </span>
-              <input type="checkbox" bind:checked={preferences.shareAudio} disabled={native} />
+              <input type="checkbox" bind:checked={preferences.shareAudio} />
             </label>
           </div>
         </details>
@@ -483,6 +515,24 @@
 </dialog>
 
 <style>
+  .audio-source {
+    display: grid;
+    gap: 0.5rem;
+    padding: 1rem 1.5rem;
+  }
+  .audio-source select {
+    width: 100%;
+    min-width: 0;
+    padding: 0.65rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 0.5rem;
+    color: inherit;
+    background: var(--surface-raised);
+  }
+  .audio-source small {
+    color: var(--text-muted);
+  }
+
   .share-dialog {
     width: min(900px, calc(100vw - 32px));
     max-height: min(820px, calc(100dvh - 32px));
@@ -580,6 +630,7 @@
   .source-tabs button {
     display: flex;
     min-height: 48px;
+    padding: 10px 12px;
     align-items: center;
     justify-content: center;
     gap: 10px;
@@ -738,7 +789,7 @@
     justify-content: center;
     gap: 8px;
     margin-top: 18px;
-    padding: 0 20px;
+    padding: 12px 20px;
     color: var(--on-accent);
     border: 1px solid var(--accent);
     border-radius: 12px;
@@ -861,10 +912,12 @@
     position: relative;
     display: flex;
     min-height: 92px;
+    flex-shrink: 0;
     align-items: center;
     justify-content: space-between;
-    gap: 24px;
-    padding: 16px 24px;
+    flex-wrap: wrap;
+    gap: 16px 24px;
+    padding: 20px 24px;
     border-top: 1px solid var(--line-soft);
     border-radius: 0 0 22px 22px;
     background: var(--surface-subtle);
@@ -872,6 +925,7 @@
 
   .quality-summary {
     display: grid;
+    flex: 1 1 240px;
     min-width: 0;
     gap: 4px;
   }
@@ -898,9 +952,11 @@
 
   .footer-controls {
     display: flex;
-    flex: 0 0 auto;
-    align-items: stretch;
-    gap: 9px;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
   }
 
   .quick-quality {
@@ -913,7 +969,8 @@
 
   .quick-quality button {
     min-width: 64px;
-    padding: 0 12px;
+    min-height: 40px;
+    padding: 8px 12px;
     color: var(--text-muted);
     border: 0;
     border-radius: 9px;
@@ -927,15 +984,10 @@
     background: var(--rail-hover);
   }
 
-  .quality-settings {
-    position: relative;
-  }
-
   .quality-settings > summary {
     display: grid;
     width: 48px;
-    height: 100%;
-    min-height: 48px;
+    height: 48px;
     padding: 0;
     place-items: center;
     color: var(--text);
@@ -959,8 +1011,8 @@
   .settings-card {
     position: absolute;
     z-index: 10;
-    right: 0;
-    bottom: calc(100% + 14px);
+    right: 24px;
+    bottom: calc(100% + 12px);
     display: grid;
     width: min(610px, calc(100vw - 48px));
     gap: 16px;
@@ -969,19 +1021,6 @@
     border-radius: 16px;
     background: var(--surface-raised);
     box-shadow: 0 18px 50px rgb(0 0 0 / 42%);
-  }
-
-  .settings-card::after {
-    position: absolute;
-    right: 15px;
-    bottom: -7px;
-    width: 12px;
-    height: 12px;
-    border-right: 1px solid var(--line-strong);
-    border-bottom: 1px solid var(--line-strong);
-    background: var(--surface-raised);
-    content: '';
-    transform: rotate(45deg);
   }
 
   .settings-card header strong,
@@ -1102,7 +1141,7 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-    padding: 0 16px;
+    padding: 10px 16px;
     border: 1px solid var(--line);
     border-radius: 12px;
     font-weight: 760;
@@ -1149,11 +1188,11 @@
     }
 
     .dialog-header {
-      padding: 14px 12px 12px;
+      padding: 16px;
     }
 
     .source-tabs {
-      margin: 0 12px;
+      margin: 0 16px;
     }
 
     .source-tabs button {
@@ -1162,7 +1201,7 @@
     }
 
     .source-region {
-      padding: 12px;
+      padding: 16px;
     }
 
     .source-grid,
@@ -1188,14 +1227,27 @@
     .stream-footer {
       align-items: stretch;
       flex-direction: column;
+      flex-wrap: nowrap;
       gap: 12px;
-      padding: 13px;
+      padding: 16px;
       border-radius: 0 0 17px 17px;
+    }
+
+    .quality-summary {
+      flex: none;
+    }
+
+    .quality-summary span {
+      white-space: normal;
     }
 
     .footer-controls {
       display: grid;
-      grid-template-columns: 1fr auto auto;
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .share-button {
+      grid-column: 1 / -1;
     }
 
     .cancel-button {
@@ -1210,10 +1262,6 @@
       width: auto;
       max-height: calc(100dvh - 138px);
       overflow: auto;
-    }
-
-    .settings-card::after {
-      display: none;
     }
 
     .option-grid {
