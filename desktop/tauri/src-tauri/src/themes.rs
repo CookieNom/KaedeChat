@@ -166,7 +166,7 @@ mod tests {
         assert!(scan(&directory, "../outside.theme.css")?.css.is_none());
         fs::write(
             directory.join("Large.theme.css"),
-            vec![b'a'; MAX_THEME_BYTES as usize + 1],
+            vec![b'a'; usize::try_from(MAX_THEME_BYTES).map_err(io::Error::other)? + 1],
         )?;
         fs::write(directory.join("Invalid.theme.css"), [0xff])?;
         #[cfg(unix)]

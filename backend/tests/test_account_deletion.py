@@ -327,6 +327,40 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
             retained = await session.get(m.Message, (id, "alpha.localhost"))
             assert retained.content == "private text" and retained.deleted_at is None
 
+        # Quarantined federation replicas must not strand private account cleanup.
+        guild = m.Guild(
+            id=40,
+            origin_domain="remote.test",
+            name="Unavailable guild",
+            owner_id=8,
+            owner_domain="alpha.localhost",
+            unavailable=True,
+            sync_status="failed",
+        )
+        session.add(guild)
+        await session.flush()
+        session.add_all(
+            m.GuildMember(
+                guild_id=40,
+                guild_domain="remote.test",
+                user_id=id,
+                user_domain="alpha.localhost",
+                joined_at=cutoff,
+            )
+            for id in (7, 8)
+        )
+        await session.flush()
+        from app.api.guild_lifecycle import _locked_guild
+        from app.core.types import EntityRef
+
+        with pytest.raises(HTTPException):
+            await _locked_guild(session, settings, EntityRef("40@remote.test"))
+        leave = {"type": "guild.leave.request"}
+        build_leave = AsyncMock(return_value=leave)
+        queue_leave = AsyncMock()
+        monkeypatch.setattr("app.api.guild_lifecycle.build_envelope", build_leave)
+        monkeypatch.setattr("app.api.guild_lifecycle.queue_event", queue_leave)
+
         user.deleted_at = cutoff
         user.disabled_at = cutoff
         user.password_hash = user.password_kdf_version = None
@@ -343,3 +377,10 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
         assert (await session.get(m.Message, (32, "alpha.localhost"))).deleted_at is not None
         assert await session.get(m.UserSettings, (7, "alpha.localhost")) is None
         assert (await session.get(m.Message, (31, "alpha.localhost"))).content == "private text"
+        assert await session.get(m.GuildMember, (40, "remote.test", 7, "alpha.localhost")) is None
+        assert (
+            await session.get(m.GuildMember, (40, "remote.test", 8, "alpha.localhost")) is not None
+        )
+        build_leave.assert_awaited_once()
+        assert build_leave.await_args.args[2] == "guild.leave.request"
+        queue_leave.assert_awaited_once_with(session, settings, "remote.test", leave)

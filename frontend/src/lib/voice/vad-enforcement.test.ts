@@ -43,6 +43,8 @@ const mocks = vi.hoisted(() => {
       track: { attach: () => HTMLVideoElement; detach: () => HTMLVideoElement[] };
     }> = [];
     tiles = () => this.videoTiles;
+    listeningVolume = () => 1;
+    setListeningVolume = vi.fn(async () => undefined);
     attachAudio = () => () => undefined;
     reconcileBrowserPermissions = vi.fn(async () => undefined);
     reconcileParticipantPermissions = vi.fn(async () => undefined);

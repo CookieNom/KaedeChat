@@ -169,6 +169,7 @@
   );
   const readStates = $derived(entities.readStates.values);
   const currentUser = $derived(entities.currentUser);
+  const draftAccount = $derived(currentUser ? entityRef(currentUser) : null);
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let activeDraftKey = $state<string | null>(null);
@@ -1012,7 +1013,7 @@
   $effect(() => {
     const targetRef = dmId;
     const targetAround = aroundMessage;
-    const draftAccount = currentUser ? entityRef(currentUser) : null;
+    const targetAccount = draftAccount;
     untrack(() => {
       const routeGeneration = ++loadGeneration;
       const snapshot = ++snapshotGeneration;
@@ -1022,7 +1023,7 @@
       resetUploads();
       editingMessage = null;
       composerDraftBeforeEdit = null;
-      activeDraftKey = draftAccount ? draftKey(draftAccount, targetRef) : null;
+      activeDraftKey = targetAccount ? draftKey(targetAccount, targetRef) : null;
       content = activeDraftKey ? readDraft(activeDraftKey) : '';
       composerCursor = 0;
       applicationCommands = [];

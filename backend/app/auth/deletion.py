@@ -228,7 +228,7 @@ async def erase_private_account_state(
     session: AsyncSession, redis: Redis, settings: Settings, user: m.User
 ) -> None:
     from app.api.e2ee import queue_device_change_updates
-    from app.api.guild_lifecycle import _locked_guild, _remove_guild_membership
+    from app.api.guild_lifecycle import _remove_guild_membership
     from app.auth.service import revoke_user_sessions
     from app.chat.e2ee_membership import (
         pause_local_e2ee_for_device_change,
@@ -274,7 +274,15 @@ async def erase_private_account_state(
         ).tuples()
     )
     for guild_id, domain in memberships:
-        guild = await _locked_guild(session, settings, EntityRef(f"{guild_id}@{domain}"))
+        # Account cleanup must also leave quarantined/unavailable replicas.
+        # Keep the guild lock and normal durable departure side effects.
+        guild = await session.scalar(
+            select(m.Guild)
+            .where(m.Guild.id == guild_id, m.Guild.origin_domain == domain)
+            .with_for_update()
+        )
+        if guild is None:
+            continue  # A concurrent guild deletion also removes its memberships.
         member = await session.get(m.GuildMember, (guild_id, domain, user.id, user.origin_domain))
         if member is not None:
             await _remove_guild_membership(session, redis, settings, guild, user, member)

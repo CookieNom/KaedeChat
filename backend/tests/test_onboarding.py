@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import text
 
 from app.api.onboarding import safe_role
 from app.chat.onboarding import (
@@ -82,7 +83,7 @@ async def test_self_selected_roles_cannot_grant_admin_or_cross_guild_access():
         managed=False,
         permissions=0,
     )
-    session = SimpleNamespace(get=AsyncMock(return_value=role))
+    session = SimpleNamespace(get=AsyncMock(return_value=role), scalar=AsyncMock(return_value=None))
     assert await safe_role(session, guild, "20@home.test") is role
     for field, value in [
         ("permissions", int(Permission.ADMINISTRATOR)),
@@ -94,6 +95,49 @@ async def test_self_selected_roles_cannot_grant_admin_or_cross_guild_access():
         with pytest.raises(HTTPException):
             await safe_role(session, guild, "20@home.test")
         setattr(role, field, old)
+
+
+@pytest.mark.asyncio
+async def test_self_selected_role_overrides_allow_participation_but_not_moderation(postgres_schema):
+    # Exercise the real override query, including categories and composite identities.
+    await postgres_schema.execute(
+        text(
+            "CREATE TABLE channel_overwrites (channel_id bigint, channel_domain text, "
+            "guild_id bigint, guild_domain text, target_id bigint, target_domain text, "
+            "target_type text, allow bigint)"
+        )
+    )
+    role = SimpleNamespace(
+        id=20,
+        origin_domain="home.test",
+        guild_id=10,
+        guild_domain="home.test",
+        managed=False,
+        permissions=0,
+    )
+    guild = SimpleNamespace(id=10, origin_domain="home.test")
+    session = SimpleNamespace(get=AsyncMock(return_value=role), scalar=postgres_schema.scalar)
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO channel_overwrites VALUES "
+            "(30, 'home.test', 10, 'home.test', 20, 'home.test', 'role', :participate), "
+            "(31, 'home.test', 10, 'home.test', 20, 'home.test', 'member', :moderate), "
+            "(32, 'other.test', 10, 'other.test', 20, 'other.test', 'role', :moderate)"
+        ),
+        {"participate": int(Permission.SEND_MESSAGES), "moderate": int(Permission.MANAGE_MESSAGES)},
+    )
+    assert await safe_role(session, guild, "20@home.test") is role
+    # An override on any channel/category for this role disqualifies it.
+    await postgres_schema.execute(
+        text(
+            "INSERT INTO channel_overwrites VALUES "
+            "(33, 'home.test', 10, 'home.test', 20, 'home.test', 'role', :moderate)"
+        ),
+        {"moderate": int(Permission.MANAGE_MESSAGES)},
+    )
+    with pytest.raises(HTTPException) as error:
+        await safe_role(session, guild, "20@home.test")
+    assert error.value.detail["code"] == "ONBOARDING_INVALID_ROLE"
 
 
 @pytest.mark.asyncio

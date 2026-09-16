@@ -71,6 +71,7 @@ const actor = {
   id: '7',
   origin_domain: 'chat.example',
   username: 'Actor',
+  handle: 'Actor@chat.example',
   display_name: null,
   avatar_hash: null
 };
@@ -181,6 +182,22 @@ afterEach(async () => {
 });
 
 describe('live channel route permissions', () => {
+  it('preserves the draft without reloading when the same account profile refreshes', async () => {
+    await render();
+    const composer = document.querySelector('textarea')!;
+    composer.value = 'Unsent draft';
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    network.api.mockClear();
+    chatEntities.ingestCurrentUser({ ...actor, display_name: 'Updated profile' });
+    await tick();
+    expect(document.querySelector('textarea')!.value).toBe('Unsent draft');
+    expect(network.api.mock.calls.some(([path]) => path === '/users/@me')).toBe(false);
+    composer.value = '';
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+  });
+
   it('keeps history-backed controls behind READ_MESSAGE_HISTORY', async () => {
     guild.channels![0].permissions = (
       Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES

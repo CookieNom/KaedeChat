@@ -36,7 +36,7 @@ from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef
-from app.db.models import Channel, Guild, GuildMember, MemberRole, Role, User
+from app.db.models import Channel, ChannelOverwrite, Guild, GuildMember, MemberRole, Role, User
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["onboarding"])
 
@@ -84,6 +84,19 @@ async def safe_role(session: AsyncSession, guild: Guild, ref: str) -> Role:
         or role.id == guild.id
         or role.managed
         or role.permissions & ~SELF_ASSIGNABLE_PERMISSIONS
+        or await session.scalar(
+            select(ChannelOverwrite.channel_id)
+            .where(
+                ChannelOverwrite.guild_id == guild.id,
+                ChannelOverwrite.guild_domain == guild.origin_domain,
+                ChannelOverwrite.target_type == "role",
+                ChannelOverwrite.target_id == role.id,
+                ChannelOverwrite.target_domain == role.origin_domain,
+                ChannelOverwrite.allow.bitwise_and(~SELF_ASSIGNABLE_PERMISSIONS) != 0,
+            )
+            .limit(1)
+        )
+        is not None
     ):
         raise HTTPException(
             422,
@@ -91,7 +104,7 @@ async def safe_role(session: AsyncSession, guild: Guild, ref: str) -> Role:
                 "code": "ONBOARDING_INVALID_ROLE",
                 "message": (
                     "Onboarding roles must belong to this server and cannot grant "
-                    "moderation or administration permissions."
+                    "moderation or administration permissions, including channel overrides."
                 ),
             },
         )

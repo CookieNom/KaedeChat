@@ -312,6 +312,7 @@
     )
   );
   const currentUser = $derived(entities.currentUser);
+  const draftAccount = $derived(currentUser ? entityRef(currentUser) : null);
   const messageSearchUsers = $derived.by(() => {
     const guildChannelKeys = new Set((guild?.channels ?? []).map((item) => entityKey(item)));
     const loadedGuildAuthors = entities.messages.values.flatMap((message) =>
@@ -3591,7 +3592,7 @@
     const targetGuild = guildId;
     const targetChannel = channelId;
     const targetAround = aroundMessage;
-    const draftAccount = currentUser ? entityRef(currentUser) : null;
+    const targetAccount = draftAccount;
     untrack(() => {
       const routeGeneration = ++loadGeneration;
       const snapshot = ++snapshotGeneration;
@@ -3610,7 +3611,7 @@
       setMembers([]);
       resetUploads();
       resetForumUploads();
-      activeDraftKey = draftAccount ? draftKey(draftAccount, targetChannel) : null;
+      activeDraftKey = targetAccount ? draftKey(targetAccount, targetChannel) : null;
       content = activeDraftKey ? readDraft(activeDraftKey) : '';
       applicationCommands = [];
       applicationLauncherOpen = false;
