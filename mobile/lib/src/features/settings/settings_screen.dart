@@ -17,6 +17,7 @@ import 'package:kaede_mobile/src/domain/text_to_speech.dart';
 import 'package:kaede_mobile/src/features/settings/developer_portal_screen.dart';
 import 'package:kaede_mobile/src/features/settings/instance_administration_screen.dart';
 import 'package:kaede_mobile/src/features/settings/reports_screen.dart';
+import 'package:kaede_mobile/src/features/shared/push_diagnostics_button.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
@@ -978,6 +979,13 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     }
                   },
           ),
+          if (!_enablingPush && _pushSetupMessage != null)
+            if (ref.read(mobileControllerProvider.notifier).pushSetupDiagnostics
+                case final diagnostics?)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: PushDiagnosticsButton(diagnostics: diagnostics),
+              ),
           if (_pushSetupMessage case final message?)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),

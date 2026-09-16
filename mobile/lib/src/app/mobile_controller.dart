@@ -6403,6 +6403,7 @@ final class MobileController extends StateNotifier<MobileState> {
       return false;
     }
     if (requireStoredOptIn && !await api.pushOptedIn()) return false;
+    var step = 'provider_token';
     try {
       final resolvedToken = token ?? await push.pushToken();
       if (resolvedToken == null ||
@@ -6415,6 +6416,7 @@ final class MobileController extends StateNotifier<MobileState> {
         }
         return false;
       }
+      step = 'installation_storage';
       final installationId = await api.installationId();
       final platform = Platform.isIOS ? 'ios' : 'android';
       final deviceName = Platform.operatingSystemVersion.length <= 100
@@ -6423,6 +6425,7 @@ final class MobileController extends StateNotifier<MobileState> {
       late final Map<String, Object?> response;
       var voipReady = !Platform.isIOS;
       if (_pushTransport == 'direct_fcm') {
+        step = 'direct_registration';
         response = await repository.registerPushDevice(
           installationId: installationId,
           token: resolvedToken,
@@ -6430,16 +6433,19 @@ final class MobileController extends StateNotifier<MobileState> {
           deviceName: deviceName,
         );
       } else {
+        step = 'relay_storage';
         final previousRelayState = await api.relayPushState();
         final routeId = _randomPushToken();
         final wakeSecret = _randomPushToken();
         final managementSecret = _randomPushToken();
+        step = 'home_enrollment';
         final enrollment = await repository.beginRelayPushEnrollment(
           installationId: installationId,
           platform: platform,
           routeId: routeId,
           appId: _pushApplicationId,
         );
+        step = 'relay_validation';
         final relayUrl = Uri.parse('${enrollment['relay_url'] ?? ''}');
         final relayOrigin = '${enrollment['relay_origin'] ?? ''}';
         final pinnedUrl = Uri.parse(_pinnedPushRelayUrl);
@@ -6456,12 +6462,14 @@ final class MobileController extends StateNotifier<MobileState> {
           );
         }
         final grant = Map<String, Object?>.from(enrollment['grant']! as Map);
+        step = 'relay_subscription';
         final subscription = await repository.createRelayPushSubscription(
           relayUrl: relayUrl,
           grant: grant,
           providerToken: resolvedToken,
           managementSecret: managementSecret,
         );
+        step = 'home_registration';
         final receipt =
             Map<String, Object?>.from(subscription['receipt']! as Map);
         response = await repository.completeRelayPushEnrollment(
@@ -6484,11 +6492,13 @@ final class MobileController extends StateNotifier<MobileState> {
           managementSecret: managementSecret,
         );
         if (Platform.isIOS) {
+          step = 'apple_call_token';
           final voipToken = await push.voipToken();
           if (voipToken != null && voipToken.isNotEmpty) {
             final voipRouteId = _randomPushToken();
             final voipWakeSecret = _randomPushToken();
             final voipManagementSecret = _randomPushToken();
+            step = 'call_home_enrollment';
             final voipEnrollment = await repository.beginRelayPushEnrollment(
               installationId: installationId,
               platform: platform,
@@ -6496,6 +6506,7 @@ final class MobileController extends StateNotifier<MobileState> {
               appId: _pushApplicationId,
               provider: 'apns_voip',
             );
+            step = 'call_relay_validation';
             final voipRelayUrl =
                 Uri.parse('${voipEnrollment['relay_url'] ?? ''}');
             if (voipRelayUrl != relayUrl ||
@@ -6506,6 +6517,7 @@ final class MobileController extends StateNotifier<MobileState> {
                 status: 502,
               );
             }
+            step = 'call_relay_subscription';
             final voipSubscription =
                 await repository.createRelayPushSubscription(
               relayUrl: relayUrl,
@@ -6516,6 +6528,7 @@ final class MobileController extends StateNotifier<MobileState> {
               managementSecret: voipManagementSecret,
               provider: 'apns_voip',
             );
+            step = 'call_home_registration';
             await repository.completeRelayPushEnrollment(
               installationId: installationId,
               platform: platform,
@@ -6543,7 +6556,9 @@ final class MobileController extends StateNotifier<MobileState> {
             voipReady = true;
           }
         }
+        step = 'relay_storage';
         await api.saveRelayPushState(relayState);
+        step = 'native_relay_storage';
         await push.setNativeRelayState(
           state: relayState,
           installationId: installationId,
@@ -6574,14 +6589,20 @@ final class MobileController extends StateNotifier<MobileState> {
         return true;
       }
     } on KaedeException catch (error) {
-      if (surfaceErrors) rethrow;
+      if (surfaceErrors) {
+        pushSetupDiagnostics = pushFailureDiagnostics(step, error);
+        rethrow;
+      }
       _setPushRegistrationWarning(userFacingError(
         error,
         summary:
             'Background notifications could not be registered. In-app messaging still works.',
       ));
     } on Object catch (error) {
-      if (surfaceErrors) rethrow;
+      if (surfaceErrors) {
+        pushSetupDiagnostics = pushFailureDiagnostics(step, error);
+        rethrow;
+      }
       _setPushRegistrationWarning(userFacingError(
         error,
         summary:
@@ -6708,49 +6729,62 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
+  String? pushSetupDiagnostics;
+
   /// Requests notification permission as a direct result of a user action and
   /// registers this installation only after consent is granted.
   Future<bool> enablePushNotifications() async {
-    if (!await push.requestPermission()) {
-      _setPushRegistrationWarning(
-        'System notifications are turned off. Allow them in Android settings, then retry.',
-      );
-      return false;
-    }
-    if (!push.remoteDeliveryAvailable) {
-      _setPushRegistrationWarning(
-        'This build is not configured for closed-app notifications. Foreground alerts still work.',
-      );
-      throw const KaedeException(
-        code: 'PUSH_PROVIDER_UNAVAILABLE',
-        message:
-            'This community build has no compatible background notification provider.',
-        status: 503,
-      );
-    }
-    final token = await push.pushToken();
-    if (token == null || token.isEmpty) {
-      _setPushRegistrationWarning(
-        'The device did not provide a notification token. Check notification permissions and its push service, then retry.',
-      );
-      throw const KaedeException(
-        code: 'PUSH_TOKEN_UNAVAILABLE',
-        message:
-            'The device did not provide a notification token. Check notification permissions and its push service, then retry.',
-        status: 503,
-      );
-    }
+    pushSetupDiagnostics = null;
+    var step = 'permission';
     try {
+      if (!await push.requestPermission()) {
+        pushSetupDiagnostics = pushFailureDiagnostics(step, 'PERMISSION_DENIED');
+        _setPushRegistrationWarning(
+          'System notifications are turned off. Allow them in system settings, then retry.',
+        );
+        return false;
+      }
+      step = 'provider_initialization';
+      if (!push.remoteDeliveryAvailable) {
+        _setPushRegistrationWarning(
+          'This build is not configured for closed-app notifications. Foreground alerts still work.',
+        );
+        throw const KaedeException(
+          code: 'PUSH_PROVIDER_UNAVAILABLE',
+          message:
+              'This community build has no compatible background notification provider.',
+          status: 503,
+        );
+      }
+      step = 'provider_token';
+      final token = await push.pushToken();
+      if (token == null || token.isEmpty) {
+        _setPushRegistrationWarning(
+          'The device did not provide a notification token. Check notification permissions and its push service, then retry.',
+        );
+        throw const KaedeException(
+          code: 'PUSH_TOKEN_UNAVAILABLE',
+          message:
+              'The device did not provide a notification token. Check notification permissions and its push service, then retry.',
+          status: 503,
+        );
+      }
+      step = 'registration';
       final registered = await _registerPushDevice(
         token: token,
         surfaceErrors: true,
         requireStoredOptIn: false,
       );
       if (registered) {
+        step = 'save_preference';
         await api.savePushOptIn(true);
+      } else {
+        pushSetupDiagnostics ??=
+            pushFailureDiagnostics(step, 'PUSH_REGISTRATION_INCOMPLETE');
       }
       return registered;
     } on Object catch (error) {
+      pushSetupDiagnostics ??= pushFailureDiagnostics(step, error);
       _setPushRegistrationWarning(userFacingError(
         error,
         summary: 'Background notifications could not be enabled.',

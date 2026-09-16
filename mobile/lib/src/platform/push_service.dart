@@ -17,6 +17,35 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/platform/system_call_service.dart';
 import 'package:path_provider/path_provider.dart';
 
+/// Copy only diagnostic metadata, never exception messages, payloads or stacks.
+String pushFailureDiagnostics(String step, Object error) {
+  String safeCode(Object? value) => value is String &&
+          RegExp(r'^[A-Za-z][A-Za-z0-9_-]{0,63}$').hasMatch(value)
+      ? value
+      : 'unknown';
+  final code = switch (error) {
+    KaedeException() => error.code,
+    FirebaseException() => error.code,
+    PlatformException() => error.code,
+    String() => error,
+    _ => null,
+  };
+  return [
+    'Kaede notification diagnostics',
+    'Time: ${DateTime.now().toUtc().toIso8601String()}',
+    'Platform: ${Platform.operatingSystem}',
+    'Transport: $_configuredPushTransport',
+    'Step: $step',
+    'Error type: ${error.runtimeType}',
+    'Error code: ${safeCode(code)}',
+    if (error is KaedeException) ...[
+      'Status: ${error.status}',
+      if (error.details['provider_code'] != null)
+        'Provider code: ${safeCode(error.details['provider_code'])}',
+    ],
+  ].join('\n');
+}
+
 enum NotificationKind {
   directMessage,
   mention,
@@ -475,17 +504,25 @@ final class PushService {
   /// objects so widget tests can exercise the controller without
   /// notification or Firebase channels.
   @visibleForTesting
-  PushService.test({bool firebaseReady = true, Future<void>? firebaseSetup})
+  PushService.test({
+    bool firebaseReady = true,
+    Future<void>? firebaseSetup,
+    FirebaseMessaging? messaging,
+  })
       : _local = FlutterLocalNotificationsPlugin(),
         _destinations = StreamController<PushDestination>.broadcast(),
         _healthEvents = StreamController<String?>.broadcast(sync: true),
         _callEvents = StreamController<SystemCallEvent>.broadcast() {
+    _messaging = messaging;
     _firebaseReady = firebaseReady;
     _firebaseResolved = firebaseSetup == null;
     _firebaseResolvedFuture = firebaseSetup;
   }
 
   final FlutterLocalNotificationsPlugin _local;
+  FirebaseMessaging? _messaging;
+  FirebaseMessaging get _firebaseMessaging =>
+      _messaging ??= FirebaseMessaging.instance;
   var _firebaseReady = false;
   var _firebaseResolved = false;
   Future<void>? _firebaseResolvedFuture;
@@ -714,7 +751,7 @@ final class PushService {
       final destination = PushDestination.parse(message.data);
       if (destination != null) _emitDestination(destination);
     }));
-    final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
+    final initialMessage = await _firebaseMessaging.getInitialMessage();
     final initialDestination = PushDestination.parse(initialMessage?.data);
     if (initialDestination != null) _emitDestination(initialDestination);
   }
@@ -771,7 +808,7 @@ final class PushService {
           true;
     }
     if (!_firebaseReady) return localAllowed;
-    final settings = await FirebaseMessaging.instance.requestPermission(
+    final settings = await _firebaseMessaging.requestPermission(
       alert: true,
       badge: true,
       sound: true,
@@ -789,7 +826,7 @@ final class PushService {
             true
         : true;
     if (!localAllowed || !_firebaseReady) return localAllowed;
-    final settings = await FirebaseMessaging.instance.getNotificationSettings();
+    final settings = await _firebaseMessaging.getNotificationSettings();
     return localAllowed && _isAuthorized(settings.authorizationStatus);
   }
 
@@ -807,7 +844,11 @@ final class PushService {
     if (!allowed) return null;
     await _ensureFirebaseResolved();
     if (!_firebaseReady) return null;
-    return FirebaseMessaging.instance.getToken().timeout(
+    // FlutterFire checks for the APNs token before requesting an FCM token.
+    // Permission can be granted before Apple's registration callback arrives.
+    for (var attempt = 0; ; attempt += 1) {
+      try {
+        return await _firebaseMessaging.getToken().timeout(
           const Duration(seconds: 30),
           onTimeout: () => throw const KaedeException(
             code: 'PUSH_TOKEN_TIMEOUT',
@@ -816,12 +857,35 @@ final class PushService {
             status: 503,
           ),
         );
+      } on FirebaseException catch (error) {
+        if (error.code == 'apns-token-not-set') {
+          if (attempt < 20) {
+            await Future<void>.delayed(const Duration(milliseconds: 500));
+            continue;
+          }
+          throw KaedeException(
+            details: {'provider_code': error.code},
+            code: 'PUSH_TOKEN_UNAVAILABLE',
+            message:
+                'Apple notification registration is not ready. Check your connection and try enabling notifications again in a moment.',
+            status: 503,
+          );
+        }
+        throw KaedeException(
+          details: {'provider_code': error.code},
+          code: 'PUSH_TOKEN_UNAVAILABLE',
+          message:
+              'The phone could not connect to its notification service. Check your connection and try again. If this continues, contact support.',
+          status: 503,
+        );
+      }
+    }
   }
 
   /// Forwards token refreshes to listeners that subscribed before the
   /// background Firebase setup finished.
   Stream<String> get tokenRefresh {
-    if (_firebaseReady) return FirebaseMessaging.instance.onTokenRefresh;
+    if (_firebaseReady) return _firebaseMessaging.onTokenRefresh;
     if (_firebaseResolved) return const Stream<String>.empty();
     final existing = _tokenRefreshBridge;
     if (existing != null) return existing.stream;
@@ -839,7 +903,7 @@ final class PushService {
       unawaited(bridge.close());
       return;
     }
-    _subscriptions.add(FirebaseMessaging.instance.onTokenRefresh.listen(
+    _subscriptions.add(_firebaseMessaging.onTokenRefresh.listen(
       bridge.add,
       onError: bridge.addError,
     ));

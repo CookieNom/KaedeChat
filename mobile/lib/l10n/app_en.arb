@@ -9111,5 +9111,8 @@
       }
     }
   },
-  "chat_mark_read_failed": "Could not mark the conversation as read. Try again."
+  "chat_mark_read_failed": "Could not mark the conversation as read. Try again.",
+  "push_diagnostics_copy": "Copy diagnostics",
+  "push_diagnostics_copied": "Diagnostics copied",
+  "push_diagnostics_copy_failed": "Copy failed — try again"
 }

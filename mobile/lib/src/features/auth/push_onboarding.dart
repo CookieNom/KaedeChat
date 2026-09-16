@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/features/shared/push_diagnostics_button.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -115,6 +116,10 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
                   if (_error case final error?) ...[
                     const SizedBox(height: 12),
                     Semantics(liveRegion: true, child: Text(error)),
+                    if (controller.pushSetupDiagnostics case final diagnostics?) ...[
+                      const SizedBox(height: 12),
+                      PushDiagnosticsButton(diagnostics: diagnostics),
+                    ],
                   ],
                 ],
               ),

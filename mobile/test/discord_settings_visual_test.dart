@@ -565,6 +565,21 @@ void main() {
   testWidgets(
       'push onboarding waits for consent and keeps setup errors visible',
       (tester) async {
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    tester.view.devicePixelRatio = 1;
+    String? clipboard;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clipboard = (call.arguments as Map)['text'] as String;
+        }
+        return null;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
     final user = fixtureUser();
     final controller = await fixtureController(
       fixtureGuild(user),
@@ -595,6 +610,25 @@ void main() {
     expect(find.textContaining('notification service did not finish starting'),
         findsOneWidget);
     expect(await controller.api.pushOptInChoice(), isNull);
+    for (final size in [const Size(390, 844), const Size(1280, 900)]) {
+      tester.view.physicalSize = size;
+      await tester.pumpAndSettle();
+      final copy = find.text('Copy diagnostics');
+      expect(copy, findsOneWidget);
+      final bounds = tester.getRect(copy);
+      expect(bounds.left, greaterThanOrEqualTo(0));
+      expect(bounds.right, lessThanOrEqualTo(size.width));
+      expect(bounds.bottom, lessThanOrEqualTo(size.height));
+      expect(tester.takeException(), isNull);
+    }
+    await tester.tap(find.text('Copy diagnostics'));
+    await tester.pumpAndSettle();
+    expect(find.text('Diagnostics copied'), findsOneWidget);
+    expect(clipboard, controller.pushSetupDiagnostics);
+    expect(clipboard, contains('Step: permission'));
+    expect(clipboard, contains('Error code: PUSH_PROVIDER_TIMEOUT'));
+    expect(clipboard, isNot(contains('access')));
+    expect(clipboard, isNot(contains('refresh')));
     await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();
     expect(find.byType(AlertDialog), findsNothing);
@@ -660,6 +694,7 @@ void main() {
     expect(find.textContaining('notification service did not finish starting'),
         findsOneWidget);
     expect(find.text('Enable background notifications'), findsOneWidget);
+    expect(find.text('Copy diagnostics'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
