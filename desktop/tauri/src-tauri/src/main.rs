@@ -3740,7 +3740,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, error::Error};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        error::Error,
+    };
 
     use kaede_api::ApiClientError;
     use kaede_auth::AuthError;

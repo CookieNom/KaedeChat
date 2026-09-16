@@ -561,7 +561,7 @@ impl VoiceMixer {
                 .volumes
                 .insert((participant.to_owned(), stream), volume);
             for (key, queue) in &mut state.tracks {
-                if key.participant == participant && !queue.priority_eligible == stream {
+                if key.participant == participant && queue.priority_eligible != stream {
                     queue.volume = volume;
                 }
             }

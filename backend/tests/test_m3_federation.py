@@ -4477,6 +4477,7 @@ def test_guild_snapshot_rejects_invalid_custom_emoji_identity() -> None:
 def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
     resource_version = datetime(2026, 7, 18, 10, 30, tzinfo=UTC)
     guild = SimpleNamespace(
+        onboarding={},
         id=10,
         origin_domain="beta.localhost",
         next_event_seq=2,
@@ -4603,6 +4604,7 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
 
 def test_guild_snapshot_does_not_export_private_moderation_state() -> None:
     guild = SimpleNamespace(
+        onboarding={},
         id=10,
         origin_domain="alpha.localhost",
         next_event_seq=2,
@@ -4618,6 +4620,7 @@ def test_guild_snapshot_does_not_export_private_moderation_state() -> None:
         updated_at=datetime(2026, 7, 18, 11, 30, tzinfo=UTC),
     )
     member = SimpleNamespace(
+        onboarding_state={},
         user_id=11,
         user_domain="alpha.localhost",
         nickname=None,

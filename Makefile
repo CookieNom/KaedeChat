@@ -127,7 +127,7 @@ desktop-test:
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
 		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-app \
 		-p kaede-gateway -p kaede-capture -p kaede-audio -p kaede-voice \
-		-p kaede-e2ee -p kaede-e2ee-ffi
+		-p kaede-e2ee -p kaede-e2ee-ffi -p kaede-tauri
 
 desktop-build:
 	pnpm --dir frontend install --frozen-lockfile

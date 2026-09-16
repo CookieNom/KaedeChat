@@ -2059,7 +2059,7 @@ async fn publish_screen_share(
         None
     };
     #[cfg(target_os = "macos")]
-    let audio_capture_thread = None;
+    let audio_capture_thread: Option<thread::JoinHandle<()>> = None;
     if let Err(error) = room
         .local_participant()
         .publish_track(
@@ -2151,50 +2151,53 @@ pub fn screen_sources() -> Vec<ScreenSource> {
         // ScreenCaptureKit owns source disclosure and selection. Returning an
         // application-enumerated list here would make the UI imply it can
         // bypass the secure system chooser when capture deliberately cannot.
-        return Vec::new();
+        Vec::new()
     }
-    #[cfg(target_os = "linux")]
-    if is_wayland_session() {
-        // The XDG desktop portal owns source enumeration and consent. Asking
-        // XWayland for a parallel source list would bypass that privacy model
-        // and commonly produces unusable numeric IDs.
-        return Vec::new();
-    }
-    let mut result = Vec::new();
-    for (kind, prefix) in [
-        (DesktopCaptureSourceType::Screen, "screen"),
-        (DesktopCaptureSourceType::Window, "window"),
-    ] {
-        let Some(capturer) = DesktopCapturer::new(DesktopCapturerOptions::new(kind)) else {
-            continue;
-        };
-        for source in capturer.get_source_list() {
-            let title = source.title();
-            result.push(ScreenSource {
-                id: format!("{prefix}:{}", source.id()),
-                label: format!(
-                    "{}: {}",
-                    if prefix == "screen" {
-                        "Display"
-                    } else {
-                        "Window"
-                    },
-                    if title.trim().is_empty() {
-                        source.id().to_string()
-                    } else {
-                        title
-                    }
-                ),
-                kind: if prefix == "screen" {
-                    "screen"
-                } else {
-                    "application"
-                },
-            });
+    #[cfg(not(target_os = "macos"))]
+    {
+        #[cfg(target_os = "linux")]
+        if is_wayland_session() {
+            // The XDG desktop portal owns source enumeration and consent. Asking
+            // XWayland for a parallel source list would bypass that privacy model
+            // and commonly produces unusable numeric IDs.
+            return Vec::new();
         }
+        let mut result = Vec::new();
+        for (kind, prefix) in [
+            (DesktopCaptureSourceType::Screen, "screen"),
+            (DesktopCaptureSourceType::Window, "window"),
+        ] {
+            let Some(capturer) = DesktopCapturer::new(DesktopCapturerOptions::new(kind)) else {
+                continue;
+            };
+            for source in capturer.get_source_list() {
+                let title = source.title();
+                result.push(ScreenSource {
+                    id: format!("{prefix}:{}", source.id()),
+                    label: format!(
+                        "{}: {}",
+                        if prefix == "screen" {
+                            "Display"
+                        } else {
+                            "Window"
+                        },
+                        if title.trim().is_empty() {
+                            source.id().to_string()
+                        } else {
+                            title
+                        }
+                    ),
+                    kind: if prefix == "screen" {
+                        "screen"
+                    } else {
+                        "application"
+                    },
+                });
+            }
+        }
+        result.sort_by_key(|device| device.label.to_lowercase());
+        result
     }
-    result.sort_by_key(|device| device.label.to_lowercase());
-    result
 }
 
 /// Captures one bounded preview frame for a source that was explicitly listed

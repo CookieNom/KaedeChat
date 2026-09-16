@@ -47,6 +47,46 @@ def exact_federated_guild_payload() -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("onboarding", [{}, {"enabled": True, "rules": ["Be kind"], "revision": 1}])
+def test_federated_invites_accept_actual_guild_projection(onboarding: dict[str, object]) -> None:
+    from app.chat.payloads import guild_payload
+    from app.db.models import Guild
+
+    fields = exact_federated_guild_payload()
+    fields["updated_at"] = datetime.fromisoformat(str(fields.pop("version")))
+    guild = guild_payload(Guild(**fields, onboarding=onboarding))
+    payload = {
+        "code": "abcdefgh",
+        "guild": guild,
+        "channel_id": None,
+        "target_type": None,
+        "target_user_id": None,
+        "scheduled_event_id": None,
+        "role_ids": [],
+        "target_user_count": 0,
+    }
+    assert (
+        invite_api.validated_federated_invite_resolution(
+            payload, expected_code="abcdefgh", expected_authority="guild.example"
+        )
+        == payload
+    )
+    joined = {"guild": guild, "snapshot_seq": "1"}
+    assert (
+        invite_api.validated_federated_join_payload(joined, expected_guild=(10, "guild.example"))
+        == joined
+    )
+
+
+@pytest.mark.parametrize("onboarding", [None, [], {"rules": [123]}, {"enabled": True}])
+def test_federated_guild_rejects_invalid_onboarding(onboarding: object) -> None:
+    with pytest.raises(ValueError):
+        invite_api.validated_federated_guild_payload(
+            exact_federated_guild_payload() | {"onboarding": onboarding},
+            expected_guild=(10, "guild.example"),
+        )
+
+
 def exact_federated_invite_payload() -> dict[str, object]:
     return {
         "code": "abcdefgh",

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -85,7 +85,10 @@ async def test_shared_guild_policy_always_allows_accepted_friends(
     recipient = user(20, "alpha.localhost")
     session = cast(
         AsyncSession,
-        SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(dm_privacy="shared_guild"))),
+        SimpleNamespace(
+            scalar=AsyncMock(return_value=SimpleNamespace(dm_privacy="shared_guild")),
+            execute=AsyncMock(return_value=Mock(all=Mock(return_value=[]))),
+        ),
     )
     relation = Relationship(type="friend") if friends else None
     shared_guild = AsyncMock(return_value=False)

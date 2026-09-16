@@ -47,6 +47,7 @@ from app.chat.invites import (
     invite_allows_user,
     invite_target_payload,
 )
+from app.chat.onboarding import OnboardingConfig
 from app.chat.payloads import guild_payload, member_payload, user_payload
 from app.chat.permissions import get_permissions, require_permissions
 from app.chat.schemas import InviteCreate
@@ -166,8 +167,14 @@ def validated_federated_guild_payload(
 ) -> dict[str, object]:
     """Validate the exact public guild projection nested in invite responses."""
 
-    if not isinstance(payload, dict) or set(payload) != FEDERATED_GUILD_PAYLOAD_FIELDS:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) - {"onboarding"} != FEDERATED_GUILD_PAYLOAD_FIELDS
+    ):
         raise ValueError("federated guild projection has an invalid shape")
+    # Older authorities omit onboarding; newer ones send the public configuration.
+    if "onboarding" in payload:
+        OnboardingConfig.model_validate(payload["onboarding"], strict=True)
     guild_id = validate_snowflake(payload.get("id"))
     guild_domain = normalize_domain(str(payload.get("origin_domain", "")))
     if (

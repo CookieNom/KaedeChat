@@ -1,4 +1,17 @@
 services:
+  # Validation must not restart servers when local source or test files change.
+  alpha-api:
+    command: &api-command ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "1048576", "--no-access-log"]
+
+  beta-api:
+    command: *api-command
+
+  alpha-gateway:
+    command: &gateway-command ["uvicorn", "app.gateway:app", "--host", "0.0.0.0", "--port", "8001", "--ws-max-size", "65536", "--no-access-log"]
+
+  beta-gateway:
+    command: *gateway-command
+
   alpha-worker:
     command: ["taskiq", "worker", "app.tasks:broker"]
 

@@ -166,7 +166,7 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    content_deletion: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    content_deletion: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Private authority state. It is never included in federated profiles;
     # remote authorities receive only a signed, request-scoped adult attestation.
@@ -1070,7 +1070,7 @@ class AuthEvent(Base, LocalUserMixin):
 
 
 class Guild(Base, FederatedIdMixin, TimestampMixin):
-    onboarding: Mapped[dict] = mapped_column(
+    onboarding: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
     __tablename__ = "guilds"
@@ -1383,7 +1383,7 @@ class GuildHistoryExportChannel(Base):
 
 
 class GuildMember(Base, TimestampMixin):
-    onboarding_state: Mapped[dict] = mapped_column(
+    onboarding_state: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
     __tablename__ = "guild_members"

@@ -998,7 +998,7 @@ async def test_display_name_patch_queries_authoritative_guild_memberships(monkey
     from app.api import users
 
     user = SimpleNamespace(
-        id=7, origin_domain="home.test", display_name="Before", profile_version=1
+        id=7, origin_domain="home.test", display_name="Before", profile_version=1, disabled_at=None
     )
     session = SimpleNamespace(
         scalar=AsyncMock(return_value=user),
