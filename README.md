@@ -190,3 +190,24 @@ checks. Native client build requirements are in the
 
 For Docker inside unprivileged LXC, the supplied Compose files avoid unlimited
 `memlock`, and lockfile tooling runs as the invoking UID/GID.
+
+## License
+
+Kaede Chat's original code is available under the [MIT License](LICENSE),
+which permits commercial use, modification, redistribution, and private forks
+while requiring preservation of the copyright and license notice.
+
+Third-party code, fonts, dependencies, and services retain their own licenses;
+the MIT license does not replace their terms. Preserve their license and
+NOTICE files when redistributing them, including those in `mobile/vendor/`
+and the bundled fonts. Dependencies covered by MPL or LGPL retain their
+applicable source-availability and other redistribution requirements; see the
+[MPL FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/). Distributed containers
+and native binaries must also satisfy the licenses of the components they
+include, including [FFmpeg](https://ffmpeg.org/legal.html) and libvips.
+
+The archived Slint client remains subject to
+[Slint's licensing options](https://github.com/slint-ui/slint/blob/master/LICENSE.md)
+if built or distributed. Optional proprietary integrations such as the
+Microsoft PhotoDNA SDK require their own authorization and are not licensed
+by this repository.
