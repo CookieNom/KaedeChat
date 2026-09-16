@@ -6738,7 +6738,8 @@ final class MobileController extends StateNotifier<MobileState> {
     var step = 'permission';
     try {
       if (!await push.requestPermission()) {
-        pushSetupDiagnostics = pushFailureDiagnostics(step, 'PERMISSION_DENIED');
+        pushSetupDiagnostics =
+            pushFailureDiagnostics(step, 'PERMISSION_DENIED');
         _setPushRegistrationWarning(
           'System notifications are turned off. Allow them in system settings, then retry.',
         );

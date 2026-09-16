@@ -508,8 +508,7 @@ final class PushService {
     bool firebaseReady = true,
     Future<void>? firebaseSetup,
     FirebaseMessaging? messaging,
-  })
-      : _local = FlutterLocalNotificationsPlugin(),
+  })  : _local = FlutterLocalNotificationsPlugin(),
         _destinations = StreamController<PushDestination>.broadcast(),
         _healthEvents = StreamController<String?>.broadcast(sync: true),
         _callEvents = StreamController<SystemCallEvent>.broadcast() {
@@ -846,17 +845,17 @@ final class PushService {
     if (!_firebaseReady) return null;
     // FlutterFire checks for the APNs token before requesting an FCM token.
     // Permission can be granted before Apple's registration callback arrives.
-    for (var attempt = 0; ; attempt += 1) {
+    for (var attempt = 0;; attempt += 1) {
       try {
         return await _firebaseMessaging.getToken().timeout(
-          const Duration(seconds: 30),
-          onTimeout: () => throw const KaedeException(
-            code: 'PUSH_TOKEN_TIMEOUT',
-            message:
-                'The phone did not return a notification token. Check your connection and Google Play services on Android, then retry.',
-            status: 503,
-          ),
-        );
+              const Duration(seconds: 30),
+              onTimeout: () => throw const KaedeException(
+                code: 'PUSH_TOKEN_TIMEOUT',
+                message:
+                    'The phone did not return a notification token. Check your connection and Google Play services on Android, then retry.',
+                status: 503,
+              ),
+            );
       } on FirebaseException catch (error) {
         if (error.code == 'apns-token-not-set') {
           if (attempt < 20) {

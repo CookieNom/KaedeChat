@@ -116,7 +116,8 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
                   if (_error case final error?) ...[
                     const SizedBox(height: 12),
                     Semantics(liveRegion: true, child: Text(error)),
-                    if (controller.pushSetupDiagnostics case final diagnostics?) ...[
+                    if (controller.pushSetupDiagnostics
+                        case final diagnostics?) ...[
                       const SizedBox(height: 12),
                       PushDiagnosticsButton(diagnostics: diagnostics),
                     ],
