@@ -3027,5 +3027,13 @@
   "chat_inbox_preview_failed": "Preview unavailable. Open the conversation to try again.",
   "chat_inbox_preview_empty": "No messages to preview.",
   "chat_inbox_expand": "Expand message previews",
-  "chat_inbox_collapse": "Collapse message previews"
+  "chat_inbox_collapse": "Collapse message previews",
+  "desktop_themes_label": "Desktop theme",
+  "desktop_themes_description": "Choose an appearance for this desktop app. Your other devices keep their own appearance.",
+  "desktop_themes_default": "Default",
+  "desktop_themes_open_folder": "Open themes folder",
+  "desktop_themes_auto_reload": "Drop .theme.css files into this folder. New themes and saved edits appear automatically.",
+  "desktop_themes_missing": "This theme is missing or unreadable. Using the default appearance until it is available again.",
+  "desktop_themes_skipped": "Could not load: {files}. Use readable .theme.css files under 256 KB with a light, dark, or system base.",
+  "desktop_themes_folder_error": "Could not open the themes folder."
 }

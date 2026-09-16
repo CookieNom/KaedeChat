@@ -15,6 +15,7 @@
   import { applyLocale, storedLocale, setSystemLanguages } from '$lib/ui/locale';
   import { nativeInvoke, type NativePlatformInfo } from '$lib/platform/native';
   import { applyTheme, storedTheme } from '$lib/ui/theme';
+  import { startDesktopThemes } from '$lib/ui/desktop-themes';
   import NativeDesktopLifecycle from '$lib/components/NativeDesktopLifecycle.svelte';
   import { clearActiveE2EEState } from '$lib/e2ee/client';
   import { onMount } from 'svelte';
@@ -27,9 +28,10 @@
   });
 
   onMount(() => {
+    const stopDesktopThemes = startDesktopThemes();
     if (window.location.pathname === '/voice-video') {
       applyTheme(storedTheme(), false);
-      return;
+      return stopDesktopThemes;
     }
     // Begin restoring a native session before any protected child route can
     // issue work. API calls also await the same single-flight promise.
@@ -88,6 +90,7 @@
     window.addEventListener('pageshow', pageRestored);
     colorScheme.addEventListener('change', colorSchemeChanged);
     return () => {
+      stopDesktopThemes();
       window.removeEventListener('languagechange', refreshLanguage);
       window.removeEventListener('focus', refreshLanguage);
       window.removeEventListener('kaede:session-expired', sessionExpired);

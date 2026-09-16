@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod themes;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
@@ -3055,6 +3057,50 @@ async fn native_voice_next_video(
 }
 
 #[tauri::command]
+async fn native_themes(
+    selected: String,
+    state: State<'_, NativeState>,
+) -> Result<themes::Catalog, NativeError> {
+    let directory = state.paths.data_dir.join("themes");
+    tauri::async_runtime::spawn_blocking(move || themes::scan(&directory, &selected))
+        .await
+        .map_err(|error| {
+            NativeError::operation("THEMES_FAILED", "Could not load desktop themes.", error)
+        })?
+        .map_err(|error| {
+            NativeError::operation(
+                "THEMES_FAILED",
+                "Could not read the themes folder. Check that it exists and is readable.",
+                error,
+            )
+        })
+}
+
+#[tauri::command]
+async fn native_open_themes_folder(state: State<'_, NativeState>) -> Result<(), NativeError> {
+    let directory = state.paths.data_dir.join("themes");
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&directory)?;
+        themes::open_folder(&directory)
+    })
+    .await
+    .map_err(|error| {
+        NativeError::operation(
+            "THEMES_FOLDER_FAILED",
+            "Could not open the themes folder.",
+            error,
+        )
+    })?
+    .map_err(|error| {
+        NativeError::operation(
+            "THEMES_FOLDER_FAILED",
+            "Could not open the themes folder in your file manager.",
+            error,
+        )
+    })
+}
+
+#[tauri::command]
 async fn native_preferences_get(state: State<'_, NativeState>) -> Result<Value, NativeError> {
     serde_json::to_value(&*state.preferences.read().await).map_err(|error| {
         NativeError::operation(
@@ -3274,6 +3320,9 @@ fn main() {
         );
         std::process::exit(1);
     });
+    if let Err(error) = themes::initialize(&paths.data_dir.join("themes")) {
+        tracing::warn!(%error, "desktop themes could not be initialized");
+    }
     let (preferences, startup_notice) = match tauri::async_runtime::block_on(
         DesktopPreferences::load(&paths),
     ) {
@@ -3499,6 +3548,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            native_themes,
+            native_open_themes_folder,
             native_platform_info,
             native_set_menu_language,
             native_update_check,

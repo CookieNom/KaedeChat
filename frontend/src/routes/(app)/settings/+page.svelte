@@ -9,6 +9,8 @@
   import Toast from '$lib/components/Toast.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
   import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
+  import NativeThemeSettings from '$lib/components/NativeThemeSettings.svelte';
+  import { desktopThemes } from '$lib/ui/desktop-themes';
   import E2EESettings from '$lib/components/E2EESettings.svelte';
   import UserApplicationInstallations from '$lib/components/UserApplicationInstallations.svelte';
   import { clearActiveE2EEState } from '$lib/e2ee/client';
@@ -973,48 +975,51 @@
             void savePreferences();
           }}
         >
-          <fieldset class="theme-picker">
-            <legend>{$t('ui_theme_efb52e71')}</legend>
-            <label>
-              <input
-                type="radio"
-                bind:group={settings.theme}
-                value="system"
-                disabled={busy}
-                onchange={(event) =>
-                  void changeTheme(event.currentTarget.value as UserSettings['theme'])}
-              />
-              <span class="theme-preview system-preview"><i></i><i></i></span>
-              <strong>{$t('ui_system_6725e7bb')}</strong>
-              <small>{$t('ui_match_this_device_5ac32633')}</small>
-            </label>
-            <label>
-              <input
-                type="radio"
-                bind:group={settings.theme}
-                value="light"
-                disabled={busy}
-                onchange={(event) =>
-                  void changeTheme(event.currentTarget.value as UserSettings['theme'])}
-              />
-              <span class="theme-preview light-preview"><i></i><i></i></span>
-              <strong>{$t('ui_light_dbcd5e7b')}</strong>
-              <small>{$t('ui_bright_and_calm_c8bfa8e4')}</small>
-            </label>
-            <label>
-              <input
-                type="radio"
-                bind:group={settings.theme}
-                value="dark"
-                disabled={busy}
-                onchange={(event) =>
-                  void changeTheme(event.currentTarget.value as UserSettings['theme'])}
-              />
-              <span class="theme-preview dark-preview"><i></i><i></i></span>
-              <strong>{$t('ui_dark_60acc53f')}</strong>
-              <small>{$t('ui_easy_on_the_eyes_826a7461')}</small>
-            </label>
-          </fieldset>
+          {#if isNativeDesktop()}<NativeThemeSettings />{/if}
+          {#if !isNativeDesktop() || !$desktopThemes.selected}
+            <fieldset class="theme-picker">
+              <legend>{$t('ui_theme_efb52e71')}</legend>
+              <label>
+                <input
+                  type="radio"
+                  bind:group={settings.theme}
+                  value="system"
+                  disabled={busy}
+                  onchange={(event) =>
+                    void changeTheme(event.currentTarget.value as UserSettings['theme'])}
+                />
+                <span class="theme-preview system-preview"><i></i><i></i></span>
+                <strong>{$t('ui_system_6725e7bb')}</strong>
+                <small>{$t('ui_match_this_device_5ac32633')}</small>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  bind:group={settings.theme}
+                  value="light"
+                  disabled={busy}
+                  onchange={(event) =>
+                    void changeTheme(event.currentTarget.value as UserSettings['theme'])}
+                />
+                <span class="theme-preview light-preview"><i></i><i></i></span>
+                <strong>{$t('ui_light_dbcd5e7b')}</strong>
+                <small>{$t('ui_bright_and_calm_c8bfa8e4')}</small>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  bind:group={settings.theme}
+                  value="dark"
+                  disabled={busy}
+                  onchange={(event) =>
+                    void changeTheme(event.currentTarget.value as UserSettings['theme'])}
+                />
+                <span class="theme-preview dark-preview"><i></i><i></i></span>
+                <strong>{$t('ui_dark_60acc53f')}</strong>
+                <small>{$t('ui_easy_on_the_eyes_826a7461')}</small>
+              </label>
+            </fieldset>
+          {/if}
           <label class="form-field">
             <span>{$t('language_settings')}</span>
             <small>{$t('language_description')}</small>

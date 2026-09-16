@@ -1,0 +1,8 @@
+/**
+ * @name Light
+ * @description Warm paper surfaces and crisp, comfortable text.
+ * @base light
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+}

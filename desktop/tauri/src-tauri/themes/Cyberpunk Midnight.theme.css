@@ -1,0 +1,39 @@
+/**
+ * @name Cyberpunk Midnight
+ * @description Deep midnight blue, electric cyan, and neon pink.
+ * @base dark
+ */
+:root[data-theme="dark"] {
+  --app-bg: #080b18;
+  --app-bg-accent: #11102b;
+  --surface: #0d1224;
+  --surface-raised: #151b33;
+  --surface-subtle: #10162a;
+  --surface-hover: #202944;
+  --surface-selected: #183348;
+  --sidebar: #0a1020;
+  --rail: #050813;
+  --rail-hover: #1b2440;
+  --rail-text: #e3faff;
+  --text: #e3faff;
+  --text-soft: #bac9e3;
+  --text-muted: #91a3c5;
+  --text-inverse: #06131c;
+  --line: #344567;
+  --line-soft: #202d49;
+  --line-strong: #617ba4;
+  --accent: #42e8ed;
+  --accent-hover: #89ffff;
+  --accent-soft: #143b48;
+  --accent-text: #83f8fc;
+  --on-accent: #06131c;
+  --pine: #6ee7b7;
+  --pine-soft: #133b35;
+  --purple: #ff7bce;
+  --purple-soft: #43203e;
+  --on-purple: #200d1a;
+  --focus: #ff7bce;
+  --shadow-sm: 0 1px 8px rgb(0 0 0 / 35%);
+  --shadow-md: 0 16px 42px rgb(0 0 0 / 50%);
+  --shadow-lg: 0 30px 90px rgb(0 0 0 / 65%);
+}

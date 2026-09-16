@@ -1,0 +1,26 @@
+/**
+ * @name OLED
+ * @description Pure black surfaces with soft white text and a maple accent.
+ * @base dark
+ */
+:root[data-theme="dark"] {
+  --app-bg: #000000;
+  --app-bg-accent: #000000;
+  --surface: #000000;
+  --surface-raised: #080808;
+  --surface-subtle: #000000;
+  --surface-hover: #181818;
+  --surface-selected: #281a17;
+  --sidebar: #000000;
+  --rail: #000000;
+  --rail-hover: #181818;
+  --text: #eeeeee;
+  --text-soft: #c5c5c5;
+  --text-muted: #a0a0a0;
+  --line: #333333;
+  --line-soft: #222222;
+  --line-strong: #666666;
+  --shadow-sm: none;
+  --shadow-md: 0 0 0 1px #333333;
+  --shadow-lg: 0 0 0 1px #333333;
+}
