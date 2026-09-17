@@ -8311,5 +8311,13 @@
   "share_locale_with_bots_description": "操作時にボットやアプリがあなたの言語を使用できるようにします。オフにすると、すべてのデバイスで言語を非公開にします。",
   "push_diagnostics_copy": "診断情報をコピー",
   "push_diagnostics_copied": "診断情報をコピーしました",
-  "push_diagnostics_copy_failed": "コピーできませんでした。再試行してください"
+  "push_diagnostics_copy_failed": "コピーできませんでした。再試行してください",
+  "debug_section": "トラブルシューティング",
+  "debug_logging": "デバッグログ",
+  "debug_logging_description": "この端末に追加の診断イベントを記録します。初期設定ではオフです。メッセージ、パスワード、トークンは記録しません。",
+  "debug_logging_instructions": "問題を再現してからログをコピーして共有してください。自動送信はされません。再起動後も設定はオンのままですが、ログはアプリの再起動時や設定をオフにしたときに消去されます。",
+  "debug_copy": "デバッグログをコピー",
+  "debug_clear": "ログを消去",
+  "debug_cleared": "デバッグログを消去しました。",
+  "debug_action_failed": "操作を完了できませんでした。再試行してください。"
 }

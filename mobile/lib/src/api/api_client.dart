@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:kaede_mobile/src/api/privacy_metadata.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
@@ -16,7 +17,16 @@ final class KaedeApiClient {
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: _authorize,
-        onError: _recover,
+        onResponse: (response, handler) {
+          DebugLog.instance
+              .record(DebugEvent.apiResponse, status: response.statusCode);
+          handler.next(response);
+        },
+        onError: (error, handler) {
+          DebugLog.instance.record(DebugEvent.apiFailed,
+              error: error, status: error.response?.statusCode);
+          _recover(error, handler);
+        },
       ),
     );
   }

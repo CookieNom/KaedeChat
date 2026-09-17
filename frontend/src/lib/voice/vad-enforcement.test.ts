@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => {
     listeningVolume = () => 1;
     setListeningVolume = vi.fn(async () => undefined);
     attachAudio = () => () => undefined;
+    watchCameras = () => () => undefined;
     reconcileBrowserPermissions = vi.fn(async () => undefined);
     reconcileParticipantPermissions = vi.fn(async () => undefined);
     startPushToTalk = vi.fn(async () => {

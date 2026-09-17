@@ -9114,5 +9114,13 @@
   "chat_mark_read_failed": "Could not mark the conversation as read. Try again.",
   "push_diagnostics_copy": "Copy diagnostics",
   "push_diagnostics_copied": "Diagnostics copied",
-  "push_diagnostics_copy_failed": "Copy failed — try again"
+  "push_diagnostics_copy_failed": "Copy failed — try again",
+  "debug_section": "Troubleshooting",
+  "debug_logging": "Debug logging",
+  "debug_logging_description": "Record extra diagnostic events on this device. Off by default. No messages, passwords, or tokens are recorded.",
+  "debug_logging_instructions": "Reproduce the problem, then copy the log to share it. Nothing is uploaded automatically. This setting stays on after restarting; logs reset when the app restarts or logging is turned off.",
+  "debug_copy": "Copy debug log",
+  "debug_clear": "Clear log",
+  "debug_cleared": "Debug log cleared.",
+  "debug_action_failed": "Could not complete this action. Try again."
 }

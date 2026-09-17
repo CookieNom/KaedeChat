@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class _Messaging extends Mock implements FirebaseMessaging {}
 
@@ -29,6 +31,9 @@ void main() {
 
   testWidgets('waits for Apple registration before returning an FCM token',
       (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await DebugLog.instance.setEnabled(true);
+    addTearDown(() => DebugLog.instance.setEnabled(false));
     var attempts = 0;
     when(() => messaging.getToken()).thenAnswer((_) async {
       if (++attempts < 3) {
@@ -47,6 +52,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
     await request;
     expect(token, 'fcm-token');
+    expect(DebugLog.instance.text, contains('tokenPending'));
+    expect(DebugLog.instance.text, contains('tokenReady'));
+    expect(DebugLog.instance.text, isNot(contains('fcm-token')));
   });
 
   testWidgets('missing Apple registration stops with an actionable error',

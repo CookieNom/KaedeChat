@@ -56,6 +56,7 @@ vi.mock('$lib/voice/session', async (original) => ({
     prioritySpeakers = () => new Set();
     tiles = () => [];
     attachAudio = () => () => undefined;
+    watchCameras = () => () => undefined;
     reconcileBrowserPermissions = vi.fn().mockResolvedValue(undefined);
     reconcileParticipantPermissions = vi.fn().mockResolvedValue(undefined);
     disconnect = vi.fn().mockResolvedValue(undefined);

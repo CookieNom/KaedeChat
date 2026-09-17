@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -801,6 +802,12 @@ final class GatewayClient {
       _syncRecoveryWatchdog();
       return;
     }
+    DebugLog.instance.record(switch (health.phase) {
+      GatewayConnectionPhase.connecting => DebugEvent.gatewayConnecting,
+      GatewayConnectionPhase.connected => DebugEvent.gatewayConnected,
+      GatewayConnectionPhase.reconnecting => DebugEvent.gatewayReconnecting,
+      GatewayConnectionPhase.offline => DebugEvent.gatewayOffline,
+    });
     _health = health;
     _syncRecoveryWatchdog();
     if (!_healthEvents.isClosed) _healthEvents.add(health);

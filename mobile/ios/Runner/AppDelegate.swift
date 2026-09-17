@@ -1,4 +1,7 @@
 import Flutter
+import FirebaseCore
+import FirebaseMessaging
+import firebase_messaging
 import UIKit
 import CallKit
 import AVFAudio
@@ -12,6 +15,33 @@ import CryptoKit
   private var systemCallChannel: FlutterMethodChannel?
   private var pushStateChannel: FlutterMethodChannel?
   private var voipRegistry: PKPushRegistry?
+  private var debugEvents: [String] = []
+  private var debugLoggingEnabled: Bool {
+    UserDefaults.standard.bool(forKey: "flutter.kaede.debug-logging")
+  }
+  private func recordDebugEvent(_ event: String) {
+    guard debugLoggingEnabled else { return }
+    debugEvents.append("\(ISO8601DateFormatter().string(from: Date())) \(event)")
+    if debugEvents.count > 100 { debugEvents.removeFirst() }
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+  ) {
+    recordDebugEvent("apns_registration_succeeded")
+    super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didFailToRegisterForRemoteNotificationsWithError error: Error
+  ) {
+    // Only a numeric code; localized descriptions/userInfo can contain secrets.
+    recordDebugEvent("apns_registration_failed code=\((error as NSError).code)")
+    super.application(application, didFailToRegisterForRemoteNotificationsWithError: error)
+  }
+
   private var voipToken: String?
   private var pendingVoipTokenResult: FlutterResult?
   private lazy var callProvider: CXProvider = {
@@ -32,6 +62,10 @@ import CryptoKit
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    recordDebugEvent("app_did_finish_launching")
+    // UIScene registers Flutter plugins after launch. Install the notification
+    // delegate now so launch-time notification responses are not missed.
+    FLTFirebaseMessagingPlugin.configureNotificationCenterDelegate()
     let registry = PKPushRegistry(queue: .main)
     registry.delegate = self
     registry.desiredPushTypes = [.voIP]
@@ -40,7 +74,9 @@ import CryptoKit
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    recordDebugEvent("implicit_engine_initializing")
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    recordDebugEvent("plugins_registered")
     let channel = FlutterMethodChannel(
       name: "chat.kaede.mobile/screen_share",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
@@ -116,6 +152,24 @@ import CryptoKit
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     )
     pushState.setMethodCallHandler { call, result in
+      // Debug controls must remain available even if app-group setup failed.
+      if call.method == "debugLog" {
+        guard self.debugLoggingEnabled else { result(""); return }
+        let registered = UIApplication.shared.isRegisteredForRemoteNotifications
+        let firebaseReady = FirebaseApp.app() != nil
+        let firebaseHasToken = firebaseReady && Messaging.messaging().apnsToken != nil
+        result((self.debugEvents + [
+          "apns_registered=\(registered)",
+          "firebase_initialized=\(firebaseReady)",
+          "firebase_apns_token_present=\(firebaseHasToken)",
+        ]).joined(separator: "\n"))
+        return
+      }
+      if call.method == "clearDebugLog" {
+        self.debugEvents.removeAll()
+        result(nil)
+        return
+      }
       guard let directory = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: Self.appGroup
       ) else {
@@ -217,6 +271,7 @@ extension AppDelegate: PKPushRegistryDelegate {
     for type: PKPushType
   ) {
     guard type == .voIP else { return }
+    recordDebugEvent("voip_token_received")
     let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
     voipToken = token
     pendingVoipTokenResult?(token)

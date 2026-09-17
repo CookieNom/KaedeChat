@@ -12,6 +12,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/platform/system_call_service.dart';
@@ -719,6 +720,7 @@ final class PushService {
   }
 
   Future<void> _initializeFirebase() async {
+    DebugLog.instance.record(DebugEvent.firebaseStarting);
     var ready = false;
     try {
       await Firebase.initializeApp();
@@ -726,7 +728,9 @@ final class PushService {
         firebaseMessagingBackgroundHandler,
       );
       ready = true;
-    } on Object {
+      DebugLog.instance.record(DebugEvent.firebaseReady);
+    } on Object catch (error) {
+      DebugLog.instance.record(DebugEvent.firebaseFailed, error: error);
       // Self-hosters can ship without Firebase credentials. Foreground local
       // notifications continue to work; closed-app push remains unavailable.
     } finally {
@@ -792,6 +796,7 @@ final class PushService {
   }
 
   Future<bool> requestPermission() async {
+    DebugLog.instance.record(DebugEvent.permissionRequested);
     await _ensureFirebaseResolved();
     var localAllowed = true;
     if (Platform.isAndroid) {
@@ -812,7 +817,10 @@ final class PushService {
       badge: true,
       sound: true,
     );
-    return localAllowed && _isAuthorized(settings.authorizationStatus);
+    final allowed = localAllowed && _isAuthorized(settings.authorizationStatus);
+    DebugLog.instance.record(
+        allowed ? DebugEvent.permissionGranted : DebugEvent.permissionDenied);
+    return allowed;
   }
 
   Future<bool> permissionGranted() async {
@@ -837,6 +845,7 @@ final class PushService {
   /// sheet during session restoration. Permission is requested only from an
   /// explicit settings action.
   Future<String?> pushToken({bool requestPermission = false}) async {
+    DebugLog.instance.record(DebugEvent.tokenRequested);
     final allowed = requestPermission
         ? await this.requestPermission()
         : await permissionGranted();
@@ -847,7 +856,7 @@ final class PushService {
     // Permission can be granted before Apple's registration callback arrives.
     for (var attempt = 0;; attempt += 1) {
       try {
-        return await _firebaseMessaging.getToken().timeout(
+        final token = await _firebaseMessaging.getToken().timeout(
               const Duration(seconds: 30),
               onTimeout: () => throw const KaedeException(
                 code: 'PUSH_TOKEN_TIMEOUT',
@@ -856,7 +865,17 @@ final class PushService {
                 status: 503,
               ),
             );
+        DebugLog.instance.record(token == null || token.isEmpty
+            ? DebugEvent.tokenFailed
+            : DebugEvent.tokenReady);
+        return token;
       } on FirebaseException catch (error) {
+        DebugLog.instance.record(
+            error.code == 'apns-token-not-set'
+                ? DebugEvent.tokenPending
+                : DebugEvent.tokenFailed,
+            error: error,
+            attempt: attempt + 1);
         if (error.code == 'apns-token-not-set') {
           if (attempt < 20) {
             await Future<void>.delayed(const Duration(milliseconds: 500));

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
@@ -12,6 +13,7 @@ import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await DebugLog.instance.initialize();
   await initializeLanguage();
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(
@@ -26,6 +28,7 @@ Future<void> main() async {
     ]);
     final database = bootstrap[0]! as LocalDatabase;
     final pushService = bootstrap[1]! as PushService;
+    DebugLog.instance.record(DebugEvent.appReady);
     runApp(
       ProviderScope(
         overrides: [
@@ -36,6 +39,7 @@ Future<void> main() async {
       ),
     );
   } on Object catch (error, stackTrace) {
+    DebugLog.instance.record(DebugEvent.appFailed, error: error);
     FlutterError.reportError(
       FlutterErrorDetails(
         exception: error,

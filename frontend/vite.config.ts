@@ -19,5 +19,9 @@ export default defineConfig({
     'import.meta.env.KAEDE_LANDING_PAGE': JSON.stringify(landingPage),
     'import.meta.env.KAEDE_OPERATOR_LEGAL_CONFIG': JSON.stringify(operatorLegalConfig)
   },
-  test: { include: ['src/**/*.test.ts'] }
+  test: {
+    include: ['src/**/*.test.ts'],
+    // Unit tests inspect embeds without contacting third-party iframe servers.
+    environmentOptions: { happyDOM: { settings: { disableIframePageLoading: true } } }
+  }
 });

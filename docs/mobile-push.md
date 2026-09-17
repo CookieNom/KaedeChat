@@ -206,3 +206,16 @@ receives gateway alerts while open.
 The diagnostic view should show distribution channel, package/bundle ID, home,
 push transport, relay/provider host, and connection state. It must never show a
 provider token, subscription, grant, HMAC, or management secret.
+
+## Collecting mobile debug logs
+
+In Android or iOS **Settings → Troubleshooting**, enable **Debug logging**,
+then reproduce the problem and choose **Copy debug log**. For startup or Apple
+push registration problems, restart the app after enabling logging first.
+
+The device remembers the setting. Logs stay in memory, retain only recent
+events, and reset on restart, **Clear log**, or disabling logging. Nothing is
+uploaded automatically. Reports include app version, startup and connection
+events, API status codes, and notification setup errors; iOS also includes
+native Apple registration callbacks and token-presence flags. They exclude
+message content, passwords, tokens, request URLs, and request/response bodies.

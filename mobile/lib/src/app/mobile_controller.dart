@@ -12,6 +12,7 @@ import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/message_store.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/client_preferences.dart';
@@ -6591,6 +6592,8 @@ final class MobileController extends StateNotifier<MobileState> {
     } on KaedeException catch (error) {
       if (surfaceErrors) {
         pushSetupDiagnostics = pushFailureDiagnostics(step, error);
+        DebugLog.instance.record(DebugEvent.pushRegistrationFailed,
+            step: step, error: error);
         rethrow;
       }
       _setPushRegistrationWarning(userFacingError(
@@ -6601,6 +6604,8 @@ final class MobileController extends StateNotifier<MobileState> {
     } on Object catch (error) {
       if (surfaceErrors) {
         pushSetupDiagnostics = pushFailureDiagnostics(step, error);
+        DebugLog.instance.record(DebugEvent.pushRegistrationFailed,
+            step: step, error: error);
         rethrow;
       }
       _setPushRegistrationWarning(userFacingError(
@@ -6735,6 +6740,7 @@ final class MobileController extends StateNotifier<MobileState> {
   /// registers this installation only after consent is granted.
   Future<bool> enablePushNotifications() async {
     pushSetupDiagnostics = null;
+    DebugLog.instance.record(DebugEvent.pushRegistrationStarted);
     var step = 'permission';
     try {
       if (!await push.requestPermission()) {
@@ -6779,6 +6785,7 @@ final class MobileController extends StateNotifier<MobileState> {
       if (registered) {
         step = 'save_preference';
         await api.savePushOptIn(true);
+        DebugLog.instance.record(DebugEvent.pushRegistrationReady);
       } else {
         pushSetupDiagnostics ??=
             pushFailureDiagnostics(step, 'PUSH_REGISTRATION_INCOMPLETE');
@@ -6786,6 +6793,8 @@ final class MobileController extends StateNotifier<MobileState> {
       return registered;
     } on Object catch (error) {
       pushSetupDiagnostics ??= pushFailureDiagnostics(step, error);
+      DebugLog.instance
+          .record(DebugEvent.pushRegistrationFailed, step: step, error: error);
       _setPushRegistrationWarning(userFacingError(
         error,
         summary: 'Background notifications could not be enabled.',

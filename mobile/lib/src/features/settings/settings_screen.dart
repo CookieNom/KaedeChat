@@ -14,6 +14,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/text_to_speech.dart';
+import 'package:kaede_mobile/src/features/settings/debug_settings.dart';
 import 'package:kaede_mobile/src/features/settings/developer_portal_screen.dart';
 import 'package:kaede_mobile/src/features/settings/instance_administration_screen.dart';
 import 'package:kaede_mobile/src/features/settings/reports_screen.dart';
@@ -1322,6 +1323,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             value: _opusDtx,
             onChanged: _setOpusDtx,
           ),
+          const DebugSettings(),
           SettingsSectionHeader(
             L10n.of(context).ui_developer_34a3d9ed,
             subheading: L10n.of(context)

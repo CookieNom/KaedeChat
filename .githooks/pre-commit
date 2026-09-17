@@ -77,6 +77,17 @@ def main():
                     f"Put Flutter {version}'s bin directory on PATH (see mobile/README.md).",
                 )
             )
+            # The formatter reads the package language version from pub get's
+            # metadata, which is not part of the exported index. Match CI using
+            # the staged manifest/lockfile and already-installed dependencies.
+            run(
+                str(Path(dart).with_name("flutter")),
+                "pub",
+                "get",
+                "--offline",
+                "--enforce-lockfile",
+                cwd=snapshot / "mobile",
+            )
             run(
                 dart,
                 "format",
