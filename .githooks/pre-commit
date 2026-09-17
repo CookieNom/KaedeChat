@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Run fast CI checks against the index without changing staged or local files."""
+
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+
+def run(*args, cwd):
+    print(f"pre-commit: {' '.join(map(str, args))}", flush=True)
+    subprocess.run(args, cwd=cwd, check=True)
+
+
+def require(name, hint):
+    executable = shutil.which(name)
+    if not executable:
+        raise RuntimeError(f"{name} is missing. {hint}")
+    return executable
+
+
+def main():
+    root = Path(
+        subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], text=True
+        ).strip()
+    )
+    changed = (
+        subprocess.check_output(
+            ["git", "diff", "--cached", "--name-only", "--no-renames", "-z"], cwd=root
+        )
+        .decode()
+        .split("\0")
+    )
+    mobile = any(
+        p.startswith(("mobile/lib/", "mobile/test/"))
+        and p.endswith(".dart")
+        or p in ("mobile/pubspec.yaml", "mobile/.fvmrc")
+        for p in changed
+    )
+    backend = any(
+        p.startswith("backend/") and p.endswith((".py", ".toml", ".lock"))
+        for p in changed
+    )
+    frontend = any(p.startswith("frontend/") for p in changed)
+    rust = any(
+        p.startswith("desktop/") and p.endswith((".rs", ".toml")) for p in changed
+    )
+    workflows = any(p.startswith(".github/workflows/") for p in changed)
+    release = any(
+        p.startswith(("desktop/", "mobile/", "frontend/", ".github/")) for p in changed
+    )
+    if not any((mobile, backend, frontend, rust, workflows, release)):
+        return
+
+    # Export the index: unstaged fixes must not hide failures in the actual commit.
+    with tempfile.TemporaryDirectory(prefix="kaede-pre-commit-") as directory:
+        snapshot = Path(directory)
+        subprocess.run(
+            ["git", "checkout-index", "--all", f"--prefix={directory}/"],
+            cwd=root,
+            check=True,
+        )
+        if release:
+            run(sys.executable, ".github/scripts/check-release-inputs.py", cwd=snapshot)
+        if mobile:
+            version = json.loads((snapshot / "mobile/.fvmrc").read_text())["flutter"]
+            sdk = root / "mobile/.fvm/flutter_sdk/bin/dart"
+            dart = (
+                str(sdk)
+                if sdk.is_file()
+                else require(
+                    "dart",
+                    f"Put Flutter {version}'s bin directory on PATH (see mobile/README.md).",
+                )
+            )
+            run(
+                dart,
+                "format",
+                "--output=none",
+                "--set-exit-if-changed",
+                "lib",
+                "test",
+                cwd=snapshot / "mobile",
+            )
+        if backend:
+            ruff = root / "backend/.venv/bin/ruff"
+            if not ruff.is_file():
+                raise RuntimeError(
+                    "Backend tools are missing. Run: cd backend && uv sync --locked"
+                )
+            run(str(ruff), "check", ".", cwd=snapshot / "backend")
+            run(str(ruff), "format", "--check", ".", cwd=snapshot / "backend")
+        if frontend:
+            pnpm = require(
+                "pnpm", "Install the packageManager version in frontend/package.json."
+            )
+            modules = root / "frontend/node_modules"
+            if not modules.is_dir():
+                raise RuntimeError(
+                    "Frontend tools are missing. Run: pnpm --dir frontend install --frozen-lockfile"
+                )
+            (snapshot / "frontend/node_modules").symlink_to(
+                modules, target_is_directory=True
+            )
+            run(pnpm, "lint", cwd=snapshot / "frontend")
+        if rust:
+            cargo = require(
+                "cargo",
+                "Install Rust and the toolchain in desktop/rust-toolchain.toml.",
+            )
+            version = tomllib.loads(
+                (snapshot / "desktop/rust-toolchain.toml").read_text()
+            )["toolchain"]["channel"]
+            run(
+                cargo,
+                f"+{version}",
+                "fmt",
+                "--all",
+                "--manifest-path",
+                "desktop/Cargo.toml",
+                "--",
+                "--check",
+                cwd=snapshot,
+            )
+        if workflows:
+            actionlint = require(
+                "actionlint", "Install actionlint 1.7.12, as used in CI."
+            )
+            files = sorted((snapshot / ".github/workflows").glob("*.y*ml"))
+            if files:
+                run(
+                    actionlint,
+                    "-shellcheck=",
+                    "-pyflakes=",
+                    *map(str, files),
+                    cwd=snapshot,
+                )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        print(
+            f"pre-commit: {error}\nFix the reported issue, stage the fix, and commit again.",
+            file=sys.stderr,
+        )
+        sys.exit(1)

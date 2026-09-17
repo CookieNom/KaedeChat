@@ -102,7 +102,7 @@ async function render() {
   await vi.waitFor(() =>
     expect(
       document.querySelector(
-        guild.channels![0].type === 2 ? '[aria-label="Open Apps"]' : 'textarea'
+        [2, 13].includes(guild.channels![0].type) ? '.voice-panel' : 'textarea'
       )
     ).not.toBeNull()
   );
@@ -385,8 +385,8 @@ describe('channel menus and voice actions', () => {
     expect(JSON.parse(moves()[0][1].body)).toEqual({ channel_id: '4@chat.example' });
   });
 
-  it('opens the route-owned launcher and preserves command execution in voice', async () => {
-    guild.channels![0].type = 2;
+  it.each([2, 13])('does not offer slash-command apps in voice channel type %s', async (type) => {
+    guild.channels![0].type = type;
     guild.channels![0].permissions = (
       Permission.VIEW_CHANNEL | Permission.USE_APPLICATION_COMMANDS
     ).toString();
@@ -404,38 +404,9 @@ describe('channel menus and voice actions', () => {
       }
     ];
     await render();
-    document.querySelector<HTMLButtonElement>('[aria-label="Open Apps"]')!.click();
-    await tick();
-    const command = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
-      (item) => item.textContent?.includes('/echo')
-    )!;
-    expect(command).toBeDefined();
-    command.click();
-    await tick();
-    const dialog = document.querySelector('[aria-labelledby="voice-command-dialog-title"]')!;
-    expect(dialog).not.toBeNull();
-    const input = dialog.querySelector<HTMLInputElement>('input')!;
-    input.value = 'hello';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    await tick();
-    dialog
-      .querySelector('form')!
-      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await vi.waitFor(() =>
-      expect(
-        network.api.mock.calls.filter(([path]) => path.endsWith('/interactions'))
-      ).toHaveLength(1)
-    );
-    const [path, options] = network.api.mock.calls.find(([path]) =>
-      path.endsWith('/interactions')
-    )!;
-    expect(path).toBe('/channels/2%40chat.example/interactions');
-    expect(options.method).toBe('POST');
-    expect(JSON.parse(options.body)).toMatchObject({
-      application_ref: '6@apps.example',
-      command_name: 'echo',
-      options: { word: 'hello' }
-    });
+    expect(document.querySelector('[aria-label="Open Apps"]')).toBeNull();
+    expect(document.querySelector('[aria-labelledby="apps-launcher-title"]')).toBeNull();
+    expect(document.querySelector('[aria-labelledby="voice-command-dialog-title"]')).toBeNull();
   });
 });
 

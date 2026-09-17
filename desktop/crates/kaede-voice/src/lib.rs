@@ -376,7 +376,8 @@ pub struct VoiceHandle {
     pub commands: mpsc::UnboundedSender<VoiceCommand>,
     pub status: watch::Receiver<VoiceStatus>,
     /// Becomes true when authoritative local permissions no longer match the
-    /// immutable capture/publication graph created from the join grant.
+    /// immutable capture/publication graph created from the join grant, or an
+    /// audio-device failure requires rebuilding that graph.
     pub grant_stale: watch::Receiver<bool>,
     pub priority_speakers: watch::Receiver<BTreeSet<String>>,
     pub video_frames: Option<mpsc::Receiver<RemoteVideoFrame>>,
@@ -1037,6 +1038,14 @@ async fn run_room(
                 });
             }
             _ = video_tick.tick() => {
+                if capture.as_ref().is_some_and(NativeCapture::has_failed) || playback.has_failed() {
+                    // Reuse the fenced restart so unplugged custom devices can
+                    // fall back to the system default with current mute state.
+                    restart_requested = true;
+                    let _ = status.send(VoiceStatus::Reconnecting);
+                    let _ = grant_stale.send(true);
+                    break;
+                }
                 if screen_share.as_ref().is_some_and(|share| share.stop.load(Ordering::Acquire)) {
                     let message = screen_share.as_ref().and_then(|share| share.capture_failure.lock().ok()?.clone())
                         .unwrap_or_else(|| "Screen sharing ended.".to_owned());
@@ -2342,7 +2351,7 @@ async fn publish_camera(
         Ok(Err(error)) => {
             stop.store(true, Ordering::Release);
             let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
-            return Err(VoiceError::CameraWorker(error));
+            return Err(error);
         }
         Err(error) => {
             stop.store(true, Ordering::Release);
@@ -2392,31 +2401,48 @@ async fn publish_camera(
     Ok(video)
 }
 
-fn open_camera(
-    device_id: Option<String>,
+fn select_camera<'a>(
+    cameras: &'a [CameraDevice],
+    preferred: Option<&str>,
+) -> Option<&'a CameraDevice> {
+    cameras
+        .iter()
+        .find(|camera| Some(camera.id.as_str()) == preferred)
+        .or_else(|| cameras.first())
+}
+
+fn start_camera_with_fallback<T>(
     settings: CameraSettings,
-) -> Result<Camera, nokhwa::NokhwaError> {
-    let index = match device_id {
-        Some(value) => value
-            .parse::<u32>()
-            .map_or_else(|_| CameraIndex::String(value), CameraIndex::Index),
-        None => CameraIndex::Index(0),
-    };
-    let format =
+    mut start: impl FnMut(RequestedFormat<'_>) -> Result<T, nokhwa::NokhwaError>,
+) -> Result<T, nokhwa::NokhwaError> {
+    let preferred =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new_from(
             settings.width,
             settings.height,
             FrameFormat::MJPEG,
             settings.frame_rate,
         )));
-    let mut camera = Camera::new(index.clone(), format).or_else(|_| {
-        Camera::new(
-            index,
-            RequestedFormat::new::<RgbFormat>(RequestedFormatType::None),
-        )
-    })?;
-    camera.open_stream()?;
-    Ok(camera)
+    start(preferred).or_else(|error| {
+        tracing::warn!(%error, "preferred camera format failed to start; retrying a supported format");
+        start(RequestedFormat::new::<RgbFormat>(RequestedFormatType::None))
+    })
+}
+
+fn open_camera(device_id: Option<&str>, settings: CameraSettings) -> Result<Camera, VoiceError> {
+    let cameras = camera_devices()?;
+    let selected = select_camera(&cameras, device_id).ok_or(VoiceError::NoCamera)?;
+    let index = selected.id.parse::<u32>().map_or_else(
+        |_| CameraIndex::String(selected.id.clone()),
+        CameraIndex::Index,
+    );
+    tracing::debug!(camera_id = %selected.id, camera_name = %selected.label, "starting camera");
+    Ok(start_camera_with_fallback(settings, |format| {
+        let mut camera = Camera::new(index.clone(), format)?;
+        // Include stream startup in the retry, dropping a failed camera before
+        // reopening it. A listed format is not necessarily usable by the driver.
+        camera.open_stream()?;
+        Ok(camera)
+    })?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2426,12 +2452,12 @@ fn run_camera_capture(
     capture_level: Arc<AtomicU32>,
     device_id: Option<String>,
     settings: CameraSettings,
-    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ready: tokio::sync::oneshot::Sender<Result<(), VoiceError>>,
 ) {
-    let mut camera = match open_camera(device_id, settings) {
+    let mut camera = match open_camera(device_id.as_deref(), settings) {
         Ok(camera) => camera,
         Err(error) => {
-            let _ = ready.send(Err(error.to_string()));
+            let _ = ready.send(Err(error));
             return;
         }
     };
@@ -2804,6 +2830,8 @@ pub enum VoiceError {
     LiveKit(#[from] livekit::RoomError),
     #[error("camera capture failed: {0}")]
     Camera(#[from] nokhwa::NokhwaError),
+    #[error("No cameras available")]
+    NoCamera,
     #[error("camera capture worker failed: {0}")]
     CameraWorker(String),
     #[error("screen capture worker failed: {0}")]
@@ -2838,11 +2866,12 @@ impl VoiceError {
             Self::LiveKit(_) =>
                 "The voice service could not complete the connection. Check your connection and try joining voice again."
                     .to_owned(),
+            Self::NoCamera => "No cameras available. Connect a camera and try again.".to_owned(),
             Self::Camera(_) =>
-                "Kaede could not use the selected camera. Check camera permission and whether another app is using it, then try again."
+                "The camera could not start. Check camera permission, close other apps using it, or choose another camera."
                     .to_owned(),
             Self::CameraWorker(_) =>
-                "The camera stopped unexpectedly. Turn the camera off and on; if it keeps failing, choose another camera."
+                "The camera could not start. Try again or choose another camera."
                     .to_owned(),
             Self::ScreenWorker(_) =>
                 "Screen sharing did not start. Approve the system chooser and screen-recording permission, then try again."
@@ -3105,6 +3134,21 @@ mod tests {
 
     #[test]
     fn voice_errors_explain_the_recovery_action() {
+        assert!(
+            VoiceError::CameraWorker("thread exited".into())
+                .user_message()
+                .contains("could not start")
+        );
+        assert!(
+            VoiceError::Camera(nokhwa::NokhwaError::OpenStreamError("busy".into()))
+                .user_message()
+                .contains("close other apps")
+        );
+        assert!(
+            VoiceError::NoCamera
+                .user_message()
+                .contains("No cameras available")
+        );
         let audio_error =
             VoiceError::ScreenAudio("The selected audio app has closed.".to_owned()).user_message();
         assert!(audio_error.contains("app has closed") && audio_error.contains("audio disabled"));
@@ -3461,6 +3505,74 @@ mod tests {
             "43@chat.example",
             granted,
         ));
+    }
+
+    #[test]
+    fn camera_selection_preserves_available_preferences_and_falls_back() {
+        let cameras = [
+            super::CameraDevice {
+                id: "4".into(),
+                label: "USB camera".into(),
+            },
+            super::CameraDevice {
+                id: "7".into(),
+                label: "Virtual camera".into(),
+            },
+        ];
+        assert_eq!(super::select_camera(&cameras, None), cameras.first());
+        assert_eq!(
+            super::select_camera(&cameras, Some("removed")),
+            cameras.first()
+        );
+        assert_eq!(super::select_camera(&cameras, Some("7")), cameras.get(1));
+        assert_eq!(super::select_camera(&[], Some("7")), None);
+    }
+
+    #[test]
+    fn camera_startup_retries_construction_and_stream_failures() {
+        use nokhwa::{NokhwaError, utils::RequestedFormatType};
+        for first_error in [
+            NokhwaError::InitializeError {
+                backend: nokhwa::utils::ApiBackend::Auto,
+                error: "unsupported format".into(),
+            },
+            NokhwaError::OpenStreamError("driver rejected preferred mode".into()),
+        ] {
+            let mut attempts = 0;
+            let result = super::start_camera_with_fallback(camera_settings(1), |format| {
+                attempts += 1;
+                if attempts == 1 {
+                    assert!(matches!(
+                        format.requested_format_type(),
+                        RequestedFormatType::Closest(_)
+                    ));
+                    Err(first_error.clone())
+                } else {
+                    assert_eq!(format.requested_format_type(), RequestedFormatType::None);
+                    Ok(())
+                }
+            });
+            assert!(result.is_ok());
+            assert_eq!(attempts, 2);
+        }
+        let mut attempts = 0;
+        assert!(
+            super::start_camera_with_fallback(camera_settings(1), |_| {
+                attempts += 1;
+                Ok(())
+            })
+            .is_ok()
+        );
+        assert_eq!(attempts, 1);
+        let error = super::start_camera_with_fallback::<()>(camera_settings(1), |_| {
+            Err(nokhwa::NokhwaError::OpenStreamError(
+                "permission denied".into(),
+            ))
+        })
+        .err();
+        assert!(
+            matches!(error, Some(nokhwa::NokhwaError::OpenStreamError(reason)) if reason == "permission denied")
+        );
     }
 
     #[test]

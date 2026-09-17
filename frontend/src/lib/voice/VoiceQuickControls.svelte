@@ -60,6 +60,7 @@
         devices = next === 'audioinput' ? available.inputs : available.outputs;
         selected =
           (next === 'audioinput' ? preferences.input_device : preferences.output_device)?.id ?? '';
+        if (!devices.some((device) => device.id === selected)) selected = '';
       } else {
         const available = await navigator.mediaDevices.enumerateDevices();
         if (current !== request) return;

@@ -1379,20 +1379,8 @@ async def livekit_webhook(
         log.warning("ignored_foreign_livekit_room", room=room)
         return await completed()
     if event_type == "room_started":
-        if kind == "g":
-            creation_time = int(getattr(event.room, "creation_time", 0) or 0)
-            now = int(time.time())
-            if creation_time <= 0 or creation_time > now + settings.federation_clock_skew_seconds:
-                creation_time = now
-            await publish_voice_channel_start_time(
-                redis,
-                settings,
-                session,
-                guild_id=scope_id,
-                channel_id=leaf_id,
-                room=room,
-                started_at=creation_time,
-            )
+        # Grant issuance can create an empty room even if the client fails to
+        # open its audio devices. Start the timer only after participant admission.
         return await completed()
     if event_type == "room_finished":
         if kind == "g":
@@ -1610,8 +1598,7 @@ async def livekit_webhook(
         if not admitted:
             return await revoke_current_join(connection_id, str(metadata["client_kind"]))
         if kind == "g":
-            # Older LiveKit versions do not always emit room_started. Only an
-            # admitted participant may trigger the idempotent fallback.
+            # Only an admitted participant starts the channel's active timer.
             await publish_voice_channel_start_time(
                 redis,
                 settings,

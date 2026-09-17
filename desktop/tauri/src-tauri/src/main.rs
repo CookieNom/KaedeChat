@@ -330,7 +330,9 @@ impl From<VoiceError> for NativeError {
                 let code = match &error {
                     VoiceError::Audio(_) => "VOICE_AUDIO_UNAVAILABLE",
                     VoiceError::LiveKit(_) => "VOICE_SERVICE_UNAVAILABLE",
-                    VoiceError::Camera(_) | VoiceError::CameraWorker(_) => "CAMERA_UNAVAILABLE",
+                    VoiceError::Camera(_) | VoiceError::CameraWorker(_) | VoiceError::NoCamera => {
+                        "CAMERA_UNAVAILABLE"
+                    }
                     VoiceError::VoiceActivityDenied => "VOICE_ACTIVITY_NOT_ALLOWED",
                     VoiceError::EncryptionPolicyMismatch | VoiceError::EncryptionKeyMissing => {
                         "VOICE_E2EE_POLICY_MISMATCH"
@@ -2408,6 +2410,21 @@ async fn native_screen_audio_apps() -> Vec<kaede_voice::AudioApplication> {
 }
 
 #[tauri::command]
+async fn native_camera_devices() -> Result<Vec<kaede_voice::CameraDevice>, NativeError> {
+    let cameras = tokio::task::spawn_blocking(camera_devices)
+        .await
+        .map_err(|error| {
+            NativeError::operation(
+                "CAMERA_ENUMERATION_FAILED",
+                "Could not list cameras. Try again.",
+                error,
+            )
+        })?
+        .map_err(NativeError::from)?;
+    Ok(cameras)
+}
+
+#[tauri::command]
 async fn native_audio_devices() -> Result<Value, NativeError> {
     let inputs = tokio::task::spawn_blocking(input_devices)
         .await
@@ -3701,6 +3718,7 @@ fn main() {
             native_gateway_next,
             native_gateway_command,
             native_audio_devices,
+            native_camera_devices,
             native_screen_audio_apps,
             native_screen_thumbnail,
             native_test_input,

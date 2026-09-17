@@ -432,12 +432,19 @@ impl Drop for SpeechProcessor {
 
 pub struct NativeCapture {
     _stream: Stream,
+    failed: Arc<AtomicBool>,
     queue: Arc<ArrayQueue<f32>>,
     pub gate: Arc<CaptureGate>,
     source_rate: u32,
 }
 
 impl NativeCapture {
+    /// Whether the audio backend reported a failed stream requiring recovery.
+    #[must_use]
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
     /// Opens the selected native input and starts its bounded capture stream.
     ///
     /// # Errors
@@ -454,7 +461,12 @@ impl NativeCapture {
         let channels = config.channels as usize;
         let queue = Arc::new(ArrayQueue::new(source_rate as usize * QUEUE_SECONDS));
         let gate = Arc::new(CaptureGate::new(settings));
-        let error_callback = |error| tracing::error!(%error, "native input stream failed");
+        let failed = Arc::new(AtomicBool::new(false));
+        let stream_failed = failed.clone();
+        let error_callback = move |error| {
+            tracing::error!(%error, "native input stream failed");
+            stream_failed.store(true, Ordering::Release);
+        };
         let stream = match format {
             SampleFormat::F32 => {
                 build_input::<f32>(&device, config, channels, queue.clone(), error_callback)?
@@ -470,6 +482,7 @@ impl NativeCapture {
         stream.play()?;
         Ok(Self {
             _stream: stream,
+            failed,
             queue,
             gate,
             source_rate,
@@ -506,6 +519,7 @@ impl NativeCapture {
 
 pub struct NativePlayback {
     _stream: Stream,
+    failed: Arc<AtomicBool>,
     queue: Arc<ArrayQueue<f32>>,
     deafened: Arc<AtomicBool>,
     sink_rate: u32,
@@ -743,6 +757,12 @@ pub struct RenderReference {
 }
 
 impl NativePlayback {
+    /// Whether the audio backend reported a failed stream requiring recovery.
+    #[must_use]
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
     /// Opens the selected native output and starts its bounded playback stream.
     ///
     /// # Errors
@@ -764,7 +784,12 @@ impl NativePlayback {
         let render_reference = RenderReference {
             queue: Arc::new(ArrayQueue::new(VOICE_SAMPLE_RATE as usize * QUEUE_SECONDS)),
         };
-        let error_callback = |error| tracing::error!(%error, "native output stream failed");
+        let failed = Arc::new(AtomicBool::new(false));
+        let stream_failed = failed.clone();
+        let error_callback = move |error| {
+            tracing::error!(%error, "native output stream failed");
+            stream_failed.store(true, Ordering::Release);
+        };
         let stream = match format {
             SampleFormat::F32 => {
                 build_output::<f32>(&device, config, queue.clone(), error_callback)?
@@ -780,6 +805,7 @@ impl NativePlayback {
         stream.play()?;
         Ok(Self {
             _stream: stream,
+            failed,
             queue,
             deafened,
             sink_rate,
@@ -921,27 +947,42 @@ fn enumerate(input: bool) -> Result<Vec<AudioDevice>, AudioError> {
 }
 
 fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<Device, AudioError> {
-    select_device(host.input_devices()?, host.default_input_device(), id)
+    select_device(
+        host.input_devices()?,
+        host.default_input_device(),
+        id,
+        |device| device.id().ok().map(|id| id.to_string()),
+    )
 }
 
 fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<Device, AudioError> {
-    select_device(host.output_devices()?, host.default_output_device(), id)
+    select_device(
+        host.output_devices()?,
+        host.default_output_device(),
+        id,
+        |device| device.id().ok().map(|id| id.to_string()),
+    )
 }
 
-fn select_device(
-    devices: impl Iterator<Item = Device>,
-    default: Option<Device>,
+fn select_device<T>(
+    mut devices: impl Iterator<Item = T>,
+    default: Option<T>,
     requested: Option<&str>,
-) -> Result<Device, AudioError> {
-    if let Some(requested) = requested {
+    device_id: impl Fn(&T) -> Option<String>,
+) -> Result<T, AudioError> {
+    if let Some(requested) = requested.filter(|id| !id.is_empty() && *id != "default") {
         for device in devices {
-            if device.id().is_ok_and(|id| id.to_string() == requested) {
+            if device_id(&device).as_deref() == Some(requested) {
                 return Ok(device);
             }
         }
-        return Err(AudioError::DeviceNotFound);
+        return default.ok_or(AudioError::DeviceNotFound);
     }
-    default.ok_or(AudioError::DeviceNotFound)
+    // Windows can expose usable endpoints without reporting a system default.
+    // A missing custom device falls back to the system default above.
+    default
+        .or_else(|| devices.next())
+        .ok_or(AudioError::DeviceNotFound)
 }
 
 trait PcmSample: cpal::SizedSample + Send + 'static {
@@ -1057,6 +1098,37 @@ pub enum AudioError {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn audio_device_selection_handles_missing_system_defaults() {
+        let id = |device: &&str| Some((*device).to_owned());
+        for requested in [None, Some(""), Some("default")] {
+            assert_eq!(
+                select_device(["mic", "usb"].into_iter(), None, requested, id).ok(),
+                Some("mic")
+            );
+            assert_eq!(
+                select_device(["mic", "usb"].into_iter(), Some("usb"), requested, id).ok(),
+                Some("usb")
+            );
+        }
+        assert_eq!(
+            select_device(["mic", "usb"].into_iter(), Some("mic"), Some("usb"), id).ok(),
+            Some("usb")
+        );
+        assert_eq!(
+            select_device(["mic"].into_iter(), Some("mic"), Some("missing"), id).ok(),
+            Some("mic")
+        );
+        assert!(matches!(
+            select_device(["mic"].into_iter(), None, Some("missing"), id),
+            Err(AudioError::DeviceNotFound)
+        ));
+        assert!(matches!(
+            select_device([].into_iter(), None, None, id),
+            Err(AudioError::DeviceNotFound)
+        ));
+    }
 
     struct RenderRecorder(Arc<Mutex<(Vec<f32>, u32)>>);
 

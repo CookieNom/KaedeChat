@@ -361,6 +361,7 @@ export class VoiceSession extends EventTarget {
   microphone = false;
   deafened = false;
   camera = false;
+  cameraAvailable = false;
   screen = false;
   canSpeak = false;
   canStream = false;
@@ -909,9 +910,52 @@ export class VoiceSession extends EventTarget {
     }
   }
 
+  watchCameras(): () => void {
+    let stopped = false;
+    let scanning = false;
+    const refresh = async () => {
+      if (scanning) return;
+      scanning = true;
+      try {
+        const cameras = await this.#listCameras();
+        if (!stopped) {
+          this.cameraAvailable = cameras.length > 0;
+          this.#changed();
+        }
+      } catch {
+        // Keep the last known state if a device scan temporarily fails.
+      } finally {
+        scanning = false;
+      }
+    };
+    void refresh();
+    navigator.mediaDevices?.addEventListener('devicechange', refresh);
+    // Native capture and some browsers do not emit devicechange events.
+    const timer = setInterval(refresh, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      navigator.mediaDevices?.removeEventListener('devicechange', refresh);
+    };
+  }
+
+  async #listCameras(): Promise<{ id: string }[]> {
+    if (isNativeDesktop()) return nativeInvoke('native_camera_devices');
+    const devices = await navigator.mediaDevices?.enumerateDevices();
+    return (devices ?? [])
+      .filter((device) => device.kind === 'videoinput')
+      .map((device) => ({ id: device.deviceId }));
+  }
+
   async toggleCamera(): Promise<void> {
     if (!this.connected || !this.canStream) return;
     const enabled = !this.camera;
+    const cameras = enabled ? await this.#listCameras() : [];
+    if (enabled) {
+      this.cameraAvailable = cameras.length > 0;
+      this.#changed();
+      if (!this.cameraAvailable || !this.connected || !this.canStream) return;
+    }
     if (isNativeDesktop()) {
       await nativeInvoke('native_voice_control', {
         control: enabled ? 'camera_on' : 'camera_off'
@@ -924,7 +968,7 @@ export class VoiceSession extends EventTarget {
     if (!enabled) await this.#adaptiveVideo?.stopSource(Track.Source.Camera);
     const publication = await this.room.localParticipant.setCameraEnabled(
       enabled,
-      camera.capture,
+      { ...camera.capture, ...(enabled && cameras[0]?.id ? { deviceId: cameras[0].id } : {}) },
       camera.publish
     );
     if (enabled && publication)

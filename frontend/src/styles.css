@@ -8640,10 +8640,6 @@ body.media-viewer-open {
   width: min(880px, 100%);
 }
 
-.voice-command-dialog {
-  width: min(760px, 100%);
-}
-
 .guild-events-dialog-body {
   padding: 1.2rem;
 }

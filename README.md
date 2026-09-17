@@ -177,6 +177,27 @@ data; leave it out when stopping or updating your instance.
 
 ## Development
 
+Enable automatic pre-commit checks once per clone (requires Python 3.11+):
+
+```sh
+make hooks
+```
+
+The hook checks a temporary copy of staged files, preserving unstaged edits.
+Depending on the changed paths, it runs Dart formatting, backend Ruff lint and
+formatting, frontend ESLint/Prettier, Rust formatting, workflow syntax, and
+release metadata checks. Install tools only for the components you edit:
+Flutter from `mobile/.fvmrc` (on PATH or under `mobile/.fvm/flutter_sdk`),
+`cd backend && uv sync --locked`, `pnpm --dir frontend install --frozen-lockfile`,
+the Rust toolchain in `desktop/rust-toolchain.toml`, and actionlint 1.7.12 for
+workflow edits. Missing tools or failed checks block the commit with instructions;
+format files locally and stage the fixes before retrying.
+
+`make hooks` sets this clone's `core.hooksPath`; integrate any existing custom
+hooks before enabling it. Full builds, type checks, dependency audits, and
+integration tests still run in CI. Use `git -c core.hooksPath=/dev/null commit`
+only when deliberately bypassing the hook.
+
 Run the standard code checks with:
 
 ```sh

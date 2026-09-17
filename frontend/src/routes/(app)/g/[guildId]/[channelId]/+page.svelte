@@ -194,7 +194,6 @@
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
   import CommandOptionComposer from '$lib/components/CommandOptionComposer.svelte';
-  import ApplicationCommandLauncher from '$lib/components/ApplicationCommandLauncher.svelte';
   import ComposerActionMenu from '$lib/components/ComposerActionMenu.svelte';
   import CreatePollDialog from '$lib/components/CreatePollDialog.svelte';
   import CreateThreadDialog from '$lib/components/CreateThreadDialog.svelte';
@@ -336,7 +335,6 @@
     if (activeDraftKey && !editingMessage) writeDraft(activeDraftKey, content);
   });
   let applicationCommands = $state<ApplicationCommand[]>([]);
-  let applicationLauncherOpen = $state(false);
   let selectedApplicationCommand = $state<ApplicationCommand | null>(null);
   let nativeThreadComposer = $state(false);
   let commandOptionValues = $state<CommandComposerValues>({});
@@ -1251,7 +1249,6 @@
     selfModerationWarning = '';
     content = '';
     applicationCommands = [];
-    applicationLauncherOpen = false;
     selectedApplicationCommand = null;
     messageSearchOpen = false;
     gifPickerOpen = false;
@@ -3614,7 +3611,6 @@
       activeDraftKey = targetAccount ? draftKey(targetAccount, targetChannel) : null;
       content = activeDraftKey ? readDraft(activeDraftKey) : '';
       applicationCommands = [];
-      applicationLauncherOpen = false;
       selectedApplicationCommand = null;
       nativeThreadComposer = false;
       commandOptionValues = {};
@@ -6102,7 +6098,6 @@
       )
     )
       return;
-    applicationLauncherOpen = false;
     selectedApplicationCommand = command;
     nativeThreadComposer = false;
     commandOptionValues = {};
@@ -7150,7 +7145,6 @@
             permissions={channel.permissions ?? '0'}
             occupants={occupantsFor(channel)}
             startedAt={voiceStartedAt}
-            onApps={channelReady ? () => (applicationLauncherOpen = true) : undefined}
           />
         {/key}
       </div>
@@ -7794,90 +7788,6 @@
     />
   {/if}
 </main>
-
-{#if channel && isVoiceLikeChannel(channel)}
-  <ApplicationCommandLauncher
-    bind:open={applicationLauncherOpen}
-    showTrigger={false}
-    compact
-    commands={usableApplicationCommands}
-    accountRef={currentUser ? entityRef(currentUser) : null}
-    disabled={busy || !channelReady || channel.archived}
-    onSelect={selectApplicationCommand}
-  />
-  {#if commandNotice}<p class="visually-hidden" role="status">{commandNotice}</p>{/if}
-{/if}
-
-{#if channel && isVoiceLikeChannel(channel) && selectedApplicationCommand}
-  <div use:portal class="channel-dialog-layer">
-    <button
-      class="channel-dialog-backdrop"
-      type="button"
-      aria-label={$t('ui_cancel_app_command_876251c6')}
-      disabled={busy}
-      onclick={cancelCommandComposer}
-    ></button>
-    <div
-      class="channel-dialog voice-command-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="voice-command-dialog-title"
-    >
-      <header>
-        <div>
-          <p>{selectedApplicationCommand.application_name}</p>
-          <h2 id="voice-command-dialog-title">
-            {$t('ui_run_value0_e0e8c6e8', {
-              value0: String(localizedCommandName(selectedApplicationCommand))
-            })}
-          </h2>
-        </div>
-        <button
-          type="button"
-          aria-label={$t('ui_cancel_app_command_876251c6')}
-          disabled={busy}
-          onclick={cancelCommandComposer}>×</button
-        >
-      </header>
-      <form
-        onsubmit={(event) => {
-          event.preventDefault();
-          void send();
-        }}
-      >
-        {@render applicationCommandFields(selectedApplicationCommand)}
-        {#if uploads.length}<UploadPreviewTray
-            {uploads}
-            onRemove={removeUpload}
-            onSpoiler={uploadQueue.setSpoiler}
-            disabled={busy}
-          />{/if}
-        {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-        <footer>
-          <button class="quiet-button" type="button" disabled={busy} onclick={cancelCommandComposer}
-            >{$t('ui_cancel_19766ed6')}</button
-          >
-          <button
-            class="primary-button"
-            disabled={busy ||
-              !channelReady ||
-              !applicationCommandAllowedByChannelPermissions(
-                selectedApplicationCommand,
-                canUseApplicationCommands,
-                canSendUserContextCommands
-              ) ||
-              !commandOptionsComplete(selectedApplicationCommand, commandOptionValues) ||
-              uploads.some((upload) => upload.status === 'uploading')}
-          >
-            {busy
-              ? $t('ui_running_46c54136')
-              : `Run /${localizedCommandName(selectedApplicationCommand)}`}
-          </button>
-        </footer>
-      </form>
-    </div>
-  </div>
-{/if}
 
 {#if threadCreateSource}
   <CreateThreadDialog

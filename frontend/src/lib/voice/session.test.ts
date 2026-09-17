@@ -1,6 +1,6 @@
 import { webCameraDefaults } from './quality';
 import { Track, type Room } from 'livekit-client';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Channel } from '$lib/chat/types';
 
 import {
@@ -15,6 +15,18 @@ import {
   type VoiceChannelPolicy,
   type VoiceToken
 } from './session';
+
+beforeEach(() => {
+  vi.stubGlobal('navigator', {
+    mediaDevices: Object.assign(new EventTarget(), {
+      enumerateDevices: vi.fn(async () => [{ kind: 'videoinput', deviceId: 'first-camera' }])
+    })
+  });
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -126,6 +138,51 @@ describe('voice connection generation fence', () => {
     expect(voice.connecting).toBe(false);
     expect(voice.microphone).toBe(false);
   });
+});
+
+it('tracks camera hotplug, blocks capture without a camera, and selects the first camera', async () => {
+  vi.useFakeTimers();
+  const devices = navigator.mediaDevices;
+  const enumerate = vi.mocked(devices.enumerateDevices);
+  enumerate.mockResolvedValue([]);
+  const room = new FakeVoiceRoom();
+  const voice = new VoiceSession(() => room as unknown as Room);
+  voice.connected = true;
+  voice.canStream = true;
+  const changed = vi.fn();
+  voice.addEventListener('change', changed);
+  const stop = voice.watchCameras();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(voice.cameraAvailable).toBe(false);
+    await voice.toggleCamera();
+    expect(room.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
+    enumerate.mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'usb-camera' },
+      { kind: 'videoinput', deviceId: 'second-camera' }
+    ] as MediaDeviceInfo[]);
+    devices.dispatchEvent(new Event('devicechange'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(voice.cameraAvailable).toBe(true);
+    await voice.toggleCamera();
+    expect(room.localParticipant.setCameraEnabled).toHaveBeenLastCalledWith(
+      true,
+      expect.objectContaining({ deviceId: 'usb-camera' }),
+      expect.any(Object)
+    );
+    enumerate.mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(voice.cameraAvailable).toBe(false);
+    await voice.toggleCamera();
+    expect(voice.camera).toBe(false);
+    stop();
+    changed.mockClear();
+    devices.dispatchEvent(new Event('devicechange'));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(changed).not.toHaveBeenCalled();
+  } finally {
+    stop();
+  }
 });
 
 describe('self voice-state publication', () => {

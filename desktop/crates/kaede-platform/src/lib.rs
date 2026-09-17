@@ -871,6 +871,11 @@ mod tests {
     #[tokio::test]
     async fn preferences_round_trip_all_native_device_choices() {
         let paths = temporary_paths("preferences");
+        let defaults = DesktopPreferences::load(&paths)
+            .await
+            .expect("fresh preferences");
+        assert!(defaults.input_device.is_none());
+        assert!(defaults.output_device.is_none());
         let preferences = DesktopPreferences {
             input_device: Some(DevicePreference {
                 id: "input-id".to_owned(),
@@ -924,5 +929,7 @@ mod tests {
         let preferences: DesktopPreferences =
             serde_json::from_value(serde_json::json!({})).expect("legacy preferences");
         assert!(preferences.opus_dtx);
+        assert!(preferences.input_device.is_none());
+        assert!(preferences.output_device.is_none());
     }
 }

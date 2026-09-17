@@ -601,6 +601,26 @@ def webhook_event(event_type: str, *, metadata: str = "") -> SimpleNamespace:
     return event
 
 
+async def test_empty_room_creation_does_not_start_the_voice_timer(monkeypatch: Any) -> None:
+    publish_start_time = AsyncMock()
+    monkeypatch.setattr(
+        "app.api.voice.receive_webhook",
+        lambda *_args: webhook_event("room_started"),
+    )
+    monkeypatch.setattr("app.api.voice.publish_voice_channel_start_time", publish_start_time)
+
+    response = await livekit_webhook(
+        request=webhook_request(),
+        authorization="signed",
+        session=AsyncMock(),
+        redis=AsyncMock(),
+        settings=settings(),
+    )
+
+    assert response.status_code == 204
+    publish_start_time.assert_not_awaited()
+
+
 async def test_track_webhook_cannot_evict_a_joined_participant(monkeypatch: Any) -> None:
     removed: list[tuple[str, str]] = []
 

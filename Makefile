@@ -21,7 +21,9 @@ VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(V
 RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
 
 .PHONY: help setup search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit mobile-check desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
+.PHONY: hooks
 help:
+	@echo "hooks            Enable fast pre-commit CI checks for this clone (Python 3.11+)"
 	@echo "setup            Run the interactive deployment configuration wizard"
 	@echo "search-rebuild   Rebuild private message search online (RESET=1 recreates the index)"
 	@echo "auto-update-enable  Install and enable the optional user systemd update timer"
@@ -54,6 +56,9 @@ help:
 	@echo "generated-compose-check Validate wizard output when it is present"
 	@echo "nginx-check      Validate the example host-nginx configuration with a temporary certificate"
 	@echo "dev              Start both local development instances (requires explicit operator action)"
+
+hooks:
+	git config --local core.hooksPath .githooks
 
 setup:
 	./setup.sh $(SETUP_ARGS)

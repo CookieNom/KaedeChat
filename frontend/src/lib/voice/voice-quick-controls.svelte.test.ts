@@ -18,7 +18,10 @@ it('selects microphone and output independently and restores the previous select
   }
   const target = document.createElement('div');
   document.body.append(target);
-  const preferences = { input_device: null, output_device: null };
+  const preferences = {
+    input_device: null,
+    output_device: { id: 'unplugged', label: 'Disconnected headphones' }
+  };
   invoke.mockImplementation(async (command: string) => {
     if (command === 'native_audio_devices')
       return {
@@ -35,18 +38,20 @@ it('selects microphone and output independently and restores the previous select
       target.querySelector<HTMLButtonElement>('[aria-label="Choose microphone"]')!.click()
     );
     await vi.waitFor(() => expect(target.querySelector('input[value="mic"]')).not.toBeNull());
+    expect(target.querySelector<HTMLInputElement>('input[value=""]')!.checked).toBe(true);
     flushSync(() => target.querySelector<HTMLInputElement>('input[value="mic"]')!.click());
     await vi.waitFor(() =>
       expect(target.querySelector('[role="alert"]')?.textContent).toContain('previous device')
     );
     expect(target.querySelector<HTMLInputElement>('input[value=""]')!.checked).toBe(true);
     expect(invoke).toHaveBeenCalledWith('native_preferences_set', {
-      preferences: { input_device: { id: 'mic', label: 'Studio microphone' }, output_device: null }
+      preferences: { ...preferences, input_device: { id: 'mic', label: 'Studio microphone' } }
     });
     flushSync(() =>
       target.querySelector<HTMLButtonElement>('[aria-label="Choose speakers"]')!.click()
     );
     await vi.waitFor(() => expect(target.querySelector('input[value="out"]')).not.toBeNull());
+    expect(target.querySelector<HTMLInputElement>('input[value=""]')!.checked).toBe(true);
     expect(target.querySelector('input[value="mic"]')).toBeNull();
     expect(
       target.querySelector('[aria-label="Choose speakers"]')!.getAttribute('aria-expanded')

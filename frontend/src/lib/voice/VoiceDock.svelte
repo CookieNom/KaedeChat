@@ -43,26 +43,26 @@
     callRef,
     permissions = null,
     occupants = [],
-    startedAt = null,
-    onApps
+    startedAt = null
   }: {
     channelRef?: string;
     callRef?: string;
     permissions?: string | null;
     occupants?: VoiceOccupant[];
     startedAt?: number | null;
-    onApps?: () => void;
   } = $props();
   const voice = new VoiceSession(undefined, (state) =>
     authenticatedGateway.client.setSelfVoiceState(state.self_mute, state.self_deaf)
   );
   onMount(() => {
     activeVoice.session = voice;
+    const stopWatchingCameras = voice.watchCameras();
     const changed = () => {
       activeVoice.revision += 1;
     };
     voice.addEventListener('change', changed);
     return () => {
+      stopWatchingCameras();
       voice.removeEventListener('change', changed);
       if (activeVoice.session === voice) activeVoice.session = null;
     };
@@ -236,6 +236,7 @@
       microphone: voice.microphone,
       deafened: voice.deafened,
       camera: voice.camera,
+      cameraAvailable: voice.cameraAvailable,
       screen: voice.screen,
       canSpeak: voice.canSpeak,
       canStream: voice.canStream,
@@ -1099,6 +1100,15 @@
       </div>
     </div>
     <div class="voice-heading-actions">
+      {#if isNativeDesktop() && view.connected && (videoDetached || view.tiles.some((tile) => !tile.local && tile.source === 'screen_share'))}
+        <button class="secondary" onclick={() => openVideoWindow('pip')}>Picture in picture</button>
+        <button class="secondary" onclick={() => openVideoWindow('popout')}>Pop out video</button>
+        {#if videoDetached}
+          <button class="secondary" onclick={() => openVideoWindow('close')}
+            >Return video to channel</button
+          >
+        {/if}
+      {/if}
       {#if canManageStage && stageLoaded}
         {#if stageInstance}
           <button class="secondary" disabled={stageLoading} onclick={editStageTopic}
@@ -1134,15 +1144,6 @@
 
   <div class="audio-host" bind:this={audioHost}></div>
 
-  {#if isNativeDesktop() && view.connected}
-    <div class="video-window-controls">
-      <button onclick={() => openVideoWindow('pip')}>Picture in picture</button>
-      <button onclick={() => openVideoWindow('popout')}>Pop out video</button>
-      {#if videoDetached}<button onclick={() => openVideoWindow('close')}
-          >Return video to channel</button
-        >{/if}
-    </div>
-  {/if}
   <main class="voice-stage">
     {#if error}<p class="voice-error" role="alert">{error}</p>{/if}
     {#if videoDegraded}<p class="voice-permission-notice" role="status">
@@ -1345,16 +1346,18 @@
       <button
         class:active={view.camera}
         class="control-button"
-        disabled={!view.canStream}
+        disabled={!view.canStream || (!view.camera && !view.cameraAvailable)}
         aria-pressed={view.camera}
         aria-label={view.camera
           ? $t('ui_turn_camera_off_2050f56d')
           : $t('ui_turn_camera_on_95e9fb56')}
         title={!view.canStream
           ? $t('ui_you_do_not_have_permission_to_use_video_in_th_b3e90649')
-          : view.camera
-            ? $t('ui_camera_off_ce3ef745')
-            : $t('ui_camera_on_071a189a')}
+          : !view.camera && !view.cameraAvailable
+            ? 'No cameras available'
+            : view.camera
+              ? $t('ui_camera_off_ce3ef745')
+              : $t('ui_camera_on_071a189a')}
         onclick={() => safely(() => voice.toggleCamera())}
       >
         <Icon name={view.camera ? 'video' : 'video-off'} size={21} />
@@ -1379,18 +1382,6 @@
       >
         <Icon name="screen" size={21} />
       </button>
-      {#if onApps}
-        <button
-          class="control-button"
-          type="button"
-          aria-label={$t('ui_open_apps_4d95ac69')}
-          aria-haspopup="dialog"
-          title={$t('ui_apps_89dd7484')}
-          onclick={onApps}
-        >
-          <Icon name="sparkles" size={20} />
-        </button>
-      {/if}
       {#if view.pushToTalkRequired}
         <button
           class:active={view.microphone}
@@ -1577,6 +1568,7 @@
 
   .voice-heading {
     display: flex;
+    flex-wrap: wrap;
     min-width: 0;
     align-items: center;
     justify-content: space-between;
@@ -1595,9 +1587,18 @@
 
   .voice-heading-actions {
     display: flex;
-    flex: 0 0 auto;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.45rem;
+  }
+
+  .voice-heading-actions .secondary:hover {
+    background: var(--paper-raised);
+  }
+
+  .voice-heading-actions button:focus-visible {
+    outline: 2px solid var(--maple);
+    outline-offset: 2px;
   }
 
   .voice-heading-actions .danger {
@@ -1709,13 +1710,6 @@
         transparent 32rem
       ),
       var(--paper);
-  }
-
-  .video-window-controls {
-    display: flex;
-    gap: 8px;
-    padding: 8px;
-    flex-wrap: wrap;
   }
 
   .video-grid {
