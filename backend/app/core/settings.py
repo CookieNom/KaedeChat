@@ -371,6 +371,8 @@ class Settings(BaseSettings):
     push_relay_origin: str = "kaede.chat"
     push_relay_app_id: str = "chat.kaede.mobile"
     push_relay_service_enabled: bool = False
+    # API capability signal; provider secrets remain confined to the worker.
+    push_relay_voip_available: bool = False
     push_relay_fcm_service_account_b64: SecretStr | None = None
     push_relay_apns_key_b64: SecretStr | None = None
     push_relay_apns_key_id: str | None = None
@@ -385,6 +387,11 @@ class Settings(BaseSettings):
     # Observability and retention
     audit_retention_days: int = Field(default=90, ge=90)
     metrics_enabled: bool = True
+
+    @field_validator("push_relay_voip_available", mode="before")
+    @classmethod
+    def blank_voip_capability_is_false(cls, value: object) -> object:
+        return False if value == "" else value
 
     @field_validator(
         "proxy_secret",

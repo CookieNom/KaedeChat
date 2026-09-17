@@ -148,8 +148,14 @@ KAEDE_PUSH_RELAY_APNS_TEAM_ID=<Apple team ID>
 KAEDE_PUSH_RELAY_APNS_TOPIC=chat.kaede.mobile.voip
 ```
 
-Only relay workers receive those credentials. FCM delivers ordinary Android
-and iOS notifications. APNs VoIP wakes launch PushKit and CallKit for incoming
+Only relay workers receive those credentials. Compose derives the API's non-secret
+`KAEDE_PUSH_RELAY_VOIP_AVAILABLE` flag from the configured APNs key. Custom
+deployments with separate API and worker processes must set that flag to `true`
+on the API when their relay worker has APNs configured. Do not copy the key
+into the API process.
+
+FCM delivers ordinary Android and iOS notifications. APNs VoIP wakes launch
+PushKit and CallKit for incoming
 iOS calls. Don't set either provider credential on an ordinary home.
 A custom build can instead use `KAEDE_PUSH_ENABLED=true` with
 `KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64`, but that legacy/direct transport is not

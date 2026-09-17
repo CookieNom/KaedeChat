@@ -350,6 +350,10 @@ def test_service_account_shape_endpoints_and_secret_hiding() -> None:
 
 
 def test_official_push_relay_needs_no_home_firebase_secret() -> None:
+    for capability, expected in (("true", True), ("", False), ("false", False)):
+        api = settings(service_role="api", push_relay_voip_available=capability)
+        assert api.push_relay_voip_available is expected
+        assert api.push_relay_apns_key_b64 is None
     home = settings(service_role="worker", push_relay_enabled=True)
     assert home.push_relay_url == "https://push.kaede.chat"
     assert home.push_relay_origin == "kaede.chat"

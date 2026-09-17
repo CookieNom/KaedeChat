@@ -471,6 +471,8 @@ services:
     environment:
       <<: *backend-core-environment
       KAEDE_SERVICE_ROLE: api
+      # Expose only whether the worker has a key, never the key itself.
+      KAEDE_PUSH_RELAY_VOIP_AVAILABLE: "${KAEDE_PUSH_RELAY_APNS_KEY_B64:+true}"
       KAEDE_ADMIN_TOKEN: ${KAEDE_ADMIN_TOKEN:-}
       KAEDE_PHOTODNA_ENABLED: ${KAEDE_PHOTODNA_ENABLED:-false}
       KAEDE_PHOTODNA_SUBSCRIPTION_KEY: ${KAEDE_PHOTODNA_SUBSCRIPTION_KEY:-}

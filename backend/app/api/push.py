@@ -516,7 +516,11 @@ async def create_relay_subscription(
 ) -> dict[str, object]:
     if not settings.push_relay_service_enabled:
         raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
-    if body.provider == "apns_voip" and settings.push_relay_apns_key_b64 is None:
+    if (
+        body.provider == "apns_voip"
+        and not settings.push_relay_voip_available
+        and settings.push_relay_apns_key_b64 is None
+    ):
         raise HTTPException(status_code=503, detail={"code": "PUSH_RELAY_VOIP_UNAVAILABLE"})
     require_relay_transport_host(request, settings)
     await _relay_registration_rate_limit(redis, request, settings)

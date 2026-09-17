@@ -362,6 +362,42 @@ def relay_request(method: str, path: str) -> Request:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("available", "key", "accepted"),
+    [(True, None, True), (False, None, False), (False, "worker-key", True)],
+)
+async def test_voip_enrollment_checks_worker_capability_without_api_secret(
+    monkeypatch: pytest.MonkeyPatch, available: bool, key: str | None, accepted: bool
+) -> None:
+    verify = AsyncMock(side_effect=ValueError("stop after capability check"))
+    monkeypatch.setattr(push_api, "_relay_registration_rate_limit", AsyncMock())
+    monkeypatch.setattr(push_api, "matching_block", AsyncMock(return_value=None))
+    monkeypatch.setattr(push_api, "verify_push_document", verify)
+    with pytest.raises(HTTPException) as caught:
+        await push_api.create_relay_subscription(
+            PushRelaySubscriptionCreate(
+                grant={"origin": "home.example"},
+                provider="apns_voip",
+                provider_token="p" * 32,
+                management_secret="m" * 43,
+            ),
+            relay_request("POST", "/push/v1/subscriptions"),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(
+                push_relay_service_enabled=True,
+                push_relay_url="https://relay.example",
+                push_relay_voip_available=available,
+                push_relay_apns_key_b64=key,
+            ),  # type: ignore[arg-type]
+        )
+    assert caught.value.detail["code"] == (
+        "PUSH_RELAY_GRANT_INVALID" if accepted else "PUSH_RELAY_VOIP_UNAVAILABLE"
+    )
+    assert bool(verify.await_count) is accepted
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("level", "verifies_grant"), [("silence", True), ("suspend", False)])
 async def test_push_relay_enrollment_ignores_guild_silence_but_honors_suspension(
     monkeypatch: pytest.MonkeyPatch,
