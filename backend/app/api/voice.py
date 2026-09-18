@@ -1674,6 +1674,9 @@ async def livekit_webhook(
                 connection_id=connection_id,
                 generation=generation,
             )
+        # A delayed leave from an older connection must not hide its replacement.
+        if not removed:
+            return await completed()
     else:
         return await completed()
     topic = (

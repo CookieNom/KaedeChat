@@ -2589,15 +2589,8 @@
 
   function refreshVoiceOccupancy() {
     if (document.visibilityState !== 'visible' || !guild) return;
-    const occupiedVoiceChannels = (guild.channels ?? []).filter(
-      (item) =>
-        isVoiceLikeChannel(item) &&
-        ((voiceOccupancy[entityKey(item)]?.length ?? 0) > 0 ||
-          Boolean(voiceOccupancyErrors[entityKey(item)]))
-    );
-    if (occupiedVoiceChannels.length > 0) {
-      void loadVoiceOccupancy(occupiedVoiceChannels, loadGeneration);
-    }
+    // An apparently empty channel may have missed its join event.
+    void loadVoiceOccupancy(guild.channels ?? [], loadGeneration);
   }
 
   function reconcileReactionMutation(eventName: ReactionDispatchName, payload: unknown) {

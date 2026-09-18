@@ -21,8 +21,22 @@
   let menuBottom = $state(80);
   let request = 0;
   const session = $derived((activeVoice.revision, activeVoice.session));
-  const muted = $derived((activeVoice.revision, !session?.microphone));
-  const deafened = $derived((activeVoice.revision, session?.deafened ?? false));
+  const connected = $derived((activeVoice.revision, session?.connected ?? false));
+  const canSpeak = $derived((activeVoice.revision, session?.canSpeak ?? false));
+  const pushToTalkRequired = $derived((activeVoice.revision, session?.pushToTalkRequired ?? false));
+  const muted = $derived((activeVoice.revision, connected && !session?.microphone));
+  const deafened = $derived((activeVoice.revision, connected && (session?.deafened ?? false)));
+  const microphoneLabel = $derived(
+    !connected
+      ? 'Join a call to use your microphone'
+      : !canSpeak
+        ? 'You do not have permission to speak in this call'
+        : pushToTalkRequired
+          ? 'Use push-to-talk in the call controls'
+          : muted
+            ? 'Unmute microphone'
+            : 'Mute microphone'
+  );
 
   async function control(deafen: boolean) {
     error = '';
@@ -117,9 +131,9 @@
 <div class="quick-controls" aria-label="Voice controls">
   <div class:off={muted} class="split">
     <button
-      disabled={!session?.connected || !session?.canSpeak}
-      aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
-      title={muted ? 'Unmute microphone' : 'Mute microphone'}
+      disabled={!connected || !canSpeak || pushToTalkRequired}
+      aria-label={microphoneLabel}
+      title={microphoneLabel}
       aria-pressed={muted}
       onclick={() => control(false)}
       ><Icon name={muted ? 'microphone-off' : 'microphone'} size={19} /></button
@@ -134,9 +148,9 @@
   </div>
   <div class:off={deafened} class="split">
     <button
-      disabled={!session?.connected}
-      aria-label={deafened ? 'Undeafen' : 'Deafen'}
-      title={deafened ? 'Undeafen' : 'Deafen'}
+      disabled={!connected}
+      aria-label={!connected ? 'Join a call to deafen' : deafened ? 'Undeafen' : 'Deafen'}
+      title={!connected ? 'Join a call to deafen' : deafened ? 'Undeafen' : 'Deafen'}
       aria-pressed={deafened}
       onclick={() => control(true)}
       ><Icon name={deafened ? 'headphones-off' : 'headphones'} size={19} /></button
@@ -168,7 +182,7 @@
   </header>
   {#if busy}<p class="device-status" role="status">Loading audio devices…</p>{/if}
   <fieldset
-    disabled={busy || (!isNativeDesktop() && !session?.connected)}
+    disabled={busy || (!isNativeDesktop() && !connected)}
     aria-label={kind === 'audioinput' ? 'Microphone' : 'Speakers'}
   >
     {#each [{ id: '', label: 'System default' }, ...devices.filter((device) => device.id && device.id !== 'default')] as device (device.id)}
@@ -183,7 +197,7 @@
       >
     {/each}
   </fieldset>
-  {#if !isNativeDesktop() && !session?.connected}<p class="device-status">
+  {#if !isNativeDesktop() && !connected}<p class="device-status">
       Join a call to select an audio device.
     </p>{/if}
   {#if error}<p class="device-status error" role="alert">{error}</p>{/if}

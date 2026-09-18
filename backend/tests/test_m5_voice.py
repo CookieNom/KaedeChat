@@ -753,8 +753,10 @@ async def test_participant_left_without_connection_metadata_cannot_remove_new_le
     assert queued == []
 
 
-async def test_last_guild_participant_leaving_clears_the_room_start_time(
+@pytest.mark.parametrize("removed", [True, False])
+async def test_participant_leave_is_published_only_when_its_connection_was_removed(
     monkeypatch: Any,
+    removed: bool,
 ) -> None:
     metadata = {
         "generation": 4,
@@ -779,13 +781,15 @@ async def test_last_guild_participant_leaving_clears_the_room_start_time(
     )
     monkeypatch.setattr(
         "app.api.voice.remove_occupant_connection",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=removed),
     )
     monkeypatch.setattr("app.api.voice.room_occupants", AsyncMock(return_value=[]))
     monkeypatch.setattr("app.api.voice.publish_voice_channel_start_time", clear_start_time)
     monkeypatch.setattr("app.api.voice.release_voice_connection", AsyncMock(return_value=True))
-    monkeypatch.setattr("app.api.voice.publish_ephemeral", AsyncMock())
-    monkeypatch.setattr("app.api.voice.enqueue_best_effort", AsyncMock(return_value=True))
+    publish = AsyncMock()
+    enqueue = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.api.voice.publish_ephemeral", publish)
+    monkeypatch.setattr("app.api.voice.enqueue_best_effort", enqueue)
     session = AsyncMock()
     redis = AsyncMock()
     voice_settings = settings()
@@ -799,6 +803,14 @@ async def test_last_guild_participant_leaving_clears_the_room_start_time(
     )
 
     assert response.status_code == 204
+    if not removed:
+        clear_start_time.assert_not_awaited()
+        publish.assert_not_awaited()
+        enqueue.assert_not_awaited()
+        return
+    publish.assert_awaited_once()
+    assert publish.call_args.args[3]["connected"] is False
+    enqueue.assert_awaited_once()
     clear_start_time.assert_awaited_once_with(
         redis,
         voice_settings,

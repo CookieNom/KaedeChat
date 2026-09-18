@@ -91,10 +91,13 @@ export function applyVoiceStateUpdate(
 
   if (typeof update.connected === 'boolean' && update.user_id && update.user_domain) {
     const channel = targetChannel(channels, update);
+    if (!channel) return occupancy;
     const withoutUser = Object.fromEntries(
       Object.entries(occupancy).map(([key, occupants]) => [
         key,
-        occupants.filter((occupant) => !sameUser(occupant, update))
+        update.connected || key === entityKey(channel)
+          ? occupants.filter((occupant) => !sameUser(occupant, update))
+          : occupants
       ])
     );
     if (update.connected && update.state && channel) {

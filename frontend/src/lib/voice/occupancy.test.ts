@@ -51,6 +51,23 @@ describe('voice occupancy reconciliation', () => {
     ).toEqual({ '10@chat.test': [], '20@chat.test': [moved] });
   });
 
+  it.each(['10', 'unknown'])(
+    'ignores a delayed leave from channel %s after a move',
+    (channelId) => {
+      const moved = occupant({ channel_id: '20' });
+      const current = { '10@chat.test': [], '20@chat.test': [moved] };
+
+      expect(
+        applyVoiceStateUpdate(current, channels, {
+          channel_id: channelId,
+          user_id: moved.user_id,
+          user_domain: moved.user_domain,
+          connected: false
+        })
+      ).toEqual(current);
+    }
+  );
+
   it('replaces only the room named by an authoritative heartbeat', () => {
     const other = occupant({
       identity: '90@chat.test',
