@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/domain/permission_selection.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -91,7 +92,7 @@ final class _ApplicationPermissionPickerState
                       ],
                     ),
                   ),
-                  FilledButton(
+                  ActionButton(
                     onPressed: () => Navigator.pop(context, _selected),
                     child: Text(L10n.of(context).ui_done_8dd31791),
                   ),

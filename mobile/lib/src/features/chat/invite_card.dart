@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 List<String> messageInviteReferences(String? content,
@@ -73,7 +74,8 @@ class InviteCard extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(L10n.of(context).ui_invitation_unavailable_9fc21e34),
-                  TextButton(
+                  ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => ref.invalidate(provider),
                     child: Text(L10n.of(context).ui_retry_8036af59),
                   ),
@@ -95,7 +97,8 @@ class InviteCard extends ConsumerWidget {
                         when description.isNotEmpty)
                       Text(description,
                           maxLines: 2, overflow: TextOverflow.ellipsis),
-                    TextButton(
+                    ActionButton(
+                      kind: ActionButtonKind.text,
                       onPressed: () =>
                           Navigator.of(context).push(MaterialPageRoute<void>(
                         builder: (_) => DeepLinkActionScreen(

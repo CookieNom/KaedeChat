@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
@@ -150,7 +151,8 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
                   child: MaterialBanner(
                     content: Text(message),
                     actions: [
-                      TextButton(
+                      ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: () {
                           setState(() {
                             error = null;

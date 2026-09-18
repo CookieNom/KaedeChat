@@ -5,6 +5,7 @@ import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -853,7 +854,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                           trailing: _query.text.isEmpty
                               ? null
                               : <Widget>[
-                                  IconButton(
+                                  ActionButton(
+                                    kind: ActionButtonKind.icon,
                                     tooltip: L10n.of(context)
                                         .ui_clear_search_text_43960e99,
                                     onPressed: () {
@@ -1000,7 +1002,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                         Row(
                           children: [
                             Expanded(
-                              child: OutlinedButton.icon(
+                              child: ActionButton(
+                                kind: ActionButtonKind.outlined,
                                 icon: Icon(Icons.date_range_rounded),
                                 label: Text(_after == null
                                     ? L10n.of(context).ui_after_date_692015bf
@@ -1021,7 +1024,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             ),
                             SizedBox(width: 12),
                             Expanded(
-                              child: OutlinedButton.icon(
+                              child: ActionButton(
+                                kind: ActionButtonKind.outlined,
                                 icon: Icon(Icons.event_rounded),
                                 label: Text(_before == null
                                     ? L10n.of(context).ui_before_date_45d5ab9e
@@ -1063,13 +1067,14 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                         ),
                         Align(
                           alignment: Alignment.centerLeft,
-                          child: TextButton(
+                          child: ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed: _clearFilters,
                             child: Text(
                                 L10n.of(context).ui_clear_filters_240d53c9),
                           ),
                         ),
-                        FilledButton.icon(
+                        ActionButton(
                           onPressed: _loading || !_canSearch ? null : _search,
                           icon: Icon(Icons.search_rounded),
                           label: Text(_loading
@@ -1087,7 +1092,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                     style:
                                         TextStyle(fontWeight: FontWeight.w700)),
                               ),
-                              TextButton(
+                              ActionButton(
+                                  kind: ActionButtonKind.text,
                                   onPressed: _clearHistory,
                                   child:
                                       Text(L10n.of(context).ui_clear_04a57fc2)),
@@ -1157,7 +1163,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             in _page?.results ?? const <MessageSearchResult>[])
                           _resultTile(context, result),
                         if (_page?.nextCursor != null)
-                          TextButton(
+                          ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed:
                                 _loading ? null : () => _search(more: true),
                             child: Text(L10n.of(context).ui_load_more_2b7b053e),
@@ -1422,7 +1429,8 @@ final class _UserFilterField extends StatelessWidget {
                         ),
                       )
                     : Icon(Icons.arrow_drop_down_rounded)
-                : IconButton(
+                : ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context)
                         .ui_clear_value0_filter_99ce9e53((label).toString()),
                     onPressed: onClear,

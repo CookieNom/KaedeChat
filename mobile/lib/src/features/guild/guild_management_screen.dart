@@ -29,6 +29,7 @@ import 'package:kaede_mobile/src/features/guild/application_command_permissions_
 import 'package:kaede_mobile/src/features/guild/bot_e2ee_participation_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_admin_advanced.dart';
 import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -1128,7 +1129,8 @@ final class _OverviewTabState extends State<_OverviewTab> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    OutlinedButton.icon(
+                    ActionButton(
+                      kind: ActionButtonKind.outlined,
                       onPressed: _busy || !widget.canManageAssets
                           ? null
                           : () => _asset('icon'),
@@ -1145,7 +1147,8 @@ final class _OverviewTabState extends State<_OverviewTab> {
                     ),
                     if (_guild.iconHash != null) ...[
                       SizedBox(height: 6),
-                      OutlinedButton.icon(
+                      ActionButton(
+                        kind: ActionButtonKind.outlined,
                         onPressed: _busy || !widget.canManageAssets
                             ? null
                             : () => _removeAsset('icon'),
@@ -1159,7 +1162,8 @@ final class _OverviewTabState extends State<_OverviewTab> {
                       ),
                     ],
                     SizedBox(height: 6),
-                    OutlinedButton.icon(
+                    ActionButton(
+                      kind: ActionButtonKind.outlined,
                       onPressed: _busy || !widget.canManageAssets
                           ? null
                           : () => _asset('banner'),
@@ -1176,7 +1180,8 @@ final class _OverviewTabState extends State<_OverviewTab> {
                     ),
                     if (_guild.bannerHash != null) ...[
                       SizedBox(height: 6),
-                      OutlinedButton.icon(
+                      ActionButton(
+                        kind: ActionButtonKind.outlined,
                         onPressed: _busy || !widget.canManageAssets
                             ? null
                             : () => _removeAsset('banner'),
@@ -1222,7 +1227,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
             SizedBox(height: 18),
             SizedBox(
               width: double.infinity,
-              child: FilledButton.icon(
+              child: ActionButton(
                   onPressed: _busy || !widget.canManage ? null : _save,
                   icon: Icon(Icons.save_outlined),
                   label: Text(L10n.of(context).ui_save_changes_61efb279)),
@@ -1255,7 +1260,8 @@ final class _OverviewTabState extends State<_OverviewTab> {
                                   color: context.kaede.textSoft,
                                   fontSize: 12.5,
                                   height: 1.4))),
-                      TextButton(
+                      ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: _loadNotificationSettings,
                         child: Text(L10n.of(context).ui_retry_8036af59),
                       ),
@@ -2062,12 +2068,14 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
               ),
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: busy ? null : () => Navigator.pop(dialogContext),
                 child: Text(L10n.of(context).ui_done_8dd31791),
               ),
               if (encrypted && channel.encryptionState == 'active')
-                FilledButton.tonal(
+                ActionButton(
+                  kind: ActionButtonKind.tonal,
                   onPressed: busy
                       ? null
                       : () => run((client) async {
@@ -2081,7 +2089,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                       Text(L10n.of(context).ui_verify_safety_number_070dce0b),
                 ),
               if (!encrypted || needsRekey)
-                FilledButton.icon(
+                ActionButton(
                   onPressed: busy
                       ? null
                       : () => run((client) async {
@@ -2603,7 +2611,8 @@ final class _MembersTabState extends State<_MembersTab> {
                     size: 18, color: context.kaede.muted),
                 suffixIcon: _search.text.isEmpty
                     ? null
-                    : IconButton(
+                    : ActionButton(
+                        kind: ActionButtonKind.icon,
                         tooltip: L10n.of(context).ui_clear_search_5a13e946,
                         onPressed: () {
                           _search.clear();
@@ -3022,7 +3031,8 @@ final class _BansTabState extends State<_BansTab> {
                             size: 20, color: context.kaede.muted),
                       ),
                       divider: true,
-                      trailing: TextButton(
+                      trailing: ActionButton(
+                          kind: ActionButtonKind.text,
                           onPressed: widget.canBanMembers
                               ? () async {
                                   try {
@@ -3085,7 +3095,8 @@ final class _BansTabState extends State<_BansTab> {
                               size: 20, color: context.kaede.muted),
                         ),
                         divider: true,
-                        trailing: TextButton(
+                        trailing: ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed: widget.canBanInstances
                                 ? () async {
                                     try {
@@ -3313,13 +3324,15 @@ final class _InvitesTabState extends State<_InvitesTab> {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        IconButton(
+                        ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip:
                               L10n.of(context).ui_copy_invite_link_a7c3b223,
                           onPressed: () => _copyInvite('${item['code']}'),
                           icon: Icon(Icons.copy_rounded, size: 18),
                         ),
-                        IconButton(
+                        ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: L10n.of(context).ui_revoke_invite_a3ecfb24,
                           style: IconButton.styleFrom(
                             foregroundColor: context.kaede.danger,
@@ -3512,11 +3525,12 @@ Future<(int?, int?)?> showInviteRestrictions(BuildContext context) async {
           ],
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () => Navigator.pop(
               dialogContext,
               (age == 0 ? null : age, uses == 0 ? null : uses),
@@ -3850,11 +3864,12 @@ Future<Map<String, Object?>?> showAdvancedInviteEditor(
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
                 onPressed: submit,
                 child: Text(L10n.of(context).ui_create_invite_918a1372)),
           ],
@@ -4156,11 +4171,12 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () {
               final cleaned = name.text.trim();
               if (!RegExp(r'^[A-Za-z0-9_]{2,32}$').hasMatch(cleaned)) {
@@ -4552,11 +4568,12 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () {
               final cleanedName = name.text.trim();
               final cleanedDescription = description.text.trim();
@@ -4692,7 +4709,8 @@ Future<StickerEdit?> showStickerEditor(
                           ),
                         ),
                       ),
-                      TextButton(
+                      ActionButton(
+                        kind: ActionButtonKind.text,
                         key: ValueKey('sticker-crop-reset'),
                         onPressed: () => setDialogState(() {
                           cropX = 0;
@@ -4727,11 +4745,12 @@ Future<StickerEdit?> showStickerEditor(
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton.icon(
+            ActionButton(
               onPressed: canCreate
                   ? () => Navigator.pop(dialogContext, (
                         name: name.trim(),
@@ -5235,7 +5254,8 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
                           TextStyle(color: context.kaede.muted, fontSize: 12)),
                 ],
               )),
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_remove_bot_869c788c,
                 color: context.kaede.danger,
                 onPressed: () => _remove(item, application, name),
@@ -5446,11 +5466,12 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(dialogContext, Set.of(selected)),
               child: Text(L10n.of(context).ui_save_4d2d5d68),
             ),
@@ -5814,7 +5835,8 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                 ),
                 actions: [
                   if (rotated['execution_url'] is String)
-                    TextButton(
+                    ActionButton(
+                      kind: ActionButtonKind.text,
                       onPressed: () async {
                         await Clipboard.setData(
                             ClipboardData(text: '${rotated['execution_url']}'));
@@ -5824,7 +5846,8 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                       },
                       child: Text(L10n.of(context).ui_copy_url_0c62d7e5),
                     ),
-                  TextButton(
+                  ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => Navigator.pop(dialogContext),
                     child: Text(L10n.of(context).ui_done_8dd31791),
                   ),
@@ -5948,7 +5971,8 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                             .toString())),
                     actions: [
                       if (created['execution_url'] is String)
-                        TextButton(
+                        ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed: () async {
                               await Clipboard.setData(ClipboardData(
                                   text: '${created['execution_url']}'));
@@ -5957,7 +5981,8 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                               }
                             },
                             child: Text(L10n.of(context).ui_copy_url_0c62d7e5)),
-                      TextButton(
+                      ActionButton(
+                          kind: ActionButtonKind.text,
                           onPressed: () => Navigator.pop(dialogContext),
                           child: Text(L10n.of(context).ui_done_8dd31791))
                     ]));
@@ -6042,11 +6067,12 @@ Future<bool> showWebhookAvatarPreviewConfirmation(
           ],
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             key: Key('confirm-webhook-avatar'),
             onPressed: () => Navigator.pop(dialogContext, true),
             child: Text(L10n.of(context).ui_upload_avatar_5c00299d),
@@ -6152,11 +6178,12 @@ final class _WebhookSettingsEditorDialogState
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             key: Key('save-webhook-settings'),
             onPressed: _save,
             child: Text(L10n.of(context).ui_save_webhook_f889ec79),
@@ -6508,13 +6535,15 @@ final class _AuditTabState extends State<_AuditTab> {
               ),
               if (_actorFilter != null || _actionFilter != null) ...[
                 SizedBox(width: 4),
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: () => unawaited(_clearFilters()),
                   child: Text(L10n.of(context).ui_clear_04a57fc2),
                 ),
               ],
               SizedBox(width: 4),
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_refresh_audit_log_8ef0543d,
                 onPressed: _loading || _refreshing || _loadingOlder
                     ? null
@@ -6548,7 +6577,8 @@ final class _AuditTabState extends State<_AuditTab> {
                   title: L10n.of(context).ui_no_matching_events_192c7226,
                   message: L10n.of(context)
                       .ui_try_another_member_or_action_filter_24ef4c64,
-                  action: TextButton(
+                  action: ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => unawaited(_clearFilters()),
                     child: Text(L10n.of(context).ui_clear_filters_240d53c9),
                   ),
@@ -6563,7 +6593,8 @@ final class _AuditTabState extends State<_AuditTab> {
         if (_hasMore && _items.isNotEmpty) ...[
           SizedBox(height: 8),
           Center(
-            child: OutlinedButton.icon(
+            child: ActionButton(
+              kind: ActionButtonKind.outlined,
               onPressed: _loadingOlder ? null : _loadOlder,
               icon: _loadingOlder
                   ? SizedBox.square(
@@ -6978,7 +7009,8 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                               ),
                             ),
                           ),
-                          TextButton(
+                          ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed: _loading || _loadingMore
                                 ? null
                                 : _retryLoadsMore
@@ -7080,7 +7112,8 @@ final class _AuditActorPickerState extends State<_AuditActorPicker> {
                 if (_hasMore)
                   Padding(
                     padding: EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    child: OutlinedButton.icon(
+                    child: ActionButton(
+                      kind: ActionButtonKind.outlined,
                       key: ValueKey('audit-actor-load-more'),
                       onPressed: _loadingMore ? null : _loadMore,
                       icon: _loadingMore
@@ -7420,7 +7453,8 @@ final class _AuditInlineError extends StatelessWidget {
                 ),
               ),
             ),
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => unawaited(retry()),
               child: Text(L10n.of(context).ui_retry_8036af59),
             ),
@@ -7663,7 +7697,8 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
             content: Text(L10n.of(context)
                 .ui_permissions_are_independent_from_the_parent_c_fdf95228),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: _mutating ? null : _sync,
                 child: Text(L10n.of(context).ui_sync_with_category_d984adf6),
               ),
@@ -7707,8 +7742,10 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
               SizedBox.square(
                   dimension: 18, child: CircularProgressIndicator()),
             if (_search.text.isNotEmpty)
-              IconButton(
-                  onPressed: _search.clear, icon: Icon(Icons.close_rounded)),
+              ActionButton(
+                  kind: ActionButtonKind.icon,
+                  onPressed: _search.clear,
+                  icon: Icon(Icons.close_rounded)),
           ],
         ),
       ),
@@ -7818,7 +7855,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
       SizedBox(height: 4),
       Row(children: [
         Expanded(
-          child: FilledButton.icon(
+          child: ActionButton(
               onPressed: _mutating || !targetEligible ? null : _save,
               icon: Icon(Icons.save_outlined),
               label: Text(_mutating
@@ -7827,7 +7864,8 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
         ),
         if (_hasOverwrite) ...[
           SizedBox(width: 10),
-          OutlinedButton.icon(
+          ActionButton(
+            kind: ActionButtonKind.outlined,
             onPressed: _mutating ||
                     !targetEligible ||
                     !channelOverwriteCanReset(
@@ -9334,11 +9372,12 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
               .ui_only_new_posts_will_use_this_policy_each_post_1635f1d1,
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton.icon(
+          ActionButton(
             onPressed: () => Navigator.pop(dialogContext, true),
             icon: Icon(Icons.lock_rounded),
             label: Text(L10n.of(context).ui_require_encryption_aa6a2ced),
@@ -9370,7 +9409,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
       padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
       child: SizedBox(
         width: double.infinity,
-        child: FilledButton.icon(
+        child: ActionButton(
           key: ValueKey('save-channel-button'),
           onPressed: _save,
           icon: Icon(
@@ -9423,7 +9462,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           ],
                         ),
                       ),
-                      IconButton(
+                      ActionButton(
+                        kind: ActionButtonKind.icon,
                         tooltip: L10n.of(context).ui_close_cd86acc3,
                         onPressed: () => Navigator.pop(context),
                         icon: Icon(Icons.close_rounded),
@@ -9693,7 +9733,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                     )
                                   : _voiceRegionsError == null
                                       ? null
-                                      : IconButton(
+                                      : ActionButton(
+                                          kind: ActionButtonKind.icon,
                                           tooltip: L10n.of(context)
                                               .ui_retry_region_discovery_ceb09eb1,
                                           onPressed: _loadVoiceRegions,
@@ -9923,7 +9964,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                   : null,
                               suffixIcon: !_defaultReactionEdited &&
                                       _defaultReactionId?.isNotEmpty == true
-                                  ? IconButton(
+                                  ? ActionButton(
+                                      kind: ActionButtonKind.icon,
                                       tooltip: L10n.of(context)
                                           .ui_clear_default_reaction_c02d6396,
                                       onPressed: () => setState(() {
@@ -9972,7 +10014,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                         .textTheme
                                         .titleMedium),
                               ),
-                              TextButton.icon(
+                              ActionButton(
+                                kind: ActionButtonKind.text,
                                 onPressed: _forumTags.length >= 20
                                     ? null
                                     : () => _editForumTag(),
@@ -9999,13 +10042,15 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  IconButton(
+                                  ActionButton(
+                                    kind: ActionButtonKind.icon,
                                     tooltip:
                                         L10n.of(context).ui_edit_tag_82fd7fa1,
                                     onPressed: () => _editForumTag(index),
                                     icon: Icon(Icons.edit_outlined),
                                   ),
-                                  IconButton(
+                                  ActionButton(
+                                    kind: ActionButtonKind.icon,
                                     tooltip:
                                         L10n.of(context).ui_delete_tag_5b3fe0de,
                                     onPressed: () => setState(
@@ -10101,7 +10146,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                       : null,
                   suffixIcon: !emojiEdited &&
                           existing?.emojiId?.isNotEmpty == true
-                      ? IconButton(
+                      ? ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: L10n.of(context).ui_clear_tag_emoji_c5f2138c,
                           onPressed: () => setDialogState(() {
                             emojiEdited = true;
@@ -10123,13 +10169,14 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
             ],
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
-              builder: (_, value, __) => FilledButton(
+              builder: (_, value, __) => ActionButton(
                 onPressed: value.text.trim().isEmpty
                     ? null
                     : () => Navigator.pop(
@@ -10461,7 +10508,8 @@ final class _RoleEditorState extends State<_RoleEditor> {
                     .ui_edit_value0_8e92dac2((widget.role!.name).toString())),
             actions: [
               if (widget.role != null && !widget.role!.managed)
-                IconButton(
+                ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context).ui_delete_role_bdde90c6,
                     style: IconButton.styleFrom(
                       foregroundColor: context.kaede.danger,
@@ -10568,7 +10616,8 @@ final class _RoleEditorState extends State<_RoleEditor> {
                 ),
               ),
             SizedBox(width: 12),
-            OutlinedButton.icon(
+            ActionButton(
+              kind: ActionButtonKind.outlined,
               onPressed: _pickRoleIcon,
               icon: Icon(Icons.image_outlined),
               label: Text(_iconFile == null && widget.role?.iconHash == null
@@ -10578,7 +10627,8 @@ final class _RoleEditorState extends State<_RoleEditor> {
             if (_iconFile != null ||
                 (!_removeIcon && widget.role?.iconHash != null)) ...[
               SizedBox(width: 8),
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => setState(() {
                   _iconFile = null;
                   _removeIcon = true;
@@ -10628,7 +10678,8 @@ final class _RoleEditorState extends State<_RoleEditor> {
               prefixIcon: Icon(Icons.search_rounded, size: 19),
               suffixIcon: _permissionSearch.text.isEmpty
                   ? null
-                  : IconButton(
+                  : ActionButton(
+                      kind: ActionButtonKind.icon,
                       tooltip: L10n.of(context).ui_clear_search_5a13e946,
                       onPressed: _permissionSearch.clear,
                       icon: Icon(Icons.close_rounded, size: 18),
@@ -10795,10 +10846,11 @@ final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
                               }))
               ])),
           actions: [
-            TextButton(
+            ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(context),
                 child: Text(L10n.of(context).ui_cancel_35afca3b)),
-            FilledButton(
+            ActionButton(
                 onPressed: () => Navigator.pop(context, selected),
                 child: Text(L10n.of(context).ui_save_4d2d5d68))
           ]);
@@ -10972,11 +11024,12 @@ Future<ModerationOptions?> showModerationOptions(
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () {
                 if (leadingField != null && leadingField.text.trim().isEmpty) {
                   ScaffoldMessenger.of(dialogContext).showSnackBar(
@@ -11027,10 +11080,11 @@ Future<String?> _prompt(BuildContext context, String title, String label,
                     decoration: InputDecoration(labelText: label))
               ]),
               actions: [
-                TextButton(
+                ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => Navigator.pop(context),
                     child: Text(L10n.of(context).ui_cancel_35afca3b)),
-                FilledButton(
+                ActionButton(
                     onPressed: () => Navigator.pop(context, input.text.trim()),
                     child: Text(L10n.of(context).ui_continue_ab43d664))
               ]));
@@ -11042,10 +11096,11 @@ Future<bool> _confirm(BuildContext context, String title, String body,
         context: context,
         builder: (context) =>
             AlertDialog(title: Text(title), content: Text(body), actions: [
-              TextButton(
+              ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: () => Navigator.pop(context, false),
                   child: Text(L10n.of(context).ui_cancel_35afca3b)),
-              FilledButton(
+              ActionButton(
                   onPressed: () => Navigator.pop(context, true),
                   style: destructive
                       ? FilledButton.styleFrom(

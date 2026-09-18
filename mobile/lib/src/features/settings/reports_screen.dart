@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -156,10 +157,11 @@ final class _ReportsNotice extends StatelessWidget {
   final Future<void> Function() onRetry;
   @override
   Widget build(BuildContext context) => Card(
-        child: ListTile(
+        child: ActionTile(
           leading: Icon(Icons.error_outline_rounded),
           title: Text(text),
-          trailing: TextButton(
+          trailing: ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: onRetry,
               child: Text(L10n.of(context).ui_retry_8036af59)),
         ),

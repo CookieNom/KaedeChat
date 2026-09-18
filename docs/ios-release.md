@@ -68,6 +68,15 @@ In App Store Connect, create an API key allowed to upload builds. Add:
 Then add the Actions variable `IOS_TESTFLIGHT_UPLOAD_ENABLED=true`. This is a
 different key from the APNs key and should not be reused for push delivery.
 
+The TestFlight job waits up to 30 minutes for Apple to process the IPA, then
+applies the encryption answers **standard third-party encryption**, **no
+proprietary encryption**, and **not distributed in France** through the App Store
+Connect API. It reuses an approved matching declaration when available. The API
+key must also have permission to manage encryption declarations and builds.
+Review these answers in `.github/scripts/upload-testflight.py` before changing
+the app's cryptography or distributing in France. If processing or declaration
+assignment fails, rerun the failed job; it resumes an existing matching build.
+
 ## 4. Configure the official relay
 
 Only the `push.kaede.chat` worker receives these values:

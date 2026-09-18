@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/push_diagnostics_button.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -115,7 +117,10 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
                   ],
                   if (_error case final error?) ...[
                     const SizedBox(height: 12),
-                    Semantics(liveRegion: true, child: Text(error)),
+                    Semantics(
+                        liveRegion: true,
+                        child: SettingsStatusPanel.error(
+                            message: error, onRetry: null)),
                     if (controller.pushSetupDiagnostics
                         case final diagnostics?) ...[
                       const SizedBox(height: 12),
@@ -125,11 +130,12 @@ final class _PushOnboardingState extends ConsumerState<PushOnboarding> {
                 ],
               ),
               actions: [
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: _busy ? null : () => _choose(false),
                   child: Text(L10n.of(context).ui_not_now_2c3d6fce),
                 ),
-                FilledButton(
+                ActionButton(
                   onPressed: _busy ? null : () => _choose(true),
                   child: Text(_busy
                       ? L10n.of(context).ui_please_wait_ad7e2c40

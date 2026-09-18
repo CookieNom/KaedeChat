@@ -3,6 +3,7 @@ import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:uuid/uuid.dart';
 
 class TrackerFieldSettingsSheet extends StatefulWidget {
@@ -41,10 +42,11 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                       content: const Text(
                           'Your changes to tracker settings have not been saved.'),
                       actions: [
-                        TextButton(
+                        ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed: () => Navigator.pop(context, false),
                             child: const Text('Keep editing')),
-                        FilledButton(
+                        ActionButton(
                             onPressed: () => Navigator.pop(context, true),
                             child: const Text('Discard'))
                       ])) ==
@@ -124,10 +126,11 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                 content: const Text(
                     'Saving this change will remove this field and its values from every task in this channel.'),
                 actions: [
-                  TextButton(
+                  ActionButton(
+                      kind: ActionButtonKind.text,
                       onPressed: () => Navigator.pop(context, false),
                       child: const Text('Cancel')),
-                  FilledButton(
+                  ActionButton(
                       onPressed: () => Navigator.pop(context, true),
                       child: const Text('Remove field'))
                 ]));
@@ -162,7 +165,8 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                     children: [
                       ListTile(
                           title: const Text('Tracker settings'),
-                          trailing: IconButton(
+                          trailing: ActionButton(
+                              kind: ActionButtonKind.icon,
                               tooltip: 'Close settings',
                               onPressed: _saving
                                   ? null
@@ -202,7 +206,8 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                     const Text(
                                         'Add fields to every task in this channel. People fields can hold reviewers or other extra assignments.'),
                                     const SizedBox(height: 12),
-                                    OutlinedButton.icon(
+                                    ActionButton(
+                                        kind: ActionButtonKind.outlined,
                                         onPressed:
                                             _fields.length >= 50 ? null : _edit,
                                         icon: const Icon(Icons.add),
@@ -225,7 +230,8 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                                             _fields[i].type] ??
                                                         _fields[i].type),
                                                 onTap: () => _edit(_fields[i]),
-                                                trailing: IconButton(
+                                                trailing: ActionButton(
+                                                    kind: ActionButtonKind.icon,
                                                     tooltip: 'Edit field',
                                                     onPressed: () =>
                                                         _edit(_fields[i]),
@@ -236,7 +242,9 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                                     const EdgeInsets.fromLTRB(
                                                         8, 0, 8, 8),
                                                 child: Row(children: [
-                                                  IconButton(
+                                                  ActionButton(
+                                                      kind:
+                                                          ActionButtonKind.icon,
                                                       tooltip: 'Move field up',
                                                       onPressed: i == 0
                                                           ? null
@@ -250,7 +258,9 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                                               }),
                                                       icon: const Icon(
                                                           Icons.arrow_upward)),
-                                                  IconButton(
+                                                  ActionButton(
+                                                      kind:
+                                                          ActionButtonKind.icon,
                                                       tooltip:
                                                           'Move field down',
                                                       onPressed: i ==
@@ -267,7 +277,9 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                                       icon: const Icon(Icons
                                                           .arrow_downward)),
                                                   const Spacer(),
-                                                  TextButton.icon(
+                                                  ActionButton(
+                                                      kind:
+                                                          ActionButtonKind.text,
                                                       onPressed: () =>
                                                           _delete(_fields[i]),
                                                       icon: const Icon(
@@ -294,7 +306,8 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                                     .colorScheme
                                                     .error))),
                                   if (_conflict)
-                                    TextButton(
+                                    ActionButton(
+                                        kind: ActionButtonKind.text,
                                         onPressed: _reload,
                                         child: const Text(
                                             'Reload latest settings')),
@@ -304,7 +317,7 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                           top: false,
                           child: Padding(
                               padding: const EdgeInsets.all(16),
-                              child: FilledButton.icon(
+                              child: ActionButton(
                                   onPressed:
                                       _saving || _conflict ? null : _save,
                                   icon: const Icon(Icons.save_outlined),
@@ -352,7 +365,8 @@ class _TrackerFieldEditorSheetState extends State<TrackerFieldEditorSheet> {
                       title: Text(widget.field == null
                           ? 'Add task field'
                           : 'Edit task field'),
-                      trailing: IconButton(
+                      trailing: ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: 'Close field editor',
                           onPressed: () => Navigator.pop(context),
                           icon: const Icon(Icons.close))),
@@ -438,7 +452,7 @@ class _TrackerFieldEditorSheetState extends State<TrackerFieldEditorSheet> {
                       top: false,
                       child: Padding(
                           padding: const EdgeInsets.all(16),
-                          child: FilledButton(
+                          child: ActionButton(
                               onPressed: () {
                                 if (_form.currentState?.validate() != true) {
                                   return;

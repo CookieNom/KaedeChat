@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -367,7 +368,7 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
     final memberOf = widget.memberOf;
     final actions = <Widget>[
       if (_application case final application?)
-        FilledButton.icon(
+        ActionButton(
           key: const ValueKey('bot-profile-add-app'),
           onPressed: () => _addApplication(application),
           icon: const Icon(Icons.add_rounded),

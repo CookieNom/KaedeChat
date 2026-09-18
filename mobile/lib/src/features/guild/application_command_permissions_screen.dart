@@ -5,6 +5,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_command_permissions.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -38,7 +39,6 @@ final class _ApplicationCommandPermissionsScreenState
   var _loading = true;
   var _saving = false;
   String? _error;
-  String? _notice;
 
   ApplicationCommandPermissionScope? get _scope =>
       _scopes.where((scope) => scope.id == _selected).firstOrNull;
@@ -81,6 +81,7 @@ final class _ApplicationCommandPermissionsScreenState
               summary: L10n.of(context)
                   .ui_could_not_load_command_permissions_f8962a14,
             ));
+        showActionFeedback(context, _error!, error: true);
       }
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -99,7 +100,6 @@ final class _ApplicationCommandPermissionsScreenState
                 ))
             .toList(growable: false);
     _error = null;
-    _notice = null;
   }
 
   Future<void> _add() async {
@@ -138,8 +138,10 @@ final class _ApplicationCommandPermissionsScreenState
                 permission: entry.permission,
               ))
           .toList(growable: false);
-      _notice = L10n.of(context)
-          .ui_application_defaults_copied_save_to_synchroni_eefae67f;
+      showActionFeedback(
+          context,
+          L10n.of(context)
+              .ui_application_defaults_copied_save_to_synchroni_eefae67f);
     });
   }
 
@@ -149,7 +151,6 @@ final class _ApplicationCommandPermissionsScreenState
     setState(() {
       _saving = true;
       _error = null;
-      _notice = null;
     });
     try {
       final saved = await widget.repository.updateApplicationCommandPermissions(
@@ -164,10 +165,12 @@ final class _ApplicationCommandPermissionsScreenState
           for (final item in _scopes) item.id == saved.id ? saved : item,
         ];
         _select(saved);
-        _notice = saved.synced
-            ? L10n.of(context)
-                .ui_this_command_now_uses_the_app_defaults_54a15a14
-            : L10n.of(context).ui_command_access_updated_1c92cfb3;
+        showActionFeedback(
+            context,
+            saved.synced
+                ? L10n.of(context)
+                    .ui_this_command_now_uses_the_app_defaults_54a15a14
+                : L10n.of(context).ui_command_access_updated_1c92cfb3);
       });
     } on Object catch (error) {
       if (mounted) {
@@ -176,6 +179,7 @@ final class _ApplicationCommandPermissionsScreenState
               summary: L10n.of(context)
                   .ui_could_not_update_command_permissions_3fb16c19,
             ));
+        showActionFeedback(context, _error!, error: true);
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -307,7 +311,8 @@ final class _ApplicationCommandPermissionsScreenState
                                         ),
                                       ],
                                     ),
-                                    IconButton(
+                                    ActionButton(
+                                      kind: ActionButtonKind.icon,
                                       tooltip: L10n.of(context)
                                           .ui_remove_override_54f30797,
                                       onPressed: !widget.canManage || _saving
@@ -325,7 +330,8 @@ final class _ApplicationCommandPermissionsScreenState
                             ),
                           if (widget.canManage) ...[
                             SizedBox(height: 8),
-                            OutlinedButton.icon(
+                            ActionButton(
+                              kind: ActionButtonKind.outlined,
                               onPressed:
                                   _saving || _draft.length >= 100 ? null : _add,
                               icon: Icon(Icons.add_rounded),
@@ -336,13 +342,14 @@ final class _ApplicationCommandPermissionsScreenState
                                       .ui_add_role_member_or_channel_13e42e08),
                             ),
                             if (_scope?.command != null)
-                              TextButton(
+                              ActionButton(
+                                kind: ActionButtonKind.text,
                                 onPressed:
                                     _saving ? null : _syncWithApplication,
                                 child: Text(L10n.of(context)
                                     .ui_use_app_defaults_2c61078f),
                               ),
-                            FilledButton(
+                            ActionButton(
                               onPressed: _saving ? null : _save,
                               child: Text(_saving
                                   ? L10n.of(context).ui_saving_bd79b37d
@@ -364,13 +371,6 @@ final class _ApplicationCommandPermissionsScreenState
                               child: Text(error,
                                   style:
                                       TextStyle(color: context.kaede.danger)),
-                            ),
-                          if (_notice case final notice?)
-                            Padding(
-                              padding: EdgeInsets.only(top: 12),
-                              child: Text(notice,
-                                  style: TextStyle(
-                                      color: context.kaede.coralText)),
                             ),
                         ],
                       ),
@@ -535,7 +535,7 @@ final class _CommandPermissionTargetSheetState
                 value: _permission,
                 onChanged: (value) => setState(() => _permission = value),
               ),
-              FilledButton(
+              ActionButton(
                 onPressed: _target == null
                     ? null
                     : () => Navigator.pop(
@@ -574,7 +574,7 @@ final class _LoadError extends StatelessWidget {
             children: [
               Text(message, textAlign: TextAlign.center),
               SizedBox(height: 12),
-              FilledButton(
+              ActionButton(
                   onPressed: onRetry,
                   child: Text(L10n.of(context).ui_retry_8036af59)),
             ],

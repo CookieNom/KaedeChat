@@ -761,16 +761,17 @@ jobs:
       needs.ios.result == 'success' &&
       vars.IOS_TESTFLIGHT_UPLOAD_ENABLED == 'true'
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Download signed iOS release
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: kaede-chat-ios
           path: release-assets
-      - name: Upload iOS release to TestFlight
+      - name: Upload iOS release and declare encryption
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -786,9 +787,8 @@ jobs:
             > "$key_directory/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
           chmod 600 "$key_directory/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
           ipa="$(find release-assets -maxdepth 1 -type f -name '*.ipa' -print -quit)"
-          xcrun altool --upload-app --type ios --file "$ipa" \
-            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+          python3 .github/scripts/upload-testflight.py "$ipa" \
+            "$key_directory/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
 
   publish:
     name: Publish GitHub Release

@@ -614,6 +614,8 @@ void main() {
       tester.view.physicalSize = size;
       await tester.pumpAndSettle();
       final copy = find.text('Copy diagnostics');
+      await tester.ensureVisible(copy);
+      await tester.pumpAndSettle();
       expect(copy, findsOneWidget);
       final bounds = tester.getRect(copy);
       expect(bounds.left, greaterThanOrEqualTo(0));
@@ -691,12 +693,56 @@ void main() {
     expect(tester.widget<FilledButton>(button).onPressed, isNull);
     await tester.pump(const Duration(seconds: 31));
     await tester.pumpAndSettle();
-    expect(find.textContaining('notification service did not finish starting'),
+    expect(
+        find.descendant(
+            of: find.byType(SnackBar),
+            matching: find.textContaining(
+                'notification service did not finish starting')),
         findsOneWidget);
     expect(find.text('Enable background notifications'), findsOneWidget);
     expect(find.text('Copy diagnostics'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final enabled in [false, true]) {
+    testWidgets('notification controls reflect saved opt-in $enabled',
+        (tester) async {
+      tester.view.physicalSize = const Size(840, 10000);
+      tester.view.devicePixelRatio = 2;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const channel = MethodChannel('chat.kaede.mobile/push_state');
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (_) async => null);
+      addTearDown(() => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null));
+      final user = fixtureUser();
+      final controller = await fixtureController(fixtureGuild(user), user, []);
+      await controller.api.savePushOptIn(enabled);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+        child: MaterialApp(
+            theme: kaedeTheme(), home: const Scaffold(body: SettingsScreen())),
+      ));
+      await tester.pumpAndSettle();
+      final label = enabled
+          ? 'Background notifications are enabled.'
+          : 'Enable background notifications';
+      final enable = find.widgetWithText(FilledButton, label);
+      expect(tester.widget<FilledButton>(enable).onPressed == null, enabled);
+      final disable = find.ancestor(
+          of: find.text('Disable background notifications'),
+          matching: find.byType(SettingsRow));
+      expect(tester.widget<SettingsRow>(disable).onTap == null, !enabled);
+      if (enabled) {
+        await tester.tap(find.text('Disable background notifications'));
+        await tester.pumpAndSettle();
+        expect(await controller.api.pushOptedIn(), isFalse);
+        expect(tester.widget<SettingsRow>(disable).onTap, isNull);
+        expect(find.byType(SnackBar), findsOneWidget);
+      }
+    });
+  }
 
   testWidgets('account settings renders Discord-style sections',
       (tester) async {
@@ -712,6 +758,8 @@ void main() {
     final controller =
         await fixtureController(fixtureGuild(user), user, requestLog);
 
+    await controller.api.savePushOptIn(false);
+
     await tester.pumpWidget(ProviderScope(
       overrides: [
         mobileControllerProvider.overrideWith((ref) => controller),
@@ -724,6 +772,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
+    expect(
+        tester
+            .widget<FilledButton>(
+                find.widgetWithText(FilledButton, 'Save profile'))
+            .onPressed,
+        isNull);
     expect(find.text('Delete all content'), findsOneWidget);
     expect(find.text('Delete account'), findsOneWidget);
     await tester.tap(find.text('Delete account'));
@@ -762,6 +816,13 @@ void main() {
           data['notification_settings'] is Map &&
           (data['notification_settings'] as Map)['direct_messages'] == false;
     }), hasLength(1));
+
+    expect(await controller.api.pushOptedIn(), isFalse);
+    expect(
+        requestLog.where((request) =>
+            request['method'] == 'POST' &&
+            '${request['path']}'.contains('push')),
+        isEmpty);
 
     await tester.tap(find.text('Age-restricted commands in direct messages'));
     await tester.pumpAndSettle();

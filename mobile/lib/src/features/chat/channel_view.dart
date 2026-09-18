@@ -40,6 +40,7 @@ import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
 import 'package:kaede_mobile/src/features/chat/spotify_preview.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/chat/voice_message_recorder.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/tracker/tracker_channel_view.dart';
@@ -1376,7 +1377,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                     borderRadius: BorderRadius.circular(6)),
                 child: Row(children: [
                   Expanded(
-                      child: TextButton(
+                      child: ActionButton(
+                    kind: ActionButtonKind.text,
                     style: TextButton.styleFrom(
                         side: BorderSide.none,
                         foregroundColor: context.kaede.textSoft,
@@ -1412,7 +1414,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                   )),
                   VerticalDivider(
                       width: 1, thickness: 1, color: context.kaede.border),
-                  TextButton(
+                  ActionButton(
+                    kind: ActionButtonKind.text,
                     style: TextButton.styleFrom(
                         side: BorderSide.none,
                         foregroundColor: context.kaede.coralText,
@@ -1508,7 +1511,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                               }
                               return Padding(
                                 padding: EdgeInsets.fromLTRB(52, 12, 52, 10),
-                                child: OutlinedButton.icon(
+                                child: ActionButton(
+                                  kind: ActionButtonKind.outlined,
                                   style: OutlinedButton.styleFrom(
                                     minimumSize: Size(0, 40),
                                     foregroundColor: context.kaede.textSoft,
@@ -1682,7 +1686,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                                     if (messageIndex == messages.length - 1 &&
                                         state.channelsWithNewerMessages
                                             .contains(channel.ref))
-                                      TextButton.icon(
+                                      ActionButton(
+                                        kind: ActionButtonKind.text,
                                         onPressed: state.loadingMessages
                                             ? null
                                             : _loadNewer,
@@ -4224,7 +4229,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                         ),
                       ),
                       SizedBox(height: 8),
-                      FilledButton(
+                      ActionButton(
                         onPressed: selected.isEmpty
                             ? null
                             : () => Navigator.pop(
@@ -4313,7 +4318,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       ref.read(mobileControllerProvider.notifier).presenceFor(user),
       actions: [
         if (channel != null && commands.isNotEmpty)
-          OutlinedButton.icon(
+          ActionButton(
+            kind: ActionButtonKind.outlined,
             icon: Icon(Icons.apps_rounded),
             label: Text(L10n.of(context).ui_apps_53d91aad),
             onPressed: () {
@@ -4543,7 +4549,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                         ),
                       Padding(
                         padding: EdgeInsets.symmetric(horizontal: 3),
-                        child: IconButton(
+                        child: ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: L10n.of(context).ui_more_emoji_6fa68e3e,
                           onPressed: () =>
                               Navigator.pop(context, 'react-picker'),
@@ -4807,11 +4814,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                       .ui_at_least_one_destination_is_not_end_to_end_en_ec79fe19,
                 ),
                 actions: [
-                  TextButton(
+                  ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => Navigator.pop(context, false),
                     child: Text(L10n.of(context).ui_cancel_35afca3b),
                   ),
-                  FilledButton(
+                  ActionButton(
                     onPressed: () => Navigator.pop(context, true),
                     child: Text(L10n.of(context).ui_share_snapshot_5a5c8a0c),
                   ),
@@ -4920,11 +4928,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                     .ui_voting_will_close_immediately_and_the_final_r_15bbf55c,
               ),
               actions: [
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: () => Navigator.pop(context, false),
                   child: Text(L10n.of(context).ui_keep_open_74cbd680),
                 ),
-                FilledButton(
+                ActionButton(
                   onPressed: () => Navigator.pop(context, true),
                   child: Text(L10n.of(context).ui_end_poll_b892c63f),
                 ),
@@ -4955,11 +4964,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                   : L10n.of(context)
                       .ui_the_message_will_remain_in_the_conversation_59e103da),
               actions: [
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: () => Navigator.pop(context, false),
                   child: Text(L10n.of(context).ui_cancel_35afca3b),
                 ),
-                FilledButton(
+                ActionButton(
                   onPressed: () => Navigator.pop(context, true),
                   child: Text(pinning
                       ? L10n.of(context).ui_pin_d4479a34
@@ -5011,10 +5021,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         content: TextField(
             controller: input, autofocus: true, minLines: 2, maxLines: 8),
         actions: [
-          TextButton(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          FilledButton(
+          ActionButton(
               onPressed: () => Navigator.pop(context, input.text.trim()),
               child: Text(L10n.of(context).ui_save_4d2d5d68)),
         ],
@@ -5038,13 +5049,14 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: input,
-            builder: (context, value, _) => FilledButton(
+            builder: (context, value, _) => ActionButton(
               onPressed: value.text.trim().isEmpty
                   ? null
                   : () => Navigator.pop(context, value.text.trim()),
@@ -5177,7 +5189,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                   if (includeContext) ...[
                     const Text(
                         'Select a boundary before or after the reported message. Every message in between is included.'),
-                    TextButton(
+                    ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: submitting || createdReportId != null
                             ? null
                             : () => setDialogState(() {
@@ -5364,12 +5377,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
               ),
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed:
                     submitting ? null : () => Navigator.pop(dialogContext),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              FilledButton(
+              ActionButton(
                 onPressed: submitting ||
                         contextBlocked() ||
                         !canSubmitMessageReport(
@@ -5885,7 +5899,8 @@ final class _PendingMessageTile extends StatelessWidget {
                   ),
                 ),
                 if (failed) ...[
-                  TextButton(
+                  ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: onRetry,
                     style: TextButton.styleFrom(
                       minimumSize: Size(0, 32),
@@ -5893,7 +5908,8 @@ final class _PendingMessageTile extends StatelessWidget {
                     ),
                     child: Text(L10n.of(context).ui_retry_8036af59),
                   ),
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     onPressed: onDiscard,
                     tooltip: L10n.of(context).ui_discard_message_d502239a,
                     visualDensity: VisualDensity.compact,
@@ -5941,7 +5957,8 @@ final class _ChatErrorStrip extends StatelessWidget {
                   ),
                 ),
               ),
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: onRetry,
                 style: TextButton.styleFrom(
                   minimumSize: Size(0, 34),
@@ -6068,11 +6085,12 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                       (count == 1 ? 'reaction' : 'reactions').toString()),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             style: FilledButton.styleFrom(
               backgroundColor: context.kaede.danger,
             ),
@@ -6171,7 +6189,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                           TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
                     ),
                   ),
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context).ui_close_reactions_12be55a7,
                     onPressed: () => Navigator.pop(context),
                     icon: Icon(Icons.close_rounded),
@@ -6212,7 +6231,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                   spacing: 8,
                   runSpacing: 6,
                   children: [
-                    OutlinedButton.icon(
+                    ActionButton(
+                      kind: ActionButtonKind.outlined,
                       onPressed: clearing || selectedEmoji.isEmpty
                           ? null
                           : () => _requestClear(emoji: selectedEmoji),
@@ -6224,7 +6244,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                                 .toString()),
                       ),
                     ),
-                    TextButton.icon(
+                    ActionButton(
+                      kind: ActionButtonKind.text,
                       style: TextButton.styleFrom(
                         foregroundColor: context.kaede.danger,
                       ),
@@ -6253,7 +6274,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                           children: [
                             Text(error, textAlign: TextAlign.center),
                             SizedBox(height: 8),
-                            TextButton(
+                            ActionButton(
+                              kind: ActionButtonKind.text,
                               onPressed: () => _load(selectedEmoji),
                               child:
                                   Text(L10n.of(context).ui_try_again_213e90fa),
@@ -6275,7 +6297,8 @@ final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
                                   if (index == selectedUsers.length) {
                                     return Padding(
                                       padding: EdgeInsets.only(top: 8),
-                                      child: OutlinedButton(
+                                      child: ActionButton(
+                                        kind: ActionButtonKind.outlined,
                                         onPressed: isLoading
                                             ? null
                                             : () => _load(
@@ -6505,7 +6528,8 @@ final class _ReplyingBar extends StatelessWidget {
                   ? L10n.of(context).ui_the_author_will_be_notified_a8f4335e
                   : L10n.of(context)
                       .ui_reply_without_notifying_the_author_1d3e78c2,
-              child: TextButton.icon(
+              child: ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => onNotifyChanged(!notify),
                 icon: Icon(
                   notify
@@ -6530,7 +6554,8 @@ final class _ReplyingBar extends StatelessWidget {
                 ),
               ),
             ),
-            IconButton(
+            ActionButton(
+              kind: ActionButtonKind.icon,
               onPressed: onClose,
               tooltip: L10n.of(context).ui_cancel_reply_d14b578b,
               visualDensity: VisualDensity.compact,
@@ -7686,11 +7711,12 @@ final class _InteractionModalDialogState
                           ],
                         ),
                       ),
-                      TextButton(
+                      ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: () => Navigator.pop(context),
                         child: Text(L10n.of(context).ui_cancel_35afca3b),
                       ),
-                      FilledButton(
+                      ActionButton(
                         onPressed: selected.length < minimum ||
                                 selected.length > component.maxValues
                             ? null
@@ -7839,7 +7865,8 @@ final class _InteractionModalDialogState
                                               fontSize: 12)),
                                     SizedBox(height: 5),
                                   ],
-                                  OutlinedButton.icon(
+                                  ActionButton(
+                                    kind: ActionButtonKind.outlined,
                                     onPressed: _submitting ||
                                             component.disabled ||
                                             options.isEmpty
@@ -7896,7 +7923,8 @@ final class _InteractionModalDialogState
                                           color: context.kaede.muted,
                                           fontSize: 12)),
                                 SizedBox(height: 5),
-                                OutlinedButton.icon(
+                                ActionButton(
+                                  kind: ActionButtonKind.outlined,
                                   onPressed: _submitting ||
                                           _uploading
                                               .contains(component.customId)
@@ -7927,11 +7955,12 @@ final class _InteractionModalDialogState
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: _submitting ? null : () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: _submitting ? null : _submit,
             child: Text(_submitting
                 ? L10n.of(context).ui_sending_e946e7bf
@@ -8227,7 +8256,8 @@ final class _RichEmbedCard extends StatelessWidget {
     if (allowExternalMedia) {
       return _ProxiedEmbedImage(url: external.toString(), fit: fit);
     }
-    return IconButton(
+    return ActionButton(
+      kind: ActionButtonKind.icon,
       tooltip: L10n.current.ui_open_external_image_6334ed35,
       onPressed: () => _open(external.toString()),
       icon: Icon(Icons.open_in_new_rounded, size: 16),
@@ -8364,7 +8394,8 @@ final class _RichEmbedCard extends StatelessWidget {
                     !allowExternalMedia)
                   Padding(
                     padding: EdgeInsets.only(top: 8),
-                    child: OutlinedButton.icon(
+                    child: ActionButton(
+                      kind: ActionButtonKind.outlined,
                       onPressed: () => _open(externalImage.toString()),
                       icon: Icon(Icons.open_in_new_rounded, size: 16),
                       label: Text(L10n.of(context)
@@ -8545,7 +8576,8 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        IconButton(
+                        ActionButton(
+                          kind: ActionButtonKind.icon,
                           key: ValueKey('poll-answer-emoji-$index'),
                           tooltip: _answers[index].emoji == null
                               ? L10n.of(context).ui_add_emoji_a3203c4a
@@ -8567,14 +8599,16 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                           ),
                         ),
                         if (_answers[index].emoji != null)
-                          IconButton(
+                          ActionButton(
+                            kind: ActionButtonKind.icon,
                             tooltip: L10n.of(context).ui_remove_emoji_8bc8171b,
                             onPressed: () =>
                                 setState(() => _answers[index].emoji = null),
                             icon: Icon(Icons.emoji_emotions_outlined, size: 18),
                           ),
                         if (_answers.length > 2)
-                          IconButton(
+                          ActionButton(
+                            kind: ActionButtonKind.icon,
                             tooltip: L10n.of(context).ui_remove_answer_7307a041,
                             onPressed: () => _remove(_answers[index]),
                             icon: Icon(Icons.close_rounded),
@@ -8585,7 +8619,8 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
                 if (_answers.length < 10)
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
+                    child: ActionButton(
+                      kind: ActionButtonKind.text,
                       key: ValueKey('poll-add-answer'),
                       onPressed: () =>
                           setState(() => _answers.add(_PollAnswerEditor())),
@@ -8631,11 +8666,12 @@ final class _PollCreateDialogState extends State<_PollCreateDialog> {
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             key: ValueKey('poll-submit'),
             onPressed: _submit,
             child: Text(L10n.of(context).ui_create_poll_7c4af1be),
@@ -8807,7 +8843,8 @@ final class _PollVotersSheetState extends State<_PollVotersSheet> {
                         }
                         return Padding(
                           padding: EdgeInsets.all(12),
-                          child: OutlinedButton(
+                          child: ActionButton(
+                            kind: ActionButtonKind.outlined,
                             onPressed: () => _load(reset: false),
                             child: Text(_error == null
                                 ? L10n.of(context).ui_load_more_2b7b053e
@@ -8974,7 +9011,8 @@ final class _MessagePollCardState extends State<_MessagePollCard> {
           if (widget.onViewVoters != null && poll.totalVotes > 0)
             Align(
               alignment: Alignment.centerLeft,
-              child: TextButton.icon(
+              child: ActionButton(
+                kind: ActionButtonKind.text,
                 key: ValueKey('poll-view-voters'),
                 onPressed: widget.onViewVoters,
                 icon: Icon(Icons.people_outline_rounded, size: 17),
@@ -9067,7 +9105,7 @@ final class _RichMessageComponentsState extends State<_RichMessageComponents> {
                         ),
                       ),
                     ),
-                    FilledButton(
+                    ActionButton(
                       onPressed: selected.length < component.minValues ||
                               selected.length > component.maxValues
                           ? null
@@ -9139,7 +9177,8 @@ final class _RichMessageComponentsState extends State<_RichMessageComponents> {
                         children: [
                           for (final component in layout.actionRow!.components)
                             if (component.isButton)
-                              FilledButton.tonalIcon(
+                              ActionButton(
+                                kind: ActionButtonKind.tonal,
                                 style: FilledButton.styleFrom(
                                   backgroundColor: _buttonColor(component),
                                   foregroundColor: readableForeground(
@@ -9178,7 +9217,8 @@ final class _RichMessageComponentsState extends State<_RichMessageComponents> {
                               )
                             else if (component.isStringSelect ||
                                 component.isEntitySelect)
-                              OutlinedButton.icon(
+                              ActionButton(
+                                kind: ActionButtonKind.outlined,
                                 onPressed: component.disabled ||
                                         _busy != null ||
                                         widget.onInvoke == null
@@ -9467,7 +9507,8 @@ final class _RichV2MediaState extends State<_RichV2Media> {
       content = SizedBox(
         height: 72,
         child: Center(
-          child: TextButton.icon(
+          child: ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => launchUrl(
               remote,
               mode: LaunchMode.externalApplication,
@@ -9918,10 +9959,12 @@ final class _LinkPreviewCardState extends ConsumerState<_LinkPreviewCard> {
                       style:
                           TextStyle(color: context.kaede.muted, fontSize: 12)),
                 ),
-                TextButton(
+                ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => _open(widget.url),
                     child: Text(L10n.of(context).ui_open_538b10e9)),
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: () => setState(() => _load(retry: true)),
                   child: Text(L10n.of(context).ui_retry_8036af59),
                 ),
@@ -10325,7 +10368,8 @@ final class _AttachmentStatusCard extends StatelessWidget {
             ),
           ),
           if (onRetry != null)
-            TextButton(
+            ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: onRetry,
                 child: Text(L10n.of(context).ui_retry_8036af59)),
         ],
@@ -10559,7 +10603,8 @@ final class _MediaPreviewError extends StatelessWidget {
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12),
                 ),
-                TextButton(
+                ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: onRetry,
                     child: Text(L10n.of(context).ui_retry_8036af59)),
               ],
@@ -11040,7 +11085,8 @@ final class _VisibleAttachmentCardState
                     ],
                   ),
                 ),
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: _retry,
                   child: Text(L10n.of(context).ui_retry_8036af59),
                 ),
@@ -11580,7 +11626,8 @@ final class _MediaDecodeError extends StatelessWidget {
                   style: TextStyle(fontSize: 12),
                 ),
                 if (onRetry != null)
-                  TextButton(
+                  ActionButton(
+                      kind: ActionButtonKind.text,
                       onPressed: onRetry,
                       child: Text(L10n.of(context).ui_retry_8036af59)),
               ],
@@ -11851,7 +11898,8 @@ final class _ApplicationCommandSheetState
                     ],
                   ),
                 ),
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: L10n.of(context).ui_cancel_command_f383c6ae,
                   onPressed: _submitting ? null : () => Navigator.pop(context),
                   icon: Icon(Icons.close_rounded),
@@ -11943,7 +11991,7 @@ final class _ApplicationCommandSheetState
               ),
             ),
             SizedBox(height: 12),
-            FilledButton.icon(
+            ActionButton(
               onPressed: _submitting ? null : _submit,
               icon: _submitting
                   ? SizedBox.square(
@@ -12107,7 +12155,8 @@ final class _ApplicationCommandSheetState
           ),
           Align(
             alignment: Alignment.centerLeft,
-            child: TextButton.icon(
+            child: ActionButton(
+              kind: ActionButtonKind.text,
               onPressed:
                   _submitting || _pickingFiles || _attachments.length >= 10
                       ? null
@@ -12282,7 +12331,8 @@ final class _ApplicationCommandPickerSheetState
                   child: Text(L10n.of(context).ui_apps_53d91aad,
                       style: Theme.of(context).textTheme.headlineSmall),
                 ),
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: L10n.of(context).ui_close_apps_0b6e16a1,
                   onPressed: () => Navigator.pop(context),
                   icon: Icon(Icons.close_rounded),
@@ -12628,7 +12678,8 @@ final class _ComposerButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
         padding: EdgeInsets.fromLTRB(3, 0, 3, 4),
-        child: IconButton(
+        child: ActionButton(
+          kind: ActionButtonKind.icon,
           tooltip: tooltip,
           onPressed: onPressed,
           visualDensity: VisualDensity.compact,
@@ -12757,7 +12808,8 @@ final class _PermissionNotice extends StatelessWidget {
                     ),
                   ),
                   if (onApps != null)
-                    IconButton(
+                    ActionButton(
+                      kind: ActionButtonKind.icon,
                       tooltip: L10n.of(context).ui_apps_53d91aad,
                       onPressed: onApps,
                       icon: Icon(Icons.apps_rounded, size: 20),

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 bool isAttachmentSpoiler(String filename) => filename.startsWith('SPOILER_');
@@ -47,7 +48,7 @@ Future<bool?> showAttachmentSpoilerEditor(
             value: spoiler,
             onChanged: (value) => setState(() => spoiler = value),
           ),
-          FilledButton(
+          ActionButton(
               onPressed: () => Navigator.pop(context, spoiler),
               child: Text(L10n.of(context).ui_done_8dd31791)),
         ]),
@@ -86,7 +87,8 @@ class _AttachmentSpoilerState extends State<AttachmentSpoiler> {
     return SizedBox(
       width: widget.compact ? null : 240,
       height: widget.compact ? null : 120,
-      child: FilledButton.tonal(
+      child: ActionButton(
+        kind: ActionButtonKind.tonal,
         onPressed: () => setState(() => _revealed = token),
         child: Semantics(
             label: L10n.of(context).ui_reveal_spoiler_attachment_965a0ac3,

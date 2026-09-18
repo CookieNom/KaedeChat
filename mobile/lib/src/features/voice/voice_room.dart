@@ -15,6 +15,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/stage_instances.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/features/voice/soundboard_access.dart';
 import 'package:kaede_mobile/src/features/voice/voice_elapsed.dart';
@@ -348,7 +349,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                   ),
                 ),
                 if (canSetVoiceStatus)
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip:
                         L10n.of(context).ui_set_voice_channel_status_ee4e27cc,
                     onPressed: _voiceStatusBusy ? null : _editVoiceStatus,
@@ -357,7 +359,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 if (!joined &&
                     (channel.type != ChannelType.stage ||
                         _stageInstance != null))
-                  FilledButton.icon(
+                  ActionButton(
                     onPressed: canConnect && !session.connecting
                         ? () => session.connect(channel, callRef: callRef)
                         : null,
@@ -521,15 +523,17 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext, ''),
             child: Text(L10n.of(context).ui_clear_04a57fc2),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () => Navigator.pop(dialogContext, controller.text),
             child: Text(L10n.of(context).ui_save_4d2d5d68),
           ),
@@ -642,7 +646,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
               ),
             ),
             if (_canManageStage)
-              FilledButton.icon(
+              ActionButton(
                 onPressed: _stageLoading ? null : _startStage,
                 icon: Icon(Icons.mic_rounded),
                 label: Text(L10n.of(context).ui_start_stage_1d128645),
@@ -669,7 +673,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         children: [
           if (session.joined && guild != null)
             if (suppressed)
-              TextButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed:
                     requested || channel.allows(Permission.requestToSpeak)
                         ? () => _runVoiceAction(
@@ -688,7 +693,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     : L10n.of(context).ui_request_to_speak_1e2c1da5),
               )
             else
-              TextButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => _runVoiceAction(
                   context,
                   () => session.moveSelfToStageAudience(guild.ref),
@@ -697,12 +703,14 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 label: Text(L10n.of(context).ui_move_to_audience_de051085),
               ),
           if (_canManageStage) ...[
-            TextButton.icon(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: _stageLoading ? null : _editStage,
               icon: Icon(Icons.edit_rounded),
               label: Text(L10n.of(context).ui_edit_topic_93089e9e),
             ),
-            TextButton.icon(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: _stageLoading ? null : _endStage,
               icon: Icon(Icons.stop_circle_outlined),
               label: Text(L10n.of(context).ui_end_stage_2bd54b88),
@@ -761,11 +769,12 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () {
               final value = controller.text.trim();
               if (value.isNotEmpty) Navigator.pop(dialogContext, value);
@@ -814,11 +823,12 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
             ],
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () {
                 final topic = controller.text.trim();
                 if (topic.isNotEmpty) {
@@ -939,11 +949,12 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
             content: Text(L10n.of(context)
                 .ui_the_live_stage_will_end_for_everyone_7d77ab3b),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              FilledButton(
+              ActionButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_end_stage_2bd54b88),
               ),
@@ -1031,7 +1042,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                         context,
                         () => session.setPushHeld(false),
                       )),
-                      child: FilledButton.tonalIcon(
+                      child: ActionButton(
+                        kind: ActionButtonKind.tonal,
                         onPressed: () {},
                         icon: Icon(session.pushHeld
                             ? Icons.mic_rounded
@@ -1141,7 +1153,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 ],
               ),
               if (session.canSpeak && (session.pushToTalk || session.canUseVad))
-                TextButton.icon(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: () => _runVoiceAction(
                     context,
                     session.toggleInputMode,
@@ -1355,7 +1368,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 ),
               ),
               SizedBox(height: 18),
-              FilledButton.icon(
+              ActionButton(
                 onPressed: starting
                     ? null
                     : () async {
@@ -2195,14 +2208,15 @@ final class _VoiceTakeoverNotice extends StatelessWidget {
             SizedBox(height: 10),
             Row(
               children: [
-                FilledButton(
+                ActionButton(
                   onPressed: moving ? null : onMove,
                   child: Text(moving
                       ? L10n.of(context).ui_moving_voice_c3ab6c0f
                       : L10n.of(context).ui_move_voice_here_0c2d2f54),
                 ),
                 SizedBox(width: 8),
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: moving ? null : onCancel,
                   child: Text(L10n.of(context).ui_keep_it_there_3cd7dd37),
                 ),

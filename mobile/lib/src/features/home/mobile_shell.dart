@@ -29,6 +29,7 @@ import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
 import 'package:kaede_mobile/src/features/guild/scheduled_events_tab.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
@@ -247,12 +248,14 @@ Future<void> _showE2eeRoomSettings(
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: busy ? null : () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_done_8dd31791),
             ),
             if (active)
-              FilledButton.tonal(
+              ActionButton(
+                kind: ActionButtonKind.tonal,
                 onPressed: busy
                     ? null
                     : () => run((client) async {
@@ -265,7 +268,7 @@ Future<void> _showE2eeRoomSettings(
                 child: Text(L10n.of(context).ui_verify_safety_number_070dce0b),
               ),
             if (canManage && (!encrypted || needsRekey))
-              FilledButton.icon(
+              ActionButton(
                 onPressed: busy
                     ? null
                     : () => run((client) async {
@@ -589,7 +592,8 @@ final class _SectionScreen extends StatelessWidget {
         child: Column(
           children: [
             ConversationCompactHeader(
-              leading: IconButton(
+              leading: ActionButton(
+                kind: ActionButtonKind.icon,
                 onPressed: onBack,
                 icon: Icon(Icons.arrow_back_rounded),
               ),
@@ -720,11 +724,12 @@ final class _ConversationScreenState
             child: Text(encryptedRoomJoinWarning(kind)),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext, false),
               child: Text(L10n.of(context).ui_go_back_628e5a9e),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(dialogContext, true),
               child: Text(L10n.of(context).ui_continue_ab43d664),
             ),
@@ -1135,7 +1140,8 @@ final class _ConversationScreenState
     return Column(
       children: [
         ConversationCompactHeader(
-          leading: IconButton(
+          leading: ActionButton(
+            kind: ActionButtonKind.icon,
             onPressed: widget.onBack,
             icon: Icon(Icons.arrow_back_rounded),
           ),
@@ -1169,13 +1175,15 @@ final class _ConversationScreenState
                   widget.channel,
                   mobile.user,
                 ))
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_follow_announcements_6b55eefc,
                 onPressed: _showAnnouncementFollow,
                 icon: Icon(Icons.notifications_none_rounded),
               ),
             if (isDm && !callUsesOverflow)
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: _activeCall == null
                     ? L10n.of(context).ui_start_call_29ddf6b1
                     : L10n.of(context).ui_join_call_a0c061ab,
@@ -1185,7 +1193,8 @@ final class _ConversationScreenState
                     : Icons.call_rounded),
               ),
             if (widget.channel.isThread && !compactHeader)
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: widget.channel.archived
                     ? L10n.of(context)
                         .ui_archived_threads_cannot_be_followed_bf519f3e
@@ -1200,7 +1209,8 @@ final class _ConversationScreenState
                     : Icons.notifications_none_rounded),
               ),
             if (supportsThreads && !compactHeader)
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_threads_23244ec6,
                 onPressed: _showThreads,
                 icon: Icon(Icons.forum_outlined),
@@ -1208,14 +1218,16 @@ final class _ConversationScreenState
             if (canReadHistory &&
                 !widget.channel.isForum &&
                 widget.channel.type != ChannelType.tracker)
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_search_this_conversation_3abf7012,
                 onPressed: _showMessageSearch,
                 icon: Icon(Icons.search_rounded),
               ),
             if ((widget.onMembers != null || widget.channel.isThread) &&
                 !compactHeader)
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: widget.channel.isThread
                     ? L10n.of(context).ui_thread_members_b6d96a16
                     : L10n.of(context).ui_member_list_8190cf45,
@@ -1377,13 +1389,14 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
             ],
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
-              builder: (_, value, __) => FilledButton(
+              builder: (_, value, __) => ActionButton(
                 onPressed: value.text.trim().isEmpty
                     ? null
                     : () => Navigator.pop(
@@ -1454,7 +1467,7 @@ final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
                       style: Theme.of(context).textTheme.headlineSmall),
                 ),
                 if (canCreate)
-                  FilledButton.icon(
+                  ActionButton(
                     onPressed: _busy ? null : _create,
                     icon: Icon(Icons.add_rounded, size: 18),
                     label: Text(L10n.of(context).ui_create_990de47d),
@@ -1715,13 +1728,14 @@ final class _ThreadDetailsSheetState
             ],
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
-              builder: (_, value, __) => FilledButton(
+              builder: (_, value, __) => ActionButton(
                 onPressed: value.text.trim().isEmpty ||
                         (forum != null &&
                             forum.flags & 16 != 0 &&
@@ -1828,10 +1842,11 @@ final class _ThreadDetailsSheetState
         title: Text(L10n.of(context).ui_delete_thread_9f21116f),
         content: Text(L10n.of(context).ui_this_cannot_be_undone_f97155ee),
         actions: [
-          TextButton(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          FilledButton(
+          ActionButton(
             style:
                 FilledButton.styleFrom(backgroundColor: context.kaede.danger),
             onPressed: () => Navigator.pop(context, true),
@@ -2247,7 +2262,8 @@ final class _ThreadMembersSheetState
                                   profile == null ? null : Text(profile.handle),
                               trailing: canRemove &&
                                       member.userRef != state.user?.ref
-                                  ? IconButton(
+                                  ? ActionButton(
+                                      kind: ActionButtonKind.icon,
                                       tooltip: L10n.of(context)
                                           .ui_remove_member_89834045,
                                       onPressed:
@@ -2339,7 +2355,8 @@ final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
       ),
       padding: EdgeInsets.fromLTRB(12, 7, 12, 7),
       alignment: Alignment.centerLeft,
-      child: OutlinedButton.icon(
+      child: ActionButton(
+        kind: ActionButtonKind.outlined,
         onPressed: _busy ||
                 widget.thread.archived ||
                 starter == null ||
@@ -2933,11 +2950,12 @@ final class _PinnedMessagesSheetState
         content: Text(L10n.of(context)
             .ui_the_message_will_remain_in_the_conversation_59e103da),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () => Navigator.pop(context, true),
             child: Text(L10n.of(context).ui_remove_pin_49a985ee),
           ),
@@ -3013,7 +3031,8 @@ final class _PinnedMessagesSheetState
                       ),
                     ),
                   ),
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context).ui_close_cd86acc3,
                     onPressed: () => Navigator.pop(context),
                     icon: Icon(Icons.close_rounded),
@@ -3029,7 +3048,8 @@ final class _PinnedMessagesSheetState
                   child: Row(
                     children: [
                       Expanded(child: Text(error)),
-                      TextButton(
+                      ActionButton(
+                          kind: ActionButtonKind.text,
                           onPressed: _load,
                           child: Text(L10n.of(context).ui_retry_8036af59)),
                     ],
@@ -3105,7 +3125,8 @@ final class _PinnedMessagesSheetState
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                         trailing: canManage
-                                            ? IconButton(
+                                            ? ActionButton(
+                                                kind: ActionButtonKind.icon,
                                                 tooltip: L10n.of(context)
                                                     .ui_unpin_message_122b93fa,
                                                 onPressed: _unpinning
@@ -3182,7 +3203,8 @@ final class _DmCallRoom extends ConsumerWidget {
           actions: [
             Padding(
               padding: EdgeInsets.only(right: 10),
-              child: TextButton.icon(
+              child: ActionButton(
+                kind: ActionButtonKind.text,
                 style: TextButton.styleFrom(
                   foregroundColor: context.kaede.danger,
                 ),
@@ -3323,7 +3345,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
               SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton.tonal(
+                child: ActionButton(
+                  kind: ActionButtonKind.tonal,
                   onPressed: _busy
                       ? null
                       : () => _run(() async {
@@ -3352,7 +3375,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
               SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton.tonalIcon(
+                child: ActionButton(
+                  kind: ActionButtonKind.tonal,
                   onPressed: _busy || _invite.text.trim().isEmpty
                       ? null
                       : () => _run(() async {
@@ -3497,7 +3521,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                   trailing: member.ref == channel.ownerRef
                       ? Chip(label: Text(L10n.of(context).ui_owner_9b22be74))
                       : isOwner
-                          ? IconButton(
+                          ? ActionButton(
+                              kind: ActionButtonKind.icon,
                               tooltip:
                                   L10n.of(context).ui_remove_member_89834045,
                               onPressed: _busy
@@ -3532,7 +3557,8 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                   ),
                 ),
               SizedBox(height: 16),
-              OutlinedButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.outlined,
                 style: OutlinedButton.styleFrom(
                   foregroundColor: context.kaede.danger,
                   side: BorderSide(color: context.kaede.dangerSoft),
@@ -3732,7 +3758,8 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
       child: Column(
         children: [
           ConversationCompactHeader(
-            leading: IconButton(
+            leading: ActionButton(
+              kind: ActionButtonKind.icon,
               onPressed: widget.onBack,
               icon: Icon(Icons.arrow_back_rounded),
             ),
@@ -3797,7 +3824,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                         actions: <Widget>[
                                           if (user.profileResolved &&
                                               user.ref != mobile.user?.ref)
-                                            FilledButton.icon(
+                                            ActionButton(
                                               onPressed: () {
                                                 Navigator.pop(context);
                                                 _openDm(
@@ -4025,7 +4052,8 @@ final class _MemberListError extends StatelessWidget {
                 style: TextStyle(color: context.kaede.muted),
               ),
               SizedBox(height: 14),
-              OutlinedButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.outlined,
                 onPressed: onRetry,
                 icon: Icon(Icons.refresh_rounded),
                 label: Text(L10n.of(context).ui_try_again_213e90fa),
@@ -4416,11 +4444,12 @@ final class _GuildOrganizerSheetState
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: name.text.trim().isEmpty || selected.isEmpty
                   ? null
                   : () => Navigator.pop(
@@ -4541,13 +4570,14 @@ final class _GuildOrganizerSheetState
               SizedBox(height: 12),
               Row(
                 children: [
-                  OutlinedButton.icon(
+                  ActionButton(
+                    kind: ActionButtonKind.outlined,
                     onPressed: _editGroup,
                     icon: Icon(Icons.create_new_folder_outlined),
                     label: Text(L10n.of(context).ui_create_group_12e0eaee),
                   ),
                   Spacer(),
-                  FilledButton.icon(
+                  ActionButton(
                     onPressed: () async {
                       await ref
                           .read(mobileControllerProvider.notifier)
@@ -4670,7 +4700,8 @@ final class _DirectMessageBrowser extends ConsumerWidget {
           ),
           _SidebarSectionHeader(
             title: L10n.of(context).ui_direct_messages_0db1f240,
-            trailing: IconButton(
+            trailing: ActionButton(
+              kind: ActionButtonKind.icon,
               tooltip: L10n.of(context).ui_new_conversation_90d5317c,
               visualDensity: VisualDensity.compact,
               onPressed: () => _newConversationAction(
@@ -5301,7 +5332,8 @@ final class GuildChannelsHeader extends StatelessWidget {
               ),
             ),
             if (onAddChannel != null)
-              TextButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 key: ValueKey('guild-add-channel-button'),
                 style: TextButton.styleFrom(
                   minimumSize: Size(0, 36),
@@ -5826,7 +5858,8 @@ final class _AccountBar extends ConsumerWidget {
               ),
             ),
             if (voice.joined)
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: voice.muted
                     ? L10n.of(context).ui_unmute_bb6972bb
                     : L10n.of(context).ui_mute_3f609f74,
@@ -5848,7 +5881,8 @@ final class _AccountBar extends ConsumerWidget {
                   size: 19,
                 ),
               ),
-            IconButton(
+            ActionButton(
+              kind: ActionButtonKind.icon,
               tooltip: L10n.of(context).chat_inbox,
               visualDensity: VisualDensity.standard,
               constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
@@ -5859,7 +5893,8 @@ final class _AccountBar extends ConsumerWidget {
               },
               icon: const Icon(Icons.inbox_outlined, size: 19),
             ),
-            IconButton(
+            ActionButton(
+              kind: ActionButtonKind.icon,
               tooltip: L10n.of(context).ui_settings_4b058728,
               visualDensity: VisualDensity.standard,
               constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
@@ -6170,7 +6205,8 @@ final class _StatusBanner extends StatelessWidget {
                 ),
               ),
               if (actionLabel != null && onAction != null)
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   key: actionKey,
                   onPressed: onAction,
                   style: TextButton.styleFrom(
@@ -6252,7 +6288,8 @@ final class _VoiceStatusBar extends StatelessWidget {
                     ],
                   ),
                 ),
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: voice.muted
                       ? L10n.of(context).ui_unmute_bb6972bb
                       : L10n.of(context).ui_mute_3f609f74,
@@ -6267,7 +6304,8 @@ final class _VoiceStatusBar extends StatelessWidget {
                     size: 20,
                   ),
                 ),
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: L10n.of(context).ui_leave_voice_dc19c17a,
                   onPressed: onLeave,
                   visualDensity: VisualDensity.compact,
@@ -6383,7 +6421,7 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
               style: TextStyle(color: context.kaede.muted, fontSize: 13),
             ),
             SizedBox(height: 18),
-            FilledButton.icon(
+            ActionButton(
               onPressed: () {
                 Navigator.pop(sheetContext);
                 _textAction(context, 'Create a guild', 'Guild name',
@@ -6401,7 +6439,8 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
               label: Text(L10n.of(context).ui_create_a_guild_cbd46599),
             ),
             SizedBox(height: 10),
-            OutlinedButton.icon(
+            ActionButton(
+              kind: ActionButtonKind.outlined,
               onPressed: () {
                 Navigator.pop(sheetContext);
                 _textAction(
@@ -6499,12 +6538,13 @@ Future<void> _createAndShowInvite(BuildContext context,
           ],
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_done_8dd31791),
           ),
           if (link != null || code.isNotEmpty)
-            FilledButton.icon(
+            ActionButton(
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: link ?? code));
                 if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -6803,7 +6843,7 @@ final class _FriendsPage extends ConsumerWidget {
       child: ListView(
         padding: EdgeInsets.fromLTRB(14, 12, 14, 32),
         children: [
-          FilledButton.icon(
+          ActionButton(
             onPressed: () => _textAction(
                 context, 'Add a friend', '@friend@example.net', (value) async {
               await ref
@@ -6975,7 +7015,8 @@ final class _RelationshipTile extends ConsumerWidget {
                   ),
                 ),
                 if (!userProfileSupportsFriendshipActions(user))
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context).ui_message_ae0ed984,
                     onPressed: user.profileResolved
                         ? () => _openDm(context, ref, user, onOpenChat)
@@ -6987,7 +7028,8 @@ final class _RelationshipTile extends ConsumerWidget {
                     'pending_in' => Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          IconButton(
+                          ActionButton(
+                            kind: ActionButtonKind.icon,
                             tooltip: L10n.of(context).ui_accept_50b26149,
                             style: IconButton.styleFrom(
                               foregroundColor: context.kaede.mint,
@@ -7001,7 +7043,8 @@ final class _RelationshipTile extends ConsumerWidget {
                                     .acceptFriend(user.ref)),
                             icon: Icon(Icons.check_circle_rounded),
                           ),
-                          IconButton(
+                          ActionButton(
+                            kind: ActionButtonKind.icon,
                             tooltip: L10n.of(context).ui_decline_58eaef39,
                             onPressed: () => _relationshipAction(
                                 context,
@@ -7014,14 +7057,16 @@ final class _RelationshipTile extends ConsumerWidget {
                           ),
                         ],
                       ),
-                    'friend' => IconButton(
+                    'friend' => ActionButton(
+                        kind: ActionButtonKind.icon,
                         tooltip: L10n.of(context).ui_message_ae0ed984,
                         onPressed: user.profileResolved
                             ? () => _openDm(context, ref, user, onOpenChat)
                             : null,
                         icon: Icon(Icons.chat_bubble_outline_rounded),
                       ),
-                    'blocked' => TextButton(
+                    'blocked' => ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: () => _relationshipAction(
                             context,
                             ref,
@@ -7031,7 +7076,8 @@ final class _RelationshipTile extends ConsumerWidget {
                                 .unblock(user.ref)),
                         child: Text(L10n.of(context).ui_unblock_987c7d5f),
                       ),
-                    _ => IconButton(
+                    _ => ActionButton(
+                        kind: ActionButtonKind.icon,
                         tooltip: L10n.of(context).ui_cancel_request_28568fb6,
                         onPressed: () => _relationshipAction(
                             context,
@@ -7128,7 +7174,7 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
     presence,
     actions: <Widget>[
       if (profile.profileResolved)
-        FilledButton.icon(
+        ActionButton(
           onPressed: () {
             Navigator.pop(context);
             _openDm(context, ref, profile, onOpenChat);
@@ -7141,7 +7187,8 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
           relationshipType != 'friend' &&
           relationshipType != 'pending_out' &&
           relationshipType != 'blocked')
-        OutlinedButton.icon(
+        ActionButton(
+          kind: ActionButtonKind.outlined,
           onPressed: () {
             Navigator.pop(context);
             _relationshipAction(
@@ -7157,7 +7204,8 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
         ),
       if (userProfileSupportsFriendshipActions(profile) &&
           relationshipType == 'friend')
-        OutlinedButton.icon(
+        ActionButton(
+          kind: ActionButtonKind.outlined,
           onPressed: () {
             Navigator.pop(context);
             _relationshipAction(
@@ -7176,7 +7224,8 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
           label: Text(L10n.of(context).ui_remove_friend_1b6055cb),
         ),
       if (relationshipType == 'blocked')
-        OutlinedButton.icon(
+        ActionButton(
+          kind: ActionButtonKind.outlined,
           onPressed: () {
             Navigator.pop(context);
             _relationshipAction(
@@ -7360,10 +7409,11 @@ Future<void> _newConversationAction(
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          FilledButton(
+          ActionButton(
             onPressed:
                 selected.length < 2 ? null : () => Navigator.pop(context, true),
             child: Text(L10n.of(context).ui_create_990de47d),

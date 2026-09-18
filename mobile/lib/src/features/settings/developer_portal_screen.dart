@@ -14,6 +14,7 @@ import 'package:kaede_mobile/src/domain/application_media.dart';
 import 'package:kaede_mobile/src/domain/developer_portal.dart';
 import 'package:kaede_mobile/src/domain/permission_selection.dart';
 import 'package:kaede_mobile/src/features/settings/application_media_screen.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/permission_picker.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -194,13 +195,14 @@ final class _DeveloperPortalScreenState
               ),
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
               ValueListenableBuilder<TextEditingValue>(
                 valueListenable: name,
-                builder: (context, value, child) => FilledButton(
+                builder: (context, value, child) => ActionButton(
                   onPressed: value.text.trim().isEmpty
                       ? null
                       : () => Navigator.pop(dialogContext, true),
@@ -247,7 +249,8 @@ final class _DeveloperPortalScreenState
         appBar: AppBar(
           title: Text(L10n.of(context).ui_developer_portal_f5349d3d),
           actions: [
-            IconButton(
+            ActionButton(
+              kind: ActionButtonKind.icon,
               tooltip: L10n.of(context).ui_refresh_0815aad4,
               onPressed: _loading ? null : _load,
               icon: const Icon(Icons.refresh_rounded),
@@ -470,11 +473,12 @@ final class _DeveloperTeamsScreenState
               ],
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              FilledButton(
+              ActionButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_add_9dc3aa14),
               ),
@@ -506,7 +510,7 @@ final class _DeveloperTeamsScreenState
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
+            ActionTile(
                 title: Text(member.label), subtitle: Text(member.ref.wire)),
             RadioGroup<String>(
               groupValue: member.role,
@@ -572,7 +576,8 @@ final class _DeveloperTeamsScreenState
         appBar: AppBar(
           title: Text(L10n.of(context).ui_developer_teams_edf19d0f),
           actions: [
-            IconButton(
+            ActionButton(
+              kind: ActionButtonKind.icon,
               tooltip: L10n.of(context).ui_new_team_8f6b244a,
               onPressed: _createTeam,
               icon: const Icon(Icons.group_add_outlined),
@@ -588,7 +593,7 @@ final class _DeveloperTeamsScreenState
               if (_error case final error?)
                 SettingsStatusPanel.error(message: error, onRetry: _load),
               for (final team in _teams)
-                ListTile(
+                ActionTile(
                   selected: team.ref == _selected,
                   leading: Icon(team.personal
                       ? Icons.person_outline_rounded
@@ -613,7 +618,7 @@ final class _DeveloperTeamsScreenState
                   const Center(child: CircularProgressIndicator())
                 else
                   for (final member in _members)
-                    ListTile(
+                    ActionTile(
                       leading: const CircleAvatar(
                         child: Icon(Icons.person_outline_rounded),
                       ),
@@ -631,7 +636,8 @@ final class _DeveloperTeamsScreenState
                 if (team.canManageMembers)
                   Padding(
                     padding: const EdgeInsets.only(top: 12),
-                    child: OutlinedButton.icon(
+                    child: ActionButton(
+                      kind: ActionButtonKind.outlined,
                       onPressed: _addMember,
                       icon: const Icon(Icons.person_add_alt_1_outlined),
                       label: Text(L10n.of(context).ui_add_member_fa100f0e),
@@ -692,7 +698,6 @@ final class _DeveloperApplicationScreenState
   var _loading = true;
   var _busy = false;
   String? _error;
-  String? _notice;
 
   KaedeRepository get repository => _repository(ref, widget.repository);
 
@@ -785,7 +790,6 @@ final class _DeveloperApplicationScreenState
     setState(() {
       _busy = true;
       _error = null;
-      _notice = null;
     });
     try {
       final updated = await repository.updateDeveloperApplication(
@@ -808,7 +812,8 @@ final class _DeveloperApplicationScreenState
       if (!mounted) return;
       setState(() {
         _application = updated;
-        _notice = L10n.of(context).ui_application_settings_saved_471d9be1;
+        showActionFeedback(
+            context, L10n.of(context).ui_application_settings_saved_471d9be1);
       });
     } on Object catch (error) {
       _showError(
@@ -847,8 +852,8 @@ final class _DeveloperApplicationScreenState
         decoded.cast<Object?>(),
       );
       if (mounted) {
-        setState(
-            () => _notice = L10n.of(context).ui_commands_published_30948651);
+        setState(() => showActionFeedback(
+            context, L10n.of(context).ui_commands_published_30948651));
       }
       await _load();
     } on Object catch (error) {
@@ -880,7 +885,8 @@ final class _DeveloperApplicationScreenState
           title: Text(L10n.of(context).ui_copy_this_credential_now_a6ebbaf5),
           content: SelectableText(token),
           actions: [
-            TextButton.icon(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: token));
                 if (context.mounted) {
@@ -894,7 +900,7 @@ final class _DeveloperApplicationScreenState
               icon: const Icon(Icons.copy_rounded),
               label: Text(L10n.of(context).ui_copy_658f3664),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_done_8dd31791),
             ),
@@ -968,11 +974,12 @@ final class _DeveloperApplicationScreenState
             ),
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(context, true),
               child: Text(L10n.of(context).ui_enroll_8c14fe85),
             ),
@@ -1068,11 +1075,12 @@ final class _DeveloperApplicationScreenState
               ),
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              FilledButton(
+              ActionButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_create_link_7d72271b),
               ),
@@ -1139,11 +1147,12 @@ final class _DeveloperApplicationScreenState
               ],
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              FilledButton(
+              ActionButton(
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_save_4d2d5d68),
               ),
@@ -1214,7 +1223,7 @@ final class _DeveloperApplicationScreenState
                         child: Text(title,
                             style: Theme.of(context).textTheme.titleLarge),
                       ),
-                      FilledButton(
+                      ActionButton(
                         onPressed: draft.length < minimum
                             ? null
                             : () => Navigator.pop(sheetContext, draft),
@@ -1260,10 +1269,14 @@ final class _DeveloperApplicationScreenState
   void _showError(Object error, String summary) {
     if (!mounted) return;
     setState(() => _error = userFacingError(error, summary: summary));
+    showActionFeedback(context, _error!, error: true);
   }
 
   void _showErrorMessage(String message) {
-    if (mounted) setState(() => _error = message);
+    if (mounted) {
+      setState(() => _error = message);
+      showActionFeedback(context, message, error: true);
+    }
   }
 
   @override
@@ -1273,12 +1286,14 @@ final class _DeveloperApplicationScreenState
       appBar: AppBar(
         title: Text(application?.name ?? 'Application'),
         actions: [
-          IconButton(
+          ActionButton(
+            kind: ActionButtonKind.icon,
             tooltip: L10n.of(context).ui_refresh_0815aad4,
             onPressed: _loading ? null : _load,
             icon: const Icon(Icons.refresh_rounded),
           ),
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: application == null || _busy ? null : _saveApplication,
             child: Text(L10n.of(context).ui_save_4d2d5d68),
           ),
@@ -1296,8 +1311,6 @@ final class _DeveloperApplicationScreenState
                       message: error,
                       onRetry: _load,
                     ),
-                  if (_notice case final notice?)
-                    SettingsStatusPanel.notice(message: notice),
                   if (application != null) ...[
                     Text(application.botHandle,
                         style: Theme.of(context).textTheme.bodySmall),
@@ -1363,7 +1376,7 @@ final class _DeveloperApplicationScreenState
                       onChanged: (value) => setState(
                           () => _targetPolicy = value ?? _targetPolicy),
                     ),
-                    ListTile(
+                    ActionTile(
                       contentPadding: EdgeInsets.zero,
                       leading: Icon(Icons.key_rounded),
                       title: Text(
@@ -1492,7 +1505,7 @@ final class _DeveloperApplicationScreenState
                     ),
                     Padding(
                       padding: const EdgeInsets.only(top: 12),
-                      child: FilledButton.icon(
+                      child: ActionButton(
                         onPressed: _busy ? null : _saveApplication,
                         icon: const Icon(Icons.save_outlined),
                         label: Text(L10n.of(context)
@@ -1516,7 +1529,7 @@ final class _DeveloperApplicationScreenState
                     ),
                     Align(
                       alignment: Alignment.centerRight,
-                      child: FilledButton.icon(
+                      child: ActionButton(
                         onPressed: _busy ? null : _saveCommands,
                         icon: const Icon(Icons.publish_outlined),
                         label:
@@ -1529,7 +1542,7 @@ final class _DeveloperApplicationScreenState
                       onAction: _createCredential,
                       children: [
                         for (final credential in _credentials)
-                          ListTile(
+                          ActionTile(
                             leading: const Icon(Icons.key_outlined),
                             title: Text(credential.label),
                             subtitle: Text(
@@ -1541,7 +1554,8 @@ final class _DeveloperApplicationScreenState
                                       .toString()),
                             ),
                             trailing: credential.revokedAt == null
-                                ? IconButton(
+                                ? ActionButton(
+                                    kind: ActionButtonKind.icon,
                                     tooltip:
                                         L10n.of(context).ui_revoke_2219c453,
                                     onPressed: () =>
@@ -1558,7 +1572,7 @@ final class _DeveloperApplicationScreenState
                       onAction: _createWorker,
                       children: [
                         for (final worker in _workers)
-                          ListTile(
+                          ActionTile(
                             leading: const Icon(
                                 Icons.precision_manufacturing_outlined),
                             title: Text(worker.name),
@@ -1574,7 +1588,8 @@ final class _DeveloperApplicationScreenState
                                       .toString()),
                             ),
                             trailing: worker.revokedAt == null
-                                ? IconButton(
+                                ? ActionButton(
+                                    kind: ActionButtonKind.icon,
                                     tooltip:
                                         L10n.of(context).ui_revoke_2219c453,
                                     onPressed: () => _revokeWorker(worker),
@@ -1613,7 +1628,7 @@ final class _DeveloperApplicationScreenState
                       onAction: _createTemplate,
                       children: [
                         for (final template in _templates)
-                          ListTile(
+                          ActionTile(
                             leading: const Icon(Icons.add_link_rounded),
                             title: Text(template.name),
                             subtitle: Text(
@@ -1623,7 +1638,8 @@ final class _DeveloperApplicationScreenState
                                   (template.active ? 'active' : 'inactive')
                                       .toString()),
                             ),
-                            trailing: IconButton(
+                            trailing: ActionButton(
+                              kind: ActionButtonKind.icon,
                               tooltip:
                                   L10n.of(context).ui_copy_invite_link_a7c3b223,
                               onPressed: () async {
@@ -1650,13 +1666,14 @@ final class _DeveloperApplicationScreenState
                       onAction: _addRule,
                       children: [
                         for (final rule in _rules)
-                          ListTile(
+                          ActionTile(
                             leading: Icon(rule.effect == 'allow'
                                 ? Icons.check_circle_outline
                                 : Icons.block_outlined),
                             title: Text(rule.targetDomain),
                             subtitle: Text(rule.effect),
-                            trailing: IconButton(
+                            trailing: ActionButton(
+                              kind: ActionButtonKind.icon,
                               tooltip: L10n.of(context).ui_remove_rule_eadcf4b9,
                               onPressed: () => _deleteRule(rule),
                               icon: const Icon(Icons.delete_outline),
@@ -1668,7 +1685,7 @@ final class _DeveloperApplicationScreenState
                       title: L10n.of(context).ui_installations_3215bb9a,
                       children: [
                         for (final installation in _installations)
-                          ListTile(
+                          ActionTile(
                             leading: const Icon(Icons.hub_outlined),
                             title: Text(installation.guildRef.wire),
                             subtitle: Text(
@@ -1708,7 +1725,7 @@ final class _MultiValueRow extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => ListTile(
+  Widget build(BuildContext context) => ActionTile(
         contentPadding: EdgeInsets.zero,
         title: Text(title),
         subtitle: Text(
@@ -1748,7 +1765,8 @@ final class _ResourceSection extends StatelessWidget {
           if (onAction != null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: OutlinedButton.icon(
+              child: ActionButton(
+                kind: ActionButtonKind.outlined,
                 onPressed: onAction,
                 icon: const Icon(Icons.add_rounded),
                 label: Text(actionLabel ?? 'Add'),

@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_commands.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -391,7 +392,8 @@ final class _MobileApplicationLauncherSheetState
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
                 ),
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: L10n.of(context).ui_close_apps_0b6e16a1,
                   onPressed: () => Navigator.pop(context),
                   icon: const Icon(Icons.close_rounded),
@@ -413,7 +415,8 @@ final class _MobileApplicationLauncherSheetState
             ),
             Align(
               alignment: Alignment.centerLeft,
-              child: TextButton.icon(
+              child: ActionButton(
+                kind: ActionButtonKind.text,
                 key: const ValueKey('app-launcher-directory-instance'),
                 onPressed: _chooseDirectoryInstance,
                 icon: const Icon(Icons.public_rounded, size: 18),
@@ -766,7 +769,8 @@ final class _MobileApplicationLauncherSheetState
                         padding: EdgeInsets.zero,
                         children: [
                           for (final command in application.commands.take(3))
-                            TextButton.icon(
+                            ActionButton(
+                              kind: ActionButtonKind.text,
                               key: ValueKey(
                                 'recent-command-${command.application.wire}-${command.id}',
                               ),
@@ -1063,16 +1067,18 @@ final class _DirectoryInstanceDialogState
           onSubmitted: (_) => _apply(),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             key: const ValueKey('app-launcher-directory-use-home'),
             onPressed: () => Navigator.pop(context, widget.home),
             child: Text(L10n.of(context).ui_use_home_578473eb),
           ),
-          FilledButton(
+          ActionButton(
             key: const ValueKey('app-launcher-directory-apply'),
             onPressed: _apply,
             child: Text(L10n.of(context).ui_apply_ca77bbdb),

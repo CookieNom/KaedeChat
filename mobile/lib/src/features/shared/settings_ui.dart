@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 /// Theme-aware layers shared by every settings surface. These deliberately use
@@ -110,7 +113,8 @@ class SettingsStatusPanel extends StatelessWidget {
         title: Text(message),
         trailing: onRetry == null
             ? null
-            : TextButton(
+            : ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: onRetry,
                 child: Text(L10n.of(context).ui_retry_8036af59)),
       ),
@@ -143,13 +147,14 @@ Future<String?> showSettingsTextDialog(
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: input,
-            builder: (context, value, child) => FilledButton(
+            builder: (context, value, child) => ActionButton(
               onPressed: value.text.trim().isEmpty
                   ? null
                   : () => Navigator.pop(dialogContext, value.text.trim()),
@@ -176,11 +181,12 @@ Future<bool> showSettingsConfirmation(
         title: Text(title),
         content: Text(message),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () => Navigator.pop(dialogContext, true),
             child: Text(actionLabel),
           ),
@@ -221,22 +227,28 @@ class SettingsRow extends StatelessWidget {
   final String? subtitle;
   final Widget? leading;
   final Widget? trailing;
-  final VoidCallback? onTap;
+  final FutureOr<void> Function()? onTap;
   final double minHeight;
   final bool divider;
   final bool danger;
   final bool enabled;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => AsyncAction(
+        onAction: enabled ? onTap : null,
+        builder: (context, run, busy) => _buildRow(context, run, busy),
+      );
+
+  Widget _buildRow(BuildContext context, VoidCallback? run, bool busy) {
     final colors = Theme.of(context).colorScheme;
     final hasSubtitle = subtitle?.isNotEmpty == true;
-    final active = enabled && onTap != null;
-    final disabled = !enabled ||
+    final active = enabled && run != null;
+    final disabled = busy ||
+        !enabled ||
         (onTap == null && (trailing is Icon || trailing is DiscordSwitch));
     final actionable = onTap != null || trailing != null;
     final row = InkWell(
-      onTap: active ? onTap : null,
+      onTap: active ? run : null,
       borderRadius: BorderRadius.circular(10),
       child: ConstrainedBox(
         constraints: BoxConstraints(minHeight: minHeight),
@@ -277,7 +289,7 @@ class SettingsRow extends StatelessWidget {
                   ),
                 ),
               ),
-              if (trailing ??
+              if ((busy ? const ActionProgress() : trailing) ??
                       (active ? const Icon(Icons.chevron_right_rounded) : null)
                   case final Widget control) ...[
                 const SizedBox(width: 8),
@@ -393,19 +405,27 @@ class SettingsSwitchRow extends StatelessWidget {
   final String title;
   final String? subtitle;
   final bool value;
-  final ValueChanged<bool> onChanged;
+  final FutureOr<void> Function(bool)? onChanged;
   final Widget? leading;
   final bool divider;
 
   @override
-  Widget build(BuildContext context) => SettingsRow(
-        title: title,
-        subtitle: subtitle,
-        leading: leading,
-        divider: divider,
-        minHeight: subtitle?.isNotEmpty == true ? 56 : 50,
-        trailing: DiscordSwitch(value: value, onChanged: onChanged),
-        onTap: () => onChanged(!value),
+  Widget build(BuildContext context) => Semantics(
+        toggled: value,
+        enabled: onChanged != null,
+        child: SettingsRow(
+          enabled: onChanged != null,
+          title: title,
+          subtitle: subtitle,
+          leading: leading,
+          divider: divider,
+          minHeight: subtitle?.isNotEmpty == true ? 56 : 50,
+          trailing: IgnorePointer(
+            child: DiscordSwitch(
+                value: value, onChanged: onChanged == null ? null : (_) {}),
+          ),
+          onTap: onChanged == null ? null : () => onChanged!(!value),
+        ),
       );
 }
 
@@ -549,7 +569,7 @@ class SettingsChoiceRow extends StatelessWidget {
   final String title;
   final String value;
   final String display;
-  final ValueChanged<String> onSelected;
+  final FutureOr<void> Function(String)? onSelected;
   final String? subtitle;
   final Widget? leading;
   final bool divider;
@@ -586,7 +606,8 @@ class SettingsChoiceRow extends StatelessWidget {
             ],
           ),
         ),
-        onTap: () => onSelected(value),
+        enabled: onSelected != null,
+        onTap: onSelected == null ? null : () => onSelected!(value),
       );
 }
 
@@ -600,15 +621,15 @@ class SettingsPrimaryButton extends StatelessWidget {
   });
 
   final String label;
-  final VoidCallback? onPressed;
+  final FutureOr<void> Function()? onPressed;
   final IconData? icon;
 
   @override
   Widget build(BuildContext context) => SizedBox(
         width: double.infinity,
         child: icon == null
-            ? FilledButton(onPressed: onPressed, child: Text(label))
-            : FilledButton.icon(
+            ? ActionButton(onPressed: onPressed, child: Text(label))
+            : ActionButton(
                 onPressed: onPressed,
                 icon: Icon(icon),
                 label: Text(label),
@@ -621,12 +642,13 @@ class SettingsDangerButton extends StatelessWidget {
   const SettingsDangerButton(this.label, {super.key, required this.onPressed});
 
   final String label;
-  final VoidCallback onPressed;
+  final FutureOr<void> Function()? onPressed;
 
   @override
   Widget build(BuildContext context) => SizedBox(
         width: double.infinity,
-        child: TextButton(
+        child: ActionButton(
+          kind: ActionButtonKind.text,
           onPressed: onPressed,
           style: TextButton.styleFrom(
             foregroundColor: Theme.of(context).colorScheme.error,
@@ -716,25 +738,31 @@ class SettingsImageOverlayButton extends StatelessWidget {
 
   final IconData icon;
   final String tooltip;
-  final VoidCallback? onPressed;
+  final FutureOr<void> Function()? onPressed;
   final double size;
 
   @override
-  Widget build(BuildContext context) => Material(
-        color: Theme.of(context).colorScheme.surfaceDim.withValues(alpha: .86),
-        borderRadius: BorderRadius.circular(size / 2),
-        child: InkWell(
-          onTap: onPressed,
-          customBorder: const CircleBorder(),
-          child: Center(
-            child: Padding(
-              padding: EdgeInsets.all(size * .24),
-              child: Tooltip(
-                message: tooltip,
-                child: Icon(
-                  icon,
-                  size: size * .5,
-                  color: Theme.of(context).colorScheme.onSurface,
+  Widget build(BuildContext context) => AsyncAction(
+        onAction: onPressed,
+        builder: (context, run, busy) => Material(
+          color:
+              Theme.of(context).colorScheme.surfaceDim.withValues(alpha: .86),
+          borderRadius: BorderRadius.circular(size / 2),
+          child: InkWell(
+            onTap: run,
+            customBorder: const CircleBorder(),
+            child: Center(
+              child: Padding(
+                padding: EdgeInsets.all(size * .24),
+                child: Tooltip(
+                  message: tooltip,
+                  child: busy
+                      ? const ActionProgress()
+                      : Icon(
+                          icon,
+                          size: size * .5,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
                 ),
               ),
             ),

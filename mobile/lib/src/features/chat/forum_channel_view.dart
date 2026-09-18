@@ -16,6 +16,7 @@ import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -363,7 +364,8 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   ),
                 ),
                 Divider(),
-                TextButton(
+                ActionButton(
+                  kind: ActionButtonKind.text,
                   style: TextButton.styleFrom(
                     alignment: Alignment.centerLeft,
                     foregroundColor: context.kaede.text,
@@ -380,7 +382,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                   child: Text(L10n.of(context).ui_reset_to_default_0db9f7dc),
                 ),
                 SizedBox(height: 4),
-                FilledButton(
+                ActionButton(
                   onPressed: () => Navigator.pop(sheetContext, (sort, view)),
                   child: Text(L10n.of(context).ui_done_8dd31791),
                 ),
@@ -465,7 +467,7 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
                 Spacer(),
               if (canPost) ...[
                 SizedBox(width: 8),
-                FilledButton.icon(
+                ActionButton(
                   key: ValueKey('forum-new-post'),
                   onPressed: _newPost,
                   icon: Icon(Icons.chat_bubble_rounded, size: 17),
@@ -501,7 +503,8 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
             alignment: Alignment.centerLeft,
             child: Padding(
               padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
-              child: OutlinedButton.icon(
+              child: ActionButton(
+                kind: ActionButtonKind.outlined,
                 key: ValueKey('forum-sort-view'),
                 onPressed: _showSortAndView,
                 icon: Icon(Icons.swap_vert_rounded, size: 18),
@@ -544,7 +547,8 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
             children: [
               Text(error, textAlign: TextAlign.center),
               SizedBox(height: 12),
-              OutlinedButton(
+              ActionButton(
+                  kind: ActionButtonKind.outlined,
                   onPressed: _load,
                   child: Text(L10n.of(context).ui_retry_8036af59)),
             ],
@@ -1052,7 +1056,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
             children: [
               Row(
                 children: [
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context).ui_close_cd86acc3,
                     onPressed: _busy || _encryptedReservation != null
                         ? null
@@ -1069,7 +1074,7 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                     builder: (context, _, __) =>
                         ValueListenableBuilder<TextEditingValue>(
                       valueListenable: _message,
-                      builder: (context, _, __) => FilledButton(
+                      builder: (context, _, __) => ActionButton(
                         onPressed: _busy ||
                                 !canSubmitForumPost(
                                   title: _title.text,
@@ -1202,7 +1207,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
                                   spoilerFilename(attachment.name, spoiler));
                             }
                           },
-                    trailing: IconButton(
+                    trailing: ActionButton(
+                      kind: ActionButtonKind.icon,
                       tooltip: L10n.of(context).ui_remove_attachment_2d603512,
                       onPressed: _busy
                           ? null
@@ -1214,7 +1220,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
               ],
               if (canAttach) ...[
                 SizedBox(height: 10),
-                OutlinedButton.icon(
+                ActionButton(
+                  kind: ActionButtonKind.outlined,
                   onPressed:
                       _busy || _attachments.length >= 10 ? null : _pickFiles,
                   icon: Icon(Icons.add_photo_alternate_outlined),

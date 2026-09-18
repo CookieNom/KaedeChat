@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:kaede_mobile/src/core/debug_log.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
@@ -13,19 +14,17 @@ class DebugSettings extends StatefulWidget {
 
 class _DebugSettingsState extends State<DebugSettings> {
   bool _busy = false;
-  String? _message;
 
   Future<void> _run(Future<void> Function() action, String success) async {
-    setState(() {
-      _busy = true;
-      _message = null;
-    });
+    if (_busy) return;
+    setState(() => _busy = true);
     try {
       await action();
-      if (mounted) setState(() => _message = success);
+      if (mounted) showActionFeedback(context, success);
     } on Object {
       if (mounted) {
-        setState(() => _message = L10n.of(context).debug_action_failed);
+        showActionFeedback(context, L10n.of(context).debug_action_failed,
+            error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -46,9 +45,8 @@ class _DebugSettingsState extends State<DebugSettings> {
             title: l10n.debug_logging,
             subtitle: l10n.debug_logging_description,
             value: log.enabled,
-            onChanged: (value) {
-              if (!_busy) _run(() => log.setEnabled(value), '');
-            },
+            onChanged:
+                _busy ? null : (value) => _run(() => log.setEnabled(value), ''),
           ),
           if (log.enabled) ...[
             SettingsInfo(l10n.debug_logging_instructions),
@@ -56,7 +54,8 @@ class _DebugSettingsState extends State<DebugSettings> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                OutlinedButton.icon(
+                ActionButton(
+                  kind: ActionButtonKind.outlined,
                   icon: const Icon(Icons.copy),
                   label: Text(l10n.debug_copy),
                   onPressed: _busy
@@ -67,7 +66,8 @@ class _DebugSettingsState extends State<DebugSettings> {
                                 ClipboardData(text: report));
                           }, l10n.push_diagnostics_copied),
                 ),
-                OutlinedButton.icon(
+                ActionButton(
+                  kind: ActionButtonKind.outlined,
                   icon: const Icon(Icons.delete_outline),
                   label: Text(l10n.debug_clear),
                   onPressed:
@@ -76,11 +76,6 @@ class _DebugSettingsState extends State<DebugSettings> {
               ],
             ),
           ],
-          if (_message case final message? when message.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Semantics(liveRegion: true, child: Text(message)),
-            ),
         ],
       ),
     );

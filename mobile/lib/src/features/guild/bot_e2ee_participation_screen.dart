@@ -5,6 +5,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/bot_e2ee_participation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -41,7 +42,6 @@ final class _BotE2eeParticipationScreenState
   var _loading = false;
   var _busy = false;
   String? _error;
-  String? _notice;
 
   @override
   void initState() {
@@ -56,7 +56,6 @@ final class _BotE2eeParticipationScreenState
     setState(() {
       _loading = true;
       _error = null;
-      _notice = null;
     });
     try {
       final participation = await widget.repository.botE2eeParticipation(
@@ -124,7 +123,6 @@ final class _BotE2eeParticipationScreenState
     setState(() {
       _busy = true;
       _error = null;
-      _notice = null;
     });
     try {
       final participation = await widget.repository.grantBotE2eeParticipation(
@@ -136,8 +134,10 @@ final class _BotE2eeParticipationScreenState
       if (mounted) {
         setState(() {
           _participation = participation;
-          _notice = L10n.of(context)
-              .ui_access_is_staged_pending_devices_activate_aft_9a102147;
+          showActionFeedback(
+              context,
+              L10n.of(context)
+                  .ui_access_is_staged_pending_devices_activate_aft_9a102147);
         });
       }
     } on Object catch (error) {
@@ -147,6 +147,7 @@ final class _BotE2eeParticipationScreenState
               summary: L10n.of(context)
                   .ui_could_not_grant_encrypted_channel_access_bfd302a4,
             ));
+        showActionFeedback(context, _error!, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -169,7 +170,6 @@ final class _BotE2eeParticipationScreenState
     setState(() {
       _busy = true;
       _error = null;
-      _notice = null;
     });
     try {
       await widget.repository.revokeBotE2eeParticipation(
@@ -181,8 +181,10 @@ final class _BotE2eeParticipationScreenState
       if (mounted) {
         setState(() {
           _participation = null;
-          _notice = L10n.of(context)
-              .ui_access_was_revoked_and_the_room_rekey_was_sta_28d7d718;
+          showActionFeedback(
+              context,
+              L10n.of(context)
+                  .ui_access_was_revoked_and_the_room_rekey_was_sta_28d7d718);
         });
       }
     } on Object catch (error) {
@@ -192,6 +194,7 @@ final class _BotE2eeParticipationScreenState
               summary: L10n.of(context)
                   .ui_could_not_revoke_encrypted_channel_access_46694806,
             ));
+        showActionFeedback(context, _error!, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -225,12 +228,13 @@ final class _BotE2eeParticipationScreenState
             ],
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
             destructive
-                ? FilledButton(
+                ? ActionButton(
                     style: FilledButton.styleFrom(
                       backgroundColor: Theme.of(context).colorScheme.error,
                       foregroundColor: Theme.of(context).colorScheme.onError,
@@ -238,7 +242,7 @@ final class _BotE2eeParticipationScreenState
                     onPressed: () => Navigator.pop(dialogContext, reason.text),
                     child: Text(action),
                   )
-                : FilledButton(
+                : ActionButton(
                     onPressed: () => Navigator.pop(dialogContext, reason.text),
                     child: Text(action),
                   ),
@@ -334,14 +338,11 @@ final class _BotE2eeParticipationScreenState
                   const SizedBox(height: 10),
                   Text(error, style: TextStyle(color: context.kaede.danger)),
                 ],
-                if (_notice case final notice?) ...[
-                  const SizedBox(height: 10),
-                  Text(notice, style: TextStyle(color: context.kaede.mint)),
-                ],
                 if (widget.canManage) ...[
                   const SizedBox(height: 14),
                   if (_participation?.active == true)
-                    OutlinedButton.icon(
+                    ActionButton(
+                      kind: ActionButtonKind.outlined,
                       onPressed: _busy ? null : _revoke,
                       icon: const Icon(Icons.link_off_rounded),
                       label: Text(_busy
@@ -349,7 +350,7 @@ final class _BotE2eeParticipationScreenState
                           : L10n.of(context).ui_revoke_access_0dd14817),
                     )
                   else
-                    FilledButton.icon(
+                    ActionButton(
                       onPressed: _busy || _loading ? null : _grant,
                       icon: const Icon(Icons.enhanced_encryption_outlined),
                       label: Text(_busy

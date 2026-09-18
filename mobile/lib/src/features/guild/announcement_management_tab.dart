@@ -7,6 +7,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/announcements.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -43,7 +44,6 @@ final class _AnnouncementManagementTabState
   var _loading = false;
   String? _busyFollow;
   String? _error;
-  String? _notice;
   var _requestGeneration = 0;
   void Function()? _removeLiveListener;
 
@@ -169,7 +169,6 @@ final class _AnnouncementManagementTabState
     setState(() {
       _loading = true;
       _error = null;
-      _notice = null;
       _follows = const <AnnouncementFollow>[];
     });
     try {
@@ -212,7 +211,6 @@ final class _AnnouncementManagementTabState
     setState(() {
       _busyFollow = 'create';
       _error = null;
-      _notice = null;
     });
     try {
       if (!_sourceAuthorized(source) || !_targetAuthorized(target)) return;
@@ -224,8 +222,10 @@ final class _AnnouncementManagementTabState
           follow,
         ];
         _target = null;
-        _notice = L10n.of(context)
-            .ui_new_announcements_can_now_be_published_to_tha_ae551f77;
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_new_announcements_can_now_be_published_to_tha_ae551f77);
       });
     } on Object catch (error) {
       if (!mounted) return;
@@ -259,11 +259,12 @@ final class _AnnouncementManagementTabState
             .ui_stop_publishing_new_announcements_to_value0_5baa0d7b(
                 (label).toString())),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: () => Navigator.pop(context, true),
             child: Text(L10n.of(context).ui_remove_21a5901d),
           ),
@@ -279,7 +280,6 @@ final class _AnnouncementManagementTabState
     setState(() {
       _busyFollow = follow.ref.wire;
       _error = null;
-      _notice = null;
     });
     try {
       if (!_sourceAuthorized(follow.sourceChannel) ||
@@ -295,9 +295,11 @@ final class _AnnouncementManagementTabState
         _follows = _follows
             .where((item) => item.ref != follow.ref)
             .toList(growable: false);
-        _notice = L10n.of(context)
-            .ui_stopped_publishing_announcements_to_value0_02d57979(
-                (label).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_stopped_publishing_announcements_to_value0_02d57979(
+                    (label).toString()));
       });
     } on Object catch (error) {
       if (!mounted) return;
@@ -409,7 +411,7 @@ final class _AnnouncementManagementTabState
                   ),
                 ),
                 SizedBox(width: 10),
-                FilledButton.icon(
+                ActionButton(
                   key: ValueKey('announcement-follow-button'),
                   onPressed:
                       _busyFollow == null && _target != null ? _create : null,
@@ -438,14 +440,6 @@ final class _AnnouncementManagementTabState
                 _error!,
                 key: ValueKey('announcement-error'),
                 style: TextStyle(color: context.kaede.danger),
-              ),
-            ],
-            if (_notice != null) ...[
-              SizedBox(height: 12),
-              Text(
-                _notice!,
-                key: ValueKey('announcement-notice'),
-                style: TextStyle(color: context.kaede.mint),
               ),
             ],
             if (!widget.createOnly) ...[
@@ -498,7 +492,8 @@ final class _AnnouncementManagementTabState
                             ? L10n.of(context).ui_remove_follower_5eb208bd
                             : L10n.of(context)
                                 .ui_manage_webhooks_is_required_in_the_destinatio_bbcabccb,
-                        child: IconButton(
+                        child: ActionButton(
+                          kind: ActionButtonKind.icon,
                           onPressed: _busyFollow == null &&
                                   canDeleteAnnouncementFollow(
                                     follow,

@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/api/tracker_media_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
@@ -149,7 +150,8 @@ class _TrackerCustomFieldsState extends State<TrackerCustomFields> {
         if (editable)
           Align(
               alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
+              child: ActionButton(
+                  kind: ActionButtonKind.outlined,
                   icon: const Icon(Icons.edit_outlined),
                   label: Text('Choose ${field.name}'),
                   onPressed: () async {
@@ -194,7 +196,8 @@ class _TrackerCustomFieldsState extends State<TrackerCustomFields> {
         Text(field.name, style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 6),
         if (field.type == 'url' && value is String && trackerSafeUrl(value))
-          TextButton.icon(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => openTrackerLink(context, value),
               icon: const Icon(Icons.open_in_new),
               label: Text(value, softWrap: true))
@@ -231,11 +234,13 @@ class _TrackerCustomFieldsState extends State<TrackerCustomFields> {
             subtitle: Text(value?.toString() ?? 'No date'),
             trailing: Wrap(children: [
               if (value != null)
-                IconButton(
+                ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: 'Clear date',
                     icon: const Icon(Icons.clear),
                     onPressed: () => _set(field, null)),
-              IconButton(
+              ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: 'Choose date',
                   icon: const Icon(Icons.calendar_month),
                   onPressed: () async {
@@ -438,8 +443,10 @@ class _TrackerReferencePickerState extends State<TrackerReferencePicker> {
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Column(children: [
                           Text(_error!),
-                          TextButton(
-                              onPressed: _search, child: const Text('Retry'))
+                          ActionButton(
+                              kind: ActionButtonKind.text,
+                              onPressed: _search,
+                              child: const Text('Retry'))
                         ])),
                   Expanded(
                       child: ids.isEmpty && !_loading
@@ -469,7 +476,8 @@ class _TrackerReferencePickerState extends State<TrackerReferencePicker> {
                                     child:
                                         Text('Up to 100 selections allowed.')),
                               if (_more)
-                                TextButton(
+                                ActionButton(
+                                    kind: ActionButtonKind.text,
                                     onPressed: _loading
                                         ? null
                                         : () => _search(more: true),
@@ -479,7 +487,7 @@ class _TrackerReferencePickerState extends State<TrackerReferencePicker> {
                       top: false,
                       child: Padding(
                           padding: const EdgeInsets.all(16),
-                          child: FilledButton(
+                          child: ActionButton(
                               onPressed: () =>
                                   Navigator.pop(context, _selected.toList()),
                               child: const Text('Done')))),
@@ -622,7 +630,8 @@ class _TrackerAttachmentsState extends State<TrackerAttachments> {
           Text(_cancelled ? 'Cancelling upload…' : _status ?? 'Uploading…'),
           Align(
               alignment: Alignment.centerLeft,
-              child: TextButton(
+              child: ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: _cancelled
                       ? null
                       : () {
@@ -639,7 +648,8 @@ class _TrackerAttachmentsState extends State<TrackerAttachments> {
                       TextStyle(color: Theme.of(context).colorScheme.error))),
         if (widget.onChanged != null)
           Wrap(spacing: 8, children: [
-            OutlinedButton.icon(
+            ActionButton(
+                kind: ActionButtonKind.outlined,
                 onPressed: _busy ||
                         widget.values.length >= 10 ||
                         widget.repository == null
@@ -647,7 +657,8 @@ class _TrackerAttachmentsState extends State<TrackerAttachments> {
                     : _upload,
                 icon: const Icon(Icons.upload_file),
                 label: const Text('Upload files')),
-            TextButton.icon(
+            ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: _busy || widget.values.length >= 10 ? null : _link,
                 icon: const Icon(Icons.link),
                 label: const Text('Add link')),
@@ -753,7 +764,8 @@ class _TrackerAttachmentTileState extends State<TrackerAttachmentTile> {
                   : _open,
               trailing: widget.onRemove == null
                   ? null
-                  : IconButton(
+                  : ActionButton(
+                      kind: ActionButtonKind.icon,
                       tooltip: 'Remove attachment',
                       onPressed: widget.onRemove,
                       icon: const Icon(Icons.close)),
@@ -819,7 +831,8 @@ class _TrackerMediaPreviewState extends State<_TrackerMediaPreview>
           ListTile(
               title: Text(widget.name,
                   maxLines: 2, overflow: TextOverflow.ellipsis),
-              trailing: IconButton(
+              trailing: ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: 'Close preview',
                   onPressed: () => Navigator.pop(context),
                   icon: const Icon(Icons.close))),
@@ -860,7 +873,8 @@ class _TrackerMediaPreviewState extends State<_TrackerMediaPreview>
                       VideoProgressIndicator(_video!,
                           allowScrubbing: true,
                           padding: const EdgeInsets.all(16)),
-                      IconButton(
+                      ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: value.isPlaying ? 'Pause' : 'Play',
                           onPressed: () => value.isPlaying
                               ? _video!.pause()
@@ -869,7 +883,8 @@ class _TrackerMediaPreviewState extends State<_TrackerMediaPreview>
                               ? Icons.pause
                               : Icons.play_arrow)),
                     ])),
-          TextButton.icon(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => openTrackerLink(context, widget.url),
               icon: const Icon(Icons.open_in_new),
               label: const Text('Open externally')),
@@ -930,10 +945,11 @@ class _TrackerAttachmentLinkDialogState
                       onChanged: (v) => setState(() => type = v!)),
                 ]))),
         actions: [
-          TextButton(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel')),
-          FilledButton(
+          ActionButton(
               onPressed: () {
                 if (form.currentState?.validate() == true) {
                   Navigator.pop(context, <String, Object?>{

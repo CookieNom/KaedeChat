@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -115,11 +116,12 @@ Future<bool> _confirm(
         title: Text(title),
         content: Text(body),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(dialogContext, false),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             style:
                 FilledButton.styleFrom(backgroundColor: context.kaede.danger),
             onPressed: () => Navigator.pop(dialogContext, true),
@@ -811,11 +813,12 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
               onPressed: _save,
               child: Text(L10n.of(context).ui_save_rule_0e059e66)),
         ],
@@ -1110,13 +1113,14 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                         alignment: WrapAlignment.end,
                         spacing: 8,
                         children: [
-                          OutlinedButton(
+                          ActionButton(
+                            kind: ActionButtonKind.outlined,
                             onPressed: _busy ? null : _estimatePrune,
                             child: Text(_busy
                                 ? L10n.of(context).ui_checking_87f62cb7
                                 : L10n.of(context).ui_estimate_2649bd57),
                           ),
-                          FilledButton(
+                          ActionButton(
                             style: FilledButton.styleFrom(
                               backgroundColor: context.kaede.danger,
                             ),
@@ -1199,7 +1203,7 @@ final class _GuildBulkModerationTabState extends State<GuildBulkModerationTab> {
                       SizedBox(height: 8),
                       Align(
                         alignment: Alignment.centerRight,
-                        child: FilledButton(
+                        child: ActionButton(
                           style: FilledButton.styleFrom(
                               backgroundColor: context.kaede.danger),
                           onPressed: _busy ? null : _bulkBan,
@@ -1565,7 +1569,8 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           if (widget.canUse)
-                            IconButton(
+                            ActionButton(
+                              kind: ActionButtonKind.icon,
                               tooltip: connected == null
                                   ? L10n.of(context)
                                       .ui_join_voice_to_play_83f9c06e
@@ -1830,13 +1835,14 @@ final class _SoundDialogState extends State<_SoundDialog> {
           ],
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: _name,
-            builder: (_, value, __) => FilledButton(
+            builder: (_, value, __) => ActionButton(
               onPressed: value.text.trim().length < 2 ? null : _save,
               child: Text(widget.action),
             ),

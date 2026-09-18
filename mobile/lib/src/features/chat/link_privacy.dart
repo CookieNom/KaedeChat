@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 String stripLinkTracking(String content) => content.replaceAllMapped(
@@ -64,11 +65,12 @@ Future<String?> preparePrivateLinks(
             'Your choice is saved for this account on this device.',
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Keep tracking'),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(context, true),
               child: const Text('Remove tracking'),
             ),

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 
 final onboardingChannelsProvider =
@@ -100,7 +101,10 @@ class _OnboardingEntryState extends ConsumerState<OnboardingEntry> {
     if (_error != null) {
       return ListTile(
           title: Text(_error!),
-          trailing: TextButton(onPressed: _load, child: const Text('Retry')));
+          trailing: ActionButton(
+              kind: ActionButtonKind.text,
+              onPressed: _load,
+              child: const Text('Retry')));
     }
     if (_object(_response?['config'])['enabled'] != true) {
       return const SizedBox.shrink();
@@ -333,10 +337,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                                       }))
                           ])),
                       actions: [
-                        TextButton(
+                        ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed: () => Navigator.pop(context),
                             child: const Text('Cancel')),
-                        FilledButton(
+                        ActionButton(
                             onPressed: () =>
                                 Navigator.pop(context, values.toList()),
                             child: const Text('Done'))
@@ -397,7 +402,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               rules[i] = v;
               _config['rules'] = rules;
             }, lines: 2, max: 1000)),
-            IconButton(
+            ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: 'Remove rule',
                 onPressed: () => setState(() {
                       final rules = _rules..removeAt(i);
@@ -405,7 +411,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                     }),
                 icon: const Icon(Icons.delete_outline))
           ]),
-        OutlinedButton.icon(
+        ActionButton(
+            kind: ActionButtonKind.outlined,
             onPressed: _rules.length >= 16
                 ? null
                 : () => setState(() => _config['rules'] = [..._rules, '']),
@@ -415,7 +422,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       if (_editorSection == 1) ...[
         _heading('Default channels',
             'Choose the places every new member should start with.'),
-        OutlinedButton(
+        ActionButton(
+            kind: ActionButtonKind.outlined,
             onPressed: () => _pick(
                 'Default channels',
                 _strings(_config['default_channel_ids']),
@@ -433,7 +441,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               child: Padding(
                   padding: const EdgeInsets.all(16),
                   child: _questionEditor(questions, i))),
-        OutlinedButton.icon(
+        ActionButton(
+            kind: ActionButtonKind.outlined,
             onPressed: questions.length >= 12
                 ? null
                 : () => setState(() {
@@ -516,14 +525,16 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                           guide[i]['channel_id'] = v == '' ? null : v;
                           _config['guide'] = guide;
                         }),
-                    TextButton(
+                    ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: () => setState(() {
                               guide.removeAt(i);
                               _config['guide'] = guide;
                             }),
                         child: const Text('Remove guide item')),
                   ]))),
-        OutlinedButton.icon(
+        ActionButton(
+            kind: ActionButtonKind.outlined,
             onPressed: guide.length >= 20
                 ? null
                 : () => setState(() => _config['guide'] = [
@@ -554,7 +565,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         Expanded(
             child: Text('Question ${index + 1}',
                 style: Theme.of(context).textTheme.titleMedium)),
-        IconButton(
+        ActionButton(
+            kind: ActionButtonKind.icon,
             tooltip: 'Move up',
             onPressed: index == 0
                 ? null
@@ -565,7 +577,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       save();
                     }),
             icon: const Icon(Icons.arrow_upward)),
-        IconButton(
+        ActionButton(
+            kind: ActionButtonKind.icon,
             tooltip: 'Remove question',
             onPressed: () => setState(() {
                   questions.removeAt(index);
@@ -616,7 +629,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                 q['options'] = options;
                 save();
               }, max: 300),
-              OutlinedButton(
+              ActionButton(
+                  kind: ActionButtonKind.outlined,
                   onPressed: () => _pick(
                           'Channels for this answer',
                           _strings(options[i]['channel_ids']),
@@ -627,7 +641,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       }),
                   child: Text(
                       '${_strings(options[i]['channel_ids']).length} channels')),
-              OutlinedButton(
+              ActionButton(
+                  kind: ActionButtonKind.outlined,
                   onPressed: () => _pick('Participation roles',
                           _strings(options[i]['role_ids']), {
                         for (final role in widget.guild.roles.where((r) =>
@@ -642,7 +657,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       Text('${_strings(options[i]['role_ids']).length} roles')),
               const Text(
                   'Self-selected roles cannot grant moderation or administration permissions.'),
-              TextButton(
+              ActionButton(
+                  kind: ActionButtonKind.text,
                   onPressed: options.length <= 1
                       ? null
                       : () => setState(() {
@@ -652,7 +668,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                           }),
                   child: const Text('Remove answer')),
             ]),
-      OutlinedButton(
+      ActionButton(
+          kind: ActionButtonKind.outlined,
           onPressed: options.length >= 20
               ? null
               : () => setState(() {
@@ -760,7 +777,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               padding: const EdgeInsets.only(bottom: 12),
               child: Semantics(
                   selected: selected.contains(option['id']),
-                  child: OutlinedButton(
+                  child: ActionButton(
+                      kind: ActionButtonKind.outlined,
                       style: OutlinedButton.styleFrom(
                           padding: const EdgeInsets.all(20),
                           side: BorderSide(
@@ -832,7 +850,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             borderRadius: BorderRadius.circular(4)),
         const SizedBox(height: 20),
       ],
-      OutlinedButton(
+      ActionButton(
+          kind: ActionButtonKind.outlined,
           onPressed: () => _pick('Browse more channels', _extraChannels,
               _channelChoices, (values) => _extraChannels = values),
           child: const Text('Browse more channels')),
@@ -857,7 +876,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               subtitle: Text(item['description'] as String? ?? '')),
           if (_channelChoices.containsKey(item['channel_id']))
-            TextButton(
+            ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: _preview
                     ? null
                     : () async {
@@ -892,7 +912,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                     : widget.guild.name),
             actions: [
               if (_editing && _response?['can_manage'] == true)
-                TextButton(
+                ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: () => setState(() {
                           _config = _object(jsonDecode(jsonEncode(_config)));
                           _preview = true;
@@ -908,7 +929,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                     ? const CircularProgressIndicator()
                     : Column(mainAxisSize: MainAxisSize.min, children: [
                         Text(_error!),
-                        TextButton(onPressed: _load, child: const Text('Retry'))
+                        ActionButton(
+                            kind: ActionButtonKind.text,
+                            onPressed: _load,
+                            child: const Text('Retry'))
                       ]))
             : SafeArea(
                 child: Column(children: [
@@ -949,7 +973,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                     padding: const EdgeInsets.all(16),
                     child: Row(children: [
                       if (!_editing)
-                        OutlinedButton(
+                        ActionButton(
+                            kind: ActionButtonKind.outlined,
                             onPressed: _step == 0 || _busy
                                 ? null
                                 : () => setState(() => _step--),
@@ -959,7 +984,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                         Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 12),
                             child: Text('${_step + 1} / $_total')),
-                      FilledButton(
+                      ActionButton(
                           onPressed: _busy ||
                                   (!_editing && !canContinue) ||
                                   (_editing && _response?['can_manage'] != true)

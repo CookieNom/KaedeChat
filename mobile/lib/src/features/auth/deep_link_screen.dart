@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/permission_selection.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -354,12 +355,12 @@ final class _DeepLinkActionScreenState
                     ],
                     SizedBox(height: 22),
                     if (_success != null)
-                      FilledButton(
+                      ActionButton(
                         onPressed: () => context.go('/'),
                         child: Text(L10n.of(context).ui_continue_ab43d664),
                       )
                     else
-                      FilledButton(
+                      ActionButton(
                         onPressed: _running
                             ? null
                             : widget.link.kind == MobileLinkKind.invite &&
@@ -713,7 +714,7 @@ final class _ApplicationInstallDeepLinkScreenState
                                     ),
                                   ),
                                 SizedBox(height: 10),
-                                FilledButton.icon(
+                                ActionButton(
                                   onPressed:
                                       _guildSaving || _selectedGuild == null
                                           ? null
@@ -783,7 +784,7 @@ final class _ApplicationInstallDeepLinkScreenState
                                       : (value) => setState(
                                           () => _botDms = value ?? false),
                                 ),
-                              FilledButton.icon(
+                              ActionButton(
                                 key: ValueKey('authorize-personal-application'),
                                 onPressed: _saving ? null : _authorize,
                                 icon: _saving
@@ -811,7 +812,8 @@ final class _ApplicationInstallDeepLinkScreenState
                               ),
                             ],
                             SizedBox(height: 18),
-                            OutlinedButton(
+                            ActionButton(
+                              kind: ActionButtonKind.outlined,
                               onPressed: () => context.go('/'),
                               child: Text(
                                   L10n.of(context).ui_back_to_kaede_e4c68b03),
@@ -840,7 +842,7 @@ final class _ApplicationInviteError extends StatelessWidget {
           SizedBox(height: 14),
           Text(error, textAlign: TextAlign.center),
           SizedBox(height: 16),
-          FilledButton(
+          ActionButton(
             onPressed: () => unawaited(onRetry()),
             child: Text(L10n.of(context).ui_try_again_213e90fa),
           ),

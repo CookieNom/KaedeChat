@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:kaede_mobile/src/domain/voice_messages.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:path_provider/path_provider.dart';
@@ -419,7 +420,8 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
               border: Border.all(color: context.kaede.border),
             ),
             child: Row(children: [
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_discard_voice_message_bd5b29f4,
                 onPressed: _finishing ? null : () => _finish(send: false),
                 icon: Icon(Icons.delete_outline_rounded),
@@ -444,7 +446,8 @@ final class _VoiceMessageRecorderState extends State<VoiceMessageRecorder> {
                 ),
               ),
               if (_locked && !ready && !_starting)
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: L10n.of(context).ui_stop_recording_8313d4fa,
                   onPressed: _finishing
                       ? null

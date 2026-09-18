@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -1737,7 +1738,8 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
             ),
           )
         else if (_error != null)
-          TextButton.icon(
+          ActionButton(
+            kind: ActionButtonKind.text,
             key: ValueKey('composer-gif-load-more'),
             onPressed: () =>
                 _load(page: _nextPage ?? 1, append: _nextPage != null),
@@ -1865,7 +1867,8 @@ final class _PickerError extends StatelessWidget {
               SizedBox(height: 10),
               Text(message, textAlign: TextAlign.center),
               SizedBox(height: 8),
-              OutlinedButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.outlined,
                 onPressed: () => unawaited(onRetry()),
                 icon: Icon(Icons.refresh_rounded),
                 label: Text(L10n.of(context).ui_retry_8036af59),

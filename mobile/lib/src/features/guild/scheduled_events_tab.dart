@@ -12,6 +12,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/scheduled_events.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -389,7 +390,8 @@ final class _GuildScheduledEventsTabState
                         spacing: 6,
                         runSpacing: 6,
                         children: [
-                          OutlinedButton.icon(
+                          ActionButton(
+                            kind: ActionButtonKind.outlined,
                             onPressed:
                                 busy ? null : () => _toggleSubscription(event),
                             icon: Icon(
@@ -404,7 +406,8 @@ final class _GuildScheduledEventsTabState
                                   : L10n.of(context).ui_notify_me_33a8c85a,
                             ),
                           ),
-                          TextButton.icon(
+                          ActionButton(
+                            kind: ActionButtonKind.text,
                             onPressed:
                                 busy ? null : () => _showSubscribers(event),
                             icon: Icon(Icons.people_outline_rounded, size: 17),
@@ -782,7 +785,7 @@ final class _GuildScheduledEventsTabState
                                     textAlign: TextAlign.center,
                                   ),
                                   SizedBox(height: 12),
-                                  FilledButton(
+                                  ActionButton(
                                     onPressed:
                                         loading ? null : () => loadMore(update),
                                     child: Text(
@@ -819,7 +822,8 @@ final class _GuildScheduledEventsTabState
                               if (subscribers.length < event.userCount)
                                 Padding(
                                   padding: EdgeInsets.all(16),
-                                  child: OutlinedButton(
+                                  child: ActionButton(
+                                    kind: ActionButtonKind.outlined,
                                     onPressed:
                                         loading ? null : () => loadMore(update),
                                     child: Text(
@@ -854,11 +858,12 @@ final class _GuildScheduledEventsTabState
           title: Text(title),
           content: Text(message),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext, false),
               child: Text(L10n.of(context).ui_keep_event_fcbe4da0),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(dialogContext, true),
               child: Text(label),
             ),
@@ -1040,7 +1045,8 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                   Wrap(
                     spacing: 8,
                     children: [
-                      OutlinedButton.icon(
+                      ActionButton(
+                        kind: ActionButtonKind.outlined,
                         onPressed: () async {
                           final selected = await ImagePicker().pickImage(
                             source: ImageSource.gallery,
@@ -1061,7 +1067,8 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                       ),
                       if (coverFile != null ||
                           (existingCover != null && !removeCover))
-                        TextButton(
+                        ActionButton(
+                          kind: ActionButtonKind.text,
                           onPressed: () => update(() {
                             coverFile = null;
                             removeCover = event?.imageHash != null;
@@ -1221,13 +1228,15 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                       children: [
                         if (endTime != null &&
                             entityType != ScheduledEventEntityType.external)
-                          IconButton(
+                          ActionButton(
+                            kind: ActionButtonKind.icon,
                             tooltip:
                                 L10n.of(context).ui_clear_end_time_053f4070,
                             onPressed: () => update(() => endTime = null),
                             icon: Icon(Icons.clear_rounded),
                           ),
-                        IconButton(
+                        ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: L10n.of(context).ui_choose_end_time_8fb40fee,
                           onPressed: pickEnd,
                           icon: Icon(Icons.edit_calendar_outlined),
@@ -1246,12 +1255,13 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      TextButton(
+                      ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: () => Navigator.pop(sheetContext),
                         child: Text(L10n.of(context).ui_cancel_35afca3b),
                       ),
                       SizedBox(width: 8),
-                      FilledButton(
+                      ActionButton(
                         onPressed: submit,
                         child: Text(event == null
                             ? L10n.of(context).ui_create_event_d0c67bc5

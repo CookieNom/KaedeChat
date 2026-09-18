@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_media.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -170,7 +171,6 @@ final class _ApplicationMediaManagerScreenState
   var _loading = true;
   var _permissionDenied = false;
   String? _error;
-  String? _notice;
   String? _busy;
   int _uploadPercent = 0;
 
@@ -267,7 +267,6 @@ final class _ApplicationMediaManagerScreenState
       _busy = 'asset-create';
       _uploadPercent = 0;
       _error = null;
-      _notice = null;
     });
     try {
       final asset = await widget.repository.uploadApplicationAsset(
@@ -282,8 +281,10 @@ final class _ApplicationMediaManagerScreenState
       setState(() {
         _assets = [..._assets.where((item) => item.id != asset.id), asset]
           ..sort(_compareAssets);
-        _notice = L10n.of(context)
-            .ui_value0_is_ready_de500e77((asset.name).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_value0_is_ready_de500e77((asset.name).toString()));
       });
     } on Object catch (error) {
       _showError(userFacingError(
@@ -316,7 +317,6 @@ final class _ApplicationMediaManagerScreenState
       _busy = 'emoji-create';
       _uploadPercent = 0;
       _error = null;
-      _notice = null;
     });
     try {
       final emoji = await widget.repository.uploadApplicationEmoji(
@@ -331,8 +331,10 @@ final class _ApplicationMediaManagerScreenState
       setState(() {
         _emojis = [..._emojis.where((item) => item.id != emoji.id), emoji]
           ..sort((left, right) => left.name.compareTo(right.name));
-        _notice = L10n.of(context)
-            .ui_value0_is_ready_c2c993a1((emoji.name).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_value0_is_ready_c2c993a1((emoji.name).toString()));
       });
     } on Object catch (error) {
       _showError(userFacingError(
@@ -375,8 +377,10 @@ final class _ApplicationMediaManagerScreenState
             .map((item) => item.id == updated.id ? updated : item)
             .toList()
           ..sort(_compareAssets);
-        _notice = L10n.of(context)
-            .ui_value0_was_updated_b041a9a4((updated.name).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_value0_was_updated_b041a9a4((updated.name).toString()));
       });
     } on Object catch (error) {
       _showError(userFacingError(
@@ -422,8 +426,10 @@ final class _ApplicationMediaManagerScreenState
             .map((item) => item.id == updated.id ? updated : item)
             .toList()
           ..sort((left, right) => left.name.compareTo(right.name));
-        _notice = L10n.of(context)
-            .ui_value0_was_updated_5b2bb66a((updated.name).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_value0_was_updated_5b2bb66a((updated.name).toString()));
       });
     } on Object catch (error) {
       _showError(userFacingError(
@@ -455,8 +461,10 @@ final class _ApplicationMediaManagerScreenState
       if (!mounted) return;
       setState(() {
         _assets = _assets.where((item) => item.id != asset.id).toList();
-        _notice = L10n.of(context)
-            .ui_value0_was_deleted_328445d6((asset.name).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_value0_was_deleted_328445d6((asset.name).toString()));
       });
     } on Object catch (error) {
       _showError(userFacingError(
@@ -487,8 +495,10 @@ final class _ApplicationMediaManagerScreenState
       if (!mounted) return;
       setState(() {
         _emojis = _emojis.where((item) => item.id != emoji.id).toList();
-        _notice = L10n.of(context)
-            .ui_value0_was_deleted_1521827c((emoji.name).toString());
+        showActionFeedback(
+            context,
+            L10n.of(context)
+                .ui_value0_was_deleted_1521827c((emoji.name).toString()));
       });
     } on Object catch (error) {
       _showError(userFacingError(
@@ -511,11 +521,12 @@ final class _ApplicationMediaManagerScreenState
           title: Text(title),
           content: Text(detail),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               key: Key('confirm-application-media-delete'),
               style:
                   FilledButton.styleFrom(backgroundColor: context.kaede.danger),
@@ -529,9 +540,9 @@ final class _ApplicationMediaManagerScreenState
 
   void _showError(String message) {
     if (!mounted) return;
+    showActionFeedback(context, message, error: true);
     setState(() {
       _error = message;
-      _notice = null;
     });
   }
 
@@ -582,7 +593,6 @@ final class _ApplicationMediaManagerScreenState
       children: [
         if (_error case final message?)
           _InlineNotice(message: message, error: true),
-        if (_notice case final message?) _InlineNotice(message: message),
         if (_busy?.endsWith('create') == true)
           LinearProgressIndicator(
             key: Key('application-media-upload-progress'),
@@ -812,11 +822,12 @@ final class _ApplicationAssetEditorDialogState
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             key: Key('save-application-asset'),
             onPressed: _save,
             child: Text(widget.action),
@@ -891,11 +902,12 @@ final class _ApplicationEmojiEditorDialogState
           ),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          FilledButton(
+          ActionButton(
             key: Key('save-application-emoji'),
             onPressed: _save,
             child: Text(widget.action),
@@ -1004,12 +1016,14 @@ final class _ApplicationMediaTile extends StatelessWidget {
               )
             else ...[
               if (availability case final control?) control,
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_edit_c2c76cb1,
                 onPressed: onEdit,
                 icon: Icon(Icons.edit_outlined),
               ),
-              IconButton(
+              ActionButton(
+                kind: ActionButtonKind.icon,
                 tooltip: L10n.of(context).ui_delete_5797ea6a,
                 color: context.kaede.danger,
                 onPressed: onDelete,
@@ -1096,7 +1110,7 @@ final class _MediaState extends StatelessWidget {
               ],
               if (actionLabel case final label?) ...[
                 SizedBox(height: 14),
-                FilledButton(onPressed: onAction, child: Text(label)),
+                ActionButton(onPressed: onAction, child: Text(label)),
               ],
             ],
           ),

@@ -7,6 +7,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -636,11 +637,12 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
           title: Text(title),
           content: Text(message),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               style: destructive
                   ? FilledButton.styleFrom(
                       backgroundColor: context.kaede.danger)
@@ -698,7 +700,8 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
             MaterialBanner(
               content: Text(_error!),
               actions: [
-                TextButton(
+                ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: _load,
                     child: Text(L10n.of(context).ui_retry_8036af59)),
               ],
@@ -831,7 +834,7 @@ final class _TrackerToolbar extends StatelessWidget {
                   ),
                 ),
                 if (canCreate)
-                  FilledButton.icon(
+                  ActionButton(
                     key: ValueKey('tracker-create-task'),
                     onPressed: busy ? null : createTask,
                     icon: Icon(Icons.add_task_rounded, size: 19),
@@ -1050,7 +1053,8 @@ final class _TrackerLaneSection extends StatelessWidget {
                             style: TextStyle(color: context.kaede.muted)),
                       ),
                       if (canCreate)
-                        TextButton.icon(
+                        ActionButton(
+                          kind: ActionButtonKind.text,
                           onPressed: busy ? null : createTask,
                           icon: Icon(Icons.add_rounded),
                           label: Text(L10n.of(context).ui_add_task_1812b769),
@@ -1075,7 +1079,8 @@ final class _TrackerLaneSection extends StatelessWidget {
               if (tasks.isNotEmpty && canCreate)
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
+                  child: ActionButton(
+                    kind: ActionButtonKind.text,
                     onPressed: busy ? null : createTask,
                     icon: Icon(Icons.add_rounded),
                     label: Text(L10n.of(context).ui_add_task_to_value0_dc3610cf(
@@ -1148,7 +1153,8 @@ final class _TrackerTaskRow extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: task.completed
                       ? L10n.of(context).ui_reopen_task_a4749ecd
                       : L10n.of(context).ui_complete_task_12ce39bb,
@@ -1404,7 +1410,8 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
                       ],
                     ),
                   ),
-                  IconButton(
+                  ActionButton(
+                    kind: ActionButtonKind.icon,
                     tooltip: L10n.of(context).ui_close_task_details_19abd22e,
                     onPressed: () => Navigator.pop(context, false),
                     icon: Icon(Icons.close_rounded),
@@ -1471,7 +1478,7 @@ final class TrackerTaskDetailsSheet extends StatelessWidget {
             if (canEdit)
               Padding(
                 padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
-                child: FilledButton.icon(
+                child: ActionButton(
                   key: ValueKey('tracker-task-details-edit'),
                   onPressed: () => Navigator.pop(context, true),
                   icon: Icon(Icons.edit_outlined),
@@ -1582,7 +1589,8 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
                           (widget.task.key).toString()),
                       style: Theme.of(context).textTheme.headlineSmall),
                 ),
-                IconButton(
+                ActionButton(
+                  kind: ActionButtonKind.icon,
                   tooltip: L10n.of(context).ui_close_cd86acc3,
                   onPressed: () => Navigator.pop(context),
                   icon: Icon(Icons.close_rounded),
@@ -1631,7 +1639,7 @@ final class _TrackerTaskMoveSheetState extends State<TrackerTaskMoveSheet> {
               },
             ),
             SizedBox(height: 18),
-            FilledButton.icon(
+            ActionButton(
               key: ValueKey('tracker-task-move-submit'),
               onPressed: unchanged
                   ? null
@@ -1807,10 +1815,11 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                 content: const Text(
                     'This replaces your unsaved changes with the latest saved task.'),
                 actions: [
-                  TextButton(
+                  ActionButton(
+                      kind: ActionButtonKind.text,
                       onPressed: () => Navigator.pop(context, false),
                       child: const Text('Keep editing')),
-                  FilledButton(
+                  ActionButton(
                       onPressed: () => Navigator.pop(context, true),
                       child: const Text('Reload'))
                 ]));
@@ -1885,7 +1894,8 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                             style: Theme.of(context).textTheme.headlineSmall,
                           ),
                         ),
-                        IconButton(
+                        ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip: L10n.of(context).ui_close_cd86acc3,
                           onPressed:
                               _busy ? null : () => Navigator.pop(context),
@@ -2022,7 +2032,8 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                                   widget.repository != null)
                                 Align(
                                     alignment: Alignment.centerLeft,
-                                    child: TextButton.icon(
+                                    child: ActionButton(
+                                        kind: ActionButtonKind.text,
                                         icon: const Icon(Icons.person_search),
                                         label: const Text('Search all members'),
                                         onPressed: _busy
@@ -2099,7 +2110,8 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     if (_dueAt != null)
-                                      IconButton(
+                                      ActionButton(
+                                        kind: ActionButtonKind.icon,
                                         tooltip: L10n.of(context)
                                             .ui_clear_due_date_2d797d28,
                                         onPressed: !widget.canEditDetails
@@ -2108,7 +2120,8 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                                                 setState(() => _dueAt = null),
                                         icon: Icon(Icons.clear_rounded),
                                       ),
-                                    IconButton(
+                                    ActionButton(
+                                      kind: ActionButtonKind.icon,
                                       tooltip: _dueAt == null
                                           ? L10n.of(context)
                                               .ui_set_due_date_3951051f
@@ -2175,7 +2188,8 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                                                 .colorScheme
                                                 .error))),
                               if (widget.onReload != null && _saveError != null)
-                                TextButton(
+                                ActionButton(
+                                    kind: ActionButtonKind.text,
                                     onPressed: _busy ? null : _reloadDraft,
                                     child: const Text('Reload latest task')),
                             ]))),
@@ -2184,7 +2198,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                     padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
                     child: SizedBox(
                       width: double.infinity,
-                      child: FilledButton.icon(
+                      child: ActionButton(
                         key: ValueKey('tracker-task-save'),
                         onPressed: _busy || _conflict ? null : _save,
                         icon: Icon(widget.task == null
@@ -2378,7 +2392,7 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   ),
                 ),
                 SizedBox(height: 10),
-                FilledButton.icon(
+                ActionButton(
                   key: ValueKey('tracker-lane-save'),
                   onPressed: _save,
                   icon: Icon(widget.lane == null
@@ -2424,7 +2438,7 @@ final class _TrackerEmpty extends StatelessWidget {
                 style: TextStyle(color: context.kaede.muted)),
             if (action != null) ...[
               SizedBox(height: 18),
-              FilledButton.icon(
+              ActionButton(
                 onPressed: action,
                 icon: Icon(Icons.add_rounded),
                 label: Text(actionLabel ?? 'Create'),
@@ -2453,7 +2467,7 @@ final class _TrackerFailure extends StatelessWidget {
               SizedBox(height: 12),
               Text(message, textAlign: TextAlign.center),
               SizedBox(height: 16),
-              FilledButton.icon(
+              ActionButton(
                 onPressed: () => retry(),
                 icon: Icon(Icons.refresh_rounded),
                 label: Text(L10n.of(context).ui_try_again_213e90fa),

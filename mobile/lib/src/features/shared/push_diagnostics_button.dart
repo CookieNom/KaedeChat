@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 class PushDiagnosticsButton extends StatefulWidget {
@@ -16,7 +17,8 @@ class _PushDiagnosticsButtonState extends State<PushDiagnosticsButton> {
   bool _failed = false;
 
   @override
-  Widget build(BuildContext context) => OutlinedButton.icon(
+  Widget build(BuildContext context) => ActionButton(
+        kind: ActionButtonKind.outlined,
         icon: Icon(_copied == widget.diagnostics ? Icons.check : Icons.copy),
         label: Text(_failed
             ? L10n.of(context).push_diagnostics_copy_failed

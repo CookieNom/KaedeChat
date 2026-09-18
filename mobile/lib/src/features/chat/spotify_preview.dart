@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -220,7 +221,8 @@ class _SpotifyPlayerState extends State<_SpotifyPlayer>
         color: context.kaede.raised,
         child: _failed
             ? Center(
-                child: TextButton.icon(
+                child: ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => launchUrl(
                     widget.uri.replace(
                         path: widget.uri.path.replaceFirst('/embed', '')),

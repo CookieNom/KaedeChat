@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -236,11 +237,12 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                 .ui_resetting_your_password_rotates_the_account_v_58928b2a,
           ),
           actions: [
-            TextButton(
+            ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(dialogContext, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            FilledButton(
+            ActionButton(
               onPressed: () => Navigator.pop(dialogContext, true),
               child: Text(L10n.of(context).ui_reset_password_679a51e9),
             ),
@@ -292,10 +294,11 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           decoration: InputDecoration(hintText: hint),
         ),
         actions: [
-          TextButton(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          FilledButton(
+          ActionButton(
               onPressed: () {
                 final value = secret ? controller.text : controller.text.trim();
                 if (value.isEmpty) {
@@ -446,7 +449,8 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         register ? TextInputAction.next : TextInputAction.done,
                     onSubmitted: (_) => register ? null : submit(),
                     decoration: InputDecoration(
-                      suffixIcon: IconButton(
+                      suffixIcon: ActionButton(
+                        kind: ActionButtonKind.icon,
                         onPressed: () => setState(() => obscure = !obscure),
                         icon: Icon(obscure
                             ? Icons.visibility_rounded
@@ -492,7 +496,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     ),
                   ],
                   SizedBox(height: 26),
-                  FilledButton.icon(
+                  ActionButton(
                     onPressed: state.phase == SessionPhase.authenticating ||
                             _submitting
                         ? null
@@ -512,7 +516,8 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                   if (!register) ...[
                     SizedBox(height: 6),
                     Center(
-                      child: TextButton(
+                      child: ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: _forgotPassword,
                         child:
                             Text(L10n.of(context).ui_forgot_password_e2619568),
@@ -622,15 +627,17 @@ final class _EmailVerificationDialogState
           ],
         ),
         actions: [
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: _busy ? null : _resend,
             child: Text(L10n.of(context).ui_resend_121c8c1e),
           ),
-          TextButton(
+          ActionButton(
+            kind: ActionButtonKind.text,
             onPressed: _busy ? null : () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_verify_later_2b8bfe56),
           ),
-          FilledButton(
+          ActionButton(
             onPressed: _busy ? null : _verify,
             child: Text(L10n.of(context).ui_verify_2d5c0c44),
           ),
@@ -674,10 +681,11 @@ final class _MfaDialogState extends State<_MfaDialog> {
                 hintText: L10n.of(context)
                     .ui_6_digit_code_or_recovery_code_c66a2083)),
         actions: [
-          TextButton(
+          ActionButton(
+              kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          FilledButton(
+          ActionButton(
               onPressed: () {
                 final value = controller.text.trim();
                 if (value.isEmpty) {

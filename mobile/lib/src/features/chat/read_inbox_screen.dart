@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 class ReadInboxScreen extends ConsumerStatefulWidget {
@@ -140,7 +141,8 @@ class _ReadInboxScreenState extends ConsumerState<ReadInboxScreen> {
         .toList();
     return Scaffold(
       appBar: AppBar(title: Text(l.chat_inbox), actions: [
-        IconButton(
+        ActionButton(
+            kind: ActionButtonKind.icon,
             tooltip: l.chat_refresh,
             onPressed: _busy ? null : _load,
             icon: const Icon(Icons.refresh))
@@ -208,7 +210,8 @@ class _ReadInboxScreenState extends ConsumerState<ReadInboxScreen> {
                                 _load();
                               }),
                   ],
-                  TextButton.icon(
+                  ActionButton(
+                      kind: ActionButtonKind.text,
                       onPressed: _busy
                           ? null
                           : () => _action(
@@ -235,7 +238,8 @@ class _ReadInboxScreenState extends ConsumerState<ReadInboxScreen> {
                           ? l.chat_jump_to_mention
                           : '${row['unread_count'] ?? ''} ${l.chat_unreads}'),
                       onTap: _busy ? null : () => _jump(row),
-                      trailing: IconButton(
+                      trailing: ActionButton(
+                          kind: ActionButtonKind.icon,
                           tooltip:
                               _mentions ? l.chat_dismiss : l.chat_mark_read,
                           icon: Icon(_mentions ? Icons.close : Icons.done_all),
@@ -255,7 +259,8 @@ class _ReadInboxScreenState extends ConsumerState<ReadInboxScreen> {
                                   })),
                     ),
                   if (_more)
-                    TextButton(
+                    ActionButton(
+                        kind: ActionButtonKind.text,
                         onPressed: _busy ? null : () => _load(append: true),
                         child: Text(l.chat_load_more)),
                 ]))),

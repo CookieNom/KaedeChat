@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/api/instance_administration_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/instance_administration.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -140,7 +141,8 @@ final class _AdministrationAttachmentViewerState
         appBar: AppBar(
           title: Text(_filename),
           actions: [
-            IconButton(
+            ActionButton(
+              kind: ActionButtonKind.icon,
               tooltip: L10n.of(context).ui_save_or_share_original_e4861e29,
               onPressed: _file == null || _sharing ? null : _share,
               icon: _sharing
@@ -222,7 +224,8 @@ final class _AdministrationAttachmentViewerState
           initialData: audio.state,
           builder: (_, snapshot) {
             final playing = snapshot.data == PlayerState.playing;
-            return FilledButton.tonalIcon(
+            return ActionButton(
+              kind: ActionButtonKind.tonal,
               onPressed: playing
                   ? audio.pause
                   : () => audio.play(
@@ -291,7 +294,8 @@ final class _EvidenceFailure extends StatelessWidget {
               const SizedBox(height: 12),
               Text(message, textAlign: TextAlign.center),
               const SizedBox(height: 16),
-              OutlinedButton.icon(
+              ActionButton(
+                kind: ActionButtonKind.outlined,
                 onPressed: retry,
                 icon: const Icon(Icons.refresh_rounded),
                 label: Text(L10n.of(context).ui_try_again_213e90fa),

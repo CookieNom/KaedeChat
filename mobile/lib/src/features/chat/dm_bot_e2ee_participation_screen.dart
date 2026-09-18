@@ -5,6 +5,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/bot_e2ee_participation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -36,7 +37,6 @@ final class _DmBotE2eeParticipationScreenState
   var _loading = true;
   var _busy = false;
   String? _error;
-  String? _notice;
 
   @override
   void initState() {
@@ -48,7 +48,6 @@ final class _DmBotE2eeParticipationScreenState
     setState(() {
       _loading = true;
       _error = null;
-      _notice = null;
     });
     try {
       final installations =
@@ -84,7 +83,6 @@ final class _DmBotE2eeParticipationScreenState
       _loading = true;
       _participation = null;
       _error = null;
-      _notice = null;
     });
     try {
       final participation = await widget.repository.dmBotE2eeParticipation(
@@ -155,11 +153,12 @@ final class _DmBotE2eeParticipationScreenState
                           (selected.applicationName).toString()),
             ),
             actions: [
-              TextButton(
+              ActionButton(
+                kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              FilledButton(
+              ActionButton(
                 style: revoke
                     ? FilledButton.styleFrom(
                         backgroundColor: Theme.of(context).colorScheme.error,
@@ -183,7 +182,6 @@ final class _DmBotE2eeParticipationScreenState
     setState(() {
       _busy = true;
       _error = null;
-      _notice = null;
     });
     try {
       final participation =
@@ -194,11 +192,13 @@ final class _DmBotE2eeParticipationScreenState
       if (mounted) {
         setState(() {
           _participation = participation;
-          _notice = participation.active
-              ? L10n.of(context)
-                  .ui_everyone_consented_app_devices_will_join_afte_e81be7d8
-              : L10n.of(context)
-                  .ui_your_consent_was_recorded_the_app_remains_blo_1736b614;
+          showActionFeedback(
+              context,
+              participation.active
+                  ? L10n.of(context)
+                      .ui_everyone_consented_app_devices_will_join_afte_e81be7d8
+                  : L10n.of(context)
+                      .ui_your_consent_was_recorded_the_app_remains_blo_1736b614);
         });
       }
     } on Object catch (error) {
@@ -208,6 +208,7 @@ final class _DmBotE2eeParticipationScreenState
               summary: L10n.of(context)
                   .ui_could_not_record_encrypted_app_consent_2ee98a85,
             ));
+        showActionFeedback(context, _error!, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -220,7 +221,6 @@ final class _DmBotE2eeParticipationScreenState
     setState(() {
       _busy = true;
       _error = null;
-      _notice = null;
     });
     try {
       final participation =
@@ -231,8 +231,10 @@ final class _DmBotE2eeParticipationScreenState
       if (mounted) {
         setState(() {
           _participation = participation;
-          _notice = L10n.of(context)
-              .ui_app_access_was_revoked_and_a_room_rekey_was_s_8aefb0a7;
+          showActionFeedback(
+              context,
+              L10n.of(context)
+                  .ui_app_access_was_revoked_and_a_room_rekey_was_s_8aefb0a7);
         });
       }
     } on Object catch (error) {
@@ -242,6 +244,7 @@ final class _DmBotE2eeParticipationScreenState
               summary: L10n.of(context)
                   .ui_could_not_revoke_encrypted_app_access_01125b9e,
             ));
+        showActionFeedback(context, _error!, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -369,21 +372,18 @@ final class _DmBotE2eeParticipationScreenState
               const SizedBox(height: 10),
               Text(error, style: TextStyle(color: context.kaede.danger)),
             ],
-            if (_notice case final notice?) ...[
-              const SizedBox(height: 10),
-              Text(notice, style: TextStyle(color: context.kaede.mint)),
-            ],
             const SizedBox(height: 18),
             if (_selected != null && !_loading)
               participation != null && !participation.revoked
-                  ? FilledButton.tonalIcon(
+                  ? ActionButton(
+                      kind: ActionButtonKind.tonal,
                       onPressed: _busy ? null : _revoke,
                       icon: const Icon(Icons.person_remove_outlined),
                       label: Text(_busy
                           ? L10n.of(context).ui_removing_be3af276
                           : L10n.of(context).ui_remove_app_and_rekey_a691fe77),
                     )
-                  : FilledButton.icon(
+                  : ActionButton(
                       onPressed: _busy ? null : _consent,
                       icon: const Icon(Icons.person_add_alt_1_rounded),
                       label: Text(_busy
