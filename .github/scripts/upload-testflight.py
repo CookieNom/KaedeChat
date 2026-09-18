@@ -1,4 +1,4 @@
-"""Upload an IPA and apply Kaede's standard encryption / no France declaration."""
+"""Upload an IPA and apply Kaede's standard encryption / no France answers."""
 
 import base64
 import json
@@ -85,6 +85,16 @@ def ipa_info(path):
 
 
 def deliver(ipa, key_file):
+    # Apple's declaration endpoint only accepts proprietary cryptography or
+    # third-party cryptography distributed in France. These existing owner
+    # answers require no documentation; set the build's exemption directly.
+    # https://developer.apple.com/help/app-store-connect/reference/app-information/export-compliance-documentation-for-encryption
+    if ANSWERS != {
+        "containsProprietaryCryptography": False,
+        "containsThirdPartyCryptography": True,
+        "availableOnFrenchStore": False,
+    }:
+        raise RuntimeError("Encryption answers changed; review the export compliance flow")
     info = ipa_info(ipa)
 
     def api(method, path, data=None):
@@ -117,7 +127,7 @@ def deliver(ipa, key_file):
             "--apiIssuer", os.environ["APP_STORE_CONNECT_ISSUER_ID"],
         ], check=True)
     else:
-        print("Build already uploaded; resuming encryption declaration.", flush=True)
+        print("Build already uploaded; resuming encryption checks.", flush=True)
 
     deadline = time.monotonic() + 1800
     while True:
@@ -132,36 +142,16 @@ def deliver(ipa, key_file):
         print(f"Waiting for Apple build processing: {state}", flush=True)
         time.sleep(30)
 
-    declaration = None
-    path = "appEncryptionDeclarations?" + urllib.parse.urlencode({"filter[app]": app_id})
-    while path and declaration is None:
-        page = api("GET", path)
-        for candidate in page["data"]:
-            attrs = candidate["attributes"]
-            if (attrs.get("appEncryptionDeclarationState") == "APPROVED"
-                    and attrs.get("platform") in (None, "IOS")
-                    and all(attrs.get(key) is value for key, value in ANSWERS.items())):
-                declaration = candidate
-                break
-        path = page.get("links", {}).get("next")
-    if declaration is None:
-        declaration = api("POST", "appEncryptionDeclarations", {
-            "type": "appEncryptionDeclarations",
-            "attributes": {**ANSWERS, "appDescription":
-                           "Kaede Chat is a messaging app with end-to-end encryption."},
-            "relationships": {"app": {"data": {"type": "apps", "id": app_id}}},
-        })["data"]
-
-    api("PATCH", "builds/" + build["id"], {
-        "type": "builds", "id": build["id"],
-        "relationships": {"appEncryptionDeclaration": {"data": {
-            "type": "appEncryptionDeclarations", "id": declaration["id"],
-        }}},
-    })
-    linked = api("GET", "builds/" + build["id"] + "/appEncryptionDeclaration")["data"]
-    if linked["id"] != declaration["id"]:
-        raise RuntimeError("Apple did not retain the encryption declaration")
-    print("TestFlight encryption declaration applied: standard encryption; no France.", flush=True)
+    build_path = "builds/" + build["id"]
+    if build["attributes"].get("usesNonExemptEncryption") is not False:
+        api("PATCH", build_path, {
+            "type": "builds", "id": build["id"],
+            "attributes": {"usesNonExemptEncryption": False},
+        })
+    confirmed = api("GET", build_path)["data"]
+    if confirmed["attributes"].get("usesNonExemptEncryption") is not False:
+        raise RuntimeError("Apple did not retain the build's encryption exemption")
+    print("TestFlight encryption answers applied: standard encryption; no France.", flush=True)
 
 
 if __name__ == "__main__":

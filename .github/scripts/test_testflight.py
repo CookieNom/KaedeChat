@@ -21,7 +21,7 @@ spec.loader.exec_module(testflight)
 
 
 class TestFlightTest(unittest.TestCase):
-    def test_delivery_creates_or_reuses_exact_answers(self):
+    def test_delivery_sets_exemption_without_creating_declaration(self):
         for reuse in (False, True):
             with self.subTest(reuse=reuse), tempfile.TemporaryDirectory() as directory:
                 ipa = Path(directory) / "app.ipa"
@@ -32,10 +32,6 @@ class TestFlightTest(unittest.TestCase):
                         "CFBundleShortVersionString": "0.1.59",
                     }, fmt=plistlib.FMT_BINARY))
                     archive.writestr("Payload/Runner.app/PlugIns/Other.appex/Info.plist", b"ignored")
-                declaration = {"id": "declaration", "attributes": {
-                    **testflight.ANSWERS, "platform": "IOS",
-                    "appEncryptionDeclarationState": "APPROVED",
-                }}
                 states = iter(["VALID", "VALID"] if reuse else [None, "PROCESSING", "VALID"])
 
                 def api(key, method, path, data=None):
@@ -52,33 +48,18 @@ class TestFlightTest(unittest.TestCase):
                         return {"data": [{"id": "build", "attributes": {
                             "processingState": state,
                         }}] if state else []}
-                    if path.startswith("appEncryptionDeclarations?"):
-                        # Even approved declarations with different answers must be ignored.
-                        wrong = {"id": "france", "attributes": {
-                            **declaration["attributes"], "availableOnFrenchStore": True,
-                        }}
-                        return {"data": [wrong], "links": {"next": testflight.API + "next"}}
-                    if path == testflight.API + "next":
-                        return {"data": [declaration] if reuse else []}
-                    if method == "POST":
-                        self.assertFalse(reuse)
-                        self.assertEqual(path, "appEncryptionDeclarations")
-                        self.assertEqual(data["attributes"], {
-                            "containsProprietaryCryptography": False,
-                            "containsThirdPartyCryptography": True,
-                            "availableOnFrenchStore": False,
-                            "appDescription": "Kaede Chat is a messaging app with end-to-end encryption.",
-                        })
-                        self.assertEqual(data["relationships"]["app"]["data"]["id"], "app")
-                        return {"data": declaration}
                     if method == "PATCH":
                         self.assertEqual(path, "builds/build")
-                        self.assertEqual(data["relationships"]["appEncryptionDeclaration"]["data"], {
-                            "type": "appEncryptionDeclarations", "id": "declaration",
+                        self.assertEqual(data, {
+                            "type": "builds", "id": "build",
+                            "attributes": {"usesNonExemptEncryption": False},
                         })
                         return {"data": {"id": "build"}}
-                    self.assertEqual(path, "builds/build/appEncryptionDeclaration")
-                    return {"data": declaration}
+                    # The previous POST with standard/no-France answers got 409.
+                    self.assertEqual((method, path), ("GET", "builds/build"))
+                    return {"data": {"id": "build", "attributes": {
+                        "usesNonExemptEncryption": False,
+                    }}}
 
                 with patch.object(testflight, "request", side_effect=api) as requests, \
                         patch.object(testflight.subprocess, "run") as upload, \
@@ -88,6 +69,40 @@ class TestFlightTest(unittest.TestCase):
                 self.assertEqual(upload.call_count, 0 if reuse else 1)
                 self.assertEqual(sleep.call_count, 0 if reuse else 1)
                 self.assertEqual(sum(call.args[1] == "PATCH" for call in requests.call_args_list), 1)
+
+    def test_existing_exemption_is_verified_without_upload_or_patch(self):
+        for confirmed in (False, True, None):
+            with self.subTest(confirmed=confirmed), \
+                    patch.object(testflight, "ipa_info", return_value={
+                        "CFBundleIdentifier": "chat.kaede.mobile",
+                        "CFBundleVersion": "54.1", "CFBundleShortVersionString": "0.1.59",
+                    }), \
+                    patch.object(testflight, "request", side_effect=[
+                        {"data": [{"id": "app"}]},
+                        *[{"data": [{"id": "build", "attributes": {
+                            "processingState": "VALID", "usesNonExemptEncryption": False,
+                        }}]}] * 2,
+                        {"data": {"id": "build", "attributes": {
+                            "usesNonExemptEncryption": confirmed,
+                        }}},
+                    ]) as requests, \
+                    patch.object(testflight.subprocess, "run") as upload:
+                if confirmed is False:
+                    testflight.deliver("app.ipa", "key.p8")
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "did not retain"):
+                        testflight.deliver("app.ipa", "key.p8")
+                upload.assert_not_called()
+                self.assertTrue(all(call.args[1] == "GET" for call in requests.call_args_list))
+
+    def test_changed_owner_answers_require_review_before_upload(self):
+        for answer in ("containsProprietaryCryptography", "availableOnFrenchStore"):
+            with self.subTest(answer=answer), \
+                    patch.dict(testflight.ANSWERS, {answer: True}), \
+                    patch.object(testflight, "request") as requests:
+                with self.assertRaisesRegex(RuntimeError, "Encryption answers changed"):
+                    testflight.deliver("app.ipa", "key.p8")
+                requests.assert_not_called()
 
     def test_failed_or_stalled_processing_never_declares_encryption(self):
         for state in ("FAILED", "INVALID", "PROCESSING"):
