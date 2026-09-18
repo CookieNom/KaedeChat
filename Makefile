@@ -156,6 +156,7 @@ env-check:
 migration-check:
 	@set -eu; \
 	trap '$(MIGRATION_COMPOSE) --profile validation down -v' EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(MIGRATION_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres; \
 	$(MIGRATION_COMPOSE) --profile validation up -d --wait --build postgres; \
 	$(MIGRATION_COMPOSE) run --rm --no-deps --build migration-check
 
@@ -171,18 +172,21 @@ migration:
 identity-check:
 	@set -eu; \
 	trap '$(IDENTITY_COMPOSE) --profile validation down -v' EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(IDENTITY_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly; \
 	$(IDENTITY_COMPOSE) --profile validation up -d --wait --build postgres dragonfly; \
 	$(IDENTITY_COMPOSE) run --rm --no-deps --build identity-check
 
 chat-check:
 	@set -eu; \
 	trap '$(CHAT_COMPOSE) --profile validation down -v' EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(CHAT_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly garage worker; \
 	$(CHAT_COMPOSE) --profile validation up -d --wait --build postgres dragonfly garage worker; \
 	$(CHAT_COMPOSE) run --rm --no-deps --build chat-check
 
 media-check:
 	@set -eu; \
 	trap '$(MEDIA_COMPOSE) --profile validation down -v' EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(MEDIA_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly garage clamav; \
 	$(MEDIA_COMPOSE) --profile validation up -d --wait --build postgres dragonfly garage clamav; \
 	$(MEDIA_COMPOSE) run --rm --no-deps --build storage-init; \
 	$(MEDIA_COMPOSE) run --rm --no-deps --build media-check
@@ -190,12 +194,14 @@ media-check:
 voice-check:
 	@set -eu; \
 	trap '$(VOICE_COMPOSE) --profile validation down -v' EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(VOICE_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps dragonfly livekit-validation; \
 	$(VOICE_COMPOSE) --profile validation up -d --wait --build dragonfly livekit-validation; \
 	$(VOICE_COMPOSE) run --rm --no-deps --build voice-check
 
 release-check:
 	@set -eu; \
 	trap '$(RELEASE_COMPOSE) --profile validation down -v' EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(RELEASE_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly; \
 	$(RELEASE_COMPOSE) --profile validation up -d --wait --build postgres dragonfly; \
 	$(RELEASE_COMPOSE) run --rm --no-deps --build release-check
 
@@ -203,6 +209,7 @@ federation-check:
 	@set -eu; \
 	cleanup() { status=$$?; if [ $$status -ne 0 ]; then $(FEDERATION_COMPOSE) logs --no-color --tail=240 alpha-api beta-api alpha-worker beta-worker alpha-gateway beta-gateway || true; fi; $(FEDERATION_COMPOSE) --profile validation down -v; exit $$status; }; \
 	trap cleanup EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(FEDERATION_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps alpha-api beta-api alpha-gateway beta-gateway alpha-worker beta-worker alpha-scheduler beta-scheduler; \
 	$(FEDERATION_COMPOSE) up -d --wait alpha-postgres alpha-dragonfly beta-postgres beta-dragonfly; \
 	$(FEDERATION_COMPOSE) run --rm --no-deps --build alpha-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
 	$(FEDERATION_COMPOSE) run --rm --no-deps --build beta-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
@@ -213,6 +220,7 @@ federation-tls-check:
 	@set -eu; \
 	cleanup() { status=$$?; if [ $$status -ne 0 ]; then $(FEDERATION_TLS_COMPOSE) logs --no-color --tail=240 alpha-api beta-api tls-edge || true; fi; $(FEDERATION_TLS_COMPOSE) --profile validation down -v; exit $$status; }; \
 	trap cleanup EXIT INT TERM; \
+	bash .github/scripts/retry-network.sh env $(FEDERATION_TLS_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps alpha-api beta-api alpha-gateway beta-gateway alpha-worker beta-worker alpha-scheduler beta-scheduler alpha-caddy beta-caddy tls-edge; \
 	$(FEDERATION_TLS_COMPOSE) up -d --wait alpha-postgres alpha-dragonfly beta-postgres beta-dragonfly; \
 	$(FEDERATION_TLS_COMPOSE) run --rm --no-deps --build tls-init; \
 	$(FEDERATION_TLS_COMPOSE) run --rm --no-deps --build alpha-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
