@@ -1,9 +1,11 @@
 """Exercise the hook in disposable repositories without installing CI toolchains."""
 
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 HOOK = Path(__file__).resolve().parents[1] / ".githooks/pre-commit"
@@ -14,6 +16,10 @@ class PreCommitTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        env = patch.dict(os.environ, {"PATH": f"{self.root / 'bin'}:{os.environ['PATH']}"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.write("bin/uv", "#!/bin/sh\nexit 0\n", executable=True)
         self.git("init", "-q")
         self.git("config", "core.hooksPath", ".githooks")
         self.write(".githooks/pre-commit", HOOK.read_text(), executable=True)
@@ -121,6 +127,42 @@ sys.exit(1 if "BAD" in Path("file with spaces.py").read_text() else 0)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
                 self.assertEqual((self.root / name).read_text(), local)
                 self.assertEqual(self.git("show", f":{name}"), index_before)
+
+    def test_audits_staged_dependencies_and_blocks_failures(self):
+        self.write(".github/scripts/check-release-inputs.py", "pass\n")
+        self.git("add", ".github")
+        self.write("backend/.venv/bin/ruff", "#!/bin/sh\nexit 0\n", executable=True)
+        (self.root / "frontend/node_modules").mkdir(parents=True)
+        for component, tool, lockfile, arguments in (
+            ("backend", "uv", "uv.lock", ["run", "--locked", "pip-audit", "--skip-editable"]),
+            ("frontend", "pnpm", "pnpm-lock.yaml", ["audit", "--audit-level=moderate"]),
+        ):
+            with self.subTest(component=component):
+                self.write(
+                    f"bin/{tool}",
+                    f"""#!/usr/bin/env python3
+from pathlib import Path
+import sys
+if sys.argv[1:] == ["lint"]:
+    sys.exit(0)
+assert sys.argv[1:] == {arguments!r}
+status = Path({lockfile!r}).read_text()
+print("audit checked staged dependencies: " + status)
+sys.exit(int(status))
+""",
+                    executable=True,
+                )
+                name = f"{component}/{lockfile}"
+                # Both vulnerabilities (1) and service errors (2) must block.
+                for status in ("1", "2", "0"):
+                    self.write(name, status)
+                    self.git("add", name)
+                    self.write(name, "unstaged dependencies")
+                    result = self.commit()
+                    self.assertEqual(result.returncode == 0, status == "0", result.stderr)
+                    self.assertIn("audit checked staged dependencies: " + status, result.stderr)
+                    self.assertEqual((self.root / name).read_text(), "unstaged dependencies")
+                    self.assertEqual(self.git("show", f":{name}"), status.encode())
 
 
 if __name__ == "__main__":

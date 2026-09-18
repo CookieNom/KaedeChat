@@ -186,7 +186,11 @@ make hooks
 The hook checks a temporary copy of staged files, preserving unstaged edits.
 Depending on the changed paths, it runs Dart formatting, backend Ruff lint and
 formatting, frontend ESLint/Prettier, Rust formatting, workflow syntax, and
-release metadata checks. Install tools only for the components you edit:
+release metadata checks. Backend changes also run `uv run --locked pip-audit
+--skip-editable`; frontend changes run `pnpm audit --audit-level=moderate`.
+These audits require network access and block commits on vulnerabilities or
+audit service errors. The backend audit installs the staged locked dependencies
+in the temporary copy using uv's cache. Install tools only for the components you edit:
 Flutter from `mobile/.fvmrc` (on PATH or under `mobile/.fvm/flutter_sdk`),
 `cd backend && uv sync --locked`, `pnpm --dir frontend install --frozen-lockfile`,
 the Rust toolchain in `desktop/rust-toolchain.toml`, and actionlint 1.7.12 for

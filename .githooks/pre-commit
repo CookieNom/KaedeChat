@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run fast CI checks against the index without changing staged or local files."""
+"""Run CI lint and dependency audits against the index without changing local files."""
 
 import json
 from pathlib import Path
@@ -105,6 +105,11 @@ def main():
                 )
             run(str(ruff), "check", ".", cwd=snapshot / "backend")
             run(str(ruff), "format", "--check", ".", cwd=snapshot / "backend")
+            uv = require("uv", "Install uv and run: cd backend && uv sync --locked")
+            run(
+                uv, "run", "--locked", "pip-audit", "--skip-editable",
+                cwd=snapshot / "backend",
+            )
         if frontend:
             pnpm = require(
                 "pnpm", "Install the packageManager version in frontend/package.json."
@@ -118,6 +123,7 @@ def main():
                 modules, target_is_directory=True
             )
             run(pnpm, "lint", cwd=snapshot / "frontend")
+            run(pnpm, "audit", "--audit-level=moderate", cwd=snapshot / "frontend")
         if rust:
             cargo = require(
                 "cargo",
