@@ -2886,23 +2886,6 @@
         </div>
       </div>
       <div class="channel-header-actions">
-        <button
-          class="icon-button"
-          title={$t('chat_mark_read')}
-          aria-label={$t('chat_mark_read')}
-          onclick={async () => {
-            if (!channel) return;
-            try {
-              await markConversationsRead({ channel: entityRef(channel) });
-              manualUnreadPaused = false;
-            } catch (caught) {
-              readStateWarning = userErrorMessage(
-                caught,
-                'Could not mark conversation read. Try again.'
-              );
-            }
-          }}>✓</button
-        >
         {#if channel && (channel.encryption_mode === 'e2ee' || (!groupConversation && e2eeActivationEnabled))}
           <button
             class:active={channel.encryption_mode === 'e2ee'}
@@ -2971,9 +2954,16 @@
           placement="header"
         />
         {#if !activeCall}
-          <button class="call-button" onclick={startCall} disabled={!channelReady || callBusy}
-            >{$t('ui_start_call_99e5d804')}</button
+          <button
+            class="icon-button"
+            type="button"
+            aria-label={$t('ui_start_call_99e5d804')}
+            title={$t('ui_start_call_99e5d804')}
+            onclick={startCall}
+            disabled={!channelReady || callBusy}
           >
+            <Icon name="phone" size={20} />
+          </button>
         {/if}
       </div>
     </header>
@@ -3095,6 +3085,8 @@
               {:else}
                 <MessageRow
                   onMarkUnread={markMessageUnread}
+                  onMarkRead={currentReadState?.unread ? markVisibleConversationRead : undefined}
+                  {markingRead}
                   message={item.message}
                   compact={item.compact}
                   mentionUsers={entities.users.values}

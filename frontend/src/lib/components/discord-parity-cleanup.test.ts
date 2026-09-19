@@ -176,6 +176,7 @@ describe('Discord parity interactions', () => {
         sticker_items: [],
         reactions: []
       } as unknown as Message;
+      const markRead = vi.fn();
       component = createClassComponent({
         component: MessageRow,
         target: document.body,
@@ -198,8 +199,18 @@ describe('Discord parity interactions', () => {
         .querySelector('.message-row')!
         .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
       await assertReactionsFirst();
-      escape();
+      expect(button('Mark as read')).toBeUndefined();
+      component.$set({ onMarkRead: markRead, markingRead: true });
       await tick();
+      expect(button('Mark as read').disabled).toBe(true);
+      button('Mark as read').click();
+      expect(markRead).not.toHaveBeenCalled();
+      component.$set({ markingRead: false });
+      await tick();
+      button('Mark as read').click();
+      await tick();
+      expect(markRead).toHaveBeenCalledOnce();
+      expect(document.querySelector('.message-context-menu')).toBeNull();
       document
         .querySelector('[aria-label="Open photo.png"]')!
         .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));

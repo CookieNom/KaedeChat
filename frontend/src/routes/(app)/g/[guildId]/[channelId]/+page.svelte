@@ -7293,6 +7293,8 @@
                 >
                   <MessageRow
                     onMarkUnread={markMessageUnread}
+                    onMarkRead={currentReadState?.unread ? markVisibleConversationRead : undefined}
+                    {markingRead}
                     message={threadTimelineStarter}
                     authorColor={threadTimelineStarter.author
                       ? memberRoleColor(
@@ -7381,6 +7383,10 @@
                   {:else}
                     <MessageRow
                       onMarkUnread={markMessageUnread}
+                      onMarkRead={currentReadState?.unread
+                        ? markVisibleConversationRead
+                        : undefined}
+                      {markingRead}
                       message={item.message}
                       compact={item.compact}
                       authorColor={item.message.author

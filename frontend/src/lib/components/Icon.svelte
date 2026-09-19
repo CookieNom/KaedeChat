@@ -29,6 +29,7 @@
     | 'more'
     | 'music'
     | 'palette'
+    | 'phone'
     | 'phone-off'
     | 'poll'
     | 'plus'
@@ -157,6 +158,10 @@
     <circle cx="10" cy="7" r=".8" fill="currentColor" stroke="none" />
     <circle cx="14" cy="7" r=".8" fill="currentColor" stroke="none" />
     <circle cx="17" cy="10" r=".8" fill="currentColor" stroke="none" />
+  {:else if name === 'phone'}
+    <path
+      d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.4 1.8.6 2.8.7a2 2 0 0 1 1.8 2.1Z"
+    />
   {:else if name === 'phone-off'}
     <path
       d="M5.2 10.2a15.5 15.5 0 0 1 13.6 0l1.3.7a2 2 0 0 1 .8 2.6l-1.2 2.2a2 2 0 0 1-2.5.9l-2.4-1.1a2 2 0 0 1-1.1-1.8v-1.2a9 9 0 0 0-3.4 0v1.2a2 2 0 0 1-1.1 1.8l-2.4 1.1a2 2 0 0 1-2.5-.9l-1.2-2.2a2 2 0 0 1 .8-2.6Z"

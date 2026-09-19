@@ -663,7 +663,7 @@ async def start_call(
                     "actor_domain": auth.user.origin_domain,
                     "action": "create",
                     "created_at": created_at,
-                    "state_version": str(state_version),
+                    "state_version": str(state_version) if state_version is not None else None,
                     "ring": payload.ring,
                 },
                 request_timeout=5,
@@ -1546,7 +1546,9 @@ async def federation_call_signal(
                 settings,
                 record,
                 actor=actor,
-                state_version=conversation.state_version,
+                state_version=(
+                    conversation.state_version if conversation.type == "group" else None
+                ),
                 exclude_domains={principal.origin},
             )
         return call_response(record)

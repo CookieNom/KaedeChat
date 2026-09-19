@@ -13,6 +13,7 @@ from app.api.calls import (
     exact_call_projection,
     federation_call_signal,
     federation_call_state,
+    start_call,
 )
 from app.core.settings import Settings
 from app.core.types import EntityRef
@@ -23,6 +24,7 @@ from app.voice.cleanup import cleanup_orphaned_dm_rooms
 from app.voice.livekit import LiveKitControl, LiveKitError
 from app.voice.schemas import (
     CallAction,
+    CallCreate,
     CallFederationRequest,
     CallResponse,
     CallStateFederationRequest,
@@ -112,15 +114,17 @@ def dm_channel() -> Channel:
 
 
 @pytest.mark.asyncio
-async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
+@pytest.mark.parametrize("conversation_type", ["direct", "group"])
+async def test_remote_call_is_committed_and_fanned_out_by_conversation_authority(
     monkeypatch: pytest.MonkeyPatch,
+    conversation_type: str,
 ) -> None:
     channel = dm_channel()
     conversation = DMConversation(
         id=channel.id,
         origin_domain=channel.origin_domain,
         pair_key="group:alpha.localhost:34",
-        type="group",
+        type=conversation_type,
         authority_domain="alpha.localhost",
         owner_id=1,
         owner_domain="alpha.localhost",
@@ -129,6 +133,7 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
     owner = user(1, "alpha.localhost")
     actor = user(2, "beta.localhost")
     third = user(3, "gamma.localhost")
+    participants = [owner, actor, third] if conversation_type == "group" else [owner, actor]
 
     async def get_model(model: object, _key: object) -> object | None:
         if model is Channel:
@@ -148,7 +153,7 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
     )
     monkeypatch.setattr(
         "app.api.calls.local_dm_participants",
-        AsyncMock(return_value=[owner, actor, third]),
+        AsyncMock(return_value=participants),
     )
     monkeypatch.setattr("app.api.calls.create_call", AsyncMock(return_value=True))
     monkeypatch.setattr("app.api.calls.notify_call", AsyncMock())
@@ -165,7 +170,7 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
             actor_domain="beta.localhost",
             action="create",
             created_at=10,
-            state_version="7",
+            state_version="7" if conversation_type == "group" else None,
         ),
         FederationPrincipal(origin="beta.localhost", key_id="beta-key"),
         cast(Any, SimpleNamespace(get=get_model)),
@@ -177,12 +182,57 @@ async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
     assert remote_user_allowed.await_args.args[1] is actor
     assert response.caller == "2@beta.localhost"
     assert set(response.participants) == {
-        "1@alpha.localhost",
-        "2@beta.localhost",
-        "3@gamma.localhost",
+        f"{participant.id}@{participant.origin_domain}" for participant in participants
     }
     propagate.assert_awaited_once()
     assert propagate.await_args.kwargs["exclude_domains"] == {"beta.localhost"}
+    assert propagate.await_args.kwargs["state_version"] == (
+        7 if conversation_type == "group" else None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conversation_type", ["direct", "group"])
+async def test_start_remote_call_sends_valid_federation_request(
+    monkeypatch: pytest.MonkeyPatch,
+    conversation_type: str,
+) -> None:
+    channel = dm_channel()
+    caller = user(1, "alpha.localhost")
+    conversation = SimpleNamespace(
+        type=conversation_type, authority_domain="beta.localhost", state_version=7
+    )
+    monkeypatch.setattr("app.api.calls.time.time", lambda: 10)
+    monkeypatch.setattr(
+        "app.api.calls.load_channel_access",
+        AsyncMock(return_value=SimpleNamespace(channel=channel, guild=None)),
+    )
+    monkeypatch.setattr(
+        "app.api.calls.local_dm_participants",
+        AsyncMock(return_value=[caller, user(2, "beta.localhost")]),
+    )
+    monkeypatch.setattr("app.api.calls.create_call", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.api.calls.notify_call", AsyncMock())
+
+    async def receive(*args: Any, **kwargs: Any) -> httpx.Response:
+        request = CallFederationRequest.model_validate(kwargs["payload"])
+        assert request.state_version == ("7" if conversation_type == "group" else None)
+        assert request.ring is True
+        return httpx.Response(200, json=call_record(authority="beta.localhost", state="ringing"))
+
+    send = AsyncMock(side_effect=receive)
+    monkeypatch.setattr("app.api.calls.signed_request", send)
+    result = await start_call(
+        EntityRef("34@alpha.localhost"),
+        CallCreate(),
+        cast(Any, SimpleNamespace(user=caller)),
+        cast(Any, SimpleNamespace(get=AsyncMock(return_value=conversation))),
+        cast(Any, object()),
+        cast(Any, SimpleNamespace(mint=AsyncMock(return_value=56))),
+        settings(),
+    )
+    send.assert_awaited_once()
+    assert result.state == "ringing"
 
 
 def test_orphaned_call_room_cleanup_is_scheduled() -> None:

@@ -120,6 +120,8 @@
     onRetry,
     onViewProfile,
     onMarkUnread,
+    onMarkRead,
+    markingRead = false,
     onReply,
     onForward,
     forwardUnavailableReason = null,
@@ -173,6 +175,8 @@
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
     onMarkUnread?: (message: Message) => void;
+    onMarkRead?: () => Promise<unknown> | unknown;
+    markingRead?: boolean;
     onReply?: (message: Message) => void;
     onForward?: (message: Message) => void;
     forwardUnavailableReason?: string | null;
@@ -1518,6 +1522,20 @@
                   value0: String(userDisplayName(message.author))
                 })}</span
               >
+            </button>
+          {/if}
+          {#if onMarkRead && !message.deleted_at}
+            <button
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              disabled={markingRead}
+              onclick={() => {
+                closeMenu();
+                void onMarkRead?.();
+              }}
+            >
+              <span>{$t('chat_mark_read')}</span>
             </button>
           {/if}
           {#if onMarkUnread && !message.deleted_at}
