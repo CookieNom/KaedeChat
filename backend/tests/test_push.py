@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
@@ -600,3 +601,11 @@ async def test_push_sync_tokens_are_hashed_bound_and_single_use() -> None:
     assert await claim_push_sync(redis, token, encoded)  # type: ignore[arg-type]
     assert await load_push_sync(redis, token) is None  # type: ignore[arg-type]
     assert not await claim_push_sync(redis, token, encoded)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_apns_http2_client_can_start_without_network() -> None:
+    # APNs uses HTTP/2. Construct the real client so a missing optional h2
+    # dependency fails here rather than dropping every background iOS call.
+    async with httpx.AsyncClient(http2=True) as client:
+        assert not client.is_closed

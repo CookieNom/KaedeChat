@@ -369,15 +369,18 @@ jobs:
           enableCrossOsArchive: true
       - name: Check native desktop stack
         if: runner.os == 'Linux'
-        run: cargo +1.97.1 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" cargo +1.97.1 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
       - name: Link macOS release
         if: runner.os == 'macOS'
-        run: cargo +1.97.1 build --release --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" cargo +1.97.1 build --release --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
       - name: Link Windows release with the shipping CRT configuration
         if: runner.os == 'Windows'
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo +1.97.1 build --release --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" cargo +1.97.1 build --release --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
       - name: Test Linux screen audio isolation
         if: runner.os == 'Linux'
         run: bash desktop/test-screen-audio.sh

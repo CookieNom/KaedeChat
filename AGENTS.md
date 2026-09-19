@@ -11,6 +11,8 @@
 
 ## Testing
 
+- Leave Rust compilation and mobile builds/tests to CI/CD by default. Do not run local `cargo build`, `cargo check`, `cargo clippy`, `cargo test`, native mobile build scripts, `flutter build`, `flutter run`, or `flutter test` unless the user explicitly requests local native validation. This also applies to Make targets that invoke them (`desktop-check`, `desktop-lint`, `desktop-test`, `desktop-build`, `desktop-dev`, and `mobile-check`).
+- Use non-compiling local checks such as Rust/Dart formatting and static source review instead, and report which validation was deferred to CI. Keep CI/CD build and test coverage enabled.
 - Add tests only when they provide meaningful coverage for new behavior, a regression, or a material risk. Do not add tests merely because a file changed or to mirror implementation details.
 - Review existing coverage first. Extend an existing test when the new case fits its purpose and remains easy to understand; avoid duplicating scenarios or assertions across tests.
 - Keep tests focused, fast, and deterministic. Use the smallest setup and lowest-cost test level that reliably verifies the behavior, and avoid unnecessary fixtures, mocks, or dependencies.
