@@ -162,6 +162,8 @@ import CryptoKit
           "apns_registered=\(registered)",
           "firebase_initialized=\(firebaseReady)",
           "firebase_apns_token_present=\(firebaseHasToken)",
+          "voip_token_present=\(self.voipToken != nil)",
+          "voip_route_present=\(self.nativeRelayState() != nil)",
         ]).joined(separator: "\n"))
         return
       }
@@ -292,11 +294,13 @@ extension AppDelegate: PKPushRegistryDelegate {
     for type: PKPushType,
     completion: @escaping () -> Void
   ) {
+    recordDebugEvent("voip_push_received")
     guard type == .voIP,
           let wake = VoipWake(payload.dictionaryPayload),
           let state = nativeRelayState(),
           wake.routeID == state.voipRouteID,
           authenticate(wake: wake, secret: state.voipWakeSecret) else {
+      recordDebugEvent("voip_wake_rejected")
       completion()
       return
     }
@@ -308,6 +312,11 @@ extension AppDelegate: PKPushRegistryDelegate {
     update.hasVideo = true
     callProvider.reportNewIncomingCall(with: uuid, update: update) { error in
       completion()
+      if let error {
+        self.recordDebugEvent("voip_callkit_failed code=\((error as NSError).code)")
+      } else {
+        self.recordDebugEvent("voip_callkit_reported")
+      }
       guard error == nil else {
         self.callIDs.removeValue(forKey: wake.deliveryID)
         return
@@ -340,6 +349,7 @@ extension AppDelegate: PKPushRegistryDelegate {
               let callID = result["event_ref"] as? String,
               let channel = result["channel_ref"] as? String,
               let caller = result["title"] as? String else {
+          self?.recordDebugEvent("voip_redemption_failed status=\((response as? HTTPURLResponse)?.statusCode ?? 0)")
           self?.callProvider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
           return
         }

@@ -7,7 +7,7 @@
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { Permission } from '$lib/generated/permissions';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, type Snippet } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { nativeInvoke, isNativeDesktop } from '$lib/platform/native';
   import { initializeE2EE } from '$lib/e2ee/client';
@@ -43,13 +43,15 @@
     callRef,
     permissions = null,
     occupants = [],
-    startedAt = null
+    startedAt = null,
+    headerActions
   }: {
     channelRef?: string;
     callRef?: string;
     permissions?: string | null;
     occupants?: VoiceOccupant[];
     startedAt?: number | null;
+    headerActions?: Snippet;
   } = $props();
   const voice = new VoiceSession(undefined, (state) =>
     authenticatedGateway.client.setSelfVoiceState(state.self_mute, state.self_deaf)
@@ -1139,6 +1141,7 @@
               : $t('ui_join_voice_201f8c4e')}
         </button>
       {/if}
+      {@render headerActions?.()}
     </div>
   </header>
 

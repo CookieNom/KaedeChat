@@ -13,6 +13,7 @@ from app.api.calls import (
     exact_call_projection,
     federation_call_signal,
     federation_call_state,
+    notify_call,
     start_call,
 )
 from app.core.settings import Settings
@@ -523,3 +524,39 @@ async def test_orphaned_dm_room_cleanup_preserves_active_call(
 
     assert removed == 1
     delete_room.assert_awaited_once_with("d.34.57")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller_exists", [True, False])
+async def test_call_push_redeems_caller_name_from_home(
+    monkeypatch: pytest.MonkeyPatch, caller_exists: bool
+) -> None:
+    caller = user(1, "alpha.localhost")
+    caller.profile_resolved = True
+    caller.display_name = "Turtle"
+    session = AsyncMock()
+    session.get.return_value = caller if caller_exists else None
+    dispatch = AsyncMock()
+    enqueue = AsyncMock()
+    monkeypatch.setattr("app.api.calls.publish_dispatch", dispatch)
+    monkeypatch.setattr("app.api.calls.enqueue_best_effort", enqueue)
+
+    await notify_call(
+        session,
+        AsyncMock(),
+        ["3@alpha.localhost"],
+        "CALL_RING",
+        call_record(state="ringing"),
+        settings(),
+    )
+
+    session.get.assert_awaited_once_with(User, (1, "alpha.localhost"))
+    # This job stays on the home; the relay receives only the resulting wake.
+    args = enqueue.await_args.args
+    assert args[5:8] == (
+        "call",
+        "Turtle" if caller_exists else "Kaede caller",
+        "Answer or decline the call.",
+    )
+    assert args[8:] == ("56@alpha.localhost", "34@alpha.localhost")
+    dispatch.assert_awaited_once()

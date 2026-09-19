@@ -3000,11 +3000,14 @@
             <VoiceDock
               callRef={activeCallRef}
               channelRef={channel ? entityRef(channel) : undefined}
-            />
+            >
+              {#snippet headerActions()}
+                <button class="end-call" disabled={callBusy} onclick={() => callAction('end')}
+                  >{$t('ui_end_call_for_everyone_1dc035bc')}</button
+                >
+              {/snippet}
+            </VoiceDock>
           {/key}
-          <button class="end-call" disabled={callBusy} onclick={() => callAction('end')}
-            >{$t('ui_end_call_for_everyone_1dc035bc')}</button
-          >
         </div>
       {/if}
       <div

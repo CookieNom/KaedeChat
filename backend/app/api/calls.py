@@ -283,6 +283,11 @@ async def notify_call(
                     rendered = bot_call_response(record, capability).model_dump(mode="json")
                 await publish_dispatch(redis, user_topic(domain, user_id), event, rendered)
                 if event == "CALL_RING" and domain == settings.domain:
+                    caller_id, caller_domain = parse_participant_identity(str(record["caller"]))
+                    caller = await session.get(User, (caller_id, caller_domain))
+                    # Display details stay on the home and are redeemed directly by
+                    # the phone; the relay only receives an opaque wake.
+                    caller_name = public_user_display_name(caller) if caller else "Kaede caller"
                     await enqueue_best_effort(
                         mobile_push_activity,
                         user_id,
@@ -290,7 +295,7 @@ async def notify_call(
                         int(record["id"]),
                         str(record["authority_domain"]),
                         "call",
-                        "Incoming Kaede call",
+                        caller_name,
                         "Answer or decline the call.",
                         f"{record['id']}@{record['authority_domain']}",
                         f"{record['channel_id']}@{record['channel_domain']}",

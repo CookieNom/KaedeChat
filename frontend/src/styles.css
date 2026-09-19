@@ -8952,17 +8952,13 @@ body.media-viewer-open {
 }
 
 .dm-call-stage {
-  position: relative;
-  min-height: min(48vh, 500px);
   overflow: hidden;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 2px solid var(--line);
 }
 
-.end-call {
-  position: absolute;
-  z-index: 2;
-  top: 1rem;
-  right: 1rem;
+.end-call:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Responsive */
