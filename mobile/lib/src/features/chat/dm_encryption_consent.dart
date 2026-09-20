@@ -59,7 +59,9 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
     if (_busy ||
         _request == null ||
         (action != 'disagree' &&
-            !ref.read(mobileControllerProvider).e2eeActivationEnabled)) return;
+            !ref.read(mobileControllerProvider).e2eeActivationEnabled)) {
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -80,15 +82,17 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
       if (action != 'disagree') {
         final client = await controller.e2eeClient();
         final updated = await client.enableRoom(widget.channel);
-        if (account != null)
+        if (account != null) {
           await acknowledgeEncryptedRoom(account, updated.ref.wire);
+        }
         await controller.refreshNavigation();
       }
     } on Object catch (caught) {
-      if (mounted)
+      if (mounted) {
         setState(() => _error = userFacingError(caught,
             summary:
                 'Could not update this encryption request. Please try again.'));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

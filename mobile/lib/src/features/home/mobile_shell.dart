@@ -297,8 +297,9 @@ Future<void> _showE2eeRoomSettings(
                                 .read(mobileControllerProvider.notifier)
                                 .repository
                                 .dmEncryptionConsent(channel.ref, 'request');
-                            if (dialogContext.mounted)
+                            if (dialogContext.mounted) {
                               Navigator.pop(dialogContext);
+                            }
                             return;
                           }
                           channel = needsRekey
