@@ -47,7 +47,11 @@ def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
     )
     with tempfile.TemporaryDirectory(prefix="kaede-setup-test-") as temporary:
         root = Path(temporary)
-        for name in ("setup.sh", "deploy/setup-inputs.sh", "deploy/compose.yml"):
+        for name in (
+            "setup.sh",
+            "deploy/setup-inputs.sh",
+            "deploy/kubernetes/stack.py",
+        ):
             destination = root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(repository / name, destination)
@@ -66,6 +70,12 @@ def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
             "".join(f"{name}={value}\n" for name, value in original.items())
         )
         env_file.chmod(0o600)
+        tools = root / ".kaede-tools/bin"
+        tools.mkdir(parents=True)
+        (tools / "kubectl").write_text("#!/bin/sh\nprintf 'test-cluster\\n'\n")
+        (tools / "kubectl").chmod(0o700)
+        kubeconfig = root / "kubeconfig"
+        kubeconfig.touch()
         master, slave = pty.openpty()
         process = subprocess.Popen(
             ["bash", str(root / "setup.sh"), "--plain"],
@@ -73,6 +83,7 @@ def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
             stdout=slave,
             stderr=slave,
             cwd=root,
+            env=os.environ | {"KUBECONFIG": str(kubeconfig)},
         )
         os.close(slave)
         pending = b""
@@ -106,28 +117,15 @@ def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
                 process.kill()
                 process.wait()
             os.close(master)
-        assert (root / "deploy/compose.generated.yml").is_file()
+        assert (root / ".kaede-kubernetes.json").is_file()
         emitted = read_env_file(env_file)
-        resolved = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--env-file",
-                str(env_file),
-                "-f",
-                str(root / "deploy/compose.yml"),
-                "config",
-                "--format",
-                "json",
-                "--no-path-resolution",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-            env=os.environ | {"KAEDE_OPERATOR_ENV_FILE": str(env_file)},
-        )
-        return emitted, json.loads(resolved.stdout)["services"]
+        sys.path.insert(0, str(repository / "deploy/kubernetes"))
+        from stack import role_environment
+
+        return emitted, {
+            role: {"environment": role_environment(emitted, role)}
+            for role in ("api", "worker")
+        }
 
 
 class DeploymentEnvironmentValidationTests(unittest.TestCase):
@@ -146,7 +144,6 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             "KAEDE_SEARCH_ENABLED": "true",
             "KAEDE_SEARCH_MASTER_KEY": "s" * 32,
             "KAEDE_SEARCH_URL": "http://meilisearch:7700",
-            "COMPOSE_PROFILES": "search",
         }
         validate_values(configured, observability=False)
         for overrides in (
@@ -155,7 +152,6 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             {"KAEDE_SEARCH_URL": "http://meilisearch:7700/not-an-origin"},
             {"KAEDE_SEARCH_BATCH_SIZE": "0"},
             {"KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS": "31"},
-            {"COMPOSE_PROFILES": ""},
         ):
             with (
                 self.subTest(overrides=overrides),

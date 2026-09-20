@@ -539,10 +539,96 @@ void main() {
       expect(details.message, isNot(contains('/srv')));
     });
 
+    for (final closeCode in [
+      GatewayCloseCode.authenticationFailed,
+      GatewayCloseCode.invalidSequence,
+    ]) {
+      test('recovers from ${closeCode.name} without restarting', () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final recovered = Completer<Map<String, Object?>>();
+        final sockets = <WebSocket>[];
+        var connections = 0;
+        server.listen((request) async {
+          final socket = await WebSocketTransformer.upgrade(request);
+          sockets.add(socket);
+          final attempt = connections++;
+          socket.listen((raw) {
+            final frame = jsonDecode(raw as String) as Map<String, Object?>;
+            if (frame['op'] == GatewayOp.heartbeat.value) {
+              if (socket.readyState == WebSocket.open) {
+                socket.add(jsonEncode(
+                    {'op': GatewayOp.heartbeatAck.value, 'd': null}));
+              }
+              return;
+            }
+            if (attempt == 0) {
+              socket.add(jsonEncode({
+                'op': GatewayOp.dispatch.value,
+                't': 'READY',
+                's': 0,
+                'd': {'session_id': 'old-session'},
+              }));
+              unawaited(socket.close(1001));
+            } else if (attempt == 1) {
+              expect(frame['op'], GatewayOp.resume.value);
+              unawaited(socket.close(closeCode.value));
+            } else if (!recovered.isCompleted) {
+              recovered.complete(frame);
+            }
+          });
+          socket.add(jsonEncode({
+            'op': GatewayOp.hello.value,
+            'd': {'heartbeat_interval': 41250},
+          }));
+        });
+        addTearDown(() async {
+          for (final socket in sockets) {
+            await socket.close();
+          }
+          await server.close(force: true);
+        });
+        final refreshRequests = <bool>[];
+        final needsRefresh = closeCode == GatewayCloseCode.authenticationFailed;
+        var refreshFailed = false;
+        final client = GatewayClient(
+          tokens: (refresh) async {
+            refreshRequests.add(refresh);
+            if (refresh && !refreshFailed) {
+              refreshFailed = true;
+              throw const SocketException('Temporary refresh outage');
+            }
+            return refresh
+                ? tokens.copyWith(accessToken: 'renewed-token')
+                : tokens;
+          },
+          socketConnector: (_) => IOWebSocketChannel.connect(
+            Uri.parse('ws://127.0.0.1:${server.port}'),
+          ),
+        );
+        addTearDown(client.close);
+        await client.connect(tokens);
+        final frame =
+            await recovered.future.timeout(const Duration(seconds: 15));
+        final data = frame['d']! as Map<String, Object?>;
+        expect(frame['op'],
+            needsRefresh ? GatewayOp.resume.value : GatewayOp.identify.value);
+        expect(
+            data['token'], needsRefresh ? 'renewed-token' : tokens.accessToken);
+        if (needsRefresh) {
+          expect(data['session_id'], 'old-session');
+          expect(refreshRequests, [false, true, true]);
+        } else {
+          expect(data.containsKey('session_id'), isFalse);
+          expect(data.containsKey('seq'), isFalse);
+          expect(refreshRequests, [false, false]);
+        }
+      });
+    }
+
     test('abandons a transport upgrade that never completes', () async {
       final stalledSocket = Completer<WebSocket>();
       final client = GatewayClient(
-        tokens: () async => tokens,
+        tokens: (_) async => tokens,
         socketConnector: (_) => IOWebSocketChannel(stalledSocket.future),
         transportReadyTimeout: const Duration(seconds: 1),
         sessionReadyTimeout: const Duration(seconds: 1),
@@ -569,7 +655,7 @@ void main() {
       addTearDown(() => server.close(force: true));
       final endpoint = Uri.parse('ws://127.0.0.1:${server.port}');
       final client = GatewayClient(
-        tokens: () async => tokens,
+        tokens: (_) async => tokens,
         socketConnector: (_) => IOWebSocketChannel.connect(endpoint),
         transportReadyTimeout: const Duration(seconds: 1),
         sessionReadyTimeout: const Duration(seconds: 1),
@@ -610,7 +696,7 @@ void main() {
       addTearDown(() => server.close(force: true));
       final endpoint = Uri.parse('ws://127.0.0.1:${server.port}');
       final client = GatewayClient(
-        tokens: () async => tokens,
+        tokens: (_) async => tokens,
         socketConnector: (_) => IOWebSocketChannel.connect(endpoint),
         transportReadyTimeout: const Duration(seconds: 1),
         sessionReadyTimeout: const Duration(seconds: 1),

@@ -86,7 +86,7 @@ encrypted TOTP material. Gateway, API, scheduler, and migration processes get
 no email delivery credentials; only the email-capable worker and the
 configuration preflight do. The scheduler receives only the Dragonfly
 task-broker URL and log level — not the master key, database URL, or proxy
-secret. In the production Compose topology the gateway also receives no
+secret. In the production Kubernetes topology the gateway also receives no
 administrator credential.
 
 Incomplete WebSocket handshakes are bounded twice. Host nginx limits concurrent

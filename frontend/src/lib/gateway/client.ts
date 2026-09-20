@@ -58,6 +58,7 @@ export class GatewayClient extends EventTarget {
   #nativeGeneration = 0;
   #preferredPresence: 'online' | 'idle' | 'dnd' | 'invisible' | null = null;
   #gatewayReady = false;
+  #lastReadySession: string | null = null;
   #presencePending = false;
   #nativeFailures = 0;
   #pendingCommands = new Map<string, QueuedGatewayCommand>();
@@ -155,6 +156,7 @@ export class GatewayClient extends EventTarget {
     this.#manualClose = true;
     this.#lifecycle += 1;
     this.#reconcileOnReady = false;
+    this.#lastReadySession = null;
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = null;
     this.#retry = 0;
@@ -362,6 +364,12 @@ export class GatewayClient extends EventTarget {
         if (typeof ready.session_id !== 'string' || !ready.session_id) {
           throw new TypeError('Invalid gateway session');
         }
+        // Native transport handles invalid sessions itself; it only forwards
+        // dispatches. A replacement READY must still reconcile missed messages.
+        if (this.#lastReadySession !== null && this.#lastReadySession !== ready.session_id) {
+          this.#reconcileOnReady = true;
+        }
+        this.#lastReadySession = ready.session_id;
         if (!this.#presencePending && isPresencePreference(ready.presence_preference)) {
           this.#preferredPresence = ready.presence_preference;
         }

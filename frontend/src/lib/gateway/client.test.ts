@@ -567,6 +567,23 @@ describe('GatewayClient lifecycle', () => {
     client.close();
   });
 
+  it('reconciles a replacement READY when the native transport hides the session reset', async () => {
+    const { GATEWAY_SESSION_RESET_EVENT, GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    const reset = vi.fn();
+    client.addEventListener(GATEWAY_SESSION_RESET_EVENT, reset);
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.DISPATCH, t: 'READY', s: 0, d: { session_id: 'initial' } });
+    expect(reset).not.toHaveBeenCalled();
+    // Native Rust handles reconnect/INVALID_SESSION and forwards only dispatches.
+    socket.message({ op: GatewayOp.DISPATCH, t: 'READY', s: 0, d: { session_id: 'replacement' } });
+    expect(reset).toHaveBeenCalledOnce();
+    socket.message({ op: GatewayOp.DISPATCH, t: 'RESUMED', s: 1, d: {} });
+    expect(reset).toHaveBeenCalledOnce();
+    client.close();
+  });
+
   it('closes a connection that misses a heartbeat acknowledgement', async () => {
     const { GatewayClient } = await import('./client');
     const client = new GatewayClient();

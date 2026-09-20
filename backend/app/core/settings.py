@@ -33,6 +33,9 @@ HOST_RE = re.compile(
     re.IGNORECASE,
 )
 AUXILIARY_KAEDE_ENV = {
+    "KAEDE_NAMESPACE",
+    "KAEDE_IMAGE_REPOSITORY",
+    "KAEDE_OBSERVABILITY_ENABLED",
     "KAEDE_API_HOST_PORT",
     "KAEDE_CADDY_HOST_PORT",
     "KAEDE_DEV_HTTP_PORT",
@@ -1163,6 +1166,7 @@ class Settings(BaseSettings):
                 "127.0.0.1",
                 "localhost",
                 "host.docker.internal",
+                "livekit",
             }:
                 raise ValueError("voice_livekit_url must target the local LiveKit control plane")
             if self.admin_token is not None and len(self.admin_token.get_secret_value()) < 32:

@@ -23,159 +23,457 @@ Tauri desktop, and Flutter mobile clients share the same server APIs.
 
 ## Setup
 
-These steps deploy the server. If you only want to run a bot on an existing
-instance, use the [bot quickstart](docs/bot-api-quickstart.md); you can skip
-Docker, DNS, and server setup.
+The steps below install **one production instance on an Ubuntu 24.04 server**,
+using K3s, host nginx, and local image builds. You do not need a container
+registry. Run commands as your normal login user with sudo access, not from a
+root shell. Run each step in order and stop if a command fails.
 
-### 1. Prepare the host and download Kaede
+This is a **new installation** walkthrough. If you already have a Compose
+instance, use the [data migration procedure](docs/operator.md#migrate-an-existing-compose-instance)
+instead of creating a second instance with the same domain.
 
-You need a Linux host with Git, Bash, Make, OpenSSL, and Docker Engine with the
-Compose plugin. Your account must be able to run Docker. Python and Node for
-the server build run inside containers.
+### 1. Choose your domain and storage
 
-For a public instance, prepare a domain pointing to this host, TLS certificates,
-and a reverse proxy. The supplied configuration uses host nginx on ports
-80/443. Bundled Garage storage also needs `media.<your-domain>` DNS and TLS.
-Choose the instance domain carefully: account handles and federation identity
-are tied to it.
+This example uses `chat.example.com`. **Replace it with your own domain in
+all commands and wizard answers below.** Choose it before registering accounts;
+it becomes part of account addresses and cannot simply be renamed later.
+
+For the simplest installation, choose **Bundled Garage** for file storage.
+Kaede will create and manage its private buckets on this server. Create these
+DNS records, both pointing to the server's public IP:
+
+| Name | Purpose |
+| --- | --- |
+| `chat.example.com` | Website, API, federation, and voice signaling |
+| `media.chat.example.com` | Uploads and downloads when using bundled Garage |
+
+Use DNS-only records if your DNS provider also offers an HTTP proxy. Only add
+AAAA records if IPv6 actually reaches this server. If the server is behind NAT,
+forward the public ports to it.
+
+Allow inbound TCP **80 and 443** in your host, provider, or Proxmox firewall.
+Keep SSH available to your administration network. Do not publicly open the
+Kubernetes API (TCP 6443), Flannel (UDP 8472), database ports, or the Kubernetes
+NodePort range. No additional host firewall is required if your provider or
+hypervisor already enforces these rules.
+
+If you enable voice, also allow the ports selected by setup. The defaults are:
+
+| Protocol | Ports | Purpose |
+| --- | --- | --- |
+| TCP | `7881`, `5349` | Voice transport and TURN over TLS |
+| UDP | `7882`, `13478` | Voice transport and TURN |
+
+The LiveKit control port (`7880` by default) and Kaede's loopback ports
+(`18081` and `18082`) do not need public access.
+
+**Using an existing S3 service instead?** Select your provider or
+**Generic S3-compatible** in setup. Have its endpoint, region, credentials,
+and three private bucket names ready: attachments, derived media, and remote
+cache. A separately hosted Garage or other local S3 service is supported too;
+its endpoint must be reachable from Kubernetes pods, not just from the host.
+Production requires HTTPS for generic S3 endpoints. You do not need the
+`media.chat.example.com` DNS record when using the provider's HTTPS media endpoint.
+
+Configure CORS in your S3 provider before using uploads:
+
+- Allow `GET` and `HEAD` from `https://chat.example.com` on all three buckets.
+- On the attachments bucket, also allow `PUT` from any HTTPS origin and allow
+  request headers (`*`). Federated moderation evidence can be uploaded from
+  another instance; the presigned URL authorizes the upload.
+- Keep the buckets private. Leave bucket creation disabled in setup if you
+  created them yourself. Provider CORS formats differ; enter these rules using
+  your provider's bucket settings.
+
+### 2. Install the host packages
+
+On a fresh Ubuntu 24.04 server:
+
+```sh
+sudo apt update
+sudo apt install -y git make python3 openssl curl ca-certificates util-linux \
+  docker.io docker-buildx nginx certbot
+sudo systemctl enable --now docker nginx
+sudo groupadd -f k3s-admin
+sudo usermod -aG docker,k3s-admin "$USER"
+```
+
+These commands use Ubuntu's Docker packages. If Docker Engine and Buildx are
+already installed from Docker's own repository, keep that installation and omit
+`docker.io docker-buildx` from the package command.
+
+**Log out and reconnect now** so both new group memberships take effect. Then
+check Docker access without sudo:
+
+```sh
+docker info
+docker buildx version
+id -nG
+```
+
+The last command must list `docker` and `k3s-admin`. All application dependencies
+are built into images; you do not need to install Node.js, Rust, or PostgreSQL
+on the host.
+
+### 3. Install K3s
+
+K3s runs the production containers. nginx stays on the host, so disable K3s's
+bundled ingress controller and load balancer before starting it:
+
+```sh
+sudo install -d -m 755 /etc/rancher/k3s
+sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<'YAML'
+node-name: kaede-production
+write-kubeconfig-mode: "0640"
+write-kubeconfig-group: k3s-admin
+secrets-encryption: true
+disable:
+  - traefik
+  - servicelb
+YAML
+curl -fsSL https://get.k3s.io -o /tmp/kaede-install-k3s.sh
+sudo env INSTALL_K3S_VERSION=v1.36.4+k3s1 INSTALL_K3S_SKIP_START=true \
+  sh /tmp/kaede-install-k3s.sh
+sudo systemctl enable --now k3s
+```
+
+Allow time for the API to start, then wait for the node and system services:
+
+```sh
+for attempt in $(seq 1 90); do
+  sudo k3s kubectl get nodes >/dev/null 2>&1 && break
+  sleep 2
+done
+sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=180s
+sudo k3s kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=180s
+```
+
+Do not continue until both readiness commands succeed. If startup fails, inspect
+`sudo journalctl -u k3s -n 100 --no-pager`.
+
+**Proxmox/unprivileged LXC:** Docker nesting, cgroup v2, and the host kernel
+support required by K3s must already be available. If kubelet reports that it
+cannot use `/dev/kmsg` in the user namespace, append this to
+`/etc/rancher/k3s/config.yaml`, restart with `sudo systemctl restart k3s`, and
+repeat the readiness checks:
+
+```yaml
+kubelet-arg:
+  - feature-gates=KubeletInUserNamespace=true
+```
+
+For an existing Kubernetes cluster, skip the installation commands. You will
+need a readable kubeconfig, permission to create the instance's resources, and
+a working storage class. The rest of this walkthrough assumes the local,
+single-node K3s installation above.
+
+### 4. Download Kaede and enable local image imports
+
+Choose a permanent checkout location. Run the remaining `make` commands from
+this directory:
 
 ```sh
 git clone https://github.com/CookieNom/KaedeChat.git
 cd KaedeChat
-docker compose version
+make tools
+.kaede-tools/bin/kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get nodes
 ```
 
-Run the remaining commands from this directory. Examples use
-`chat.example.com`; replace it with your domain.
+`make tools` installs the pinned, checksum-verified command-line tools into this
+checkout. The node should show `Ready`, without needing sudo. If the kubeconfig
+is unreadable, check `id -nG` and reconnect after adding the `k3s-admin` group;
+do not make cluster credentials world-readable.
 
-### 2. Configure the instance
+Docker builds Kaede's images, but K3s has a separate image store. Install the
+helper that imports them:
 
-The wizard writes `.env` and a Compose override for your choices. Keep TCP
-80/443 public and the Caddy/API loopback ports private. Voice also needs the
-[RTC/TURN ports](docs/operator.md#hosts-certificates-and-ports).
+```sh
+sudo install -o root -g root -m 0755 deploy/kubernetes/import-image.sh /usr/local/sbin/kaede-import-image
+whoami
+sudo visudo -f /etc/sudoers.d/kaede-image-import
+```
 
-From a clean checkout, generate the production configuration and review the
-files before starting anything:
+In the editor, add the following line, replacing `YOUR_LOGIN` with the username
+printed by `whoami`. Keep the final `""`; it restricts the helper to no arguments.
+Save and exit:
+
+```sudoers
+YOUR_LOGIN ALL=(root) NOPASSWD: /usr/local/sbin/kaede-import-image ""
+```
+
+Then fix the file permissions and validate the rule:
+
+```sh
+sudo chown root:root /etc/sudoers.d/kaede-image-import
+sudo chmod 0440 /etc/sudoers.d/kaede-image-import
+sudo visudo -c
+sudo -n -l /usr/local/sbin/kaede-import-image
+```
+
+`visudo` must report `parsed OK`, and the final command must list the helper
+without asking for a password. This is the only privileged operation used by
+normal deployments and local-image updates.
+
+### 5. Obtain your HTTPS certificate
+
+If you already manage a certificate for these hostnames, keep it and use its
+absolute certificate/key paths in step 6. Otherwise, the following sets up
+Certbot validation on a new nginx installation. DNS and inbound port 80 from
+step 1 must be working first.
+
+```sh
+sudo mkdir -p /var/www/letsencrypt
+sudo tee /etc/nginx/conf.d/kaede.conf >/dev/null <<'NGINX'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name chat.example.com media.chat.example.com;
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+    location / { return 404; }
+}
+NGINX
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot certonly --webroot -w /var/www/letsencrypt \
+  --cert-name chat.example.com \
+  -d chat.example.com -d media.chat.example.com
+```
+
+For external S3 without a local media hostname, remove `media.chat.example.com`
+from `server_name` and omit its `-d` argument. Certbot will ask for a contact
+email and agreement to its terms.
+
+The resulting paths are:
+
+- Certificate: `/etc/letsencrypt/live/chat.example.com/fullchain.pem`
+- Private key: `/etc/letsencrypt/live/chat.example.com/privkey.pem`
+
+Do not overwrite another site's nginx configuration. The temporary Kaede
+HTTP-only file above will be replaced with Kaede's generated configuration in
+step 7.
+
+### 6. Configure your instance
 
 ```sh
 make setup
+```
+
+The wizard creates `.env`, `.kaede-kubernetes.json`, and a host nginx
+configuration. For the single-server installation above, use these answers:
+
+| Wizard question | Answer |
+| --- | --- |
+| Instance domain | `chat.example.com` (your actual domain) |
+| Production kubeconfig | `/etc/rancher/k3s/k3s.yaml` |
+| Kubernetes context | `default`, as shown by the wizard |
+| Namespace | `kaede` |
+| Image delivery | `local` |
+| Image repository prefix | Keep `kaede.local`; no registry is contacted |
+| Storage class / capacity | `local-path` / `20Gi` per volume |
+| Image-pull Secret | Leave blank |
+| Host nginx configuration | Yes |
+| Certificate and private-key paths | The two paths from step 5 |
+| Internal edge / diagnostic ports | Keep `18081` / `18082` if available |
+| Storage provider | `Bundled Garage`, or your prepared S3 provider |
+| Automatic updates | No for the initial installation |
+
+Choose voice/video if you opened its ports in step 1. If setup selects different
+ports because some are occupied, update your firewall/NAT rules to match the
+five ports it displays; only the four transport/TURN ports need public access.
+Search is available through bundled Meilisearch. Monitoring is optional.
+
+For email, supply your SMTP/provider credentials, or choose **Disabled (no email
+at signup)**. With email disabled, users register with a username and password
+and cannot use email-based password recovery. GIF search, Turnstile, and push
+notifications are optional; the wizard explains their required credentials.
+Using the public push relay does not require hosting a relay yourself.
+
+You do not need to copy `.env.example` or invent encryption/storage keys: setup
+generates the required secrets. Keep `.env` private and back it up. Do not
+change the domain or regenerate the instance keys after users have joined.
+
+The wizard **does not** start Kaede, install nginx configuration, obtain
+certificates, or open firewall ports. After it finishes, run:
+
+```sh
 make env-check
-make generated-compose-check
+make kubernetes-check
 ```
 
-The generated deployment is `.env`, `deploy/compose.generated.yml`, and
-`deploy/generated/README.txt`. If you selected host nginx, also review and
-install `deploy/generated/kaede.nginx.conf`, run `nginx -t`, and reload nginx
-only after validation succeeds. The wizard won't obtain certificates, install
-the proxy file, change firewall rules, or start Kaede for you. For external
-S3, keep the buckets private and follow the
-[exact CORS rules](docs/deployment-wizard.md#after-setup).
+Both must pass before deployment. The generated
+`deploy/generated/README.txt` records the ports and services you selected.
 
-### 3. Start and check the services
-
-After the setup checks pass, build and start the services:
+### 7. Start Kaede and connect nginx
 
 ```sh
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml \
-  up -d --build --wait --wait-timeout 180
+make deploy
+make status
 ```
 
-`preflight` checks configuration, then `migrate` applies pending database
-migrations and initializes the instance. Application services wait for both to
-succeed. If either fails, inspect its logs and fix the cause before restarting;
-do not run a separate host migration or bypass the startup dependencies.
+The first deployment builds and imports the images, creates persistent storage,
+applies database migrations, checks the media buckets, and waits for the
+application to become ready. It can take several minutes. Deployment rows
+should show matching `READY` counts; completed setup Jobs are normal.
 
-After startup, check the one-shot services, application logs, and readiness:
+If deployment fails, read its error before retrying. Useful diagnostics are:
 
 ```sh
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml ps --all
+make logs SERVICE=api
+make logs SERVICE=preflight
+```
 
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml \
-  logs --tail=200 migrate api gateway worker scheduler caddy
+Review the generated nginx file locally; it contains the domains, certificate
+paths, and a private proxy secret. Install it in place of the temporary file
+from step 5:
 
+```sh
+less deploy/generated/kaede.nginx.conf
+sudo install -o root -g root -m 0600 deploy/generated/kaede.nginx.conf /etc/nginx/conf.d/kaede.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+If `nginx -t` fails, correct the reported error before reloading. Kaede does not
+reload nginx for you. Keep the generated ACME challenge locations so Certbot
+can renew the certificate.
+
+Check the application and the full HTTPS route:
+
+```sh
 curl --fail http://127.0.0.1:18082/health/ready
 curl --fail https://chat.example.com/.well-known/kaede/server
 ```
 
-Replace `chat.example.com` and the diagnostic port with your values from setup.
-`migrate`, `preflight`, `frontend-build`, and storage initialization should
-exit successfully; the long-running services should be healthy. That last
-discovery request exercises DNS, TLS, nginx, Caddy routing, and the federation
-identity in one go.
+The first should return `{"status":"ready"}`; the second should return your
+instance's discovery document. Substitute your selected diagnostic port if it
+is not `18082`. Then open **https://chat.example.com** in a browser.
 
-### 4. Create your account and grant owner access
+### 8. Create the owner account and test the installation
 
-Register a normal local account through the web interface first, then grant it
-the `owner` role from the running API container:
+Register an account through the website. If you enabled email, complete email
+verification. Grant that local account owner access, replacing `alice` with
+its username:
 
 ```sh
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml \
-  exec -T api kaede admin-grant alice --role owner
+make exec SERVICE=api COMMAND='kaede admin-grant alice --role owner'
 ```
 
-The command takes a local username (`alice`) or the complete local handle
-(`alice@chat.example.com`). Remote users and bot accounts can't hold
-instance-administration roles. Open `https://chat.example.com/administration`
-and sign in with that account; if it was already signed in, reload the page
-after granting the role. The browser never uses or exposes an operator admin
-token.
+Sign in and open **https://chat.example.com/administration**. You do not put an
+operator token into the browser. Create a guild and a channel, send a message,
+and upload and download an attachment. For voice, join the same voice channel
+from two accounts, preferably on different networks, and test audio.
 
-Owner grants and removals use the CLI. Owners can delegate other staff roles
-from the panel. Keep two protected owner accounts to avoid losing access.
-See the [administration guide](docs/administration-and-developer-portals.md)
-for roles, moderation, and application review.
+### 9. Set up certificate renewal and backups
 
-### 5. Create a guild or install a bot
+For the Certbot installation above, enable its timer and install a reload hook:
 
-Open the web app, create a guild, and send a message in its text channel.
-If you enabled LiveKit during setup, create a voice channel and test joining
-from a second account before adding bot media features.
+```sh
+sudo systemctl enable --now certbot.timer
+sudo install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/kaede >/dev/null <<'SH'
+#!/bin/sh
+set -eu
+[ "$RENEWED_LINEAGE" = /etc/letsencrypt/live/chat.example.com ] || exit 0
+nginx -t
+systemctl reload nginx
+SH
+sudo chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/kaede
+sudo certbot renew --dry-run
+```
 
-The Developer Portal at `/developers` is available to active local human
-accounts without an administrator grant. Follow the
-[bot quickstart](docs/bot-api-quickstart.md) to create an application, install
-it in your guild, enroll its Python worker, publish `/ping`, and run it.
+If you enabled voice, also append this line to the hook so LiveKit loads the
+renewed TURN certificate. Replace `kaede` if you selected another namespace:
+
+```sh
+sudo tee -a /etc/letsencrypt/renewal-hooks/deploy/kaede >/dev/null <<'SH'
+/usr/local/bin/k3s kubectl -n kaede rollout restart deployment/livekit
+SH
+```
+
+Restarting LiveKit can interrupt active calls. If another tool manages your
+certificates, arrange the equivalent nginx reload and LiveKit restart there.
+
+Before accepting important data, arrange backups of PostgreSQL, media storage,
+cache snapshots, `.env`, and `.kaede-kubernetes.json`. Keep a copy off the server
+and test restoration. Persistent Kubernetes volumes are not backups. See
+[backup and restore](docs/operator.md#backup-and-restore-boundary) for maintenance
+and recovery procedures; the initial deployment is now complete.
+
+The [K3s installation reference](https://docs.k3s.io/installation/configuration),
+[Ubuntu Docker packages](https://packages.ubuntu.com/noble-updates/docker-buildx),
+and [Certbot guide](https://eff-certbot.readthedocs.io/en/stable/using.html)
+cover the underlying host tools if you need to adapt this walkthrough.
 
 ## Updates and backups
-
-After the initial deployment, update Kaede from the repository directory:
 
 ```sh
 make auto-update-run
 ```
 
-This checks the configured Git branch, builds the update, runs your backup hook
-if configured, stops application writers, applies migrations, and restarts the
-services with health checks. It works even when scheduled updates are disabled.
-The updater needs Python 3 and `flock` (from util-linux) on the host, and a
-checkout without modified tracked files.
+The updater fast-forwards a clean checkout, builds and imports images, runs
+preflight and your backup hook, and rolls out compatible application changes.
+New API/gateway pods must be ready before old ones terminate. Existing
+WebSockets receive a bounded grace period and then reconnect/resume; sockets
+cannot transfer between processes. Failed compatible application rollouts
+restore the previous application specifications.
 
-Back up PostgreSQL, object storage, secrets, and configuration together before
-updating. Configure a backup hook and optional scheduled updates with
-`make setup`. To see the updater configuration and timer status:
-
-```sh
-make auto-update-status
-```
-
-See the [operator guide](docs/operator.md#optional-automatic-updates) for
-scheduling, backup hooks, and recovery if an update fails.
-
-To stop services while retaining their data:
+Schema or infrastructure changes stop unattended deployment before active
+workloads change. After a verified backup, deploy those explicitly:
 
 ```sh
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml down
+make deploy MAINTENANCE=1
 ```
 
-Use both Compose files for production commands. Adding `-v` deletes named-volume
-data; leave it out when stopping or updating your instance.
+Maintenance deployments stop writers and may interrupt service. Single-node
+storage, voice-server replacement, and host failures are not highly available.
+Back up PostgreSQL, object storage, cache snapshots, `.env`, and configuration
+together. See [updates and recovery](docs/operator.md#upgrade-and-rollback).
+Scheduled updates remain optional: `make auto-update-enable`,
+`make auto-update-disable`, and `make auto-update-status` manage the user timer.
 
 ## Development
+
+Use a separate checkout for development. You need Docker with Buildx, Git,
+Make, Python 3.11+, and a Linux systemd user session for background Tilt. You
+do not need to install host K3s or run the production setup wizard. From that
+checkout, run:
+
+```sh
+make tools
+make dev                 # start in background, using .env when present
+make dev-logs            # follow logs; Ctrl-C stops following only
+make dev-down           # keeps persistent data
+make dev-federation     # opt-in, separate alpha/beta cluster
+make dev-federation-down
+make dev-federation-logs # follow alpha/beta logs
+```
+
+Without `.env`, development uses disposable test credentials and local Garage;
+voice, search, scanning, and monitoring are off. With `.env`, enabled features
+are retained, but API and gateway concurrency is reduced to one. Never point
+a development environment at production databases or writable production S3
+buckets. Each checkout has its own cluster. Background Tilt uses a Linux systemd
+user service; builds continue after the command returns. It is not enabled at
+boot. For foreground operation, run:
+
+```sh
+PATH="$PWD/.kaede-tools/bin:$PATH" python3 deploy/kubernetes/dev.py up --foreground --env-file .env
+```
+
+`make dev-down` releases its CPU and RAM; do not delete the cluster or use `tilt down` to stop it, because that
+can delete persistent data.
+
+The default single-instance edge is `http://dev.localhost:28081`; an existing
+`.env` uses its configured domain and `KAEDE_CADDY_HOST_PORT` with host nginx.
+Alpha/beta use `http://alpha.localhost:28081` and
+`http://beta.localhost:28181`. Set `DEV_HTTP_PORT` before first cluster creation
+to change the host port. Browser loopback HTTP works for local development;
+use host nginx and trusted TLS when testing from another device. Changing a
+cluster’s published ports or host mounts requires recreating its node; export
+its data before deleting the cluster.
+
 
 Enable automatic pre-commit checks once per clone (requires Python 3.11+):
 
@@ -208,13 +506,13 @@ Run the standard code checks with:
 make check
 ```
 
-`make dev` starts the two-instance development environment. The
+The
 [operator guide](docs/operator.md#acceptance-checks) lists the focused acceptance
 checks. Native client build requirements are in the
 [desktop](desktop/README.md) and [mobile](mobile/README.md) READMEs.
 
-For Docker inside unprivileged LXC, the supplied Compose files avoid unlimited
-`memlock`, and lockfile tooling runs as the invoking UID/GID.
+For unprivileged LXC, see the operator guide’s K3s prerequisites. Lockfile
+tooling runs as the invoking UID/GID.
 
 ## License
 

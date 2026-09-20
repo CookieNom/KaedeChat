@@ -1,7 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use kaede_protocol::{GatewayEnvelope, GatewayOp, PROTOCOL_VERSION};
+use kaede_protocol::{GatewayCloseCode, GatewayEnvelope, GatewayOp, PROTOCOL_VERSION};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -69,15 +69,23 @@ pub struct GatewayHandle {
     pub resume: Arc<Mutex<ResumeState>>,
 }
 
+/// Open the gateway using current account credentials on each connection.
+/// The provider receives `true` when the server rejected the previous token
+/// and the account session must refresh it before retrying.
 #[must_use]
-pub fn spawn(url: Url, token: SecretString) -> GatewayHandle {
+pub fn spawn<F, Fut, E>(url: Url, token_provider: F) -> GatewayHandle
+where
+    F: Fn(bool) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<SecretString, E>> + Send,
+    E: Send,
+{
     let (event_tx, event_rx) = mpsc::channel(512);
     let (command_tx, command_rx) = mpsc::channel(128);
     let (status_tx, status_rx) = watch::channel(GatewayStatus::Disconnected);
     let resume = Arc::new(Mutex::new(ResumeState::default()));
     tokio::spawn(run(
         url,
-        token,
+        token_provider,
         event_tx,
         command_rx,
         status_tx,
@@ -91,32 +99,52 @@ pub fn spawn(url: Url, token: SecretString) -> GatewayHandle {
     }
 }
 
-async fn run(
+async fn run<F, Fut, E>(
     url: Url,
-    token: SecretString,
+    token_provider: F,
     event_tx: mpsc::Sender<GatewayEnvelope>,
     mut command_rx: mpsc::Receiver<GatewayCommand>,
     status_tx: watch::Sender<GatewayStatus>,
     resume: Arc<Mutex<ResumeState>>,
-) {
+) where
+    F: Fn(bool) -> Fut + Send,
+    Fut: Future<Output = Result<SecretString, E>> + Send,
+    E: Send,
+{
     let mut delay = Duration::from_secs(1);
+    let mut refresh_token = false;
     loop {
         let _ = status_tx.send(if delay == Duration::from_secs(1) {
             GatewayStatus::Connecting
         } else {
             GatewayStatus::Reconnecting
         });
-        match connect_once(
-            &url,
-            &token,
-            &event_tx,
-            &mut command_rx,
-            &status_tx,
-            &resume,
-        )
-        .await
-        {
+        let result = match token_provider(refresh_token).await {
+            Ok(token) => {
+                refresh_token = false;
+                connect_once(
+                    &url,
+                    &token,
+                    &event_tx,
+                    &mut command_rx,
+                    &status_tx,
+                    &resume,
+                )
+                .await
+            }
+            Err(_) => Ok(ConnectionEnd::AuthenticationFailed),
+        };
+        if *status_tx.borrow() == GatewayStatus::Connected {
+            delay = Duration::from_secs(1);
+        }
+        match result {
             Ok(ConnectionEnd::Shutdown) => break,
+            Ok(ConnectionEnd::AuthenticationFailed) => {
+                refresh_token = true;
+                let _ = status_tx.send(GatewayStatus::AuthenticationFailed);
+                time::sleep(delay).await;
+                delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+            }
             Ok(ConnectionEnd::Reconnect) | Err(_) => {
                 let _ = status_tx.send(GatewayStatus::Reconnecting);
                 time::sleep(delay).await;
@@ -127,6 +155,7 @@ async fn run(
     let _ = status_tx.send(GatewayStatus::Disconnected);
 }
 
+#[allow(clippy::too_many_lines)] // Keep the socket handshake and recovery decisions together.
 async fn connect_once(
     url: &Url,
     token: &SecretString,
@@ -150,6 +179,9 @@ async fn connect_once(
         .get("heartbeat_interval")
         .and_then(Value::as_u64)
         .ok_or(GatewayError::InvalidHello)?;
+    if !(1_000..=120_000).contains(&interval_ms) {
+        return Err(GatewayError::InvalidHello);
+    }
     let resume_snapshot = resume.lock().await.clone();
     let auth = if let (Some(session_id), Some(sequence)) =
         (resume_snapshot.session_id, resume_snapshot.sequence)
@@ -169,11 +201,19 @@ async fn connect_once(
     writer.send(Message::Text(auth.to_string().into())).await?;
     let mut heartbeat = time::interval(Duration::from_millis(interval_ms));
     heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-    let _ = status_tx.send(GatewayStatus::Connected);
+    let mut heartbeat_acknowledged = true;
+    let mut ready = false;
+    let ready_deadline = time::sleep(IDENTIFY_TIMEOUT);
+    tokio::pin!(ready_deadline);
 
     loop {
         tokio::select! {
+            () = &mut ready_deadline, if !ready => return Ok(ConnectionEnd::Reconnect),
             _ = heartbeat.tick() => {
+                if !heartbeat_acknowledged {
+                    return Ok(ConnectionEnd::Reconnect);
+                }
+                heartbeat_acknowledged = false;
                 let sequence = resume.lock().await.sequence;
                 writer.send(Message::Text(json!({
                     "op": GatewayOp::Heartbeat as u8,
@@ -191,7 +231,18 @@ async fn connect_once(
             incoming = reader.next() => {
                 let Some(incoming) = incoming else { return Ok(ConnectionEnd::Reconnect); };
                 let incoming = incoming?;
-                if incoming.is_close() {
+                if let Message::Close(frame) = incoming {
+                    if let Some(frame) = frame {
+                        let code = u16::from(frame.code);
+                        if code == GatewayCloseCode::AuthenticationFailed as u16
+                            || code == GatewayCloseCode::NotAuthenticated as u16
+                        {
+                            return Ok(ConnectionEnd::AuthenticationFailed);
+                        }
+                        if code == GatewayCloseCode::InvalidSequence as u16 {
+                            *resume.lock().await = ResumeState::default();
+                        }
+                    }
                     return Ok(ConnectionEnd::Reconnect);
                 }
                 if incoming.is_ping() {
@@ -202,6 +253,10 @@ async fn connect_once(
                 let envelope = decode_text(incoming)?;
                 match envelope.op {
                     op if op == GatewayOp::Dispatch as u8 => {
+                        if matches!(envelope.t.as_deref(), Some("READY" | "RESUMED")) {
+                            ready = true;
+                            let _ = status_tx.send(GatewayStatus::Connected);
+                        }
                         if let Some(sequence) = envelope.s {
                             resume.lock().await.sequence = Some(sequence);
                         }
@@ -219,6 +274,7 @@ async fn connect_once(
                         *resume.lock().await = ResumeState::default();
                         return Ok(ConnectionEnd::Reconnect);
                     }
+                    op if op == GatewayOp::HeartbeatAck as u8 => heartbeat_acknowledged = true,
                     _ => {}
                 }
             }
@@ -300,6 +356,7 @@ fn decode_text(message: Message) -> Result<GatewayEnvelope, GatewayError> {
 
 enum ConnectionEnd {
     Reconnect,
+    AuthenticationFailed,
     Shutdown,
 }
 
@@ -330,6 +387,131 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One scripted exchange covers the full reconnect sequence.
+    async fn reconnect_refreshes_credentials_and_recovers_a_rejected_resume() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::{accept_async, tungstenite::protocol::CloseFrame};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let url = Url::parse(&format!(
+            "ws://{}/gateway",
+            listener.local_addr().expect("address")
+        ))
+        .expect("URL");
+        let server = tokio::spawn(async move {
+            for attempt in 0..4 {
+                let (stream, _) = listener.accept().await.expect("connection");
+                let mut socket = accept_async(stream).await.expect("WebSocket");
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "op": GatewayOp::Hello as u8,
+                            "d": {"heartbeat_interval": 1000},
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("HELLO");
+                let auth = decode_text(socket.next().await.expect("auth").expect("frame"))
+                    .expect("auth payload");
+                assert_eq!(
+                    auth.d["token"],
+                    if attempt == 0 { "expired" } else { "refreshed" }
+                );
+                assert_eq!(
+                    auth.op,
+                    if attempt == 2 {
+                        GatewayOp::Resume
+                    } else {
+                        GatewayOp::Identify
+                    } as u8
+                );
+                if attempt == 0 || attempt == 2 {
+                    let code = if attempt == 0 {
+                        GatewayCloseCode::AuthenticationFailed
+                    } else {
+                        assert_eq!(auth.d["seq"], 7);
+                        GatewayCloseCode::InvalidSequence
+                    };
+                    socket
+                        .close(Some(CloseFrame {
+                            code: (code as u16).into(),
+                            reason: "".into(),
+                        }))
+                        .await
+                        .expect("close");
+                    continue;
+                }
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "op": GatewayOp::Dispatch as u8, "t": "READY", "s": 7,
+                            "d": {"session_id": format!("session-{attempt}")},
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("READY");
+                if attempt == 1 {
+                    socket
+                        .send(Message::Text(
+                            json!({"op": GatewayOp::Reconnect as u8, "d": null})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .expect("RECONNECT");
+                } else {
+                    while let Some(Ok(message)) = socket.next().await {
+                        if message.is_close() {
+                            break;
+                        }
+                        socket
+                            .send(Message::Text(
+                                json!({"op": GatewayOp::HeartbeatAck as u8, "d": null})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .expect("ACK");
+                    }
+                }
+            }
+        });
+        let refreshes = Arc::new(Mutex::new(Vec::new()));
+        let calls = refreshes.clone();
+        let mut gateway = spawn(url, move |refresh| {
+            let calls = calls.clone();
+            async move {
+                let mut calls = calls.lock().await;
+                calls.push(refresh);
+                Ok::<_, ()>(SecretString::from(if calls.len() == 1 {
+                    "expired"
+                } else {
+                    "refreshed"
+                }))
+            }
+        });
+        time::timeout(Duration::from_secs(12), async {
+            let first = gateway.events.recv().await.expect("first READY");
+            assert_eq!(first.d["session_id"], "session-1");
+            let recovered = gateway.events.recv().await.expect("replacement READY");
+            assert_eq!(recovered.d["session_id"], "session-3");
+            gateway
+                .commands
+                .send(GatewayCommand::Shutdown)
+                .await
+                .expect("shutdown");
+            server.await.expect("server assertions");
+        })
+        .await
+        .expect("automatic recovery");
+        assert_eq!(*refreshes.lock().await, vec![false, true, false, false]);
+    }
 
     #[test]
     fn member_requests_are_bounded_before_serialization() {

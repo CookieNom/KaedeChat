@@ -267,7 +267,8 @@ final class GatewayClient {
   }) : _socketConnector =
             socketConnector ?? ((uri) => WebSocketChannel.connect(uri));
 
-  final Future<SessionTokens?> Function() tokens;
+  /// Refresh rejected credentials through the account's shared refresh path.
+  final Future<SessionTokens?> Function(bool refresh) tokens;
   final GatewaySocketConnector _socketConnector;
   final Duration transportReadyTimeout;
   final Duration sessionReadyTimeout;
@@ -286,6 +287,7 @@ final class GatewayClient {
   int _generation = 0;
   int _reconnectAttempts = 0;
   bool _closed = false;
+  bool _refreshTokens = false;
   bool _awaitingHeartbeatAck = false;
   Future<void>? _reconnecting;
   Future<void>? _foregroundReconnect;
@@ -404,6 +406,15 @@ final class GatewayClient {
         ),
       ),
       onDone: () {
+        if (_closed || generation != _generation) return;
+        if (socket.closeCode == GatewayCloseCode.invalidSequence.value) {
+          _sessionId = null;
+          _sequence = null;
+        }
+        if (socket.closeCode == GatewayCloseCode.authenticationFailed.value ||
+            socket.closeCode == GatewayCloseCode.notAuthenticated.value) {
+          _refreshTokens = true;
+        }
         final close = gatewayCloseDetails(
           socket.closeCode,
           socket.closeReason,
@@ -496,6 +507,7 @@ final class GatewayClient {
     _recoveryWatchdog?.cancel();
     _recoveryWatchdog = null;
     _tokens = null;
+    _refreshTokens = false;
     _sessionId = null;
     _sequence = null;
     _awaitingHeartbeatAck = false;
@@ -720,12 +732,13 @@ final class GatewayClient {
       minimumDelay = null;
       await Future<void>.delayed(delay);
       if (_closed || expectedGeneration != _generation) return;
-      final current = await tokens();
-      if (current == null || _closed || expectedGeneration != _generation) {
-        return;
-      }
-      _tokens = current;
       try {
+        final current = await tokens(_refreshTokens);
+        if (current == null || _closed || expectedGeneration != _generation) {
+          return;
+        }
+        _refreshTokens = false;
+        _tokens = current;
         _setHealth(const GatewayHealth(
           GatewayConnectionPhase.reconnecting,
           message: 'Reconnecting realtime updates…',
@@ -734,7 +747,7 @@ final class GatewayClient {
         await _openTransport(current, expectedGeneration);
         return;
       } on Object {
-        // A failed DNS/TLS/WebSocket handshake has no stream callback to
+        // A failed token refresh or DNS/TLS/WebSocket handshake has no callback to
         // schedule another attempt. Keep this single supervisor alive and
         // carry forward the generation created by the failed transport.
         if (_closed || expectedGeneration != _generation) return;

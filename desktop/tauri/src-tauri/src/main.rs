@@ -1120,12 +1120,19 @@ async fn activate_account(account: NativeAccount, state: &NativeState) -> Result
     if let Some(commands) = state.gateway_commands.write().await.take() {
         let _ = commands.send(GatewayCommand::Shutdown).await;
     }
-    let token = account
-        .session
-        .access_token()
-        .await
-        .map_err(NativeError::from)?;
-    let gateway = kaede_gateway::spawn(account.api.endpoint().gateway_url().clone(), token);
+    let session = account.session.clone();
+    let gateway = kaede_gateway::spawn(
+        account.api.endpoint().gateway_url().clone(),
+        move |refresh| {
+            let session = session.clone();
+            async move {
+                if refresh {
+                    session.refresh().await?;
+                }
+                session.access_token().await
+            }
+        },
+    );
     start_gateway_forwarder(gateway, state).await;
     *state.account.write().await = Some(Arc::new(account));
     Ok(())

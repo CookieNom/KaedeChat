@@ -1,0 +1,52 @@
+{
+  "backend-check": [
+    "sh",
+    "-ec",
+    "ruff check . && ruff format --check . && mypy app scripts"
+  ],
+  "backend-test": [
+    "pytest",
+    "--cov=app",
+    "--cov-report=term-missing"
+  ],
+  "frontend-check": [
+    "sh",
+    "-ec",
+    "pnpm lint && pnpm check && pnpm build && pnpm check:csp && pnpm check:e2ee-wasm"
+  ],
+  "frontend-test": [
+    "sh",
+    "-ec",
+    "pnpm exec svelte-kit sync && pnpm test && pnpm test:livekit-crypto"
+  ],
+  "migration-check": [
+    "sh",
+    "-ec",
+    "alembic upgrade a23d8f1c6e40 && python -m scripts.verify_migration_guards prepare-thread-permissions && alembic upgrade head && python -m scripts.verify_migration_guards verify-thread-permissions && python -m scripts.verify_migration_guards cleanup-thread-permissions && python -m scripts.verify_schema && alembic downgrade fb7c3e9a1d42 && python -m scripts.verify_migration_guards prepare-bot-permissions && alembic upgrade head && python -m scripts.verify_migration_guards verify-bot-permissions-upgrade && python -m scripts.verify_migration_guards prepare-bot-permissions-downgrade && alembic downgrade fb7c3e9a1d42 && python -m scripts.verify_migration_guards verify-bot-permissions-downgrade && alembic upgrade head && python -m scripts.verify_migration_guards verify-bot-permissions-upgrade && python -m scripts.verify_migration_guards cleanup-bot-permissions && python -m scripts.verify_migration_guards prepare-foundation-feature && if downgrade_output=\"$(alembic downgrade fb7c3e9a1d42 2>&1)\"; then\n  echo 'unsafe foundation-feature downgrade unexpectedly succeeded' >&2;\n  exit 1;\nfi && case \"$downgrade_output\" in\n  *'cannot downgrade fc9a4b7d2e10 while Stage or new channel settings exist'*) ;;\n  *) printf '%s\\n' \"$downgrade_output\" >&2; exit 1 ;;\nesac && python -m scripts.verify_migration_guards verify-foundation-feature && python -m scripts.verify_migration_guards cleanup-foundation-feature && alembic downgrade b46d9a1f2c73 && python -m scripts.verify_migration_guards prepare-federation && if downgrade_output=\"$(alembic downgrade a35c8d2e7f41 2>&1)\"; then\n  echo 'unsafe federation-event downgrade unexpectedly succeeded' >&2;\n  exit 1;\nfi && case \"$downgrade_output\" in\n  *'cannot downgrade: federation event IDs collide across origins'*) ;;\n  *) printf '%s\\n' \"$downgrade_output\" >&2; exit 1 ;;\nesac && python -m scripts.verify_migration_guards verify-federation && python -m scripts.verify_migration_guards cleanup-federation && python -m scripts.verify_migration_guards prepare-guild && if downgrade_output=\"$(alembic downgrade a35c8d2e7f41 2>&1)\"; then\n  echo 'unsafe guild-event downgrade unexpectedly succeeded' >&2;\n  exit 1;\nfi && case \"$downgrade_output\" in\n  *'cannot downgrade: guild event IDs collide across guild domains'*) ;;\n  *) printf '%s\\n' \"$downgrade_output\" >&2; exit 1 ;;\nesac && python -m scripts.verify_migration_guards verify-guild && python -m scripts.verify_migration_guards cleanup-guild && alembic downgrade base && alembic upgrade head && TEST_DATABASE_URL=\"$KAEDE_DATABASE_URL\" pytest -q -m postgres && alembic check"
+  ],
+  "identity-check": [
+    "sh",
+    "-ec",
+    "alembic upgrade head && kaede bootstrap && python -m scripts.verify_identity"
+  ],
+  "chat-check": [
+    "sh",
+    "-ec",
+    "alembic upgrade head && kaede bootstrap && python -m scripts.verify_chat"
+  ],
+  "media-check": [
+    "sh",
+    "-ec",
+    "alembic upgrade head && kaede bootstrap && python -m scripts.verify_media"
+  ],
+  "voice-check": [
+    "python",
+    "-m",
+    "scripts.verify_voice"
+  ],
+  "release-check": [
+    "sh",
+    "-ec",
+    "alembic upgrade head && kaede bootstrap && python -m scripts.verify_release"
+  ]
+}

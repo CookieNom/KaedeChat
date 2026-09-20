@@ -595,13 +595,16 @@ final class KaedeApiClient {
     }
   }
 
+  Future<SessionTokens> refreshTokens() =>
+      _refreshSingleFlight(_sessionGeneration);
+
   Future<SessionTokens> _refreshSingleFlight(int generation) {
     if (_refreshing case final existing?) return existing;
-    final created = _refresh(generation);
-    _refreshing = created;
-    created.whenComplete(() {
+    late final Future<SessionTokens> created;
+    created = _refresh(generation).whenComplete(() {
       if (identical(_refreshing, created)) _refreshing = null;
     });
+    _refreshing = created;
     return created;
   }
 

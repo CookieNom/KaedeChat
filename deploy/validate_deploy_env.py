@@ -1,11 +1,4 @@
-"""Validate the operator environment at the deployment boundary.
-
-The application settings validator sees the environment passed to a process.  A
-Compose ``--env-file`` is otherwise only an interpolation source, which can hide
-misspelled variables from that validator.  Production preflight loads the same
-file through ``env_file`` and invokes this small, dependency-free guard before
-the application preflight.
-"""
+"""Validate operator environment files before Kubernetes deployment."""
 
 from __future__ import annotations
 
@@ -543,8 +536,8 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
     if environment != "production":
         if not allow_nonproduction:
             raise DeploymentConfigurationError(
-                "the production Compose topology requires KAEDE_ENVIRONMENT=production; "
-                "use deploy/compose.dev.yml or the isolated validation targets"
+                "the production deployment requires KAEDE_ENVIRONMENT=production; "
+                "use make dev or the isolated validation targets"
             )
         return
 
@@ -636,13 +629,6 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
             raise DeploymentConfigurationError(
                 "KAEDE_SEARCH_URL must be an HTTP(S) origin without a path, credentials, "
                 "query, or fragment"
-            )
-        profiles = {
-            item.strip() for item in values.get("COMPOSE_PROFILES", "").split(",") if item.strip()
-        }
-        if search_url.hostname == "meilisearch" and "search" not in profiles:
-            raise DeploymentConfigurationError(
-                "COMPOSE_PROFILES must include search when the bundled Meilisearch URL is used"
             )
         for name, default, minimum, maximum in (
             ("KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS", 5, 1, 30),

@@ -448,6 +448,14 @@ def production_settings(**overrides: object) -> Settings:
 def test_valid_production_settings() -> None:
     configured = production_settings()
     assert configured.domain == "chat.example.com"
+    voice = production_settings(
+        voice_enabled=True,
+        voice_public_url="wss://chat.example.com/livekit",
+        voice_livekit_url="http://livekit:7880",
+        voice_api_key="test-livekit-key",
+        voice_api_secret="test-livekit-secret-0000000000000000",
+    )
+    assert voice.voice_livekit_url == "http://livekit:7880"
 
 
 def test_production_can_disable_email_delivery() -> None:

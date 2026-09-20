@@ -11,7 +11,8 @@ umask 077
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ENV_FILE="$ROOT/.env"
-OVERLAY_FILE="$ROOT/deploy/compose.generated.yml"
+OVERLAY_FILE="$ROOT/.kaede-kubernetes.json"
+export PATH="$ROOT/.kaede-tools/bin:$PATH"
 GENERATED_DIR="$ROOT/deploy/generated"
 LOCK_FILE="$ROOT/.kaede-setup.lock"
 MARKER_FILE="$ROOT/.kaede-setup.in-progress"
@@ -24,7 +25,7 @@ STAGE_DIR=
 
 OUTPUTS=(
   ".env"
-  "deploy/compose.generated.yml"
+  ".kaede-kubernetes.json"
   "deploy/generated/kaede.nginx.conf"
   "deploy/generated/README.txt"
 )
@@ -33,14 +34,14 @@ usage() {
   cat <<'EOF'
 Usage: ./setup.sh [--dry-run] [--plain]
 
-Interactively generate Kaede's production .env, Compose override, optional host
+Interactively generate Kaede's production .env, Kubernetes target configuration, optional host
 nginx configuration, and optional per-user automatic-update timer.
 
   --dry-run  collect and validate answers without writing files
   --plain    use the built-in ANSI interface even when gum is installed
   --help     show this help
 
-The script never starts Docker Compose. It changes a user systemd timer only
+The script never deploys to Kubernetes. It changes a user systemd timer only
 when automatic updates are explicitly enabled or disabled.
 EOF
 }
@@ -63,8 +64,8 @@ command -v openssl >/dev/null || {
   printf 'OpenSSL is required to generate deployment secrets. Install OpenSSL, then rerun make setup.\n' >&2
   exit 2
 }
-[[ -f "$ROOT/deploy/compose.yml" ]] || {
-  printf 'deploy/compose.yml is missing. Restore the repository checkout, then rerun make setup.\n' >&2
+[[ -f "$ROOT/deploy/kubernetes/stack.py" ]] || {
+  printf 'deploy/kubernetes/stack.py is missing. Restore the repository checkout, then rerun make setup.\n' >&2
   exit 2
 }
 [[ -f "$ROOT/deploy/setup-inputs.sh" && ! -L "$ROOT/deploy/setup-inputs.sh" ]] || {
@@ -113,7 +114,7 @@ cleanup() {
       rm -f -- "$MARKER_FILE"
       warn 'Previous configuration restored.'
     else
-      warn 'Rollback was incomplete. Do not run Compose until .kaede-setup.in-progress is resolved.'
+      warn 'Rollback was incomplete. Do not deploy until .kaede-setup.in-progress is resolved.'
     fi
   fi
   [[ $LOCK_CREATED != true ]] || rm -f -- "$LOCK_FILE"
@@ -604,11 +605,35 @@ if [[ -n ${OLD[KAEDE_DOMAIN]-} && ${OLD[KAEDE_DOMAIN]%.} != "$DOMAIN" && ${OLD[K
   die "KAEDE_DOMAIN is already '${OLD[KAEDE_DOMAIN]%.}' and cannot be changed to '$DOMAIN' safely by setup; rerun with the established domain or follow a documented migration procedure"
 fi
 
+command -v python3 >/dev/null || die 'Python 3 is required for Kubernetes configuration'
+command -v kubectl >/dev/null || die 'kubectl is required; run make tools or install kubectl first'
+old_kube() {
+  python3 - "$OVERLAY_FILE" "$1" "$2" <<'PYTHON'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+config = json.loads(path.read_text()) if path.exists() else {}
+print(config.get(sys.argv[2], sys.argv[3]))
+PYTHON
+}
+KUBE_FILE=$(prompt_text 'Kubeconfig path for the production cluster' "$(old_kube kubeconfig "${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}")")
+[[ -f $KUBE_FILE && -r $KUBE_FILE ]] || die 'The selected kubeconfig must be a readable regular file'
+note 'Available Kubernetes contexts:'
+kubectl --kubeconfig "$KUBE_FILE" config get-contexts -o name
+KUBE_CONTEXT=$(prompt_text 'Production Kubernetes context' "$(old_kube context "$(kubectl --kubeconfig "$KUBE_FILE" config current-context)")")
+CLUSTER_UID=$(kubectl --kubeconfig "$KUBE_FILE" --context "$KUBE_CONTEXT" get namespace kube-system -o jsonpath='{.metadata.uid}') || die 'Cannot access the selected Kubernetes cluster'
+[[ -n $CLUSTER_UID ]] || die 'The selected cluster did not return its identity'
+kubectl --kubeconfig "$KUBE_FILE" --context "$KUBE_CONTEXT" wait --for=condition=Ready nodes --all --timeout=30s || die 'The selected cluster has nodes that are not Ready; fix cluster startup before configuring deployment'
 while true; do
-  PROJECT_NAME=$(prompt_text 'Docker Compose project name (optional; blank uses kaede; use the existing name for an installed instance)' "$(old COMPOSE_PROJECT_NAME '')")
-  [[ -z $PROJECT_NAME || $PROJECT_NAME =~ ^[a-z0-9][a-z0-9_-]*$ ]] && break
-  warn 'Use lowercase letters, digits, underscores, or hyphens, starting with a letter or digit.'
+  PROJECT_NAME=$(prompt_text 'Kubernetes namespace for this instance' "$(old KAEDE_NAMESPACE kaede)")
+  [[ $PROJECT_NAME =~ ^[a-z][a-z0-9-]*$ && ${#PROJECT_NAME} -le 63 && $PROJECT_NAME != *- && $PROJECT_NAME != default && $PROJECT_NAME != kube-* ]] && break
+  warn 'Use a dedicated namespace: lowercase letters, digits and hyphens, starting with a letter and ending with a letter or digit.'
 done
+IMAGE_TRANSPORT=$(choose 'Production image delivery' "$(old_kube image_transport local)" local registry)
+IMAGE_REPOSITORY=$(prompt_text 'Image repository prefix (local imports do not contact a registry)' "$(old KAEDE_IMAGE_REPOSITORY kaede.local)")
+STORAGE_CLASS=$(prompt_text 'Kubernetes storage class' "$(old_kube storage_class local-path)")
+STORAGE_SIZE=$(prompt_text 'Capacity requested for each persistent volume' "$(old_kube storage_size 20Gi)")
+IMAGE_PULL_SECRET=$(prompt_text 'Existing image-pull Secret name (blank for local/public images)' "$(old_kube image_pull_secret '')")
 
 FEDERATION_DEFAULT=$(old KAEDE_FEDERATION_MODE open)
 [[ $FEDERATION_DEFAULT == open || $FEDERATION_DEFAULT == allowlist ]] || FEDERATION_DEFAULT=open
@@ -626,14 +651,14 @@ else
   VOICE=false
 fi
 OLD_PROFILES=$(old COMPOSE_PROFILES '')
-if confirm 'Enable the observability profile?' "$([[ ,$OLD_PROFILES, == *,observability,* ]] && printf true || printf false)"; then
+if confirm 'Enable observability?' "$([[ $(old KAEDE_OBSERVABILITY_ENABLED false) == true || ,$OLD_PROFILES, == *,observability,* ]] && printf true || printf false)"; then
   OBSERVABILITY=true
 else
   OBSERVABILITY=false
 fi
 
 section 'Automatic updates' \
-  'Optional host-side updates safely fast-forward a selected Git branch, preflight and build before downtime, then stop writers, migrate once, restart, and health-check. Database rollback remains manual.'
+  'Optional host-side updates safely fast-forward a selected Git branch, build and validate, then roll compatible application updates. Schema changes require an explicit maintenance deployment. Database rollback remains manual.'
 if confirm 'Enable the per-user automatic-update timer?' "$([[ $(old AUTO_UPDATE_ENABLED false) == true ]] && printf true || printf false)"; then
   AUTO_UPDATE=true
 else
@@ -1283,14 +1308,6 @@ LOG_LEVEL=${OLD[KAEDE_LOG_LEVEL]-INFO}
 LOG_LEVEL=${LOG_LEVEL^^}
 case "$LOG_LEVEL" in DEBUG|INFO|WARNING|ERROR) ;; *) die "existing KAEDE_LOG_LEVEL must be DEBUG, INFO, WARNING, or ERROR; received '$LOG_LEVEL'" ;; esac
 
-PROFILES=()
-[[ $VOICE == true ]] && PROFILES+=(voice)
-[[ $OBSERVABILITY == true ]] && PROFILES+=(observability)
-[[ $SEARCH_ENABLED == true ]] && PROFILES+=(search)
-COMPOSE_PROFILES=
-if ((${#PROFILES[@]})); then
-  COMPOSE_PROFILES=$(IFS=,; printf '%s' "${PROFILES[*]}")
-fi
 
 STAGE_DIR=$(mktemp -d "$ROOT/.kaede-setup-stage.XXXXXX")
 chmod 700 "$STAGE_DIR"
@@ -1300,7 +1317,7 @@ emit() {
   local key=$1 value=$2
   [[ $key =~ ^[A-Z][A-Z0-9_]*$ ]] || die "internal invalid environment key: $key"
   [[ $value != *$'\n'* && $value != *$'\r'* ]] || die "invalid control character in $key"
-  [[ $value =~ ^[-A-Za-z0-9_./:@%+,=~{}]*$ ]] || die "$key contains characters unsafe for a Compose dotenv file"
+  [[ $value =~ ^[-A-Za-z0-9_./:@%+,=~{}]*$ ]] || die "$key contains characters unsafe for a dotenv file"
   printf '%s=%s\n' "$key" "$value"
 }
 
@@ -1309,7 +1326,8 @@ emit() {
   emit SETUP_STORAGE_PROVIDER "$STORAGE"
   emit SETUP_EMAIL_PROVIDER "$EMAIL"
   emit SETUP_HOST_NGINX "$HOST_NGINX"
-  [[ -z $PROJECT_NAME ]] || emit COMPOSE_PROJECT_NAME "$PROJECT_NAME"
+  emit KAEDE_NAMESPACE "$PROJECT_NAME"
+  emit KAEDE_IMAGE_REPOSITORY "$IMAGE_REPOSITORY"
   emit AUTO_UPDATE_ENABLED "$AUTO_UPDATE"
   emit AUTO_UPDATE_REMOTE "$AUTO_UPDATE_REMOTE"
   emit AUTO_UPDATE_BRANCH "$AUTO_UPDATE_BRANCH"
@@ -1473,29 +1491,19 @@ emit() {
     emit GRAFANA_ADMIN_USER "$GRAFANA_USER"
     emit GRAFANA_ADMIN_PASSWORD "$GRAFANA_PASSWORD"
   fi
-  [[ -z $COMPOSE_PROFILES ]] || emit COMPOSE_PROFILES "$COMPOSE_PROFILES"
+  emit KAEDE_OBSERVABILITY_ENABLED "$OBSERVABILITY"
 } > "$STAGE_DIR/env"
 chmod 600 "$STAGE_DIR/env"
 
-render_overlay() {
-  local output=$1
-  {
-    printf '# Generated by ./setup.sh; rerun the script instead of editing.\nservices:'
-    if [[ $STORAGE == garage ]]; then
-      printf ' {}\n'
-      return
-    fi
-    printf '\n'
-    if [[ $STORAGE != garage ]]; then
-      cat <<'YAML'
-  garage:
-    profiles: [disabled-garage-generated]
-YAML
-    fi
-  } > "$output"
-  chmod 644 "$output"
-}
-render_overlay "$STAGE_DIR/compose.yml"
+python3 - "$KUBE_FILE" "$KUBE_CONTEXT" "$PROJECT_NAME" "$CLUSTER_UID" "$IMAGE_REPOSITORY" "$IMAGE_TRANSPORT" "$STORAGE_CLASS" "$STORAGE_SIZE" "$IMAGE_PULL_SECRET" > "$STAGE_DIR/kubernetes.json" <<'PYTHON'
+import json, sys
+from pathlib import Path
+keys = ('kubeconfig', 'context', 'namespace', 'cluster_uid', 'image_repository', 'image_transport', 'storage_class', 'storage_size', 'image_pull_secret')
+config = dict(zip(keys, sys.argv[1:]))
+config['kubeconfig'] = str(Path(config['kubeconfig']).resolve())
+print(json.dumps(config, indent=2))
+PYTHON
+chmod 600 "$STAGE_DIR/kubernetes.json"
 
 remove_marked_blocks() {
   local source=$1 output=$2 remove_media=$3 remove_push_relay=$4
@@ -1536,7 +1544,7 @@ fi
 {
   printf 'Kaede deployment configuration generated by ./setup.sh.\n\n'
   printf 'No containers, proxies, certificates, or production services were started or reloaded.\n\n'
-  printf 'Validate:\n  make env-check\n  make generated-compose-check\n\n'
+  printf 'Validate:\n  make env-check\n  make kubernetes-check\n\n'
   printf 'Internal Caddy edge: 127.0.0.1:%s\n' "$EDGE_PORT"
   printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\nMobile push: %s\nAutomatic updates: %s\n' \
     "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_CHOICE" "$AUTO_UPDATE"
@@ -1560,7 +1568,7 @@ fi
       "$LIVEKIT_RTC_UDP_PORT" "$TURN_PORT"
   fi
   printf '\nAfter review, start explicitly with:\n'
-  printf '  KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env -f deploy/compose.yml -f deploy/compose.generated.yml up -d --build --wait\n'
+  printf '  make deploy\n'
   printf '\nStartup automatically applies pending Alembic migrations in revision order, then bootstraps the instance. Application services start only after that one-shot step succeeds.\n'
 } > "$STAGE_DIR/generated/README.txt"
 chmod 644 "$STAGE_DIR/generated/README.txt"
@@ -1637,7 +1645,7 @@ restore_previous() {
     target="$ROOT/$relative"
     if [[ -f $BACKUP_DIR/$relative ]]; then
       case "$relative" in
-        deploy/compose.generated.yml|deploy/generated/README.txt) mode=644 ;;
+        deploy/generated/README.txt) mode=644 ;;
         *) mode=600 ;;
       esac
       atomic_install "$BACKUP_DIR/$relative" "$target" "$mode" || return 1
@@ -1657,7 +1665,7 @@ else
   rm -f -- "$GENERATED_DIR/kaede.nginx.conf"
 fi
 atomic_install "$STAGE_DIR/generated/README.txt" "$GENERATED_DIR/README.txt" 644
-atomic_install "$STAGE_DIR/compose.yml" "$OVERLAY_FILE" 644
+atomic_install "$STAGE_DIR/kubernetes.json" "$OVERLAY_FILE" 600
 atomic_install "$STAGE_DIR/env" "$ENV_FILE" 600
 rm -f -- "$MARKER_FILE"
 PUBLISHING=false

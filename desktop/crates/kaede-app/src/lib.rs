@@ -378,8 +378,17 @@ impl AccountRuntime {
         }
         let state = Arc::new(RwLock::new(initial));
 
-        let token = session.access_token().await?;
-        let mut gateway = kaede_gateway::spawn(api.endpoint().gateway_url().clone(), token);
+        let gateway_session = session.clone();
+        let mut gateway =
+            kaede_gateway::spawn(api.endpoint().gateway_url().clone(), move |refresh| {
+                let session = gateway_session.clone();
+                async move {
+                    if refresh {
+                        session.refresh().await?;
+                    }
+                    session.access_token().await
+                }
+            });
         let runtime = Arc::new(Self {
             api,
             service,

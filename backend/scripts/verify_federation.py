@@ -59,15 +59,21 @@ from scripts.verification import (
 PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
 PASSWORD_AUTH_SALT = bytes(range(16))
 PASSWORD_VAULT_SALT = bytes(reversed(range(16)))
-ALPHA_URL = os.getenv("ALPHA_URL", "http://alpha-api:8000")
-BETA_URL = os.getenv("BETA_URL", "http://beta-api:8000")
+ALPHA_URL = os.getenv("ALPHA_URL", "http://api.kaede-alpha.svc.cluster.local:8000")
+BETA_URL = os.getenv("BETA_URL", "http://api.kaede-beta.svc.cluster.local:8000")
 ALPHA_DATABASE_URL = os.environ["ALPHA_DATABASE_URL"]
 BETA_DATABASE_URL = os.environ["BETA_DATABASE_URL"]
 BETA_DRAGONFLY_URL = os.environ["BETA_DRAGONFLY_URL"]
 TLS_CA_FILE = os.getenv("TLS_CA_FILE")
 BOT_GATEWAY_URL = os.getenv(
     "BETA_BOT_GATEWAY_URL",
-    "ws://beta-api:8000/api/v1/bots/gateway",
+    "ws://api.kaede-beta.svc.cluster.local:8000/api/v1/bots/gateway",
+)
+ALPHA_GATEWAY_URL = os.getenv(
+    "ALPHA_GATEWAY_URL", "ws://gateway.kaede-alpha.svc.cluster.local:8001/gateway?v=1&encoding=json"
+)
+BETA_GATEWAY_URL = os.getenv(
+    "BETA_GATEWAY_URL", "ws://gateway.kaede-beta.svc.cluster.local:8001/gateway?v=1&encoding=json"
 )
 BOT_GATEWAY_PATH = "/api/v1/bots/gateway"
 
@@ -2051,7 +2057,7 @@ async def verify() -> None:
             ),
             "DM conversation did not replicate",
         )
-        async with connect("ws://beta-gateway:8001/gateway?v=1&encoding=json") as socket:
+        async with connect(BETA_GATEWAY_URL) as socket:
             hello = json.loads(await socket.recv())
             require(hello["op"] == 10, "Beta gateway HELLO missing")
             token = bob["Authorization"].removeprefix("Bearer ")
@@ -2376,8 +2382,8 @@ async def verify() -> None:
         # signing material. Exercise that boundary over the real broker and
         # confirm the remote member home projects the resulting live event.
         async with (
-            connect("ws://beta-gateway:8001/gateway?v=1&encoding=json") as beta_socket,
-            connect("ws://alpha-gateway:8001/gateway?v=1&encoding=json") as alpha_socket,
+            connect(BETA_GATEWAY_URL) as beta_socket,
+            connect(ALPHA_GATEWAY_URL) as alpha_socket,
         ):
             beta_hello = json.loads(await beta_socket.recv())
             require(beta_hello["op"] == 10, "Beta presence gateway HELLO missing")

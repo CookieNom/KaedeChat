@@ -69,7 +69,7 @@ class ClientReleaseTests(unittest.TestCase):
             "mobile/README.md": set(),
             "desktop/legacy-slint/crates/kaede-desktop/src/main.rs": set(),
             "backend/app/main.py": set(),
-            "deploy/compose.yml": set(),
+            "deploy/kubernetes/stack.py": set(),
         }
         for path, expected in cases.items():
             with self.subTest(path=path):

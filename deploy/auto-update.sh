@@ -121,13 +121,6 @@ write_deployed_commit() {
   fi
 }
 
-compose_command() {
-  COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$ROOT/deploy/compose.yml")
-  [[ ! -f $ROOT/deploy/compose.generated.yml ]] || \
-    COMPOSE+=(-f "$ROOT/deploy/compose.generated.yml")
-  export KAEDE_OPERATOR_ENV_FILE="$ENV_FILE"
-}
-
 show_status() {
   validate_config
   local head deployed
@@ -154,9 +147,9 @@ run_update() {
     return 0
   fi
   command -v git >/dev/null || die 'git is required; install Git before enabling automatic updates'
-  command -v docker >/dev/null || die 'Docker is required; install Docker Engine and its Compose plugin'
-  docker compose version >/dev/null 2>&1 || \
-    die "the Docker Compose plugin is unavailable; install it and verify 'docker compose version' succeeds"
+  command -v docker >/dev/null || die 'Docker Engine is required to build images'
+  export PATH="$ROOT/.kaede-tools/bin:$PATH"
+  command -v kubectl >/dev/null || die 'kubectl is required; run make tools'
   command -v python3 >/dev/null || die 'Python 3 is required; install Python 3 before enabling automatic updates'
   command -v flock >/dev/null || die 'flock is required; install the util-linux package before enabling automatic updates'
   [[ ! -e $ROOT/.kaede-setup.in-progress ]] || \
@@ -211,34 +204,10 @@ run_update() {
 
   [[ -z $(git -C "$ROOT" status --porcelain --untracked-files=no) ]] || \
     die "the updated checkout unexpectedly contains tracked modifications; inspect 'git -C $ROOT status --short' and deploy manually after resolving them"
-  compose_command
-  log 'validating the operator environment and new application image'
-  python3 "$ROOT/deploy/validate_deploy_env.py" --file "$ENV_FILE" --file-only || \
-    die "deployment environment validation failed; correct the preceding setting error in $ENV_FILE, then retry"
-  "${COMPOSE[@]}" run --rm --no-deps --build preflight || \
-    die 'new application preflight failed; the running deployment was not stopped. Correct the preceding preflight error, then retry'
-  log 'building application images before downtime'
-  "${COMPOSE[@]}" build --pull api gateway worker scheduler migrate storage-init frontend-build voice-preflight || \
-    die 'application image build failed; the running deployment was not stopped. Correct the build error, then retry'
-
-  if [[ -n $BACKUP_HOOK ]]; then
-    log "running configured backup hook $BACKUP_HOOK"
-    KAEDE_UPDATE_FROM="${deployed:-$current}" KAEDE_UPDATE_TO="$target" KAEDE_ROOT="$ROOT" \
-      "$BACKUP_HOOK" || \
-      die "backup hook failed: $BACKUP_HOOK. The running deployment was not stopped; fix the hook or perform a verified backup before retrying"
-  else
-    log 'WARNING: no AUTO_UPDATE_BACKUP_HOOK is configured; relying on the operator backup policy'
-  fi
-
-  log 'quiescing application writers and the internal edge'
-  "${COMPOSE[@]}" stop caddy api gateway worker scheduler || \
-    die "could not stop all application writers; inspect 'docker compose ps' and service logs before retrying or restoring service"
-  log 'applying migrations exactly once before application writers restart'
-  "${COMPOSE[@]}" run --rm --no-deps migrate || \
-    die 'database migration failed after application writers were stopped. Inspect the migration output and database backup; do not start incompatible application images until the migration is resolved'
-  log 'starting the updated topology and waiting for health checks'
-  "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT" || \
-    die "updated services did not become healthy within $WAIT_TIMEOUT seconds. Inspect 'docker compose ps' and service logs; the source and database migration may already be updated"
+  log 'building and rolling out the new application; schema/infrastructure changes require manual maintenance'
+  KAEDE_UPDATE_FROM="${deployed:-$current}" KAEDE_UPDATE_TO="$target" KAEDE_ROOT="$ROOT" \
+    python3 "$ROOT/deploy/kubernetes/manage.py" deploy --update-only --env-file "$ENV_FILE" --revision "$target" || \
+    die 'Kubernetes deployment failed or requires maintenance; inspect the preceding error and make status. The deployed commit has not been advanced'
   write_deployed_commit "$target"
   log "automatic update completed at $target"
 }

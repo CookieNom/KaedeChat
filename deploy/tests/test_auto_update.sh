@@ -21,6 +21,8 @@ printf '%s\n' \
 chmod 600 "$TEST_ROOT/repo/.env"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/bin/systemctl"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/bin/docker"
+cp "$TEST_ROOT/bin/docker" "$TEST_ROOT/bin/kubectl"
+chmod 755 "$TEST_ROOT/bin/kubectl"
 chmod 755 "$TEST_ROOT/bin/systemctl" "$TEST_ROOT/bin/docker"
 
 git -C "$TEST_ROOT/repo" init -q -b main

@@ -34,6 +34,10 @@ deploy/generated/
 .kaede-auto-update.in-progress
 .kaede-auto-update.lock
 .kaede-auto-update-state
+.kaede-kubernetes.json
+.kaede-kubernetes.lock
+.kaede-dev-kubeconfig
+.kaede-tools/
 *.local.pem
 *.local.key
 kaede-dev-root.crt
@@ -58,3 +62,5 @@ tmp/
 # Microsoft PhotoDNA SDK is licensed operator material. Keep it local and
 # mount it read-only at runtime; never include it in source distributions.
 vendor/photodna-sdk/
+
+.kaede-federation-kubeconfig

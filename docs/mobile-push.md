@@ -148,7 +148,7 @@ KAEDE_PUSH_RELAY_APNS_TEAM_ID=<Apple team ID>
 KAEDE_PUSH_RELAY_APNS_TOPIC=chat.kaede.mobile.voip
 ```
 
-Only relay workers receive those credentials. Compose derives the API's non-secret
+Only relay workers receive those credentials. The deployment derives the API's non-secret
 `KAEDE_PUSH_RELAY_VOIP_AVAILABLE` flag from the configured APNs key. Custom
 deployments with separate API and worker processes must set that flag to `true`
 on the API when their relay worker has APNs configured. Do not copy the key

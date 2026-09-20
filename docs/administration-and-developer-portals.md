@@ -19,12 +19,10 @@ the first owner role from the CLI:
 Run this from the repository root after registering the local account:
 
 ```sh
-KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
-  -f deploy/compose.yml -f deploy/compose.generated.yml \
-  exec -T api kaede admin-grant alice --role owner
+make exec SERVICE=api COMMAND='kaede admin-grant alice --role owner'
 ```
 
-Use the same Compose prefix for `kaede admin-grant bob --role trust_safety`
+Use the same `make exec SERVICE=api COMMAND='...'` wrapper for `kaede admin-grant bob --role trust_safety`
 or `kaede admin-revoke bob --role trust_safety`. Both files are needed for a
 wizard-generated production deployment.
 

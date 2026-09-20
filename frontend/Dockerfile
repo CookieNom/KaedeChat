@@ -65,3 +65,10 @@ RUN pnpm build
 
 FROM scratch AS static
 COPY --from=build /workspace/build /
+
+FROM caddy:2.11.4-alpine AS runtime
+COPY --from=build /workspace/build /srv/frontend
+COPY Caddyfile /etc/caddy/Caddyfile
+ENV XDG_CONFIG_HOME=/tmp/config XDG_DATA_HOME=/tmp/data
+USER 10001:10001
+EXPOSE 8080

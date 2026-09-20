@@ -431,7 +431,7 @@ Future<MobileController> fixtureController(
   );
   final repository = KaedeRepository(api);
   final gateway = GatewayClient(
-    tokens: () async => null,
+    tokens: (_) async => null,
     socketConnector: (uri) => throw UnimplementedError(),
   );
   final database = await LocalDatabase.openWithDatabase(_TestDatabase());

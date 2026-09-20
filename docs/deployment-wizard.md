@@ -19,6 +19,7 @@ only after you explicitly opt into automatic updates.
 | Setting | What to prepare |
 | --- | --- |
 | Domain and proxy | Instance domain, DNS, TLS certificate/key paths, loopback edge port, and optional host nginx configuration |
+| Kubernetes | Readable kubeconfig, production context, dedicated namespace, storage class/capacity, and local image imports or a registry |
 | Storage | Bundled Garage, or credentials and three private buckets at an S3-compatible provider |
 | Email | SMTP or Mailtrap credentials, or no-email registration |
 | Optional features | LiveKit voice/video, private message search, GIF search, Turnstile, mobile push, and monitoring |
@@ -47,15 +48,14 @@ and validate answers without writing anything.
 ## Generated files
 
 - `.env` — complete production settings and generated secrets, mode `0600`;
-- `deploy/compose.generated.yml` — selects Garage or external S3 and optional profiles;
+- `.kaede-kubernetes.json` — pins cluster identity, namespace, image delivery, and storage;
 - `deploy/generated/kaede.nginx.conf` — only when host nginx is requested;
 - `deploy/generated/README.txt` — exact validation and startup guidance.
 
-The generated environment also records the numeric UID and GID that own
-`.env`. The one-shot preflight validators use that identity so they can read
-the private bind mount without running as root or gaining additional
-capabilities. If you move the deployment to another account or host, rerun the
-wizard.
+Run `make tools` before setup if kubectl is missing. K3s must already be
+installed and Ready; setup verifies access but does not install the cluster.
+The environment's operator GID is used only for optional PhotoDNA file access.
+Application Secrets are split by role instead of mounting the whole `.env`.
 
 The script uses OpenSSL's CSPRNG for independent application, gateway, proxy,
 database, Dragonfly, Garage, LiveKit, Grafana, and admin secrets. Reruns
@@ -105,7 +105,7 @@ or disable closed-app delivery entirely.
 
 If you run the wizard for the configured relay authority itself, it can enable
 the relay service and read the private Firebase service-account JSON from a
-local, non-symlink file. Compose passes that credential only to relay workers,
+local, non-symlink file. The deployment passes that credential only to relay workers,
 and the standalone deployment validator checks it before startup. The public
 Android/iOS Firebase application files remain build-time inputs and are ignored
 by Git. See [mobile push delivery](mobile-push.md).
@@ -114,11 +114,12 @@ Automatic updates are disabled by default. When you enable them, setup installs
 a `kaede-auto-update.timer` in your user's systemd configuration. Its first run
 reconciles and records the current commit. The updater never accepts a dirty
 tracked checkout, detached head, force-pushed history, downgrade, or
-non-fast-forward merge. It builds and runs preflight before stopping services;
-then it runs the configured backup hook, quiesces application writers, applies
-migrations, restarts, and waits for health. Declining a backup hook requires a
-separate warning confirmation. The timer needs the same Docker access your user
-has for manual deployment commands.
+non-fast-forward merge. It builds/imports images, runs preflight and the backup
+hook, and rolls compatible application changes with readiness checks. Migrations
+or infrastructure changes require `make deploy MAINTENANCE=1` after a backup.
+The timer needs Docker and kubeconfig access, plus the root-owned local import
+helper and narrowly scoped sudoers rule when local imports are selected. See
+[local imports](operator.md#local-production-image-imports).
 
 ## After setup
 
@@ -126,7 +127,7 @@ Review the generated files, then validate without starting the application:
 
 ```sh
 make env-check
-make generated-compose-check
+make kubernetes-check
 ```
 
 Inspect or change the update timer later with `make auto-update-status`,
@@ -135,11 +136,10 @@ reach your user's systemd manager, it leaves `AUTO_UPDATE_ENABLED=false` and
 prints a warning rather than claiming the timer is active. See the operator
 guide for lingering, logs, failure handling, and a cron fallback.
 
-On the first explicit `docker compose up`, the one-shot `migrate` service
-creates an empty database schema by applying all Alembic revisions in order. On
-later starts it applies only pending revisions. Instance bootstrap follows
-migration, and database-facing application services wait for the whole step to
-succeed.
+On the first `make deploy`, the migration Job creates the database schema and
+bootstraps the instance before application writers start. Later deployments
+with changed migration files require explicit maintenance. Preflight and
+storage-init failures stop deployment before new applications are started.
 
 If a host nginx file was generated, install it manually in nginx's `http`
 context, run `nginx -t`, and reload nginx yourself. The internal edge stays on
@@ -156,6 +156,6 @@ For voice, choose whether to keep an existing port set, let setup pick an
 available set, or enter all five host ports manually. Each LiveKit deployment
 on one host needs unique control, RTC TCP, RTC UDP, TURN/TLS TCP, and TURN UDP
 ports. Review those ports, host/provider firewall rules, NAT forwarding, and
-certificate paths before enabling the profile. Automatic selection only checks
+certificate paths before enabling voice. Automatic selection only checks
 listeners at setup time, so start the deployment before assigning those ports
 to anything else.

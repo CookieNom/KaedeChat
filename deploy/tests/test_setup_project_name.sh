@@ -10,13 +10,13 @@ old() { printf '%s' "$existing"; }
 prompt_text() { local answer; read -r answer; printf '%s' "${answer:-$2}"; }
 warn() { printf '%s\n' "$*" >&2; }
 
-for existing in '' kaede-chat-dev; do
+for existing in kaede kaede-chat-dev; do
   result=$(eval "$block" <<< ''; printf '%s' "$PROJECT_NAME")
   [[ $result == "$existing" ]]
 done
 existing=
 result=$(eval "$block" <<< 'kaede-chat'; printf '%s' "$PROJECT_NAME")
 [[ $result == kaede-chat ]]
-result=$(eval "$block" <<< $'Bad Name\n-invalid\nvalid_2'; printf '%s' "$PROJECT_NAME")
-[[ $result == valid_2 ]]
+result=$(eval "$block" <<< $'Bad Name\n-invalid\nvalid-2'; printf '%s' "$PROJECT_NAME")
+[[ $result == valid-2 ]]
 printf 'setup project name tests passed\n'

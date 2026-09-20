@@ -1,70 +1,62 @@
+export PATH := $(CURDIR)/.kaede-tools/bin:$(PATH)
 DESKTOP_RUST_VERSION := $(shell sed -n 's/^channel = "\(.*\)"/\1/p' desktop/rust-toolchain.toml)
 ENV_FILE ?= .env
-OPERATOR_ENV_FILE := $(abspath $(ENV_FILE))
-GENERATED_COMPOSE := $(if $(wildcard deploy/compose.generated.yml),-f deploy/compose.generated.yml,)
-CONFIG_GUARD := test ! -e .kaede-setup.in-progress || { echo 'setup transaction is incomplete; inspect .kaede-setup.in-progress and rerun make setup before starting services' >&2; exit 2; }
-COMPOSE := $(CONFIG_GUARD); KAEDE_OPERATOR_ENV_FILE="$(OPERATOR_ENV_FILE)" docker compose --env-file "$(ENV_FILE)" -f deploy/compose.yml $(GENERATED_COMPOSE)
-DEV_COMPOSE := docker compose -f deploy/compose.dev.yml
-VALIDATION_RUN_ID := $(shell date +%s%N)
-FEDERATION_COMPOSE_FILES := -f deploy/compose.dev.yml -f deploy/compose.federation-validation.yml
-FEDERATION_COMPOSE := docker compose --project-name kaede-federation-validation-$(VALIDATION_RUN_ID) $(FEDERATION_COMPOSE_FILES)
-FEDERATION_TLS_COMPOSE := docker compose --project-name kaede-federation-tls-validation-$(VALIDATION_RUN_ID) $(FEDERATION_COMPOSE_FILES) -f deploy/compose.federation-tls.yml
-VALIDATION_COMPOSE := ALLOW_NONPRODUCTION_DEPLOYMENT=true KAEDE_OPERATOR_ENV_FILE="$(abspath deploy/.env.schema)" docker compose --env-file deploy/.env.schema -f deploy/compose.yml
-CHECK_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-check-validation-$(VALIDATION_RUN_ID)
-TEST_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-test-validation-$(VALIDATION_RUN_ID)
-MIGRATION_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-migration-validation-$(VALIDATION_RUN_ID)
-IDENTITY_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-identity-validation-$(VALIDATION_RUN_ID)
-CHAT_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-chat-validation-$(VALIDATION_RUN_ID)
-AUDIT_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-audit-validation-$(VALIDATION_RUN_ID)
-MEDIA_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-media-validation-$(VALIDATION_RUN_ID)
-VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(VALIDATION_RUN_ID)
-RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
+CONFIG_GUARD := test ! -e .kaede-setup.in-progress || { echo 'setup transaction is incomplete; rerun make setup' >&2; exit 2; }
+KUBE := python3 deploy/kubernetes/manage.py
+KUBE_ARGS := --env-file "$(ENV_FILE)" $(if $(KUBE_CONFIG),--config "$(KUBE_CONFIG)",)
 
-.PHONY: help setup search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit mobile-check desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
-.PHONY: hooks
+.PHONY: dev-logs dev-federation-logs
+.PHONY: help setup tools deploy status logs exec dev dev-cluster dev-down dev-federation dev-federation-down kubernetes-check env-check legacy-down
+.PHONY: hooks lock generate search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check
+.PHONY: check test audit migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check nginx-check
+.PHONY: mobile-check desktop-check desktop-lint desktop-test desktop-build desktop-dev
 help:
-	@echo "hooks            Enable pre-commit lint and audits for this clone (Python 3.11+)"
-	@echo "setup            Run the interactive deployment configuration wizard"
-	@echo "search-rebuild   Rebuild private message search online (RESET=1 recreates the index)"
-	@echo "auto-update-enable  Install and enable the optional user systemd update timer"
-	@echo "auto-update-disable Disable and remove the optional user systemd update timer"
-	@echo "auto-update-status  Show updater configuration and user timer status"
-	@echo "auto-update-run     Check for and deploy an update immediately"
-	@echo "auto-update-check   Test updater validation, timer generation, and dirty-tree refusal"
-	@echo "lock             Generate uv and pnpm lockfiles in one-off containers"
-	@echo "generate         Regenerate shared TypeScript and Rust protocol constants"
-	@echo "check            Run lint, type, codegen, and unit checks in containers"
-	@echo "test             Run backend and frontend tests in containers"
-	@echo "audit            Check locked Python and JavaScript dependencies for advisories"
-	@echo "mobile-check     Run locked Flutter formatting, analysis, and tests (requires Flutter)"
-	@echo "desktop-check    Format and compile the portable native desktop workspace"
-	@echo "desktop-lint     Run strict Clippy checks across all portable desktop targets"
-	@echo "desktop-test     Run desktop protocol, state, platform, auth, and media tests"
-	@echo "desktop-build    Build the bundled frontend and native Tauri application"
-	@echo "desktop-dev      Run the Tauri application against the frontend dev server"
-	@echo "env-check        Validate ENV_FILE and run the production preflight in isolation"
-	@echo "migration        Generate an Alembic revision with m=\"description\""
-	@echo "migration-check  Run Alembic up/down/up against disposable PostgreSQL"
-	@echo "identity-check   Exercise M1 identity against disposable PostgreSQL and Dragonfly"
-	@echo "chat-check       Exercise the implemented M2 chat and gateway acceptance path"
-	@echo "media-check      Exercise M4 Garage, ClamAV, media, and webhook lifecycles"
-	@echo "voice-check      Exercise M5 Dragonfly state and an isolated LiveKit server"
-	@echo "release-check    Exercise M6 rate limits, warmup, fanout, and amplification"
-	@echo "federation-check Exercise the isolated M3 Alpha/Beta federation gate"
-	@echo "federation-tls-check Exercise M3 through an isolated nginx/TLS/Caddy edge"
-	@echo "compose-check    Render production and development Compose configurations"
-	@echo "generated-compose-check Validate wizard output when it is present"
-	@echo "nginx-check      Validate the example host-nginx configuration with a temporary certificate"
-	@echo "dev              Start both local development instances (requires explicit operator action)"
+	@echo "setup                 Configure production Kubernetes, storage, and host nginx"
+	@echo "tools                 Install pinned kubectl, k3d, and Tilt into this checkout (no sudo)"
+	@echo "deploy                Build/import images and deploy (MAINTENANCE=1 permits migrations)"
+	@echo "status / logs         Show production status / logs (SERVICE=api)"
+	@echo "exec                  Run a production command (SERVICE=worker COMMAND='...')"
+	@echo "dev / dev-down        Start Tilt in background / stop Tilt and cluster, retaining data"
+	@echo "dev-logs              Follow development logs (Ctrl-C stops following)"
+	@echo "dev-federation-logs   Follow alpha/beta logs"
+	@echo "dev-federation        Start the separate alpha/beta development cluster"
+	@echo "dev-federation-down   Stop the alpha/beta cluster, retaining data"
+	@echo "env-check             Validate the operator environment"
+	@echo "kubernetes-check      Test deployment configuration and manifest contracts"
+	@echo "auto-update-run       Fetch and roll out a compatible production update"
+	@echo "auto-update-enable / auto-update-disable / auto-update-status"
+	@echo "check / test / audit  Run application checks in disposable k3d clusters"
+	@echo "migration             Generate a migration with m='description'"
+	@echo "migration-check / identity-check / chat-check / media-check / voice-check"
+	@echo "release-check / federation-check / federation-tls-check"
+	@echo "legacy-down           Stop a named legacy Compose project (PROJECT=name); keep volumes"
+	@echo "hooks / lock / generate / nginx-check / search-rebuild"
+	@echo "desktop-check / desktop-lint / desktop-test / desktop-build / desktop-dev / mobile-check"
 
 hooks:
 	git config --local core.hooksPath .githooks
 
+tools:
+	python3 deploy/kubernetes/install-tools.py
+
 setup:
 	./setup.sh $(SETUP_ARGS)
 
+deploy:
+	@$(CONFIG_GUARD)
+	$(KUBE) deploy $(KUBE_ARGS) $(if $(filter 1 true yes,$(MAINTENANCE)),--maintenance,) $(if $(REVISION),--revision "$(REVISION)",)
+
+status:
+	$(KUBE) status $(KUBE_ARGS)
+
+logs:
+	$(KUBE) logs $(KUBE_ARGS) $(or $(SERVICE),api)
+
+exec:
+	$(KUBE) exec $(KUBE_ARGS) $(or $(SERVICE),api) $(COMMAND)
+
 search-rebuild:
-	$(COMPOSE) exec -T worker python -m scripts.rebuild_search $(if $(filter 1 true yes,$(RESET)),--reset-index,)
+	$(KUBE) exec $(KUBE_ARGS) worker python -m scripts.rebuild_search $(if $(filter 1 true yes,$(RESET)),--reset-index,)
 
 auto-update-enable:
 	./deploy/install-auto-update.sh enable
@@ -81,6 +73,46 @@ auto-update-run:
 auto-update-check:
 	./deploy/tests/test_auto_update.sh
 
+env-check:
+	@$(CONFIG_GUARD)
+	python3 deploy/validate_deploy_env.py --file "$(ENV_FILE)" --file-only
+
+kubernetes-check:
+	python3 -m unittest discover -s deploy/tests -p 'test_*.py'
+	bash deploy/tests/test_setup_project_name.sh
+	bash -n setup.sh deploy/auto-update.sh deploy/kubernetes/import-image.sh
+
+check test audit migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check:
+	python3 deploy/kubernetes/check.py $@
+
+migration:
+	@test -n "$(m)" || { echo 'usage: make migration m="describe the change"' >&2; exit 2; }
+	REVISION_MESSAGE="$(m)" python3 deploy/kubernetes/check.py migration
+
+dev:
+	python3 deploy/kubernetes/dev.py up --env-file "$(ENV_FILE)"
+
+dev-logs:
+	python3 deploy/kubernetes/dev.py logs
+
+dev-federation-logs:
+	python3 deploy/kubernetes/dev.py logs --federation
+
+dev-cluster:
+	python3 deploy/kubernetes/dev.py cluster --env-file "$(ENV_FILE)"
+
+dev-down:
+	python3 deploy/kubernetes/dev.py down
+
+dev-federation:
+	python3 deploy/kubernetes/dev.py up --federation
+
+dev-federation-down:
+	python3 deploy/kubernetes/dev.py down --federation
+
+legacy-down:
+	python3 deploy/kubernetes/legacy.py stop --project "$(PROJECT)"
+
 lock:
 	docker build --target tooling -t kaede-backend-tooling backend
 	docker run --rm --user "$$(id -u):$$(id -g)" -e HOME=/tmp -e UV_CACHE_DIR=/tmp/uv-cache -v "$(CURDIR)/backend:/workspace" -w /workspace kaede-backend-tooling uv lock
@@ -88,24 +120,6 @@ lock:
 
 generate:
 	docker run --rm --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/workspace" -w /workspace/backend python:3.12.13-slim python -m scripts.generate_protocol
-
-check:
-	@set -eu; \
-	trap '$(CHECK_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	$(CHECK_COMPOSE) run --rm --no-deps --build backend-check; \
-	$(CHECK_COMPOSE) run --rm --no-deps --build frontend-check
-
-test:
-	@set -eu; \
-	trap '$(TEST_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	$(TEST_COMPOSE) run --rm --no-deps --build backend-test; \
-	$(TEST_COMPOSE) run --rm --no-deps --build frontend-test
-
-audit:
-	@set -eu; \
-	trap '$(AUDIT_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	$(AUDIT_COMPOSE) run --rm --no-deps --build backend-check pip-audit --skip-editable; \
-	$(AUDIT_COMPOSE) run --rm --no-deps --build frontend-check pnpm audit --audit-level=moderate
 
 mobile-check:
 	cd mobile && flutter pub get --enforce-lockfile
@@ -144,154 +158,6 @@ desktop-dev:
 	frontend_pid=$$!; trap 'kill $$frontend_pid 2>/dev/null || true' EXIT INT TERM; \
 	cd desktop/tauri && cargo +$(DESKTOP_RUST_VERSION) tauri dev --config src-tauri/tauri.dev.conf.json
 
-env-check:
-	@test -f "$(ENV_FILE)" || { echo 'ENV_FILE does not exist: $(ENV_FILE). Run make setup or pass ENV_FILE=/path/to/operator.env' >&2; exit 2; }
-	docker run --rm \
-		-v "$(OPERATOR_ENV_FILE):/run/kaede/operator.env:ro" \
-		-v "$(CURDIR)/deploy/validate_deploy_env.py:/run/kaede/validate_deploy_env.py:ro" \
-		python:3.12.13-slim python /run/kaede/validate_deploy_env.py \
-		--file /run/kaede/operator.env --file-only
-	$(COMPOSE) run --rm --no-deps --build preflight
-
-migration-check:
-	@set -eu; \
-	trap '$(MIGRATION_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(MIGRATION_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres; \
-	$(MIGRATION_COMPOSE) --profile validation up -d --wait --build postgres; \
-	$(MIGRATION_COMPOSE) run --rm --no-deps --build migration-check
-
-migration:
-	@test -n "$(m)" || { echo 'usage: make migration m="describe the change"' >&2; exit 2; }
-	@set -eu; \
-	trap '$(MIGRATION_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	$(MIGRATION_COMPOSE) --profile validation up -d --wait --build postgres; \
-	$(MIGRATION_COMPOSE) run --rm --no-deps --build --user "$$(id -u):$$(id -g)" \
-		-e HOME=/tmp -e REVISION_MESSAGE="$(m)" migration-check \
-		sh -ec 'alembic upgrade head && alembic revision --autogenerate -m "$$REVISION_MESSAGE"'
-
-identity-check:
-	@set -eu; \
-	trap '$(IDENTITY_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(IDENTITY_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly; \
-	$(IDENTITY_COMPOSE) --profile validation up -d --wait --build postgres dragonfly; \
-	$(IDENTITY_COMPOSE) run --rm --no-deps --build identity-check
-
-chat-check:
-	@set -eu; \
-	trap '$(CHAT_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(CHAT_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly garage worker; \
-	$(CHAT_COMPOSE) --profile validation up -d --wait --build postgres dragonfly garage worker; \
-	$(CHAT_COMPOSE) run --rm --no-deps --build chat-check
-
-media-check:
-	@set -eu; \
-	trap '$(MEDIA_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(MEDIA_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly garage clamav; \
-	$(MEDIA_COMPOSE) --profile validation up -d --wait --build postgres dragonfly garage clamav; \
-	$(MEDIA_COMPOSE) run --rm --no-deps --build storage-init; \
-	$(MEDIA_COMPOSE) run --rm --no-deps --build media-check
-
-voice-check:
-	@set -eu; \
-	trap '$(VOICE_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(VOICE_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps dragonfly livekit-validation; \
-	$(VOICE_COMPOSE) --profile validation up -d --wait --build dragonfly livekit-validation; \
-	$(VOICE_COMPOSE) run --rm --no-deps --build voice-check
-
-release-check:
-	@set -eu; \
-	trap '$(RELEASE_COMPOSE) --profile validation down -v' EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(RELEASE_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps postgres dragonfly; \
-	$(RELEASE_COMPOSE) --profile validation up -d --wait --build postgres dragonfly; \
-	$(RELEASE_COMPOSE) run --rm --no-deps --build release-check
-
-federation-check:
-	@set -eu; \
-	cleanup() { status=$$?; if [ $$status -ne 0 ]; then $(FEDERATION_COMPOSE) logs --no-color --tail=240 alpha-api beta-api alpha-worker beta-worker alpha-gateway beta-gateway || true; fi; $(FEDERATION_COMPOSE) --profile validation down -v; exit $$status; }; \
-	trap cleanup EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(FEDERATION_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps alpha-api beta-api alpha-gateway beta-gateway alpha-worker beta-worker alpha-scheduler beta-scheduler; \
-	$(FEDERATION_COMPOSE) up -d --wait alpha-postgres alpha-dragonfly beta-postgres beta-dragonfly; \
-	$(FEDERATION_COMPOSE) run --rm --no-deps --build alpha-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
-	$(FEDERATION_COMPOSE) run --rm --no-deps --build beta-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
-	$(FEDERATION_COMPOSE) up -d --wait --build alpha-api beta-api alpha-gateway beta-gateway alpha-worker beta-worker alpha-scheduler beta-scheduler; \
-	$(FEDERATION_COMPOSE) --profile validation run --rm --no-deps --build federation-check
-
-federation-tls-check:
-	@set -eu; \
-	cleanup() { status=$$?; if [ $$status -ne 0 ]; then $(FEDERATION_TLS_COMPOSE) logs --no-color --tail=240 alpha-api beta-api tls-edge || true; fi; $(FEDERATION_TLS_COMPOSE) --profile validation down -v; exit $$status; }; \
-	trap cleanup EXIT INT TERM; \
-	bash .github/scripts/retry-network.sh env $(FEDERATION_TLS_COMPOSE) --profile validation pull --policy missing --ignore-buildable --include-deps alpha-api beta-api alpha-gateway beta-gateway alpha-worker beta-worker alpha-scheduler beta-scheduler alpha-caddy beta-caddy tls-edge; \
-	$(FEDERATION_TLS_COMPOSE) up -d --wait alpha-postgres alpha-dragonfly beta-postgres beta-dragonfly; \
-	$(FEDERATION_TLS_COMPOSE) run --rm --no-deps --build tls-init; \
-	$(FEDERATION_TLS_COMPOSE) run --rm --no-deps --build alpha-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
-	$(FEDERATION_TLS_COMPOSE) run --rm --no-deps --build beta-api sh -ec 'alembic upgrade head && kaede bootstrap'; \
-	$(FEDERATION_TLS_COMPOSE) up -d --wait --build alpha-api beta-api alpha-gateway beta-gateway alpha-worker beta-worker alpha-scheduler beta-scheduler alpha-caddy beta-caddy tls-edge; \
-	$(FEDERATION_TLS_COMPOSE) --profile validation run --rm --no-deps --build federation-check
-
-compose-check:
-	python3 -m unittest discover -s deploy/tests -p 'test_validate_*.py'
-	@docker compose --env-file .env.example -f deploy/compose.yml config --format json | \
-		docker run --rm -i -v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py
-	@docker compose --profile observability --env-file .env.example -f deploy/compose.yml config --format json | \
-		docker run --rm -i -v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py --observability
-	@KAEDE_OPERATOR_ENV_FILE="$(abspath deploy/.env.schema)" KAEDE_VOICE_ENABLED=true \
-		docker compose --profile voice --env-file deploy/.env.schema -f deploy/compose.yml config --format json | \
-		docker run --rm -i --network none \
-		-v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py --voice
-	@KAEDE_OPERATOR_ENV_FILE="$(abspath deploy/.env.schema)" KAEDE_VOICE_ENABLED=true \
-		LIVEKIT_CONTROL_PORT=7890 LIVEKIT_RTC_TCP_PORT=7891 LIVEKIT_RTC_UDP_PORT=7892 \
-		LIVEKIT_TURN_TLS_PORT=5350 KAEDE_TURN_UDP_PORT=13489 \
-		KAEDE_VOICE_LIVEKIT_URL=http://host.docker.internal:7890 \
-		docker compose --profile voice --env-file deploy/.env.schema -f deploy/compose.yml config --format json | \
-		docker run --rm -i --network none \
-		-v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py --voice
-	docker compose --env-file deploy/reference.env.example -f deploy/compose.yml config --quiet
-	@docker compose --env-file .env.s3.example -f deploy/compose.yml -f deploy/compose.s3.yml config --format json | \
-		docker run --rm -i -v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py --external-s3
-	@KAEDE_DEV_HTTPS_PORT=29443 docker compose -f deploy/compose.dev.yml config --format json | \
-		docker run --rm -i -v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py --development --dev-https-port 29443
-	docker compose -f deploy/compose.dev.yml -f deploy/compose.federation-tls.yml config --quiet
-	docker run --rm -e KAEDE_DOMAIN=chat.example.com -e KAEDE_PROXY_SECRET=01234567890123456789012345678901 -e KAEDE_EDGE_SECRET=abcdefghijklmnopqrstuvwxyz012345 -e KAEDE_VOICE_ENABLED=false -v "$(CURDIR)/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile
-	docker run --rm -e KAEDE_PROXY_SECRET=kaede-development-proxy-secret-00001 -e KAEDE_DEV_HTTPS_PORT=18443 -v "$(CURDIR)/deploy/Caddyfile.dev:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile
-	@config="$$(docker compose --profile voice --env-file deploy/.env.schema -f deploy/compose.yml config --format json | docker run --rm -i python:3.12.13-slim python -c 'import json, sys; print(json.load(sys.stdin)["services"]["livekit"]["environment"]["LIVEKIT_CONFIG"])')"; \
-	docker run --rm livekit/livekit-server:v1.13.3 --config-body "$$config" ports >/dev/null
-	docker run --rm \
-		-v "$(CURDIR)/deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-		-v "$(CURDIR)/deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
-		--entrypoint /bin/promtool prom/prometheus:v3.13.1 \
-		check config /etc/prometheus/prometheus.yml
-	docker run --rm -v "$(CURDIR)/deploy/observability/grafana/dashboards:/dashboards:ro" \
-		python:3.12.13-slim python -c 'import json; json.load(open("/dashboards/kaede-overview.json", encoding="utf-8"))'
-	$(MAKE) generated-compose-check
-	$(MAKE) nginx-check
-
-generated-compose-check:
-	@$(CONFIG_GUARD); \
-	if [ ! -f deploy/compose.generated.yml ]; then \
-		echo "generated Compose validation skipped (run make setup to create it)"; \
-		exit 0; \
-	fi; \
-	test -f .env || { echo "deploy/compose.generated.yml exists but .env is missing; rerun make setup to regenerate a matching configuration" >&2; exit 2; }; \
-	args=""; \
-	if grep -q '^KAEDE_MEDIA_STORAGE_BACKEND=s3$$' .env; then args="$$args --external-s3"; fi; \
-	case ",$$(grep '^COMPOSE_PROFILES=' .env | cut -d= -f2-)," in \
-		*,observability,*) args="$$args --observability" ;; \
-	esac; \
-	case ",$$(grep '^COMPOSE_PROFILES=' .env | cut -d= -f2-)," in \
-		*,voice,*) args="$$args --voice" ;; \
-	esac; \
-	KAEDE_OPERATOR_ENV_FILE="$(abspath .env)" docker compose --env-file .env \
-		-f deploy/compose.yml -f deploy/compose.generated.yml config --format json | \
-		docker run --rm -i --network none \
-		-v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
-		python:3.12.13-slim python /validate_compose.py $$args
-
 nginx-check:
 	@set -eu; \
 	tmp="$$(mktemp -d)"; \
@@ -303,9 +169,3 @@ nginx-check:
 		-v "$(CURDIR)/deploy/nginx/kaede.conf.example:/etc/nginx/conf.d/kaede.conf:ro" \
 		-v "$$tmp:/etc/letsencrypt/live/chat.example.com:ro" \
 		nginx:1.29.0-alpine nginx -t
-
-dev:
-	$(DEV_COMPOSE) up --build
-
-dev-down:
-	$(DEV_COMPOSE) down

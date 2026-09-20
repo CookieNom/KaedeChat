@@ -18,11 +18,9 @@ binds only to `127.0.0.1:18081`, and the API diagnostic binding defaults to
 `127.0.0.1:18082`. If you change the edge port during a manual setup, update
 both `.env` and the host-nginx upstream.
 
-LiveKit uses host networking and sits behind the `voice` Compose profile, so
-the default topology doesn't bind its host ports. The edge returns 404 for
+LiveKit uses host networking and starts only when `KAEDE_VOICE_ENABLED=true`. The edge returns 404 for
 `/livekit` unless `KAEDE_VOICE_ENABLED=true`; the voice preflight requires
-that exact opt-in. Once you've enabled voice with both the setting and
-`--profile voice`, allow the selected RTC/TURN traffic through the host and
+that exact opt-in. Once you have enabled voice, allow the selected RTC/TURN traffic through the host and
 provider firewalls: TCP `LIVEKIT_RTC_TCP_PORT`, UDP `LIVEKIT_RTC_UDP_PORT`,
 UDP `KAEDE_TURN_UDP_PORT`, and TCP `LIVEKIT_TURN_TLS_PORT`. Keep
 `LIVEKIT_CONTROL_PORT` and the API/edge loopback ports blocked from external
@@ -33,7 +31,7 @@ The defaults are control TCP 7880, RTC TCP 7881, RTC UDP 7882, TURN/TLS TCP
 5349, and TURN UDP 13478. Every host-networked LiveKit process on the same
 host needs its own five-port set. The setup wizard can find an available set or accept one you pick by hand. Automatic
 selection avoids conflicts with listeners present while setup runs. It can't
-stop another process from claiming a selected port before Compose starts.
+stop another process from claiming a selected port before Kubernetes starts the pod.
 
 ## Secrets and initial configuration
 
@@ -49,8 +47,7 @@ the optional services, and it can render a configuration for host-level
 nginx. It never starts the topology or reloads host nginx. If you select
 automatic updates, it installs or removes only the current user's systemd
 timer. See [the deployment-wizard guide](deployment-wizard.md) for every
-option and generated file. If you used the wizard, run the two-file Compose
-command in `deploy/generated/README.txt`.
+option and generated file. If you used the wizard, follow the commands in `deploy/generated/README.txt`.
 
 Rerunning the wizard preserves existing quota tuning. As a one-time upgrade,
 it recognizes the exact defaults written by older Kaede setup versions and
@@ -128,13 +125,9 @@ make env-check
 
 The target rejects duplicate assignments, group/world-readable production
 files, documented placeholder credentials, disabled production malware
-scanning, and unknown `KAEDE_` settings. Compose's `--env-file` normally
-affects interpolation only, so Kaede also loads the selected file into its
-isolated preflight process. That catches misspellings that would otherwise
-fall back to a default. For a file other than the repository-root `.env`, run
-`make env-check ENV_FILE=/absolute/path/to/kaede.env`, then set both
-`--env-file` and `KAEDE_OPERATOR_ENV_FILE` to that same absolute path for
-later direct Compose commands.
+scanning, and invalid settings. Application preflight also rejects unknown
+`KAEDE_` settings. For another file, pass `ENV_FILE=/absolute/path/to/kaede.env`
+to both validation and deployment targets.
 
 Generate independent values. These commands produce characters that are safe
 in headers, YAML, and the PostgreSQL URL:
@@ -160,7 +153,7 @@ Use a different value for every line. The PostgreSQL password goes into both
 `POSTGRES_PASSWORD` and `KAEDE_DATABASE_URL`; the Dragonfly password goes
 into both `DRAGONFLY_PASSWORD` and `KAEDE_DRAGONFLY_URL`. Set the public
 HTTPS `KAEDE_APP_URL`, the email sender/backend credentials, and an optional
-random `KAEDE_ADMIN_TOKEN`. When enabling the `voice` profile, also set
+random `KAEDE_ADMIN_TOKEN`. When enabling voice, also set
 `KAEDE_VOICE_ENABLED=true`, `KAEDE_VOICE_PUBLIC_URL=wss://<domain>/livekit`,
 the LiveKit keys, the five port settings, and the certificate paths. The
 control port in `KAEDE_VOICE_LIVEKIT_URL` must match `LIVEKIT_CONTROL_PORT`.
@@ -243,8 +236,7 @@ host-edge secrets.
 Kaede requires an S3-compatible object store; Garage is only the default.
 Pick exactly one deployment mode.
 
-For self-hosted Garage, keep `KAEDE_MEDIA_STORAGE_BACKEND=garage` and start
-with `deploy/compose.yml`. The provider-neutral `storage-init` service
+For self-hosted Garage, keep `KAEDE_MEDIA_STORAGE_BACKEND=garage`. The provider-neutral `storage-init` service
 creates all three private buckets idempotently. Single-node Garage has no
 replica redundancy, so back up both its metadata and data volumes
 independently.
@@ -284,13 +276,11 @@ retention and privacy requirements. Backblaze B2 buckets are versioned by
 default, so the lifecycle step is required there for bounded physical
 retention.
 
-For a new deployment, choose external S3 in `make setup` and use the generated
-Compose file for every command, as shown in [server setup](../README.md#setup).
-For a manually maintained deployment, `deploy/compose.s3.yml` is the external
-storage override; use it together with `deploy/compose.yml`. Fill in all
-credentials and validate `.env` before starting services.
-
-The override removes Garage from the rendered service set. `storage-init`
+Choose external S3 in `make setup`; no Garage workload or PVC is then created.
+For another locally hosted S3 service, select the same `s3` mode and use an
+endpoint reachable from the pods. Production requires TLS for external S3;
+development can use HTTP. `host.k3d.internal` reaches the Docker host from k3d,
+but browsers need a separately reachable public URL. `storage-init`
 verifies all three pre-created buckets before API and worker startup, and it
 fails closed on bad credentials, missing buckets, or an unreachable provider.
 Virtual addressing puts the bucket before the endpoint host, so it requires
@@ -337,15 +327,10 @@ KAEDE_PHOTODNA_SUBSCRIPTION_KEY=<Microsoft subscription key>
 PHOTODNA_EDGEHASHGENERATOR=/absolute/host/path/to/photodna-sdk
 ```
 
-Compose mounts that directory read-only at `/opt/photodna` only in preflight,
-API, and worker containers. API and worker retain the image's dedicated
-unprivileged UID `10001`; Compose grants only the supplemental
-`OPERATOR_ENV_GID` (default `1000`) needed to read the SDK. Preflight runs as
-the operator UID/GID because it also validates the mode-`0600` operator env
-file. Set `OPERATOR_ENV_UID`/`OPERATOR_ENV_GID` to the account that owns the
-SDK directory, and give that group read/traverse permission only. That way the
-confidential files never become world-readable, and the long-running services
-keep their image identity.
+Kubernetes mounts that directory read-only at `/opt/photodna` in preflight,
+API, and worker pods. They run as UID `10001`, with supplemental group
+`OPERATOR_ENV_GID` (default `1000`) to read the SDK. Keep group read/traverse
+permissions restricted. k3d mounts the same directory into its node first.
 
 Preflight loads the native library and rejects an incomplete or incompatible
 installation before the API starts. The matcher URL is fixed in code to
@@ -397,274 +382,250 @@ are deleted, and are never published as clean. Other generator or provider
 errors remain fail-closed and retryable. MIME validation, ClamAV, dimension
 limits, and normal image processing still apply.
 
+## Kubernetes prerequisites
+
+Use a single-node K3s cluster for a small production instance. Install K3s
+following its [official installation instructions](https://docs.k3s.io/quick-start).
+Configure `/etc/rancher/k3s/config.yaml` before starting it:
+
+```yaml
+node-name: kaede-production
+write-kubeconfig-mode: "0640"
+write-kubeconfig-group: k3s-admin
+secrets-encryption: true
+disable:
+  - traefik
+  - servicelb
+```
+
+Create the access group, add your deployment user, and start K3s as root:
+
+```sh
+sudo groupadd -f k3s-admin
+sudo usermod -aG k3s-admin "$USER"
+sudo systemctl enable --now k3s
+```
+
+Log out and back in for group membership, then run `make tools` and verify:
+
+```sh
+.kaede-tools/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes
+.kaede-tools/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A
+```
+
+The node and kube-system pods must be Ready. Cluster credentials grant
+administrative access; do not make the kubeconfig world-readable. Keep
+TCP 6443 private or restricted to your administration network. Do not expose
+Flannel UDP 8472 or the NodePort range publicly. A Proxmox/provider firewall
+can enforce these restrictions; UFW is not required. The k3d API and HTTP
+publications bind loopback. Host nginx remains outside both clusters.
+
+Inside an unprivileged LXC container, Docker nesting, a writable cgroup v2
+hierarchy, and the necessary host kernel modules must be available. If K3s
+fails because kubelet cannot use `/dev/kmsg` in the user namespace, add:
+
+```yaml
+kubelet-arg:
+  - feature-gates=KubeletInUserNamespace=true
+```
+
+Restart K3s and check its journal and node readiness. k3d already passes this
+flag to its development node. Do not weaken the host container's isolation
+without first diagnosing the actual failure. See the Kubernetes
+[user-namespace requirements](https://kubernetes.io/docs/tasks/administer-cluster/kubelet-in-userns/).
+Development uses separate pod/service CIDRs from the host K3s defaults.
+
+### Local production image imports
+
+`make setup` defaults to local image imports. Docker builds the images; K3s
+uses its own containerd store. On the single K3s server, install the small
+root-owned import helper once:
+
+```sh
+sudo install -o root -g root -m 0755 deploy/kubernetes/import-image.sh /usr/local/sbin/kaede-import-image
+sudo visudo -f /etc/sudoers.d/kaede-image-import
+```
+
+For deployment user `cookie`, add this exact sudoers entry (substitute your
+actual account name):
+
+```sudoers
+cookie ALL=(root) NOPASSWD: /usr/local/sbin/kaede-import-image ""
+```
+
+Then validate with `sudo visudo -c`. The helper accepts no arguments and imports
+an image archive from stdin into K3s's `k8s.io` namespace. It is the only sudo
+operation used by deployment and unattended updates. Keep it root-owned and
+review changes before reinstalling it. This flow assumes the command runs on
+the single production K3s node. For multiple nodes or a remote cluster, choose
+a registry instead and provision an image-pull Secret if necessary.
+
 ## Validate and start
 
-For a wizard-generated deployment, follow the [README startup sequence](../README.md#setup)
-and the exact command in `deploy/generated/README.txt`. Always include
-`deploy/compose.yml` and `deploy/compose.generated.yml`, with `.env` selected
-by both `--env-file` and `KAEDE_OPERATOR_ENV_FILE`.
+```sh
+make setup
+make env-check
+make kubernetes-check
+make deploy
+make status
+make logs SERVICE=api
+```
 
-Run `make env-check` and `make generated-compose-check` before startup. The
-[acceptance checks](#acceptance-checks) validate code against disposable
-services; they are separate from the health checks of your running deployment.
+`.kaede-kubernetes.json` pins the kubeconfig, context, namespace, cluster UID,
+storage class/capacity, and image delivery. Every production action verifies
+the saved cluster identity. `KUBE_CONFIG=/path/to/config.json` selects another
+saved deployment, and `ENV_FILE=/path/to/operator.env` selects its environment.
+Never change namespace or storage class to work around a failed rollout: that
+would select different data.
 
-The one-shot preflight runs before data services. Then `migrate` applies
-every pending Alembic revision in dependency order through `head` and
-idempotently bootstraps the instance identity. API, gateway, worker, and
-Caddy start only after that one-shot service succeeds. On an empty database
-this creates a fresh schema; on later starts it upgrades the existing one. A
-stored domain mismatch, migration failure, or invalid secret fails closed.
-
-The API health check uses readiness rather than liveness and includes a
-75-second start period for the snowflake worker-ID quarantine. Caddy waits
-for that check, and `--wait` keeps the startup command pending until the
-dependency is ready.
-
-Install the nginx example in its `http` context and replace every example
-value. Keep the resulting secret-bearing file root-owned and
-non-world-readable (for example, mode `0600`). Then use your distribution's
-normal validation and reload commands (commonly `nginx -t` followed by
-`systemctl reload nginx`). Don't reload a configuration that failed
-validation.
-
-The example defines HTTP-context zones for `/gateway`, `/api/v1/bots/gateway`, `/livekit`
-signaling, and federation-link upgrade routes, and for the separate media
-virtual host. The `/livekit` location must forward both its ordinary
-validation requests and the `/livekit/rtc` WebSocket upgrade; routing it
-through the ordinary catch-all strips the signaling upgrade. Both user and bot
-gateway paths must also forward WebSocket upgrades; the ordinary catch-all causes
-bot connections to fail with HTTP 404. For existing nginx installations, replace
-`location = /gateway {` with `location ~ ^/(gateway|api/v1/bots/gateway)$ {`,
-keep its proxy settings, then validate and reload nginx. Updating containers alone
-does not update the host nginx configuration. Gateway
-admission allows at most 20 incomplete/active upgrades per source address,
-with 10 new upgrades per second and a burst of 20. If you serve unusually
-large groups behind one NAT, you can raise those values after measuring
-reconnect bursts, but keep both the connection and request limits. Kaede also
-keeps an independent process-local cap, so bypassing host nginx through a
-trusted loopback path can't create an unbounded pre-authentication queue.
+Preflight validates application settings before stateful services start. The
+migration Job runs once before any new writer starts, then storage-init verifies
+all S3 buckets. Readiness gates the API, gateway, frontend, and internal edge.
+Host nginx reaches loopback bridge pods on the configured edge/diagnostic ports;
+ordinary application rollouts leave these bridges and stateful services running.
+The supplied topology is intended for a single node and local-path volumes.
+Storage requests are Kubernetes capacities, not a substitute for free-space
+monitoring or application quotas.
 
 ## Development CA
 
-`make dev` is the only target that publishes the Alpha/Beta edge ports. It
-uses Caddy's local CA at `https://alpha.localhost:18443` and
-`https://beta.localhost:18443`. If the browser doesn't trust it, export the
-CA after the stack starts and import it into the development machine or
-browser trust store:
-
-```sh
-docker compose -f deploy/compose.dev.yml cp \
-  caddy:/data/caddy/pki/authorities/local/root.crt ./kaede-dev-root.crt
-```
-
-Never install this development CA on production systems. Run `make dev-down`
-when finished. Add `-v` by hand only when you mean to delete the development
-databases and the CA.
-
-`make federation-tls-check` uses a separate one-hour ephemeral CA inside its
-disposable Compose project and publishes no host ports. The validation-only
-`KAEDE_FEDERATION_CA_FILE` setting lets Alpha/Beta trust that CA. Settings
-reject both custom federation trust roots and peer URL overrides in
-production.
+Default k3d development uses HTTP on loopback hostnames, with no CA installation.
+For real-device HTTPS, keep TLS on host nginx using your trusted certificate,
+and set the development `.env` public URLs accordingly. Federation TLS acceptance
+checks generate a temporary CA inside their disposable test cluster; they never
+install it into your host trust store.
 
 ## Backup and restore boundary
 
-A recoverable backup set contains all of the following, taken at one quiesced
-writer boundary:
+Back up the database, private object buckets, Dragonfly snapshots, `.env`, and
+`.kaede-kubernetes.json` as one recovery set. Preserve `KAEDE_SECRET_KEY`, domain,
+and storage keys. PVCs and single-node Garage are persistent storage, not backups.
+External object-store versioning and retention need their own recovery policy.
+Keep copies off the host and exercise restoration before relying on them.
 
-- a PostgreSQL custom-format dump;
-- the Garage data and metadata volumes, or a provider-native protected copy
-  of all three external S3 buckets;
-- `.env` or an equivalent secret-manager export, especially
-  `KAEDE_SECRET_KEY`, `KAEDE_GATEWAY_SECRET_KEY`, the object-store keys, and
-  the LiveKit keys;
-- the deployed revision, migration head, internal-edge/host-nginx
-  configuration, and TLS certificate automation state.
+For a consistent maintenance backup, place host nginx in maintenance mode and
+scale API, gateway, worker, and scheduler to zero. Wait for all writer pods to
+terminate before dumping PostgreSQL. Use explicitly selected kubeconfig/context
+and namespace with every kubectl command. Do not delete PVCs to stop services.
+Take Garage metadata and data snapshots together after Garage has stopped; a
+live file copy of its metadata is not a consistent backup. Snapshot Dragonfly
+before stopping it. Capture provider-hosted S3 using its documented backup tools.
+Restore into a separate cluster/namespace and isolated buckets for a drill,
+without allowing a duplicate federation authority to contact public peers.
 
-First place host nginx in maintenance mode and stop every application writer.
-If the voice profile is active, stop LiveKit too. For bundled Garage, stop it
-only after the application writers have stopped. Leave PostgreSQL running so
-it can produce a consistent dump:
+### Migrate an existing Compose instance
 
-```sh
-docker compose --env-file .env -f deploy/compose.yml \
-  stop caddy api gateway worker scheduler livekit
-# Garage deployments only, after the writer stop completes:
-docker compose --env-file .env -f deploy/compose.yml stop garage
-```
-
-Create a PostgreSQL dump with a destination you control, and verify that
-`pg_restore --list` can read it while writers are still stopped:
+The one-time cutover needs downtime. Keep the old checkout, containers, and
+volumes until the new instance is verified. Do not run old and new writers
+against the same identity or object store simultaneously. First prepare K3s,
+disable the old update timer, run setup (retaining secrets and domain),
+install the image helper, and build
+images before the outage:
 
 ```sh
-install -d -m 0700 /var/backups/kaede
-docker compose --env-file .env -f deploy/compose.yml exec -T postgres \
-  pg_dump -U kaede -d kaede -Fc > /var/backups/kaede/kaede-postgres.dump
-pg_restore --list /var/backups/kaede/kaede-postgres.dump >/dev/null
+make auto-update-disable
+make tools
+make setup
+PATH="$PWD/.kaede-tools/bin:$PATH" python3 deploy/kubernetes/manage.py build
+# Find and inspect the exact old project; this does not stop anything:
+docker compose ls
+python3 deploy/kubernetes/legacy.py inspect --project kaede-chat
 ```
 
-Before restarting writers, take a protected copy or provider snapshot of all
-three object buckets. A Garage backup must include both its metadata and data
-volumes; a copy of only one is unusable. For external S3, record the provider
-snapshot/version boundary and verify object counts. Encrypt the database
-dump, the object copy, and the secret-manager export at rest. Test
-restoration of the combined set, not each component on its own.
+Disable the old update timer. Put nginx in maintenance mode, then export:
 
-After every component is copied and verified, start Garage first when it's in
-use, then start the application topology. Remove maintenance mode only after
-readiness succeeds. Don't restart writers between the database dump and the
-object-copy boundary.
+```sh
+make auto-update-disable
+python3 deploy/kubernetes/legacy.py export --project kaede-chat --backup /path/to/new-backup
+```
 
-Dragonfly stores leases, sessions, presence, cache, and task transport. Its
-snapshot improves continuity, but it's not a substitute for the PostgreSQL
-and object-store backups.
+Export stops that project's writers, dumps PostgreSQL, snapshots Dragonfly,
+stops the remaining containers, and archives bundled Garage/search/monitoring
+volumes. It copies the private operator environment and records checksums.
+An interrupted export leaves the source stopped; inspect the error and resume
+from the retained containers, rather than starting both stacks. External S3
+objects stay in their existing buckets and require a separate backup.
 
-Restore into a separate Compose project, database, volumes, and object bucket
-namespace first. Don't point a drill at production buckets: cleanup jobs are
-allowed to delete objects. Keep restored SMTP, federation egress, webhooks,
-and public DNS/firewall exposure disabled, and use different loopback ports
-from the live instance. The restored database must use the original domain
-and `KAEDE_SECRET_KEY` to verify protected identity material, which means the
-clone must never be network-visible at the same time as the authoritative
-instance. Run `alembic upgrade head`, bootstrap, and validate
-identity/chat/federation behavior before any cutover. A backup that hasn't
-passed an isolated restore drill isn't usable.
+Restore only into a fresh namespace, using the same component versions:
 
-Keep both the worker and scheduler services running for identity email
-delivery. API requests commit encrypted delivery intents even if Dragonfly
-can't accept the immediate wake; the scheduler's minute sweep is the recovery
-path. Operational logs include only opaque outbox IDs and retry counters,
-never recipient addresses, message bodies, provider errors, or one-time
-links. The console backend is a development-only exception and must never be
-selected in production.
+```sh
+PATH="$PWD/.kaede-tools/bin:$PATH" python3 deploy/kubernetes/legacy.py restore --backup /path/to/new-backup
+make deploy
+```
+
+Restore refuses an existing namespace or mismatched identity/storage keys. Check
+readiness, instance discovery, login, history, media download/upload, and voice
+before removing maintenance mode. After new writes occur, reverting to old
+volumes would lose those writes; use a reviewed reverse migration or backup
+restore instead. `make legacy-down PROJECT=kaede-chat` stops retained legacy
+containers without deleting containers, networks, or volumes. No Compose
+manifest is required for this shutdown tool.
+
+For a development cutover, create the empty node with `make dev-cluster`, then
+use `legacy.py restore --development --backup ...` and `make dev`. This restores
+data into the separate k3d cluster. Keep the same development `.env` and stop the
+old project first so its HTTP and LiveKit ports can be reused.
 
 ## Upgrade and rollback
 
 ### Optional automatic updates
 
-`make setup` optionally saves a Docker Compose project name in `.env` as
-`COMPOSE_PROJECT_NAME` and preserves it on subsequent runs. Leave it blank
-for the default `kaede`. For multiple installations on one Docker host, give
-each checkout a distinct name. For an existing installation, use the exact
-name originally passed to `docker compose -p`; changing it selects different
-containers and volumes. You can also add this setting directly to `.env`.
-Both manual updates and the automatic updater read it without additional flags.
+`make auto-update-run` works even with scheduling disabled. It requires a clean
+tracked checkout on the configured branch and accepts only fast-forward Git
+updates. It builds/imports images, runs preflight and the executable
+`AUTO_UPDATE_BACKUP_HOOK` if configured, then rolls compatible applications.
+The hook receives `KAEDE_UPDATE_FROM`, `KAEDE_UPDATE_TO`, and `KAEDE_ROOT` during
+an auto-update. Nonzero exit stops deployment. Image builds/imports happen before
+any workload replacement; Docker build failure leaves the running application alone.
 
-The supplied automatic updater runs on the host because this deployment
-builds the Kaede web and backend images from the local source tree. It's
-disabled by default. Enable it in `make setup`, or manage it later:
+New API/gateway pods must pass readiness before old pods terminate. Old gateway
+pods retain established sockets for a bounded grace period, then clients must
+reconnect/resume. Load balancing directs new connections to ready pods; it cannot
+move an established WebSocket. This reduces update disruption but does not make
+single-node hardware, storage upgrades, or LiveKit replacement highly available.
+
+Changed migrations or stateful/host-network infrastructure configuration refuse
+an unattended update. The checkout may already be newer, but the deployed commit
+is recorded only after all workloads become ready. Compatible failed application
+rollouts restore previous Deployment specifications; the release marker remains
+unchanged. Inspect `make status`, `make logs SERVICE=api`, and Job logs before
+retrying. Schema changes are never automatically downgraded.
+
+Enable or inspect scheduling with:
 
 ```sh
 make auto-update-enable
 make auto-update-status
-make auto-update-run
-make auto-update-disable
 journalctl --user -u kaede-auto-update.service
+make auto-update-disable
 ```
 
-The user running the timer must own this checkout and `.env`, have Docker
-Compose access, and have a working user systemd manager. On servers where the
-user manager stops at logout, an administrator must enable lingering for the
-Kaede service account, then verify the timer:
-
-```sh
-sudo loginctl enable-linger kaede
-systemctl --user list-timers kaede-auto-update.timer
-```
-
-Replace `kaede` with the actual unprivileged service account. Lingering is a
-host policy decision; setup never enables it. Don't run the timer as root
-merely to avoid configuring Docker access.
-
-The settings are ordinary non-secret entries in `.env`:
-
-```dotenv
-AUTO_UPDATE_ENABLED=false
-AUTO_UPDATE_REMOTE=origin
-AUTO_UPDATE_BRANCH=main
-AUTO_UPDATE_INTERVAL=6h
-AUTO_UPDATE_JITTER=30m
-# AUTO_UPDATE_BACKUP_HOOK=/usr/local/sbin/kaede-backup
-AUTO_UPDATE_WAIT_TIMEOUT_SECONDS=300
-```
-
-Intervals are `6h`, `12h`, `1d`, or `1w`. The timer adds the configured
-random delay so fetches don't synchronize across hosts. The backup hook must
-be an absolute, regular, non-symlink executable. It runs only after new
-images and preflight succeed but before services stop, with
-`KAEDE_UPDATE_FROM`, `KAEDE_UPDATE_TO`, and `KAEDE_ROOT` in its environment.
-It must exit nonzero unless it has created and verified a database and
-object-store backup at one consistent boundary.
-
-Each run takes a local lock. It refuses a dirty tracked checkout or a
-detached/wrong branch, fetches only the configured branch, and verifies that
-the new commit is a descendant of the current one. It won't follow a
-force-push, a downgrade, or divergent local history. It then validates and
-builds before any downtime, runs the backup hook, stops `caddy`, `api`,
-`gateway`, `worker`, and `scheduler`, runs the new migration image once,
-starts the topology without rebuilding, and waits for Compose health checks.
-The deployed commit is recorded, so a failed deployment stays retryable even
-when Git already reached the target commit.
-
-The updater first runs itself from a private temporary copy, so a
-fast-forward can't replace the shell program while that same program is still
-executing. Configure Git authentication to work non-interactively for the
-timer account. Never put a personal access token directly in the remote URL
-or the systemd unit.
-
-If fetching, preflight, building, or the backup hook fails, the old services
-keep running. If migration or startup fails, writers stay stopped: inspect
-the journal and Compose logs, keep the public edge in maintenance mode, and
-use the reviewed manual recovery procedure below. The updater won't guess at
-schema downgrades or restore a database for you.
-
-Treat write access to the configured Git branch and remote as production code
-execution. Protect the GitHub organization and maintainers with MFA and
-branch protection, require reviewed, green changes before merging, and prefer
-a stable release branch over a development branch. Git transport authenticity
-doesn't replace review of the code being deployed.
-
-On a host without systemd, set `AUTO_UPDATE_ENABLED=true` only after
-reviewing the same risks, and invoke `deploy/auto-update.sh run` from the
-service account's cron. Redirect output to a protected log and set up
-equivalent alerting; cron has weaker missed-run handling and status
-visibility than the supplied timer.
-
-Other viable architectures have different tradeoffs:
-
-- Published application images plus a registry watcher give you immutable
-  digests and faster pull/restart cycles. Kaede does not currently publish
-  the web/backend images, though, and a watcher needs highly privileged
-  Docker-socket access and can't safely coordinate Kaede's backup/migration
-  boundary on its own.
-- A GitHub Actions deployment over SSH or a self-hosted runner can require
-  CI, approvals, and signed releases before rollout. It adds runner and
-  credential trust, GitHub availability, and the same backup/migration
-  orchestration. A good later choice for a larger operation, not a simpler
-  local default.
-- A plain cron entry is widely available but has poorer logging, randomized
-  scheduling, missed-run behavior, and enable/disable ergonomics than
-  systemd.
+Unattended updates require a successful initial `make deploy`; they never
+initialize an empty replacement for a legacy instance. The deployment user needs
+Docker, kubeconfig, and the local import sudo rule.
+For a user timer to run after logout, an administrator can run
+`sudo loginctl enable-linger <user>`. On non-systemd hosts, cron can invoke
+`deploy/auto-update.sh run` from the checkout with its tool PATH configured.
+The same updater locks prevent overlapping timer/cron runs. Intervals are
+`6h`, `12h`, `1d`, or `1w`; jitter and backup-hook settings are in `.env`.
 
 ### Manual upgrade and rollback
 
-Before upgrading: take and verify backups, record `alembic current`, review
-every new migration downgrade, and render the new Compose configuration.
-Never let an old application writer overlap a new schema migration. Build the
-new images first, place host nginx in maintenance mode, stop `caddy`, `api`,
-`gateway`, `worker`, and `scheduler`, and then run the new `migrate` image
-exactly once:
+For a reviewed schema/infrastructure change, back up and put nginx in
+maintenance mode, then run:
 
 ```sh
 make env-check
-docker compose --env-file .env -f deploy/compose.yml build
-docker compose --env-file .env -f deploy/compose.yml \
-  stop caddy api gateway worker scheduler
-docker compose --env-file .env -f deploy/compose.yml \
-  run --rm --no-deps migrate
-docker compose --env-file .env -f deploy/compose.yml \
-  up -d --no-build --wait --wait-timeout 180
+make deploy MAINTENANCE=1
+make status
 ```
+
+Maintenance stops writers before updating infrastructure and running migrations.
+If a migration fails, writers stay stopped. Resolve the migration or restore the
+matching backup before resuming; never start incompatible old code. Maintenance
+removes disabled optional workloads while retaining their PVCs.
+It keeps previous credential/config revisions for rollback. Old Secrets/ConfigMaps
+can be removed once no live pod, Job, or retained ReplicaSet references them.
 
 The password-KDF-v2 cutover migration refuses to run while any local human
 account still lacks version-2 authentication and vault salts. Before deploying this
@@ -695,7 +656,7 @@ running the migration. That guarantees no browser credential issued by the
 old version can still rewrite an already-clean legacy key. Keep maintenance
 mode in place until readiness, smoke checks, the migration head, and instance
 discovery have all been verified. The startup `migrate` gate may run again
-during `up`; its upgrade and bootstrap operations are idempotent.
+during a retry; its upgrade and bootstrap operations are idempotent.
 
 API workers quarantine newly available snowflake worker IDs for 60 seconds
 before becoming ready. Allow at least this startup window in
@@ -723,7 +684,7 @@ upgrade. Verification and password-reset credentials are unaffected.
 Rotate the instance federation signing key inside a running API container:
 
 ```sh
-docker compose --env-file .env -f deploy/compose.yml exec -T api kaede rotate-key
+make exec SERVICE=api COMMAND='kaede rotate-key'
 ```
 
 The command takes a database-wide identity lock, verifies the stored keypair
@@ -949,12 +910,12 @@ orphan objects, or a genuinely undersized target.
 ## Private message search
 
 New setup runs offer typo-tolerant message search backed by the bundled
-Meilisearch service. It binds only to the private Compose `data` network, and
+Meilisearch service. It binds only to the instance namespace, behind a private Service, and
 its master key is generated into the mode-0600 operator `.env`. The key is
 never sent to browsers, mobile clients, desktop clients, or federation peers.
 Disable search with `KAEDE_SEARCH_ENABLED=false`. On an existing deployment,
 rerun `make setup`, choose search, then apply the generated configuration and
-migrations normally. The generated `COMPOSE_PROFILES=search` activates the
+migrations normally. `KAEDE_SEARCH_ENABLED=true` activates the
 bundled service only when search is enabled, so opting out doesn't leave an
 idle search container running.
 
@@ -1036,14 +997,15 @@ data-handling policy you accept.
 
 ## Observability boundary
 
-The optional profile defines Prometheus, a provisioned Kaede overview
+`KAEDE_OBSERVABILITY_ENABLED=true` enables Prometheus, a provisioned Kaede overview
 dashboard in Grafana, alert rules, and a Loki endpoint. It doesn't mount or
 proxy the Docker socket: project-label filtering isn't an access-control
 boundary, and a socket reader could inspect unrelated host containers.
-Grafana binds only to `127.0.0.1:18084` by default and requires the
+Grafana has a private ClusterIP Service and a production loopback bridge on
+`KAEDE_GRAFANA_HOST_PORT` (default `18084`). It requires the
 externally supplied administrator password. Set a unique
 `GRAFANA_ADMIN_PASSWORD` of at least 20 characters; observability preflight
-rejects a blank or documented placeholder before any profile service starts.
+rejects a blank or documented placeholder before any monitoring service starts.
 Prometheus, Loki, and Grafana have restart policies and readiness checks.
 
 Metrics cover API health, connected gateway sessions, pending/failed
@@ -1076,13 +1038,13 @@ the built-in audit checks cover language dependencies rather than base-image
 OS packages. A production release process should mirror or digest-pin
 approved images and run an image/SBOM vulnerability scanner. LiveKit health
 and RTC/TURN reachability are separate from API database/Dragonfly readiness.
-Monitor its HTTP and media-plane ports externally whenever the voice profile
+Monitor its HTTP and media-plane ports externally whenever the voice feature
 is enabled.
 
 ## Acceptance checks
 
-Run checks from the repository root. These targets create disposable Compose
-projects and remove their containers, networks, and volumes on exit; they do
+Run `make tools` first, then checks from the repository root. These targets create disposable k3d
+clusters and remove those clusters on exit; they do
 not publish application ports or validate an existing production deployment.
 
 | Target | Coverage |

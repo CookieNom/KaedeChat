@@ -28,7 +28,8 @@ final repositoryProvider = Provider<KaedeRepository>((ref) {
 final gatewayProvider = Provider<GatewayClient>((ref) {
   final api = ref.watch(apiClientProvider);
   final gateway = GatewayClient(
-    tokens: () async => api.tokens ?? await api.restore(),
+    tokens: (refresh) async =>
+        refresh ? await api.refreshTokens() : api.tokens ?? await api.restore(),
   );
   ref.onDispose(gateway.close);
   return gateway;

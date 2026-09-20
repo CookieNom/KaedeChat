@@ -462,7 +462,7 @@ jobs:
         run: uv run pytest -q -m postgres
       - run: uv run alembic check
 
-  compose:
+  kubernetes:
     needs: release-inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -470,7 +470,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12.13" }
-      - run: make compose-check
+      - run: make kubernetes-check
+      - run: make nginx-check
       - run: make auto-update-check
 
   identity:
@@ -479,6 +480,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make identity-check
 
   chat:
@@ -487,6 +489,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make chat-check
 
   media:
@@ -495,6 +498,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make media-check
 
   voice:
@@ -503,6 +507,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make voice-check
 
   release:
@@ -511,6 +516,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make release-check
 
   federation:
@@ -519,6 +525,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make federation-check
 
   federation-tls:
@@ -527,4 +534,5 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: make tools
       - run: make federation-tls-check

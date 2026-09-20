@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import base64
+import copy
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kubernetes"))
+import manage
+from dev import development_values, instances
+from stack import ROOT, read_env_file, render
+
+
+class KubernetesTests(unittest.TestCase):
+    def setUp(self):
+        self.values = read_env_file(ROOT / "deploy/.env.schema")
+
+    def test_role_credentials_and_rollout_contract(self):
+        items = render(self.values, "kaede-test")["items"]
+        index = {(o["kind"], o["metadata"]["name"]): o for o in items}
+
+        def env(role):
+            obj = index[("Deployment", role)]
+            ref = obj["spec"]["template"]["spec"]["containers"][0]["envFrom"][0][
+                "secretRef"
+            ]["name"]
+            return {
+                k: base64.b64decode(v).decode()
+                for k, v in index[("Secret", ref)]["data"].items()
+            }
+
+        self.assertNotIn("KAEDE_DATABASE_URL", env("scheduler"))
+        self.assertNotIn("KAEDE_ADMIN_TOKEN", env("gateway"))
+        self.assertNotIn("KAEDE_MEDIA_S3_SECRET_KEY", env("gateway"))
+        self.assertEqual(
+            env("gateway")["KAEDE_SECRET_KEY"], self.values["KAEDE_GATEWAY_SECRET_KEY"]
+        )
+        self.assertNotEqual(
+            env("gateway")["KAEDE_SECRET_KEY"], env("api")["KAEDE_SECRET_KEY"]
+        )
+        for role in ("api", "gateway"):
+            obj = index[("Deployment", role)]
+            self.assertEqual(
+                obj["spec"]["strategy"]["rollingUpdate"]["maxUnavailable"], 0
+            )
+            pod = obj["spec"]["template"]["spec"]
+            self.assertFalse(pod["automountServiceAccountToken"])
+            self.assertEqual(
+                pod["containers"][0]["readinessProbe"]["httpGet"]["path"],
+                "/health/ready",
+            )
+            self.assertTrue(
+                pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"]
+            )
+        self.assertEqual(
+            index[("Deployment", "scheduler")]["spec"]["strategy"]["type"], "Recreate"
+        )
+        self.assertEqual(index[("Job", "migrate")]["spec"]["backoffLimit"], 0)
+        for obj in items:
+            if obj["kind"] in {"Deployment", "StatefulSet", "Job"}:
+                self.assertFalse(obj["spec"]["template"]["spec"]["enableServiceLinks"])
+            if obj["kind"] == "Service":
+                self.assertNotIn("nodePort", obj["spec"]["ports"][0])
+                self.assertNotEqual(obj["spec"].get("type"), "LoadBalancer")
+
+    def test_external_s3_and_search_do_not_start_bundled_services(self):
+        values = self.values | {
+            "KAEDE_MEDIA_STORAGE_BACKEND": "s3",
+            "KAEDE_MEDIA_S3_ENDPOINT": "http://s3.example.test:9000",
+            "KAEDE_SEARCH_ENABLED": "true",
+            "KAEDE_SEARCH_URL": "http://search.example.test:7700",
+        }
+        items = render(values, "kaede-test")["items"]
+        names = {o["metadata"]["name"] for o in items}
+        self.assertTrue(
+            {"garage", "garage-data", "garage-meta", "meilisearch"}.isdisjoint(names)
+        )
+
+    def test_configuration_changes_are_immutable_and_infrastructure_is_gated(self):
+        before = render(self.values, "kaede-test")["items"]
+        after = render(self.values | {"POSTGRES_PASSWORD": "changed"}, "kaede-test")[
+            "items"
+        ]
+
+        def names(items):
+            return {o["metadata"]["name"] for o in items if o["kind"] == "Secret"}
+
+        self.assertNotEqual(names(before), names(after))
+        self.assertNotEqual(
+            manage.infrastructure_digest(before), manage.infrastructure_digest(after)
+        )
+        apps = render(self.values, "kaede-test", backend="new-image")["items"]
+        self.assertEqual(
+            manage.infrastructure_digest(before), manage.infrastructure_digest(apps)
+        )
+
+    def test_development_is_one_instance_and_federation_is_explicit(self):
+        with (
+            patch(
+                "dev.read_env_file",
+                side_effect=[self.values.copy(), {"KAEDE_DOMAIN": "existing.example"}],
+            ),
+            patch("pathlib.Path.is_file", return_value=True),
+        ):
+            configured = development_values(Path("existing.env"))
+        self.assertNotIn("KAEDE_ADMIN_TOKEN", configured)
+        self.assertNotIn("KAEDE_SECRET_KEY", configured)
+        with patch("dev.development_values", return_value=self.values.copy()):
+            self.assertEqual(list(instances(False)), ["kaede-dev"])
+        self.assertEqual(set(instances(True)), {"kaede-alpha", "kaede-beta"})
+        items = render(
+            self.values | {"KAEDE_GATEWAY_WORKERS": "6", "KAEDE_API_WORKERS": "8"},
+            "kaede-dev",
+            development=True,
+        )["items"]
+        for obj in items:
+            if obj["kind"] == "Deployment" and obj["metadata"]["name"] in {
+                "api",
+                "gateway",
+            }:
+                self.assertEqual(obj["spec"]["replicas"], 1)
+        self.assertEqual(
+            instances(True)["kaede-beta"]["KAEDE_APP_URL"],
+            "http://beta.localhost:28181",
+        )
+
+    def test_wrong_cluster_and_migration_refuse_before_workload_changes(self):
+        cfg = {
+            "namespace": "kaede-test",
+            "cluster_uid": "expected",
+            "image_repository": "local",
+        }
+        with patch("manage.kubectl", return_value="wrong"):
+            with self.assertRaisesRegex(ValueError, "identity"):
+                manage.verify_cluster(cfg)
+        current = json.dumps({"data": {"schema": "old", "revision": "previous"}})
+        with (
+            patch("manage.verify_cluster"),
+            patch("manage.kubectl", return_value=current),
+            patch("manage.apply") as apply,
+        ):
+            with self.assertRaisesRegex(ValueError, "migrations changed"):
+                manage.deploy(
+                    cfg, self.values, "new", ("backend:new", "frontend:new"), False
+                )
+            self.assertEqual(len(apply.call_args_list), 1)
+            self.assertEqual(apply.call_args.args[1][0]["kind"], "Namespace")
+
+    def test_failed_compatible_rollout_restores_previous_application(self):
+        cfg = {
+            "namespace": "kaede-test",
+            "cluster_uid": "expected",
+            "image_repository": "local",
+        }
+        objects = manage.deployment(cfg, self.values, ("backend:new", "frontend:new"))[
+            "items"
+        ]
+        saved = [copy.deepcopy(o) for o in objects if o["kind"] == "Deployment"]
+        for obj in saved:
+            obj["spec"]["template"]["spec"]["containers"][0]["image"] = "old-image"
+        current = {
+            "data": {
+                "schema": manage.schema_digest(),
+                "infrastructure": manage.infrastructure_digest(objects),
+            }
+        }
+
+        def kubectl(cfg, *args, **kwargs):
+            return json.dumps(current if "configmap" in args else {"items": saved})
+
+        failed = False
+
+        def wait(cfg, obj):
+            nonlocal failed
+            if obj["kind"] == "Deployment" and not failed:
+                failed = True
+                raise manage.subprocess.CalledProcessError(1, "rollout")
+
+        with (
+            patch("manage.verify_cluster"),
+            patch("manage.kubectl", side_effect=kubectl),
+            patch("manage.job"),
+            patch("manage.wait_workload", side_effect=wait),
+            patch("manage.apply") as apply,
+        ):
+            with self.assertRaises(manage.subprocess.CalledProcessError):
+                manage.deploy(
+                    cfg, self.values, "new", ("backend:new", "frontend:new"), False
+                )
+            self.assertEqual(apply.call_args.args[1], saved)
+
+
+if __name__ == "__main__":
+    unittest.main()

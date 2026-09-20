@@ -139,7 +139,7 @@ Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
       userRef: messageRef(901)));
   final database = await seededDatabase();
   final gateway = GatewayClient(
-      tokens: () async => null,
+      tokens: (_) async => null,
       socketConnector: (_) => throw UnimplementedError());
   final controller = MobileController(KaedeRepository(api), api, gateway,
       database, PushService.test(firebaseReady: true));
