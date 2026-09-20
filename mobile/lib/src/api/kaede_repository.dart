@@ -2213,6 +2213,14 @@ final class KaedeRepository {
         },
       );
 
+  Future<Map<String, Object?>> dmEncryptionConsent(
+          EntityRef channel, String action, {String? requestId}) =>
+      api.sendJson('POST', '/api/v1/e2ee/channels/${channel.wire}/consent',
+          data: {
+            'action': action,
+            if (requestId != null) 'request_id': requestId
+          });
+
   Future<Map<String, Object?>> proposeE2eeRoom(
     EntityRef channel,
     String deviceId,

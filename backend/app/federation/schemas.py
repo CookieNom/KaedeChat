@@ -268,6 +268,15 @@ class E2EERoomProxyRequest(UnambiguousInputModel):
         return self
 
 
+class E2EEDMConsentRequest(UnambiguousInputModel):
+    model_config = ConfigDict(extra="forbid")
+    channel_id: SnowflakeString
+    channel_domain: FederationDomain
+    actor: RemoteUserProfile
+    action: Literal["status", "request", "agree", "disagree"]
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
 class E2EERoomOperationStatusRequest(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 

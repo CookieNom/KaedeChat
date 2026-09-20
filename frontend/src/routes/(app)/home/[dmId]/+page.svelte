@@ -130,6 +130,7 @@
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
+  import DMEncryptionConsent from '$lib/components/DMEncryptionConsent.svelte';
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import {
     decryptConversationMessages,
@@ -2099,7 +2100,49 @@
     }
   }
 
+  let consentRefresh = $state(0);
+  let consentStatus = $state<string | null>(null);
+  const consentPending = $derived(consentStatus === 'pending' || consentStatus === 'approved');
+
   async function enableEncryption() {
+    if (
+      !channel ||
+      !currentUser ||
+      groupBusy ||
+      (!groupConversation && consentPending) ||
+      channel.encryption_mode === 'e2ee' ||
+      !e2eeActivationEnabled
+    )
+      return;
+    const confirmed = window.confirm(
+      (groupConversation
+        ? ''
+        : 'Send an encryption request? The other participant must agree before encryption is enabled.\n\n') +
+        $t('ui_turn_on_end_to_end_encryption_for_this_conver_0f55c4d1')
+    );
+    if (!confirmed) return;
+    if (!groupConversation) {
+      const targetRef = entityRef(channel);
+      groupBusy = true;
+      try {
+        await initializeE2EE(currentUser);
+        if (!channel || entityRef(channel) !== targetRef) return;
+        await api(`/e2ee/channels/${encodeURIComponent(targetRef)}/consent`, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'request' })
+        });
+        consentRefresh += 1;
+      } catch (caught) {
+        error = userErrorMessage(caught, 'Could not request encryption. Please try again.');
+      } finally {
+        groupBusy = false;
+      }
+      return;
+    }
+    await activateConsentedEncryption();
+  }
+
+  async function activateConsentedEncryption() {
     if (
       !channel ||
       !currentUser ||
@@ -2108,18 +2151,17 @@
       !e2eeActivationEnabled
     )
       return;
-    const confirmed = window.confirm(
-      $t('ui_turn_on_end_to_end_encryption_for_this_conver_0f55c4d1')
-    );
-    if (!confirmed) return;
+    const targetRef = entityRef(channel);
+    const accountRef = entityRef(currentUser);
     groupBusy = true;
     groupError = '';
     try {
       const client = await initializeE2EE(currentUser);
-      const updated = await client.activateRoom(entityRef(channel));
+      if (!channel || entityRef(channel) !== targetRef) return;
+      const updated = await client.activateRoom(targetRef);
       e2eeClient = client;
       entities.channels.upsert(updated);
-      acknowledgeEncryptedRoom(entityRef(currentUser), entityRef(updated));
+      acknowledgeEncryptedRoom(accountRef, entityRef(updated));
       e2eeSafetyNumber = await client.safetyNumber(updated);
     } catch (caught) {
       const message = userErrorMessage(
@@ -2892,13 +2934,17 @@
             class:e2ee-status-button={channel.encryption_mode === 'e2ee'}
             class="icon-button"
             type="button"
-            disabled={groupBusy}
+            disabled={groupBusy || (channel.encryption_mode === 'plaintext' && consentPending)}
             aria-label={channel.encryption_mode === 'e2ee'
               ? $t('ui_end_to_end_encryption_is_on_3e72f343')
-              : $t('ui_turn_on_end_to_end_encryption_b2438d75')}
+              : consentPending
+                ? 'Encryption request sent'
+                : 'Request end-to-end encryption'}
             title={channel.encryption_mode === 'e2ee'
               ? $t('ui_end_to_end_encrypted_f01afb7a')
-              : $t('ui_turn_on_end_to_end_encryption_b2438d75')}
+              : consentPending
+                ? 'Encryption request sent'
+                : 'Request end-to-end encryption'}
             onclick={channel.encryption_mode === 'e2ee' ? showEncryptionInfo : enableEncryption}
           >
             <Icon name="lock" size={18} />
@@ -2974,6 +3020,21 @@
           >{$t('ui_retry_now_5148c3e2')}</button
         >
       </div>
+    {/if}
+    {#if channel && currentUser && !groupConversation && channel.encryption_mode === 'plaintext'}
+      {#key entityRef(channel)}
+        <DMEncryptionConsent
+          channelRef={entityRef(channel)}
+          userRef={entityRef(currentUser)}
+          refresh={consentRefresh}
+          disabled={groupBusy}
+          activationEnabled={e2eeActivationEnabled}
+          onEnable={activateConsentedEncryption}
+          onStatus={(status) => {
+            consentStatus = status;
+          }}
+        />
+      {/key}
     {/if}
     <div
       class:has-active-call={Boolean(activeCall && callJoined)}

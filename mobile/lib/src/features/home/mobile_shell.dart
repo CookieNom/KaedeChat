@@ -135,6 +135,24 @@ Future<void> _showE2eeRoomSettings(
   var busy = false;
   String? error;
   String? safetyNumber;
+  var consentPending = false;
+  if (channel.guildRef == null &&
+      channel.conversationType == 'direct' &&
+      channel.encryptionMode == 'plaintext') {
+    try {
+      final result = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .dmEncryptionConsent(channel.ref, 'status');
+      final request = result['request'] as Map?;
+      consentPending =
+          request?['status'] == 'pending' || request?['status'] == 'approved';
+    } on Object catch (caught) {
+      error = userFacingError(caught,
+          summary: 'Could not check the encryption request.');
+    }
+    if (!context.mounted) return;
+  }
   await showDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
@@ -269,9 +287,20 @@ Future<void> _showE2eeRoomSettings(
               ),
             if (canManage && (!encrypted || needsRekey))
               ActionButton(
-                onPressed: busy
+                onPressed: busy || consentPending
                     ? null
                     : () => run((client) async {
+                          if (!encrypted &&
+                              channel.guildRef == null &&
+                              channel.conversationType == 'direct') {
+                            await ref
+                                .read(mobileControllerProvider.notifier)
+                                .repository
+                                .dmEncryptionConsent(channel.ref, 'request');
+                            if (dialogContext.mounted)
+                              Navigator.pop(dialogContext);
+                            return;
+                          }
                           channel = needsRekey
                               ? await client.rekeyRoom(channel)
                               : await client.enableRoom(channel);
@@ -299,7 +328,12 @@ Future<void> _showE2eeRoomSettings(
                     needsRekey ? Icons.sync_lock_rounded : Icons.lock_rounded),
                 label: Text(needsRekey
                     ? L10n.of(context).ui_rotate_keys_014b6162
-                    : L10n.of(context).ui_enable_encryption_a0595627),
+                    : channel.guildRef == null &&
+                            channel.conversationType == 'direct'
+                        ? (consentPending
+                            ? 'Encryption request sent'
+                            : 'Request encryption')
+                        : L10n.of(context).ui_enable_encryption_a0595627),
               ),
           ],
         );

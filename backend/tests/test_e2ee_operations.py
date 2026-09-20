@@ -583,10 +583,19 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
     assert session.commit.await_count == 2
 
 
-@pytest.mark.parametrize("kind", ["activate", "rekey"])
+@pytest.mark.parametrize(
+    "kind, consent_error",
+    [
+        ("activate", None),
+        ("rekey", None),
+        ("activate", "required"),
+        ("activate", "stale"),
+    ],
+)
 async def test_room_commit_saves_controls_before_last_message_reference(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
+    consent_error: str | None,
 ) -> None:
     domain = "alpha.localhost"
     user = SimpleNamespace(id=7, origin_domain=domain)
@@ -615,6 +624,7 @@ async def test_room_commit_saves_controls_before_last_message_reference(
         policy_generation=1,
         base_policy_generation=0,
         group_id=GROUP_ID,
+        consent_request_id=None,
         participant_refs=[{"id": "7", "domain": domain}],
         key_packages=[],
     )
@@ -669,6 +679,28 @@ async def test_room_commit_saves_controls_before_last_message_reference(
     monkeypatch.setattr(e2ee_api, "message_payload", lambda *_: {})
     monkeypatch.setattr(e2ee_api, "channel_payload", lambda *_: {})
     monkeypatch.setattr(e2ee_api, "profile_from_user", lambda *_: {})
+
+    if consent_error:
+        guard = AsyncMock(return_value="new-request")
+        if consent_error == "required":
+            guard.side_effect = HTTPException(409, detail={"code": "E2EE_DM_CONSENT_REQUIRED"})
+        monkeypatch.setattr(e2ee_api, "require_dm_encryption_consent", guard)
+        with pytest.raises(HTTPException, match="E2EE_DM_"):
+            await e2ee_api._commit_room_operation(
+                kind,
+                e2ee_api.EntityRef(f"10@{domain}"),
+                payload,
+                SimpleNamespace(user=user),
+                session,
+                AsyncMock(),
+                SimpleNamespace(mint=AsyncMock()),
+                SimpleNamespace(domain=domain),
+                actor_home_attested=False,
+            )
+        assert channel.encryption_mode == "plaintext"
+        assert operation.status == "failed"
+        assert not saved_messages
+        return
 
     response = await e2ee_api._commit_room_operation(
         kind,
@@ -797,3 +829,115 @@ async def test_operation_control_rejects_missing_or_wrong_authority_metadata() -
             },
             expected_authority="alpha.localhost",
         )
+
+
+@pytest.mark.parametrize("response", ["agree", "disagree"])
+async def test_direct_dm_encryption_requires_the_other_participants_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response: str,
+) -> None:
+    from app.core.types import EntityRef
+    from app.db.models import DMConversation
+
+    alice = SimpleNamespace(id=1, origin_domain="home.example", username="alice")
+    bob = SimpleNamespace(id=2, origin_domain="home.example", username="bob")
+    conversation = SimpleNamespace(
+        type="direct", authority_domain="home.example", e2ee_consent=None
+    )
+    channel = SimpleNamespace(id=10, origin_domain="home.example", encryption_mode="plaintext")
+    access = SimpleNamespace(channel=channel, guild=None, participants=[alice, bob])
+    session = SimpleNamespace(get=AsyncMock(return_value=conversation), commit=AsyncMock())
+    settings = SimpleNamespace(domain="home.example", e2ee_activation_enabled=True)
+    monkeypatch.setattr(e2ee_api, "load_channel_access", AsyncMock(return_value=access))
+    monkeypatch.setattr(e2ee_api, "lock_local_channel_mutation", AsyncMock(return_value=access))
+    monkeypatch.setattr(e2ee_api, "room_participants", AsyncMock(return_value=[alice, bob]))
+
+    async def act(actor, action, request_id=None):
+        return await e2ee_api.dm_encryption_consent(
+            EntityRef("10@home.example"),
+            e2ee_api.DMEncryptionConsentRequest(action=action, request_id=request_id),
+            SimpleNamespace(user=actor),
+            session,
+            AsyncMock(),
+            settings,
+        )
+
+    with pytest.raises(HTTPException, match="E2EE_DM_CONSENT_REQUIRED"):
+        await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access)
+    requested = (await act(alice, "request"))["request"]
+    assert requested["status"] == "pending"
+    request_id = requested["request_id"]
+    assert (await act(bob, "status"))["request"] == requested
+    assert (await act(alice, "request"))["request"]["request_id"] == request_id
+    with pytest.raises(HTTPException, match="E2EE_DM_OTHER_PARTICIPANT_REQUIRED"):
+        await act(alice, "agree", request_id)
+    with pytest.raises(HTTPException, match="E2EE_DM_REQUEST_STALE"):
+        await act(bob, response, "s" * 43)
+    with pytest.raises(HTTPException, match="E2EE_DM_CONSENT_REQUIRED"):
+        await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access)
+    replied = (await act(bob, response, request_id))["request"]
+    assert replied["status"] == ("approved" if response == "agree" else "declined")
+    assert (await act(bob, response, request_id))["request"] == replied
+    if response == "agree":
+        assert (
+            await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access) == request_id
+        )
+    else:
+        with pytest.raises(HTTPException, match="E2EE_DM_CONSENT_REQUIRED"):
+            await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access)
+        assert (await act(alice, "request"))["request"]["request_id"] != request_id
+    assert channel.encryption_mode == "plaintext"
+    assert any(
+        call.args[0] is DMConversation and call.kwargs.get("with_for_update")
+        for call in session.get.call_args_list
+    )
+
+
+@pytest.mark.parametrize("changed", ["expiry", "participants"])
+async def test_dm_encryption_approval_expires_and_binds_participants(monkeypatch, changed):
+    participants = [SimpleNamespace(id=1, origin_domain="home.example")]
+    consent = {
+        "request_id": "r" * 43,
+        "status": "approved",
+        "participants": e2ee_api._operation_participant_refs(participants),
+        "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    }
+    conversation = SimpleNamespace(type="direct", e2ee_consent=consent)
+    session = SimpleNamespace(get=AsyncMock(return_value=conversation))
+    access = SimpleNamespace(
+        guild=None, channel=SimpleNamespace(id=10, origin_domain="home.example")
+    )
+    monkeypatch.setattr(e2ee_api, "room_participants", AsyncMock(return_value=participants))
+    if changed == "expiry":
+        consent["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    else:
+        participants.append(SimpleNamespace(id=2, origin_domain="home.example"))
+    with pytest.raises(HTTPException, match="E2EE_DM_CONSENT_REQUIRED"):
+        await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access)
+    conversation.type = "group"
+    assert await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access) is None
+    access.guild = SimpleNamespace()
+    assert await e2ee_api.require_dm_encryption_consent(session, AsyncMock(), access) is None
+
+
+async def test_remote_dm_consent_is_forwarded_to_the_conversation_authority(monkeypatch):
+    actor = SimpleNamespace(id=1, origin_domain="home.example")
+    channel = SimpleNamespace(id=10, origin_domain="remote.example")
+    access = SimpleNamespace(channel=channel, guild=None)
+    conversation = SimpleNamespace(type="direct", authority_domain="remote.example")
+    session = SimpleNamespace(get=AsyncMock(return_value=conversation))
+    monkeypatch.setattr(e2ee_api, "load_channel_access", AsyncMock(return_value=access))
+    proxy = AsyncMock(return_value={"request": {"status": "approved"}})
+    monkeypatch.setattr(e2ee_api, "proxy_room_e2ee_request", proxy)
+    result = await e2ee_api.dm_encryption_consent(
+        e2ee_api.EntityRef("10@remote.example"),
+        e2ee_api.DMEncryptionConsentRequest(action="agree", request_id="r" * 43),
+        SimpleNamespace(user=actor),
+        session,
+        AsyncMock(),
+        SimpleNamespace(domain="home.example"),
+    )
+    assert result == {"request": {"status": "approved"}}
+    assert proxy.await_args.args[2:4] == ("remote.example", "/_kaede/v1/e2ee/rooms/consent")
+    assert proxy.await_args.kwargs["actor"] is actor
+    assert proxy.await_args.kwargs["body"] == {"action": "agree", "request_id": "r" * 43}

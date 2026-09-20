@@ -6,7 +6,7 @@ import re
 import secrets
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -1521,6 +1521,122 @@ async def require_room_policy_authority(
     return conversation
 
 
+class DMEncryptionConsentRequest(RequestModel):
+    action: Literal["status", "request", "agree", "disagree"]
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
+def current_dm_consent(
+    conversation: DMConversation,
+    participants: list[User],
+) -> dict[str, object]:
+    consent: dict[str, object] = dict(conversation.e2ee_consent or {})
+    if consent.get("status") in {"pending", "approved"} and (
+        consent["participants"] != _operation_participant_refs(participants)
+        or datetime.fromisoformat(cast(str, consent["expires_at"])) <= datetime.now(UTC)
+    ):
+        consent["status"] = "expired"
+    return consent
+
+
+async def require_dm_encryption_consent(
+    session: AsyncSession,
+    redis: Redis,
+    access: ChannelAccess,
+) -> str | None:
+    if access.guild is not None:
+        return None
+    conversation = await session.get(
+        DMConversation,
+        (access.channel.id, access.channel.origin_domain),
+        populate_existing=True,
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    if conversation.type != "direct":
+        return None
+    consent = current_dm_consent(conversation, await room_participants(session, redis, access))
+    if consent.get("status") != "approved":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_DM_CONSENT_REQUIRED"})
+    return cast(str, consent["request_id"])
+
+
+@router.post("/channels/{channel_id}/consent")
+async def dm_encryption_consent(
+    channel_id: EntityRef,
+    payload: DMEncryptionConsentRequest,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    access = await load_channel_access(session, settings, auth.user, channel_id)
+    if access.guild is not None:
+        raise HTTPException(status_code=400, detail={"code": "E2EE_DIRECT_DM_REQUIRED"})
+    conversation = await session.get(
+        DMConversation, (access.channel.id, access.channel.origin_domain)
+    )
+    if conversation is None or conversation.type != "direct":
+        raise HTTPException(status_code=400, detail={"code": "E2EE_DIRECT_DM_REQUIRED"})
+    if conversation.authority_domain != settings.domain:
+        return await proxy_room_e2ee_request(
+            session,
+            settings,
+            conversation.authority_domain,
+            "/_kaede/v1/e2ee/rooms/consent",
+            channel=access.channel,
+            actor=auth.user,
+            body=payload.model_dump(),
+        )
+    access = await lock_local_channel_mutation(session, settings, access)
+    conversation = await session.get(
+        DMConversation,
+        (access.channel.id, access.channel.origin_domain),
+        populate_existing=True,
+        with_for_update=payload.action != "status",
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    participants = await room_participants(session, redis, access)
+    actor_ref = {"id": str(auth.user.id), "domain": auth.user.origin_domain}
+    if actor_ref not in _operation_participant_refs(participants):
+        raise HTTPException(status_code=403, detail={"code": "MISSING_ACCESS"})
+    consent = current_dm_consent(conversation, participants)
+    if payload.action == "status":
+        return {"request": consent or None}
+    if payload.action != "disagree" and not settings.e2ee_activation_enabled:
+        raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
+    if access.channel.encryption_mode != "plaintext":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_ALREADY_ENABLED"})
+    if payload.action == "request":
+        if consent.get("status") in {"pending", "approved"}:
+            return {"request": consent}
+        consent = {
+            "request_id": encode_base64url(secrets.token_bytes(32)),
+            "requester": actor_ref,
+            "requester_name": auth.user.username,
+            "participants": _operation_participant_refs(participants),
+            "status": "pending",
+            "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        }
+    else:
+        if not consent or consent.get("request_id") != payload.request_id:
+            raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+        if consent["requester"] == actor_ref:
+            raise HTTPException(
+                status_code=403, detail={"code": "E2EE_DM_OTHER_PARTICIPANT_REQUIRED"}
+            )
+        desired = "approved" if payload.action == "agree" else "declined"
+        if consent["status"] == desired:
+            return {"request": consent}
+        if consent["status"] != "pending":
+            raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+        consent["status"] = desired
+    conversation.e2ee_consent = consent
+    await session.commit()
+    return {"request": consent}
+
+
 @router.get("/channels/{channel_id}/control-log")
 async def room_encryption_control_log(
     channel_id: EntityRef,
@@ -2684,6 +2800,11 @@ async def _propose_room_operation(
                     status_code=409,
                     detail={"code": "E2EE_OPERATION_IN_PROGRESS", "operation_id": active.id},
                 )
+        consent_request_id = (
+            await require_dm_encryption_consent(session, redis, access)
+            if kind == "activate"
+            else None
+        )
         participants = await room_participants(session, redis, access)
         operation = E2EERoomOperation(
             id=payload.operation_id,
@@ -2699,6 +2820,7 @@ async def _propose_room_operation(
             base_policy_generation=channel.encryption_policy_generation,
             policy_generation=channel.encryption_policy_generation + 1,
             group_id=encode_base64url(secrets.token_bytes(32)),
+            consent_request_id=consent_request_id,
             participant_refs=_operation_participant_refs(participants),
             key_packages=[],
             expires_at=datetime.now(UTC) + ROOM_OPERATION_TTL,
@@ -2979,6 +3101,15 @@ async def _commit_room_operation(
         ):
             raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_CONFLICT"})
         return _stored_response(operation.committed_response, "committed")
+    if kind == "activate":
+        try:
+            consent_request_id = await require_dm_encryption_consent(session, redis, access)
+            if consent_request_id != operation.consent_request_id:
+                raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+        except HTTPException:
+            operation.status = "failed"
+            await session.commit()
+            raise
     if operation.status != "prepared" or operation.expires_at <= datetime.now(UTC):
         if operation.status == "prepared" and operation.expires_at <= datetime.now(UTC):
             operation.status = "failed"

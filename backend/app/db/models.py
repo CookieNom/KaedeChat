@@ -800,6 +800,7 @@ class E2EERoomOperation(Base, TimestampMixin):
     base_policy_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     policy_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     group_id: Mapped[str] = mapped_column(String(43), nullable=False)
+    consent_request_id: Mapped[str | None] = mapped_column(String(43))
     participant_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     key_packages: Mapped[list[dict[str, str]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
@@ -3665,6 +3666,7 @@ class Pin(Base):
 
 class DMConversation(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "dm_conversations"
+    e2ee_consent: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     pair_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     type: Mapped[str] = mapped_column(String(16), server_default="direct")
     authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)

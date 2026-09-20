@@ -89,6 +89,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   E2EE_ROOM_MEMBER_LIMIT: 'This conversation has too many members for encrypted-room setup.',
   E2EE_AUTHORITY_REMOTE:
     "Encrypted-room settings must be completed by the conversation's home instance.",
+  E2EE_DM_CONSENT_REQUIRED: 'The other participant must agree before encryption can be enabled.',
+  E2EE_DM_REQUEST_STALE: 'This encryption request expired or changed. Review the current request.',
+  E2EE_DM_OTHER_PARTICIPANT_REQUIRED: 'Only the other participant can respond to this request.',
+  E2EE_ALREADY_ENABLED: 'Encryption is already enabled for this conversation.',
   E2EE_OPERATION_INVALID: 'The encrypted message operation is not valid for this request.',
   E2EE_OPERATION_CONFLICT:
     'This encrypted-room update conflicts with an earlier request. Refresh and try again.',

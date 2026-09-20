@@ -279,18 +279,19 @@ export class ChatEntityStore {
   }
 
   beginGatewaySession(user: UserSummary): void {
-    const preserveMembers = Boolean(
+    const sameAccount = Boolean(
       this.currentUser && entityKey(this.currentUser) === entityKey(user)
     );
-    this.clearSession({ preserveMembers });
+    this.clearSession({ preserveMembers: sameAccount, preserveMessages: sameAccount });
     this.ingestCurrentUser(user);
   }
 
-  clearSession(options: { preserveMembers?: boolean } = {}): void {
+  clearSession(options: { preserveMembers?: boolean; preserveMessages?: boolean } = {}): void {
     this.guilds.clear();
     this.channels.clear();
     this.users.clear();
-    this.messages.clear();
+    // HTTP history can arrive before the initial gateway READY for this account.
+    if (!options.preserveMessages) this.messages.clear();
     this.readStates.clear();
     if (!options.preserveMembers) this.members.clear();
     this.relationships.clear();

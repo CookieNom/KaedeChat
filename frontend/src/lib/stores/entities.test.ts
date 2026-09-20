@@ -351,7 +351,7 @@ describe('normalized entity collections', () => {
     expect(store.users.get('7@alpha.test')).toEqual(user);
   });
 
-  it('preserves a same-account roster across a gateway re-identify when requested', () => {
+  it('preserves loaded history and roster on same-account READY but clears them on account changes', () => {
     const store = new ChatEntityStore();
     const user: UserSummary = {
       id: '7',
@@ -372,14 +372,37 @@ describe('normalized entity collections', () => {
       }
     ]);
 
+    const message: Message = {
+      id: '9',
+      origin_domain: 'alpha.test',
+      channel_id: '3',
+      channel_domain: 'alpha.test',
+      author_id: user.id,
+      author_domain: user.origin_domain,
+      author: user,
+      content: 'Already loaded over HTTP',
+      message_type: 0,
+      flags: 0,
+      client_nonce: null,
+      referenced_message_id: null,
+      referenced_message_domain: null,
+      mention_user_refs: [],
+      edited_at: null,
+      deleted_at: null,
+      created_at: '2026-08-12T00:00:00Z'
+    };
+    store.messages.upsert(message);
+
     store.beginGatewaySession(user);
 
     expect(store.currentUser).toEqual(user);
+    expect(store.messages.values).toEqual([message]);
     expect(store.members.values).toEqual([
       { guild_id: '1', guild_domain: 'alpha.test', user, nickname: null, role_ids: [] }
     ]);
     store.beginGatewaySession({ ...user, id: '8' });
     expect(store.members.values).toEqual([]);
+    expect(store.messages.values).toEqual([]);
   });
 
   it('replaces visible denormalized placeholders when a profile resolves live', () => {

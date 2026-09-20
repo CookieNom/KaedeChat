@@ -151,6 +151,13 @@ state:
 `failed` is terminal for that proposal. `legacy` identifies pre-protocol opaque
 transport and must never be described as MLS E2EE.
 
+For 1:1 DMs, either participant can request encryption. The other participant
+must explicitly agree after reviewing the warning card; Disagree leaves the
+conversation unencrypted. Requests expire after 24 hours. The authority stores
+consent, binds it to the participants and activation operation, and checks it
+again before activation, including for federated DMs. Group DMs and guild
+channels keep their existing activation permissions.
+
 Once a generation becomes active, it can't return to plaintext. A user who
 wants an unencrypted conversation creates a new room. Every participating home
 must validate the exact mode, state, generation, protocol, suite, group ID, and

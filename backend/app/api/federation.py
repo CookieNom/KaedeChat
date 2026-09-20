@@ -95,6 +95,7 @@ from app.api.channels import (
 )
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, get_snowflake
 from app.api.e2ee import (
+    DMEncryptionConsentRequest,
     RoomActivationRequest,
     RoomProposalRequest,
     RoomRekeyActivationRequest,
@@ -102,6 +103,7 @@ from app.api.e2ee import (
     activate_room_rekey_attested,
     claim_local_bot_room_key_packages,
     claim_local_room_key_packages,
+    dm_encryption_consent,
     propose_room_encryption,
     propose_room_rekey,
     require_room_policy_authority,
@@ -494,6 +496,7 @@ from app.federation.schemas import (
     DMGroupMutationRequest,
     DMMessageOperationRequest,
     DMOpenFederationRequest,
+    E2EEDMConsentRequest,
     E2EEKeyPackageClaimRequest,
     E2EERoomOperationStatusRequest,
     E2EERoomProxyRequest,
@@ -8277,7 +8280,7 @@ def require_channel_federation_access(
 
 
 async def federated_e2ee_actor(
-    payload: E2EERoomProxyRequest | E2EERoomOperationStatusRequest,
+    payload: E2EERoomProxyRequest | E2EERoomOperationStatusRequest | E2EEDMConsentRequest,
     principal: FederationPrincipal,
     session: AsyncSession,
     redis: Redis,
@@ -8321,6 +8324,32 @@ async def enforce_e2ee_room_proxy_limit(redis: Redis, principal: FederationPrinc
         "e2ee-room-proxy",
         capacity=120,
         refill_per_minute=120,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/consent")
+async def federation_e2ee_dm_consent(
+    payload: E2EEDMConsentRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        f"e2ee-consent:{payload.actor.id}",
+        capacity=60,
+        refill_per_minute=60,
+    )
+    auth = await federated_e2ee_actor(payload, principal, session, redis, settings)
+    return await dm_encryption_consent(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        DMEncryptionConsentRequest(action=payload.action, request_id=payload.request_id),
+        auth,
+        session,
+        redis,
+        settings,
     )
 
 

@@ -127,7 +127,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       // roster is a separate gateway request. Keep the same account's last
       // known roster until that request arrives instead of flashing—or
       // indefinitely leaving—an empty member list. Account changes still clear
-      // all member data before the new READY is applied.
+      // all member data before the new READY is applied. Likewise, preserve
+      // history that HTTP may have loaded before the initial READY arrives.
       chatEntities.beginGatewaySession(ready.user);
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.ingestDirectMessages(ready.dm_channels);

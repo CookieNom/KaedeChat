@@ -36,6 +36,7 @@ import 'package:kaede_mobile/src/features/chat/application_launcher.dart';
 import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/invite_card.dart';
+import 'package:kaede_mobile/src/features/chat/dm_encryption_consent.dart';
 import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
 import 'package:kaede_mobile/src/features/chat/spotify_preview.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
@@ -1310,6 +1311,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     try {
       content = Column(
         children: [
+          if (channel.guildRef == null &&
+              channel.conversationType == 'direct' &&
+              channel.encryptionMode == 'plaintext')
+            DmEncryptionConsent(
+                key: ValueKey('consent:${channel.ref.wire}'), channel: channel),
           if (state.activeGuild?.syncStatus == 'quota_paused')
             _FederationStatusStrip(
               title: L10n.of(context)
