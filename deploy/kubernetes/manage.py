@@ -266,18 +266,24 @@ def deploy(
     }
     if writers and not previous and not maintenance:
         raise ValueError(
-            "Application workloads exist without a completed release; review them and retry with MAINTENANCE=1"
+            "Application workloads exist without a completed release.\n"
+            "Review them, then run:\n\n"
+            "    make deploy MAINTENANCE=1\n"
         )
     schema = schema_digest()
     requires_migration = previous.get("schema") != schema
     if previous and requires_migration and not maintenance:
         raise ValueError(
-            "Database migrations changed. Automatic rolling update refused; back up the instance and run make deploy MAINTENANCE=1"
+            "Database migrations changed. Automatic rolling update refused.\n"
+            "Back up the instance, then run:\n\n"
+            "    make deploy MAINTENANCE=1\n"
         )
     infra = infrastructure_digest(objects)
     if previous and previous.get("infrastructure") != infra and not maintenance:
         raise ValueError(
-            "Infrastructure configuration changed; back up and run make deploy MAINTENANCE=1"
+            "Infrastructure configuration changed.\n"
+            "Back up the instance, then run:\n\n"
+            "    make deploy MAINTENANCE=1\n"
         )
     cfg["wait_seconds"] = int(values.get("AUTO_UPDATE_WAIT_TIMEOUT_SECONDS", "600"))
     # Creating immutable credential/config revisions does not change running pods.
