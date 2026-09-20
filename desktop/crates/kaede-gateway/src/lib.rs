@@ -76,8 +76,8 @@ pub struct GatewayHandle {
 pub fn spawn<F, Fut, E>(url: Url, token_provider: F) -> GatewayHandle
 where
     F: Fn(bool) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<SecretString, E>> + Send,
-    E: Send,
+    Fut: Future<Output = Result<SecretString, E>> + Send + 'static,
+    E: Send + 'static,
 {
     let (event_tx, event_rx) = mpsc::channel(512);
     let (command_tx, command_rx) = mpsc::channel(128);

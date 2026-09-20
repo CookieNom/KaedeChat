@@ -552,7 +552,10 @@ void main() {
           final socket = await WebSocketTransformer.upgrade(request);
           sockets.add(socket);
           final attempt = connections++;
+          var closing = false;
           socket.listen((raw) {
+            // close() shuts the sink before readyState necessarily changes.
+            if (closing) return;
             final frame = jsonDecode(raw as String) as Map<String, Object?>;
             if (frame['op'] == GatewayOp.heartbeat.value) {
               if (socket.readyState == WebSocket.open) {
@@ -568,9 +571,11 @@ void main() {
                 's': 0,
                 'd': {'session_id': 'old-session'},
               }));
+              closing = true;
               unawaited(socket.close(1001));
             } else if (attempt == 1) {
               expect(frame['op'], GatewayOp.resume.value);
+              closing = true;
               unawaited(socket.close(closeCode.value));
             } else if (!recovered.isCompleted) {
               recovered.complete(frame);
