@@ -254,6 +254,76 @@ class KubernetesTests(unittest.TestCase):
             self.assertEqual(len(apply.call_args_list), 1)
             self.assertEqual(apply.call_args.args[1][0]["kind"], "Namespace")
 
+    def test_maintenance_stops_writers_before_migration_and_restores_replicas(self):
+        cfg = {"namespace": "kaede-test", "context": "test"}
+        writers = ["api", "gateway", "scheduler", "worker"]
+        events = []
+
+        def kubectl(_cfg, *args, **kwargs):
+            if args[0] == "get":
+                return json.dumps(
+                    {}
+                    if "configmap" in args
+                    else {"items": [{"metadata": {"name": name}} for name in writers]}
+                )
+            events.append(args)
+            return ""
+
+        def apply(_cfg, items):
+            for obj in items:
+                if obj["kind"] == "Deployment":
+                    events.append(
+                        ("restore", obj["metadata"]["name"], obj["spec"]["replicas"])
+                    )
+
+        def job(_cfg, obj):
+            events.append(("job", obj["metadata"]["name"]))
+
+        with (
+            patch("manage.verify_cluster"),
+            patch("manage.kubectl", side_effect=kubectl),
+            patch("manage.job", side_effect=job),
+            patch("manage.wait_workload"),
+            patch("manage.apply", side_effect=apply),
+        ):
+            manage.deploy(
+                cfg, self.values, "new", ("backend:new", "frontend:new"), True
+            )
+
+        self.assertEqual(
+            events[:9],
+            [
+                ("job", "preflight"),
+                *[
+                    (
+                        "patch",
+                        f"deployment/{name}",
+                        "--type=merge",
+                        '-p={"spec":{"replicas":0}}',
+                        "--field-manager=kaede",
+                    )
+                    for name in writers
+                ],
+                *[
+                    (
+                        "wait",
+                        "--for=delete",
+                        "pod",
+                        "-l",
+                        f"app={name}",
+                        "--timeout=120s",
+                    )
+                    for name in writers
+                ],
+            ],
+        )
+        migration = events.index(("job", "migrate"))
+        self.assertGreaterEqual(migration, 9)
+        for name in writers:
+            restored = next(event for event in events if event[:2] == ("restore", name))
+            self.assertGreater(restored[2], 0)
+            self.assertGreater(events.index(restored), migration)
+
     def test_failed_compatible_rollout_restores_previous_application(self):
         cfg = {
             "namespace": "kaede-test",

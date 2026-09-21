@@ -312,9 +312,10 @@ def deploy(
         for name in sorted(writers):
             kubectl(
                 cfg,
-                "scale",
+                "patch",
                 f"deployment/{name}",
-                "--replicas=0",
+                "--type=merge",
+                '-p={"spec":{"replicas":0}}',
                 "--field-manager=kaede",
             )
         for name in sorted(writers):
