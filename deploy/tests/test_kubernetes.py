@@ -269,12 +269,15 @@ class KubernetesTests(unittest.TestCase):
             events.append(args)
             return ""
 
-        def apply(_cfg, items):
+        def apply(_cfg, items, *, force_conflicts=False):
             for obj in items:
                 if obj["kind"] == "Deployment":
+                    self.assertTrue(force_conflicts)
                     events.append(
                         ("restore", obj["metadata"]["name"], obj["spec"]["replicas"])
                     )
+                else:
+                    self.assertFalse(force_conflicts)
 
         def job(_cfg, obj):
             events.append(("job", obj["metadata"]["name"]))
@@ -324,6 +327,17 @@ class KubernetesTests(unittest.TestCase):
             self.assertGreater(restored[2], 0)
             self.assertGreater(events.index(restored), migration)
 
+    def test_apply_conflict_takeover_is_explicit(self):
+        items = [{"apiVersion": "apps/v1", "kind": "Deployment"}]
+        for force in (False, True):
+            with self.subTest(force=force), patch("manage.kubectl") as kubectl:
+                manage.apply({}, items, force_conflicts=force)
+                self.assertEqual("--force-conflicts" in kubectl.call_args.args, force)
+                self.assertIn("--server-side", kubectl.call_args.args)
+                self.assertEqual(
+                    json.loads(kubectl.call_args.kwargs["data"])["items"], items
+                )
+
     def test_failed_compatible_rollout_restores_previous_application(self):
         cfg = {
             "namespace": "kaede-test",
@@ -366,6 +380,12 @@ class KubernetesTests(unittest.TestCase):
                     cfg, self.values, "new", ("backend:new", "frontend:new"), False
                 )
             self.assertEqual(apply.call_args.args[1], saved)
+            self.assertFalse(
+                any(
+                    call.kwargs.get("force_conflicts", False)
+                    for call in apply.call_args_list
+                )
+            )
 
 
 if __name__ == "__main__":

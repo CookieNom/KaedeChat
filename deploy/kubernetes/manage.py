@@ -91,13 +91,14 @@ def verify_cluster(cfg: dict) -> None:
         )
 
 
-def apply(cfg: dict, items: list[dict]) -> None:
+def apply(cfg: dict, items: list[dict], *, force_conflicts: bool = False) -> None:
     if items:
         kubectl(
             cfg,
             "apply",
             "--server-side",
             "--field-manager=kaede",
+            *(["--force-conflicts"] if force_conflicts else []),
             "-f",
             "-",
             data=json.dumps({"apiVersion": "v1", "kind": "List", "items": items}),
@@ -373,7 +374,9 @@ def deploy(
         )
     )["items"]
     try:
-        apply(cfg, apps)
+        # Maintenance patches own replicas as Update operations, separately from
+        # Apply even with the same manager name. Reclaim the desired app specs.
+        apply(cfg, apps, force_conflicts=maintenance)
         for obj in apps:
             wait_workload(cfg, obj)
     except subprocess.CalledProcessError:
