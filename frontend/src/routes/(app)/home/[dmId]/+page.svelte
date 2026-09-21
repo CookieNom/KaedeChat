@@ -171,6 +171,9 @@
   const readStates = $derived(entities.readStates.values);
   const currentUser = $derived(entities.currentUser);
   const draftAccount = $derived(currentUser ? entityRef(currentUser) : null);
+  const pendingRequests = $derived(
+    entities.relationships.values.filter((item) => item.type === 'pending_in').length
+  );
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let activeDraftKey = $state<string | null>(null);
@@ -2812,7 +2815,10 @@
         ><Icon name="home" size={18} />{$t('ui_overview_d4b1ea57')}</a
       >
       <a href={resolve('/home/friends')} onclick={() => closeMobileNavigation(false)}
-        ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}</a
+        ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}
+        {#if pendingRequests > 0}
+          <small class="unread-badge">{pendingRequests > 99 ? '99+' : pendingRequests}</small>
+        {/if}</a
       >
     </nav>
     <div class="home-sidebar-heading">

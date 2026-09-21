@@ -56,14 +56,16 @@ def relationship_row(
     )
 
 
-async def notify_relationship(redis: Redis, owner: User, target: User, relation_type: str) -> None:
+async def notify_relationship(
+    redis: Redis, owner: User, target: User, relation_type: str, *, notify_push: bool = True
+) -> None:
     await publish_dispatch(
         redis,
         user_topic(owner.origin_domain, owner.id),
         "USER_UPDATE",
         {"relationship": {"type": relation_type, "user": user_payload(target)}},
     )
-    if relation_type in {"pending_in", "friend"}:
+    if notify_push and relation_type in {"pending_in", "friend"}:
         name = target.display_name or target.username
         await enqueue_best_effort(
             mobile_push_activity,

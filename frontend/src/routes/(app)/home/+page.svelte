@@ -697,7 +697,12 @@
         class:active={friendsView}
         href={resolve('/home/friends')}
         aria-current={friendsView ? 'page' : undefined}
-        ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}</a
+        ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}
+        {#if incomingRequests.length > 0}
+          <small class="unread-badge"
+            >{incomingRequests.length > 99 ? '99+' : incomingRequests.length}</small
+          >
+        {/if}</a
       >
     </nav>
     <div class="home-sidebar-heading">

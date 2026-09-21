@@ -24,6 +24,7 @@ import type {
   Message,
   PresenceStatus,
   ReadStateStatus,
+  Relationship,
   Role,
   ThreadMember,
   UserSummary
@@ -58,6 +59,28 @@ type ReadyPayload = {
 
 const guildProjectionRefreshGenerations = new SvelteMap<string, number>();
 let guildProjectionSession = 0;
+let relationshipSnapshotUpdates: Map<string, Relationship | null> | null = null;
+
+function refreshRelationships(): void {
+  const session = guildProjectionSession;
+  const updates = new SvelteMap<string, Relationship | null>();
+  relationshipSnapshotUpdates = updates;
+  void api<Relationship[]>('/users/@me/relationships')
+    .then((relationships) => {
+      if (session !== guildProjectionSession) return;
+      chatEntities.relationships.replace(relationships);
+      for (const [key, relationship] of updates) {
+        if (relationship) chatEntities.relationships.upsert(relationship);
+        else chatEntities.relationships.remove(key);
+      }
+    })
+    .catch(() => {
+      // Keep live updates when offline; the next READY retries the snapshot.
+    })
+    .finally(() => {
+      if (relationshipSnapshotUpdates === updates) relationshipSnapshotUpdates = null;
+    });
+}
 
 function refreshGuildPermissionProjection(guildId: string, guildDomain: string): void {
   if (!guildId || !guildDomain) return;
@@ -130,6 +153,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       // all member data before the new READY is applied. Likewise, preserve
       // history that HTTP may have loaded before the initial READY arrives.
       chatEntities.beginGatewaySession(ready.user);
+      refreshRelationships();
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.ingestDirectMessages(ready.dm_channels);
       chatEntities.ingestPresences(ready.presences ?? []);
@@ -553,6 +577,25 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     }
     case 'USER_UPDATE': {
+      const update = dispatch.d as {
+        relationship?: { type: Relationship['type'] | 'none'; user: UserSummary };
+      };
+      if (update.relationship) {
+        const { type, user } = update.relationship;
+        const key = entityKey(user);
+        const relationship =
+          type === 'none'
+            ? null
+            : {
+                type,
+                user,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              };
+        relationshipSnapshotUpdates?.set(key, relationship);
+        if (relationship) chatEntities.relationships.upsert(relationship);
+        else chatEntities.relationships.remove(key);
+      }
       const user = dispatch.d as UserSummary;
       if (user.id && user.origin_domain) chatEntities.applyUserProfile(user);
       return;

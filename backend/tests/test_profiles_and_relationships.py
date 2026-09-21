@@ -1030,3 +1030,45 @@ async def test_display_name_patch_queries_authoritative_guild_memberships(monkey
     assert user.display_name == "After"
     assert user.profile_version == 2
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_domain", ["local.example", "remote.example"])
+@pytest.mark.parametrize(
+    "relation_type,notify_push,expected_push",
+    [
+        ("pending_in", True, True),
+        ("friend", True, True),
+        ("pending_out", True, False),
+        ("none", True, False),
+        ("blocked", True, False),
+        ("friend", False, False),
+    ],
+)
+async def test_relationship_notifications_queue_mobile_push_only_for_incoming_activity(
+    monkeypatch, target_domain, relation_type, notify_push, expected_push
+):
+    from app.api import relationships
+
+    owner = User(id=7, origin_domain="local.example", username="local", is_local=True)
+    target = User(id=42, origin_domain=target_domain, username="maple", display_name="Maple")
+    publish = AsyncMock()
+    enqueue = AsyncMock()
+    monkeypatch.setattr(relationships, "publish_dispatch", publish)
+    monkeypatch.setattr(relationships, "enqueue_best_effort", enqueue)
+    monkeypatch.setattr(relationships, "user_payload", lambda user: {"id": str(user.id)})
+    await relationships.notify_relationship(
+        Mock(), owner, target, relation_type, notify_push=notify_push
+    )
+    assert publish.await_args.args[2:] == (
+        "USER_UPDATE",
+        {"relationship": {"type": relation_type, "user": {"id": "42"}}},
+    )
+    assert enqueue.await_count == int(expected_push)
+    if expected_push:
+        args = enqueue.await_args.args
+        assert args[:3] == (relationships.mobile_push_activity, 7, "local.example")
+        assert args[5] == "relationship"
+        assert args[-1] == f"relationship:42@{target_domain}:{relation_type}"
+        if relation_type == "pending_in":
+            assert args[6:8] == ("New friend request", "Maple sent you a friend request.")

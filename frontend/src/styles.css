@@ -2875,7 +2875,8 @@ progress {
 
 .channel-tree a .unread-badge,
 .channel-sidebar > nav:not(.channel-tree) a .unread-badge,
-.home-dm-list a .unread-badge {
+.home-dm-list a .unread-badge,
+.home-nav a .unread-badge {
   margin-left: auto;
 }
 

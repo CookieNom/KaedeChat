@@ -4201,7 +4201,9 @@ final class _ServerRail extends ConsumerWidget {
                 active: state.selectedGuild == null,
                 onTap: onOpenHome,
                 badge: state.dms.fold(
-                  0,
+                  state.relationships
+                      .where((item) => item['type'] == 'pending_in')
+                      .length,
                   (total, dm) =>
                       total +
                       max(

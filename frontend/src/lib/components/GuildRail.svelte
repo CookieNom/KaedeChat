@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { t } from '$lib/ui/locale';
 
   import { resolve } from '$app/paths';
@@ -53,6 +54,11 @@
     homeUnreadCount?: number;
     activeGuildKey?: string | null;
   } = $props();
+
+  const pendingRequests = $derived(
+    chatEntities.relationships.values.filter((item) => item.type === 'pending_in').length
+  );
+  const homeNotificationCount = $derived(homeUnreadCount + pendingRequests);
 
   const guildByRef = $derived(new Map(guilds.map((guild) => [entityKey(guild), guild])));
   const navigation = $derived(reconcileGuildNavigation(guildNavigation.navigation, guilds));
@@ -327,8 +333,8 @@
     class:active={homeActive}
     class="spine-home"
     href={resolve(homeHref as '/home')}
-    aria-label={homeUnreadCount
-      ? `Home, ${homeUnreadCount} unread direct messages`
+    aria-label={homeNotificationCount
+      ? `Home, ${homeUnreadCount} unread direct messages, ${pendingRequests} friend requests`
       : $t('ui_home_3a786953')}
     aria-current={homeActive ? 'page' : undefined}
     title={$t('ui_home_3a786953')}
@@ -336,8 +342,8 @@
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
     </svg>
-    {#if homeUnreadCount}
-      <small class="rail-unread">{compactBadge(homeUnreadCount)}</small>
+    {#if homeNotificationCount}
+      <small class="rail-unread">{compactBadge(homeNotificationCount)}</small>
     {/if}
   </a>
   <div class="spine-separator" aria-hidden="true"></div>

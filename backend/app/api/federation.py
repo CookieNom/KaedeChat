@@ -109,6 +109,7 @@ from app.api.e2ee import (
     require_room_policy_authority,
     room_encryption_operation_status_for_actor,
 )
+from app.api.relationships import notify_relationship
 from app.api.scheduled_events import (
     active_scheduled_event_for_invite,
     scheduled_event_invite_payload,
@@ -7182,19 +7183,12 @@ async def process_event(
             relationship_application is not None
             and relationship_application.relation_type is not None
         ):
-            await publish_dispatch(
+            await notify_relationship(
                 redis,
-                user_topic(
-                    relationship_application.recipient.origin_domain,
-                    relationship_application.recipient.id,
-                ),
-                "USER_UPDATE",
-                {
-                    "relationship": {
-                        "type": relationship_application.relation_type,
-                        "user": user_payload(relationship_application.actor),
-                    }
-                },
+                relationship_application.recipient,
+                relationship_application.actor,
+                relationship_application.relation_type,
+                notify_push=envelope.type != "relationship.profile",
             )
         if (
             replicated_guild_message_payload is not None
