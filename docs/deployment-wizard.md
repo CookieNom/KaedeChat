@@ -131,7 +131,9 @@ make kubernetes-check
 ```
 
 Inspect or change the update timer later with `make auto-update-status`,
-`make auto-update-enable`, and `make auto-update-disable`. If setup cannot
+`make auto-update-enable`, and `make auto-update-disable`. Disabling automatic
+installation keeps owner notification checks running; use
+`deploy/install-auto-update.sh stop` to stop both. If setup cannot
 reach your user's systemd manager, it leaves `AUTO_UPDATE_ENABLED=false` and
 prints a warning rather than claiming the timer is active. See the operator
 guide for lingering, logs, failure handling, and a cron fallback.

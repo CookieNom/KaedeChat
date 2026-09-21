@@ -200,7 +200,14 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             name="fk_users_origin_locality_instances",
         ),
         CheckConstraint("username ~ '^[a-z0-9_.]{2,32}$'", name="username_format"),
-        CheckConstraint("account_type IN ('human','bot')", name="account_type_value"),
+        CheckConstraint("account_type != 'system' OR is_local", name="system_is_local"),
+        Index(
+            "uq_users_system_origin",
+            "origin_domain",
+            unique=True,
+            postgresql_where=text("account_type = 'system'"),
+        ),
+        CheckConstraint("account_type IN ('human','bot','system')", name="account_type_value"),
         CheckConstraint(
             "age_assurance_state IN ('unknown','adult','minor')",
             name="age_assurance_state_value",
@@ -210,7 +217,7 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             name="age_assurance_local_human_only",
         ),
         CheckConstraint(
-            "deleted_at IS NOT NULL OR NOT is_local OR account_type = 'bot' "
+            "deleted_at IS NOT NULL OR NOT is_local OR account_type IN ('bot','system') "
             "OR password_hash IS NOT NULL",
             name="local_auth_fields",
         ),
@@ -5284,3 +5291,17 @@ class InstanceBlock(Base):
 from app.db import bot_models as bot_models  # noqa: E402, F401
 
 ALL_MODEL_TABLES = tuple(Base.metadata.tables)
+
+
+class SystemUpdateNotice(Base):
+    """Delivery receipts survive message deletion and retries."""
+
+    __tablename__ = "system_update_notices"
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id", "user_domain"], ["users.id", "users.origin_domain"], ondelete="CASCADE"
+        ),
+    )

@@ -62,6 +62,7 @@ rollback_enable() {
 }
 
 enable_timer() {
+  local install_updates=${1:-true}
   safe_env_file
   command -v systemctl >/dev/null || \
     die 'systemd is required for the timer; use the cron fallback documented in docs/operator.md on this host'
@@ -82,7 +83,7 @@ enable_timer() {
   set_env AUTO_UPDATE_INTERVAL "$interval"
   set_env AUTO_UPDATE_JITTER "$jitter"
   set_env AUTO_UPDATE_WAIT_TIMEOUT_SECONDS "$(read_env AUTO_UPDATE_WAIT_TIMEOUT_SECONDS 300)"
-  set_env AUTO_UPDATE_ENABLED true
+  set_env AUTO_UPDATE_ENABLED "$install_updates"
   if ! "$ROOT/deploy/auto-update.sh" status >/dev/null; then
     set_env AUTO_UPDATE_ENABLED false
     die "automatic-update configuration is invalid; correct the preceding error in $ENV_FILE, then run 'make auto-update-enable' again. Configuration was left disabled"
@@ -95,7 +96,7 @@ enable_timer() {
     die "Git remote '$remote' does not exist; add it with 'git remote add $remote <repository-url>' or change AUTO_UPDATE_REMOTE"
   fi
   checked_out=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  if [[ $checked_out != "$branch" ]]; then
+  if [[ $install_updates == true && $checked_out != "$branch" ]]; then
     set_env AUTO_UPDATE_ENABLED false
     die "check out the configured branch '$branch' before enabling updates (found '${checked_out:-detached HEAD}'), or change AUTO_UPDATE_BRANCH"
   fi
@@ -141,7 +142,7 @@ EOF
     rollback_enable
     die "could not enable the user timer; configuration was left disabled. Run 'systemctl --user status kaede-auto-update.timer' and 'journalctl --user -u kaede-auto-update.timer' for details"
   fi
-  printf 'Kaede automatic updates are enabled (%s with up to %s jitter).\n' "$interval" "$jitter"
+  printf 'Kaede update checks are enabled (%s with up to %s jitter); automatic installation: %s.\n' "$interval" "$jitter" "$install_updates"
   printf 'For updates while logged out, verify user lingering as documented in docs/operator.md.\n'
 }
 
@@ -170,7 +171,12 @@ show_status() {
 
 case ${1:-status} in
   enable) enable_timer ;;
-  disable) disable_timer ;;
+  disable)
+    safe_env_file
+    set_env AUTO_UPDATE_ENABLED false
+    enable_timer false ;;
+  notify) enable_timer false ;;
+  stop) disable_timer ;;
   status) show_status ;;
-  *) die 'usage: deploy/install-auto-update.sh {enable|disable|status}' ;;
+  *) die 'usage: deploy/install-auto-update.sh {enable|disable|notify|stop|status}' ;;
 esac

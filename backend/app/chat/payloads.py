@@ -78,7 +78,9 @@ def user_payload(user: User) -> dict[str, object]:
         "e2ee_device_generation": str(getattr(user, "e2ee_device_generation", None) or 0),
         "profile_resolved": user.profile_resolved,
         "handle": f"{user.username}@{user.origin_domain}",
-        "account_type": user.account_type,
+        "account_type": (
+            user.account_type if user.account_type != "system" or user.is_local else "human"
+        ),
         "bot": user.account_type == "bot",
     }
 

@@ -560,6 +560,8 @@ async def require_call_policy(
         participants = await local_dm_participants(
             session, int(record["channel_id"]), str(record["channel_domain"])
         )
+    if any(user.account_type == "system" for user in participants):
+        raise HTTPException(status_code=403, detail={"code": "SYSTEM_CONVERSATION_READ_ONLY"})
     identities = {
         participant_identity(participant.id, participant.origin_domain): participant
         for participant in participants

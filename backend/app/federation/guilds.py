@@ -3120,6 +3120,8 @@ async def _apply_reaction_mutation(
         raise ValueError("reaction emoji is invalid") from None
     message = await session.get(Message, message_ref)
     user = await session.get(User, user_ref)
+    if user is not None and user.account_type == "system":
+        raise ValueError("system accounts cannot participate in federated guilds")
     added = event_type.endswith("add")
     if message is not None and user is not None:
         channel = await session.get(Channel, (message.channel_id, message.channel_domain))
@@ -3236,6 +3238,8 @@ async def _apply_poll_vote_mutation(
     channel_ref = _event_context_channel_ref(context, "poll vote")
     message = await session.get(Message, message_ref)
     user = await session.get(User, user_ref)
+    if user is not None and user.account_type == "system":
+        raise ValueError("system accounts cannot participate in federated guilds")
     added = event_type.endswith("add")
     if message is not None:
         channel = await session.get(Channel, (message.channel_id, message.channel_domain))

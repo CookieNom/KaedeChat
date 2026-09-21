@@ -1204,7 +1204,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
               _canSendUserContextCommands(channel),
             ))
         .toList(growable: false);
-    final canSend = !encryptedPaused &&
+    final systemConversation = channel.recipients.any((user) => user.isSystem);
+    final canSend = !systemConversation &&
+        !encryptedPaused &&
         (!channel.locked || canManageThreads(channel)) &&
         moderationStatus == null &&
         (channel.type == ChannelType.dm ||
@@ -1313,7 +1315,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         children: [
           if (channel.guildRef == null &&
               channel.conversationType == 'direct' &&
-              channel.encryptionMode == 'plaintext')
+              channel.encryptionMode == 'plaintext' &&
+              !systemConversation)
             DmEncryptionConsent(
                 key: ValueKey('consent:${channel.ref.wire}'), channel: channel),
           if (state.activeGuild?.syncStatus == 'quota_paused')
@@ -1621,7 +1624,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                                   : () => ref
                                       .read(mobileControllerProvider.notifier)
                                       .selectChannel(message.thread!),
-                              onReaction: detached || channel.archived
+                              onReaction: systemConversation ||
+                                      detached ||
+                                      channel.archived
                                   ? null
                                   : (emoji) => _toggleReaction(message, emoji),
                               onComponent: detached || channel.archived
@@ -1636,7 +1641,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                               onPollVoters: detached || message.poll == null
                                   ? null
                                   : () => _showPollVoters(message),
-                              onAddReaction: detached ||
+                              onAddReaction: systemConversation ||
+                                      detached ||
                                       message.reactionCounts.isEmpty ||
                                       !canAddMessageReaction(
                                         channel,
@@ -1759,17 +1765,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
             ),
           if (!canSend)
             _PermissionNotice(
-              message: encryptedPaused
-                  ? L10n.of(context)
-                      .ui_encrypted_messaging_is_paused_while_participa_812e00c5
-                  : channel.locked && !canManageThreads(channel)
+              message: systemConversation
+                  ? 'Official notices from this instance. Replies are disabled.'
+                  : encryptedPaused
                       ? L10n.of(context)
-                          .ui_this_thread_is_locked_only_moderators_can_sen_723dfceb
-                      : moderationStatus == null
+                          .ui_encrypted_messaging_is_paused_while_participa_812e00c5
+                      : channel.locked && !canManageThreads(channel)
                           ? L10n.of(context)
-                              .ui_you_do_not_have_permission_to_send_messages_h_af698d70
-                          : L10n.of(context)
-                              .ui_you_cannot_send_messages_while_timed_out_481f2aaf,
+                              .ui_this_thread_is_locked_only_moderators_can_sen_723dfceb
+                          : moderationStatus == null
+                              ? L10n.of(context)
+                                  .ui_you_do_not_have_permission_to_send_messages_h_af698d70
+                              : L10n.of(context)
+                                  .ui_you_cannot_send_messages_while_timed_out_481f2aaf,
               onApps: state.user == null
                   ? null
                   : () => _showApplicationCommandLauncher(channel),
@@ -4462,8 +4470,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     final mobileState = ref.read(mobileControllerProvider);
     final me = mobileState.user?.ref;
     final channel = mobileState.activeChannel!;
+    final systemConversation = channel.recipients.any((user) => user.isSystem);
     final channelFollowNotice = message.messageType == 12;
-    final canReact = !channelFollowNotice &&
+    final canReact = !systemConversation &&
+        !channelFollowNotice &&
         canAddMessageReaction(channel, emojiExists: false);
     final canManage = channel.type == ChannelType.dm ||
         channel.type == ChannelType.groupDm ||
@@ -4477,9 +4487,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
           message,
           mobileState.user,
         );
-    final canManageReactions =
-        !channelFollowNotice && canClearMessageReactions(channel);
-    final canPin = canReadRetainedChannelHistory(channel) &&
+    final canManageReactions = !systemConversation &&
+        !channelFollowNotice &&
+        canClearMessageReactions(channel);
+    final canPin = !systemConversation &&
+        canReadRetainedChannelHistory(channel) &&
         canPinMessage(channel, message);
     final canDelete = (message.authorRef == me || canManage) &&
         (!channel.archived || !channel.locked || canManageThreads(channel));
@@ -4593,7 +4605,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                 title: Text(L10n.of(context).chat_mark_unread),
                 onTap: () => Navigator.pop(context, 'mark-unread'),
               ),
-              if (!channelFollowNotice)
+              if (!systemConversation && !channelFollowNotice)
                 ListTile(
                     leading: Icon(Icons.reply_rounded),
                     title: Text(L10n.of(context).ui_reply_d1ca83c7),
@@ -4613,7 +4625,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                   leading: Icon(Icons.link_rounded),
                   title: Text(L10n.of(context).ui_copy_message_link_09495605),
                   onTap: () => Navigator.pop(context, 'copy-link')),
-              if (forwardDestinations.isNotEmpty)
+              if (!systemConversation && forwardDestinations.isNotEmpty)
                 ListTile(
                   leading: Icon(Icons.forward_rounded),
                   title: Text(L10n.of(context).ui_forward_e50883ba),
@@ -7030,9 +7042,12 @@ final class _MessageTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          if (author?.isApplication == true) ...[
+                          if (author?.isApplication == true ||
+                              author?.isSystem == true) ...[
                             const SizedBox(width: 5),
-                            const ApplicationTag(compact: true),
+                            ApplicationTag(
+                                compact: true,
+                                system: author?.isSystem == true),
                           ],
                           if (authorIconRole?.iconHash
                               case final iconHash?) ...[

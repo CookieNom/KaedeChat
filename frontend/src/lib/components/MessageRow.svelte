@@ -32,7 +32,12 @@
     UserSummary
   } from '$lib/chat/types';
   import type { CustomEmojiOption } from '$lib/chat/emojis';
-  import { isApplicationUser, userDisplayName, userPublicHandle } from '$lib/chat/users';
+  import {
+    isSystemUser,
+    isApplicationUser,
+    userDisplayName,
+    userPublicHandle
+  } from '$lib/chat/users';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { interactionAttributionText } from '$lib/chat/interaction-metadata';
@@ -967,7 +972,10 @@
           />
         {/if}
         {#if message.webhook}<small class="webhook-badge">{$t('ui_webhook_47e276fc')}</small>{/if}
-        {#if isApplicationUser(message.author)}<small class="app-badge"
+        {#if isSystemUser(message.author)}<small
+            class="app-badge"
+            title="Official notice from this instance">SYSTEM</small
+          >{:else if isApplicationUser(message.author)}<small class="app-badge"
             >{$t('ui_app_b7179fe7')}</small
           >{/if}
         {#if !presentedMessage.content_unavailable}<time

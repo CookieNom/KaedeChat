@@ -213,7 +213,11 @@ run_update() {
 }
 
 case ${1:-run} in
-  run) run_update false ;;
+  run)
+    export PATH="$ROOT/.kaede-tools/bin:$PATH"
+    python3 "$ROOT/deploy/kubernetes/update_notices.py" --env-file "$ENV_FILE" || \
+      log "update notification check failed; continuing with the configured update policy"
+    run_update false ;;
   run-now) run_update true ;;
   status) show_status ;;
   mark-current) mark_current ;;

@@ -8065,6 +8065,7 @@ async def federation_user_lookup(
             User.origin_domain == settings.domain,
             User.is_local.is_(True),
             User.username == username,
+            User.account_type != "system",
         )
     )
     if user is None:
@@ -8097,7 +8098,7 @@ async def federation_user_profile_by_ref(
         refill_per_minute=120,
     )
     user = await session.get(User, (int(user_id), settings.domain))
-    if user is None or not user.is_local:
+    if user is None or not user.is_local or user.account_type == "system":
         raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
     return await build_envelope(
         session,

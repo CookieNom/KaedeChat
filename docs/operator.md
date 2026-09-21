@@ -600,6 +600,26 @@ journalctl --user -u kaede-auto-update.service
 make auto-update-disable
 ```
 
+Setup enables scheduled update checks even when automatic installation is off.
+`make auto-update-disable` keeps these notification-only checks running;
+`deploy/install-auto-update.sh stop` stops both checks and automatic installation.
+For an existing installation, run `make auto-update-disable` to install the
+notification-only timer, or keep an already enabled auto-update timer. Run
+`make update-notices` to check immediately without installing anything.
+
+Current local instance owners receive one DM per available upstream commit from
+**Kaede System**, marked **SYSTEM**. This local-only account cannot log in,
+receive replies, or participate in federation. Its dedicated notification DM is
+plaintext; ordinary encrypted conversations are unaffected. Delivery receipts
+prevent repeat notices after retries or message deletion.
+
+Checks compare the configured Git branch with the cluster's completed release.
+Changed migration content or current infrastructure requires maintenance. Changed
+deployment code, or an unverifiable baseline, is reported as requiring review;
+the checker never executes code from the candidate update. Notification failures
+do not block scheduled installation. The first deployment introducing system
+notices requires maintenance for its database migration.
+
 Unattended updates require a successful initial `make deploy`; they never
 initialize an empty replacement for a legacy instance. The deployment user needs
 Docker, kubeconfig, and the local import sudo rule.

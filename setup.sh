@@ -1678,8 +1678,8 @@ if [[ $AUTO_UPDATE == true ]]; then
     warn 'The automatic-update timer could not be enabled. The installer left AUTO_UPDATE_ENABLED=false; see docs/operator.md.'
   fi
 else
-  "$ROOT/deploy/install-auto-update.sh" disable >/dev/null || \
-    warn 'Could not remove an existing user update timer; run make auto-update-disable.'
+  "$ROOT/deploy/install-auto-update.sh" notify >/dev/null || \
+    warn 'Could not enable update notifications; run make auto-update-disable to enable notification-only checks.'
 fi
 printf 'Review deploy/generated/README.txt, then run: make env-check\n'
 if [[ $STORAGE == garage ]]; then

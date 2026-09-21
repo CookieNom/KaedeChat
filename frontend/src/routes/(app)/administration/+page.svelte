@@ -1181,7 +1181,7 @@
                         ? `Suspended until ${new Date(user.suspended_until!).toLocaleString()}`
                         : $t('ui_active_92340695')}</span
                   >
-                  {#if can('users.manage') && user.account_type !== 'bot'}
+                  {#if can('users.manage') && (user.account_type ?? 'human') === 'human'}
                     <label class="age-assurance-control">
                       <span class="sr-only"
                         >{$t('ui_age_assurance_for_value0_cb69de11', {
@@ -1203,7 +1203,7 @@
                       </select>
                     </label>
                   {/if}
-                  {#if can('users.manage') && user.account_type !== 'bot'}
+                  {#if can('users.manage') && (user.account_type ?? 'human') === 'human'}
                     <button
                       type="button"
                       class:danger-button={!userIsSuspended(user)}

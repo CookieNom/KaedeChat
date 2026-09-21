@@ -2510,6 +2510,8 @@ async def slowmode_retry_after_ms(redis: Redis, key: str) -> int:
 async def require_dm_send(session: AsyncSession, access: ChannelAccess, actor: User) -> None:
     if access.guild is not None:
         return
+    if any(user.account_type == "system" for user in access.participants):
+        raise HTTPException(status_code=403, detail={"code": "SYSTEM_CONVERSATION_READ_ONLY"})
     conversation = await session.get(
         DMConversation, (access.channel.id, access.channel.origin_domain)
     )

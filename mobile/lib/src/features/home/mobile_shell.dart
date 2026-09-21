@@ -1087,6 +1087,8 @@ final class _ConversationScreenState
     final width = MediaQuery.sizeOf(context).width;
     final compactHeader = width <= 400;
     final callUsesOverflow = conversationCallUsesOverflow(width);
+    final systemConversation =
+        widget.channel.recipients.any((user) => user.isSystem);
     final isDm = widget.channel.type == ChannelType.dm ||
         widget.channel.type == ChannelType.groupDm;
     final canReadHistory = canReadRetainedChannelHistory(widget.channel);
@@ -1121,7 +1123,7 @@ final class _ConversationScreenState
             title: Text(L10n.of(context).ui_pinned_messages_c56c8a9d),
           ),
         ),
-      if (isDm && callUsesOverflow)
+      if (isDm && !systemConversation && callUsesOverflow)
         PopupMenuItem(
           value: 'call',
           enabled: !_callBusy,
@@ -1216,7 +1218,7 @@ final class _ConversationScreenState
                 onPressed: _showAnnouncementFollow,
                 icon: Icon(Icons.notifications_none_rounded),
               ),
-            if (isDm && !callUsesOverflow)
+            if (isDm && !systemConversation && !callUsesOverflow)
               ActionButton(
                 kind: ActionButtonKind.icon,
                 tooltip: _activeCall == null
@@ -2733,8 +2735,8 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
             (user) => user.ref != state.user?.ref,
             orElse: () => current.recipients.first,
           );
-    final showEncryption =
-        current.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
+    final showEncryption = !current.recipients.any((user) => user.isSystem) &&
+        (current.encryptionMode == 'e2ee' || state.e2eeActivationEnabled);
     return SafeArea(
       child: SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
@@ -4037,9 +4039,10 @@ final class _MemberRow extends StatelessWidget {
                                   ),
                                 ),
                               ),
-                              if (user.isApplication) ...[
+                              if (user.isApplication || user.isSystem) ...[
                                 const SizedBox(width: 5),
-                                const ApplicationTag(compact: true),
+                                ApplicationTag(
+                                    compact: true, system: user.isSystem),
                               ],
                             ],
                           ),

@@ -1236,6 +1236,8 @@ async def _ensure_history_identity(
     origin = normalize_domain(origin)
     authority = normalize_domain(authority_origin)
     existing = await session.get(User, (user_id, origin))
+    if existing is not None and existing.account_type == "system":
+        raise ValueError("system accounts cannot participate in federated history")
     if profile is not None:
         if (int(profile.id), profile.origin_domain) != (user_id, origin):
             raise ValueError("historical author profile identity is invalid")

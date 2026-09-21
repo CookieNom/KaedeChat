@@ -495,6 +495,8 @@ async def open_direct_message_for(
     target = resolved_target or await resolve_handle(
         session, settings, redis, requester_key, payload.handle
     )
+    if target.account_type == "system":
+        raise HTTPException(status_code=403, detail={"code": "SYSTEM_CONVERSATION_READ_ONLY"})
     if (target.id, target.origin_domain) == (auth.user.id, auth.user.origin_domain):
         raise HTTPException(status_code=400, detail={"code": "CANNOT_DM_SELF"})
     # A local block is authoritative even when the other participant and the

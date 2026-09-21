@@ -43,3 +43,8 @@ export function applyUserProfileToHomeProjections(
       selectedUser && entityKey(selectedUser) === key ? { ...selectedUser, ...user } : selectedUser
   };
 }
+
+/** Only the local server can issue this account type; federation cannot admit it. */
+export function isSystemUser(user: UserSummary | null | undefined): boolean {
+  return user?.account_type === 'system';
+}

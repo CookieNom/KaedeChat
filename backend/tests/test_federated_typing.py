@@ -111,7 +111,7 @@ def relay_objects(*, guild: bool) -> dict[str, object]:
         guild_id=9 if guild else None,
         guild_domain="authority.example" if guild else None,
     )
-    actor = SimpleNamespace(id=42, origin_domain="member.example")
+    actor = SimpleNamespace(id=42, origin_domain="member.example", account_type="human")
     return {
         "channel": channel,
         "actor": actor,
@@ -172,6 +172,16 @@ async def test_typing_relay_requires_authority_actor_membership_and_local_recipi
     assert channel is objects["channel"]
     assert actor is objects["actor"]
     assert audience == {"7@local.example"}
+
+    actor.account_type = "system"
+    with pytest.raises(ValueError, match="unavailable room participant"):
+        await federated_typing.validate_typing_relay_scope(
+            cast(Any, relay_session(objects, guild=guild)),
+            cast(Any, SimpleNamespace(domain="local.example")),
+            relay_projection(),
+            authority_domain="authority.example",
+        )
+    actor.account_type = "human"
 
     with pytest.raises(ValueError, match="another instance"):
         await federated_typing.validate_typing_relay_scope(

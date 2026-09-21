@@ -4,12 +4,15 @@ import base64
 import copy
 import json
 import sys
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kubernetes"))
 import manage
+import update_notices
 from dev import development_values, instances
 from stack import ROOT, read_env_file, render
 
@@ -17,6 +20,108 @@ from stack import ROOT, read_env_file, render
 class KubernetesTests(unittest.TestCase):
     def setUp(self):
         self.values = read_env_file(ROOT / "deploy/.env.schema")
+
+    def test_update_notice_maintenance_classification(self):
+        previous = {"schema": "same-schema", "infrastructure": "same-infra"}
+        classify = update_notices.classify_update
+        self.assertEqual(
+            classify(previous, "same-schema", "same-infra", ["frontend/src/app.css"]),
+            ("not_required", []),
+        )
+        self.assertEqual(
+            classify(previous, "new-schema", "same-infra", []),
+            ("required", ["database"]),
+        )
+        self.assertEqual(
+            classify(previous, "same-schema", "new-infra", []),
+            ("required", ["infrastructure"]),
+        )
+        self.assertEqual(
+            classify(
+                previous, "same-schema", "same-infra", ["deploy/kubernetes/stack.py"]
+            ),
+            ("unknown", ["deployment"]),
+        )
+        self.assertEqual(
+            classify(previous, "same-schema", "same-infra", None),
+            ("unknown", ["unverified"]),
+        )
+        self.assertEqual(
+            classify({}, "same-schema", "same-infra", []), ("unknown", ["unverified"])
+        )
+
+    def test_update_check_reads_upstream_without_checking_out_or_executing_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", str(root), *args], text=True
+                ).strip()
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "Update test")
+            git("config", "user.email", "test@example.invalid")
+            migrations = root / "backend/migrations"
+            migrations.mkdir(parents=True)
+            source = migrations / "initial.py"
+            source.write_text("# baseline\n")
+            git("add", ".")
+            git("commit", "-qm", "baseline")
+            current = git("rev-parse", "HEAD")
+            git("checkout", "-qb", "upstream")
+            marker = root / "executed-upstream"
+            source.write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+            )
+            git("commit", "-qam", "candidate")
+            target = git("rev-parse", "HEAD")
+            git("checkout", "-q", "main")
+            git("remote", "add", "origin", str(root))
+            report = None
+
+            def kubectl(_cfg, *args, **kwargs):
+                nonlocal report
+                if args[0] == "get":
+                    return json.dumps(
+                        {
+                            "data": {
+                                "revision": current,
+                                "schema": "old",
+                                "infrastructure": "same",
+                            }
+                        }
+                    )
+                self.assertEqual(
+                    args,
+                    ("exec", "-i", "deployment/api", "--", "kaede", "notify-update"),
+                )
+                report = json.loads(kwargs["data"])
+                return ""
+
+            with (
+                patch.object(update_notices, "ROOT", root),
+                patch.object(
+                    update_notices,
+                    "read_env_file",
+                    return_value={"AUTO_UPDATE_BRANCH": "upstream"},
+                ),
+                patch.object(update_notices, "validate_file_permissions"),
+                patch.object(manage, "settings", return_value={}),
+                patch.object(manage, "verify_cluster"),
+                patch.object(manage, "kubectl", side_effect=kubectl),
+                patch.object(
+                    manage, "image_names", return_value=("backend", "frontend")
+                ),
+                patch.object(manage, "deployment", return_value={"items": []}),
+                patch.object(manage, "infrastructure_digest", return_value="same"),
+            ):
+                update_notices.check_updates(root / ".env", root / "cluster.json")
+            self.assertEqual(report["revision"], target)
+            self.assertEqual(report["maintenance"], "required")
+            self.assertEqual(git("rev-parse", "HEAD"), current)
+            self.assertFalse(marker.exists())
+            self.assertEqual(source.read_text(), "# baseline\n")
 
     def test_role_credentials_and_rollout_contract(self):
         items = render(self.values, "kaede-test")["items"]

@@ -1907,6 +1907,8 @@ async def room_participants(
 ) -> list[User]:
     guild = getattr(access, "guild", None)
     if guild is None:
+        if any(user.account_type == "system" for user in access.participants):
+            raise HTTPException(status_code=403, detail={"code": "SYSTEM_CONVERSATION_READ_ONLY"})
         human_participants = [
             participant for participant in access.participants if participant.account_type != "bot"
         ]

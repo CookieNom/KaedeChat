@@ -358,7 +358,7 @@ async def upsert_remote_user(
 ) -> User:
     if profile.origin_domain == settings.domain:
         user = await session.get(User, (database_snowflake(profile.id, "user id"), settings.domain))
-        if user is None or not user.is_local:
+        if user is None or not user.is_local or user.account_type == "system":
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
         if user.username != profile.username:
             raise ValueError("local user profile does not match the stored immutable handle")
@@ -587,6 +587,8 @@ def sanitized_remote_blurhash(raw: object) -> str | None:
 
 
 def profile_from_user(user: User) -> dict[str, object]:
+    if user.account_type == "system":
+        raise ValueError("system accounts cannot participate in federation")
     return {
         "id": str(user.id),
         "origin_domain": user.origin_domain,

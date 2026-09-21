@@ -119,7 +119,7 @@ async def require_user(
             AuthSession.absolute_expires_at > now,
         )
     )
-    if user is None or account_is_banned(user):
+    if user is None or user.account_type == "system" or account_is_banned(user):
         raise unauthorized()
     cookie_authenticated = bearer_token is None and cookie_token is not None
     if (

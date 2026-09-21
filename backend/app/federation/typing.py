@@ -250,7 +250,7 @@ async def validate_typing_relay_scope(
         raise ValueError("typing relay audience targets another instance")
     channel = await session.get(Channel, (int(projection.channel_id), projection.channel_domain))
     actor = await session.get(User, (int(projection.user_id), projection.user_domain))
-    if channel is None or channel.unavailable or actor is None:
+    if channel is None or channel.unavailable or actor is None or actor.account_type == "system":
         raise ValueError("typing relay references an unavailable room participant")
     if channel.guild_id is not None and channel.guild_domain is not None:
         guild = await session.get(Guild, (channel.guild_id, channel.guild_domain))

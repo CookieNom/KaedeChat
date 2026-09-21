@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { UserSummary } from './types';
-import { isApplicationUser } from './users';
+import { isApplicationUser, isSystemUser } from './users';
 
 const human: UserSummary = {
   id: '1',
@@ -18,4 +18,11 @@ describe('trusted application identity', () => {
     expect(isApplicationUser(human)).toBe(false);
     expect(isApplicationUser({ ...human, display_name: 'APP' })).toBe(false);
   });
+});
+
+it('does not infer system authority from a name or bot flag', () => {
+  expect(isSystemUser({ ...human, display_name: 'Kaede System', username: 'system' })).toBe(false);
+  expect(isSystemUser({ ...human, account_type: 'bot', bot: true })).toBe(false);
+  expect(isSystemUser({ ...human, account_type: 'system' })).toBe(true);
+  expect(isApplicationUser({ ...human, account_type: 'system' })).toBe(false);
 });

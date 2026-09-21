@@ -31,7 +31,7 @@ Color presenceColor(BuildContext context, PresenceStatus status) =>
     };
 
 bool userProfileSupportsFriendshipActions(KaedeUser user) =>
-    !user.isApplication;
+    !user.isApplication && !user.isSystem;
 
 IconData presenceIcon(PresenceStatus status) => switch (status) {
       PresenceStatus.online => Icons.circle,
@@ -45,13 +45,16 @@ IconData presenceIcon(PresenceStatus status) => switch (status) {
 /// account discriminator; display names, nicknames, and webhook labels cannot
 /// opt into it.
 final class ApplicationTag extends StatelessWidget {
-  const ApplicationTag({super.key, this.compact = false});
+  const ApplicationTag({super.key, this.compact = false, this.system = false});
 
   final bool compact;
+  final bool system;
 
   @override
   Widget build(BuildContext context) => Semantics(
-        label: L10n.of(context).ui_application_account_c4c86f4a,
+        label: system
+            ? 'Official account of this instance'
+            : L10n.of(context).ui_application_account_c4c86f4a,
         child: ExcludeSemantics(
           child: Container(
             padding: EdgeInsets.symmetric(
@@ -63,7 +66,7 @@ final class ApplicationTag extends StatelessWidget {
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
-              L10n.of(context).ui_app_61a6c98c,
+              system ? 'SYSTEM' : L10n.of(context).ui_app_61a6c98c,
               style: TextStyle(
                 color: context.kaede.onPurple,
                 fontSize: compact ? 8 : 9,
@@ -472,9 +475,9 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                                     Theme.of(context).textTheme.headlineSmall,
                               ),
                             ),
-                            if (user.isApplication) ...[
+                            if (user.isApplication || user.isSystem) ...[
                               const SizedBox(width: 7),
-                              const ApplicationTag(),
+                              ApplicationTag(system: user.isSystem),
                             ],
                           ],
                         ),

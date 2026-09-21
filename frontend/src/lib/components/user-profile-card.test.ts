@@ -130,3 +130,26 @@ it('keeps profiles and role removal usable when installation is unavailable', as
   await vi.waitFor(() => expect(onRoleChange).toHaveBeenCalledWith(bot, role, false));
   expect(button('Copy username')).toBeTruthy();
 });
+
+it('shows the system badge without friendship, app installation, or message actions', async () => {
+  mocks.api.mockResolvedValue([]);
+  const onMessage = vi.fn();
+  component = mount(UserProfileCard, {
+    target: document.body,
+    props: {
+      user: { ...bot, account_type: 'system', display_name: 'Kaede System' },
+      x: 0,
+      y: 0,
+      onClose: vi.fn(),
+      onMessage
+    }
+  });
+  await vi.waitFor(() => expect(document.querySelector('.app-badge')?.textContent).toBe('SYSTEM'));
+  expect(
+    [...document.querySelectorAll('button')].some((item) => item.textContent?.trim() === 'Message')
+  ).toBe(false);
+  expect(document.querySelector('.relationship-friend')).toBeNull();
+  expect(mocks.api.mock.calls.some(([path]) => String(path).includes('/bot-profiles/'))).toBe(
+    false
+  );
+});

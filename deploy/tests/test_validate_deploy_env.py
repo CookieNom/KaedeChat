@@ -57,7 +57,7 @@ def generated_setup_configuration(tuned: bool) -> tuple[dict[str, str], dict]:
             shutil.copyfile(repository / name, destination)
         # Exercise config publication without touching the user's systemd service.
         updater = root / "deploy/install-auto-update.sh"
-        updater.write_text('#!/bin/sh\n[ "$1" = disable ]\n', encoding="utf-8")
+        updater.write_text('#!/bin/sh\n[ "$1" = notify ]\n', encoding="utf-8")
         updater.chmod(0o700)
         original = {
             "KAEDE_DOMAIN": "audit.kaede.chat",

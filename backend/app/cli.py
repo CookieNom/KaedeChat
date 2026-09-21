@@ -376,6 +376,41 @@ def admin_revoke(
     typer.echo(asyncio.run(admin_grant_operation(username, role, revoke=True)))
 
 
+@cli.command("notify-update")
+def notify_update() -> None:
+    """Accept a validated update report on stdin from the trusted host checker."""
+    import sys
+
+    from app.admin.update_notices import UpdateNotice, deliver_update_notice
+    from app.chat.postcommit import publish_committed_dispatches
+
+    notice = UpdateNotice.model_validate_json(sys.stdin.read(8193))
+
+    async def run() -> int:
+        settings = get_settings()
+        engine, sessionmaker = create_engine_and_sessionmaker(
+            settings.database_url.get_secret_value()
+        )
+        redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+        lease = None
+        try:
+            lease = await WorkerLease.acquire(redis)
+            async with sessionmaker() as session:
+                count = await deliver_update_notice(
+                    session, settings, SnowflakeGenerator(lease), notice
+                )
+                await session.commit()
+                await publish_committed_dispatches(session, redis)
+                return count
+        finally:
+            if lease is not None:
+                await lease.close()
+            await redis.aclose()
+            await engine.dispose()
+
+    typer.echo(f"Delivered {asyncio.run(run())} update notices")
+
+
 def main() -> None:
     cli()
 

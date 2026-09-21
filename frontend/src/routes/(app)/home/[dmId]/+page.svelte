@@ -104,7 +104,7 @@
     ReadStateStatus,
     UserSummary
   } from '$lib/chat/types';
-  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
+  import { isSystemUser, userDisplayName, userPublicHandle } from '$lib/chat/users';
   import {
     GATEWAY_SESSION_RESET_EVENT,
     type Dispatch,
@@ -384,8 +384,11 @@
   const channel = $derived(
     directMessages.find((item) => matchesEntityRef(dmId, item, localDomain)) ?? null
   );
+  const systemConversation = $derived(channel?.recipients?.some(isSystemUser) ?? false);
   const canCreatePoll = $derived(Boolean(channelReady && channel));
-  const canPinMessages = $derived(Boolean(channel && channelSupportsMessagePins(channel)));
+  const canPinMessages = $derived(
+    Boolean(!systemConversation && channel && channelSupportsMessagePins(channel))
+  );
   const forwardDestinations = $derived(
     channel ? forwardingDestinations(channel, entities.channels.values) : []
   );
@@ -1529,6 +1532,7 @@
   }
 
   async function send(retry?: PendingMessageSend) {
+    if (systemConversation) return;
     const text = content.trim();
     if (editingMessage && !retry) {
       if (!text || busy) return;
@@ -2873,7 +2877,7 @@
       </a>
     </div>
   </aside>
-  <section class="message-pane dm-message-pane">
+  <section class="message-pane dm-message-pane" class:system-notice-pane={systemConversation}>
     <header class="channel-header">
       <div class="channel-header-primary">
         <button
@@ -2928,7 +2932,7 @@
         </div>
       </div>
       <div class="channel-header-actions">
-        {#if channel && (channel.encryption_mode === 'e2ee' || (!groupConversation && e2eeActivationEnabled))}
+        {#if !systemConversation && channel && (channel.encryption_mode === 'e2ee' || (!groupConversation && e2eeActivationEnabled))}
           <button
             class:active={channel.encryption_mode === 'e2ee'}
             class:e2ee-status-button={channel.encryption_mode === 'e2ee'}
@@ -2999,7 +3003,7 @@
           users={[...(currentUser ? [currentUser] : []), ...(channel?.recipients ?? [])]}
           placement="header"
         />
-        {#if !activeCall}
+        {#if !systemConversation && !activeCall}
           <button
             class="icon-button"
             type="button"
@@ -3021,7 +3025,7 @@
         >
       </div>
     {/if}
-    {#if channel && currentUser && !groupConversation && channel.encryption_mode === 'plaintext'}
+    {#if !systemConversation && channel && currentUser && !groupConversation && channel.encryption_mode === 'plaintext'}
       {#key entityRef(channel)}
         <DMEncryptionConsent
           channelRef={entityRef(channel)}
@@ -3168,13 +3172,14 @@
                   onDelete={deleteMessage}
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
-                  onReply={startReply}
-                  onForward={forwardDestinations.length &&
+                  onReply={systemConversation ? undefined : startReply}
+                  onForward={!systemConversation &&
+                  forwardDestinations.length &&
                   forwardUnavailableReason(item.message) === null
                     ? requestForward
                     : undefined}
                   forwardUnavailableReason={forwardUnavailableReason(item.message)}
-                  {applicationCommands}
+                  applicationCommands={systemConversation ? [] : applicationCommands}
                   contextCommandAccountRef={currentUser ? entityRef(currentUser) : null}
                   onApplicationCommand={executeContextCommand}
                   resolveInteractionRequest={componentInteractionRequest}
@@ -3186,7 +3191,7 @@
                     item.message.author_domain === currentUser?.origin_domain
                   )}
                   onMessageUpdate={reconcile}
-                  canReact
+                  canReact={!systemConversation}
                   customEmojis={pickerEmojis}
                   reactionUserKey={currentUser ? entityKey(currentUser) : ''}
                   onToggleReaction={toggleMessageReaction}
@@ -3197,225 +3202,233 @@
         {/key}
       </div>
     </div>
-    <footer class="composer-wrap">
-      <span class="typing-line">{typing}</span>
-      {#if commandNotice}<span class="typing-line" role="status">{commandNotice}</span>{/if}
-      {#if replyingMessage}
-        <div class="reply-banner">
-          <span>
-            {$t('ui_replying_to_2e89f01d')}
-            <strong>{userDisplayName(replyingMessage.author)}</strong>
-          </span>
-          <div class="reply-banner-actions">
-            <button type="button" onclick={cancelReply} aria-label={$t('ui_cancel_reply_2355f731')}
-              >×</button
-            >
+    {#if systemConversation}
+      <footer class="composer-wrap system-notice-footer">
+        <p role="status">Official notices from this instance. Replies are disabled.</p>
+      </footer>
+    {:else}
+      <footer class="composer-wrap">
+        <span class="typing-line">{typing}</span>
+        {#if commandNotice}<span class="typing-line" role="status">{commandNotice}</span>{/if}
+        {#if replyingMessage}
+          <div class="reply-banner">
+            <span>
+              {$t('ui_replying_to_2e89f01d')}
+              <strong>{userDisplayName(replyingMessage.author)}</strong>
+            </span>
+            <div class="reply-banner-actions">
+              <button
+                type="button"
+                onclick={cancelReply}
+                aria-label={$t('ui_cancel_reply_2355f731')}>×</button
+              >
+            </div>
           </div>
-        </div>
-      {/if}
-      {#if editingMessage}
-        <div class="editing-banner">
-          <span
-            >{$t('ui_editing_message_7dbfd44a')}
-            <small>{$t('ui_your_draft_and_attachments_are_saved_88ba9911')}</small></span
-          >
-          <button type="button" onclick={finishEditing}>{$t('ui_cancel_19766ed6')}</button>
-        </div>
-      {/if}
-      <ComposerAutocomplete
-        bind:this={autocomplete}
-        query={completionQuery?.query ?? ''}
-        options={completionOptions}
-        listboxId="dm-message-suggestions"
-        onActiveIndexChange={(index) => (completionActive = index)}
-        onOpenChange={(open) => (completionOpen = open)}
-        onSelect={chooseCompletion}
-      />
-      <form
-        class="composer"
-        ondragover={(event) => event.preventDefault()}
-        ondrop={composerDrop}
-        onsubmit={(event) => {
-          event.preventDefault();
-          send();
-        }}
-      >
-        <input
-          class="visually-hidden"
-          bind:this={fileInput}
-          type="file"
-          multiple
-          onchange={(event) => {
-            const target = event.currentTarget;
-            if (target.files) void queueFiles(target.files);
-            target.value = '';
-            composerInput?.focus();
-          }}
+        {/if}
+        {#if editingMessage}
+          <div class="editing-banner">
+            <span
+              >{$t('ui_editing_message_7dbfd44a')}
+              <small>{$t('ui_your_draft_and_attachments_are_saved_88ba9911')}</small></span
+            >
+            <button type="button" onclick={finishEditing}>{$t('ui_cancel_19766ed6')}</button>
+          </div>
+        {/if}
+        <ComposerAutocomplete
+          bind:this={autocomplete}
+          query={completionQuery?.query ?? ''}
+          options={completionOptions}
+          listboxId="dm-message-suggestions"
+          onActiveIndexChange={(index) => (completionActive = index)}
+          onOpenChange={(open) => (completionOpen = open)}
+          onSelect={chooseCompletion}
         />
-        <ComposerActionMenu
-          canAttach={!editingMessage && !selectedApplicationCommand}
-          canPoll={canCreatePoll && !editingMessage && !selectedApplicationCommand}
-          disabled={busy ||
-            !channelReady ||
-            !channel ||
-            Boolean(editingMessage || selectedApplicationCommand)}
-          onAttach={() => fileInput?.click()}
-          onPoll={() => {
-            gifPickerOpen = false;
-            emojiPickerOpen = false;
-            pollDialogOpen = true;
+        <form
+          class="composer"
+          ondragover={(event) => event.preventDefault()}
+          ondrop={composerDrop}
+          onsubmit={(event) => {
+            event.preventDefault();
+            send();
           }}
-        />
-        {#if selectedApplicationCommand}
-          <CommandOptionComposer
-            commandName={selectedApplicationCommand.name}
-            commandDisplayName={localizedCommandName(selectedApplicationCommand)}
-            applicationName={selectedApplicationCommand.application_name}
-            options={selectedApplicationCommand.options ?? []}
-            values={commandOptionValues}
-            users={[currentUser, ...(channel?.recipients ?? [])].filter(
-              (user): user is UserSummary => Boolean(user)
-            )}
-            channels={directMessages}
-            attachments={uploads.flatMap((upload) =>
-              upload.status === 'ready' && upload.attachmentId
-                ? [
-                    {
-                      id: upload.attachmentId,
-                      label: upload.file.name,
-                      filename: upload.file.name,
-                      contentType: upload.file.type
-                    }
-                  ]
-                : []
-            )}
-            disabled={busy}
-            onValueChange={(name, value) =>
-              (commandOptionValues = { ...commandOptionValues, [name]: value })}
-            onAttachmentFiles={(option, path, files) =>
-              void queueFiles(files, {
-                path,
-                fileTypes: option.file_types,
-                command: selectedApplicationCommand!
-              })}
-            onAutocomplete={autocompleteCommandOption}
-            onSubmit={() => void send()}
-            onCancel={cancelCommandComposer}
+        >
+          <input
+            class="visually-hidden"
+            bind:this={fileInput}
+            type="file"
+            multiple
+            onchange={(event) => {
+              const target = event.currentTarget;
+              if (target.files) void queueFiles(target.files);
+              target.value = '';
+              composerInput?.focus();
+            }}
           />
-        {:else}
-          <textarea
-            use:autosizeTextarea={{ value: content, maxHeight: 180 }}
-            bind:this={composerInput}
-            bind:value={content}
-            oninput={composerChanged}
-            onselect={syncComposerCursor}
-            onclick={syncComposerCursor}
-            onkeyup={syncComposerCursor}
-            onkeydown={composerKeydown}
-            onpaste={composerPaste}
-            disabled={!channelReady || !channel}
-            role="combobox"
-            aria-autocomplete="list"
-            aria-expanded={completionOpen}
-            aria-controls={completionOpen ? 'dm-message-suggestions' : undefined}
-            aria-activedescendant={completionOpen
-              ? `dm-message-suggestions-option-${completionActive}`
-              : undefined}
-            aria-label={$t('ui_direct_message_cd3e1605')}
-            placeholder={`Message ${conversationTitle}`}
-            rows="1"
-            maxlength="4000"
-          ></textarea>
-        {/if}
-        {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !selectedApplicationCommand}
-          <button
-            class="gif-button"
-            class:active={gifPickerOpen}
-            type="button"
-            disabled={busy || !channelReady || !channel || !gifPickerEnabled}
-            aria-label={gifPickerEnabled
-              ? $t('ui_choose_a_gif_261f5249')
-              : $t('ui_gif_availability_could_not_be_checked_5290ae44')}
-            title={gifPickerEnabled ? $t('ui_choose_a_gif_261f5249') : gifConfigurationError}
-            aria-expanded={gifPickerOpen}
-            onclick={() => {
-              gifPickerOpen = !gifPickerOpen;
-              emojiPickerOpen = false;
-            }}>{$t('ui_gif_76c664ef')}</button
-          >
-        {/if}
-        {#if !editingMessage && !selectedApplicationCommand}
-          <button
-            class="emoji-button"
-            class:active={emojiPickerOpen}
-            type="button"
-            disabled={busy || !channelReady || !channel}
-            aria-label={$t('ui_choose_an_emoji_or_sticker_b4c5df44')}
-            title={$t('ui_emoji_and_stickers_d4c7b8e2')}
-            aria-expanded={emojiPickerOpen}
-            onclick={() => {
-              emojiPickerOpen = !emojiPickerOpen;
+          <ComposerActionMenu
+            canAttach={!editingMessage && !selectedApplicationCommand}
+            canPoll={canCreatePoll && !editingMessage && !selectedApplicationCommand}
+            disabled={busy ||
+              !channelReady ||
+              !channel ||
+              Boolean(editingMessage || selectedApplicationCommand)}
+            onAttach={() => fileInput?.click()}
+            onPoll={() => {
               gifPickerOpen = false;
-            }}>☺</button
+              emojiPickerOpen = false;
+              pollDialogOpen = true;
+            }}
+          />
+          {#if selectedApplicationCommand}
+            <CommandOptionComposer
+              commandName={selectedApplicationCommand.name}
+              commandDisplayName={localizedCommandName(selectedApplicationCommand)}
+              applicationName={selectedApplicationCommand.application_name}
+              options={selectedApplicationCommand.options ?? []}
+              values={commandOptionValues}
+              users={[currentUser, ...(channel?.recipients ?? [])].filter(
+                (user): user is UserSummary => Boolean(user)
+              )}
+              channels={directMessages}
+              attachments={uploads.flatMap((upload) =>
+                upload.status === 'ready' && upload.attachmentId
+                  ? [
+                      {
+                        id: upload.attachmentId,
+                        label: upload.file.name,
+                        filename: upload.file.name,
+                        contentType: upload.file.type
+                      }
+                    ]
+                  : []
+              )}
+              disabled={busy}
+              onValueChange={(name, value) =>
+                (commandOptionValues = { ...commandOptionValues, [name]: value })}
+              onAttachmentFiles={(option, path, files) =>
+                void queueFiles(files, {
+                  path,
+                  fileTypes: option.file_types,
+                  command: selectedApplicationCommand!
+                })}
+              onAutocomplete={autocompleteCommandOption}
+              onSubmit={() => void send()}
+              onCancel={cancelCommandComposer}
+            />
+          {:else}
+            <textarea
+              use:autosizeTextarea={{ value: content, maxHeight: 180 }}
+              bind:this={composerInput}
+              bind:value={content}
+              oninput={composerChanged}
+              onselect={syncComposerCursor}
+              onclick={syncComposerCursor}
+              onkeyup={syncComposerCursor}
+              onkeydown={composerKeydown}
+              onpaste={composerPaste}
+              disabled={!channelReady || !channel}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={completionOpen}
+              aria-controls={completionOpen ? 'dm-message-suggestions' : undefined}
+              aria-activedescendant={completionOpen
+                ? `dm-message-suggestions-option-${completionActive}`
+                : undefined}
+              aria-label={$t('ui_direct_message_cd3e1605')}
+              placeholder={`Message ${conversationTitle}`}
+              rows="1"
+              maxlength="4000"
+            ></textarea>
+          {/if}
+          {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !selectedApplicationCommand}
+            <button
+              class="gif-button"
+              class:active={gifPickerOpen}
+              type="button"
+              disabled={busy || !channelReady || !channel || !gifPickerEnabled}
+              aria-label={gifPickerEnabled
+                ? $t('ui_choose_a_gif_261f5249')
+                : $t('ui_gif_availability_could_not_be_checked_5290ae44')}
+              title={gifPickerEnabled ? $t('ui_choose_a_gif_261f5249') : gifConfigurationError}
+              aria-expanded={gifPickerOpen}
+              onclick={() => {
+                gifPickerOpen = !gifPickerOpen;
+                emojiPickerOpen = false;
+              }}>{$t('ui_gif_76c664ef')}</button
+            >
+          {/if}
+          {#if !editingMessage && !selectedApplicationCommand}
+            <button
+              class="emoji-button"
+              class:active={emojiPickerOpen}
+              type="button"
+              disabled={busy || !channelReady || !channel}
+              aria-label={$t('ui_choose_an_emoji_or_sticker_b4c5df44')}
+              title={$t('ui_emoji_and_stickers_d4c7b8e2')}
+              aria-expanded={emojiPickerOpen}
+              onclick={() => {
+                emojiPickerOpen = !emojiPickerOpen;
+                gifPickerOpen = false;
+              }}>☺</button
+            >
+          {/if}
+          <small class="composer-count"
+            >{selectedApplicationCommand ? '' : `${content.length}/4000`}</small
           >
-        {/if}
-        <small class="composer-count"
-          >{selectedApplicationCommand ? '' : `${content.length}/4000`}</small
-        >
-        <button
-          class="send-button"
-          disabled={busy ||
-            !channelReady ||
-            !channel ||
-            uploads.some((item) => item.status === 'uploading') ||
-            (selectedApplicationCommand
-              ? !commandOptionsComplete(selectedApplicationCommand, commandOptionValues)
-              : editingMessage
-                ? !content.trim()
-                : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
-          aria-label={$t('ui_send_message_93a26b1e')}
-          title={$t('ui_send_message_93a26b1e')}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
-          </svg>
-        </button>
-      </form>
-      {#if gifConfigurationError}
-        <p class="composer-feature-warning" role="status">
-          <span>{gifConfigurationError}</span>
           <button
-            type="button"
-            disabled={gifConfigurationLoading}
-            onclick={() => void refreshGifConfiguration()}
+            class="send-button"
+            disabled={busy ||
+              !channelReady ||
+              !channel ||
+              uploads.some((item) => item.status === 'uploading') ||
+              (selectedApplicationCommand
+                ? !commandOptionsComplete(selectedApplicationCommand, commandOptionValues)
+                : editingMessage
+                  ? !content.trim()
+                  : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
+            aria-label={$t('ui_send_message_93a26b1e')}
+            title={$t('ui_send_message_93a26b1e')}
           >
-            {gifConfigurationLoading
-              ? $t('ui_checking_ec963ffc')
-              : $t('ui_retry_gif_check_b1062c5e')}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
+            </svg>
           </button>
-        </p>
-      {/if}
-      {#if gifPickerOpen}
-        <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
-      {/if}
-      {#if emojiPickerOpen}
-        <EmojiPicker
-          customEmojis={pickerEmojis}
-          stickers={pickerStickers}
-          onSelect={chooseEmoji}
-          onStickerSelect={chooseSticker}
-          onClose={() => (emojiPickerOpen = false)}
-        />
-      {/if}
-      {#if uploads.length && !editingMessage}
-        <UploadPreviewTray
-          {uploads}
-          onRemove={removeUpload}
-          onSpoiler={uploadQueue.setSpoiler}
-          disabled={busy}
-        />
-      {/if}
-    </footer>
+        </form>
+        {#if gifConfigurationError}
+          <p class="composer-feature-warning" role="status">
+            <span>{gifConfigurationError}</span>
+            <button
+              type="button"
+              disabled={gifConfigurationLoading}
+              onclick={() => void refreshGifConfiguration()}
+            >
+              {gifConfigurationLoading
+                ? $t('ui_checking_ec963ffc')
+                : $t('ui_retry_gif_check_b1062c5e')}
+            </button>
+          </p>
+        {/if}
+        {#if gifPickerOpen}
+          <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
+        {/if}
+        {#if emojiPickerOpen}
+          <EmojiPicker
+            customEmojis={pickerEmojis}
+            stickers={pickerStickers}
+            onSelect={chooseEmoji}
+            onStickerSelect={chooseSticker}
+            onClose={() => (emojiPickerOpen = false)}
+          />
+        {/if}
+        {#if uploads.length && !editingMessage}
+          <UploadPreviewTray
+            {uploads}
+            onRemove={removeUpload}
+            onSpoiler={uploadQueue.setSpoiler}
+            disabled={busy}
+          />
+        {/if}
+      </footer>
+    {/if}
     {#if pinsOpen}
       <PinnedMessagesPanel
         messages={pinnedMessages}
@@ -3615,3 +3628,19 @@
     onClose={() => (encryptedAppsOpen = false)}
   />
 {/if}
+
+<style>
+  .system-notice-pane {
+    height: 100%;
+  }
+  .system-notice-footer {
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
+  .system-notice-footer p {
+    margin: 0;
+  }
+</style>

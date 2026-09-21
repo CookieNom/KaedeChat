@@ -122,6 +122,8 @@ async def share_guild(session: AsyncSession, first: User, second: User) -> bool:
 
 
 async def can_direct_message(session: AsyncSession, sender: User, recipient: User) -> bool:
+    if sender.account_type == "system" or recipient.account_type == "system":
+        return False
     if await blocked_between(session, sender, recipient):
         return False
     settings = await session.scalar(

@@ -220,7 +220,7 @@ final class ThreadMember {
       };
 }
 
-enum AccountType { human, bot }
+enum AccountType { human, bot, system }
 
 final class KaedeUser {
   const KaedeUser({
@@ -257,6 +257,7 @@ final class KaedeUser {
       mfaEnabled: _boolean(json['mfa_enabled']),
       ageAssuranceState: _string(json['age_assurance_state']) ?? 'unknown',
       accountType: switch (_string(json['account_type'])) {
+        'system' => AccountType.system,
         'bot' => AccountType.bot,
         _ when _boolean(json['bot']) => AccountType.bot,
         _ => AccountType.human,
@@ -286,6 +287,7 @@ final class KaedeUser {
   final PresenceStatus presence;
 
   bool get isApplication => accountType == AccountType.bot;
+  bool get isSystem => accountType == AccountType.system;
 
   String get name => profileResolved
       ? (displayName?.trim().isNotEmpty == true ? displayName! : username)

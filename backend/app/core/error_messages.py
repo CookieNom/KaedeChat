@@ -314,6 +314,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "CUSTOM_STICKER_NOT_FOUND": "That sticker could not be found or was deleted.",
     "CUSTOM_STICKER_SOURCE_ACCESS_REQUIRED": "You no longer have access to the guild that owns that sticker.",
     "DM_PRIVACY_REJECTED": "This user's privacy settings do not allow a direct message or call from you.",
+    "SYSTEM_CONVERSATION_READ_ONLY": "This conversation contains official instance notices. Replies and other changes are disabled.",
     "DM_REACTION_LIMIT_REACHED": "That direct-message post already has the maximum number of reactions. Remove an existing reaction before adding another.",
     "EMAIL_DISABLED": "Email features are disabled on this server.",
     "EMAIL_NOT_VERIFIED": "Verify your email address before signing in.",

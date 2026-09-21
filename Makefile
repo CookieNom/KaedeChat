@@ -7,7 +7,7 @@ KUBE_ARGS := --env-file "$(ENV_FILE)" $(if $(KUBE_CONFIG),--config "$(KUBE_CONFI
 
 .PHONY: dev-logs dev-federation-logs
 .PHONY: help setup tools deploy status logs exec dev dev-cluster dev-down dev-federation dev-federation-down kubernetes-check env-check legacy-down
-.PHONY: hooks lock generate search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check
+.PHONY: hooks lock generate search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check update-notices
 .PHONY: check test audit migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check nginx-check
 .PHONY: mobile-check desktop-check desktop-lint desktop-test desktop-build desktop-dev
 help:
@@ -66,6 +66,9 @@ auto-update-disable:
 
 auto-update-status:
 	./deploy/install-auto-update.sh status
+
+update-notices:
+	python3 deploy/kubernetes/update_notices.py $(KUBE_ARGS)
 
 auto-update-run:
 	./deploy/auto-update.sh run-now

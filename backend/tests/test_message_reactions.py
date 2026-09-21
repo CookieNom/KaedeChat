@@ -80,7 +80,7 @@ def guild_reaction_replica() -> tuple[SimpleNamespace, SimpleNamespace]:
         permission_generation=1,
         snapshot_generation=1,
     )
-    actor = SimpleNamespace(id=10, origin_domain="guild.example")
+    actor = SimpleNamespace(id=10, origin_domain="guild.example", account_type="human")
     message = SimpleNamespace(
         id=20,
         origin_domain="guild.example",
@@ -193,7 +193,7 @@ async def test_guild_reaction_clear_projects_the_authority_aggregate_event(
         permission_generation=1,
         snapshot_generation=1,
     )
-    actor = SimpleNamespace(id=10, origin_domain="guild.example")
+    actor = SimpleNamespace(id=10, origin_domain="guild.example", account_type="human")
     message = SimpleNamespace(
         id=20,
         origin_domain="guild.example",
@@ -269,7 +269,7 @@ async def test_local_reaction_clear_queues_the_same_aggregate_federation_event(
     raw_emoji: str | None,
     event_type: str,
 ) -> None:
-    actor = SimpleNamespace(id=10, origin_domain="guild.example")
+    actor = SimpleNamespace(id=10, origin_domain="guild.example", account_type="human")
     guild = SimpleNamespace(id=12, origin_domain="guild.example")
     channel = SimpleNamespace(
         id=30,
@@ -333,7 +333,7 @@ async def test_local_reaction_clear_queues_the_same_aggregate_federation_event(
 async def test_local_bulk_delete_queues_one_aggregate_federation_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    actor = SimpleNamespace(id=10, origin_domain="guild.example")
+    actor = SimpleNamespace(id=10, origin_domain="guild.example", account_type="human")
     guild = SimpleNamespace(id=12, origin_domain="guild.example")
     channel = SimpleNamespace(
         id=30,

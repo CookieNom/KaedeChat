@@ -813,7 +813,12 @@ async def patch_user_state(
     principal.require("users.manage")
     user_id, user_domain = user_ref.resolve(settings.domain)
     user = await session.get(User, (user_id, user_domain), with_for_update=True)
-    if user is None or not user.is_local or user.deleted_at is not None:
+    if (
+        user is None
+        or not user.is_local
+        or user.deleted_at is not None
+        or user.account_type == "system"
+    ):
         raise HTTPException(status_code=404, detail={"code": "LOCAL_USER_NOT_FOUND"})
     if user.id == principal.user.id and payload.disabled is True:
         raise HTTPException(status_code=409, detail={"code": "CANNOT_DISABLE_SELF"})

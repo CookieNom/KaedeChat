@@ -68,6 +68,8 @@ fi
 
 "${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/install-auto-update.sh" disable >/dev/null
 grep -qx 'AUTO_UPDATE_ENABLED=false' "$TEST_ROOT/repo/.env"
+test -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.timer"
+"${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/install-auto-update.sh" stop >/dev/null
 test ! -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.timer"
 test ! -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.service"
 

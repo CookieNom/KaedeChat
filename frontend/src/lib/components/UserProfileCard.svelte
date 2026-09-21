@@ -11,7 +11,12 @@
   import { userAppContextCommands } from '$lib/chat/context-commands';
   import { entityRef } from '$lib/chat/refs';
   import type { PresenceStatus, Relationship, Role, UserSummary } from '$lib/chat/types';
-  import { isApplicationUser, userDisplayName, userPublicHandle } from '$lib/chat/users';
+  import {
+    isSystemUser,
+    isApplicationUser,
+    userDisplayName,
+    userPublicHandle
+  } from '$lib/chat/users';
   import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { portal } from '$lib/ui/portal';
@@ -360,7 +365,11 @@
       <div class="user-popover-identity">
         <h2>
           {userDisplayName(user)}
-          {#if isApplicationUser(user)}<small class="app-badge">{$t('ui_bot_fb000ced')}</small>{/if}
+          {#if isSystemUser(user)}<small class="app-badge" title="Official account of this instance"
+              >SYSTEM</small
+            >{:else if isApplicationUser(user)}<small class="app-badge"
+              >{$t('ui_bot_fb000ced')}</small
+            >{/if}
         </h2>
         {#if userPublicHandle(user)}
           <p>@{userPublicHandle(user)}</p>
@@ -472,7 +481,7 @@
             <Icon name="edit" size={17} />
             <span>{$t('ui_edit_profile_15c4aa13')}</span>
           </a>
-        {:else if onMessage && user.profile_resolved !== false}
+        {:else if onMessage && !isSystemUser(user) && user.profile_resolved !== false}
           <button type="button" class="user-popover-primary" onclick={() => onMessage?.(user)}>
             <Icon name="message" size={17} />
             <span>{$t('ui_message_2f77668a')}</span>
@@ -505,7 +514,7 @@
             </a>
           {/if}
         {/if}
-        {#if !isSelf && !isApplicationUser(user) && user.profile_resolved !== false}
+        {#if !isSelf && !isSystemUser(user) && !isApplicationUser(user) && user.profile_resolved !== false}
           <button
             type="button"
             class:relationship-friend={relationshipType === 'friend'}
