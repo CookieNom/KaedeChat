@@ -26,6 +26,7 @@ frontend/coverage/
 deploy/data/
 deploy/compose.generated.yml
 deploy/generated/
+strix_runs/
 .codex/
 .kaede-backups/
 .kaede-setup.in-progress

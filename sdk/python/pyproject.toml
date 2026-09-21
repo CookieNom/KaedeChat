@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "KaedeChat contributors" }]
 keywords = ["kaedechat", "bot", "sdk", "asyncio", "federation"]
 dependencies = [
-  "cryptography>=43,<46",
+  "cryptography>=50.0.1,<51",
   "httpx>=0.27,<1",
   "websockets>=14,<17",
 ]
