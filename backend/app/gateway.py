@@ -68,6 +68,7 @@ from app.db.models import (
     GuildMember,
     MemberRole,
     ReadState,
+    Relationship,
     User,
     UserSettings,
 )
@@ -280,8 +281,9 @@ local marker = string.find(raw, ',"generation":', 1, true)
 if not marker then return 0 end
 local base = string.sub(raw, 1, marker - 1)
 local generation = redis.call('INCR', KEYS[1])
+-- Keep the exact integer text; tostring rounds large presence generations.
 local state = base
-    .. ',"generation":' .. tostring(generation)
+    .. ',"generation":' .. redis.call('GET', KEYS[1])
     .. ',"expires_at":' .. ARGV[1] .. '}'
 redis.call('SET', KEYS[2], state)
 redis.call('ZADD', KEYS[3], ARGV[1], ARGV[2])
@@ -307,8 +309,9 @@ if not marker then return 0 end
 local base = string.sub(raw, 1, marker - 1)
 local generation = redis.call('INCR', KEYS[3])
 local claim_until = tonumber(ARGV[2]) + tonumber(ARGV[3])
+-- Federation generations are microsecond timestamps, too large for tostring.
 local claimed = base
-    .. ',"generation":' .. tostring(generation)
+    .. ',"generation":' .. redis.call('GET', KEYS[3])
     .. ',"expires_at":' .. tostring(expires_at)
     .. ',"claim_until":' .. tostring(claim_until) .. '}'
 redis.call('SET', KEYS[1], claimed)
@@ -668,16 +671,50 @@ async def presence_reaper(redis: Redis, sessionmaker: async_sessionmaker[AsyncSe
                                 )
                             )
                         )
+                        dm_conversations = select(
+                            DMParticipant.conversation_id, DMParticipant.conversation_domain
+                        ).where(
+                            DMParticipant.user_id == user_id,
+                            DMParticipant.user_domain == domain,
+                        )
+                        local_peer_ids = list(
+                            await session.scalars(
+                                select(Relationship.user_id)
+                                .where(
+                                    Relationship.user_domain == settings.domain,
+                                    Relationship.target_id == user_id,
+                                    Relationship.target_domain == domain,
+                                    Relationship.type == "friend",
+                                )
+                                .union(
+                                    select(DMParticipant.user_id).where(
+                                        DMParticipant.user_domain == settings.domain,
+                                        tuple_(
+                                            DMParticipant.conversation_id,
+                                            DMParticipant.conversation_domain,
+                                        ).in_(dm_conversations),
+                                    )
+                                )
+                            )
+                        )
                     still_leader = await renew_reaper_lease(redis, owner)
                     delivered = True
-                    for guild in guilds:
+                    topics = [guild_topic(guild.origin_domain, guild.id) for guild in guilds]
+                    topics.extend(
+                        user_topic(settings.domain, peer_id) for peer_id in local_peer_ids
+                    )
+                    for topic in topics:
                         projected = await publish_presence(
                             redis,
-                            guild_topic(guild.origin_domain, guild.id),
+                            topic,
                             {
                                 "user_id": str(user_id),
                                 "user_domain": domain,
                                 "status": "offline",
+                                "activities": [],
+                                "since": None,
+                                "afk": False,
+                                "client_status": {},
                             },
                             user_domain=domain,
                             user_id=user_id,

@@ -41,6 +41,7 @@ import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
 import 'package:kaede_mobile/src/features/chat/spotify_preview.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/chat/voice_message_recorder.dart';
+import 'package:kaede_mobile/src/features/shared/attachment_picker.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
@@ -3069,7 +3070,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     } else {
       pickerType = FileType.any;
     }
-    final result = await FilePicker.platform.pickFiles(
+    final result = await pickAttachments(
+      context,
       allowMultiple: true,
       withData: false,
       withReadStream: true,
@@ -7577,7 +7579,8 @@ final class _InteractionModalDialogState
     } else {
       pickerType = FileType.any;
     }
-    final picked = await FilePicker.platform.pickFiles(
+    final picked = await pickAttachments(
+      context,
       allowMultiple: component.maxValues > 1,
       withData: kIsWeb,
       type: pickerType,

@@ -30,6 +30,7 @@ import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
+import 'package:kaede_mobile/src/platform/push_registration.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/platform/system_call_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -982,6 +983,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void>? _navigationRefresh;
   var _navigationRefreshQueued = false;
   Future<void>? _notificationActivation;
+  final _pushRegistration = PushRegistration();
   Future<void> _cacheWriteTail = Future<void>.value();
 
   /// Keeps an interaction's channel/application authority outside the
@@ -6411,229 +6413,266 @@ final class MobileController extends StateNotifier<MobileState> {
           resolvedToken.isEmpty ||
           !_sessionIsCurrent(accountKey, generation)) {
         if (_sessionIsCurrent(accountKey, generation)) {
-          _setPushRegistrationWarning(push.remoteDeliveryAvailable
-              ? 'Background notifications are enabled, but this device did not provide a push token. Check notification permissions and the device push service, then retry.'
-              : 'This build is not configured for closed-app notifications. Foreground alerts still work.');
+          _setPushRegistrationWarning(
+            push.remoteDeliveryAvailable
+                ? 'Background notifications are enabled, but this device did not provide a push token. Check notification permissions and the device push service, then retry.'
+                : 'This build is not configured for closed-app notifications. Foreground alerts still work.',
+          );
         }
         return false;
       }
-      step = 'installation_storage';
-      final installationId = await api.installationId();
-      final platform = Platform.isIOS ? 'ios' : 'android';
-      final deviceName = Platform.operatingSystemVersion.length <= 100
-          ? Platform.operatingSystemVersion
-          : Platform.operatingSystemVersion.substring(0, 100);
-      late final Map<String, Object?> response;
-      var voipReady = !Platform.isIOS;
-      String? callSetupWarning;
-      if (_pushTransport == 'direct_fcm') {
-        step = 'direct_registration';
-        response = await repository.registerPushDevice(
-          installationId: installationId,
-          token: resolvedToken,
-          platform: platform,
-          deviceName: deviceName,
-        );
-      } else {
-        step = 'relay_storage';
-        final previousRelayState = await api.relayPushState();
-        final routeId = _randomPushToken();
-        final wakeSecret = _randomPushToken();
-        final managementSecret = _randomPushToken();
-        step = 'home_enrollment';
-        final enrollment = await repository.beginRelayPushEnrollment(
-          installationId: installationId,
-          platform: platform,
-          routeId: routeId,
-          appId: _pushApplicationId,
-        );
-        step = 'relay_validation';
-        final relayUrl = Uri.parse('${enrollment['relay_url'] ?? ''}');
-        final relayOrigin = '${enrollment['relay_origin'] ?? ''}';
-        final pinnedUrl = Uri.parse(_pinnedPushRelayUrl);
-        if (relayUrl.scheme != 'https' ||
-            relayUrl.host != pinnedUrl.host ||
-            relayUrl.port != pinnedUrl.port ||
-            relayUrl.path != pinnedUrl.path ||
-            relayOrigin != _pinnedPushRelayOrigin) {
-          throw const KaedeException(
-            code: 'PUSH_RELAY_INVALID',
-            message:
-                'Your home offered a notification relay that this app does not trust.',
-            status: 502,
-          );
-        }
-        final grant = Map<String, Object?>.from(enrollment['grant']! as Map);
-        step = 'relay_subscription';
-        final subscription = await repository.createRelayPushSubscription(
-          relayUrl: relayUrl,
-          grant: grant,
-          providerToken: resolvedToken,
-          managementSecret: managementSecret,
-        );
-        step = 'home_registration';
-        final receipt =
-            Map<String, Object?>.from(subscription['receipt']! as Map);
-        response = await repository.completeRelayPushEnrollment(
-          installationId: installationId,
-          platform: platform,
-          routeId: routeId,
-          wakeSecret: wakeSecret,
-          receipt: receipt,
-          deviceName: deviceName,
-        );
-        final home = api.tokens?.instance;
-        if (home == null) return false;
-        var relayState = RelayPushState(
-          home: home,
-          relayUrl: relayUrl,
-          relayOrigin: Domain(relayOrigin),
-          subscriptionId: '${subscription['subscription_id']}',
-          routeId: routeId,
-          wakeSecret: wakeSecret,
-          managementSecret: managementSecret,
-        );
-        if (Platform.isIOS) {
-          // Keep the ordinary notification route usable during call setup.
-          step = 'relay_storage';
-          await api.saveRelayPushState(relayState);
-          step = 'native_relay_storage';
-          await push.setNativeRelayState(
-            state: relayState,
-            installationId: installationId,
-          );
-          try {
-            step = 'apple_call_token';
-            final voipToken = await push.voipToken();
-            if (voipToken != null && voipToken.isNotEmpty) {
-              final voipRouteId = _randomPushToken();
-              final voipWakeSecret = _randomPushToken();
-              final voipManagementSecret = _randomPushToken();
-              step = 'call_home_enrollment';
-              final voipEnrollment = await repository.beginRelayPushEnrollment(
-                installationId: installationId,
-                platform: platform,
-                routeId: voipRouteId,
-                appId: _pushApplicationId,
-                provider: 'apns_voip',
+      return await _pushRegistration.run(
+        session: (accountKey, generation),
+        token: resolvedToken,
+        force: surfaceErrors,
+        register: () async {
+          if (requireStoredOptIn && !await api.pushOptedIn()) return false;
+          if (!_sessionIsCurrent(accountKey, generation)) return false;
+          step = 'installation_storage';
+          final installationId = await api.installationId();
+          final platform = Platform.isIOS ? 'ios' : 'android';
+          final deviceName = Platform.operatingSystemVersion.length <= 100
+              ? Platform.operatingSystemVersion
+              : Platform.operatingSystemVersion.substring(0, 100);
+          late final Map<String, Object?> response;
+          var voipReady = !Platform.isIOS;
+          String? callSetupWarning;
+          if (_pushTransport == 'direct_fcm') {
+            step = 'direct_registration';
+            response = await repository.registerPushDevice(
+              installationId: installationId,
+              token: resolvedToken,
+              platform: platform,
+              deviceName: deviceName,
+            );
+          } else {
+            step = 'relay_storage';
+            final previousRelayState = await api.relayPushState();
+            final routeId = _randomPushToken();
+            final wakeSecret = _randomPushToken();
+            final managementSecret = _randomPushToken();
+            step = 'home_enrollment';
+            final enrollment = await repository.beginRelayPushEnrollment(
+              installationId: installationId,
+              platform: platform,
+              routeId: routeId,
+              appId: _pushApplicationId,
+            );
+            step = 'relay_validation';
+            final relayUrl = Uri.parse('${enrollment['relay_url'] ?? ''}');
+            final relayOrigin = '${enrollment['relay_origin'] ?? ''}';
+            final pinnedUrl = Uri.parse(_pinnedPushRelayUrl);
+            if (relayUrl.scheme != 'https' ||
+                relayUrl.host != pinnedUrl.host ||
+                relayUrl.port != pinnedUrl.port ||
+                relayUrl.path != pinnedUrl.path ||
+                relayOrigin != _pinnedPushRelayOrigin) {
+              throw const KaedeException(
+                code: 'PUSH_RELAY_INVALID',
+                message:
+                    'Your home offered a notification relay that this app does not trust.',
+                status: 502,
               );
-              step = 'call_relay_validation';
-              final voipRelayUrl =
-                  Uri.parse('${voipEnrollment['relay_url'] ?? ''}');
-              if (voipRelayUrl != relayUrl ||
-                  '${voipEnrollment['relay_origin'] ?? ''}' != relayOrigin) {
-                throw const KaedeException(
-                  code: 'PUSH_RELAY_INVALID',
-                  message: 'Your home offered an untrusted call relay.',
-                  status: 502,
+            }
+            final grant = Map<String, Object?>.from(
+              enrollment['grant']! as Map,
+            );
+            step = 'relay_subscription';
+            final subscription = await repository.createRelayPushSubscription(
+              relayUrl: relayUrl,
+              grant: grant,
+              providerToken: resolvedToken,
+              managementSecret: managementSecret,
+            );
+            step = 'home_registration';
+            final receipt = Map<String, Object?>.from(
+              subscription['receipt']! as Map,
+            );
+            response = await repository.completeRelayPushEnrollment(
+              installationId: installationId,
+              platform: platform,
+              routeId: routeId,
+              wakeSecret: wakeSecret,
+              receipt: receipt,
+              deviceName: deviceName,
+            );
+            final home = api.tokens?.instance;
+            if (home == null) return false;
+            var relayState = RelayPushState(
+              home: home,
+              relayUrl: relayUrl,
+              relayOrigin: Domain(relayOrigin),
+              subscriptionId: '${subscription['subscription_id']}',
+              routeId: routeId,
+              wakeSecret: wakeSecret,
+              managementSecret: managementSecret,
+            );
+            if (Platform.isIOS) {
+              // Keep the ordinary notification route usable during call setup.
+              step = 'relay_storage';
+              await api.saveRelayPushState(relayState);
+              step = 'native_relay_storage';
+              await push.setNativeRelayState(
+                state: relayState,
+                installationId: installationId,
+              );
+              try {
+                step = 'apple_call_token';
+                final voipToken = await push.voipToken();
+                if (voipToken != null && voipToken.isNotEmpty) {
+                  final voipRouteId = _randomPushToken();
+                  final voipWakeSecret = _randomPushToken();
+                  final voipManagementSecret = _randomPushToken();
+                  step = 'call_home_enrollment';
+                  final voipEnrollment =
+                      await repository.beginRelayPushEnrollment(
+                    installationId: installationId,
+                    platform: platform,
+                    routeId: voipRouteId,
+                    appId: _pushApplicationId,
+                    provider: 'apns_voip',
+                  );
+                  step = 'call_relay_validation';
+                  final voipRelayUrl = Uri.parse(
+                    '${voipEnrollment['relay_url'] ?? ''}',
+                  );
+                  if (voipRelayUrl != relayUrl ||
+                      '${voipEnrollment['relay_origin'] ?? ''}' !=
+                          relayOrigin) {
+                    throw const KaedeException(
+                      code: 'PUSH_RELAY_INVALID',
+                      message: 'Your home offered an untrusted call relay.',
+                      status: 502,
+                    );
+                  }
+                  step = 'call_relay_subscription';
+                  final voipSubscription =
+                      await repository.createRelayPushSubscription(
+                    relayUrl: relayUrl,
+                    grant: Map<String, Object?>.from(
+                      voipEnrollment['grant']! as Map,
+                    ),
+                    providerToken: voipToken,
+                    managementSecret: voipManagementSecret,
+                    provider: 'apns_voip',
+                  );
+                  step = 'call_home_registration';
+                  await repository.completeRelayPushEnrollment(
+                    installationId: installationId,
+                    platform: platform,
+                    routeId: voipRouteId,
+                    wakeSecret: voipWakeSecret,
+                    receipt: Map<String, Object?>.from(
+                      voipSubscription['receipt']! as Map,
+                    ),
+                    deviceName: deviceName,
+                    provider: 'apns_voip',
+                  );
+                  relayState = RelayPushState(
+                    home: home,
+                    relayUrl: relayUrl,
+                    relayOrigin: Domain(relayOrigin),
+                    subscriptionId: relayState.subscriptionId,
+                    routeId: relayState.routeId,
+                    wakeSecret: relayState.wakeSecret,
+                    managementSecret: relayState.managementSecret,
+                    voipSubscriptionId:
+                        '${voipSubscription['subscription_id']}',
+                    voipRouteId: voipRouteId,
+                    voipWakeSecret: voipWakeSecret,
+                    voipManagementSecret: voipManagementSecret,
+                  );
+                  voipReady = true;
+                }
+              } on Object catch (error) {
+                _pushRegistration.recordFailure(error);
+                pushSetupDiagnostics = pushFailureDiagnostics(step, error);
+                DebugLog.instance.record(
+                  DebugEvent.pushRegistrationFailed,
+                  step: step,
+                  error: error,
+                );
+                callSetupWarning = userFacingError(
+                  error,
+                  summary:
+                      'Call alerts could not be set up. Ordinary notifications are ready. Retry notification setup to enable incoming-call alerts.',
                 );
               }
-              step = 'call_relay_subscription';
-              final voipSubscription =
-                  await repository.createRelayPushSubscription(
-                relayUrl: relayUrl,
-                grant: Map<String, Object?>.from(
-                  voipEnrollment['grant']! as Map,
-                ),
-                providerToken: voipToken,
-                managementSecret: voipManagementSecret,
-                provider: 'apns_voip',
-              );
-              step = 'call_home_registration';
-              await repository.completeRelayPushEnrollment(
-                installationId: installationId,
-                platform: platform,
-                routeId: voipRouteId,
-                wakeSecret: voipWakeSecret,
-                receipt: Map<String, Object?>.from(
-                  voipSubscription['receipt']! as Map,
-                ),
-                deviceName: deviceName,
-                provider: 'apns_voip',
-              );
-              relayState = RelayPushState(
-                home: home,
-                relayUrl: relayUrl,
-                relayOrigin: Domain(relayOrigin),
-                subscriptionId: relayState.subscriptionId,
-                routeId: relayState.routeId,
-                wakeSecret: relayState.wakeSecret,
-                managementSecret: relayState.managementSecret,
-                voipSubscriptionId: '${voipSubscription['subscription_id']}',
-                voipRouteId: voipRouteId,
-                voipWakeSecret: voipWakeSecret,
-                voipManagementSecret: voipManagementSecret,
-              );
-              voipReady = true;
             }
-          } on Object catch (error) {
-            pushSetupDiagnostics = pushFailureDiagnostics(step, error);
-            DebugLog.instance.record(DebugEvent.pushRegistrationFailed,
-                step: step, error: error);
-            callSetupWarning = userFacingError(
-              error,
-              summary:
-                  'Call alerts could not be set up. Ordinary notifications are ready. Retry notification setup to enable incoming-call alerts.',
+            step = 'relay_storage';
+            await api.saveRelayPushState(relayState);
+            step = 'native_relay_storage';
+            await push.setNativeRelayState(
+              state: relayState,
+              installationId: installationId,
             );
-          }
-        }
-        step = 'relay_storage';
-        await api.saveRelayPushState(relayState);
-        step = 'native_relay_storage';
-        await push.setNativeRelayState(
-          state: relayState,
-          installationId: installationId,
-        );
-        if (previousRelayState != null &&
-            previousRelayState.subscriptionId !=
-                '${subscription['subscription_id']}') {
-          try {
-            await repository.revokeRelayPushSubscription(previousRelayState);
-            if (previousRelayState.voipSubscriptionId case final id?) {
-              await repository.revokeRelayPushSubscriptionById(
-                previousRelayState,
-                id,
-                previousRelayState.voipManagementSecret!,
-              );
+            if (previousRelayState != null &&
+                previousRelayState.subscriptionId !=
+                    '${subscription['subscription_id']}') {
+              try {
+                await repository.revokeRelayPushSubscription(
+                  previousRelayState,
+                );
+                if (previousRelayState.voipSubscriptionId case final id?) {
+                  await repository.revokeRelayPushSubscriptionById(
+                    previousRelayState,
+                    id,
+                    previousRelayState.voipManagementSecret!,
+                  );
+                }
+              } on Object {
+                // The home binding now points at the new route. The old relay
+                // subscription expires even if this best-effort cleanup is lost.
+              }
             }
-          } on Object {
-            // The home binding now points at the new route. The old relay
-            // subscription expires even if this best-effort cleanup is lost.
           }
-        }
-      }
-      if (_sessionIsCurrent(accountKey, generation)) {
-        _pushDeviceId = '${response['id']}';
-        _setPushRegistrationWarning(callSetupWarning ??
-            (voipReady
-                ? null
-                : 'Message notifications are ready, but this iPhone did not provide a call token. Restart Kaede to retry incoming-call setup.'));
-        return true;
-      }
+          if (_sessionIsCurrent(accountKey, generation)) {
+            _pushDeviceId = '${response['id']}';
+            _setPushRegistrationWarning(
+              callSetupWarning ??
+                  (voipReady
+                      ? null
+                      : 'Message notifications are ready, but this iPhone did not provide a call token. Restart Kaede to retry incoming-call setup.'),
+            );
+            return true;
+          }
+          return false;
+        },
+      );
     } on KaedeException catch (error) {
       if (surfaceErrors) {
         pushSetupDiagnostics = pushFailureDiagnostics(step, error);
-        DebugLog.instance.record(DebugEvent.pushRegistrationFailed,
-            step: step, error: error);
+        DebugLog.instance.record(
+          DebugEvent.pushRegistrationFailed,
+          step: step,
+          error: error,
+        );
         rethrow;
       }
-      _setPushRegistrationWarning(userFacingError(
-        error,
-        summary:
-            'Background notifications could not be registered. In-app messaging still works.',
-      ));
+      _setPushRegistrationWarning(
+        userFacingError(
+          error,
+          summary:
+              'Background notifications could not be registered. In-app messaging still works.',
+        ),
+      );
     } on Object catch (error) {
       if (surfaceErrors) {
         pushSetupDiagnostics = pushFailureDiagnostics(step, error);
-        DebugLog.instance.record(DebugEvent.pushRegistrationFailed,
-            step: step, error: error);
+        DebugLog.instance.record(
+          DebugEvent.pushRegistrationFailed,
+          step: step,
+          error: error,
+        );
         rethrow;
       }
-      _setPushRegistrationWarning(userFacingError(
-        error,
-        summary:
-            'Background notifications could not be registered. In-app messaging still works.',
-      ));
+      _setPushRegistrationWarning(
+        userFacingError(
+          error,
+          summary:
+              'Background notifications could not be registered. In-app messaging still works.',
+        ),
+      );
     }
     return false;
   }
@@ -6825,10 +6864,11 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> disablePushNotifications() async {
+    await api.savePushOptIn(false);
+    await _pushRegistration.invalidate();
     final deviceId = _pushDeviceId;
     final relayState = await api.relayPushState();
     _pushDeviceId = null;
-    await api.savePushOptIn(false);
     if (relayState != null) {
       try {
         await repository.revokeRelayPushSubscription(relayState);

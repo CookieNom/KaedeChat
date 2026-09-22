@@ -61,23 +61,30 @@ async def test_session_claim_reserves_each_visible_slot_and_rejects_overflow(red
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("initial_generation", [0, 1_789_956_123_456_789])
 async def test_presence_renewal_fences_old_expiry_and_preserves_empty_arrays(
-    redis_scope, monkeypatch
+    redis_scope, monkeypatch, initial_generation
 ) -> None:
     redis, domain = redis_scope
     user = User(id=7, origin_domain=domain, is_local=True, username="maple")
     handle = f"{domain}:7"
+    await redis.set(f"presence:generation:{handle}", initial_generation)
     monkeypatch.setattr(gateway.time, "time", lambda: 1000.0)
-    assert await gateway.set_presence_state(redis, user, "online", activities=[]) == 1
+    assert (
+        await gateway.set_presence_state(redis, user, "online", activities=[])
+        == initial_generation + 1
+    )
     monkeypatch.setattr(gateway.time, "time", lambda: 1050.0)
-    assert await gateway.renew_presence_state(redis, user) == 2
+    assert await gateway.renew_presence_state(redis, user) == initial_generation + 2
     renewed = gateway.decode_presence_state(await redis.get(f"presence:{handle}"))
-    assert renewed is not None and renewed[1:3] == (2, [])
+    assert renewed is not None and renewed[1:3] == (initial_generation + 2, [])
     assert await gateway.claim_expired_presence(redis, handle, 1090) == 0
-    assert await gateway.claim_expired_presence(redis, handle, 1140) == 3
+    assert await gateway.claim_expired_presence(redis, handle, 1140) == initial_generation + 3
     claimed = gateway.decode_presence_state(await redis.get(f"presence:{handle}"))
-    assert claimed is not None and claimed[1:3] == (3, [])
-    assert await gateway.finalize_expired_presence(redis, handle, 3, 1140)
+    assert claimed is not None and claimed[1:3] == (initial_generation + 3, [])
+    assert await gateway.finalize_expired_presence(redis, handle, initial_generation + 3, 1140)
+    assert await redis.get(f"presence:{handle}") is None
+    assert await redis.zscore("presence:expirations", handle) is None
 
 
 @pytest.mark.asyncio
@@ -179,9 +186,10 @@ async def test_remote_presence_lua_preserves_payload_and_rejects_older_generatio
     redis, domain = redis_scope
     handle = f"{domain}:7"
     keys = (f"presence:generation:{handle}", f"presence:{handle}", "presence:expirations")
+    observed_at = 1_789_956_123_456_789
     for generation, status, activities in (
-        (2, "online", [{"name": "Game", "type": 0}]),
-        (3, "idle", []),
+        (observed_at, "online", [{"name": "Game", "type": 0}]),
+        (observed_at + 1, "idle", []),
     ):
         encoded = encode_presence_state(
             status, activities, None, False, generation=generation, expires_at=1140
@@ -195,6 +203,10 @@ async def test_remote_presence_lua_preserves_payload_and_rejects_older_generatio
         assert await redis.get(keys[1]) == encoded
         assert json.loads(await redis.get(keys[1]))["activities"] == activities
     assert await redis.eval(SET_REMOTE_PRESENCE_SCRIPT, 3, *keys, 1, "{}", 1000, handle) == 0
-    assert await redis.get(keys[0]) == "3"
+    assert await redis.get(keys[0]) == str(observed_at + 1)
     assert await redis.get(keys[1]) == encoded
     assert await redis.zscore(keys[2], handle) == 1140
+    generation = await gateway.claim_expired_presence(redis, handle, 1140)
+    assert generation == observed_at + 2
+    assert await gateway.finalize_expired_presence(redis, handle, generation, 1140)
+    assert await redis.get(keys[1]) is None

@@ -442,14 +442,39 @@ Future<_PushRedemption> _redeemOpaqueWake(OpaquePushWake wake) async {
   final tokens = await api.restore();
   if (tokens == null) return const _PushRedemption();
   try {
-    final response = await api.sendJson(
-      'POST',
-      '/api/v1/users/@me/push-devices/notifications/redeem',
-      data: <String, Object?>{
-        'installation_id': await api.installationId(),
-        'event_token': wake.eventToken,
-      },
-    ).timeout(const Duration(seconds: 8));
+    final Map<String, Object?> response;
+    if (wake.version == 2) {
+      final relayState = await api.relayPushState();
+      if (relayState?.home != tokens.instance ||
+          !await authenticatePushWake(wake, relayState)) {
+        return const _PushRedemption();
+      }
+      // Match the native iOS extension: redeem this event with its wake proof,
+      // without rotating the login session from a notification callback.
+      response = await api.postPublicJson(
+        Uri.parse('https://${tokens.instance.value}'
+            '/api/v1/users/@me/push-devices/notifications/redeem-wake'),
+        expectedOrigin: tokens.instance.value,
+        data: <String, Object?>{
+          'installation_id': await api.installationId(),
+          'version': wake.version,
+          'route_id': wake.routeId,
+          'event_token': wake.eventToken,
+          'delivery_id': wake.deliveryId,
+          'expires_at': wake.expiresAt,
+          'wake_mac': wake.wakeMac,
+        },
+      ).timeout(const Duration(seconds: 8));
+    } else {
+      response = await api.sendJson(
+        'POST',
+        '/api/v1/users/@me/push-devices/notifications/redeem',
+        data: <String, Object?>{
+          'installation_id': await api.installationId(),
+          'event_token': wake.eventToken,
+        },
+      ).timeout(const Duration(seconds: 8));
+    }
     if (response.isEmpty) return const _PushRedemption();
     final notification = PushNotificationEnvelope.parse(response);
     return notification == null

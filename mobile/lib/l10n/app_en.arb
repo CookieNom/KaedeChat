@@ -1,4 +1,6 @@
 {
+  "attachmentPhotosAndVideos": "Photos and videos",
+  "attachmentFiles": "Files",
   "chat_jump_to_read": "Jump to where you left off",
   "chat_load_newer": "Load newer messages",
   "chat_new_messages": "New messages",

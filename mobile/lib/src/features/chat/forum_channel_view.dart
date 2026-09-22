@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -16,6 +15,7 @@ import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/attachment_spoiler.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
+import 'package:kaede_mobile/src/features/shared/attachment_picker.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -803,7 +803,8 @@ final class _NewForumPostSheetState extends ConsumerState<_NewForumPostSheet> {
         !canCreateForumPostNow(before, hasAttachments: true)) {
       return;
     }
-    final result = await FilePicker.platform.pickFiles(
+    final result = await pickAttachments(
+      context,
       allowMultiple: true,
       withData: false,
       withReadStream: false,

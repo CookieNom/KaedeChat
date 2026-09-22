@@ -18,6 +18,60 @@ from app.chat.events import (
 from app.db.models import Channel, Guild, User
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("peer_delivered", [True, False])
+@pytest.mark.parametrize("shared_guild", [True, False])
+async def test_presence_reaper_notifies_private_peers_before_finalizing(
+    monkeypatch: pytest.MonkeyPatch, peer_delivered: bool, shared_guild: bool
+) -> None:
+    redis = AsyncMock()
+    redis.zrangebyscore.return_value = ["remote.test:7"]
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.scalars.side_effect = [
+        [Guild(id=42, origin_domain="alpha.test")] if shared_guild else [],
+        [8, 9],
+    ]
+    session.get.return_value = None
+    monkeypatch.setattr(gateway, "settings", SimpleNamespace(domain="alpha.test"))
+    monkeypatch.setattr(gateway.time, "time", lambda: 1090.0)
+    monkeypatch.setattr(gateway, "renew_reaper_lease", AsyncMock(return_value=True))
+    claim = AsyncMock(return_value=2)
+    finalize = AsyncMock(return_value=True)
+    release = AsyncMock()
+    publish = AsyncMock(side_effect=([True] if shared_guild else []) + [peer_delivered, True])
+    monkeypatch.setattr(gateway, "claim_expired_presence", claim)
+    monkeypatch.setattr(gateway, "finalize_expired_presence", finalize)
+    monkeypatch.setattr(gateway, "release_reaper_lease", release)
+    monkeypatch.setattr(gateway, "publish_presence", publish)
+    monkeypatch.setattr(gateway.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.presence_reaper(redis, lambda: session)  # type: ignore[arg-type]
+
+    claim.assert_awaited_once_with(redis, "remote.test:7", 1090)
+    assert [call.args[1] for call in publish.await_args_list] == (
+        (["guild:alpha.test:42"] if shared_guild else [])
+        + ["user:alpha.test:8", "user:alpha.test:9"]
+    )
+    for call in publish.await_args_list:
+        assert call.args[2] == {
+            "user_id": "7",
+            "user_domain": "remote.test",
+            "status": "offline",
+            "activities": [],
+            "since": None,
+            "afk": False,
+            "client_status": {},
+        }
+        assert call.kwargs == {"user_domain": "remote.test", "user_id": 7, "generation": 2}
+    if peer_delivered:
+        finalize.assert_awaited_once_with(redis, "remote.test:7", 2, 1090)
+    else:
+        finalize.assert_not_awaited()
+    release.assert_awaited_once()
+
+
 class LimiterRedis:
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}

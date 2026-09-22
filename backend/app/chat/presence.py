@@ -23,8 +23,9 @@ local generation = redis.call('INCR', KEYS[1])
 -- encodes an empty decoded array as {}, which makes the strict worker decoder
 -- reject otherwise valid presence state. The trusted base is always a compact
 -- top-level object; generation and expiry remain atomic additions in Lua.
+-- Read the exact counter text: Lua tostring rounds large federation generations.
 local state = string.sub(ARGV[1], 1, -2)
-    .. ',"generation":' .. tostring(generation)
+    .. ',"generation":' .. redis.call('GET', KEYS[1])
     .. ',"expires_at":' .. ARGV[2] .. '}'
 redis.call('SET', KEYS[2], state)
 redis.call('ZADD', KEYS[3], ARGV[2], ARGV[3])

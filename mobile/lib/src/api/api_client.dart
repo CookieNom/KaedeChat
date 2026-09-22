@@ -11,8 +11,12 @@ import 'package:kaede_mobile/src/core/network_json.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 
 final class KaedeApiClient {
-  KaedeApiClient({required SessionVault vault, Dio? httpClient})
-      : _vault = vault,
+  KaedeApiClient({
+    required SessionVault vault,
+    Dio? httpClient,
+    Dio? refreshClient,
+  })  : _vault = vault,
+        _refreshClient = refreshClient,
         _dio = httpClient ?? _defaultHttpClient() {
     _dio.interceptors.add(
       InterceptorsWrapper(
@@ -33,6 +37,9 @@ final class KaedeApiClient {
 
   final SessionVault _vault;
   final Dio _dio;
+  final Dio? _refreshClient;
+  // The app and notification callbacks may use separate clients in one isolate.
+  static Future<void> _refreshQueue = Future<void>.value();
   static Dio _defaultHttpClient() => Dio(
         BaseOptions(
           connectTimeout: const Duration(seconds: 12),
@@ -117,7 +124,8 @@ final class KaedeApiClient {
 
   Future<void> useTokens(SessionTokens tokens) async {
     if (_tokens?.accountKey != tokens.accountKey ||
-        _tokens?.instance != tokens.instance) {
+        _tokens?.instance != tokens.instance ||
+        _tokens?.refreshToken != tokens.refreshToken) {
       _sessionGeneration += 1;
     }
     _tokens = tokens;
@@ -190,6 +198,9 @@ final class KaedeApiClient {
     ));
     try {
       final response = await client.post<Object?>(uri.toString(), data: data);
+      if (response.statusCode == HttpStatus.noContent) {
+        return const <String, Object?>{};
+      }
       return _jsonObject(response.data);
     } on DioException catch (error) {
       throw KaedeException.fromDio(error);
@@ -581,7 +592,12 @@ final class KaedeApiClient {
       return;
     }
     try {
-      final tokens = await _refreshSingleFlight(requestGeneration!);
+      // A delayed 401 may belong to an access token already replaced by another
+      // request. Retry with the current token instead of rotating it again.
+      final tokens =
+          request.headers['Authorization'] != 'Bearer ${current.accessToken}'
+              ? current
+              : await _refreshSingleFlight(requestGeneration!);
       if (requestGeneration != _sessionGeneration ||
           requestOrigin != 'https://${tokens.instance.value}') {
         handler.next(error);
@@ -601,9 +617,10 @@ final class KaedeApiClient {
   Future<SessionTokens> _refreshSingleFlight(int generation) {
     if (_refreshing case final existing?) return existing;
     late final Future<SessionTokens> created;
-    created = _refresh(generation).whenComplete(() {
+    created = _refreshQueue.then((_) => _refresh(generation)).whenComplete(() {
       if (identical(_refreshing, created)) _refreshing = null;
     });
+    _refreshQueue = created.then<void>((_) {}, onError: (Object _) {});
     _refreshing = created;
     return created;
   }
@@ -617,27 +634,75 @@ final class KaedeApiClient {
         status: 401,
       );
     }
-    final refreshClient = Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 12),
-        receiveTimeout: const Duration(seconds: 20),
-        sendTimeout: const Duration(seconds: 20),
-        followRedirects: false,
-        validateStatus: (status) => status != null && status < 500,
-        headers: const <String, String>{
-          'Accept': 'application/json',
-          'X-Kaede-Client': 'mobile',
-        },
-      ),
-    );
+    final stored = await _vault.read();
+    if (generation != _sessionGeneration ||
+        _tokens?.refreshToken != current.refreshToken) {
+      throw const KaedeException(
+        code: 'SESSION_CHANGED',
+        message: 'The active session changed.',
+        status: 401,
+      );
+    }
+    if (stored == null) {
+      // Another client has already cleared the rejected session. Notify this
+      // client's listeners too, without deleting any newly written vault data.
+      _sessionGeneration += 1;
+      _tokens = null;
+      _closeFileClient();
+      _sessionExpired.add(null);
+      throw const KaedeException(
+        code: 'SESSION_EXPIRED',
+        message: 'Your session expired. Sign in again.',
+        status: 401,
+      );
+    }
+    if (stored.accountKey != current.accountKey) {
+      throw const KaedeException(
+        code: 'SESSION_CHANGED',
+        message: 'The active session changed.',
+        status: 401,
+      );
+    }
+    // Another client may already have rotated and persisted this session.
+    if (stored.refreshToken != current.refreshToken) {
+      _tokens = stored;
+      return stored;
+    }
+    final refreshClient = _refreshClient ??
+        Dio(
+          BaseOptions(
+            connectTimeout: const Duration(seconds: 12),
+            receiveTimeout: const Duration(seconds: 20),
+            sendTimeout: const Duration(seconds: 20),
+            followRedirects: false,
+            validateStatus: (status) => status != null && status < 500,
+            headers: const <String, String>{
+              'Accept': 'application/json',
+              'X-Kaede-Client': 'mobile',
+            },
+          ),
+        );
     try {
       final response = await refreshClient.post<Map<String, Object?>>(
         'https://${current.instance.value}/api/v1/auth/refresh',
         data: <String, Object?>{'refresh_token': current.refreshToken},
       );
-      if (response.statusCode case 400 || 401) {
+      final latestStored = await _vault.read();
+      if (generation != _sessionGeneration ||
+          _tokens?.refreshToken != current.refreshToken ||
+          latestStored?.accountKey != current.accountKey ||
+          latestStored?.refreshToken != current.refreshToken) {
+        throw const KaedeException(
+          code: 'SESSION_CHANGED',
+          message: 'The active session changed.',
+          status: 401,
+        );
+      }
+      if (response.statusCode == 401) {
         await clearTokens(expectedGeneration: generation);
-        _sessionExpired.add(null);
+        if (_tokens == null && _sessionGeneration == generation + 1) {
+          _sessionExpired.add(null);
+        }
         throw const KaedeException(
           code: 'SESSION_EXPIRED',
           message: 'Your session expired. Sign in again.',
@@ -656,14 +721,6 @@ final class KaedeApiClient {
       final refresh = body?['refresh_token'];
       if (access is! String || refresh is! String) {
         throw const FormatException('Invalid refresh response');
-      }
-      if (generation != _sessionGeneration ||
-          _tokens?.refreshToken != current.refreshToken) {
-        throw const KaedeException(
-          code: 'SESSION_CHANGED',
-          message: 'The active session changed.',
-          status: 401,
-        );
       }
       final updated = current.copyWith(
         accessToken: access,
