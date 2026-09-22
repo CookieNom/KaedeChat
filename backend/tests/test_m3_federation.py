@@ -1691,7 +1691,7 @@ async def test_message_purge_does_not_invent_a_singular_gateway_delete() -> None
 async def test_poll_mutations_reject_a_context_channel_mismatch(event_type: str) -> None:
     guild = granular_replica_guild()
     actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
-    voter = SimpleNamespace(id=9, origin_domain="member.example")
+    voter = SimpleNamespace(id=9, origin_domain="member.example", account_type="human")
     message = SimpleNamespace(
         id=81,
         origin_domain="alpha.localhost",

@@ -303,7 +303,7 @@ def test_local_user_tables_have_database_constraints() -> None:
         and constraint.name is not None
         and constraint.name.endswith("local_auth_fields")
         and str(constraint.sqltext)
-        == "deleted_at IS NOT NULL OR NOT is_local OR account_type = 'bot' "
+        == "deleted_at IS NOT NULL OR NOT is_local OR account_type IN ('bot','system') "
         "OR password_hash IS NOT NULL"
         for constraint in users.constraints
     )

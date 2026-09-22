@@ -304,8 +304,8 @@ async def test_pending_rules_block_unsolicited_member_dms_but_exempt_friends_and
 
     from app.chat import permissions, privacy
 
-    actor = SimpleNamespace(id=2, origin_domain="home.test")
-    recipient = SimpleNamespace(id=3, origin_domain="home.test")
+    actor = SimpleNamespace(id=2, origin_domain="home.test", account_type="human")
+    recipient = SimpleNamespace(id=3, origin_domain="home.test", account_type="human")
     guild = SimpleNamespace(onboarding=config().model_dump())
     member = SimpleNamespace(onboarding_state={})
     session = SimpleNamespace(
