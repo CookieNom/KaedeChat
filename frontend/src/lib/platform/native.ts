@@ -57,7 +57,7 @@ export interface NativePreferences {
 export interface NativeDevices {
   inputs: NativeAudioDevice[];
   outputs: NativeAudioDevice[];
-  cameras: { id: string; label: string }[];
+  cameras: { id: string; label: string; aliases?: string[] }[];
   screens: NativeScreenSource[];
 }
 

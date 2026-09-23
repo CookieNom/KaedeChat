@@ -22,7 +22,7 @@ pub struct CaptureOptions {
 }
 
 #[repr(C)]
-struct Callbacks {
+pub(crate) struct Callbacks {
     context: *mut c_void,
     stopped: extern "C" fn(*mut c_void) -> bool,
     audio: extern "C" fn(*mut c_void, *const i16, usize),
@@ -46,6 +46,27 @@ pub fn run(
     audio: &(dyn Fn(&[i16]) + Sync),
     video: &(dyn Fn(PackedFrame<'_>) + Sync),
     status: &(dyn Fn(Result<(), String>) + Sync),
+) {
+    with_callbacks(
+        options,
+        stopped,
+        audio,
+        video,
+        status,
+        |options, callbacks| {
+            // SAFETY: with_callbacks keeps all arguments alive until this call returns.
+            unsafe { kaede_capture_run(options, callbacks) };
+        },
+    );
+}
+
+pub(crate) fn with_callbacks(
+    options: CaptureOptions,
+    stopped: &(dyn Fn() -> bool + Sync),
+    audio: &(dyn Fn(&[i16]) + Sync),
+    video: &(dyn Fn(PackedFrame<'_>) + Sync),
+    status: &(dyn Fn(Result<(), String>) + Sync),
+    native: impl FnOnce(*const CaptureOptions, *const Callbacks),
 ) {
     struct Context<'a> {
         stopped: &'a (dyn Fn() -> bool + Sync),
@@ -118,8 +139,7 @@ pub fn run(
         video: on_video,
         status: on_status,
     };
-    // SAFETY: options, callbacks, and context outlive all native callbacks.
-    unsafe { kaede_capture_run(&raw const options, &raw const callbacks) };
+    native(&raw const options, &raw const callbacks);
 }
 
 #[derive(Debug, Serialize)]

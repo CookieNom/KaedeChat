@@ -4,6 +4,8 @@
 //! Keeping the conversion here makes the native screen and camera backends
 //! replaceable without coupling either one to the room transport.
 
+#[cfg(target_os = "windows")]
+pub mod directshow;
 pub mod system_audio;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

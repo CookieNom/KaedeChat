@@ -5,6 +5,9 @@
 Windows 10 and later use WASAPI through CPAL and Windows Credential Manager.
 Screen audio requires Windows build 20348 or later (including Windows 11);
 older builds support video-only sharing.
+Camera discovery combines Media Foundation and DirectShow devices, including
+DirectShow virtual cameras such as OBS. Matching device paths produce one camera
+entry; DirectShow is also a capture fallback when Media Foundation cannot open it.
 Native camera capture, desktop capture, global shortcuts, tray integration, and
 Windows notifications are all supported. Signed NSIS packages are produced
 on Windows runners. Production releases ship a per-user NSIS installer. It

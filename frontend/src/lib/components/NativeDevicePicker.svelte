@@ -7,6 +7,7 @@
   interface DeviceOption {
     id: string;
     label: string;
+    aliases?: string[];
     is_default?: boolean;
     channels?: number;
     sample_rate?: number;
@@ -18,6 +19,7 @@
     icon,
     selectedId = '',
     defaultLabel = 'System default',
+    emptyMessage = '',
     options = [],
     onSelect
   }: {
@@ -26,6 +28,7 @@
     icon: IconName;
     selectedId?: string;
     defaultLabel?: string;
+    emptyMessage?: string;
     options?: DeviceOption[];
     onSelect: (id: string) => void;
   } = $props();
@@ -34,7 +37,9 @@
   let searchInput = $state<HTMLInputElement>();
   let open = $state(false);
   let query = $state('');
-  const selected = $derived(options.find((option) => option.id === selectedId));
+  const selected = $derived(
+    options.find((option) => option.id === selectedId || option.aliases?.includes(selectedId))
+  );
   const unavailable = $derived(Boolean(selectedId && !selected));
   const filtered = $derived(
     options.filter((option) => option.label.toLowerCase().includes(query.trim().toLowerCase()))
@@ -148,10 +153,10 @@
         </button>
         {#each filtered as option (option.id)}
           <button
-            class:selected={option.id === selectedId}
+            class:selected={option.id === selected?.id}
             type="button"
             role="option"
-            aria-selected={option.id === selectedId}
+            aria-selected={option.id === selected?.id}
             onclick={() => choose(option.id)}
           >
             <span class="device-option-icon"><Icon name={icon} size={18} /></span>
@@ -164,11 +169,13 @@
                     : $t('ui_available_e6744473'))}</small
               >
             </span>
-            {#if option.id === selectedId}<Icon name="check" size={18} />{/if}
+            {#if option.id === selected?.id}<Icon name="check" size={18} />{/if}
           </button>
         {/each}
         {#if filtered.length === 0}
-          <p>{$t('ui_no_matching_devices_8d58a1c4')}</p>
+          <p>
+            {!options.length && emptyMessage ? emptyMessage : $t('ui_no_matching_devices_8d58a1c4')}
+          </p>
         {/if}
       </div>
     </div>

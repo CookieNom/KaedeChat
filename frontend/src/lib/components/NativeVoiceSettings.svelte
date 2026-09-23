@@ -23,6 +23,8 @@
   let hotkeyStatus = $state('');
   let inputLevel = $state(0);
   let testingInput = $state(false);
+  let changingInputTest = $state(false);
+  let disposed = false;
   let testingOutput = $state(false);
   let devicesUpdatedAt = $state<Date | null>(null);
   let deviceSignature = '';
@@ -31,7 +33,7 @@
     return JSON.stringify({
       inputs: available.inputs.map(({ id, label, is_default }) => [id, label, is_default]),
       outputs: available.outputs.map(({ id, label, is_default }) => [id, label, is_default]),
-      cameras: available.cameras.map(({ id, label }) => [id, label]),
+      cameras: available.cameras.map(({ id, label, aliases }) => [id, label, aliases]),
       screens: available.screens.map(({ id, label }) => [id, label])
     });
   }
@@ -58,26 +60,32 @@
   }
 
   async function testInput() {
-    if (testingInput) return;
-    testingInput = true;
+    if (changingInputTest) return;
+    changingInputTest = true;
     error = '';
     notice = '';
     try {
-      const peak = await nativeInvoke<number>('native_test_input', {
-        deviceId: preferences?.input_device?.id ?? null
-      });
-      inputLevel = peak;
-      notice =
-        peak > 0.005
-          ? 'Microphone input received.'
-          : 'The microphone opened, but no speech was detected.';
+      if (testingInput) {
+        await nativeInvoke('native_stop_input_test');
+        testingInput = false;
+        inputLevel = 0;
+      } else {
+        await nativeInvoke('native_test_input', {
+          deviceId: preferences?.input_device?.id ?? null
+        });
+        if (disposed) {
+          await nativeInvoke('native_stop_input_test');
+        } else {
+          testingInput = true;
+        }
+      }
     } catch (caught) {
       error = userErrorMessage(
         caught,
         $t('ui_could_not_open_the_selected_microphone_it_may_f44c7506')
       );
     } finally {
-      testingInput = false;
+      changingInputTest = false;
     }
   }
 
@@ -136,6 +144,8 @@
     window.addEventListener('focus', rescanOnFocus);
     document.addEventListener('visibilitychange', rescanWhenVisible);
     return () => {
+      disposed = true;
+      void nativeInvoke('native_stop_input_test').catch(() => undefined);
       clearInterval(meter);
       clearInterval(deviceWatcher);
       window.removeEventListener('focus', rescanOnFocus);
@@ -231,6 +241,7 @@
             icon="video"
             selectedId={preferences.camera_device?.id ?? ''}
             options={devices.cameras}
+            emptyMessage="No cameras found. Connect a camera or check that your virtual camera is installed."
             onSelect={(id) => (preferences!.camera_device = devicePreference(id, devices.cameras))}
           />
           <NativeDevicePicker
@@ -265,14 +276,24 @@
             </select>
           </label>
         </div>
+        <label class="form-field native-input-meter">
+          <span>{$t('ui_input_level_17b694d7')}</span>
+          <small>Shown while testing your microphone or connected to voice.</small>
+          <meter min="0" max="1" value={inputLevel}></meter>
+        </label>
         <div class="native-device-actions">
           <button
             class="secondary-button"
             type="button"
-            disabled={testingInput}
+            disabled={changingInputTest}
+            aria-pressed={testingInput}
             onclick={() => void testInput()}
           >
-            {testingInput ? $t('ui_listening_bbb4106e') : $t('ui_test_microphone_4875bbe1')}
+            {changingInputTest
+              ? 'Please wait…'
+              : testingInput
+                ? 'Stop testing'
+                : $t('ui_test_microphone_4875bbe1')}
           </button>
           <button
             class="secondary-button"
@@ -367,11 +388,6 @@
             >
           </div>
         </div>
-        <label class="form-field native-input-meter">
-          <span>{$t('ui_input_level_17b694d7')}</span>
-          <small>{$t('ui_shown_while_connected_to_voice_audio_never_cr_1d34668a')}</small>
-          <meter min="0" max="1" value={inputLevel}></meter>
-        </label>
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
         {#if notice}<p class="settings-helper" role="status">{notice}</p>{/if}
         <div class="form-actions">

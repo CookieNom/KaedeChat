@@ -381,6 +381,12 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static"
         shell: bash
         run: bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" cargo +1.97.1 build --release --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
+      - name: Test Windows camera discovery and frame conversion
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        shell: bash
+        run: cargo +1.97.1 test --release --locked --manifest-path desktop/Cargo.toml -p kaede-capture --lib
       - name: Test Linux screen audio isolation
         if: runner.os == 'Linux'
         run: bash desktop/test-screen-audio.sh

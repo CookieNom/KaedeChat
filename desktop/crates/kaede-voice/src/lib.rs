@@ -1,5 +1,6 @@
 //! `LiveKit` transport backed exclusively by Kaede's `CPAL` audio graph.
 
+mod camera_catalog;
 mod native_video_probe;
 mod screen_audio;
 pub use kaede_capture::system_audio::{
@@ -1051,6 +1052,12 @@ async fn run_room(
                         .unwrap_or_else(|| "Screen sharing ended.".to_owned());
                     let _ = stop_published_video(&room, screen_share.take()).await;
                     send_media_error(&status, &room, can_speak, can_stream, None, camera.as_ref(), message);
+                }
+                if camera.as_ref().is_some_and(|camera| camera.stop.load(Ordering::Acquire)) {
+                    let message = camera.as_ref().and_then(|camera| camera.capture_failure.lock().ok()?.clone())
+                        .unwrap_or_else(|| "Camera capture ended.".to_owned());
+                    let _ = stop_published_video(&room, camera.take()).await;
+                    send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), None, message);
                 }
                 reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
             }
@@ -2134,6 +2141,8 @@ async fn publish_screen_share(
 pub struct CameraDevice {
     pub id: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2297,15 +2306,68 @@ pub fn screen_source_thumbnail(source_id: &str) -> Option<ScreenThumbnail> {
 ///
 /// Returns an error when the operating system camera backend cannot be queried.
 pub fn camera_devices() -> Result<Vec<CameraDevice>, VoiceError> {
-    let mut cameras = nokhwa::query(nokhwa::utils::ApiBackend::Auto)?
+    Ok(camera_sources()?
         .into_iter()
-        .map(|camera| CameraDevice {
-            id: camera.index().as_string(),
-            label: camera.human_name(),
+        .map(|camera| camera.device)
+        .collect())
+}
+
+fn camera_sources() -> Result<Vec<camera_catalog::CameraSource>, VoiceError> {
+    let native = nokhwa::query(nokhwa::utils::ApiBackend::Auto)
+        .map(|cameras| {
+            cameras
+                .into_iter()
+                .map(|camera| {
+                    (
+                        CameraDevice {
+                            id: camera.index().as_string(),
+                            label: camera.human_name(),
+                            aliases: Vec::new(),
+                        },
+                        {
+                            #[cfg(target_os = "windows")]
+                            {
+                                camera.misc()
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                String::new()
+                            }
+                        },
+                    )
+                })
+                .collect()
         })
-        .collect::<Vec<_>>();
-    cameras.sort_by_key(|device| device.label.to_lowercase());
-    Ok(cameras)
+        .map_err(|error| error.to_string());
+    #[cfg(target_os = "windows")]
+    let directshow = kaede_capture::directshow::devices().map(|devices| {
+        devices
+            .into_iter()
+            .map(|device| {
+                (
+                    CameraDevice {
+                        id: format!("dshow:{}", device.id),
+                        label: device.label,
+                        aliases: Vec::new(),
+                    },
+                    if device.device_path.is_empty() {
+                        device.id
+                    } else {
+                        device.device_path
+                    },
+                )
+            })
+            .collect()
+    });
+    #[cfg(not(target_os = "windows"))]
+    let directshow = Ok(Vec::new());
+    if let Err(error) = &native {
+        tracing::warn!(%error, "native camera discovery failed");
+    }
+    if let Err(error) = &directshow {
+        tracing::warn!(%error, "DirectShow camera discovery failed");
+    }
+    camera_catalog::combine(native, directshow).map_err(VoiceError::CameraWorker)
 }
 
 async fn publish_camera(
@@ -2330,6 +2392,8 @@ async fn publish_camera(
     let capture_level = Arc::new(AtomicU32::new(0));
     let thread_level = capture_level.clone();
     let thread_stop = stop.clone();
+    let failure = Arc::new(Mutex::new(None));
+    let thread_failure = failure.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let capture_thread = match thread::Builder::new()
         .name("kaede-camera-capture".to_owned())
@@ -2341,6 +2405,7 @@ async fn publish_camera(
                 camera_id,
                 settings,
                 ready_tx,
+                thread_failure,
             );
         }) {
         Ok(thread) => thread,
@@ -2383,7 +2448,7 @@ async fn publish_camera(
     let video = PublishedVideo {
         audio: None,
         audio_capture_thread: None,
-        capture_failure: Arc::new(Mutex::new(None)),
+        capture_failure: failure,
         source: TrackSource::Camera,
         encoding: VideoEncoding {
             max_bitrate: settings.max_bitrate,
@@ -2407,7 +2472,13 @@ fn select_camera<'a>(
 ) -> Option<&'a CameraDevice> {
     cameras
         .iter()
-        .find(|camera| Some(camera.id.as_str()) == preferred)
+        .find(|camera| {
+            Some(camera.id.as_str()) == preferred
+                || camera
+                    .aliases
+                    .iter()
+                    .any(|id| Some(id.as_str()) == preferred)
+        })
         .or_else(|| cameras.first())
 }
 
@@ -2428,9 +2499,7 @@ fn start_camera_with_fallback<T>(
     })
 }
 
-fn open_camera(device_id: Option<&str>, settings: CameraSettings) -> Result<Camera, VoiceError> {
-    let cameras = camera_devices()?;
-    let selected = select_camera(&cameras, device_id).ok_or(VoiceError::NoCamera)?;
+fn open_camera(selected: &CameraDevice, settings: CameraSettings) -> Result<Camera, VoiceError> {
     let index = selected.id.parse::<u32>().map_or_else(
         |_| CameraIndex::String(selected.id.clone()),
         CameraIndex::Index,
@@ -2445,7 +2514,7 @@ fn open_camera(device_id: Option<&str>, settings: CameraSettings) -> Result<Came
     })?)
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn run_camera_capture(
     source: NativeVideoSource,
     stop: Arc<AtomicBool>,
@@ -2453,8 +2522,69 @@ fn run_camera_capture(
     device_id: Option<String>,
     settings: CameraSettings,
     ready: tokio::sync::oneshot::Sender<Result<(), VoiceError>>,
+    failure: screen_audio::CaptureFailure,
 ) {
-    let mut camera = match open_camera(device_id.as_deref(), settings) {
+    let cameras = match camera_sources() {
+        Ok(cameras) => cameras,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    let devices = cameras
+        .iter()
+        .map(|camera| camera.device.clone())
+        .collect::<Vec<_>>();
+    let Some(selected) = select_camera(&devices, device_id.as_deref()) else {
+        let _ = ready.send(Err(VoiceError::NoCamera));
+        return;
+    };
+    let selected = cameras
+        .iter()
+        .find(|camera| camera.device.id == selected.id);
+    let Some(selected) = selected else {
+        return;
+    };
+    let native = if selected.native {
+        open_camera(&selected.device, settings)
+    } else {
+        Err(VoiceError::NoCamera)
+    };
+    #[cfg(target_os = "windows")]
+    if native.is_err()
+        && let Some(id) = selected.directshow.as_deref()
+    {
+        if let Err(error) = &native {
+            tracing::debug!(%error, "using DirectShow camera capture");
+        }
+        let ready = Mutex::new(Some(ready));
+        kaede_capture::directshow::run(
+            id,
+            kaede_capture::system_audio::CaptureOptions {
+                window: 0,
+                process: 0,
+                width: settings.width,
+                height: settings.height,
+                fps: settings.frame_rate,
+                audio: false,
+            },
+            &|| stop.load(Ordering::Acquire),
+            &|frame| publish_camera_frame(&source, &capture_level, settings, frame),
+            &|status| {
+                if let Ok(mut pending) = ready.lock()
+                    && let Some(sender) = pending.take()
+                {
+                    let _ = sender.send(status.map_err(VoiceError::CameraWorker));
+                } else if let Err(message) = status {
+                    screen_audio::fail(&stop, &failure, message);
+                }
+            },
+        );
+        return;
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (failure, &selected.directshow);
+    let mut camera = match native {
         Ok(camera) => camera,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -2485,40 +2615,18 @@ fn run_camera_capture(
                     tracing::warn!(%error, "camera frame decode failed");
                     continue;
                 }
-                let Some(converted) = (PackedFrame {
-                    width,
-                    height,
-                    stride: stride_width.saturating_mul(3),
-                    format: PackedPixelFormat::Rgb,
-                    data: &rgb,
-                })
-                .to_i420() else {
-                    tracing::warn!(width, height, "camera produced an invalid frame");
-                    continue;
-                };
-                let mut buffer = I420Buffer::new(converted.width, converted.height);
-                let (y, u, v) = buffer.data_mut();
-                y.copy_from_slice(&converted.y);
-                u.copy_from_slice(&converted.u);
-                v.copy_from_slice(&converted.v);
-                let shift = capture_level.load(Ordering::Acquire).min(3);
-                let (width, height) = bounded_dimensions(
-                    converted.width,
-                    converted.height,
-                    (settings.width >> shift).max(320),
-                    (settings.height >> shift).max(180),
+                publish_camera_frame(
+                    &source,
+                    &capture_level,
+                    settings,
+                    PackedFrame {
+                        width,
+                        height,
+                        stride: stride_width.saturating_mul(3),
+                        format: PackedPixelFormat::Rgb,
+                        data: &rgb,
+                    },
                 );
-                let buffer = if width != converted.width || height != converted.height {
-                    let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height))
-                    else {
-                        tracing::warn!(width, height, "camera scale exceeds native dimensions");
-                        continue;
-                    };
-                    buffer.scale(width, height)
-                } else {
-                    buffer
-                };
-                source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
             }
             Err(error) => {
                 tracing::warn!(%error, "camera frame capture failed");
@@ -2526,6 +2634,38 @@ fn run_camera_capture(
             }
         }
     }
+}
+
+fn publish_camera_frame(
+    source: &NativeVideoSource,
+    capture_level: &AtomicU32,
+    settings: CameraSettings,
+    frame: PackedFrame<'_>,
+) {
+    let Some(converted) = frame.to_i420() else {
+        return;
+    };
+    let mut buffer = I420Buffer::new(converted.width, converted.height);
+    let (y, u, v) = buffer.data_mut();
+    y.copy_from_slice(&converted.y);
+    u.copy_from_slice(&converted.u);
+    v.copy_from_slice(&converted.v);
+    let shift = capture_level.load(Ordering::Acquire).min(3);
+    let (width, height) = bounded_dimensions(
+        converted.width,
+        converted.height,
+        (settings.width >> shift).max(320),
+        (settings.height >> shift).max(180),
+    );
+    let buffer = if width != converted.width || height != converted.height {
+        let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height)) else {
+            return;
+        };
+        buffer.scale(width, height)
+    } else {
+        buffer
+    };
+    source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
 }
 
 async fn stop_published_video(
@@ -3513,10 +3653,12 @@ mod tests {
             super::CameraDevice {
                 id: "4".into(),
                 label: "USB camera".into(),
+                aliases: Vec::new(),
             },
             super::CameraDevice {
                 id: "7".into(),
                 label: "Virtual camera".into(),
+                aliases: vec!["dshow:virtual".into()],
             },
         ];
         assert_eq!(super::select_camera(&cameras, None), cameras.first());
@@ -3525,6 +3667,10 @@ mod tests {
             cameras.first()
         );
         assert_eq!(super::select_camera(&cameras, Some("7")), cameras.get(1));
+        assert_eq!(
+            super::select_camera(&cameras, Some("dshow:virtual")),
+            cameras.get(1)
+        );
         assert_eq!(super::select_camera(&[], Some("7")), None);
     }
 

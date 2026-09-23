@@ -47,7 +47,7 @@ uuid.workspace = true
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7.3"
 winreg = "0.55.0"
-windows = { version = "0.62.2", features = ["UI_Shell"] }
+windows = { version = "0.62.2", features = ["UI_Shell", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [lints]
 workspace = true

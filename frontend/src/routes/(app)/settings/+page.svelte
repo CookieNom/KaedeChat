@@ -417,7 +417,13 @@
   }
 
   async function testDesktopNotification() {
-    if (!isNativeDesktop() || testingNotification) return;
+    if (
+      !isNativeDesktop() ||
+      !developerModeDraft ||
+      !browserNotificationsDraft ||
+      testingNotification
+    )
+      return;
     error = '';
     notice = '';
     testingNotification = true;
@@ -1149,8 +1155,8 @@
               {$t('ui_notifications_are_blocked_in_your_browser_all_bfd725b6')}
             </p>
           {/if}
-          {#if isNativeDesktop()}
-            <div class="form-actions">
+          {#if isNativeDesktop() && developerModeDraft}
+            <div class="native-device-actions">
               <button
                 type="button"
                 class="secondary-button"

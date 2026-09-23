@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod themes;
+#[cfg(target_os = "windows")]
+mod windows_hotkeys;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -9,7 +11,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -48,7 +50,9 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+#[cfg(not(target_os = "windows"))]
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -90,6 +94,7 @@ struct NativeState {
     gateway_events_tx: mpsc::UnboundedSender<(u64, Value)>,
     gateway_events_rx: Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     voice: Mutex<Option<VoiceHandle>>,
+    input_test: Mutex<Option<InputTest>>,
     voice_target: RwLock<Option<InstalledVoiceTarget>>,
     voice_video: Mutex<Option<mpsc::Receiver<kaede_voice::RemoteVideoFrame>>>,
     voice_install: VoiceInstallFence,
@@ -2241,6 +2246,13 @@ fn configured_hotkey(
             error,
         )
     })?;
+    #[cfg(target_os = "windows")]
+    if windows_hotkeys::key_to_vk(&shortcut.key).is_none() {
+        return Err(NativeError::local(
+            code,
+            "That key is not supported as a voice shortcut.",
+        ));
+    }
     Ok(Some(RegisteredHotkey {
         configured: configured.to_owned(),
         shortcut,
@@ -2311,6 +2323,9 @@ fn replace_global_hotkeys(
         .iter()
         .zip(&next)
         .any(|(a, b)| a.as_ref().map(|v| v.shortcut) != b.as_ref().map(|v| v.shortcut));
+    #[cfg(target_os = "windows")]
+    let _ = app;
+    #[cfg(not(target_os = "windows"))]
     if changed {
         let manager = app.global_shortcut();
         let mut removed = Vec::new();
@@ -2355,17 +2370,78 @@ fn replace_global_hotkeys(
     Ok(changed)
 }
 
+fn handle_voice_shortcut(app: &AppHandle, shortcut: &Shortcut, pressed: bool) {
+    let state = app.state::<NativeState>();
+
+    let toggle = {
+        let mut hotkey = state.hotkey.lock();
+        if pressed {
+            if !hotkey.pressed.insert(shortcut.id()) {
+                return;
+            }
+        } else {
+            hotkey.pressed.remove(&shortcut.id());
+        }
+        if !pressed {
+            None
+        } else if hotkey
+            .toggle_mute
+            .as_ref()
+            .is_some_and(|key| key.shortcut == *shortcut)
+        {
+            Some(false)
+        } else if hotkey
+            .toggle_deafen
+            .as_ref()
+            .is_some_and(|key| key.shortcut == *shortcut)
+        {
+            Some(true)
+        } else {
+            None
+        }
+    };
+    if let Some(deafen) = toggle {
+        tauri::async_runtime::spawn(toggle_global_voice(app.clone(), deafen));
+        return;
+    }
+    let command = {
+        let hotkey = state.hotkey.lock();
+        if hotkey
+            .push_to_talk
+            .as_ref()
+            .is_some_and(|registered| registered.shortcut == *shortcut)
+        {
+            Some(VoiceCommand::SetPushToTalk(pressed))
+        } else if hotkey
+            .priority_push_to_talk
+            .as_ref()
+            .is_some_and(|registered| registered.shortcut == *shortcut)
+        {
+            Some(VoiceCommand::SetPriorityPushToTalk(pressed))
+        } else {
+            None
+        }
+    };
+    if let Some(command) = command
+        && let Some(sender) = state.push_to_talk_sender.lock().as_ref()
+    {
+        let _ = sender.send(command);
+    }
+}
+
 async fn toggle_global_voice(app: AppHandle, deafen: bool) {
     let state = app.state::<NativeState>();
     let voice = state.voice.lock().await;
-    let Some(handle) = voice.as_ref() else {
-        return;
-    };
     let mut ui = state.voice_ui.write().await;
     let (muted, deafened) = if deafen {
         (ui.muted || !ui.deafened, !ui.deafened)
     } else {
         (!ui.muted, if ui.muted { false } else { ui.deafened })
+    };
+    let Some(handle) = voice.as_ref() else {
+        ui.muted = muted;
+        ui.deafened = deafened;
+        return;
     };
     let gateway = state.gateway_commands.read().await;
     let published = if let Some(sender) = gateway.as_ref() {
@@ -2579,37 +2655,84 @@ fn screen_share_settings(preferences: &DesktopPreferences) -> ScreenShareSetting
     settings
 }
 
+// Dropping the sender stops capture even when the settings window disappears.
+struct InputTest {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: tokio::task::JoinHandle<()>,
+    level: Arc<AtomicU32>,
+}
+
 #[tauri::command]
-#[allow(clippy::cast_precision_loss)]
 async fn native_test_input(
     device_id: Option<String>,
     state: State<'_, NativeState>,
-) -> Result<f32, NativeError> {
+) -> Result<(), NativeError> {
+    let mut current = state.input_test.lock().await;
+    if current.is_some() {
+        return Ok(());
+    }
     let preferences = state.preferences.read().await;
     let mut settings = capture_settings(&preferences);
     settings.device_id = device_id;
     drop(preferences);
-    tokio::task::spawn_blocking(move || {
-        let capture = NativeCapture::open(&settings)
-            .map_err(|error| audio_device_error("AUDIO_INPUT_FAILED", "microphone", error))?;
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let (ready, opened) = tokio::sync::oneshot::channel();
+    let level = Arc::new(AtomicU32::new(0));
+    let meter = level.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let capture = match NativeCapture::open(&settings) {
+            Ok(capture) => capture,
+            Err(error) => {
+                let _ = ready.send(Err(audio_device_error(
+                    "AUDIO_INPUT_FAILED",
+                    "microphone",
+                    error,
+                )));
+                return;
+            }
+        };
         let mut processors = ProcessorChain::default();
         processors.push(Box::new(SpeechProcessor::from_settings(&settings)));
-        let mut peak = 0.0_f32;
-        for _ in 0..120 {
-            std::thread::sleep(Duration::from_millis(10));
-            let _ = capture.drain_voice_frame(Duration::from_millis(10), &mut processors);
-            peak = peak.max(capture.gate.level());
+        if ready.send(Ok(())).is_err() {
+            return;
         }
-        Ok(peak)
-    })
-    .await
-    .map_err(|error| {
+        while matches!(
+            stopped.recv_timeout(Duration::from_millis(10)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = capture.drain_voice_frame(Duration::from_millis(10), &mut processors);
+            meter.store(capture.gate.level().to_bits(), Ordering::Relaxed);
+        }
+    });
+    opened.await.map_err(|error| {
         NativeError::operation(
             "AUDIO_INPUT_FAILED",
-            "The microphone test stopped unexpectedly. Restart Kaede and try the test again.",
+            "The microphone test stopped unexpectedly. Try again.",
             error,
         )
-    })?
+    })??;
+    *current = Some(InputTest {
+        stop,
+        worker,
+        level,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn native_stop_input_test(state: State<'_, NativeState>) -> Result<(), NativeError> {
+    let mut current = state.input_test.lock().await;
+    if let Some(test) = current.take() {
+        drop(test.stop);
+        test.worker.await.map_err(|error| {
+            NativeError::operation(
+                "AUDIO_INPUT_FAILED",
+                "The microphone test stopped unexpectedly.",
+                error,
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2796,6 +2919,16 @@ async fn join_native_voice_reserved(
     // that remains installed; a control cannot be stranded on the old room.
     let mut installed_voice = state.voice.lock().await;
     let voice_ui = state.voice_ui.read().await.clone();
+    if (voice_ui.muted || voice_ui.deafened)
+        && let Some(sender) = state.gateway_commands.read().await.as_ref()
+    {
+        let _ = sender
+            .send(GatewayCommand::VoiceState {
+                self_mute: voice_ui.muted || voice_ui.deafened,
+                self_deaf: voice_ui.deafened,
+            })
+            .await;
+    }
     if let Some(gate) = handle.input_level.as_ref() {
         gate.set_muted(voice_ui.muted || voice_ui.deafened);
     }
@@ -2921,22 +3054,22 @@ async fn native_voice_control(
             settings: screen_share_settings(&preferences),
         },
     };
-    voice
-        .as_mut()
-        .ok_or_else(|| {
-            NativeError::local(
-                "VOICE_NOT_CONNECTED",
-                "Join a voice channel before using voice controls.",
-            )
-        })?
-        .commands
-        .send(command)
-        .map_err(|_| {
+    if let Some(handle) = voice.as_mut() {
+        handle.commands.send(command).map_err(|_| {
             NativeError::local(
                 "VOICE_DISCONNECTED",
                 "The voice session ended before that change was applied. Join voice again and retry.",
             )
         })?;
+    } else if !matches!(
+        control,
+        VoiceControl::Mute | VoiceControl::Unmute | VoiceControl::Deafen | VoiceControl::Undeafen
+    ) {
+        return Err(NativeError::local(
+            "VOICE_NOT_CONNECTED",
+            "Join a voice channel before using voice controls.",
+        ));
+    }
     let mut ui = state.voice_ui.write().await;
     match control {
         VoiceControl::Mute => ui.muted = true,
@@ -3016,7 +3149,7 @@ async fn leave_active_voice(state: &NativeState) {
     *state.voice_video.lock().await = None;
     let voice = state.voice.lock().await.take();
     *state.voice_target.write().await = None;
-    *state.voice_ui.write().await = VoiceUiState::default();
+    // Mute and deafen belong to the client, so the next call inherits them.
     state.voice_volumes.write().await.clear();
     drop(install_guard);
     if let Some(voice) = voice {
@@ -3032,9 +3165,18 @@ async fn native_voice_leave(state: State<'_, NativeState>) -> Result<(), NativeE
 
 #[tauri::command]
 async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, NativeError> {
+    let test_level = state
+        .input_test
+        .lock()
+        .await
+        .as_ref()
+        .map(|test| f32::from_bits(test.level.load(Ordering::Relaxed)));
     let voice = state.voice.lock().await;
     let Some(voice) = voice.as_ref() else {
-        return Ok(json!({"state": "disconnected"}));
+        let ui = state.voice_ui.read().await;
+        return Ok(
+            json!({"state": "disconnected", "muted": ui.muted, "deafened": ui.deafened, "input_level": test_level.unwrap_or(0.0)}),
+        );
     };
     let mut value = match voice.status.borrow().clone() {
         VoiceStatus::Disconnected => json!({"state": "disconnected"}),
@@ -3078,7 +3220,10 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
         map.insert("deafened".to_owned(), Value::Bool(ui.deafened));
         map.insert(
             "input_level".to_owned(),
-            json!(voice.input_level.as_ref().map_or(0.0, |gate| gate.level())),
+            json!(
+                test_level
+                    .unwrap_or_else(|| voice.input_level.as_ref().map_or(0.0, |gate| gate.level()))
+            ),
         );
         map.insert(
             "priority_speakers".to_owned(),
@@ -3474,7 +3619,6 @@ fn main() {
     let (gateway_events_tx, gateway_events_rx) = mpsc::unbounded_channel();
     let (voice_restart_tx, mut voice_restart_rx) = mpsc::unbounded_channel();
     let push_to_talk_sender = Arc::new(SyncMutex::new(None::<mpsc::UnboundedSender<VoiceCommand>>));
-    let event_sender = push_to_talk_sender.clone();
     let hotkey = Arc::new(SyncMutex::new(HotkeyRegistration {
         pressed: BTreeSet::new(),
         push_to_talk: None,
@@ -3483,7 +3627,6 @@ fn main() {
         toggle_deafen: None,
         status: "Push to talk is disabled; priority push to talk is disabled.".to_owned(),
     }));
-    let event_hotkey = hotkey.clone();
     let state = NativeState {
         instance: RwLock::new(None),
         account: RwLock::new(None),
@@ -3495,6 +3638,7 @@ fn main() {
         gateway_events_tx,
         gateway_events_rx: Mutex::new(gateway_events_rx),
         voice: Mutex::new(None),
+        input_test: Mutex::new(None),
         voice_target: RwLock::new(None),
         voice_video: Mutex::new(None),
         voice_install: VoiceInstallFence::new(),
@@ -3516,47 +3660,8 @@ fn main() {
         ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, shortcut, event| {
-                    let pressed = event.state == ShortcutState::Pressed;
-                    let toggle = {
-                        let mut hotkey = event_hotkey.lock();
-                        if pressed {
-                            if !hotkey.pressed.insert(shortcut.id()) { return; }
-                        } else {
-                            hotkey.pressed.remove(&shortcut.id());
-                        }
-                        if !pressed { None }
-                        else if hotkey.toggle_mute.as_ref().is_some_and(|key| key.shortcut == *shortcut) { Some(false) }
-                        else if hotkey.toggle_deafen.as_ref().is_some_and(|key| key.shortcut == *shortcut) { Some(true) }
-                        else { None }
-                    };
-                    if let Some(deafen) = toggle {
-                        tauri::async_runtime::spawn(toggle_global_voice(app.clone(), deafen));
-                        return;
-                    }
-                    let command = {
-                        let hotkey = event_hotkey.lock();
-                        if hotkey
-                            .push_to_talk
-                            .as_ref()
-                            .is_some_and(|registered| registered.shortcut == *shortcut)
-                        {
-                            Some(VoiceCommand::SetPushToTalk(pressed))
-                        } else if hotkey
-                            .priority_push_to_talk
-                            .as_ref()
-                            .is_some_and(|registered| registered.shortcut == *shortcut)
-                        {
-                            Some(VoiceCommand::SetPriorityPushToTalk(pressed))
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(command) = command
-                        && let Some(sender) = event_sender.lock().as_ref()
-                    {
-                        let _ = sender.send(command);
-                    }
+                .with_handler(|app, shortcut, event| {
+                    handle_voice_shortcut(app, shortcut, event.state == ShortcutState::Pressed);
                 })
                 .build(),
         )
@@ -3569,6 +3674,8 @@ fn main() {
         ))
         .manage(state)
         .setup(move |app| {
+            #[cfg(target_os = "windows")]
+            windows_hotkeys::start(app.handle().clone());
             let voice_restart_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(request) = voice_restart_rx.recv().await {
@@ -3729,6 +3836,7 @@ fn main() {
             native_screen_audio_apps,
             native_screen_thumbnail,
             native_test_input,
+            native_stop_input_test,
             native_test_output,
             native_voice_join,
             native_voice_control,

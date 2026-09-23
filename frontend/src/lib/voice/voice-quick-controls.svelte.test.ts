@@ -32,8 +32,8 @@ it('refreshes call controls through connection, permission and push-to-talk chan
     const [microphone, deafen] = target.querySelectorAll<HTMLButtonElement>(
       '.split > button:first-child'
     );
-    expect(microphone.disabled).toBe(true);
-    expect(microphone.title).toBe('Join a call to use your microphone');
+    expect(microphone.disabled).toBe(false);
+    expect(microphone.title).toBe('Mute microphone');
     expect(target.querySelector('.split.off')).toBeNull();
 
     flushSync(() => {
@@ -43,8 +43,10 @@ it('refreshes call controls through connection, permission and push-to-talk chan
     expect(microphone.disabled).toBe(false);
     expect(deafen.disabled).toBe(false);
     expect(microphone.title).toBe('Unmute microphone');
-    microphone.click();
-    deafen.click();
+    flushSync(() => microphone.click());
+    await vi.waitFor(() => expect(microphone.disabled).toBe(false));
+    flushSync(() => deafen.click());
+    await vi.waitFor(() => expect(deafen.disabled).toBe(false));
     expect(session.toggleMicrophone).toHaveBeenCalledOnce();
     expect(session.toggleDeafen).toHaveBeenCalledOnce();
 
@@ -66,8 +68,8 @@ it('refreshes call controls through connection, permission and push-to-talk chan
     update({ deafened: true });
     expect(deafen.title).toBe('Undeafen');
     update({ connected: false });
-    expect(microphone.disabled).toBe(true);
-    expect(deafen.disabled).toBe(true);
+    expect(microphone.disabled).toBe(false);
+    expect(deafen.disabled).toBe(false);
     expect(target.querySelector('.split.off')).toBeNull();
   } finally {
     await unmount(component);
@@ -128,6 +130,63 @@ it('selects microphone and output independently and restores the previous select
     expect(
       target.querySelector('[aria-label="Choose speakers"]')!.getAttribute('aria-expanded')
     ).toBe('true');
+  } finally {
+    await unmount(component);
+    target.remove();
+  }
+});
+
+it('lets desktop users pre-mute and pre-deafen without a call and restores that state on remount', async () => {
+  let state = { state: 'disconnected', muted: false, deafened: false };
+  invoke.mockImplementation(async (command: string, args?: { control: string }) => {
+    if (command === 'native_voice_status') return { ...state };
+    if (command === 'native_voice_control') {
+      switch (args?.control) {
+        case 'mute':
+          state.muted = true;
+          break;
+        case 'unmute':
+          state.muted = false;
+          break;
+        case 'deafen':
+          state = { ...state, muted: true, deafened: true };
+          break;
+        case 'undeafen':
+          state.deafened = false;
+          break;
+      }
+    }
+  });
+  const target = document.createElement('div');
+  document.body.append(target);
+  let component = mount(VoiceQuickControls, { target });
+  const click = async (label: string) => {
+    const button = target.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+    expect(button.disabled).toBe(false);
+    flushSync(() => {
+      button.click();
+      button.click();
+    });
+    await vi.waitFor(() => expect(button.disabled).toBe(false));
+  };
+  try {
+    flushSync();
+    await click('Mute microphone');
+    expect(state).toEqual({ state: 'disconnected', muted: true, deafened: false });
+    expect(target.querySelector('[aria-label="Unmute microphone"]')).not.toBeNull();
+    await click('Unmute microphone');
+    expect(state.muted).toBe(false);
+    await click('Deafen');
+    expect(state.muted && state.deafened).toBe(true);
+    await unmount(component);
+    component = mount(VoiceQuickControls, { target });
+    flushSync();
+    await vi.waitFor(() => expect(target.querySelector('[aria-label="Undeafen"]')).not.toBeNull());
+    await click('Undeafen');
+    expect(state).toEqual({ state: 'disconnected', muted: true, deafened: false });
+    await click('Deafen');
+    await click('Unmute microphone');
+    expect(state).toEqual({ state: 'disconnected', muted: false, deafened: false });
   } finally {
     await unmount(component);
     target.remove();

@@ -121,16 +121,14 @@
       <p class="desktop-error" role="alert">{desktopLifecycle.autostartError}</p>
     {/if}
 
-    {#if desktopLifecycle.taskbar}
+    {#if desktopLifecycle.taskbar?.supported && (desktopLifecycle.taskbar.allowed || desktopLifecycle.taskbar.pinned)}
       <div class="settings-card-row desktop-taskbar">
         <div>
           <strong>{$t('ui_windows_taskbar_63eeece9')}</strong>
           <p>
             {desktopLifecycle.taskbar.pinned
               ? $t('ui_kaede_is_already_pinned_4941bec5')
-              : desktopLifecycle.taskbar.supported && desktopLifecycle.taskbar.allowed
-                ? $t('ui_windows_will_show_its_own_confirmation_before_a76f7dcc')
-                : $t('ui_use_pin_to_taskbar_from_kaede_s_running_taskb_254f9683')}
+              : $t('ui_windows_will_show_its_own_confirmation_before_a76f7dcc')}
           </p>
         </div>
         {#if !desktopLifecycle.taskbar.pinned && desktopLifecycle.taskbar.supported && desktopLifecycle.taskbar.allowed}

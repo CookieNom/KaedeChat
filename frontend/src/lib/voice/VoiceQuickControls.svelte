@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { resolve } from '$app/paths';
   import Icon from '$lib/components/Icon.svelte';
   import {
     isNativeDesktop,
     nativeInvoke,
     type NativeDevices,
-    type NativePreferences
+    type NativePreferences,
+    type NativeVoiceStatus
   } from '$lib/platform/native';
   import { activeVoice } from './active.svelte';
   const id = $props.id();
@@ -20,18 +21,41 @@
   let menuLeft = $state(16);
   let menuBottom = $state(80);
   let request = 0;
+  let controlling = $state(false);
+  let nativeState = $state<NativeVoiceStatus>();
+  let nativeRequest = 0;
+  async function refreshNativeState() {
+    const current = ++nativeRequest;
+    const status = await nativeInvoke<NativeVoiceStatus>('native_voice_status');
+    if (current === nativeRequest) nativeState = status;
+  }
+  onMount(() => {
+    if (!isNativeDesktop()) return;
+    const refresh = () => {
+      if (!controlling) void refreshNativeState().catch(() => undefined);
+    };
+    refresh();
+    const timer = setInterval(refresh, 500);
+    return () => clearInterval(timer);
+  });
   const session = $derived((activeVoice.revision, activeVoice.session));
   const connected = $derived((activeVoice.revision, session?.connected ?? false));
   const canSpeak = $derived((activeVoice.revision, session?.canSpeak ?? false));
   const pushToTalkRequired = $derived((activeVoice.revision, session?.pushToTalkRequired ?? false));
-  const muted = $derived((activeVoice.revision, connected && !session?.microphone));
-  const deafened = $derived((activeVoice.revision, connected && (session?.deafened ?? false)));
+  const muted = $derived(
+    (activeVoice.revision, connected ? !session?.microphone : (nativeState?.muted ?? false))
+  );
+  const deafened = $derived(
+    (activeVoice.revision,
+    connected ? (session?.deafened ?? false) : (nativeState?.deafened ?? false))
+  );
+  const unavailable = $derived(!connected && !isNativeDesktop());
   const microphoneLabel = $derived(
-    !connected
+    unavailable
       ? 'Join a call to use your microphone'
-      : !canSpeak
+      : connected && !canSpeak
         ? 'You do not have permission to speak in this call'
-        : pushToTalkRequired
+        : connected && pushToTalkRequired
           ? 'Use push-to-talk in the call controls'
           : muted
             ? 'Unmute microphone'
@@ -39,14 +63,27 @@
   );
 
   async function control(deafen: boolean) {
+    if (controlling) return;
+    nativeRequest += 1;
+    controlling = true;
     error = '';
     try {
-      if (deafen) await session?.toggleDeafen();
+      if (!connected && isNativeDesktop()) {
+        if (!deafen && muted && deafened) {
+          await nativeInvoke('native_voice_control', { control: 'undeafen' });
+        }
+        await nativeInvoke('native_voice_control', {
+          control: deafen ? (deafened ? 'undeafen' : 'deafen') : muted ? 'unmute' : 'mute'
+        });
+      } else if (deafen) await session?.toggleDeafen();
       else await session?.toggleMicrophone();
+      if (isNativeDesktop()) await refreshNativeState();
     } catch {
       kind = deafen ? 'audiooutput' : 'audioinput';
       error = 'Could not change the call controls. Try again.';
       document.getElementById(id)?.showPopover();
+    } finally {
+      controlling = false;
     }
   }
 
@@ -131,7 +168,7 @@
 <div class="quick-controls" aria-label="Voice controls">
   <div class:off={muted} class="split">
     <button
-      disabled={!connected || !canSpeak || pushToTalkRequired}
+      disabled={controlling || unavailable || (connected && (!canSpeak || pushToTalkRequired))}
       aria-label={microphoneLabel}
       title={microphoneLabel}
       aria-pressed={muted}
@@ -148,9 +185,9 @@
   </div>
   <div class:off={deafened} class="split">
     <button
-      disabled={!connected}
-      aria-label={!connected ? 'Join a call to deafen' : deafened ? 'Undeafen' : 'Deafen'}
-      title={!connected ? 'Join a call to deafen' : deafened ? 'Undeafen' : 'Deafen'}
+      disabled={controlling || unavailable}
+      aria-label={unavailable ? 'Join a call to deafen' : deafened ? 'Undeafen' : 'Deafen'}
+      title={unavailable ? 'Join a call to deafen' : deafened ? 'Undeafen' : 'Deafen'}
       aria-pressed={deafened}
       onclick={() => control(true)}
       ><Icon name={deafened ? 'headphones-off' : 'headphones'} size={19} /></button

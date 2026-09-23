@@ -10,8 +10,11 @@ fn main() {
             println!("cargo:rustc-link-lib=xcb");
         }
         "windows" => {
-            build.file("native/windows.cpp").flag("/EHsc");
-            for library in ["ole32", "mmdevapi", "user32"] {
+            build
+                .file("native/windows.cpp")
+                .file("native/windows_camera.cpp")
+                .flag("/EHsc");
+            for library in ["ole32", "oleaut32", "strmiids", "mmdevapi", "user32"] {
                 println!("cargo:rustc-link-lib={library}");
             }
         }
