@@ -78,3 +78,4 @@ strip = "symbols"
 
 [patch.crates-io]
 nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
+tao = { path = "vendor/tao" }
