@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,7 +20,6 @@ void main() {
   setUp(() {
     calls.clear();
     FilePickerIO.registerWith();
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       calls.add(call);
@@ -30,7 +28,6 @@ void main() {
   });
 
   tearDown(() {
-    debugDefaultTargetPlatformOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
@@ -85,19 +82,18 @@ void main() {
       await tester.pumpAndSettle();
       expect(calls, isEmpty);
       expect(tester.takeException(), isNull);
-    });
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   }
 
   testWidgets('filtered requests retain their picker type', (tester) async {
     await open(tester, type: FileType.image);
     expect(calls.single.method, 'image');
     expect(find.text('Photos and videos'), findsNothing);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('Android continues directly to its file picker', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
     await open(tester);
     expect(calls.single.method, 'any');
     expect(find.text('Photos and videos'), findsNothing);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 }
