@@ -11,7 +11,7 @@
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
   import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
   import NativeThemeSettings from '$lib/components/NativeThemeSettings.svelte';
-  import { desktopThemes } from '$lib/ui/desktop-themes';
+  import { desktopThemes, selectDesktopTheme } from '$lib/ui/desktop-themes';
   import E2EESettings from '$lib/components/E2EESettings.svelte';
   import UserApplicationInstallations from '$lib/components/UserApplicationInstallations.svelte';
   import { clearActiveE2EEState } from '$lib/e2ee/client';
@@ -29,14 +29,7 @@
     type TtsPlaybackMode,
     type TtsPreferences
   } from '$lib/chat/tts';
-  import {
-    applyLocale,
-    languages,
-    localePreference,
-    markLanguageChosen,
-    matchLanguage,
-    t
-  } from '$lib/ui/locale';
+  import { applyLocale, languages, markLanguageChosen, matchLanguage, t } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
   import { loadMediaQuality, saveMediaQuality } from '$lib/voice/quality';
   import { chatEntities } from '$lib/stores/entities.svelte';
@@ -82,17 +75,20 @@
   let administrationAvailable = $state(false);
   let busy = $state(false);
   let savedSettings = $state<UserSettings | null>(null);
+  let desktopThemeDraft = $state('');
   const preferencesDirty = $derived(
     !!savedSettings &&
-      settings.age_restricted_dm_commands_enabled !==
-        savedSettings.age_restricted_dm_commands_enabled
+      (settings.theme !== savedSettings.theme ||
+        settings.locale !== savedSettings.locale ||
+        desktopThemeDraft !== $desktopThemes.selected ||
+        settings.age_restricted_dm_commands_enabled !==
+          savedSettings.age_restricted_dm_commands_enabled)
   );
   const privacyDirty = $derived(
     !!savedSettings &&
       (settings.dm_privacy !== savedSettings.dm_privacy ||
         settings.share_locale_with_bots !== savedSettings.share_locale_with_bots)
   );
-  let savedTheme = $state<UserSettings['theme']>('system');
   let assetProgress = $state(0);
   let assetStage = $state<'uploading' | 'processing' | null>(null);
   let lifecycle = 0;
@@ -150,7 +146,8 @@
               ? 'system'
               : (matchLanguage(loadedSettings.locale) ?? 'en')
         };
-        savedSettings = structuredClone(loadedSettings);
+        savedSettings = { ...settings };
+        desktopThemeDraft = $desktopThemes.selected;
         developerModeDraft = developerModeFromSettings(loadedSettings.notification_settings);
         developerMode.apply(loadedSettings.notification_settings);
         browserNotificationsDraft = browserNotificationsFromSettings(
@@ -162,7 +159,6 @@
         ttsPlaybackDraft = tts.playback;
         ttsRateDraft = tts.rate;
         applyTtsPreferences(tts);
-        savedTheme = loadedSettings.theme;
         emailEnabled = authConfiguration.password_recovery_enabled;
         loaded = true;
         applyTheme(settings.theme);
@@ -178,29 +174,6 @@
       if (routeController === controller) routeController = null;
     };
   });
-
-  async function changeLanguage(locale: string) {
-    if (busy) return;
-    const previous = $localePreference;
-    beginAction();
-    try {
-      const updated = await api<UserSettings>('/users/@me/settings', {
-        method: 'PATCH',
-        signal: routeController?.signal,
-        body: JSON.stringify({ locale })
-      });
-      if (routeController?.signal.aborted) return;
-      settings.locale =
-        updated.locale === 'system' ? 'system' : (matchLanguage(updated.locale) ?? 'en');
-      applyLocale(updated.locale);
-      markLanguageChosen();
-    } catch {
-      settings.locale = previous === 'system' ? 'system' : (matchLanguage(previous) ?? 'en');
-      error = $t('language_save_error');
-    } finally {
-      busy = false;
-    }
-  }
 
   function beginAction() {
     error = '';
@@ -224,8 +197,8 @@
     };
   }
 
-  async function savePreferences() {
-    if (!preferencesDirty && !privacyDirty) return;
+  async function savePreferences(section: 'appearance' | 'privacy') {
+    if (section === 'appearance' ? !preferencesDirty : !privacyDirty) return;
     const controller = routeController;
     if (busy || !loaded || !controller) return;
     const generation = lifecycle;
@@ -234,21 +207,40 @@
       const updated = await api<UserSettings>('/users/@me/settings', {
         method: 'PATCH',
         signal: controller.signal,
-        body: JSON.stringify({
-          locale: settings.locale,
-          theme: settings.theme,
-          dm_privacy: settings.dm_privacy,
-          share_locale_with_bots: settings.share_locale_with_bots,
-          age_restricted_dm_commands_enabled: settings.age_restricted_dm_commands_enabled
-        })
+        body: JSON.stringify(
+          section === 'privacy'
+            ? {
+                dm_privacy: settings.dm_privacy,
+                share_locale_with_bots: settings.share_locale_with_bots
+              }
+            : {
+                locale: settings.locale,
+                theme: settings.theme,
+                age_restricted_dm_commands_enabled: settings.age_restricted_dm_commands_enabled
+              }
+        )
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
-      settings = updated;
-      savedSettings = structuredClone(updated);
-      savedTheme = updated.theme;
-      applyTheme(settings.theme);
-      applyLocale(settings.locale);
-      developerMode.apply(updated.notification_settings);
+      const persisted =
+        section === 'privacy'
+          ? {
+              dm_privacy: updated.dm_privacy,
+              share_locale_with_bots: updated.share_locale_with_bots
+            }
+          : {
+              locale:
+                updated.locale === 'system' ? 'system' : (matchLanguage(updated.locale) ?? 'en'),
+              theme: updated.theme,
+              age_restricted_dm_commands_enabled: updated.age_restricted_dm_commands_enabled
+            };
+      settings = { ...settings, ...persisted };
+      savedSettings = { ...savedSettings!, ...persisted };
+      if (section === 'appearance') {
+        if (desktopThemeDraft !== $desktopThemes.selected) selectDesktopTheme(desktopThemeDraft);
+        applyTheme(settings.theme);
+        applyLocale(settings.locale);
+        markLanguageChosen();
+      }
       notice = $t('ui_preferences_saved_60d6766a');
     } catch (caught) {
       if (controller.signal.aborted || generation !== lifecycle) return;
@@ -288,51 +280,11 @@
     }
   }
 
-  async function changeTheme(theme: UserSettings['theme']) {
-    const controller = routeController;
-    if (busy || !loaded || !controller) return;
-    const generation = lifecycle;
-    const previousTheme = savedTheme;
-    const draftLocale = settings.locale;
-    const draftPrivacy = settings.dm_privacy;
-    const draftShareLocale = settings.share_locale_with_bots;
-    applyTheme(theme);
-    beginAction();
-    try {
-      const updated = await api<UserSettings>('/users/@me/settings', {
-        method: 'PATCH',
-        signal: controller.signal,
-        body: JSON.stringify({ theme })
-      });
-      if (controller.signal.aborted || generation !== lifecycle) return;
-      settings = {
-        ...updated,
-        locale: draftLocale,
-        dm_privacy: draftPrivacy,
-        share_locale_with_bots: draftShareLocale
-      };
-      savedTheme = updated.theme;
-      applyTheme(updated.theme);
-      notice = $t('ui_theme_updated_419ead52');
-    } catch (caught) {
-      if (controller.signal.aborted || generation !== lifecycle) return;
-      settings.theme = previousTheme;
-      applyTheme(previousTheme);
-      actionError(caught, $t('ui_could_not_update_the_theme_5199cfaa'));
-    } finally {
-      if (generation === lifecycle) busy = false;
-    }
-  }
-
   async function changeDeveloperMode(enabled: boolean) {
     const controller = routeController;
     if (busy || !loaded || !controller) return;
     const generation = lifecycle;
     const previous = developerModeDraft;
-    const draftLocale = settings.locale;
-    const draftTheme = settings.theme;
-    const draftPrivacy = settings.dm_privacy;
-    const draftShareLocale = settings.share_locale_with_bots;
     developerModeDraft = enabled;
     beginAction();
     try {
@@ -347,13 +299,7 @@
         })
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
-      settings = {
-        ...updated,
-        locale: draftLocale,
-        theme: draftTheme,
-        dm_privacy: draftPrivacy,
-        share_locale_with_bots: draftShareLocale
-      };
+      settings.notification_settings = updated.notification_settings;
       developerModeDraft = developerModeFromSettings(updated.notification_settings);
       developerMode.apply(updated.notification_settings);
       notice = `Developer mode ${developerModeDraft ? 'enabled' : 'disabled'}.`;
@@ -378,10 +324,6 @@
     if (busy || !loaded || !controller) return;
     const generation = lifecycle;
     const previous = browserNotificationsDraft;
-    const draftLocale = settings.locale;
-    const draftTheme = settings.theme;
-    const draftPrivacy = settings.dm_privacy;
-    const draftShareLocale = settings.share_locale_with_bots;
 
     if (enabled) {
       const permission = await browserNotifications.requestPermission();
@@ -413,13 +355,7 @@
         })
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
-      settings = {
-        ...updated,
-        locale: draftLocale,
-        theme: draftTheme,
-        dm_privacy: draftPrivacy,
-        share_locale_with_bots: draftShareLocale
-      };
+      settings.notification_settings = updated.notification_settings;
       browserNotificationsDraft = browserNotificationsFromSettings(updated.notification_settings);
       browserNotifications.apply(updated.notification_settings);
       browserNotifications.markPromptHandled();
@@ -494,8 +430,7 @@
         })
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
-      settings = updated;
-      savedSettings = structuredClone(updated);
+      settings.notification_settings = updated.notification_settings;
       const saved = ttsPreferencesFromSettings(updated.notification_settings);
       ttsEnabledDraft = saved.enabled;
       ttsPlaybackDraft = saved.playback;
@@ -1001,48 +936,30 @@
           class="settings-card settings-form"
           onsubmit={(event) => {
             event.preventDefault();
-            void savePreferences();
+            void savePreferences('appearance');
           }}
         >
-          {#if isNativeDesktop()}<NativeThemeSettings />{/if}
-          {#if !isNativeDesktop() || !$desktopThemes.selected}
+          {#if isNativeDesktop()}<NativeThemeSettings
+              bind:selected={desktopThemeDraft}
+              disabled={busy}
+            />{/if}
+          {#if !isNativeDesktop() || !desktopThemeDraft}
             <fieldset class="theme-picker">
               <legend>{$t('ui_theme_efb52e71')}</legend>
               <label>
-                <input
-                  type="radio"
-                  bind:group={settings.theme}
-                  value="system"
-                  disabled={busy}
-                  onchange={(event) =>
-                    void changeTheme(event.currentTarget.value as UserSettings['theme'])}
-                />
+                <input type="radio" bind:group={settings.theme} value="system" disabled={busy} />
                 <span class="theme-preview system-preview"><i></i><i></i></span>
                 <strong>{$t('ui_system_6725e7bb')}</strong>
                 <small>{$t('ui_match_this_device_5ac32633')}</small>
               </label>
               <label>
-                <input
-                  type="radio"
-                  bind:group={settings.theme}
-                  value="light"
-                  disabled={busy}
-                  onchange={(event) =>
-                    void changeTheme(event.currentTarget.value as UserSettings['theme'])}
-                />
+                <input type="radio" bind:group={settings.theme} value="light" disabled={busy} />
                 <span class="theme-preview light-preview"><i></i><i></i></span>
                 <strong>{$t('ui_light_dbcd5e7b')}</strong>
                 <small>{$t('ui_bright_and_calm_c8bfa8e4')}</small>
               </label>
               <label>
-                <input
-                  type="radio"
-                  bind:group={settings.theme}
-                  value="dark"
-                  disabled={busy}
-                  onchange={(event) =>
-                    void changeTheme(event.currentTarget.value as UserSettings['theme'])}
-                />
+                <input type="radio" bind:group={settings.theme} value="dark" disabled={busy} />
                 <span class="theme-preview dark-preview"><i></i><i></i></span>
                 <strong>{$t('ui_dark_60acc53f')}</strong>
                 <small>{$t('ui_easy_on_the_eyes_826a7461')}</small>
@@ -1052,11 +969,7 @@
           <label class="form-field">
             <span>{$t('language_settings')}</span>
             <small>{$t('language_description')}</small>
-            <select
-              bind:value={settings.locale}
-              disabled={busy}
-              onchange={(event) => void changeLanguage(event.currentTarget.value)}
-            >
+            <select bind:value={settings.locale} disabled={busy}>
               <option value="system">{$t('language_system')}</option>
               {#each languages as language (language.code)}
                 <option value={language.code}>{language.name}</option>
@@ -1225,7 +1138,7 @@
           class="settings-card settings-form"
           onsubmit={(event) => {
             event.preventDefault();
-            void savePreferences();
+            void savePreferences('privacy');
           }}
         >
           <label class="form-field">

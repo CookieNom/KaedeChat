@@ -9,10 +9,11 @@ try {
         ['system', 'light', 'dark'].includes(cached.base)
       ) {
         theme = cached.base;
-        const style = document.createElement('style');
-        style.id = 'kaede-desktop-theme';
-        style.textContent = cached.css;
-        document.head.append(style);
+        // Match runtime theme application without blocked inline style elements.
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(cached.css);
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        document.kaedeDesktopTheme = { sheet, css: cached.css };
       }
     } catch {
       // A damaged desktop theme cache must not prevent the default appearance.

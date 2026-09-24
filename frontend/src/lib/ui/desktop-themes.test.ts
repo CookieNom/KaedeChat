@@ -1,12 +1,15 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { readFileSync } from 'node:fs';
 
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   localStorage.clear();
   document.head.innerHTML = '';
+  document.adoptedStyleSheets = [];
+  delete document.kaedeDesktopTheme;
 });
 
 afterEach(() => {
@@ -33,16 +36,17 @@ it('reloads additions and edits, preserves the local choice across account updat
     applyTheme('light');
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(localStorage.getItem('kaede.theme')).toBe('light');
-    expect(document.getElementById('kaede-desktop-theme')?.textContent).toBe(css);
+    expect(document.kaedeDesktopTheme?.sheet.cssRules[0].cssText).toBe(css);
     css = ':root { --accent: pink; }';
     themes.push({ id: 'New.theme.css', name: 'New', description: '', base: 'light' });
     await vi.advanceTimersByTimeAsync(2000);
     expect(get(desktopThemes).themes).toHaveLength(2);
-    expect(document.getElementById('kaede-desktop-theme')?.textContent).toBe(css);
+    expect(document.kaedeDesktopTheme?.sheet.cssRules[0].cssText).toBe(css);
     themes = [];
     await vi.advanceTimersByTimeAsync(2000);
     expect(get(desktopThemes).missing).toBe(true);
-    expect(document.getElementById('kaede-desktop-theme')).toBeNull();
+    expect(document.kaedeDesktopTheme).toBeUndefined();
+    expect(document.adoptedStyleSheets).toHaveLength(0);
     expect(document.documentElement.dataset.theme).toBe('light');
     expect(localStorage.getItem('kaede.desktop-theme-cache')).toBeNull();
     selectDesktopTheme('');
@@ -89,7 +93,7 @@ it('restores the cache immediately, follows selections from another window, and 
     resolveOld({ themes: [], css: null, skipped: [] });
     await vi.advanceTimersByTimeAsync(0);
     expect(get(desktopThemes).selected).toBe('Light.theme.css');
-    expect(document.getElementById('kaede-desktop-theme')?.textContent).toContain('green');
+    expect(document.kaedeDesktopTheme?.sheet.cssRules[0].cssText).toContain('green');
   } finally {
     stop();
   }
@@ -99,5 +103,34 @@ it('does not load desktop themes in a browser', async () => {
   const { startDesktopThemes } = await import('./desktop-themes');
   startDesktopThemes()();
   expect(vi.getTimerCount()).toBe(0);
-  expect(document.getElementById('kaede-desktop-theme')).toBeNull();
+  expect(document.kaedeDesktopTheme).toBeUndefined();
+  expect(document.adoptedStyleSheets).toHaveLength(0);
 });
+
+it.each([
+  ['OLED', '#000000'],
+  ['Cyberpunk Midnight', '#080b18']
+])(
+  'restores %s at startup and reuses its stylesheet until defaults are selected',
+  async (name, background) => {
+    const css = readFileSync(`../desktop/tauri/src-tauri/themes/${name}.theme.css`, 'utf8');
+    localStorage.setItem('kaede.desktop-theme', name);
+    localStorage.setItem(
+      'kaede.desktop-theme-cache',
+      JSON.stringify({ id: name, base: 'dark', css })
+    );
+    window.__TAURI__ = { core: { invoke: vi.fn() } };
+    const otherSheet = new CSSStyleSheet();
+    document.adoptedStyleSheets = [otherSheet];
+    new Function(readFileSync('static/theme.js', 'utf8'))();
+    const sheet = document.kaedeDesktopTheme?.sheet;
+    expect(sheet?.cssRules[0].cssText).toContain(`--app-bg: ${background}`);
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(document.adoptedStyleSheets).toEqual([otherSheet, sheet]);
+    const { applyDesktopTheme } = await import('./theme');
+    applyDesktopTheme({ base: 'dark', css });
+    expect(document.adoptedStyleSheets).toEqual([otherSheet, sheet]);
+    applyDesktopTheme(null);
+    expect(document.adoptedStyleSheets).toEqual([otherSheet]);
+  }
+);

@@ -1,18 +1,31 @@
 export type ThemePreference = 'system' | 'light' | 'dark';
 
+declare global {
+  interface Document {
+    kaedeDesktopTheme?: { sheet: CSSStyleSheet; css: string };
+  }
+}
+
 let desktopBase: ThemePreference | null = null;
 
 export function applyDesktopTheme(theme: { base: ThemePreference; css: string } | null): void {
   desktopBase = theme?.base ?? null;
-  let style = document.getElementById('kaede-desktop-theme');
+  // CSSOM styles work under the static app's strict style-src policy.
+  const active = document.kaedeDesktopTheme;
   if (theme) {
-    if (!style) {
-      style = document.createElement('style');
-      style.id = 'kaede-desktop-theme';
-    }
-    if (style.textContent !== theme.css) style.textContent = theme.css;
-    if (document.head.lastElementChild !== style) document.head.append(style);
-  } else style?.remove();
+    const sheet = active?.sheet ?? new CSSStyleSheet();
+    if (active?.css !== theme.css) sheet.replaceSync(theme.css);
+    document.adoptedStyleSheets = [
+      ...document.adoptedStyleSheets.filter((item) => item !== sheet),
+      sheet
+    ];
+    document.kaedeDesktopTheme = { sheet, css: theme.css };
+  } else if (active) {
+    document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+      (item) => item !== active.sheet
+    );
+    delete document.kaedeDesktopTheme;
+  }
   applyTheme(storedTheme(), false);
 }
 

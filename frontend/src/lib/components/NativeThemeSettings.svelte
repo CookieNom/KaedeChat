@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { desktopThemes, selectDesktopTheme } from '$lib/ui/desktop-themes';
+  import { desktopThemes } from '$lib/ui/desktop-themes';
   import { nativeError, nativeInvoke } from '$lib/platform/native';
   import { t } from '$lib/ui/locale';
 
+  let { selected = $bindable(''), disabled = false }: { selected?: string; disabled?: boolean } =
+    $props();
+
   let folderError = $state('');
   let opening = $state(false);
-  const current = $derived(
-    $desktopThemes.themes.find((theme) => theme.id === $desktopThemes.selected)
-  );
+  const current = $derived($desktopThemes.themes.find((theme) => theme.id === selected));
 
   async function openFolder() {
     opening = true;
@@ -26,13 +27,10 @@
   <label class="form-field">
     <span>{$t('desktop_themes_label')}</span>
     <small>{$t('desktop_themes_description')}</small>
-    <select
-      value={$desktopThemes.selected}
-      onchange={(event) => selectDesktopTheme(event.currentTarget.value)}
-    >
+    <select bind:value={selected} {disabled}>
       <option value="">{$t('desktop_themes_default')}</option>
-      {#if $desktopThemes.selected && !current}
-        <option value={$desktopThemes.selected}>{$desktopThemes.selected}</option>
+      {#if selected && !current}
+        <option value={selected}>{selected}</option>
       {/if}
       {#each $desktopThemes.themes as theme (theme.id)}
         <option value={theme.id}>{theme.name}</option>
