@@ -95,6 +95,8 @@ def run_check(action: str) -> None:
     backend, frontend = f"kaede-check-backend:{name}", f"kaede-check-frontend:{name}"
     run(
         [
+            "bash",
+            str(ROOT / ".github/scripts/retry-network.sh"),
             "docker",
             "build",
             "--target",
@@ -107,6 +109,8 @@ def run_check(action: str) -> None:
     if action in {"check", "test", "audit"}:
         run(
             [
+                "bash",
+                str(ROOT / ".github/scripts/retry-network.sh"),
                 "docker",
                 "build",
                 "--target",

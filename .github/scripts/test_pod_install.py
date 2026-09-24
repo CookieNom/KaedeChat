@@ -93,3 +93,18 @@ fi
                 )
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertEqual(actual, attempts)
+
+    def test_docker_registry_failure_recovers_without_retrying_build_errors(self):
+        for failures, message, attempts, status in (
+            (1, "failed to copy: httpReadSeeker: failed open: unexpected status code "
+             "https://registry-1.docker.io/v2/docker/dockerfile/manifests/sha256:abc: "
+             "502 Bad Gateway", 2, 0),
+            (10, "Dockerfile: unknown instruction: RUNN", 1, 7),
+        ):
+            with self.subTest(message=message):
+                result, actual = self.run_install(
+                    failures, message,
+                    command=['docker', 'build', '--target', 'development', '.'],
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(actual, attempts)
