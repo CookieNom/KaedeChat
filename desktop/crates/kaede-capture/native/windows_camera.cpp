@@ -56,6 +56,8 @@ MIDL_INTERFACE("6B652FFF-11FE-4FCE-92AD-0266B5D7C78F") SampleGrabber : public IU
     virtual HRESULT STDMETHODCALLTYPE SetCallback(SampleCallback *, long) = 0;
 };
 constexpr GUID sample_grabber_clsid{0xc1f400a0, 0x3f08, 0x11d3, {0x9f, 0x0b, 0x00, 0x60, 0x08, 0x03, 0x9e, 0x37}};
+// The Null Renderer CLSID was also declared in the removed Qedit.h.
+constexpr GUID null_renderer_clsid{0xc1f400a4, 0x3f08, 0x11d3, {0x9f, 0x0b, 0x00, 0x60, 0x08, 0x03, 0x9e, 0x37}};
 constexpr size_t max_frame_bytes = 256 * 1024 * 1024;
 
 void check(HRESULT result, const char *message) {
@@ -247,7 +249,7 @@ void capture(const char *id, const CaptureOptions &options, const CaptureCallbac
     requested.formattype = FORMAT_VideoInfo;
     check(grabber->SetMediaType(&requested), "Could not request a camera video format.");
     check(graph->AddFilter(grabber_filter.Get(), L"Camera frames"), "Could not prepare camera frames.");
-    check(CoCreateInstance(CLSID_NullRenderer, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&renderer)), "Could not prepare camera capture.");
+    check(CoCreateInstance(null_renderer_clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&renderer)), "Could not prepare camera capture.");
     check(graph->AddFilter(renderer.Get(), L"Camera sink"), "Could not prepare camera capture.");
     check(builder->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, camera.Get(), grabber_filter.Get(), renderer.Get()),
         "The camera could not provide a supported video format.");
