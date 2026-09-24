@@ -2190,6 +2190,17 @@ void main() {
       expect(previewMediaUrl('https://example.test/page'), isNull);
     });
 
+    test('application invitations bypass website previews', () {
+      const invite =
+          'https://kaede.chat/applications/91287871893315584@kaede.chat/install/install';
+      expect(automaticMessageLinkPreview(invite, encrypted: false), isNull);
+      expect(
+        automaticMessageLinkPreview('$invite https://example.test/page',
+            encrypted: false),
+        'https://example.test/page',
+      );
+    });
+
     test('never derives network previews from decrypted message content', () {
       const media = 'look https://static.example/cat.webp';
       const link = 'read https://example.test/page';

@@ -44,6 +44,47 @@ void main() {
     }
   });
 
+  test('application invites use the install flow and respect preview privacy',
+      () {
+    const url =
+        'https://kaede.chat/applications/91287871893315584@kaede.chat/install/install';
+    final links = messageApplicationInvites('$url $url.', encrypted: false);
+    expect(links, hasLength(1));
+    expect(links.single.application!.wire, '91287871893315584@kaede.chat');
+    expect(links.single.templateSlug, 'install');
+    expect(messageApplicationInvites(url, encrypted: true), isEmpty);
+    expect(messageApplicationInvites('||$url||', encrypted: false), isEmpty);
+    for (final invalid in [
+      '$url?query=1',
+      '$url#fragment',
+      url.replaceFirst('https:', 'http:'),
+      url.replaceFirst('kaede.chat/', 'user@kaede.chat/'),
+      url.replaceFirst('kaede.chat/', 'kaede.chat:8443/'),
+      url.replaceFirst('/install/install', '/install/invalid!slug'),
+    ]) {
+      expect(applicationInviteLink(invalid), isNull);
+    }
+  });
+
+  testWidgets('application invite card fits phone and desktop widths',
+      (tester) async {
+    final link = applicationInviteLink(
+        'https://kaede.chat/applications/91287871893315584@kaede.chat/install/install')!;
+    for (final width in [260.0, 700.0]) {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body:
+              SizedBox(width: width, child: ApplicationInviteCard(link: link)),
+        ),
+      ));
+      expect(find.text('Application invitation'), findsOneWidget);
+      expect(find.text('kaede.chat'), findsOneWidget);
+      expect(find.text('Retry'), findsNothing);
+      expect(find.text('View invitation'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+  });
+
   testWidgets('invite card renders preview and unavailable state on a phone',
       (tester) async {
     const reference = '6eaJyk5M@kaede.chat';

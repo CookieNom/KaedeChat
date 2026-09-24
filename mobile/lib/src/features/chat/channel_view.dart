@@ -734,7 +734,9 @@ String? previewableMessageLink(String? content) {
         uri.pathSegments.firstOrNull == 'invite') {
       continue;
     }
-    if (previewMediaUrl(raw) != null) continue;
+    if (previewMediaUrl(raw) != null || applicationInviteLink(raw) != null) {
+      continue;
+    }
     return uri.toString();
   }
   return null;
@@ -7208,6 +7210,16 @@ final class _MessageTile extends StatelessWidget {
                     ))
                       InviteCard(
                           key: ValueKey(reference), reference: reference),
+                  if (!deleted && !displayedMessage.contentUnavailable)
+                    for (final link in messageApplicationInvites(
+                      displayedMessage.content,
+                      encrypted: encrypted,
+                    ))
+                      ApplicationInviteCard(
+                        key: ValueKey(
+                            '${link.application!.wire}/${link.templateSlug}'),
+                        link: link,
+                      ),
                   if (!deleted &&
                       displayedMessage.e2ee == null &&
                       mediaPreview == null &&

@@ -44,6 +44,74 @@ List<String> messageInviteReferences(String? content,
   return references.toList();
 }
 
+MobileDeepLink? applicationInviteLink(String value) {
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort ||
+      uri.hasQuery ||
+      uri.hasFragment ||
+      !uri.host.contains('.')) {
+    return null;
+  }
+  final link = MobileDeepLink.parse(uri);
+  if (link?.kind != MobileLinkKind.applicationInstall ||
+      !RegExp(r'^[a-z0-9][a-z0-9_-]{1,63}$').hasMatch(link!.templateSlug!)) {
+    return null;
+  }
+  return link;
+}
+
+List<MobileDeepLink> messageApplicationInvites(String? content,
+    {required bool encrypted}) {
+  if (encrypted || content == null) return const [];
+  final visible = content.replaceAll(RegExp(r'\|\|[\s\S]*?\|\|'), ' ');
+  final links = <String, MobileDeepLink>{};
+  for (final match in RegExp(r'https?://[^\s<>()]+').allMatches(visible)) {
+    final link = applicationInviteLink(
+      match[0]!.replaceFirst(RegExp(r'[.,!?;:]+$'), ''),
+    );
+    if (link == null) continue;
+    links['${link.application!.wire}/${link.templateSlug}'] = link;
+    if (links.length == 3) break;
+  }
+  return links.values.toList();
+}
+
+class ApplicationInviteCard extends StatelessWidget {
+  const ApplicationInviteCard({super.key, required this.link});
+
+  final MobileDeepLink link;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.only(top: 8),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Application invitation',
+                  style: Theme.of(context).textTheme.titleMedium),
+              Text(link.application!.domain.value),
+              const SizedBox(height: 8),
+              ActionButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        ApplicationInstallDeepLinkScreen(link: link),
+                  ),
+                ),
+                child: Text(L10n.of(context).ui_view_invitation_1c1c650f),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
 final inviteCardPreviewProvider = FutureProvider.autoDispose
     .family<Map<String, Object?>, String>((ref, reference) async {
   final preview = await ref.watch(repositoryProvider).previewInvite(reference);
