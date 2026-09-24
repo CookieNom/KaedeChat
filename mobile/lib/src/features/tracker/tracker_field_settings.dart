@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
@@ -60,7 +61,10 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
     try {
       await widget.repository.updateTrackerBoard(widget.channel, _board.version,
           keyPrefix: _prefix.text.trim().toUpperCase(), customFields: _fields);
-      if (mounted) Navigator.pop(context, true);
+      if (mounted) {
+        showActionFeedback(context, 'Tracker settings saved.');
+        Navigator.pop(context, true);
+      }
     } on Object catch (e) {
       if (mounted) {
         setState(() {
@@ -317,7 +321,17 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                           top: false,
                           child: Padding(
                               padding: const EdgeInsets.all(16),
-                              child: ActionButton(
+                              child: SaveButton(
+                                  controllers: [_prefix],
+                                  hasChanges: () =>
+                                      _prefix.text.trim().toUpperCase() !=
+                                          _board.keyPrefix ||
+                                      jsonEncode(_fields
+                                              .map((f) => f.toJson())
+                                              .toList()) !=
+                                          jsonEncode(_board.customFields
+                                              .map((f) => f.toJson())
+                                              .toList()),
                                   onPressed:
                                       _saving || _conflict ? null : _save,
                                   icon: const Icon(Icons.save_outlined),

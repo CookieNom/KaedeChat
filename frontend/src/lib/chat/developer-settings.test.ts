@@ -354,10 +354,21 @@ it('keeps failed command drafts and supports removal with undo before publicatio
   await vi.waitFor(() => expect(publishedCommands).toEqual([]));
 });
 
-it('saves profile artwork immediately without marking app settings as unsaved', async () => {
+it('saves profile artwork immediately and only enables its Save for unsaved edits', async () => {
+  let rejectMediaSave = false;
   const original = network.api.getMockImplementation()!;
   network.api.mockImplementation(async (path: string, options: RequestInit = {}) => {
     if (path.endsWith('/assets/tickets')) return { id: '50' };
+    if (path.endsWith('/assets/50') && options.method === 'PATCH') {
+      if (rejectMediaSave) throw new Error('Offline');
+      return {
+        id: '50',
+        application_ref: ref,
+        media_hash: saved.icon_hash,
+        version: 2,
+        ...JSON.parse(String(options.body))
+      };
+    }
     if (path.endsWith('/assets') && options.method === 'POST') {
       saved.icon_hash = 'a'.repeat(64);
       return {
@@ -381,6 +392,27 @@ it('saves profile artwork immediately without marking app settings as unsaved', 
   input('Name', 'Unsaved bot name');
   expect(button('Save changes').disabled).toBe(false);
   expect(document.querySelector('.avatar img')?.getAttribute('src')).toContain('a'.repeat(64));
+  const row = document.querySelector('.items article')!;
+  const save = [...row.querySelectorAll('button')].find(
+    (button) => button.textContent?.trim() === 'Save'
+  )!;
+  const name = row.querySelector('input')!;
+  expect(save.disabled).toBe(true);
+  name.value = 'Updated picture';
+  name.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
+  expect(save.disabled).toBe(false);
+  rejectMediaSave = true;
+  flushSync(() => save.click());
+  await vi.waitFor(() => expect(document.querySelector('.media-notice.error')).not.toBeNull());
+  expect(save.disabled).toBe(false);
+  expect(name.value).toBe('Updated picture');
+  rejectMediaSave = false;
+  flushSync(() => save.click());
+  await vi.waitFor(() => expect(save.disabled).toBe(true));
+  await vi.waitFor(() => expect(name.disabled).toBe(false));
+  expect(save.disabled).toBe(true);
+  expect(button('Save changes').disabled).toBe(false);
 });
 
 it('shows the exact bot snowflake and authority-qualified reference separately from the application ref', () => {

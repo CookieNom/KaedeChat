@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' show max;
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -357,6 +358,17 @@ Future<void> _showDmBotE2eeParticipation(
       ),
     );
 
+KaedeChannel? forumPostBackDestination(
+  KaedeChannel? channel,
+  Iterable<KaedeChannel> channels,
+) {
+  if (channel?.isThread != true) return null;
+  for (final parent in channels) {
+    if (parent.ref == channel!.parentRef && parent.isForum) return parent;
+  }
+  return null;
+}
+
 final class MobileShell extends ConsumerStatefulWidget {
   const MobileShell({super.key});
 
@@ -433,7 +445,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                         : _ConversationScreen(
                             channel: activeChannel,
                             visible: _conversationVisible,
-                            onBack: _openNavigation,
+                            onBack: _backFromConversation,
                             onMembers: activeChannel.guildRef != null &&
                                     conversation.guild != null &&
                                     canViewGuildMemberRoster(
@@ -471,7 +483,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
         onPopInvokedWithResult: (didPop, _) {
           if (didPop) return;
           if (page > 0) {
-            _openNavigation();
+            _backFromConversation();
           } else {
             _showSection(_ShellSection.messages);
           }
@@ -527,6 +539,20 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     if (!_pages.hasClients) return;
     _pages.animateToPage(1,
         duration: Duration(milliseconds: 220), curve: Curves.easeOutCubic);
+  }
+
+  void _backFromConversation() {
+    final state = ref.read(mobileControllerProvider);
+    final forum = forumPostBackDestination(
+      state.activeChannel,
+      state.activeGuild?.channels ?? const <KaedeChannel>[],
+    );
+    if (forum != null) {
+      unawaited(
+          ref.read(mobileControllerProvider.notifier).selectChannel(forum));
+      return;
+    }
+    _openNavigation();
   }
 
   void _openNavigation() {
@@ -1665,6 +1691,7 @@ final class _ThreadDetailsSheetState
   Future<void> _run(
     Future<void> Function() action, {
     bool Function()? authorized,
+    String? success,
   }) async {
     if (_busy || authorized?.call() == false) return;
     setState(() {
@@ -1674,6 +1701,7 @@ final class _ThreadDetailsSheetState
     try {
       if (authorized?.call() == false) return;
       await action();
+      if (mounted && success != null) showActionFeedback(context, success);
     } on Object catch (error) {
       if (mounted) setState(() => _error = userFacingError(error));
     } finally {
@@ -1772,7 +1800,12 @@ final class _ThreadDetailsSheetState
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
-              builder: (_, value, __) => ActionButton(
+              builder: (_, value, __) => SaveButton(
+                hasChanges: () =>
+                    value.text.trim() != (thread.name ?? '') ||
+                    duration != thread.autoArchiveDuration ||
+                    appliedTags.length != thread.appliedTagIds.length ||
+                    !appliedTags.containsAll(thread.appliedTagIds),
                 onPressed: value.text.trim().isEmpty ||
                         (forum != null &&
                             forum.flags & 16 != 0 &&
@@ -1803,7 +1836,8 @@ final class _ThreadDetailsSheetState
               'auto_archive_duration': result.$2,
               if (forum != null) 'applied_tag_ids': result.$3,
             }),
-        authorized: () => _canEdit);
+        authorized: () => _canEdit,
+        success: 'Thread settings saved.');
   }
 
   Future<void> _notifications() async {
@@ -3382,7 +3416,9 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
               SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerRight,
-                child: ActionButton(
+                child: SaveButton(
+                  controllers: [_name],
+                  hasChanges: () => _name.text.trim() != (channel.name ?? ''),
                   kind: ActionButtonKind.tonal,
                   onPressed: _busy
                       ? null
@@ -3396,6 +3432,9 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                                       ? null
                                       : _name.text.trim(),
                                 );
+                            if (context.mounted) {
+                              showActionFeedback(context, 'Group name saved.');
+                            }
                           }),
                   child: Text(L10n.of(context).ui_save_name_7692acbb),
                 ),
@@ -3639,19 +3678,57 @@ final class _GuildMemberRoute extends ConsumerWidget {
     if (live == null || !canViewGuildMemberRoster(live, state.user?.ref)) {
       return Scaffold(
         appBar: AppBar(title: Text(L10n.of(context).ui_members_ed3c96b0)),
-        body: Center(
-          child: Text(L10n.of(context)
-              .ui_the_member_list_is_no_longer_available_5902875d),
+        body: MemberListNavigation(
+          child: Center(
+            child: Text(L10n.of(context)
+                .ui_the_member_list_is_no_longer_available_5902875d),
+          ),
         ),
       );
     }
     return Scaffold(
-      body: _GuildMemberPane(
-        guild: live,
-        onBack: () => Navigator.of(context).pop(),
+      body: MemberListNavigation(
+        child: _GuildMemberPane(
+          guild: live,
+          onBack: () => Navigator.of(context).pop(),
+        ),
       ),
     );
   }
+}
+
+/// Keeps member controls clear of system UI and lets a right swipe go back.
+final class MemberListNavigation extends StatefulWidget {
+  const MemberListNavigation({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  State<MemberListNavigation> createState() => _MemberListNavigationState();
+}
+
+final class _MemberListNavigationState extends State<MemberListNavigation> {
+  double _dragDistance = 0;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+        bottom: false,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: (_) => _dragDistance = 0,
+          onHorizontalDragUpdate: (details) =>
+              _dragDistance += details.primaryDelta ?? 0,
+          onHorizontalDragEnd: (details) {
+            if ((_dragDistance >= 72 ||
+                    (_dragDistance > 0 &&
+                        (details.primaryVelocity ?? 0) >= 500)) &&
+                ModalRoute.of(context)?.isCurrent == true) {
+              Navigator.of(context).maybePop();
+            }
+          },
+          child: widget.child,
+        ),
+      );
 }
 
 final class _GuildMemberPane extends ConsumerStatefulWidget {
@@ -4489,7 +4566,13 @@ final class _GuildOrganizerSheetState
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            ActionButton(
+            SaveButton(
+              controllers: [name],
+              hasChanges: () =>
+                  existing == null ||
+                  name.text.trim() != existing.name ||
+                  selected.length != existing.guilds.length ||
+                  !selected.containsAll(existing.guilds),
               onPressed: name.text.trim().isEmpty || selected.isEmpty
                   ? null
                   : () => Navigator.pop(
@@ -4617,12 +4700,28 @@ final class _GuildOrganizerSheetState
                     label: Text(L10n.of(context).ui_create_group_12e0eaee),
                   ),
                   Spacer(),
-                  ActionButton(
+                  SaveButton(
+                    hasChanges: () =>
+                        jsonEncode(_navigation.toJson()) !=
+                        jsonEncode(widget.initial.toJson()),
                     onPressed: () async {
                       await ref
                           .read(mobileControllerProvider.notifier)
                           .saveGuildNavigation(_navigation);
-                      if (context.mounted) Navigator.pop(context);
+                      if (context.mounted) {
+                        final result = ref.read(mobileControllerProvider);
+                        if (result.phase != SessionPhase.ready ||
+                            result.error != null) {
+                          showActionFeedback(
+                              context,
+                              result.error ??
+                                  'Could not save server groups. Try again.',
+                              error: true);
+                          return;
+                        }
+                        showActionFeedback(context, 'Server groups saved.');
+                        Navigator.pop(context);
+                      }
                     },
                     icon: Icon(Icons.sync_rounded),
                     label: Text(L10n.of(context).ui_save_4d2d5d68),

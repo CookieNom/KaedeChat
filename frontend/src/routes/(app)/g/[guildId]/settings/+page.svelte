@@ -963,6 +963,54 @@
     };
   }
 
+  let savedChannel = $state('');
+  const channelDraft = $derived(
+    JSON.stringify([
+      channelName,
+      channelTopic.trim(),
+      channelNsfw,
+      channelParent,
+      channelSlowmode,
+      channelBitrate,
+      channelUserLimit,
+      channelRtcRegion.trim(),
+      channelHistoryPolicy,
+      channelForumTags,
+      channelForumSort,
+      channelForumLayout,
+      channelForumArchive,
+      channelForumSlowmode,
+      channelForumReaction,
+      channelForumReactionId,
+      channelForumE2EE,
+      channelForumRequireTag
+    ])
+  );
+  const channelDirty = $derived(!!selectedChannel && channelDraft !== savedChannel);
+  const guildDirty = $derived(
+    !!guild &&
+      (name !== guild.name ||
+        description.trim() !== (guild.description ?? '') ||
+        guildHistoryPolicy !== (guild.federated_history_policy ?? 'disabled'))
+  );
+  const roleDirty = $derived(
+    !!selectedRole &&
+      (roleName !== selectedRole.name ||
+        roleColor !== roleColorValue(selectedRole.color) ||
+        rolePermissions !== selectedRole.permissions ||
+        roleHoist !== selectedRole.hoist ||
+        roleMentionable !== selectedRole.mentionable)
+  );
+  const overwriteDirty = $derived.by(() => {
+    const existing = channelOverwrites.find(
+      (item) => `${item.target_type}:${item.target_id}@${item.target_domain}` === overwriteTarget
+    );
+    return (
+      !!overwriteTarget &&
+      (overwriteAllow !== (existing?.allow ?? '0') || overwriteDeny !== (existing?.deny ?? '0'))
+    );
+  });
+
   function selectChannel(channel: Channel, force = false) {
     if (busy && !force) return;
     selectedChannel = channel;
@@ -999,6 +1047,7 @@
     channelForumReactionId = channel.default_reaction_emoji?.emoji_id ?? null;
     channelForumE2EE = channel.e2ee_required ?? false;
     channelForumRequireTag = Boolean(Number(channel.flags ?? 0) & (1 << 4));
+    savedChannel = channelDraft;
     channelSafetyNumber = '';
     error = '';
     notice = '';
@@ -1136,6 +1185,7 @@
   }
 
   function saveChannelOverwrite() {
+    if (!overwriteDirty) return;
     if (
       !guild ||
       !selectedChannel ||
@@ -1596,7 +1646,7 @@
   }
 
   function saveGuild() {
-    if (!canManageGuild) return;
+    if (!canManageGuild || !guildDirty) return;
     return run(async (targetGuild, generation) => {
       const updated = await api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}`, {
         method: 'PATCH',
@@ -1844,7 +1894,19 @@
     };
   }
 
+  function emojiDirty(emoji: CustomEmoji) {
+    const value = emojiDrafts[entityKey(emoji)];
+    return (
+      !!value &&
+      (value.name.trim() !== emoji.name ||
+        (canEditEmojiRoleRestrictions(emoji) &&
+          JSON.stringify([...value.roles].sort()) !==
+            JSON.stringify([...(emoji.roles ?? [])].sort())))
+    );
+  }
+
   async function updateEmoji(emoji: CustomEmoji) {
+    if (!emojiDirty(emoji)) return;
     const draftValue = emojiDrafts[entityKey(emoji)];
     if (!guild || !draftValue || !canEditEmoji(emoji) || emojiBusy) return;
     if (!draftValue.name.trim()) {
@@ -2109,7 +2171,25 @@
     };
   }
 
+  function stickerDirty(sticker: GuildSticker) {
+    const value = stickerDrafts[entityKey(sticker)];
+    return (
+      !!value &&
+      (value.name.trim() !== sticker.name ||
+        value.description.trim() !== (sticker.description ?? '') ||
+        JSON.stringify([
+          ...new Set(
+            value.tags
+              .split(',')
+              .map((tag) => tag.trim())
+              .filter(Boolean)
+          )
+        ]) !== JSON.stringify(sticker.tags ?? []))
+    );
+  }
+
   async function updateSticker(sticker: GuildSticker) {
+    if (!stickerDirty(sticker)) return;
     const draftValue = stickerDrafts[entityKey(sticker)];
     if (!guild || !draftValue || !canEditSticker(sticker) || stickerBusy) return;
     const tags = [
@@ -2199,7 +2279,7 @@
   }
 
   function saveChannel() {
-    if (!canEditSelectedChannel || !selectedChannel) return;
+    if (!canEditSelectedChannel || !selectedChannel || !channelDirty) return;
     const target = selectedChannel;
     return run(async (targetGuild, generation) => {
       const current = guild?.channels?.find((channel) => entityKey(channel) === entityKey(target));
@@ -2368,7 +2448,7 @@
   }
 
   function saveRole() {
-    if (!canManageSelectedRole || !selectedRole) return;
+    if (!canManageSelectedRole || !selectedRole || !roleDirty) return;
     const target = selectedRole;
     return run(async (targetGuild, generation) => {
       const updated = await api<Role>(
@@ -2695,7 +2775,16 @@
     });
   }
 
+  function webhookDirty(webhook: WebhookSummary) {
+    return (
+      (webhookNameDrafts[webhook.id] ?? webhook.name).trim() !== webhook.name ||
+      (webhookChannelDrafts[webhook.id] ?? `${webhook.channel_id}@${webhook.channel_domain}`) !==
+        `${webhook.channel_id}@${webhook.channel_domain}`
+    );
+  }
+
   function updateWebhook(webhook: WebhookSummary) {
+    if (!webhookDirty(webhook)) return;
     if (!canManageWebhook(webhook)) return;
     const nextName = (webhookNameDrafts[webhook.id] ?? webhook.name).trim();
     if (!nextName) {
@@ -3828,7 +3917,7 @@
             {/if}
             {#if canManageGuild}
               <div class="form-actions">
-                <button class="primary-button" disabled={busy}
+                <button class="primary-button" disabled={busy || !guildDirty}
                   >{$t('ui_save_overview_1b6df9ef')}</button
                 >
               </div>
@@ -4340,7 +4429,7 @@
                       </label>
                     {/if}
                     <div class="form-actions">
-                      <button class="primary-button" disabled={busy}
+                      <button class="primary-button" disabled={busy || !channelDirty}
                         >{$t('ui_save_channel_694a13e9')}</button
                       >
                     </div>
@@ -4551,7 +4640,9 @@
                             <button
                               class="primary-button"
                               type="button"
-                              disabled={busy || !canManageOverwriteTarget(overwriteTarget)}
+                              disabled={busy ||
+                                !overwriteDirty ||
+                                !canManageOverwriteTarget(overwriteTarget)}
                               onclick={() => void saveChannelOverwrite()}
                               >{$t('ui_save_permissions_1eab372a')}</button
                             >
@@ -4796,6 +4887,7 @@
                                 class="secondary-button"
                                 type="button"
                                 disabled={busy ||
+                                  !webhookDirty(webhook) ||
                                   !(webhookNameDrafts[webhook.id] ?? webhook.name).trim()}
                                 onclick={() => void updateWebhook(webhook)}
                                 >{$t('ui_save_1509f561')}</button
@@ -5057,7 +5149,7 @@
                         <button
                           class="secondary-button"
                           type="button"
-                          disabled={emojiBusy}
+                          disabled={emojiBusy || !emojiDirty(emoji)}
                           onclick={() => void updateEmoji(emoji)}>{$t('ui_save_1509f561')}</button
                         >
                         <button
@@ -5301,7 +5393,7 @@
                         <button
                           class="secondary-button"
                           type="button"
-                          disabled={stickerBusy}
+                          disabled={stickerBusy || !stickerDirty(sticker)}
                           onclick={() => void updateSticker(sticker)}
                           >{$t('ui_save_1509f561')}</button
                         >
@@ -5736,7 +5828,9 @@
                         >{$t('ui_the_default_role_cannot_be_deleted_f09efff5')}</span
                       >
                     {/if}
-                    <button class="primary-button" disabled={busy || !canManageSelectedRole}
+                    <button
+                      class="primary-button"
+                      disabled={busy || !roleDirty || !canManageSelectedRole}
                       >{$t('ui_save_role_c7523b15')}</button
                     >
                   </div>

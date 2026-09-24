@@ -5047,7 +5047,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
               kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          ActionButton(
+          SaveButton(
+              controllers: [input],
+              hasChanges: () => input.text.trim() != original.trim(),
               onPressed: () => Navigator.pop(context, input.text.trim()),
               child: Text(L10n.of(context).ui_save_4d2d5d68)),
         ],

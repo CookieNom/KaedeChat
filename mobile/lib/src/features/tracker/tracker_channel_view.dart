@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -331,7 +332,10 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         },
       ),
     );
-    if (draft != null) await _load(background: true);
+    if (draft != null) {
+      if (mounted) showActionFeedback(context, 'Task saved.');
+      await _load(background: true);
+    }
   }
 
   Future<void> _editTask(TrackerTask task) async {
@@ -404,7 +408,10 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         },
       ),
     );
-    if (draft != null) await _load(background: true);
+    if (draft != null) {
+      if (mounted) showActionFeedback(context, 'Task saved.');
+      await _load(background: true);
+    }
   }
 
   Future<void> _moveTask(TrackerTask task) async {
@@ -1716,6 +1723,19 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
   String? _saveError;
   bool get _busy => _saving || _busyFields.isNotEmpty;
 
+  late String _savedDraft;
+  String get _draftState => jsonEncode([
+        _assignee?.wire,
+        if (widget.canEditDetails) ...[
+          _title.text.trim(),
+          _description.text.trim(),
+          _lane.wire,
+          _priority.name,
+          _dueAt?.toIso8601String(),
+          _customValues
+        ],
+      ]);
+
   @override
   void initState() {
     super.initState();
@@ -1728,6 +1748,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
     // Keep one idempotency key for the whole editor lifecycle. If a caller
     // retries after a lost response, the server returns the original task.
     _clientNonce = Uuid().v4();
+    _savedDraft = _draftState;
   }
 
   @override
@@ -1843,6 +1864,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
           _fields = board.customFields;
           _lanes = board.lanes;
           _draftGeneration++;
+          _savedDraft = _draftState;
           _saveError = null;
           _conflict = false;
         });
@@ -2094,6 +2116,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                                                 setState(() {
                                                   _assignee = assignee;
                                                   _draftGeneration++;
+                                                  _savedDraft = _draftState;
                                                 });
                                               })),
                               SizedBox(height: 14),
@@ -2198,7 +2221,10 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                     padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
                     child: SizedBox(
                       width: double.infinity,
-                      child: ActionButton(
+                      child: SaveButton(
+                        controllers: [_title, _description],
+                        hasChanges: () =>
+                            widget.task == null || _draftState != _savedDraft,
                         key: ValueKey('tracker-task-save'),
                         onPressed: _busy || _conflict ? null : _save,
                         icon: Icon(widget.task == null
@@ -2392,7 +2418,14 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                   ),
                 ),
                 SizedBox(height: 10),
-                ActionButton(
+                SaveButton(
+                  controllers: [_name],
+                  hasChanges: () =>
+                      widget.lane == null ||
+                      _name.text.trim() != widget.lane!.name ||
+                      _color != widget.lane!.color ||
+                      _kind != widget.lane!.kind ||
+                      _completed != widget.lane!.completed,
                   key: ValueKey('tracker-lane-save'),
                   onPressed: _save,
                   icon: Icon(widget.lane == null

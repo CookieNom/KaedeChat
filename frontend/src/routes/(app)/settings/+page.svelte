@@ -81,6 +81,17 @@
   let loaded = $state(false);
   let administrationAvailable = $state(false);
   let busy = $state(false);
+  let savedSettings = $state<UserSettings | null>(null);
+  const preferencesDirty = $derived(
+    !!savedSettings &&
+      settings.age_restricted_dm_commands_enabled !==
+        savedSettings.age_restricted_dm_commands_enabled
+  );
+  const privacyDirty = $derived(
+    !!savedSettings &&
+      (settings.dm_privacy !== savedSettings.dm_privacy ||
+        settings.share_locale_with_bots !== savedSettings.share_locale_with_bots)
+  );
   let savedTheme = $state<UserSettings['theme']>('system');
   let assetProgress = $state(0);
   let assetStage = $state<'uploading' | 'processing' | null>(null);
@@ -89,6 +100,12 @@
   let displayName = $state('');
   let bio = $state('');
   let customStatus = $state('');
+  const profileDirty = $derived(
+    !!profile &&
+      (displayName !== (profile.display_name ?? '') ||
+        bio !== (profile.bio ?? '') ||
+        customStatus !== (profile.custom_status ?? ''))
+  );
   let developerModeDraft = $state(false);
   let opusDtxDraft = $state(true);
   let browserNotificationsDraft = $state(false);
@@ -133,6 +150,7 @@
               ? 'system'
               : (matchLanguage(loadedSettings.locale) ?? 'en')
         };
+        savedSettings = structuredClone(loadedSettings);
         developerModeDraft = developerModeFromSettings(loadedSettings.notification_settings);
         developerMode.apply(loadedSettings.notification_settings);
         browserNotificationsDraft = browserNotificationsFromSettings(
@@ -207,6 +225,7 @@
   }
 
   async function savePreferences() {
+    if (!preferencesDirty && !privacyDirty) return;
     const controller = routeController;
     if (busy || !loaded || !controller) return;
     const generation = lifecycle;
@@ -225,6 +244,7 @@
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
       settings = updated;
+      savedSettings = structuredClone(updated);
       savedTheme = updated.theme;
       applyTheme(settings.theme);
       applyLocale(settings.locale);
@@ -239,6 +259,7 @@
   }
 
   async function saveProfile() {
+    if (!profileDirty) return;
     const controller = routeController;
     if (busy || !loaded || !controller) return;
     const generation = lifecycle;
@@ -474,6 +495,7 @@
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
       settings = updated;
+      savedSettings = structuredClone(updated);
       const saved = ttsPreferencesFromSettings(updated.notification_settings);
       ttsEnabledDraft = saved.enabled;
       ttsPlaybackDraft = saved.playback;
@@ -881,7 +903,7 @@
           </label>
           <div class="profile-field-footer">
             <span>{bio.length}/500</span>
-            <button class="primary-button" disabled={busy}>
+            <button class="primary-button" disabled={busy || !profileDirty}>
               {busy
                 ? assetStage
                   ? $t('ui_processing_image_51bc622f')
@@ -1062,7 +1084,7 @@
             />
           </label>
           <div class="form-actions">
-            <button class="primary-button" disabled={busy}>
+            <button class="primary-button" disabled={busy || !preferencesDirty}>
               {busy ? $t('ui_saving_23e39291') : $t('ui_save_preferences_089e57e3')}
             </button>
           </div>
@@ -1225,7 +1247,7 @@
             <input type="checkbox" bind:checked={settings.share_locale_with_bots} disabled={busy} />
           </label>
           <div class="form-actions">
-            <button class="primary-button" disabled={busy}>
+            <button class="primary-button" disabled={busy || !privacyDirty}>
               {busy ? $t('ui_saving_23e39291') : $t('ui_save_privacy_6b9197ce')}
             </button>
           </div>

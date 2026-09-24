@@ -23,7 +23,9 @@ it('preserves the selected color when a newly created status appears and is save
     lanes: [],
     tasks: []
   };
-  const onUpdateLane = vi.fn();
+  const onUpdateLane = vi.fn((lane: TrackerLane, patch) => {
+    state.set('lanes', [{ ...lane, ...patch }]);
+  });
   const onCreateLane = vi.fn((request: CreateTrackerLaneRequest) => {
     state.set('lanes', [
       {
@@ -73,9 +75,20 @@ it('preserves the selected color when a newly created status appears and is save
   const save = [...row.querySelectorAll('button')].find(
     (button) => button.textContent?.trim() === 'Save'
   )!;
+  expect(save.disabled).toBe(true);
   save.click();
-  expect(onUpdateLane).toHaveBeenCalledWith(state.get('lanes')![0], {
-    name: 'Testing',
+  expect(onUpdateLane).not.toHaveBeenCalled();
+  const laneName = row.querySelector<HTMLInputElement>('input[maxlength="100"]')!;
+  laneName.value = 'Updated';
+  laneName.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
+  expect(save.disabled).toBe(false);
+  const previous = state.get('lanes')![0];
+  save.click();
+  flushSync();
+  expect(save.disabled).toBe(true);
+  expect(onUpdateLane).toHaveBeenCalledWith(previous, {
+    name: 'Updated',
     color: 0xff00ff,
     completed: false
   });

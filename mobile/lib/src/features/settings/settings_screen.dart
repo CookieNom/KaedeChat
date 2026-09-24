@@ -550,7 +550,12 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       : null,
                 ),
                 SizedBox(height: 8),
-                ActionButton(
+                SaveButton(
+                  hasChanges: () =>
+                      guilds != installation.contexts.contains('guild') ||
+                      privateChannels !=
+                          installation.contexts.contains('private_channel') ||
+                      botDms != installation.contexts.contains('bot_dm'),
                   onPressed:
                       grantsEditable && (guilds || privateChannels || botDms)
                           ? () => Navigator.pop(sheetContext, 'save')

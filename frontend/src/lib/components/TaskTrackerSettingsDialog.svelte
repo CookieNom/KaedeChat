@@ -87,10 +87,19 @@
     laneCompleted = false;
   }
 
+  function laneDirty(lane: TrackerLane) {
+    const key = entityKey(lane);
+    return (
+      (names[key] ?? lane.name).trim() !== lane.name ||
+      parseColor(colors[key] ?? trackerColor(lane.color)) !== lane.color ||
+      (completed[key] ?? lane.completed) !== lane.completed
+    );
+  }
+
   function saveLane(lane: TrackerLane) {
     const key = entityKey(lane);
     const name = names[key]?.trim();
-    if (!name || busy) return;
+    if (!name || busy || !laneDirty(lane)) return;
     void onUpdateLane(lane, {
       name,
       color: parseColor(colors[key] ?? trackerColor(lane.color)),
@@ -162,7 +171,8 @@
         class="prefix-form"
         onsubmit={(event) => {
           event.preventDefault();
-          if (prefix.trim()) void onPrefix(prefix.trim().toUpperCase());
+          if (!busy && prefix.trim() && prefix.trim().toUpperCase() !== board.key_prefix)
+            void onPrefix(prefix.trim().toUpperCase());
         }}
       >
         <label>
@@ -231,8 +241,10 @@
                   disabled={busy || index === lanes.length - 1}
                   onclick={() => void onMoveLane(lane, index + 1)}>↓</button
                 >
-                <button type="button" disabled={busy} onclick={() => saveLane(lane)}
-                  >{$t('ui_save_1509f561')}</button
+                <button
+                  type="button"
+                  disabled={busy || !names[key]?.trim() || !laneDirty(lane)}
+                  onclick={() => saveLane(lane)}>{$t('ui_save_1509f561')}</button
                 >
                 {#if deleteConfirmKey === key}
                   <button

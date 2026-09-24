@@ -1,9 +1,20 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
-  let { label, value = $bindable() }: { label: string; value?: string | null } = $props();
+  let {
+    label,
+    value = $bindable(),
+    disabled = false,
+    onsave
+  }: {
+    label: string;
+    value?: string | null;
+    disabled?: boolean;
+    onsave?: () => void;
+  } = $props();
   let recording = $state(false);
+  let pending = $state<string | null>(null);
   function record(event: KeyboardEvent) {
-    if (!recording) return;
+    if (!recording || disabled) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.key === 'Escape') {
@@ -13,7 +24,7 @@
     if (event.repeat || ['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) || !event.code)
       return;
     const key = event.code.replace(/^(Key|Digit)/, '');
-    value = [
+    pending = [
       event.ctrlKey && 'Ctrl',
       event.altKey && 'Alt',
       event.shiftKey && 'Shift',
@@ -22,7 +33,6 @@
     ]
       .filter(Boolean)
       .join('+');
-    recording = false;
   }
 </script>
 
@@ -31,25 +41,55 @@
   <div class:recording class="recorder">
     <button
       class="record"
+      type="button"
+      {disabled}
       aria-label={`Record ${label.toLowerCase()} shortcut`}
       aria-pressed={recording}
-      onclick={() => (recording = !recording)}
+      onclick={() => {
+        pending = null;
+        recording = true;
+      }}
       onkeydown={record}
-      onblur={() => (recording = false)}
     >
-      {#if recording}<span>Press a key combination…</span>{:else if value}<span class="keys"
-          >{#each value.split('+') as key, index (index)}<kbd>{key}</kbd>{/each}</span
+      {#if recording && !pending}<span>Press a single key or key combination…</span
+        >{:else if recording ? pending : value}<span class="keys"
+          >{#each (recording ? pending! : value!).split('+') as key, index (index)}<kbd>{key}</kbd
+            >{/each}</span
         >{:else}<span class="placeholder">Record shortcut</span>{/if}
       <Icon name="key" size={16} />
     </button>
-    {#if value}<button
+    {#if value && !recording}<button
+        type="button"
+        {disabled}
         class="clear"
         aria-label={`Clear ${label.toLowerCase()} shortcut`}
         title="Clear shortcut"
         onclick={() => (value = null)}><Icon name="x" size={16} /></button
       >{/if}
   </div>
-  {#if recording}<small role="status">Press Escape to cancel</small>{/if}
+  {#if recording}
+    <small role="status"
+      >{pending
+        ? 'Click Save keybind to finish, or press another key to replace it.'
+        : 'Waiting for a key. Save becomes available after you press a key.'}</small
+    >
+    <div class="recording-actions">
+      <button
+        type="button"
+        class="save"
+        disabled={disabled || !pending}
+        onclick={() => {
+          if (disabled || !pending) return;
+          value = pending;
+          recording = false;
+          onsave?.();
+        }}>Save keybind</button
+      >
+      <button type="button" {disabled} onclick={() => (recording = false)}>Cancel</button>
+    </div>
+  {:else}
+    <small>Click the box to record a keybind.</small>
+  {/if}
 </div>
 
 <style>
@@ -116,6 +156,24 @@
   }
   small {
     font-size: 11px;
+  }
+  .recording-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .recording-actions button {
+    min-height: 44px;
+    border: 1px solid var(--line);
+    background: var(--surface-raised);
+  }
+  .recording-actions .save {
+    background: var(--accent);
+    color: var(--on-accent, #fff);
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .clear:hover {
     color: var(--danger);

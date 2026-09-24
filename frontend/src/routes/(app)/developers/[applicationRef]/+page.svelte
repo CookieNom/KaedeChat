@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
@@ -622,6 +623,7 @@
         application = { ...updatedApplication, ...newerEdits };
         if (directoryTags === submittedTags) directoryTags = savedTags;
         saveState = 'saved';
+        notice = $t('ui_application_settings_saved_bb68cc15');
 
         void loadDirectoryPreview(applicationRef);
       }
@@ -873,6 +875,8 @@
     previewController.abort();
   });
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 <svelte:head
   ><title

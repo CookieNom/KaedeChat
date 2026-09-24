@@ -49,6 +49,65 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets(
+        'Save tracks edits, reverts, pending saves and retries on $platform',
+        (tester) async {
+      final input = TextEditingController(text: 'Original');
+      addTearDown(input.dispose);
+      var saved = input.text;
+      var pending = Completer<void>();
+      var calls = 0;
+      await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme().copyWith(platform: platform),
+        home: Scaffold(
+            body: SaveButton(
+          controllers: [input],
+          hasChanges: () => input.text.trim() != saved,
+          onPressed: () async {
+            calls++;
+            final submitted = input.text.trim();
+            await pending.future;
+            saved = submitted;
+          },
+          child: const Text('Save'),
+        )),
+      ));
+      bool enabled() =>
+          tester.widget<FilledButton>(find.byType(FilledButton)).onPressed !=
+          null;
+      expect(enabled(), isFalse);
+      input.text = 'Edited';
+      await tester.pump();
+      expect(enabled(), isTrue);
+      input.text = 'Original';
+      await tester.pump();
+      expect(enabled(), isFalse);
+      input.text = 'Edited';
+      await tester.pump();
+      await tester.tap(find.text('Save'));
+      await tester.pump();
+      expect(enabled(), isFalse);
+      expect(calls, 1);
+      pending.complete();
+      await tester.pumpAndSettle();
+      expect(enabled(), isFalse);
+      input.text = 'Another edit';
+      await tester.pump();
+      pending = Completer<void>();
+      await tester.tap(find.text('Save'));
+      pending.completeError(StateError('Offline'));
+      await tester.pumpAndSettle();
+      expect(enabled(), isTrue);
+      expect(input.text, 'Another edit');
+      pending = Completer<void>();
+      await tester.tap(find.text('Save'));
+      input.text = 'Edited while saving';
+      pending.complete();
+      await tester.pumpAndSettle();
+      expect(saved, 'Another edit');
+      expect(enabled(), isTrue);
+    });
+
     testWidgets('settings switch and choice await their changes on $platform',
         (tester) async {
       var switches = 0;

@@ -408,6 +408,7 @@ button:disabled,
 .danger-button:disabled,
 .icon-button:disabled {
   cursor: not-allowed;
+  filter: grayscale(1);
   opacity: 0.52;
   transform: none;
   box-shadow: none;
@@ -3873,6 +3874,11 @@ progress {
   align-items: start;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+}
+
+.native-quality-grid > .form-field {
+  align-self: stretch;
+  grid-template-rows: auto 1fr auto;
 }
 
 .native-device-toolbar {

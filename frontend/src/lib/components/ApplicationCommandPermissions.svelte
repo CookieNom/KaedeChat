@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
@@ -50,6 +51,7 @@
   let targetPermission = $state(true);
 
   const selected = $derived(scopes.find((scope) => scope.id === selectedId) ?? null);
+  const dirty = $derived(JSON.stringify(draft) !== JSON.stringify(selected?.permissions ?? []));
   const applicationDefaults = $derived(scopes.find((scope) => scope.command === null) ?? null);
   const roleOptions = $derived(
     roles.map((role) => ({
@@ -111,7 +113,7 @@
   }
 
   async function save() {
-    if (!selected || !canManage || saving) return;
+    if (!selected || !canManage || saving || !dirty) return;
     saving = true;
     error = '';
     notice = '';
@@ -153,6 +155,8 @@
   }
 </script>
 
+<Toast message={notice} onDismiss={() => (notice = '')} />
+
 <details
   class="command-permissions"
   bind:open
@@ -171,7 +175,11 @@
   {:else}
     <label>
       {$t('ui_command_71316697')}
-      <select value={selectedId} onchange={(event) => selectScope(event.currentTarget.value)}>
+      <select
+        value={selectedId}
+        disabled={saving}
+        onchange={(event) => selectScope(event.currentTarget.value)}
+      >
         {#each scopes as scope (scope.id)}
           <option value={scope.id}>
             {scope.command ? `/${scope.command.name}` : `All ${scope.application_name} commands`}
@@ -265,7 +273,7 @@
               >{$t('ui_use_app_defaults_0f89d751')}</button
             >
           {/if}
-          <button type="button" disabled={saving} onclick={() => void save()}
+          <button type="button" disabled={saving || !dirty} onclick={() => void save()}
             >{saving ? $t('ui_saving_23e39291') : $t('ui_save_permissions_1eab372a')}</button
           >
         </div>

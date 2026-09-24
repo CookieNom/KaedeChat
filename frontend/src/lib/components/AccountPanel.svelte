@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import VoiceQuickControls from '$lib/voice/VoiceQuickControls.svelte';
   import { tick } from 'svelte';
   import { resolve } from '$app/paths';
@@ -68,7 +69,7 @@
   }
 
   async function saveStatus() {
-    if (busy || loading) return;
+    if (busy || loading || status.trim() === (displayed?.custom_status ?? '')) return;
     busy = true;
     error = '';
     try {
@@ -126,6 +127,8 @@
     }
   }
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 <button
   bind:this={trigger}
@@ -204,7 +207,11 @@
           disabled={busy}
         />
         <div class="status-actions">
-          <button class="primary-button" disabled={busy}>Save</button>
+          <button
+            class="primary-button"
+            disabled={busy || loading || status.trim() === (displayed?.custom_status ?? '')}
+            >Save</button
+          >
           <button
             type="button"
             class="secondary-button"

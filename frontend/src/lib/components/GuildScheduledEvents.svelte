@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { onDestroy, onMount, untrack } from 'svelte';
@@ -61,6 +62,7 @@
   let editorOpen = $state(false);
   let editing = $state<ScheduledEvent | null>(null);
   let draft = $state<ScheduledEventDraft>(emptyDraft());
+  let savedDraft = $state('');
   let busyRef = $state('');
   let error = $state('');
   let notice = $state('');
@@ -71,6 +73,9 @@
   let coverFile = $state<File | null>(null);
   let coverPreview = $state('');
   let removeCover = $state(false);
+  const dirty = $derived(
+    !editing || JSON.stringify(draft) !== savedDraft || !!coverFile || removeCover
+  );
   let uploadProgress = $state(0);
 
   onDestroy(() => releaseCoverPreview());
@@ -221,6 +226,7 @@
       endTime: event.scheduled_end_time ? localDateTime(event.scheduled_end_time) : '',
       recurrence: scheduledEventRecurrencePreset(event.recurrence_rule)
     };
+    savedDraft = JSON.stringify(draft);
     resetCover(event);
     editorOpen = true;
     error = '';
@@ -228,7 +234,7 @@
   }
 
   async function save() {
-    if (busyRef) return;
+    if (busyRef || !dirty) return;
     busyRef = editing ? scheduledEventRef(editing) : 'create';
     error = '';
     let detailsSaved = false;
@@ -241,6 +247,7 @@
       else publish([...events, saved]);
       detailsSaved = true;
       editing = saved;
+      savedDraft = JSON.stringify(draft);
       if (coverFile) {
         saved = await uploadScheduledEventImage(
           guildRef,
@@ -410,6 +417,8 @@
     }
   }
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 <section id="scheduled-events" class="events-panel" aria-labelledby="scheduled-events-title">
   <header>
@@ -728,7 +737,7 @@
           <button type="button" onclick={() => (editorOpen = false)} disabled={Boolean(busyRef)}
             >{$t('ui_cancel_19766ed6')}</button
           >
-          <button class="primary" disabled={Boolean(busyRef)}
+          <button class="primary" disabled={Boolean(busyRef) || !dirty}
             >{busyRef ? $t('ui_saving_23e39291') : $t('ui_save_event_2ea84a3c')}</button
           >
         </footer>

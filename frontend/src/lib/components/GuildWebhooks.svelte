@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { userErrorMessage } from '$lib/api/client';
@@ -121,7 +122,16 @@
     }
   }
 
+  function webhookDirty(webhook: WebhookSummary) {
+    return (
+      (nameDrafts[webhook.id] ?? webhook.name).trim() !== webhook.name ||
+      (channelDrafts[webhook.id] ?? `${webhook.channel_id}@${webhook.channel_domain}`) !==
+        `${webhook.channel_id}@${webhook.channel_domain}`
+    );
+  }
+
   async function saveWebhook(webhook: WebhookSummary) {
+    if (!webhookDirty(webhook)) return;
     const name = (nameDrafts[webhook.id] ?? webhook.name).trim();
     const channelRef =
       channelDrafts[webhook.id] ?? `${webhook.channel_id}@${webhook.channel_domain}`;
@@ -295,6 +305,8 @@
   }
 </script>
 
+<Toast message={notice} onDismiss={() => (notice = '')} />
+
 <section id="webhooks" class="integration-section" aria-labelledby="guild-webhooks-title">
   <header>
     <span class="section-icon" aria-hidden="true"><Icon name="globe" size={19} /></span>
@@ -449,7 +461,9 @@
             <button
               class="secondary-button"
               type="button"
-              disabled={Boolean(busyRef) || !(nameDrafts[webhook.id] ?? webhook.name).trim()}
+              disabled={Boolean(busyRef) ||
+                !webhookDirty(webhook) ||
+                !(nameDrafts[webhook.id] ?? webhook.name).trim()}
               onclick={() => void saveWebhook(webhook)}>{$t('ui_save_1509f561')}</button
             >
             <button

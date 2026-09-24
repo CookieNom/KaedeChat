@@ -753,6 +753,39 @@ void main() {
       expect(posts.map((post) => post.ref.id.value), <String>['2', '1']);
     });
 
+    test('forum thumbnails skip spoilers, unsafe files, and non-images', () {
+      KaedeAttachment attachment(String name,
+              {String status = 'clean', String type = 'image/png'}) =>
+          KaedeAttachment(
+            ref: EntityRef.parse('80@chat.example'),
+            filename: name,
+            contentType: type,
+            size: 100,
+            scanStatus: status,
+          );
+      final post = _post('1', createdAt: '2026-08-24T09:00:00Z');
+      final excluded = [
+        attachment('SPOILER_secret.png'),
+        attachment('pending.png', status: 'pending'),
+        attachment('blocked.png', status: 'infected'),
+        attachment('encrypted.png', status: 'encrypted'),
+        attachment('notes.txt', type: 'text/plain'),
+      ];
+      KaedeChannel withAttachments(List<KaedeAttachment> attachments) =>
+          post.copyWith(
+            starterMessage:
+                post.starterMessage!.copyWith(attachments: attachments),
+          );
+      final image = attachment('photo.png');
+      expect(forumPostThumbnail(post), isNull);
+      expect(forumPostThumbnail(withAttachments(excluded)), isNull);
+      expect(
+        forumPostThumbnail(
+            withAttachments([...excluded, image, attachment('later.png')])),
+        same(image),
+      );
+    });
+
     test('forum feed revision changes only for the selected parent', () {
       final forum = EntityRef.parse('15@chat.example');
       final first = _post('1', createdAt: '2026-08-24T09:00:00Z');

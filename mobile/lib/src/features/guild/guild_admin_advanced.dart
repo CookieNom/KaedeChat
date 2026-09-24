@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
@@ -464,6 +465,13 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
             !channel.e2eeRequired,
       );
 
+  late String _savedDraft;
+  @override
+  void initState() {
+    super.initState();
+    _savedDraft = jsonEncode(_draft().toJson());
+  }
+
   @override
   void dispose() {
     _name.dispose();
@@ -818,7 +826,11 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+              controllers: [_name, _keywords, _regex, _allow, _blockMessage],
+              hasChanges: () =>
+                  widget.existing == null ||
+                  jsonEncode(_draft().toJson()) != _savedDraft,
               onPressed: _save,
               child: Text(L10n.of(context).ui_save_rule_0e059e66)),
         ],
@@ -1409,6 +1421,7 @@ final class _GuildSoundboardTabState extends ConsumerState<GuildSoundboardTab> {
       context,
       title: L10n.of(context).ui_edit_sound_1fb48f02,
       action: 'Save',
+      isEditing: true,
       initialName: sound.name,
       initialEmojiRef: sound.emojiRef,
       initialEmojiName: sound.emojiName ?? '',
@@ -1646,6 +1659,7 @@ Future<SoundboardSoundDraft?> showSoundboardSoundEditor(
   EntityRef? initialEmojiRef,
   String initialEmojiName = '',
   double initialVolume = 1,
+  bool isEditing = false,
 }) =>
     showDialog<SoundboardSoundDraft>(
       context: context,
@@ -1658,6 +1672,7 @@ Future<SoundboardSoundDraft?> showSoundboardSoundEditor(
         initialEmojiRef: initialEmojiRef,
         initialEmojiName: initialEmojiName,
         initialVolume: initialVolume,
+        isEditing: isEditing,
       ),
     );
 
@@ -1671,6 +1686,7 @@ final class _SoundDialog extends StatefulWidget {
     this.initialEmojiRef,
     this.initialEmojiName = '',
     this.initialVolume = 1,
+    required this.isEditing,
   });
 
   final String title;
@@ -1681,6 +1697,7 @@ final class _SoundDialog extends StatefulWidget {
   final EntityRef? initialEmojiRef;
   final String initialEmojiName;
   final double initialVolume;
+  final bool isEditing;
 
   @override
   State<_SoundDialog> createState() => _SoundDialogState();
@@ -1842,7 +1859,20 @@ final class _SoundDialogState extends State<_SoundDialog> {
           ),
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: _name,
-            builder: (_, value, __) => ActionButton(
+            builder: (_, value, __) => SaveButton(
+              controllers: [_emojiName],
+              hasChanges: () =>
+                  !widget.isEditing ||
+                  value.text.trim() != widget.initialName ||
+                  _volume != widget.initialVolume ||
+                  _emojiSelection !=
+                      (widget.initialEmojiRef != null
+                          ? 'custom:${widget.initialEmojiRef!.wire}'
+                          : widget.initialEmojiName.trim().isNotEmpty
+                              ? 'unicode'
+                              : 'none') ||
+                  (_emojiSelection == 'unicode' &&
+                      _emojiName.text.trim() != widget.initialEmojiName),
               onPressed: value.text.trim().length < 2 ? null : _save,
               child: Text(widget.action),
             ),

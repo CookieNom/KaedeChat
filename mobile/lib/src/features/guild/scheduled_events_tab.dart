@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -931,6 +932,17 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
           event.imageHash,
           variant: 'thumbnail_1024',
         );
+  String draftState() => jsonEncode([
+        name.text.trim(),
+        description.text.trim(),
+        location.text.trim(),
+        entityType.name,
+        channelRef?.wire,
+        startTime.toIso8601String(),
+        endTime?.toIso8601String(),
+        recurrence.name
+      ]);
+  final savedDraft = draftState();
   String? validation;
   final result = await showModalBottomSheet<ScheduledEventEditorResult>(
     context: context,
@@ -1261,7 +1273,13 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                         child: Text(L10n.of(context).ui_cancel_35afca3b),
                       ),
                       SizedBox(width: 8),
-                      ActionButton(
+                      SaveButton(
+                        controllers: [name, description, location],
+                        hasChanges: () =>
+                            event == null ||
+                            draftState() != savedDraft ||
+                            coverFile != null ||
+                            removeCover,
                         onPressed: submit,
                         child: Text(event == null
                             ? L10n.of(context).ui_create_event_d0c67bc5

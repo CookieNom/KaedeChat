@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { tick, untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { api, userErrorMessage } from '$lib/api/client';
@@ -38,6 +39,14 @@
   let editorSection = $state(0);
   const editorSections = ['Server rules', 'Default channels', 'Questions', 'Server guide'];
   const returning = $derived(!!response?.state.completed_at && !response?.needs_rules);
+  const choicesDirty = $derived(
+    JSON.stringify([answers, completedTasks, extraChannels]) !==
+      JSON.stringify([
+        response?.state.answers ?? {},
+        response?.state.completed_tasks ?? [],
+        response?.state.extra_channel_ids ?? []
+      ])
+  );
   const tasks = $derived(config.guide.filter((item) => item.kind === 'task'));
   const finishedTasks = $derived(tasks.filter((item) => completedTasks.includes(item.id)).length);
   const channels = $derived(
@@ -129,16 +138,24 @@
           : [id]
     };
   }
+  const configDirty = $derived(JSON.stringify(config) !== JSON.stringify(response?.config));
+
   async function saveConfig() {
+    if (busy || loading || !response || !configDirty) return;
     busy = true;
     error = '';
     notice = '';
+    const submitted = JSON.stringify(config);
     try {
       response = await api<OnboardingResponse>(path, {
         method: 'PUT',
-        body: JSON.stringify(config)
+        body: submitted
       });
-      config = structuredClone($state.snapshot(response.config));
+      if (JSON.stringify(config) === submitted) {
+        config = structuredClone($state.snapshot(response.config));
+      } else {
+        config.revision = response.config.revision;
+      }
       notice = 'Server onboarding saved.';
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not save onboarding.');
@@ -151,6 +168,7 @@
       close();
       return;
     }
+    if (busy || (returning && !choicesDirty)) return;
     busy = true;
     error = '';
     try {
@@ -195,6 +213,8 @@
     });
   }
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 {#if admin}
   <section id="onboarding" class="onboarding-settings">
@@ -429,7 +449,7 @@
       <div class="save-row">
         <span>Preview your welcome before publishing.</span><button
           class="primary"
-          disabled={busy}
+          disabled={busy || loading || !configDirty}
           onclick={saveConfig}>{busy ? 'Saving…' : 'Save onboarding'}</button
         >
       </div>
@@ -630,7 +650,10 @@
             class="primary"
             disabled={!canContinue}
             onclick={() => (step += 1)}>Continue →</button
-          >{:else}<button class="primary" disabled={busy} onclick={finish}
+          >{:else}<button
+            class="primary"
+            disabled={busy || (!preview && returning && !choicesDirty)}
+            onclick={finish}
             >{busy
               ? 'Saving…'
               : preview

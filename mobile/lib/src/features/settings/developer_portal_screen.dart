@@ -760,6 +760,7 @@ final class _DeveloperApplicationScreenState
         _userScopes = application.userInstallScopes.toSet();
         _userContexts = application.userInstallContexts.toSet();
         _e2eeModes = application.e2eeModes.toSet();
+        _savedSettings = _settingsDraft;
         _commands.text = const JsonEncoder.withIndent('  ').convert(results[1]);
         _credentials = results[2] as List<DeveloperCredential>;
         _workers = results[3] as List<DeveloperWorker>;
@@ -779,7 +780,25 @@ final class _DeveloperApplicationScreenState
     }
   }
 
+  String _savedSettings = '';
+  String get _settingsDraft => jsonEncode([
+        _name.text.trim(),
+        _nullable(_description.text),
+        _nullable(_supportUrl.text),
+        _nullable(_privacyUrl.text),
+        _targetPolicy,
+        _permissionBits.text.trim(),
+        _defaultScopes.toList()..sort(),
+        _defaultIntents.toList()..sort(),
+        _installTypes.toList()..sort(),
+        _userScopes.toList()..sort(),
+        _userContexts.toList()..sort(),
+        _e2eeModes.toList()..sort()
+      ]);
+
   Future<void> _saveApplication() async {
+    if (_settingsDraft == _savedSettings) return;
+    final submitted = _settingsDraft;
     if (_busy) return;
     final permissions = BigInt.tryParse(_permissionBits.text.trim());
     if (permissions == null || permissions.isNegative) {
@@ -812,6 +831,7 @@ final class _DeveloperApplicationScreenState
       if (!mounted) return;
       setState(() {
         _application = updated;
+        _savedSettings = submitted;
         showActionFeedback(
             context, L10n.of(context).ui_application_settings_saved_471d9be1);
       });
@@ -1152,7 +1172,9 @@ final class _DeveloperApplicationScreenState
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              ActionButton(
+              SaveButton(
+                controllers: [domain],
+                hasChanges: () => domain.text.trim().isNotEmpty,
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_save_4d2d5d68),
               ),
@@ -1292,7 +1314,15 @@ final class _DeveloperApplicationScreenState
             onPressed: _loading ? null : _load,
             icon: const Icon(Icons.refresh_rounded),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [
+              _name,
+              _description,
+              _supportUrl,
+              _privacyUrl,
+              _permissionBits
+            ],
+            hasChanges: () => _settingsDraft != _savedSettings,
             kind: ActionButtonKind.text,
             onPressed: application == null || _busy ? null : _saveApplication,
             child: Text(L10n.of(context).ui_save_4d2d5d68),
@@ -1505,7 +1535,15 @@ final class _DeveloperApplicationScreenState
                     ),
                     Padding(
                       padding: const EdgeInsets.only(top: 12),
-                      child: ActionButton(
+                      child: SaveButton(
+                        controllers: [
+                          _name,
+                          _description,
+                          _supportUrl,
+                          _privacyUrl,
+                          _permissionBits
+                        ],
+                        hasChanges: () => _settingsDraft != _savedSettings,
                         onPressed: _busy ? null : _saveApplication,
                         icon: const Icon(Icons.save_outlined),
                         label: Text(L10n.of(context)

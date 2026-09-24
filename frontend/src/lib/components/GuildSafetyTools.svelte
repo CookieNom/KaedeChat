@@ -1,4 +1,6 @@
 <script lang="ts">
+  let saveNotice = $state('');
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
@@ -102,6 +104,10 @@
   let sounds = $state<SoundboardSound[]>([]);
   let selectedRuleId = $state('');
   let draft = $state<AutoModDraft>(blankRule());
+  let savedRule = $state('');
+  const ruleDirty = $derived(
+    !selectedRuleId || JSON.stringify(autoModPayload(draft)) !== savedRule
+  );
   let automodBusy = $state(false);
   let automodError = $state('');
   let automodNotice = $state('');
@@ -230,6 +236,7 @@
       exemptRoles: [...rule.exempt_roles],
       exemptChannels: [...rule.exempt_channels]
     };
+    savedRule = JSON.stringify(autoModPayload(draft));
   }
 
   function togglePreset(value: 'profanity' | 'sexual_content' | 'slurs') {
@@ -265,7 +272,7 @@
 
   async function saveRule(event: SubmitEvent) {
     event.preventDefault();
-    if (automodBusy) return;
+    if (automodBusy || !ruleDirty) return;
     const payload = autoModPayload(draft);
     const actions = payload.actions as unknown[];
     if (!draft.name.trim()) {
@@ -311,6 +318,7 @@
       );
       editRule(saved);
       automodNotice = updating ? 'AutoMod rule saved.' : 'AutoMod rule created.';
+      saveNotice = automodNotice;
     } catch (caught) {
       if (!controller.signal.aborted)
         automodError = userErrorMessage(caught, $t('ui_could_not_save_the_automod_rule_d2fbd7f2'));
@@ -591,7 +599,20 @@
     };
   }
 
+  function soundDirty(sound: SoundboardSound) {
+    const value = soundDrafts[entityKey(sound)];
+    return (
+      !!value &&
+      (value.name.trim() !== sound.name ||
+        boundedVolume(value.volume) !== sound.volume ||
+        value.emojiSelection !==
+          (sound.emoji_id ? `custom:${sound.emoji_id}` : sound.emoji_name ? 'unicode' : 'none') ||
+        (value.emojiSelection === 'unicode' && value.emojiName.trim() !== (sound.emoji_name ?? '')))
+    );
+  }
+
   async function updateSound(sound: SoundboardSound) {
+    if (!soundDirty(sound)) return;
     const draftValue = soundDrafts[entityKey(sound)];
     if (!canEditSound(sound) || !draftValue || soundBusy) return;
     soundBusy = true;
@@ -614,6 +635,7 @@
       sounds = sounds.map((item) => (entityKey(item) === entityKey(updated) ? updated : item));
       setSoundDraft(updated);
       soundNotice = `“${updated.name}” was updated.`;
+      saveNotice = soundNotice;
     } catch (caught) {
       if (!controller.signal.aborted)
         soundError = userErrorMessage(caught, $t('ui_could_not_update_the_sound_61a120de'));
@@ -678,6 +700,8 @@
   });
   onDestroy(() => controller.abort());
 </script>
+
+<Toast message={saveNotice} onDismiss={() => (saveNotice = '')} />
 
 {#if canManageAutoMod}
   <section id="automod" class="tool-section">
@@ -893,7 +917,7 @@
           >
         </div>
         <footer>
-          <button class="primary" disabled={automodBusy}
+          <button class="primary" disabled={automodBusy || !ruleDirty}
             >{automodBusy
               ? $t('ui_saving_23e39291')
               : selectedRuleId
@@ -1182,7 +1206,7 @@
               >{/if}{#if canEditSound(sound)}<button
                 type="button"
                 class="secondary"
-                disabled={soundBusy}
+                disabled={soundBusy || !soundDirty(sound)}
                 onclick={() => void updateSound(sound)}>{$t('ui_save_1509f561')}</button
               ><button
                 type="button"

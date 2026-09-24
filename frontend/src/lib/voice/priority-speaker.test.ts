@@ -55,22 +55,30 @@ describe('native Priority Speaker UI', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('input[value="voice_activity"]')).not.toBeNull()
     );
-    const priorityInput = () =>
-      Array.from(document.querySelectorAll('label'))
-        .find((label) => label.textContent?.includes('Priority push-to-talk shortcut'))
-        ?.querySelector('input');
-    expect(priorityInput()).toBeUndefined();
+    const recorder = (label: string) =>
+      document.querySelector<HTMLButtonElement>(`button[aria-label="Record ${label} shortcut"]`);
+    expect(recorder('priority push-to-talk shortcut')).toBeNull();
     document.querySelector<HTMLInputElement>('input[value="push_to_talk"]')!.click();
     await tick();
-    expect(priorityInput()?.value).toBe('Ctrl+Alt+Space');
+    const priority = recorder('priority push-to-talk shortcut')!;
+    expect(priority.textContent).toContain('Space');
+    expect(recorder('push-to-talk shortcut')!.textContent).toContain('Ctrl');
+    flushSync(() => priority.click());
+    flushSync(() =>
+      priority.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'p',
+          code: 'KeyP',
+          altKey: true,
+          bubbles: true,
+          cancelable: true
+        })
+      )
+    );
     expect(
-      document.querySelector<HTMLInputElement>('input[placeholder="Ctrl+Shift+Space"]')?.value
-    ).toBe('Ctrl+Space');
-    priorityInput()!.value = 'Alt+P';
-    priorityInput()!.dispatchEvent(new Event('input', { bubbles: true }));
-    document
-      .querySelector('form')!
-      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      native.invoke.mock.calls.filter(([command]) => command === 'native_preferences_set')
+    ).toHaveLength(0);
+    priority.closest('.shortcut-field')!.querySelector<HTMLButtonElement>('.save')!.click();
     await tick();
     expect(native.invoke).toHaveBeenCalledWith('native_preferences_set', {
       preferences: expect.objectContaining({
@@ -81,6 +89,6 @@ describe('native Priority Speaker UI', () => {
     });
     document.querySelector<HTMLInputElement>('input[value="voice_activity"]')!.click();
     await tick();
-    expect(priorityInput()).toBeUndefined();
+    expect(recorder('priority push-to-talk shortcut')).toBeNull();
   });
 });

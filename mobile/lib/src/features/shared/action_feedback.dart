@@ -11,7 +11,9 @@ void showActionFeedback(BuildContext context, String message,
   ScaffoldMessenger.of(context)
     ..clearSnackBars()
     ..showSnackBar(SnackBar(
-      content: Text(message),
+      content:
+          Text(message, style: error ? TextStyle(color: colors.onError) : null),
+      closeIconColor: error ? colors.onError : null,
       backgroundColor: error ? colors.error : null,
       duration: Duration(seconds: error ? 6 : 4),
       showCloseIcon: true,
@@ -140,6 +142,53 @@ class ActionButton extends StatelessWidget {
               ),
           };
         },
+      );
+}
+
+/// Save controls listen to text edits as well as the editor's other state.
+/// The editor owns the saved baseline and advances it only after success.
+class SaveButton extends StatefulWidget {
+  const SaveButton(
+      {super.key,
+      required this.hasChanges,
+      required this.onPressed,
+      this.controllers = const [],
+      this.child,
+      this.label,
+      this.icon,
+      this.kind = ActionButtonKind.filled});
+
+  final bool Function() hasChanges;
+  final FutureOr<void> Function()? onPressed;
+  final List<TextEditingController> controllers;
+  final Widget? child, label, icon;
+  final ActionButtonKind kind;
+
+  @override
+  State<SaveButton> createState() => _SaveButtonState();
+}
+
+class _SaveButtonState extends State<SaveButton> {
+  Future<void> _save() async {
+    if (widget.onPressed == null || !widget.hasChanges()) return;
+    try {
+      await widget.onPressed!();
+    } finally {
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: Listenable.merge(widget.controllers),
+        builder: (context, _) => ActionButton(
+          onPressed:
+              widget.onPressed == null || !widget.hasChanges() ? null : _save,
+          kind: widget.kind,
+          label: widget.label,
+          icon: widget.icon,
+          child: widget.child,
+        ),
       );
 }
 

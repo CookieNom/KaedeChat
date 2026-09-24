@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { ApiError, userErrorMessage } from '$lib/api/client';
@@ -334,6 +335,7 @@
     let detailsSavedBeforeMove = false;
     actionBusy = true;
     actionError = '';
+    actionNotice = '';
     try {
       if (target) {
         let updated = await updateTrackerTask(channel, target, request as UpdateTrackerTaskRequest);
@@ -354,6 +356,7 @@
       }
       await reload(false);
       hideTaskDialog();
+      actionNotice = 'Task saved.';
     } catch (caught) {
       if (detailsSavedBeforeMove && target) {
         hideTaskDialog();
@@ -384,6 +387,7 @@
       await deleteTrackerTask(channel, editingTask);
       await reload(false);
       hideTaskDialog();
+      actionNotice = 'Task saved.';
     } catch (caught) {
       actionError = await actionFailure(caught, 'Could not delete the task. Try again.');
     } finally {
@@ -463,8 +467,10 @@
     if (!board || actionBusy) return;
     actionBusy = true;
     actionError = '';
+    actionNotice = '';
     try {
       board = await updateTracker(channel, board.version, patch);
+      actionNotice = 'Tracker settings saved.';
     } catch (caught) {
       actionError = await actionFailure(caught, 'Could not update the board settings. Try again.');
     } finally {
@@ -493,8 +499,10 @@
     if (actionBusy) return;
     actionBusy = true;
     actionError = '';
+    actionNotice = '';
     try {
       await updateTrackerLane(channel, lane, patch);
+      actionNotice = 'Status saved.';
       await reload(false);
     } catch (caught) {
       actionError = await actionFailure(caught, 'Could not update the status. Try again.');
@@ -575,6 +583,8 @@
     };
   }
 </script>
+
+<Toast message={actionNotice} onDismiss={() => (actionNotice = '')} />
 
 <section
   bind:this={trackerRoot}

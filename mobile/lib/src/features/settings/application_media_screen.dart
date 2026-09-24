@@ -358,6 +358,7 @@ final class _ApplicationMediaManagerScreenState
       context,
       title: L10n.of(context).ui_edit_asset_5db3b1f5,
       action: 'Save changes',
+      isEditing: true,
       initial: ApplicationAssetDraft(name: asset.name, kind: asset.kind),
     );
     if (draft == null || !mounted) return;
@@ -399,6 +400,7 @@ final class _ApplicationMediaManagerScreenState
       context,
       title: L10n.of(context).ui_edit_emoji_26aed3f7,
       action: 'Save changes',
+      isEditing: true,
       initial: ApplicationEmojiDraft(name: emoji.name),
     );
     if (draft == null || !mounted) return;
@@ -718,6 +720,7 @@ Future<ApplicationAssetDraft?> showApplicationAssetEditor(
   required String title,
   required String action,
   required ApplicationAssetDraft initial,
+  bool isEditing = false,
 }) =>
     showDialog<ApplicationAssetDraft>(
       context: context,
@@ -725,6 +728,7 @@ Future<ApplicationAssetDraft?> showApplicationAssetEditor(
         title: title,
         action: action,
         initial: initial,
+        isEditing: isEditing,
       ),
     );
 
@@ -733,6 +737,7 @@ Future<ApplicationEmojiDraft?> showApplicationEmojiEditor(
   required String title,
   required String action,
   required ApplicationEmojiDraft initial,
+  bool isEditing = false,
 }) =>
     showDialog<ApplicationEmojiDraft>(
       context: context,
@@ -740,6 +745,7 @@ Future<ApplicationEmojiDraft?> showApplicationEmojiEditor(
         title: title,
         action: action,
         initial: initial,
+        isEditing: isEditing,
       ),
     );
 
@@ -748,10 +754,12 @@ final class _ApplicationAssetEditorDialog extends StatefulWidget {
     required this.title,
     required this.action,
     required this.initial,
+    required this.isEditing,
   });
 
   final String title;
   final String action;
+  final bool isEditing;
   final ApplicationAssetDraft initial;
 
   @override
@@ -827,7 +835,12 @@ final class _ApplicationAssetEditorDialogState
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [_name],
+            hasChanges: () =>
+                !widget.isEditing ||
+                _name.text.trim() != widget.initial.name ||
+                _kind != widget.initial.kind,
             key: Key('save-application-asset'),
             onPressed: _save,
             child: Text(widget.action),
@@ -841,10 +854,12 @@ final class _ApplicationEmojiEditorDialog extends StatefulWidget {
     required this.title,
     required this.action,
     required this.initial,
+    required this.isEditing,
   });
 
   final String title;
   final String action;
+  final bool isEditing;
   final ApplicationEmojiDraft initial;
 
   @override
@@ -907,7 +922,10 @@ final class _ApplicationEmojiEditorDialogState
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [_name],
+            hasChanges: () =>
+                !widget.isEditing || _name.text.trim() != widget.initial.name,
             key: Key('save-application-emoji'),
             onPressed: _save,
             child: Text(widget.action),

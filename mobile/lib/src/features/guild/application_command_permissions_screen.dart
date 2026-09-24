@@ -145,7 +145,17 @@ final class _ApplicationCommandPermissionsScreenState
     });
   }
 
+  bool get _hasChanges {
+    final saved = _scope?.permissions ?? [];
+    return saved.length != _draft.length ||
+        _draft.any((entry) => !saved.any((item) =>
+            item.target == entry.target &&
+            item.type == entry.type &&
+            item.permission == entry.permission));
+  }
+
   Future<void> _save() async {
+    if (!_hasChanges) return;
     final scope = _scope;
     if (!widget.canManage || scope == null || _saving) return;
     setState(() {
@@ -350,7 +360,7 @@ final class _ApplicationCommandPermissionsScreenState
                                     .ui_use_app_defaults_2c61078f),
                               ),
                             ActionButton(
-                              onPressed: _saving ? null : _save,
+                              onPressed: _saving || !_hasChanges ? null : _save,
                               child: Text(_saving
                                   ? L10n.of(context).ui_saving_bd79b37d
                                   : L10n.of(context)

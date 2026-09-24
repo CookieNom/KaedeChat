@@ -162,6 +162,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   String? _error;
   String get _path =>
       '/api/v1/guilds/${widget.guild.ref.pathSegment}/onboarding';
+  String _savedConfig = '', _savedChoices = '';
+  String get _choices =>
+      jsonEncode([_answers, _tasks, _extraChannels, _accepted]);
+  bool get _hasChanges => _editing
+      ? jsonEncode(_config) != _savedConfig
+      : _response?['needs_rules'] == true ||
+          _response?['needs_onboarding'] == true ||
+          _choices != _savedChoices;
   bool get _editing => widget.admin && !_preview;
   List<OnboardingJson> get _questions => _objects(_config['questions'])
       .where((q) =>
@@ -215,6 +223,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         _tasks = _strings(state['completed_tasks']);
         _extraChannels = _strings(state['extra_channel_ids']);
         _accepted = response['needs_rules'] != true;
+        _savedConfig = jsonEncode(_config);
+        _savedChoices = _choices;
         _error = null;
       });
     } on Object catch (error) {
@@ -226,6 +236,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Future<bool> _save({bool close = true}) async {
+    if (_busy || (!_preview && !_hasChanges)) return false;
     if (_preview) {
       setState(() {
         _preview = false;
@@ -237,6 +248,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       _busy = true;
       _error = null;
     });
+    final submittedConfig = jsonEncode(_config);
+    final submittedChoices = _choices;
     try {
       final response = await ref
           .read(mobileControllerProvider.notifier)
@@ -244,7 +257,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           .api
           .sendJson('PUT', _editing ? _path : '$_path/@me',
               data: _editing
-                  ? _config
+                  ? jsonDecode(submittedConfig)
                   : {
                       'revision': _config['revision'],
                       'accept_rules': _accepted,
@@ -255,7 +268,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       if (!mounted) return false;
       setState(() {
         _response = response;
-        _config = _object(response['config']);
+        if (jsonEncode(_config) == submittedConfig) {
+          _config = _object(response['config']);
+        } else {
+          _config['revision'] = _object(response['config'])['revision'];
+        }
         final choiceState = _object(response['state']);
         if (choiceState['completed_at'] != null) {
           ref
@@ -263,13 +280,15 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               .state = _strings(choiceState['channel_ids']);
         }
       });
+      _savedConfig = jsonEncode(_object(response['config']));
+      _savedChoices = submittedChoices;
       if (!_editing) {
         final controller = ref.read(mobileControllerProvider.notifier);
         final guild = await controller.repository.guild(widget.guild.ref);
         await controller.selectGuild(guild);
         if (!mounted) return true;
       }
-      if (!_editing && close) {
+      if (!_editing && close && !_hasChanges) {
         Navigator.of(context).pop();
       } else {
         ScaffoldMessenger.of(context)
@@ -987,7 +1006,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       ActionButton(
                           onPressed: _busy ||
                                   (!_editing && !canContinue) ||
-                                  (_editing && _response?['can_manage'] != true)
+                                  (_editing &&
+                                      _response?['can_manage'] != true) ||
+                                  (!_preview &&
+                                      (_editing || _step == _total - 1) &&
+                                      !_hasChanges)
                               ? null
                               : () {
                                   if (!_editing && _step < _total - 1) {

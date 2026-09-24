@@ -533,7 +533,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
             onPressed: () => Navigator.pop(dialogContext, ''),
             child: Text(L10n.of(context).ui_clear_04a57fc2),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [controller],
+            hasChanges: () => controller.text.trim() != (_voiceStatus ?? ''),
             onPressed: () => Navigator.pop(dialogContext, controller.text),
             child: Text(L10n.of(context).ui_save_4d2d5d68),
           ),
@@ -774,7 +776,11 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [controller],
+            hasChanges: () =>
+                controller.text.trim().isNotEmpty &&
+                controller.text.trim() != initial.trim(),
             onPressed: () {
               final value = controller.text.trim();
               if (value.isNotEmpty) Navigator.pop(dialogContext, value);

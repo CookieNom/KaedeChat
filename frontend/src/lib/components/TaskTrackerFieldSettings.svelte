@@ -22,7 +22,24 @@
     choices = field?.options.join('\n') ?? '';
     localError = '';
   }
+  const dirty = $derived.by(() => {
+    const field = fields.find((f) => f.id === editing);
+    return (
+      !field ||
+      name.trim() !== field.name ||
+      type !== field.type ||
+      JSON.stringify(
+        ['select', 'multiselect'].includes(type)
+          ? choices
+              .split('\n')
+              .map((v) => v.trim())
+              .filter(Boolean)
+          : []
+      ) !== JSON.stringify(field.options)
+    );
+  });
   async function save() {
+    if (busy || !name.trim() || !dirty) return;
     const options = ['select', 'multiselect'].includes(type)
       ? choices
           .split('\n')
@@ -139,7 +156,7 @@
         >{/if}
       {#if localError}<p class="wide" role="alert">{localError}</p>{/if}
       <div class="actions wide">
-        <button class="primary" disabled={busy || !name.trim()}
+        <button class="primary" disabled={busy || !name.trim() || !dirty}
           >{editing ? 'Save field' : 'Add field'}</button
         ><button type="button" disabled={busy} onclick={() => (editing = null)}>Cancel</button>
       </div>

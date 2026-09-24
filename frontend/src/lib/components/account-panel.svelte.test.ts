@@ -99,6 +99,14 @@ it('keeps the status editor and shows an error when saving fails', async () => {
       expect(document.querySelector<HTMLButtonElement>('.status-bubble')?.disabled).toBe(false);
     });
     flushSync(() => document.querySelector<HTMLButtonElement>('.status-bubble')!.click());
+    const save = document.querySelector<HTMLButtonElement>('.status-actions .primary-button')!;
+    expect(save.disabled).toBe(true);
+    const input = document.querySelector<HTMLInputElement>('input')!;
+    flushSync(() => {
+      input.value = 'Baking';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(save.disabled).toBe(false);
     document.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }));
     await vi.waitFor(() =>
       expect(document.querySelector('[role="alert"]')?.textContent).toBe(
@@ -106,6 +114,7 @@ it('keeps the status editor and shows an error when saving fails', async () => {
       )
     );
     expect(document.querySelector('input')).not.toBeNull();
+    expect(save.disabled).toBe(false);
   } finally {
     await unmount(component);
   }

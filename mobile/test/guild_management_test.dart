@@ -539,6 +539,18 @@ void main() {
 
       await tester.tap(find.text('Edit webhook'));
       await tester.pumpAndSettle();
+      final save = find.descendant(
+          of: find.byKey(const Key('save-webhook-settings')),
+          matching: find.byType(FilledButton));
+      expect(tester.widget<FilledButton>(save).onPressed, isNull);
+      await tester.enterText(
+          find.byKey(const Key('webhook-name-field')), 'Changed');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(save).onPressed, isNotNull);
+      await tester.enterText(
+          find.byKey(const Key('webhook-name-field')), 'Release bot');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(save).onPressed, isNull);
       await tester.enterText(
         find.byKey(const Key('webhook-name-field')),
         'Forum helper',

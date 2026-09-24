@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
@@ -611,6 +613,15 @@ final class _ForumChannelViewState extends ConsumerState<ForumChannelView> {
   }
 }
 
+@visibleForTesting
+KaedeAttachment? forumPostThumbnail(KaedeChannel post) =>
+    post.starterMessage?.attachments
+        .where((attachment) =>
+            attachment.scanStatus == 'clean' &&
+            attachment.contentType.startsWith('image/') &&
+            !isAttachmentSpoiler(attachment.filename))
+        .firstOrNull;
+
 final class _ForumPostCard extends StatelessWidget {
   const _ForumPostCard({
     required this.post,
@@ -627,6 +638,7 @@ final class _ForumPostCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final starter = post.starterMessage;
+    final image = forumPostThumbnail(post);
     final tags = <ForumTag>[
       for (final tag in forum.availableTags)
         if (post.appliedTagIds.contains(tag.id)) tag,
@@ -667,6 +679,13 @@ final class _ForumPostCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (!gallery && image != null) ...[
+                    SizedBox(width: 12),
+                    SizedBox.square(
+                      dimension: 72,
+                      child: _ForumPostImage(attachment: image),
+                    ),
+                  ],
                   if (post.encryptionMode == 'e2ee')
                     Icon(Icons.lock_rounded,
                         size: 14, color: context.kaede.muted),
@@ -700,12 +719,17 @@ final class _ForumPostCard extends StatelessWidget {
                 SizedBox(height: 9),
                 Text(
                   content,
-                  maxLines: gallery ? 6 : 2,
+                  maxLines: gallery && image == null ? 6 : 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: context.kaede.textSoft),
                 ),
               ],
-              if (gallery) Spacer(),
+              if (gallery && image != null) ...[
+                SizedBox(height: 10),
+                Expanded(
+                    child: _ForumPostImage(attachment: image, gallery: true)),
+              ] else if (gallery)
+                Spacer(),
               SizedBox(height: 10),
               Row(
                 children: [
@@ -745,6 +769,72 @@ final class _ForumPostCard extends StatelessWidget {
       ),
     );
   }
+}
+
+final class _ForumPostImage extends ConsumerStatefulWidget {
+  const _ForumPostImage({required this.attachment, this.gallery = false});
+
+  final KaedeAttachment attachment;
+  final bool gallery;
+
+  @override
+  ConsumerState<_ForumPostImage> createState() => _ForumPostImageState();
+}
+
+final class _ForumPostImageState extends ConsumerState<_ForumPostImage> {
+  late Future<List<int>> _bytes;
+
+  void _load() {
+    final attachment = widget.attachment;
+    final path = attachment.historyMediaUrl != null ||
+            attachment.privateMediaUrl != null
+        ? attachmentMediaPath(attachment.ref,
+            historyMediaUrl: attachment.historyMediaUrl,
+            privateMediaUrl: attachment.privateMediaUrl)
+        : '/media/${Uri.encodeComponent(attachment.ref.domain.value)}/'
+            '${attachment.ref.id.value}/${widget.gallery ? 'thumbnail_512' : 'thumbnail_128'}';
+    _bytes = ref.read(mobileControllerProvider.notifier).api.getBytes(path);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ForumPostImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment != widget.attachment ||
+        oldWidget.gallery != widget.gallery) {
+      _load();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: SizedBox.expand(
+          child: ColoredBox(
+            color: context.kaede.raised,
+            child: FutureBuilder<List<int>>(
+              future: _bytes,
+              builder: (context, snapshot) {
+                final fallback = Center(
+                    child:
+                        Icon(Icons.image_outlined, color: context.kaede.muted));
+                if (!snapshot.hasData) return fallback;
+                return Image.memory(
+                  Uint8List.fromList(snapshot.data!),
+                  fit: BoxFit.cover,
+                  semanticLabel: widget.attachment.filename,
+                  errorBuilder: (_, __, ___) => fallback,
+                );
+              },
+            ),
+          ),
+        ),
+      );
 }
 
 final class _NewForumPostSheet extends ConsumerStatefulWidget {

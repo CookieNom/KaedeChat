@@ -1,4 +1,6 @@
 <script lang="ts">
+  let saveNotice = $state('');
+  import Toast from '$lib/components/Toast.svelte';
   import { chatEntities } from '$lib/stores/entities.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -202,13 +204,21 @@
     editingName = '';
   }
 
-  function saveGroupName() {
-    if (!editingGroup || !editingName.trim() || guildNavigation.saving) return;
+  async function saveGroupName() {
+    if (
+      !editingGroup ||
+      !editingName.trim() ||
+      editingName.trim() === editingGroup.name ||
+      guildNavigation.saving
+    )
+      return;
     const next = updateGuildGroup(navigation, editingGroup.id, {
       name: editingName.trim().slice(0, 32)
     });
     closeGroupEditor();
-    void guildNavigation.save(next.items);
+    saveNotice = '';
+    await guildNavigation.save(next.items);
+    if (!guildNavigation.error) saveNotice = 'Group name saved.';
   }
 
   function removeGroup() {
@@ -297,6 +307,8 @@
     items[next]?.focus();
   }
 </script>
+
+<Toast message={saveNotice} onDismiss={() => (saveNotice = '')} />
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- guild and directory helpers resolve the configured base path. -->
 
@@ -578,8 +590,12 @@
         <button class="secondary-button" type="button" onclick={closeGroupEditor}
           >{$t('ui_cancel_19766ed6')}</button
         >
-        <button type="button" disabled={!editingName.trim()} onclick={saveGroupName}
-          >{$t('ui_save_1509f561')}</button
+        <button
+          type="button"
+          disabled={guildNavigation.saving ||
+            !editingName.trim() ||
+            editingName.trim() === editingGroup.name}
+          onclick={saveGroupName}>{$t('ui_save_1509f561')}</button
         >
       </div>
     </section>

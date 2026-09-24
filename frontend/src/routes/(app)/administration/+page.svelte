@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { resolve } from '$app/paths';
@@ -994,6 +995,8 @@
     return () => window.clearInterval(reportRefresh);
   });
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 <svelte:head><title>{$t('ui_instance_administration_kaede_chat_179586fc')}</title></svelte:head>
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  let saveNotice = $state('');
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { entityKey } from '$lib/chat/refs';
@@ -124,7 +126,11 @@
   async function submitRename() {
     const name = renameName.trim();
     if (!name || name === thread.name || busy) return;
-    if ((await onRename(name)) !== false) renameOpen = false;
+    saveNotice = '';
+    if ((await onRename(name)) !== false) {
+      renameOpen = false;
+      saveNotice = 'Name saved.';
+    }
   }
 
   function closeThreadActions(restoreFocus = false) {
@@ -156,6 +162,8 @@
     details.querySelector<HTMLElement>('summary')?.focus();
   }
 </script>
+
+<Toast message={saveNotice} onDismiss={() => (saveNotice = '')} />
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- guildChannelPath resolves the typed route -->
 <svelte:window onpointerdown={dismissThreadActions} onkeydown={dismissThreadActionsOnEscape} />

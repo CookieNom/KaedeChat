@@ -99,3 +99,90 @@ it('allows retry after a failed start and cleans up a start that finishes after 
   await settle();
   expect(invoke.mock.calls.filter(([name]) => name === 'native_stop_input_test')).toHaveLength(2);
 });
+
+it('enables Save only for unsaved changes, blocks duplicate submissions, and keeps failures retryable', async () => {
+  const { target, component } = setup();
+  await settle();
+  const save = target.querySelector<HTMLButtonElement>('.form-actions button')!;
+  const quality = target.querySelector<HTMLInputElement>('input[type=range]')!;
+  const change = (value: string) => {
+    flushSync(() => {
+      quality.value = value;
+      quality.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  expect(save.disabled).toBe(true);
+  change('0.04');
+  expect(save.disabled).toBe(false);
+  change('0.02');
+  expect(save.disabled).toBe(true);
+  change('0.04');
+  let finish!: () => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      })
+  );
+  flushSync(() =>
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+  );
+  expect(save.disabled).toBe(true);
+  target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }));
+  expect(invoke.mock.calls.filter(([name]) => name === 'native_preferences_set')).toHaveLength(1);
+  finish();
+  await settle();
+  expect(save.disabled).toBe(true);
+  expect(target.querySelector('.settings-toast')?.textContent).toContain('settings saved');
+  await vi.advanceTimersByTimeAsync(3500);
+  flushSync();
+  expect(target.querySelector('.settings-toast')).toBeNull();
+  change('0.06');
+  invoke.mockRejectedValueOnce(new Error('Save failed'));
+  flushSync(() =>
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+  );
+  await settle();
+  expect(save.disabled).toBe(false);
+  expect(target.querySelector('[role="alert"]')).not.toBeNull();
+  flushSync(() =>
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+  );
+  await settle();
+  expect(save.disabled).toBe(true);
+  change('0.02');
+  expect(save.disabled).toBe(false);
+  await unmount(component);
+});
+
+it('keeps edits made during a pending save unsaved', async () => {
+  const { target, component } = setup();
+  await settle();
+  const save = target.querySelector<HTMLButtonElement>('.form-actions button')!;
+  const quality = target.querySelector<HTMLInputElement>('input[type=range]')!;
+  flushSync(() => {
+    quality.value = '0.04';
+    quality.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  let finish!: () => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      })
+  );
+  flushSync(() =>
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+  );
+  flushSync(() => {
+    quality.value = '0.06';
+    quality.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  finish();
+  await settle();
+  expect(save.disabled).toBe(false);
+  expect(invoke.mock.calls.find(([name]) => name === 'native_preferences_set')?.[1]).toMatchObject({
+    preferences: { vad_threshold: 0.04 }
+  });
+  await unmount(component);
+});

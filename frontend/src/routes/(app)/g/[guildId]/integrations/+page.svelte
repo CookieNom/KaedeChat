@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { resolve } from '$app/paths';
@@ -39,6 +40,9 @@
 
   const guildRef = $derived(page.params.guildId ?? '');
   let guild = $state<Guild | null>(null);
+  let savedRestrictions = $state<Record<string, string>>({});
+  const restrictionDraft = (installation: Installation) =>
+    JSON.stringify([...installation.channel_restrictions].sort());
   let installations = $state<Installation[]>([]);
   let error = $state('');
   let notice = $state('');
@@ -133,6 +137,9 @@
           );
           if (!loadIsCurrent(targetGuildRef, controller, generation)) return;
           installations = loadedInstallations;
+          savedRestrictions = Object.fromEntries(
+            loadedInstallations.map((item) => [item.id, restrictionDraft(item)])
+          );
         } catch (caught) {
           if (loadIsCurrent(targetGuildRef, controller, generation)) {
             error = userErrorMessage(
@@ -213,6 +220,7 @@
   }
 
   async function saveChannelRestrictions(installation: Installation) {
+    if (savedRestrictions[installation.id] === restrictionDraft(installation)) return;
     const targetGuildRef = loadedGuildRef;
     const loadedGuild = guild;
     if (!loadedGuild || busyRef || targetGuildRef !== guildRef) return;
@@ -242,6 +250,7 @@
         guild !== loadedGuild
       )
         return;
+      savedRestrictions[installation.id] = JSON.stringify([...updated.channel_restrictions].sort());
       installations = installations.map((item) =>
         item.id === installation.id
           ? {
@@ -309,6 +318,8 @@
     loadController.abort();
   });
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 <svelte:head
   ><title
@@ -449,7 +460,8 @@
               </fieldset>
               <button
                 type="button"
-                disabled={busyRef !== ''}
+                disabled={busyRef !== '' ||
+                  savedRestrictions[installation.id] === restrictionDraft(installation)}
                 onclick={() => void saveChannelRestrictions(installation)}
               >
                 {busyRef === `${loadedGuildRef}:${installation.application.ref}:channels`

@@ -1,4 +1,6 @@
 <script lang="ts">
+  let saveNotice = $state('');
+  import Toast from '$lib/components/Toast.svelte';
   import GuildOnboarding from '$lib/components/GuildOnboarding.svelte';
   import { draftKey, readDraft, writeDraft } from '$lib/chat/local-drafts';
   import { preparePrivateLinks } from '$lib/chat/link-privacy';
@@ -1644,7 +1646,17 @@
     );
   }
 
+  const channelDialogDirty = $derived(
+    !channelDialogTarget ||
+      channelDialogName.trim() !== (channelDialogTarget.name ?? '') ||
+      channelDialogParent !==
+        (channelDialogTarget.parent_id && channelDialogTarget.parent_domain
+          ? `${channelDialogTarget.parent_id}@${channelDialogTarget.parent_domain}`
+          : '')
+  );
+
   async function saveChannelDialog() {
+    if (!channelDialogDirty) return;
     if (!guild || channelDialogBusy || !channelDialogName.trim()) return;
     const targetGuild = entityRef(guild);
     const routeGeneration = loadGeneration;
@@ -1713,6 +1725,7 @@
         setCurrentChannels([...(guild.channels ?? []), created]);
       }
       saved = true;
+      saveNotice = 'Channel saved.';
     } catch (caught) {
       if (!stillCurrent()) return;
       channelDialogError = userErrorMessage(
@@ -6376,6 +6389,8 @@
   }
 </script>
 
+<Toast message={saveNotice} onDismiss={() => (saveNotice = '')} />
+
 <!-- eslint-disable svelte/no-navigation-without-resolve -- route helpers resolve the typed template before substituting encoded parameters -->
 
 <svelte:head
@@ -8475,7 +8490,10 @@
             disabled={channelDialogBusy}
             onclick={() => closeChannelDialog()}>{$t('ui_cancel_19766ed6')}</button
           >
-          <button class="primary-button" disabled={channelDialogBusy || !channelDialogName.trim()}>
+          <button
+            class="primary-button"
+            disabled={channelDialogBusy || !channelDialogDirty || !channelDialogName.trim()}
+          >
             {channelDialogBusy
               ? $t('ui_saving_23e39291')
               : channelDialogTarget

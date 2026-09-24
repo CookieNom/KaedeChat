@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -1227,7 +1228,12 @@ final class _OverviewTabState extends State<_OverviewTab> {
             SizedBox(height: 18),
             SizedBox(
               width: double.infinity,
-              child: ActionButton(
+              child: SaveButton(
+                  controllers: [_name, _description],
+                  hasChanges: () =>
+                      _name.text.trim() != _guild.name ||
+                      _description.text.trim() != (_guild.description ?? '') ||
+                      _history != _guild.federatedHistoryPolicy,
                   onPressed: _busy || !widget.canManage ? null : _save,
                   icon: Icon(Icons.save_outlined),
                   label: Text(L10n.of(context).ui_save_changes_61efb279)),
@@ -4103,6 +4109,8 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
       // Ignore stale role restrictions that cannot be safely resubmitted.
     }
   }
+  final initialRoles =
+      jsonEncode(selectedRoles.map((r) => r.wire).toList()..sort());
   String? error;
   final result = await showDialog<Map<String, Object?>>(
     context: context,
@@ -4176,7 +4184,12 @@ Future<Map<String, Object?>?> showEmojiSettingsEditor(
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [name],
+            hasChanges: () =>
+                name.text.trim() != '${emoji['name'] ?? ''}' ||
+                jsonEncode(selectedRoles.map((r) => r.wire).toList()..sort()) !=
+                    initialRoles,
             onPressed: () {
               final cleaned = name.text.trim();
               if (!RegExp(r'^[A-Za-z0-9_]{2,32}$').hasMatch(cleaned)) {
@@ -4504,6 +4517,7 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
         ? (sticker['tags']! as List).map((item) => '$item').join('\n')
         : '',
   );
+  final initialTags = tags.text.trim();
   final available = sticker['available'] != false;
   String? error;
   final result = await showDialog<Map<String, Object?>>(
@@ -4573,7 +4587,12 @@ Future<Map<String, Object?>?> showStickerSettingsEditor(
             onPressed: () => Navigator.pop(dialogContext),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [name, description, tags],
+            hasChanges: () =>
+                name.text.trim() != '${sticker['name'] ?? ''}' ||
+                description.text.trim() != '${sticker['description'] ?? ''}' ||
+                tags.text.trim() != initialTags,
             onPressed: () {
               final cleanedName = name.text.trim();
               final cleanedDescription = description.text.trim();
@@ -5471,7 +5490,13 @@ final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            ActionButton(
+            SaveButton(
+              hasChanges: () =>
+                  jsonEncode(selected.toList()..sort()) !=
+                  jsonEncode((item['channel_restrictions'] as List? ?? const [])
+                      .map((value) => '$value')
+                      .toList()
+                    ..sort()),
               onPressed: () => Navigator.pop(dialogContext, Set.of(selected)),
               child: Text(L10n.of(context).ui_save_4d2d5d68),
             ),
@@ -6183,7 +6208,11 @@ final class _WebhookSettingsEditorDialogState
             onPressed: () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_cancel_35afca3b),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [_name],
+            hasChanges: () =>
+                _name.text.trim() != widget.initialName ||
+                _channel.ref != widget.initialChannel.ref,
             key: Key('save-webhook-settings'),
             onPressed: _save,
             child: Text(L10n.of(context).ui_save_webhook_f889ec79),
@@ -7856,7 +7885,8 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
       Row(children: [
         Expanded(
           child: ActionButton(
-              onPressed: _mutating || !targetEligible ? null : _save,
+              onPressed:
+                  _mutating || !targetEligible || !_hasChanges ? null : _save,
               icon: Icon(Icons.save_outlined),
               label: Text(_mutating
                   ? L10n.of(context).ui_saving_bd79b37d
@@ -7924,7 +7954,20 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
     if (value > 0) _allow |= mask;
   }
 
+  bool get _hasChanges {
+    final existing = _overwrites
+        .where((item) =>
+            '${item['target_id']}@${item['target_domain'] ?? widget.guild.ref.domain.value}' ==
+                _target?.wire &&
+            item['target_type'] == _type)
+        .firstOrNull;
+    return _target != null &&
+        (_allow != BigInt.parse('${existing?['allow'] ?? '0'}') ||
+            _deny != BigInt.parse('${existing?['deny'] ?? '0'}'));
+  }
+
   Future<void> _save() async {
+    if (!_hasChanges) return;
     final target = _target;
     if (target == null || _mutating || !_targetEligible(target, _type)) return;
     final targetType = _type;
@@ -9295,6 +9338,29 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
   late String _parent =
       (widget.channel?.parentRef ?? widget.initialParent)?.wire ?? '';
 
+  late String _savedDraft;
+  String get _draftState => jsonEncode([
+        _name.text.trim(),
+        _topic.text.trim(),
+        _type.name,
+        _nsfw,
+        _slow,
+        _bitrate,
+        _userLimit,
+        _videoQualityMode,
+        _rtcRegion,
+        _threadSlow,
+        _defaultAutoArchive,
+        _forumSort,
+        _forumLayout,
+        _requireTag,
+        _e2eeRequired,
+        _forumTags.map((tag) => tag.toJson()).toList(),
+        _history,
+        _parent,
+        _defaultReactionPayload()
+      ]);
+
   bool get _voiceLike => _type.isVoiceLike;
 
   static const _types = <(ChannelType, String, IconData)>[
@@ -9320,6 +9386,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
   @override
   void initState() {
     super.initState();
+    _savedDraft = _draftState;
     if (widget.loadVoiceRegions != null) unawaited(_loadVoiceRegions());
   }
 
@@ -9409,7 +9476,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
       padding: EdgeInsets.fromLTRB(20, 10, 20, 18),
       child: SizedBox(
         width: double.infinity,
-        child: ActionButton(
+        child: SaveButton(
+          controllers: [_name, _topic, _defaultReaction, _trackerPrefix],
+          hasChanges: () =>
+              widget.channel == null || _draftState != _savedDraft,
           key: ValueKey('save-channel-button'),
           onPressed: _save,
           icon: Icon(
@@ -10176,7 +10246,14 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
             ),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: name,
-              builder: (_, value, __) => ActionButton(
+              builder: (_, value, __) => SaveButton(
+                controllers: [emoji],
+                hasChanges: () =>
+                    existing == null ||
+                    value.text.trim() != existing.name ||
+                    moderated != existing.moderated ||
+                    emoji.text.trim() != (existing.emojiName ?? '') ||
+                    (emojiEdited && existing.emojiId != null),
                 onPressed: value.text.trim().isEmpty
                     ? null
                     : () => Navigator.pop(
@@ -10742,7 +10819,17 @@ final class _RoleEditorState extends State<_RoleEditor> {
               ),
           SizedBox(height: 90),
         ]),
-        floatingActionButton: FloatingActionButton.extended(
+        floatingActionButton: SaveButton(
+          controllers: [_name],
+          hasChanges: () =>
+              widget.role == null ||
+              _name.text.trim() != widget.role!.name ||
+              _permissions != widget.role!.permissions ||
+              _color != widget.role!.color ||
+              _hoist != widget.role!.hoist ||
+              _mentionable != widget.role!.mentionable ||
+              _iconFile != null ||
+              _removeIcon,
           onPressed: _name.text.trim().isEmpty ? null : _submit,
           icon: Icon(
               widget.role == null ? Icons.add_rounded : Icons.save_outlined),
@@ -10850,7 +10937,10 @@ final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
                 kind: ActionButtonKind.text,
                 onPressed: () => Navigator.pop(context),
                 child: Text(L10n.of(context).ui_cancel_35afca3b)),
-            ActionButton(
+            SaveButton(
+                hasChanges: () =>
+                    selected.length != widget.member.roleIds.length ||
+                    !selected.containsAll(widget.member.roleIds),
                 onPressed: () => Navigator.pop(context, selected),
                 child: Text(L10n.of(context).ui_save_4d2d5d68))
           ]);

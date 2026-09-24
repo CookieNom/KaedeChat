@@ -103,6 +103,17 @@
       )
       .sort((left, right) => memberName(left).localeCompare(memberName(right)));
   });
+  const dirty = $derived(
+    !task ||
+      assigneeKey !== (task.assignee ? entityKey(task.assignee) : '') ||
+      (!assignmentOnly &&
+        (title.trim() !== task.title ||
+          description.trim() !== (task.description ?? '') ||
+          priority !== task.priority ||
+          laneKey !== `${task.lane_id}@${task.lane_domain}` ||
+          due !== toLocalDateTime(task.due_at) ||
+          JSON.stringify(customValues) !== JSON.stringify(task.custom_values ?? {})))
+  );
   const canChangeAssignee = $derived(trackerCanChangeAssignee(task, currentUser, canAssign));
 
   onMount(() => {
@@ -133,7 +144,7 @@
   }
 
   function submit() {
-    if (busy || uploading || readOnly || (!assignmentOnly && !title.trim())) return;
+    if (busy || uploading || readOnly || !dirty || (!assignmentOnly && !title.trim())) return;
     if (assignmentOnly) {
       void onSave({ assignee_id: assigneeKey || null }, initialLane);
       return;
@@ -346,7 +357,7 @@
           {#if !readOnly}
             <button
               class="save-button"
-              disabled={busy || uploading || (!assignmentOnly && !title.trim())}
+              disabled={busy || uploading || !dirty || (!assignmentOnly && !title.trim())}
             >
               {busy
                 ? $t('ui_saving_23e39291')

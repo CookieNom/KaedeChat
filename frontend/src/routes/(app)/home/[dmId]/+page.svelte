@@ -1,4 +1,6 @@
 <script lang="ts">
+  let saveNotice = $state('');
+  import Toast from '$lib/components/Toast.svelte';
   import { draftKey, readDraft, writeDraft } from '$lib/chat/local-drafts';
   import { preparePrivateLinks } from '$lib/chat/link-privacy';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
@@ -2015,9 +2017,11 @@
   }
 
   async function updateGroupName() {
+    if (groupName.trim() === (channel?.name ?? '')) return;
     if (!channel || groupBusy) return;
     groupBusy = true;
     groupError = '';
+    saveNotice = '';
     try {
       const updated = await api<Channel>(
         `/users/@me/channels/${encodeURIComponent(entityRef(channel))}/group`,
@@ -2027,6 +2031,7 @@
         }
       );
       entities.channels.upsert(updated);
+      saveNotice = 'Group name saved.';
     } catch (caught) {
       groupError = userErrorMessage(
         caught,
@@ -2753,6 +2758,8 @@
     if (value) acknowledgeLatestIfVisible();
   }
 </script>
+
+<Toast message={saveNotice} onDismiss={() => (saveNotice = '')} />
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
 
@@ -3506,7 +3513,12 @@
           placeholder={$t('ui_optional_group_name_ed1f40c9')}
         />
       </label>
-      <button class="secondary-button" type="button" disabled={groupBusy} onclick={updateGroupName}>
+      <button
+        class="secondary-button"
+        type="button"
+        disabled={groupBusy || groupName.trim() === (channel?.name ?? '')}
+        onclick={updateGroupName}
+      >
         {$t('ui_save_name_b7297226')}
       </button>
     </section>

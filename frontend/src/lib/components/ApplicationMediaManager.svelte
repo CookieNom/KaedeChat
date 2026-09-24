@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
   import { onDestroy } from 'svelte';
@@ -52,6 +53,10 @@
   ];
 
   let assets = $state<ApplicationAsset[]>([]);
+  let savedAssets = $state<Record<string, string>>({});
+  let savedEmojis = $state<Record<string, string>>({});
+  const assetDraft = (asset: ApplicationAsset) => JSON.stringify([asset.name.trim(), asset.kind]);
+  const emojiDraft = (emoji: ApplicationEmoji) => emoji.name.trim();
   let savedKinds = new Map<string, ApplicationAssetKind>();
   let emojis = $state<ApplicationEmoji[]>([]);
   let loading = $state(true);
@@ -105,6 +110,8 @@
         api<ApplicationEmoji[]>(`/applications/${targetRef}/emojis`, { signal })
       ]);
       if (!requestIsCurrent(applicationRef, signal, generation)) return;
+      savedAssets = Object.fromEntries(loadedAssets.map((asset) => [asset.id, assetDraft(asset)]));
+      savedEmojis = Object.fromEntries(loadedEmojis.map((emoji) => [emoji.id, emojiDraft(emoji)]));
       replaceAssets(loadedAssets);
       emojis = loadedEmojis;
     } catch (caught) {
@@ -228,6 +235,7 @@
         { signal }
       );
       if (!operationIsCurrent(applicationRef, signal)) return;
+      savedAssets[created.id] = assetDraft(created);
       updateProfile(created);
       replaceAssets(
         [...assets.filter((item) => item.id !== created.id), created].sort((a, b) =>
@@ -296,6 +304,7 @@
         { signal }
       );
       if (!operationIsCurrent(applicationRef, signal)) return;
+      savedEmojis[created.id] = emojiDraft(created);
       emojis = [...emojis.filter((item) => item.id !== created.id), created].sort((a, b) =>
         a.name.localeCompare(b.name)
       );
@@ -316,7 +325,7 @@
   }
 
   async function saveAsset(asset: ApplicationAsset): Promise<void> {
-    if (busy) return;
+    if (busy || !asset.name.trim() || savedAssets[asset.id] === assetDraft(asset)) return;
     const applicationRef = loadedRef;
     const targetRef = encodeURIComponent(applicationRef);
     const operation = `asset-${asset.id}`;
@@ -332,14 +341,13 @@
         body: JSON.stringify({ name, kind })
       });
       if (!operationIsCurrent(applicationRef, signal)) return;
+      savedAssets[updated.id] = assetDraft(updated);
       updateProfile(updated);
       replaceAssets(assets.map((item) => (item.id === updated.id ? updated : item)));
       notice = `${updated.name} was updated.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
         error = userErrorMessage(caught, $t('ui_could_not_update_the_application_asset_8781a9c1'));
-        busy = '';
-        await reload(applicationRef);
       }
     } finally {
       if (operationIsCurrent(applicationRef, signal) && busy === operation) busy = '';
@@ -370,7 +378,7 @@
   }
 
   async function saveEmoji(emoji: ApplicationEmoji): Promise<void> {
-    if (busy) return;
+    if (busy || !emoji.name.trim() || savedEmojis[emoji.id] === emojiDraft(emoji)) return;
     const applicationRef = loadedRef;
     const targetRef = encodeURIComponent(applicationRef);
     const operation = `emoji-${emoji.id}`;
@@ -385,13 +393,12 @@
         body: JSON.stringify({ name })
       });
       if (!operationIsCurrent(applicationRef, signal)) return;
+      savedEmojis[updated.id] = emojiDraft(updated);
       emojis = emojis.map((item) => (item.id === updated.id ? updated : item));
       notice = `:${updated.name}: was updated.`;
     } catch (caught) {
       if (operationIsCurrent(applicationRef, signal)) {
         error = userErrorMessage(caught, $t('ui_could_not_update_the_application_emoji_96d119d1'));
-        busy = '';
-        await reload(applicationRef);
       }
     } finally {
       if (operationIsCurrent(applicationRef, signal) && busy === operation) busy = '';
@@ -436,6 +443,8 @@
     controller.abort();
   });
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 {#if error}<div class="media-notice error" role="alert">{error}</div>{/if}
 {#if notice}<div class="media-notice success" role="status">{notice}</div>{/if}
@@ -531,10 +540,14 @@
               <img src={assetUrl(asset.media_hash, 'thumbnail_512', mediaDomain)} alt="" />
               <div class="fields">
                 <label
-                  >{$t('ui_name_dcd1d522')}<input bind:value={asset.name} maxlength="100" /></label
+                  >{$t('ui_name_dcd1d522')}<input
+                    bind:value={asset.name}
+                    maxlength="100"
+                    disabled={Boolean(busy)}
+                  /></label
                 >
                 <label
-                  >{$t('ui_kind_f5387f9b')}<select bind:value={asset.kind}>
+                  >{$t('ui_kind_f5387f9b')}<select bind:value={asset.kind} disabled={Boolean(busy)}>
                     {#each assetKinds as kind (kind)}<option value={kind}>{kind}</option>{/each}
                   </select></label
                 >
@@ -544,7 +557,9 @@
               </div>
               <div class="actions">
                 <button
-                  disabled={Boolean(busy) || !asset.name.trim()}
+                  disabled={Boolean(busy) ||
+                    !asset.name.trim() ||
+                    savedAssets[asset.id] === assetDraft(asset)}
                   onclick={() => saveAsset(asset)}>{$t('ui_save_1509f561')}</button
                 >
                 <button class="danger" disabled={Boolean(busy)} onclick={() => deleteAsset(asset)}
@@ -593,6 +608,7 @@
                 <label
                   >{$t('ui_name_dcd1d522')}<input
                     bind:value={emoji.name}
+                    disabled={Boolean(busy)}
                     minlength="2"
                     maxlength="32"
                   /></label
@@ -604,7 +620,9 @@
               </div>
               <div class="actions">
                 <button
-                  disabled={Boolean(busy) || !emoji.name.trim()}
+                  disabled={Boolean(busy) ||
+                    !emoji.name.trim() ||
+                    savedEmojis[emoji.id] === emojiDraft(emoji)}
                   onclick={() => saveEmoji(emoji)}>{$t('ui_save_1509f561')}</button
                 >
                 <button class="danger" disabled={Boolean(busy)} onclick={() => deleteEmoji(emoji)}

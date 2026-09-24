@@ -568,7 +568,9 @@ final class _InstanceAdministrationScreenState
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              ActionButton(
+              SaveButton(
+                controllers: [domain],
+                hasChanges: () => domain.text.trim().isNotEmpty,
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_save_4d2d5d68),
               ),

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toast from '$lib/components/Toast.svelte';
   import ShortcutRecorder from './ShortcutRecorder.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -18,6 +19,8 @@
   let preferences = $state<NativePreferences | null>(null);
   let loading = $state(true);
   let saving = $state(false);
+  let savedPreferences = $state('');
+  const dirty = $derived(preferences !== null && JSON.stringify(preferences) !== savedPreferences);
   let notice = $state('');
   let error = $state('');
   let hotkeyStatus = $state('');
@@ -121,6 +124,7 @@
         deviceSignature = signature(available);
         devicesUpdatedAt = new Date();
         preferences = loaded;
+        savedPreferences = JSON.stringify(loaded);
         hotkeyStatus = shortcutStatus;
       })
       .catch(
@@ -160,13 +164,15 @@
   }
 
   async function save() {
-    if (!preferences || saving) return;
+    if (!preferences || saving || !dirty) return;
     saving = true;
     notice = '';
     error = '';
     try {
-      await nativeInvoke('native_preferences_set', { preferences });
-      hotkeyStatus = await nativeInvoke<string>('native_hotkey_status');
+      const submitted = JSON.stringify(preferences);
+      await nativeInvoke('native_preferences_set', { preferences: JSON.parse(submitted) });
+      savedPreferences = submitted;
+      hotkeyStatus = await nativeInvoke<string>('native_hotkey_status').catch(() => hotkeyStatus);
       notice = $t('ui_native_voice_settings_saved_active_voice_was__e3210080');
     } catch (caught) {
       error = userErrorMessage(
@@ -178,6 +184,8 @@
     }
   }
 </script>
+
+<Toast message={notice} onDismiss={() => (notice = '')} />
 
 {#if isNativeDesktop()}
   <section id="voice-devices" class="settings-section">
@@ -254,7 +262,7 @@
             onSelect={(id) => (preferences!.screen_source = devicePreference(id, devices.screens))}
           />
         </div>
-        <div class="native-device-grid">
+        <div class="native-device-grid native-quality-grid">
           <label class="form-field">
             <span>{$t('ui_outgoing_audio_quality_c8cb11c2')}</span>
             <small>{$t('ui_sets_the_maximum_opus_bitrate_network_conditi_8557a159')}</small>
@@ -328,23 +336,25 @@
             />
           </label>
         {:else}
-          <label class="form-field">
-            <span>{$t('ui_push_to_talk_shortcut_ea17fe61')}</span>
-            <small>{$t('ui_global_shortcuts_may_be_unavailable_under_way_546d7a8a')}</small>
-            <input
+          <div class="form-field">
+            <ShortcutRecorder
+              label={$t('ui_push_to_talk_shortcut_ea17fe61')}
               bind:value={preferences.push_to_talk_hotkey}
-              placeholder={$t('ui_ctrl_shift_space_e7302a99')}
+              disabled={saving}
+              onsave={() => void save()}
             />
-          </label>
-          <label class="form-field">
-            <span>{$t('ui_priority_push_to_talk_shortcut_25230d9b')}</span>
-            <small> {$t('ui_available_while_using_push_to_talk_when_your__5cbdb3ca')} </small>
-            <input
+            <small>{$t('ui_global_shortcuts_may_be_unavailable_under_way_546d7a8a')}</small>
+          </div>
+          <div class="form-field">
+            <ShortcutRecorder
+              label={$t('ui_priority_push_to_talk_shortcut_25230d9b')}
               bind:value={preferences.priority_push_to_talk_hotkey}
-              placeholder={$t('ui_ctrl_alt_space_8857c46c')}
+              disabled={saving}
+              onsave={() => void save()}
             />
+            <small>{$t('ui_available_while_using_push_to_talk_when_your__5cbdb3ca')}</small>
             <small>{hotkeyStatus}</small>
-          </label>
+          </div>
         {/if}
         <fieldset class="native-device-grid">
           <legend>Global shortcuts</legend>
@@ -391,7 +401,7 @@
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
         {#if notice}<p class="settings-helper" role="status">{notice}</p>{/if}
         <div class="form-actions">
-          <button class="primary-button" disabled={saving}
+          <button class="primary-button" disabled={saving || !dirty}
             >{saving ? $t('ui_saving_23e39291') : $t('ui_save_voice_settings_aa805aa2')}</button
           >
         </div>

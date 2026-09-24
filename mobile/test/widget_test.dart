@@ -28,6 +28,123 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:markdown/markdown.dart' as md;
 
 void main() {
+  test('forum post Back returns to its forum before channel navigation', () {
+    KaedeChannel channel(String id, ChannelType type, {EntityRef? parent}) =>
+        KaedeChannel(
+          ref: EntityRef.parse(id),
+          type: type,
+          parentRef: parent,
+          position: 0,
+          permissions: BigInt.zero,
+        );
+    final forum = channel('15@chat.example', ChannelType.forum);
+    final text = channel('16@chat.example', ChannelType.text);
+    final post = channel(
+      '17@chat.example',
+      ChannelType.publicThread,
+      parent: forum.ref,
+    );
+    final thread = channel(
+      '18@chat.example',
+      ChannelType.publicThread,
+      parent: text.ref,
+    );
+    final otherForum = channel('15@other.example', ChannelType.forum);
+    final channels = [otherForum, text, forum];
+
+    expect(forumPostBackDestination(post, channels), same(forum));
+    expect(forumPostBackDestination(forum, channels), isNull);
+    expect(forumPostBackDestination(thread, channels), isNull);
+    expect(forumPostBackDestination(null, channels), isNull);
+    expect(forumPostBackDestination(post, [otherForum, text]), isNull);
+  });
+
+  group('member list navigation', () {
+    for (final size in [const Size(390, 844), const Size(1200, 900)]) {
+      testWidgets('safe header and swipe back at $size', (tester) async {
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (context) => MediaQuery(
+                      data: MediaQuery.of(context).copyWith(
+                        padding: const EdgeInsets.only(top: 59, bottom: 34),
+                      ),
+                      child: Scaffold(
+                        body: MemberListNavigation(
+                          child: Column(
+                            children: [
+                              IconButton(
+                                tooltip: 'Back to channel',
+                                onPressed: () => Navigator.of(context).pop(),
+                                icon: const Icon(Icons.arrow_back),
+                              ),
+                              Expanded(
+                                child: ListView.builder(
+                                  itemCount: 100,
+                                  itemBuilder: (_, index) => SizedBox(
+                                    height: 56,
+                                    child: Text('Member $index'),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                child: const Text('Open members'),
+              ),
+            ),
+          ),
+        ));
+        await tester.tap(find.text('Open members'));
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(find.byTooltip('Back to channel')).dy,
+            greaterThanOrEqualTo(59));
+        await tester.tap(find.byTooltip('Back to channel'));
+        await tester.pumpAndSettle();
+        expect(find.text('Open members'), findsOneWidget);
+
+        await tester.tap(find.text('Open members'));
+        await tester.pumpAndSettle();
+        final list = find.byType(ListView);
+        await tester.drag(list, const Offset(0, -150));
+        await tester.pumpAndSettle();
+        expect(find.byType(MemberListNavigation), findsOneWidget);
+        expect(
+          tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position
+              .pixels,
+          greaterThan(0),
+        );
+        await tester.drag(list, const Offset(-150, 0));
+        await tester.pumpAndSettle();
+        expect(find.byType(MemberListNavigation), findsOneWidget);
+        await tester.drag(list, const Offset(30, 0));
+        await tester.pumpAndSettle();
+        expect(find.byType(MemberListNavigation), findsOneWidget);
+        final cancelled = await tester.startGesture(tester.getCenter(list));
+        await cancelled.moveBy(const Offset(150, 0));
+        await cancelled.cancel();
+        await tester.pumpAndSettle();
+        expect(find.byType(MemberListNavigation), findsOneWidget);
+        await tester.drag(list, const Offset(150, 0));
+        await tester.pumpAndSettle();
+        expect(find.byType(MemberListNavigation), findsNothing);
+        expect(find.text('Open members'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  });
+
   group('conversation parity navigation', () {
     final guild = EntityRef.parse('20@home.example');
 
