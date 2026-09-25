@@ -23,6 +23,9 @@ fi
 cd "$repo_dir/desktop"
 
 build_android() {
+  # NDK r27 and older default to 4 KB pages; Play requires 16 KB alignment.
+  local RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+  export RUSTFLAGS
   local ndk_root="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
   if [[ -z "$ndk_root" ]]; then
     local sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"

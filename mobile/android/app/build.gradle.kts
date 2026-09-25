@@ -74,6 +74,7 @@ dependencies {
 val buildKaedeE2ee by tasks.registering(Exec::class) {
     val nativeScript = rootProject.file("../tool/build_e2ee_native.sh")
     val rustSources = rootProject.file("../../desktop/crates/kaede-e2ee/src")
+    inputs.file(nativeScript)
     inputs.dir(rustSources)
     inputs.dir(rootProject.file("../../desktop/crates/kaede-e2ee-ffi/src"))
     inputs.file(rootProject.file("../../desktop/Cargo.toml"))

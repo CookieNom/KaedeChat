@@ -191,6 +191,8 @@ jobs:
       - name: Install patched WebRTC
         run: tar -xf "$RUNNER_TEMP/webrtc-android.tar" -C native/webrtc
       - run: flutter build apk --debug
+      - name: Check Android native library page alignment
+        run: python3 tool/check_android_page_sizes.py build/app/outputs/flutter-apk/app-debug.apk
       - name: Enforce mobile cache size budgets
         if: always()
         working-directory: ${{ github.workspace }}

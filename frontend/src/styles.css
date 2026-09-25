@@ -3027,7 +3027,7 @@ progress {
 
 .sidebar-user-dock > .icon-button {
   grid-column: 3;
-  grid-row: 1 / 3;
+  grid-row: 1;
 }
 
 .sidebar-user-dock strong {

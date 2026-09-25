@@ -568,6 +568,10 @@ jobs:
             --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
             --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
             --dart-define=KAEDE_PUSH_APP_ID=chat.kaede.mobile
+      - name: Check Android native library page alignment
+        run: |
+          python3 tool/check_android_page_sizes.py build/app/outputs/flutter-apk/app-release.apk
+          python3 tool/check_android_page_sizes.py build/app/outputs/bundle/release/app-release.aab
       - name: Collect Android release files
         run: |
           set -euo pipefail
