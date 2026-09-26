@@ -26,6 +26,7 @@
       "icons/icon.ico"
     ],
     "category": "SocialNetworking",
+    "license": "MIT",
     "shortDescription": "Self-hosted federated chat",
     "longDescription": "A native client for Kaede Chat federated communities.",
     "targets": "all",
@@ -45,7 +46,13 @@
         "depends": ["libpulse0", "libxcb1"]
       },
       "rpm": {
-        "depends": ["pulseaudio-libs", "libxcb"]
+        "depends": [
+          "pulseaudio-libs",
+          "libxcb",
+          "alsa-lib",
+          "systemd-libs",
+          "openssl-libs"
+        ]
       },
       "appimage": {
         "bundleMediaFramework": true

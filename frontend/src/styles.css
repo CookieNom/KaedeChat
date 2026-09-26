@@ -1181,6 +1181,15 @@ progress {
   margin-top: 1.9rem;
 }
 
+.cl-download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  margin-top: 0.75rem;
+  font-weight: 650;
+}
+
 .cl-assure {
   margin-top: 1.15rem;
   color: var(--text-muted);

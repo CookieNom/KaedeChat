@@ -1383,7 +1383,12 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
         .map_err(NativeError::from)?
     {
         LoginOutcome::Authenticated => {
-            let pending = pending_guard.take().expect("verified pending MFA");
+            let pending = pending_guard.take().ok_or_else(|| {
+                NativeError::local(
+                    "MFA_TICKET_INVALID",
+                    "Your sign-in attempt expired. Start sign-in again.",
+                )
+            })?;
             drop(pending_guard);
             let domain = pending.api.endpoint().domain().clone();
             let remembered_key = pending.account_key.clone();

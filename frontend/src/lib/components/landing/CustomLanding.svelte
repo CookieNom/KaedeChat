@@ -4,6 +4,7 @@
   import { resolve } from '$app/paths';
   import { operatorLegalConfig } from '$lib/branding/landing';
   import Icon from '$lib/components/Icon.svelte';
+  import Downloads from './Downloads.svelte';
 
   const year = new Date().getFullYear();
 
@@ -76,6 +77,7 @@
     <nav aria-label={$t('ui_page_0a30a815')}>
       <a href="#features">{$t('ui_features_5697d03d')}</a>
       <a href="#how-we-run">{$t('ui_what_to_know_8248a6c6')}</a>
+      <a href="#downloads">Download</a>
       <a href="#hosting">{$t('ui_hosting_b4ec9bba')}</a>
       <a href={resolve('/support')}>Support</a>
       <a class="cl-signin" href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
@@ -96,6 +98,9 @@
         >{$t('ui_sign_in_bfd402b2')}</a
       >
     </div>
+    <a class="cl-download-link" href="#downloads"
+      >Download the app <Icon name="chevron-down" size={16} /></a
+    >
     <p class="cl-assure">{$t('ui_your_account_stays_on_this_instance_remote_in_7a26c2c0')}</p>
 
     <div class="cl-preview" role="img" aria-label={$t('ui_a_preview_of_a_kaede_channel_3198a834')}>
@@ -169,6 +174,8 @@
       {/each}
     </div>
   </section>
+
+  <Downloads />
 
   <section class="cl-section cl-section-alt" id="how-we-run">
     <div class="cl-section-head">

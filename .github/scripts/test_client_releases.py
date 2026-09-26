@@ -141,14 +141,15 @@ class ClientReleaseTests(unittest.TestCase):
                 with self.subTest(release=item):
                     changed, _ = selector.select_releases(root, [item], "v1.1.0")
                     self.assertTrue(all(changed.values()))
-            item = release("v1.0.0")
-            next(asset for asset in item["assets"] if asset["name"].endswith("arm64.dmg"))["size"] = 0
-            changed, _ = selector.select_releases(root, [item], "v1.1.0")
-            self.assertEqual(changed, {"desktop": True, "android": False, "ios": False})
+            for suffix in ("arm64.dmg", "linux-x86_64.rpm"):
+                item = release("v1.0.0")
+                next(asset for asset in item["assets"] if asset["name"].endswith(suffix))["size"] = 0
+                changed, _ = selector.select_releases(root, [item], "v1.1.0")
+                self.assertEqual(changed, {"desktop": True, "android": False, "ios": False})
 
     def test_publish_requires_exactly_the_selected_builds(self):
         expression = WORKFLOW.read_text().split("  publish:\n")[1].split("    if: >-\n")[1].split("    runs-on:")[0]
-        jobs = {"desktop-linux": "desktop", "desktop-windows": "desktop", "desktop-macos": "desktop",
+        jobs = {"desktop-linux": "desktop", "desktop-rpm": "desktop", "desktop-windows": "desktop", "desktop-macos": "desktop",
                 "android": "android", "ios": "ios"}
         for flags in itertools.product((False, True), repeat=4):
             desktop, android, ios, ios_enabled = flags

@@ -21,6 +21,8 @@ def required_assets(tag):
     return {
         "desktop": {
             "latest.json",
+            f"{prefix}-linux-x86_64.deb",
+            f"{prefix}-linux-x86_64.rpm",
             f"{prefix}-linux-x86_64.AppImage",
             f"{prefix}-linux-x86_64.AppImage.sig",
             f"{prefix}-windows-x86_64-setup.exe",

@@ -68,7 +68,15 @@ releases require a Developer ID Application identity and notarization secrets.
 Both macOS architectures build whenever desktop is selected after CI succeeds; no
 `APPLE_RELEASE_ENABLED` variable is needed. Each must produce a nonempty DMG
 before the release can be published.
-Test Linux AppImage and Debian packages on a clean supported distribution.
+The RPM job builds its builder image from `desktop/rpm/Dockerfile` on AlmaLinux
+10, then compiles and packages the app against that RHEL-compatible ABI. It
+publishes `Kaede-Chat-<tag>-linux-x86_64.rpm` and its SHA-256 checksum and gates
+publication on a clean AlmaLinux installation and shared-library check. RPM
+users need RHEL 10, AlmaLinux 10, or Rocky Linux 10 with EPEL and CodeReady Builder
+(CRB) enabled. RHEL 9 is not supported: its repositories lack WebKitGTK 4.1.
+The RPM is not GPG-signed; the adjacent checksum verifies download integrity.
+
+Test Linux AppImage, Debian, and RPM packages on a clean supported distribution.
 Release testing must cover:
 
 - login and adaptive Turnstile, secure session restart, upload, and gateway
