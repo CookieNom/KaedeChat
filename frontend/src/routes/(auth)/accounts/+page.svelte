@@ -67,68 +67,93 @@
 </script>
 
 <svelte:head><title>Switch accounts · Kaede Chat</title></svelte:head>
-<h1 class="auth-title">Switch accounts</h1>
-{#if isNativeDesktop()}
-  <p class="auth-intro">
-    Choose a saved sign-in or add another account. Switching disconnects your current call.
-  </p>
-  <div class="accounts" aria-busy={busy}>
-    {#each accounts as account (account.account_key)}
-      <div class="account">
-        <button class="secondary-button" disabled={busy} onclick={() => choose(account)}>
-          <strong>{account.label}</strong><small
-            >{account.instance}{active === account.account_key ? ' · Current account' : ''}</small
-          >
-        </button>
-        {#if active !== account.account_key}
-          <button
-            class="secondary-button"
-            disabled={busy}
-            aria-label={`Remove saved sign-in for ${account.label}`}
-            onclick={() => forget(account)}>Remove</button
-          >
-        {/if}
-      </div>
-    {:else}
-      <p>{busy ? 'Loading accounts…' : 'No saved accounts yet.'}</p>
-    {/each}
-  </div>
-  <a class="primary-button" href={resolve('/login?add-account=1')}>Add an account / sign in again</a
-  >
-  <p class="field-note">
-    Remove forgets the sign-in on this device. Revoke sessions in account settings to sign out other
-    devices.
-  </p>
-{:else}
-  <p>Saved-account switching is available in the desktop app.</p>
-{/if}
-{#if error}<p class="form-error" role="alert">{error}</p>{/if}
-{#if active && accounts.some((account) => account.account_key === active)}
-  <button
-    class="secondary-button"
-    disabled={busy}
-    onclick={() => choose(accounts.find((account) => account.account_key === active)!)}
-    >Back to current account</button
-  >
-{:else}
-  <a href={resolve('/home')}>Back to chat</a>
-{/if}
+<div class="account-switcher">
+  <h1 class="auth-title">Switch accounts</h1>
+  {#if isNativeDesktop()}
+    <p class="auth-intro">
+      Choose a saved sign-in or add another account. Switching disconnects your current call.
+    </p>
+    <div class="accounts" aria-busy={busy}>
+      {#each accounts as account (account.account_key)}
+        <div class="account">
+          <button class="secondary-button" disabled={busy} onclick={() => choose(account)}>
+            <strong>{account.label}</strong><small
+              >{account.instance}{active === account.account_key ? ' · Current account' : ''}</small
+            >
+          </button>
+          {#if active !== account.account_key}
+            <button
+              class="secondary-button"
+              disabled={busy}
+              aria-label={`Remove saved sign-in for ${account.label}`}
+              onclick={() => forget(account)}>Remove</button
+            >
+          {/if}
+        </div>
+      {:else}
+        <p>{busy ? 'Loading accounts…' : 'No saved accounts yet.'}</p>
+      {/each}
+    </div>
+    <a class="primary-button" href={resolve('/login?add-account=1')}
+      >Add an account / sign in again</a
+    >
+    <p class="field-note">
+      Remove forgets the sign-in on this device. Revoke sessions in account settings to sign out
+      other devices.
+    </p>
+  {:else}
+    <p>Saved-account switching is available in the desktop app.</p>
+  {/if}
+  {#if error}<p class="form-error" role="alert">{error}</p>{/if}
+  {#if active && accounts.some((account) => account.account_key === active)}
+    <button
+      class="secondary-button"
+      disabled={busy}
+      onclick={() => choose(accounts.find((account) => account.account_key === active)!)}
+      >Back to current account</button
+    >
+  {:else}
+    <a href={resolve('/home')}>Back to chat</a>
+  {/if}
+</div>
 
 <style>
+  .account-switcher {
+    display: grid;
+    gap: 1.25rem;
+  }
+  .auth-title {
+    margin: 0;
+    font-size: clamp(1.75rem, 5vw, 2.25rem);
+    line-height: 1.15;
+    letter-spacing: -0.03em;
+  }
+  .auth-intro,
+  .field-note {
+    margin: 0;
+  }
+  .account-switcher > .primary-button {
+    margin: 0;
+    text-align: center;
+  }
   .accounts {
     display: grid;
     gap: 12px;
-    margin-bottom: 20px;
   }
   .account {
     display: flex;
+    align-items: center;
     gap: 8px;
   }
   .account > button:first-child {
     display: grid;
+    min-width: 0;
     flex: 1;
+    justify-content: stretch;
+    gap: 0.25rem;
     text-align: left;
     overflow-wrap: anywhere;
+    line-height: 1.4;
   }
   small {
     color: var(--text-muted);
