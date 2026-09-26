@@ -4,6 +4,7 @@ import {
   copyAuthenticatedImage,
   dmHistoryAttachmentMediaPath,
   downloadAuthenticatedMedia,
+  saveMediaBlob,
   privateInteractionAttachmentMediaPath,
   isSafeSameOriginMediaPath,
   mediaCapacityRetryDelay
@@ -40,6 +41,31 @@ describe('authenticated image clipboard', () => {
 });
 
 describe('authenticated media download', () => {
+  it('saves desktop attachments through the native dialog with the filename and original bytes', async () => {
+    const bytes = new Uint8Array([0, 1, 255]);
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const createElement = vi.fn();
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    vi.stubGlobal('document', { createElement });
+    try {
+      await saveMediaBlob(new Blob([bytes]), '写真.png');
+      const [command, payload] = invoke.mock.calls[0] as [string, Uint8Array];
+      expect(command).toBe('native_save_attachment');
+      const length = new DataView(payload.buffer).getUint32(0, true);
+      expect(new TextDecoder().decode(payload.slice(4, 4 + length))).toBe('写真.png');
+      expect(payload.slice(4 + length)).toEqual(bytes);
+      expect(createElement).not.toHaveBeenCalled();
+
+      invoke.mockRejectedValueOnce(new Error('Cannot save file'));
+      await expect(saveMediaBlob(new Blob([bytes]), 'image.png')).rejects.toThrow(
+        'Cannot save file'
+      );
+      expect(createElement).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('blob-URL download behavior', async () => {
     const click = vi.fn();
     const anchor = { href: '', download: '', click };

@@ -13,8 +13,14 @@
   let {
     siteKey,
     action,
+    size = 'normal',
     onToken
-  }: { siteKey: string; action: string; onToken: (token: string | null) => void } = $props();
+  }: {
+    siteKey: string;
+    action: string;
+    size?: 'normal' | 'compact';
+    onToken: (token: string | null) => void;
+  } = $props();
   let container = $state<HTMLDivElement | null>(null);
   let widgetId: string | null = null;
   let cancelled = false;
@@ -59,6 +65,7 @@
         widgetId = turnstile.render(container, {
           sitekey: siteKey,
           action,
+          size,
           theme: 'auto',
           callback: (token: string) => onToken(token),
           'expired-callback': () => onToken(null),

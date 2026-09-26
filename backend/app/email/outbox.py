@@ -42,7 +42,7 @@ def retry_delay(attempt: int) -> timedelta:
     return RETRY_DELAYS[min(max(attempt, 1) - 1, len(RETRY_DELAYS) - 1)]
 
 
-def _payload_context(settings: Settings, outbox_id: str, one_time_token_id: str) -> bytes:
+def _payload_context(settings: Settings, outbox_id: str, one_time_token_id: str | None) -> bytes:
     return (
         f"kaede-email-outbox:v{PAYLOAD_VERSION}:{settings.domain}:{outbox_id}:{one_time_token_id}"
     ).encode()
@@ -51,7 +51,7 @@ def _payload_context(settings: Settings, outbox_id: str, one_time_token_id: str)
 def encrypt_email_payload(
     settings: Settings,
     outbox_id: str,
-    one_time_token_id: str,
+    one_time_token_id: str | None,
     message: OutboundEmail,
 ) -> bytes:
     payload = {
@@ -83,7 +83,7 @@ def encrypt_email_payload(
 def decrypt_email_payload(
     settings: Settings,
     outbox_id: str,
-    one_time_token_id: str,
+    one_time_token_id: str | None,
     encrypted_payload: bytes,
 ) -> OutboundEmail:
     if not 29 <= len(encrypted_payload) <= 1_048_576:
@@ -119,22 +119,27 @@ def decrypt_email_payload(
 def enqueue_email_intent(
     session: AsyncSession,
     settings: Settings,
-    token: OneTimeToken,
+    token: OneTimeToken | None,
     message: OutboundEmail,
+    *,
+    expires_at: datetime | None = None,
 ) -> EmailOutbox:
-    """Add a delivery intent to the caller's token-issuance transaction."""
+    """Add a delivery intent to the caller's transaction."""
+
+    if token is None and expires_at is None:
+        raise ValueError("email without an account token requires an expiry")
 
     outbox_id = secrets.token_urlsafe(24)
     record = EmailOutbox(
         id=outbox_id,
-        one_time_token_id=token.id,
+        one_time_token_id=token.id if token else None,
         encrypted_payload=encrypt_email_payload(
             settings,
             outbox_id,
-            token.id,
+            token.id if token else None,
             message,
         ),
-        expires_at=token.expires_at,
+        expires_at=token.expires_at if token else expires_at,
     )
     session.add(record)
     return record

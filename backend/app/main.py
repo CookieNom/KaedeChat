@@ -72,6 +72,7 @@ from app.api.soundboard import human_router as human_soundboard_router
 from app.api.soundboard import router as soundboard_router
 from app.api.stage_instances import bot_router as bot_stage_instances_router
 from app.api.stage_instances import router as stage_instances_router
+from app.api.support import router as support_router
 from app.api.threads import bot_router as bot_threads_router
 from app.api.threads import federation_router as thread_federation_router
 from app.api.threads import router as threads_router
@@ -151,6 +152,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(auth_router)
+app.include_router(support_router)
 app.include_router(automod_router)
 app.include_router(admin_router)
 app.include_router(admin_portal_router)

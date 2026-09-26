@@ -533,7 +533,6 @@ def test_unknown_kaede_environment_setting_is_rejected(monkeypatch: pytest.Monke
         ("KAEDE_LANDING_PAGE", "custom"),
         ("KAEDE_LEGAL_INSTANCE_NAME", "Kaede Test"),
         ("KAEDE_LEGAL_OPERATOR_NAME", "Test Operator"),
-        ("KAEDE_LEGAL_CONTACT_EMAIL", "operator@chat.test"),
         ("KAEDE_LEGAL_EFFECTIVE_DATE", "2026-08-29"),
         ("KAEDE_LEGAL_MINIMUM_AGE", "16"),
         ("KAEDE_LEGAL_JURISDICTION", "Test Jurisdiction"),
@@ -574,3 +573,13 @@ def test_committed_environment_templates_use_known_kaede_settings() -> None:
         if unexpected := sorted(names - known):
             unknown[str(template.relative_to(repository))] = unexpected
     assert unknown == {}
+
+
+def test_support_recipient_is_loaded_and_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KAEDE_LEGAL_CONTACT_EMAIL", "operator@example.com")
+    assert settings().legal_contact_email == "operator@example.com"
+    monkeypatch.setenv("KAEDE_LEGAL_CONTACT_EMAIL", " ")
+    assert settings().legal_contact_email is None
+    monkeypatch.setenv("KAEDE_LEGAL_CONTACT_EMAIL", "not-an-email")
+    with pytest.raises(ValueError, match="legal_contact_email"):
+        settings()

@@ -982,7 +982,7 @@ class OneTimeToken(Base, LocalUserMixin):
 
 
 class EmailOutbox(Base):
-    """Encrypted, durable delivery intent for a one-time-token email.
+    """Encrypted, durable delivery intent for account and support email.
 
     Recipient addresses and message bodies deliberately live only inside the
     authenticated ciphertext.  The remaining columns are operational metadata
@@ -991,11 +991,11 @@ class EmailOutbox(Base):
 
     __tablename__ = "email_outbox"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    one_time_token_id: Mapped[str] = mapped_column(
+    one_time_token_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("one_time_tokens.id", ondelete="CASCADE"),
         unique=True,
-        nullable=False,
+        nullable=True,
     )
     encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     status: Mapped[str] = mapped_column(

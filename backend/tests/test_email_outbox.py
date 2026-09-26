@@ -36,18 +36,19 @@ def settings() -> Settings:
     )
 
 
-def test_email_payload_round_trip_is_authenticated_and_opaque() -> None:
+@pytest.mark.parametrize("token_id", ["token-id", None])
+def test_email_payload_round_trip_is_authenticated_and_opaque(token_id: str | None) -> None:
     config = settings()
     message = OutboundEmail(
         to="maple@example.com",
         subject="Verify your account",
         text="https://chat.example.com/verify#token=kc1_ot_highly-secret",
     )
-    encrypted = encrypt_email_payload(config, "outbox-id", "token-id", message)
+    encrypted = encrypt_email_payload(config, "outbox-id", token_id, message)
 
     assert b"maple@example.com" not in encrypted
     assert b"kc1_ot_highly-secret" not in encrypted
-    assert decrypt_email_payload(config, "outbox-id", "token-id", encrypted) == message
+    assert decrypt_email_payload(config, "outbox-id", token_id, encrypted) == message
 
 
 def test_email_payload_rejects_tampering_and_context_swaps() -> None:

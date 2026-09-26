@@ -1843,6 +1843,58 @@ async fn native_soundboard_media(
     Ok(Response::new(bytes.to_vec()))
 }
 
+fn attachment_save_payload(payload: &[u8]) -> Option<(&str, &[u8])> {
+    let length = u32::from_le_bytes(payload.get(..4)?.try_into().ok()?) as usize;
+    if !(1..=4096).contains(&length) {
+        return None;
+    }
+    let filename = std::str::from_utf8(payload.get(4..4 + length)?).ok()?;
+    let filename = filename.rsplit(['/', '\\']).next()?;
+    if filename.is_empty() || matches!(filename, "." | "..") || filename.contains('\0') {
+        return None;
+    }
+    let bytes = payload.get(4 + length..)?;
+    (bytes.len() <= 100 * 1024 * 1024).then_some((filename, bytes))
+}
+
+#[tauri::command]
+async fn native_save_attachment(
+    window: tauri::WebviewWindow,
+    request: Request<'_>,
+) -> Result<(), NativeError> {
+    static SAVE_LOCK: Mutex<()> = Mutex::const_new(());
+    let _guard = SAVE_LOCK.try_lock().map_err(|_| {
+        NativeError::local("SAVE_IN_PROGRESS", "Finish saving the current file first.")
+    })?;
+    let contents = match request.body() {
+        InvokeBody::Raw(payload) => attachment_save_payload(payload),
+        InvokeBody::Json(_) => None,
+    };
+    let (filename, bytes) = contents.ok_or_else(|| {
+        NativeError::local(
+            "INVALID_SAVE_BODY",
+            "Kaede could not read the file to save.",
+        )
+    })?;
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_parent(&window)
+        .set_title("Save As")
+        .set_file_name(filename);
+    if let Ok(directory) = window.app_handle().path().download_dir() {
+        dialog = dialog.set_directory(directory);
+    }
+    let Some(file) = dialog.save_file().await else {
+        return Ok(());
+    };
+    file.write(bytes).await.map_err(|error| {
+        NativeError::operation(
+            "SAVE_FAILED",
+            "Kaede could not save the file. Check the destination and try again.",
+            error,
+        )
+    })
+}
+
 #[tauri::command]
 async fn native_upload_object(
     request: Request<'_>,
@@ -3794,6 +3846,7 @@ fn main() {
             native_media_request,
             native_soundboard_media,
             native_upload_object,
+            native_save_attachment,
             native_gateway_next,
             native_gateway_command,
             native_audio_devices,
@@ -3852,11 +3905,42 @@ mod tests {
     use super::{
         GatewayCommand, HotkeyRegistration, InstalledVoiceTarget, NativeError, NativeRequest,
         PublicDownloadPolicy, VoiceCommand, VoiceInstallFence, VoiceRestartRequest, VoiceTarget,
-        configured_hotkey, decode_gateway_command, forward_voice_restart, hotkey_status,
-        hotkeys_conflict, is_autostart_launch, native_forward_headers, release_voice_hotkeys,
-        submitted_password_kdf_version, valid_sha256, validate_attachment_media_path,
-        validate_native_password_request, validate_soundboard_media_url,
+        attachment_save_payload, configured_hotkey, decode_gateway_command, forward_voice_restart,
+        hotkey_status, hotkeys_conflict, is_autostart_launch, native_forward_headers,
+        release_voice_hotkeys, submitted_password_kdf_version, valid_sha256,
+        validate_attachment_media_path, validate_native_password_request,
+        validate_soundboard_media_url,
     };
+
+    #[test]
+    fn attachment_save_payload_preserves_bytes_and_rejects_invalid_names() {
+        fn payload(filename: &[u8], contents: &[u8]) -> Vec<u8> {
+            let mut payload = u32::try_from(filename.len())
+                .unwrap_or_default()
+                .to_le_bytes()
+                .to_vec();
+            payload.extend_from_slice(filename);
+            payload.extend_from_slice(contents);
+            payload
+        }
+
+        let contents = [0, 1, 255];
+        let valid = payload("../folder\\写真.png".as_bytes(), &contents);
+        assert_eq!(
+            attachment_save_payload(&valid),
+            Some(("写真.png", contents.as_slice()))
+        );
+        assert_eq!(
+            attachment_save_payload(&payload(b"empty.txt", &[])),
+            Some(("empty.txt", &[][..]))
+        );
+        for filename in [b"".as_slice(), b"..", b"folder/", b"bad\0name", &[255]] {
+            assert!(attachment_save_payload(&payload(filename, &contents)).is_none());
+        }
+        assert!(attachment_save_payload(&[1, 0, 0]).is_none());
+        assert!(attachment_save_payload(&[10, 0, 0, 0, b'a']).is_none());
+        assert!(attachment_save_payload(&u32::MAX.to_le_bytes()).is_none());
+    }
 
     #[test]
     fn voice_shortcuts_are_distinct_and_report_both_states() {

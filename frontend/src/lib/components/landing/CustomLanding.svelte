@@ -77,6 +77,7 @@
       <a href="#features">{$t('ui_features_5697d03d')}</a>
       <a href="#how-we-run">{$t('ui_what_to_know_8248a6c6')}</a>
       <a href="#hosting">{$t('ui_hosting_b4ec9bba')}</a>
+      <a href={resolve('/support')}>Support</a>
       <a class="cl-signin" href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
       <a class="secondary-button" href={resolve('/register')}>{$t('ui_create_account_798ca2ce')}</a>
     </nav>
@@ -221,6 +222,7 @@
       </p>
     </div>
     <nav class="cl-footer-links" aria-label={$t('ui_footer_26c87bb5')}>
+      <a href={resolve('/support')}>Support</a>
       <a href={resolve('/terms')}>{$t('ui_terms_of_service_e69e0614')}</a>
       <a href={resolve('/privacy')}>{$t('ui_privacy_policy_ba445cff')}</a>
       <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>

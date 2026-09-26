@@ -14,6 +14,7 @@ from pydantic import (
     AliasChoices,
     BaseModel,
     ConfigDict,
+    EmailStr,
     Field,
     SecretStr,
     field_validator,
@@ -45,7 +46,6 @@ AUXILIARY_KAEDE_ENV = {
     "KAEDE_GENERATED_OUTPUT",
     "KAEDE_GRAFANA_HOST_PORT",
     "KAEDE_LANDING_PAGE",
-    "KAEDE_LEGAL_CONTACT_EMAIL",
     "KAEDE_LEGAL_EFFECTIVE_DATE",
     "KAEDE_LEGAL_INSTANCE_NAME",
     "KAEDE_LEGAL_JURISDICTION",
@@ -343,6 +343,7 @@ class Settings(BaseSettings):
     # Email
     email_backend: Literal["smtp", "mailtrap_api", "console", "disabled"] = "console"
     email_from_address: str = "no-reply@localhost"
+    legal_contact_email: EmailStr | None = None
     app_url: str = "http://localhost:5173"
     smtp_url: SecretStr | None = None
     mailtrap_api_token: SecretStr | None = None
@@ -400,6 +401,7 @@ class Settings(BaseSettings):
         "proxy_secret",
         "admin_token",
         "smtp_url",
+        "legal_contact_email",
         "mailtrap_api_token",
         "federation_ca_file",
         "media_public_base_url",

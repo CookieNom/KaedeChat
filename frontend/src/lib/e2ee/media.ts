@@ -1,6 +1,10 @@
 import { api } from '$lib/api/client';
 import { uploadObject, type UploadTicket, type VoiceUploadMetadata } from '$lib/media/uploads';
-import { attachmentMediaPath, authenticatedMediaBlob } from '$lib/media/authenticated';
+import {
+  attachmentMediaPath,
+  authenticatedMediaBlob,
+  saveMediaBlob
+} from '$lib/media/authenticated';
 import { scrubImageMetadata } from '$lib/media/privacy-metadata';
 import {
   base64url,
@@ -292,14 +296,5 @@ export async function downloadEncryptedFile(
   privateMediaUrl?: string | null
 ): Promise<void> {
   const plaintext = await decryptEncryptedAttachment(manifest, historyMediaUrl, privateMediaUrl);
-  const objectUrl = URL.createObjectURL(plaintext);
-  try {
-    const anchor = document.createElement('a');
-    anchor.href = objectUrl;
-    anchor.download = manifest.filename;
-    anchor.rel = 'noopener';
-    anchor.click();
-  } finally {
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-  }
+  await saveMediaBlob(plaintext, manifest.filename);
 }

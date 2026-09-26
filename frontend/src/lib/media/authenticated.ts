@@ -1,4 +1,4 @@
-import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
+import { isNativeDesktop, nativeInvoke, nativeInvokeBytes } from '$lib/platform/native';
 import { apiErrorMessage } from '$lib/api/errors';
 import { parseCanonicalEntityRef } from '$lib/chat/refs';
 
@@ -361,11 +361,25 @@ export async function downloadAuthenticatedMedia(
   source: AuthenticatedMediaSource,
   filename: string
 ): Promise<void> {
-  const objectUrl = URL.createObjectURL(await authenticatedMediaBlob(source));
+  await saveMediaBlob(await authenticatedMediaBlob(source), filename);
+}
+
+export async function saveMediaBlob(blob: Blob, filename: string): Promise<void> {
+  if (isNativeDesktop()) {
+    const name = new TextEncoder().encode(filename);
+    const payload = new Uint8Array(4 + name.length + blob.size);
+    new DataView(payload.buffer).setUint32(0, name.length, true);
+    payload.set(name, 4);
+    payload.set(new Uint8Array(await blob.arrayBuffer()), 4 + name.length);
+    await nativeInvokeBytes('native_save_attachment', payload);
+    return;
+  }
+  const objectUrl = URL.createObjectURL(blob);
   try {
     const anchor = document.createElement('a');
     anchor.href = objectUrl;
     anchor.download = filename;
+    anchor.rel = 'noopener';
     anchor.click();
   } finally {
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);

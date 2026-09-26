@@ -1,7 +1,7 @@
 import { webcrypto } from 'node:crypto';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { decryptFile, encryptFile, encryptedManifestDigest } from './media';
+import { decryptFile, downloadEncryptedFile, encryptFile, encryptedManifestDigest } from './media';
 import { fromBase64url } from './encoding';
 import fileVector from '../../../static/protocol/kaede-file-v1.json';
 
@@ -10,6 +10,30 @@ beforeAll(() => {
 });
 
 describe('encrypted attachments', () => {
+  it('saves decrypted desktop attachments through the native Save As dialog', async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(fromBase64url(fileVector.ciphertext_base64url))
+      .mockResolvedValueOnce(undefined);
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    try {
+      await downloadEncryptedFile({
+        ...(fileVector.manifest as Parameters<typeof downloadEncryptedFile>[0]),
+        attachment_id: '60',
+        attachment_domain: 'chat.example'
+      });
+      const call = invoke.mock.calls[1] as [string, Uint8Array];
+      expect(call[0]).toBe('native_save_attachment');
+      const length = new DataView(call[1].buffer).getUint32(0, true);
+      expect(new TextDecoder().decode(call[1].slice(4, 4 + length))).toBe(
+        fileVector.manifest.filename
+      );
+      expect(call[1].slice(4 + length)).toEqual(fromBase64url(fileVector.plaintext_base64url));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('round trips a multi-chunk file without exposing its metadata in ciphertext', async () => {
     const contents = new Uint8Array(180_000);
     for (let offset = 0; offset < contents.length; offset += 65_536)

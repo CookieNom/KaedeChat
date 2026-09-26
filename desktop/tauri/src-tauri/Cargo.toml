@@ -25,6 +25,7 @@ kaede-protocol = { path = "../../crates/kaede-protocol" }
 kaede-turnstile = { path = "../../crates/kaede-turnstile" }
 kaede-voice = { path = "../../crates/kaede-voice" }
 reqwest.workspace = true
+rfd.workspace = true
 parking_lot.workspace = true
 secrecy.workspace = true
 serde.workspace = true

@@ -114,6 +114,21 @@ operator automatically deletes stored or federated data. Do not claim a
 settings workflow or deletion outcome unless the deployment actually adds and
 verifies one.
 
+The custom homepage links to `/support`, a public form with a support-reason
+selector. Requests go to `KAEDE_LEGAL_CONTACT_EMAIL`, which must also be set
+in the API runtime environment. Delivery uses the existing email worker:
+set `KAEDE_EMAIL_BACKEND=mailtrap_api` with `KAEDE_MAILTRAP_API_TOKEN`, or
+`smtp` with `KAEDE_SMTP_URL`, and configure `KAEDE_EMAIL_FROM_ADDRESS` for
+your provider. Apply database migrations and keep the worker and scheduler
+running. No additional email service is needed.
+
+Support requests are encrypted in the email outbox and retried for up to seven
+days; terminal records are cleaned up after seven more days. The form is
+unavailable when the recipient is unset or email is disabled. It uses the
+configured Turnstile check, plus limits of three requests per hour per IP and
+100 per hour per instance. Visitor email addresses are included for replies
+and are not verified.
+
 ## Manual environment configuration
 
 Before starting any service, validate both the file itself and the effective
