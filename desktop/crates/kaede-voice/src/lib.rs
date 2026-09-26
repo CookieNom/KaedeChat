@@ -909,7 +909,7 @@ async fn run_room(
     playback_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            result = async { screen_start.as_mut().expect("pending capture").await }, if screen_start.is_some() => {
+            Some(result) = futures_util::future::OptionFuture::from(screen_start.as_mut()) => {
                 screen_start = None;
                 match result {
                     Ok(video) => { screen_share = Some(video); }
@@ -923,7 +923,7 @@ async fn run_room(
                     screen_sharing: screen_share.is_some(), camera_enabled: camera.is_some(),
                 });
             }
-            result = async { camera_start.as_mut().expect("pending capture").await }, if camera_start.is_some() => {
+            Some(result) = futures_util::future::OptionFuture::from(camera_start.as_mut()) => {
                 camera_start = None;
                 match result {
                     Ok(video) => { camera = Some(video); }
