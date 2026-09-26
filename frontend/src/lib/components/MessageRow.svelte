@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { verifiedMessageContent } from '$lib/chat/reconcile';
   import { t } from '$lib/ui/locale';
 
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
@@ -265,13 +266,7 @@
     Boolean(presentedMessage.message_snapshots?.length) ||
       Boolean(presentedMessage.forwarded_message_ref && !isAnnouncementCopy)
   );
-  const renderedContent = $derived(
-    presentedMessage.e2ee
-      ? presentedMessage.e2ee_verified === true
-        ? (presentedMessage.decrypted_content ?? null)
-        : null
-      : presentedMessage.content
-  );
+  const renderedContent = $derived(verifiedMessageContent(presentedMessage));
 
   function replyReferencePreview(reference: Message): string {
     if (reference.deleted_at) return 'Message removed';

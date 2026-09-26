@@ -385,6 +385,8 @@ export class VoiceSession extends EventTarget {
   #listeningVolumes = new Map<string, number>();
   #audioOwners = new Map<HTMLMediaElement, { identity: string; stream: boolean }>();
   #connectGeneration = 0;
+  #microphoneGeneration = 0;
+  #microphoneBusy = false;
   #pushToTalkDesired = false;
   #pushToTalkQueue: Promise<void> = Promise.resolve();
   #candidateRoom: Room | null = null;
@@ -473,6 +475,7 @@ export class VoiceSession extends EventTarget {
     channel: VoiceChannelPolicy,
     encryptionKey?: ArrayBuffer
   ): Promise<void> {
+    ++this.#microphoneGeneration;
     this.#mediaQuality = loadMediaQuality();
     this.#pushToTalkDesired = false;
     await this.#pushToTalkQueue;
@@ -751,64 +754,97 @@ export class VoiceSession extends EventTarget {
   }
 
   async toggleMicrophone(): Promise<void> {
-    if (!this.connected || !this.canSpeak || this.pushToTalkRequired) return;
-    const wasDeafened = this.deafened;
-    const nextMuted = this.microphone;
-    const nextDeafened = nextMuted ? wasDeafened : false;
-    if (!nextMuted) {
-      // Publish an unmute before opening capture. If realtime state is down,
-      // the local microphone stays closed instead of surprising the user.
-      await this.#publishVoiceState({ self_mute: false, self_deaf: false });
-    }
-    if (isNativeDesktop()) {
-      try {
-        if (!nextMuted && wasDeafened) {
-          await nativeInvoke('native_voice_control', { control: 'undeafen' });
+    if (this.#microphoneBusy || !this.connected || !this.canSpeak || this.pushToTalkRequired)
+      return;
+    this.#microphoneBusy = true;
+    const generation = ++this.#microphoneGeneration;
+    const room = this.room;
+    const connection = this.#connectGeneration;
+    const current = () =>
+      generation === this.#microphoneGeneration &&
+      this.connected &&
+      this.canSpeak &&
+      !this.pushToTalkRequired;
+    const closeStaleCapture = async () => {
+      if (isNativeDesktop() && connection !== this.#connectGeneration) return;
+      if (isNativeDesktop()) await nativeInvoke('native_voice_control', { control: 'mute' });
+      else await room.localParticipant.setMicrophoneEnabled(false);
+      if (connection !== this.#connectGeneration) return;
+      this.microphone = false;
+      this.#changed();
+      await this.#publishVoiceState({ self_mute: true, self_deaf: this.deafened });
+    };
+    try {
+      const wasDeafened = this.deafened;
+      const nextMuted = this.microphone;
+      const nextDeafened = nextMuted ? wasDeafened : false;
+      if (!nextMuted) {
+        // Publish an unmute before opening capture. If realtime state is down,
+        // the local microphone stays closed instead of surprising the user.
+        await this.#publishVoiceState({ self_mute: false, self_deaf: false });
+        if (!current()) return;
+      }
+      if (isNativeDesktop()) {
+        try {
+          if (!nextMuted && wasDeafened) {
+            await nativeInvoke('native_voice_control', { control: 'undeafen' });
+            if (!current()) return;
+          }
+          await nativeInvoke('native_voice_control', {
+            control: nextMuted ? 'mute' : 'unmute'
+          });
+        } catch (caught) {
+          if (!nextMuted) {
+            if (wasDeafened) {
+              await nativeInvoke('native_voice_control', { control: 'deafen' }).catch(
+                () => undefined
+              );
+            }
+            await this.#publishVoiceState({
+              self_mute: true,
+              self_deaf: wasDeafened
+            }).catch(() => undefined);
+          }
+          throw caught;
         }
-        await nativeInvoke('native_voice_control', {
-          control: nextMuted ? 'mute' : 'unmute'
-        });
+        if (!current()) {
+          await closeStaleCapture();
+          return;
+        }
+        this.#nativeMuted = nextMuted;
+        this.#nativeDeafened = nextDeafened;
+        this.microphone = !this.#nativeMuted;
+        this.deafened = this.#nativeDeafened;
+        this.#changed();
+        if (nextMuted) {
+          await this.#publishVoiceState({ self_mute: true, self_deaf: nextDeafened });
+        }
+        return;
+      }
+      try {
+        await room.localParticipant.setMicrophoneEnabled(!nextMuted);
       } catch (caught) {
         if (!nextMuted) {
-          if (wasDeafened) {
-            await nativeInvoke('native_voice_control', { control: 'deafen' }).catch(
-              () => undefined
-            );
-          }
           await this.#publishVoiceState({
             self_mute: true,
-            self_deaf: wasDeafened
+            self_deaf: this.deafened
           }).catch(() => undefined);
         }
         throw caught;
       }
-      this.#nativeMuted = nextMuted;
-      this.#nativeDeafened = nextDeafened;
-      this.microphone = !this.#nativeMuted;
-      this.deafened = this.#nativeDeafened;
+      if (!current()) {
+        await closeStaleCapture();
+        return;
+      }
+      this.microphone = !nextMuted;
+      if (!nextMuted && wasDeafened) this.#setBrowserDeafened(false);
+      this.deafened = nextDeafened;
       this.#changed();
       if (nextMuted) {
         await this.#publishVoiceState({ self_mute: true, self_deaf: nextDeafened });
       }
-      return;
-    }
-    try {
-      await this.room.localParticipant.setMicrophoneEnabled(!nextMuted);
-    } catch (caught) {
-      if (!nextMuted) {
-        await this.#publishVoiceState({
-          self_mute: true,
-          self_deaf: this.deafened
-        }).catch(() => undefined);
-      }
-      throw caught;
-    }
-    this.microphone = !nextMuted;
-    if (!nextMuted && wasDeafened) this.#setBrowserDeafened(false);
-    this.deafened = nextDeafened;
-    this.#changed();
-    if (nextMuted) {
-      await this.#publishVoiceState({ self_mute: true, self_deaf: nextDeafened });
+    } finally {
+      this.#microphoneBusy = false;
     }
   }
 
@@ -856,7 +892,13 @@ export class VoiceSession extends EventTarget {
     await this.room.localParticipant.setMicrophoneEnabled(true);
     this.microphone = true;
     this.#changed();
-    if (!this.#pushToTalkDesired || !this.connected || this.deafened) {
+    if (
+      !this.#pushToTalkDesired ||
+      !this.connected ||
+      !this.canSpeak ||
+      !this.pushToTalkRequired ||
+      this.deafened
+    ) {
       await this.room.localParticipant.setMicrophoneEnabled(false);
       this.microphone = false;
       this.#changed();
@@ -866,6 +908,7 @@ export class VoiceSession extends EventTarget {
 
   async toggleDeafen(): Promise<void> {
     if (!this.connected) return;
+    ++this.#microphoneGeneration;
     const nextDeafened = !this.deafened;
     if (nextDeafened && this.pushToTalkRequired) await this.stopPushToTalk();
     if (!nextDeafened) {
@@ -1058,6 +1101,7 @@ export class VoiceSession extends EventTarget {
     const revokeStream = this.canStream && !permissions.canStream;
     if (!revokeSpeak && !requirePushToTalk && !revokeStream) return;
 
+    if (revokeSpeak || requirePushToTalk) ++this.#microphoneGeneration;
     if (revokeSpeak) {
       this.canSpeak = false;
       this.pushToTalkRequired = false;
@@ -1137,6 +1181,7 @@ export class VoiceSession extends EventTarget {
   }
 
   async disconnect(): Promise<void> {
+    ++this.#microphoneGeneration;
     const adaptiveVideo = this.#adaptiveVideo;
     this.#adaptiveVideo = null;
     this.videoDegraded = false;

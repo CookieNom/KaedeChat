@@ -241,3 +241,36 @@ describe('encrypted rich media privacy', () => {
     noExternalActivity();
   });
 });
+
+it('shows only verified plaintext in encrypted pins', async () => {
+  const { default: PinnedMessagesPanel } =
+    await import('$lib/components/PinnedMessagesPanel.svelte');
+  component = createClassComponent({
+    component: PinnedMessagesPanel,
+    target: document.body,
+    props: {
+      messages: [
+        {
+          ...message,
+          e2ee: {},
+          content: 'forged',
+          decrypted_content: 'secret',
+          e2ee_verified: false
+        }
+      ],
+      onClose: () => {},
+      onJump: () => {}
+    }
+  });
+  flushSync();
+  expect(document.body.textContent).not.toContain('forged');
+  expect(document.body.textContent).not.toContain('secret');
+  component.$set({
+    messages: [
+      { ...message, e2ee: {}, content: 'forged', decrypted_content: 'secret', e2ee_verified: true }
+    ]
+  });
+  flushSync();
+  expect(document.body.textContent).toContain('secret');
+  expect(document.body.textContent).not.toContain('forged');
+});

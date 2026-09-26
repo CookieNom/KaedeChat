@@ -37,8 +37,9 @@ use livekit::{
     },
     options::{AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
-        DataPacket, DataPacketKind, DisconnectReason, LocalAudioTrack, LocalTrack, LocalVideoTrack,
-        Participant, RemoteTrack, Room, RoomEvent, RoomOptions, TrackKind, TrackSource,
+        DataPacket, DataPacketKind, DisconnectReason, LocalAudioTrack, LocalParticipant,
+        LocalTrack, LocalVideoTrack, Participant, RemoteTrack, Room, RoomEvent, RoomOptions,
+        TrackKind, TrackSource,
     },
     webrtc::{
         audio_frame::AudioFrame,
@@ -887,6 +888,8 @@ async fn run_room(
     let mut playback_tick = time::interval(AUDIO_FRAME_TIME);
     let mut screen_share: Option<PublishedVideo> = None;
     let mut camera: Option<PublishedVideo> = None;
+    let mut screen_start: Option<PendingVideo<'_>> = None;
+    let mut camera_start: Option<PendingVideo<'_>> = None;
     let mut video_tick = time::interval(Duration::from_secs(2));
     video_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut subscriptions = BTreeSet::new();
@@ -906,6 +909,34 @@ async fn run_room(
     playback_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            result = async { screen_start.as_mut().expect("pending capture").await }, if screen_start.is_some() => {
+                screen_start = None;
+                match result {
+                    Ok(video) => { screen_share = Some(video); }
+                    Err(error) => {
+                        send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), error.user_message());
+                        continue;
+                    }
+                }
+                let _ = status.send(VoiceStatus::Connected {
+                    room: room.name(), can_speak, can_stream,
+                    screen_sharing: screen_share.is_some(), camera_enabled: camera.is_some(),
+                });
+            }
+            result = async { camera_start.as_mut().expect("pending capture").await }, if camera_start.is_some() => {
+                camera_start = None;
+                match result {
+                    Ok(video) => { camera = Some(video); }
+                    Err(error) => {
+                        send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), error.user_message());
+                        continue;
+                    }
+                }
+                let _ = status.send(VoiceStatus::Connected {
+                    room: room.name(), can_speak, can_stream,
+                    screen_sharing: screen_share.is_some(), camera_enabled: camera.is_some(),
+                });
+            }
             report = performance_rx.recv() => {
                 if let Some((cpu, bandwidth, observed)) = report {
                     if camera.is_none() && screen_share.is_none() { budget = VideoBudget::default(); }
@@ -1170,11 +1201,14 @@ async fn run_room(
                                 "You do not have permission to use your camera in this channel.".to_owned());
                             continue;
                         }
-                        let result = if enabled && camera.is_none() {
-                            publish_camera(&room, device_id.as_deref(), video_quality_mode).await.map(|published| {
-                                camera = Some(published);
-                            })
+                        let result = if enabled && camera.is_none() && camera_start.is_none() {
+                            let room = &room;
+                            camera_start = Some(Box::pin(async move {
+                                publish_camera(room, device_id.as_deref(), video_quality_mode).await
+                            }));
+                            continue;
                         } else if !enabled {
+                            camera_start = None;
                             stop_published_video(&room, camera.take()).await
                         } else {
                             Ok(())
@@ -1201,11 +1235,14 @@ async fn run_room(
                                 "You do not have permission to share your screen in this channel.".to_owned());
                             continue;
                         }
-                        let result = if enabled && screen_share.is_none() {
-                            publish_screen_share(&room, source_id.as_deref(), settings).await.map(|published| {
-                                screen_share = Some(published);
-                            })
+                        let result = if enabled && screen_share.is_none() && screen_start.is_none() {
+                            let room = &room;
+                            screen_start = Some(Box::pin(async move {
+                                publish_screen_share(room, source_id.as_deref(), settings).await
+                            }));
+                            continue;
                         } else if !enabled {
+                            screen_start = None;
                             stop_published_video(&room, screen_share.take()).await
                         } else {
                             Ok(())
@@ -1467,6 +1504,8 @@ async fn run_room(
             }
         }
     }
+    drop(screen_start);
+    drop(camera_start);
     video_degraded.store(false, Ordering::Release);
     if let Some(job) = performance_job {
         job.abort();
@@ -1949,6 +1988,30 @@ fn reconcile_video_subscriptions(
     *subscribed = next;
 }
 
+// Dropping a pending chooser/camera future must also cancel its capture thread.
+type PendingVideo<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<PublishedVideo, VoiceError>> + Send + 'a>,
+>;
+
+struct CaptureStartupGuard {
+    stop: Option<Arc<AtomicBool>>,
+    participant: LocalParticipant,
+    track: LocalVideoTrack,
+}
+
+impl Drop for CaptureStartupGuard {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, Ordering::Release);
+            let participant = self.participant.clone();
+            let track = self.track.clone();
+            tokio::spawn(async move {
+                let _ = participant.unpublish_track(&track.sid()).await;
+            });
+        }
+    }
+}
+
 struct PublishedVideo {
     audio: Option<screen_audio::PublishedAudio>,
     audio_capture_thread: Option<thread::JoinHandle<()>>,
@@ -2003,6 +2066,11 @@ async fn publish_screen_share(
         RtcVideoSource::Native(source.clone()),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let mut startup_guard = CaptureStartupGuard {
+        stop: Some(stop.clone()),
+        participant: room.local_participant(),
+        track: track.clone(),
+    };
     let failure = Arc::new(Mutex::new(None));
     let thread_failure = failure.clone();
     let (audio_sender, audio_receiver) = mpsc::channel(10);
@@ -2134,6 +2202,7 @@ async fn publish_screen_share(
         stop,
         capture_thread: Some(capture_thread),
     };
+    startup_guard.stop = None;
     Ok(video)
 }
 
@@ -2389,6 +2458,11 @@ async fn publish_camera(
         RtcVideoSource::Native(source.clone()),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let mut startup_guard = CaptureStartupGuard {
+        stop: Some(stop.clone()),
+        participant: room.local_participant(),
+        track: track.clone(),
+    };
     let capture_level = Arc::new(AtomicU32::new(0));
     let thread_level = capture_level.clone();
     let thread_stop = stop.clone();
@@ -2463,6 +2537,7 @@ async fn publish_camera(
         stop,
         capture_thread: Some(capture_thread),
     };
+    startup_guard.stop = None;
     Ok(video)
 }
 

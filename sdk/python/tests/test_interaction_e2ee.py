@@ -633,3 +633,26 @@ async def test_client_decrypts_before_command_dispatch(
             "INTERACTION_CREATE", malformed, target="https://guild.example"
         )
     assert received == [{"query": "safe"}]
+
+
+def test_message_edit_replay_memory_is_bounded_without_losing_revision_checks() -> None:
+    from kaede_bot.e2ee import MAX_INTERACTION_REPLAY_ENTRIES
+
+    context = InteractionE2EEContext(
+        provider=FakeProvider(), channel_ref=EntityRef(20, 'chat.example'),
+        group_id=b'group', policy_generation=1, epoch=7,
+    )
+    message = EntityRef(30, 'chat.example')
+    for revision in range(1, MAX_INTERACTION_REPLAY_ENTRIES * 2):
+        context.record_message_ciphertext(
+            str(revision).encode(), message, revision,
+            'create' if revision == 1 else 'edit',
+        )
+    assert len(context._message_ciphertexts) == MAX_INTERACTION_REPLAY_ENTRIES
+    assert len(context._message_revisions) == 1
+    with pytest.raises(E2EEProtocolError, match='replayed'):
+        context.record_message_ciphertext(str(revision).encode(), EntityRef(31, 'chat.example'), 1, 'create')
+    with pytest.raises(E2EEProtocolError, match='equivocated'):
+        context.record_message_ciphertext(b'changed', message, revision, 'edit')
+    with pytest.raises(E2EEProtocolError, match='stale'):
+        context.record_message_ciphertext(b'old', message, 2, 'edit')

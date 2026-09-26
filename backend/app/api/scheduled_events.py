@@ -49,6 +49,7 @@ from app.db.models import (
     MemberRole,
     User,
 )
+from app.federation.guilds import lock_current_guild
 from app.media.schemas import AssetCommitRequest, UploadTicketRequest
 from app.media.service import (
     attachment_payload,
@@ -257,7 +258,8 @@ async def scheduled_event_for_guild(
         GuildScheduledEvent.guild_domain == guild.origin_domain,
     )
     if for_update:
-        statement = statement.with_for_update()
+        await lock_current_guild(session, guild)
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     event = await session.scalar(statement)
     if event is None:
         raise _error(

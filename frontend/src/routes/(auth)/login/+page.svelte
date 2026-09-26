@@ -74,7 +74,7 @@
     verificationResendAvailable = false;
     verificationResendStatus = '';
     try {
-      if (!(await instanceField?.apply())) return;
+      if (!ticket && !(await instanceField?.apply())) return;
       if (ticket) {
         await api('/auth/mfa', {
           method: 'POST',

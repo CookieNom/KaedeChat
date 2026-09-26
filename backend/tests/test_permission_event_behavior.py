@@ -974,3 +974,33 @@ async def test_collection_name_role_projection(
     assert published.await_args_list[0].args[3]["emojis"][0]["roles"] == ["9@chat.example"]
     assert published.await_args_list[1].args[3]["stickers"][0]["name"] == "wave"
     assert published.await_args_list[2].args[3]["soundboard_sounds"][0]["name"] == "chime"
+
+
+@pytest.mark.asyncio
+async def test_postcommit_savepoints_preserve_transaction_boundaries(monkeypatch) -> None:
+    publish = AsyncMock(return_value={})
+    wake = AsyncMock()
+    monkeypatch.setattr(postcommit, "publish_dispatch", publish)
+    monkeypatch.setattr("app.core.task_wake.wake_federation_destinations", wake)
+    async with AsyncSession() as session:
+        postcommit.queue_postcommit_dispatch(session, "topic", "OUTER", {})
+        nested = await session.begin_nested()
+        postcommit.queue_postcommit_dispatch(session, "topic", "INNER", {})
+        postcommit.queue_postcommit_federation_wakes(session, ["peer.example"])
+        await nested.commit()
+        assert await postcommit.publish_committed_dispatches(session, SimpleNamespace()) == 0
+        await session.rollback()
+        assert await postcommit.publish_committed_dispatches(session, SimpleNamespace()) == 0
+        publish.assert_not_awaited()
+        wake.assert_not_awaited()
+
+        postcommit.queue_postcommit_dispatch(session, "topic", "OUTER", {})
+        postcommit.queue_postcommit_federation_wakes(session, ["outer.example"])
+        nested = await session.begin_nested()
+        postcommit.queue_postcommit_dispatch(session, "topic", "INNER", {})
+        postcommit.queue_postcommit_federation_wakes(session, ["inner.example"])
+        await nested.rollback()
+        await session.commit()
+        assert await postcommit.publish_committed_dispatches(session, SimpleNamespace()) == 2
+        assert publish.await_args.args[2] == "OUTER"
+        wake.assert_awaited_once_with({"outer.example"})

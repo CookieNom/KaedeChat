@@ -695,3 +695,43 @@ async def test_terminal_recurrence_materializes_next_occurrence_with_subscribers
         10,
         "chat.example",
     )
+
+
+@pytest.mark.asyncio
+async def test_event_scan_progress_survives_occupied_batches(monkeypatch):
+    from app.scheduled_events import service
+
+    events = [
+        SimpleNamespace(
+            id=i, origin_domain="chat.example", guild_id=10, guild_domain="chat.example"
+        )
+        for i in range(1, 4)
+    ]
+    current_guild = SimpleNamespace(id=10, origin_domain="chat.example")
+    values = {}
+    redis = AsyncMock()
+    redis.get.side_effect = lambda key: values.get(key)
+    redis.set.side_effect = lambda key, value: values.update({key: value})
+    redis.delete.side_effect = lambda key: values.pop(key, None)
+    session = AsyncMock()
+    session.scalars.side_effect = lambda query: [
+        event for event in events if event.id > query.compile().params["id_1"]
+    ][:2]
+    inspected = []
+
+    async def get(model, key, **kwargs):
+        if model is service.GuildScheduledEvent:
+            inspected.append(key[0])
+            return events[key[0] - 1]
+        return current_guild
+
+    session.get.side_effect = get
+    monkeypatch.setattr(service, "lock_terminal_room", AsyncMock())
+    monkeypatch.setattr(service, "lock_current_guild", AsyncMock(return_value=current_guild))
+    monkeypatch.setattr(service, "scheduled_event_lifecycle_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_empty_channel_lifecycle_status", AsyncMock(return_value=None))
+    for _ in range(2):
+        await service.advance_scheduled_event_lifecycle(
+            session, redis, SimpleNamespace(domain="chat.example"), batch_size=2
+        )
+    assert inspected == [1, 2, 3]

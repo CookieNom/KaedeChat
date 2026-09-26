@@ -592,7 +592,7 @@ async def process_search_outbox(session: AsyncSession, settings: Settings) -> in
     claims = {(row.message_id, row.message_domain): row.updated_at for row in rows}
     for row in rows:
         row.locked_at = now
-    await session.commit()
+    # Hold claims through the external write so a newer worker cannot overtake it.
     upserts: list[dict[str, object]] = []
     removals: list[str] = []
     for message_id, message_domain in claims:

@@ -64,6 +64,7 @@
     mergeMessageSnapshot,
     messageReferenceTarget,
     reconcileMessage,
+    mergeMessageUpdate,
     resolvedReferencedMessage,
     type MessageDeliveryUpdate
   } from '$lib/chat/reconcile';
@@ -623,7 +624,7 @@
     pinnedMessages = pinnedMessages.map(patch);
   }
 
-  function applyDispatch(dispatch: Dispatch) {
+  function applyDispatch(dispatch: Dispatch, decryptedUpdate = false) {
     if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
       if (isCurrentChannel(message.channel_id, message.channel_domain)) {
@@ -697,16 +698,16 @@
         reconcileReactionMutation('MESSAGE_UPDATE', dispatch.d);
         return;
       }
-      if (update.e2ee && channel && e2eeClient) {
-        void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) =>
-          applyDispatch({ ...dispatch, d: { ...decrypted, e2ee: null } })
-        );
+      if (update.e2ee && channel && e2eeClient && !decryptedUpdate) {
+        const generation = loadGeneration;
+        void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) => {
+          if (generation === loadGeneration) applyDispatch({ ...dispatch, d: decrypted }, true);
+        });
         return;
       }
-      setMessages(
-        messages.map((item) =>
-          entityKey(item) === entityKey(update) ? { ...item, ...update } : item
-        )
+      setMessages(messages.map((item) => mergeMessageUpdate(item, update, decryptedUpdate)));
+      pinnedMessages = pinnedMessages.map((item) =>
+        mergeMessageUpdate(item, update, decryptedUpdate)
       );
     } else if (dispatch.t === 'ATTACHMENT_UPDATE') {
       const update = dispatch.d as {
@@ -1265,8 +1266,11 @@
         if (routeGeneration !== loadGeneration || targetRef !== dmId) return;
         e2eeClient = client;
         orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
-        pinnedMessages = await decryptConversationMessages(client, loadedChannel, loadedPins);
-        e2eeSafetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
+        const decryptedPins = await decryptConversationMessages(client, loadedChannel, loadedPins);
+        const safetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
+        if (routeGeneration !== loadGeneration || snapshot !== snapshotGeneration) return;
+        pinnedMessages = decryptedPins;
+        e2eeSafetyNumber = safetyNumber;
       } else {
         e2eeClient = null;
         e2eeSafetyNumber = '';
@@ -2310,17 +2314,26 @@
 
   async function loadPins() {
     if (!channel) return;
+    const target = channel;
+    const client = e2eeClient;
+    const generation = loadGeneration;
     pinsLoading = true;
     pinsError = '';
     try {
-      pinnedMessages = await loadPinnedMessages(entityRef(channel));
+      let loaded = await loadPinnedMessages(entityRef(target));
+      if (generation !== loadGeneration) return;
+      if (client && target.encryption_mode === 'e2ee')
+        loaded = await decryptConversationMessages(client, target, loaded);
+      if (generation !== loadGeneration) return;
+      pinnedMessages = loaded;
     } catch (caught) {
+      if (generation !== loadGeneration) return;
       pinsError = userErrorMessage(
         caught,
         $t('ui_could_not_load_pinned_messages_close_this_pan_7f16cd85')
       );
     } finally {
-      pinsLoading = false;
+      if (generation === loadGeneration) pinsLoading = false;
     }
   }
 

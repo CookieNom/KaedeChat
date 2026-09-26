@@ -371,6 +371,8 @@ final class VoiceSession extends ChangeNotifier {
   var _generation = 0;
   var _connecting = false;
   var _muted = false;
+  var _microphoneGeneration = 0;
+  var _microphoneBusy = false;
   var _deafened = false;
   var _camera = false;
   var _screen = false;
@@ -541,6 +543,7 @@ final class VoiceSession extends ChangeNotifier {
         _callRef == callRef) {
       return;
     }
+    ++_microphoneGeneration;
     final requestedCamera = _camera;
     final requestedScreen = _screen;
     final generation = ++_generation;
@@ -891,6 +894,7 @@ final class VoiceSession extends ChangeNotifier {
         }
         final error = _friendly(exception);
         if (_room != null) await _disposeRoom(notify: false);
+        ++_microphoneGeneration;
         _canSpeak = false;
         _canStream = false;
         _recoverableDisconnect = false;
@@ -935,6 +939,7 @@ final class VoiceSession extends ChangeNotifier {
     final gainedServerGrant = (speak && !_canSpeak) || (stream && !_canStream);
     _canUseVad = voiceChannelCanUseVad(fresh);
     if (!speak && _canSpeak) {
+      ++_microphoneGeneration;
       _canSpeak = false;
       _muted = true;
       await _room?.localParticipant?.setMicrophoneEnabled(false);
@@ -947,6 +952,7 @@ final class VoiceSession extends ChangeNotifier {
       await _room?.localParticipant?.setScreenShareEnabled(false);
     }
     if (!_canUseVad && !_pushToTalk) {
+      ++_microphoneGeneration;
       _pushToTalk = true;
       _pushHeld = false;
       await _room?.localParticipant?.setMicrophoneEnabled(false);
@@ -963,56 +969,79 @@ final class VoiceSession extends ChangeNotifier {
   }
 
   Future<void> toggleMute() async {
-    if (!_canSpeak) return;
-    final next = !_muted;
-    final wasDeafened = _deafened;
-    final room = _room;
-    final publish = !next && (!_pushToTalk || _pushHeld);
-    if (!next) {
-      // Do not open capture until the authoritative session can publish the
-      // unmute. Offline UI must fail closed for microphone privacy.
-      await _voiceStatePublisher(selfMute: false, selfDeaf: false);
-    }
-    if (publish && room != null) {
-      final protected = await _activateBackgroundService(
-        room,
-        microphone: true,
-      );
-      if (defaultTargetPlatform == TargetPlatform.android && !protected) {
-        await _voiceStatePublisher(
-          selfMute: true,
-          selfDeaf: wasDeafened,
-        ).catchError((_) {});
+    if (!_canSpeak || !connected || _microphoneBusy) return;
+    _microphoneBusy = true;
+    final generation = ++_microphoneGeneration;
+    bool current() =>
+        generation == _microphoneGeneration && _canSpeak && connected;
+    try {
+      final next = !_muted;
+      final wasDeafened = _deafened;
+      final room = _room;
+      final publish = !next && (!_pushToTalk || _pushHeld);
+      if (!next) {
+        // Do not open capture until the authoritative session can publish the
+        // unmute. Offline UI must fail closed for microphone privacy.
+        await _voiceStatePublisher(selfMute: false, selfDeaf: false);
+        if (!current()) return;
+      }
+      if (publish && room != null) {
+        final protected = await _activateBackgroundService(
+          room,
+          microphone: true,
+        );
+        if (defaultTargetPlatform == TargetPlatform.android && !protected) {
+          await _voiceStatePublisher(
+            selfMute: true,
+            selfDeaf: wasDeafened,
+          ).catchError((_) {});
+          return;
+        }
+      }
+      if (!current()) return;
+      try {
+        await room?.localParticipant?.setMicrophoneEnabled(publish);
+        if (!current()) {
+          await room?.localParticipant?.setMicrophoneEnabled(false);
+          if (identical(room, _room)) {
+            await _voiceStatePublisher(selfMute: true, selfDeaf: _deafened);
+          }
+          return;
+        }
+        if (!next && wasDeafened) await _setRemoteDeafened(false);
+      } on Object {
+        if (!next) {
+          await _voiceStatePublisher(
+            selfMute: true,
+            selfDeaf: wasDeafened,
+          ).catchError((_) {});
+        }
+        rethrow;
+      }
+      if (!current()) {
+        await room?.localParticipant?.setMicrophoneEnabled(false);
+        if (identical(room, _room)) await _setRemoteDeafened(_deafened);
         return;
       }
-    }
-    try {
-      await room?.localParticipant?.setMicrophoneEnabled(publish);
-      if (!next && wasDeafened) await _setRemoteDeafened(false);
-    } on Object {
-      if (!next) {
+      _muted = next;
+      if (!next) _deafened = false;
+      if (!publish && room != null && _appActive) {
+        await _activateBackgroundService(room, microphone: false);
+      }
+      notifyListeners();
+      if (next) {
         await _voiceStatePublisher(
           selfMute: true,
           selfDeaf: wasDeafened,
-        ).catchError((_) {});
+        );
       }
-      rethrow;
-    }
-    _muted = next;
-    if (!next) _deafened = false;
-    if (!publish && room != null && _appActive) {
-      await _activateBackgroundService(room, microphone: false);
-    }
-    notifyListeners();
-    if (next) {
-      await _voiceStatePublisher(
-        selfMute: true,
-        selfDeaf: wasDeafened,
-      );
+    } finally {
+      _microphoneBusy = false;
     }
   }
 
   Future<void> toggleDeafen() async {
+    ++_microphoneGeneration;
     final next = !_deafened;
     if (!next) {
       await _voiceStatePublisher(selfMute: true, selfDeaf: false);
@@ -1343,6 +1372,7 @@ final class VoiceSession extends ChangeNotifier {
         _canStream = capabilities.canStream;
         _canUseVad = capabilities.canUseVad;
         if (!_canSpeak) {
+          ++_microphoneGeneration;
           _muted = true;
           _pushHeld = false;
           await room?.localParticipant?.setMicrophoneEnabled(false);
@@ -1747,6 +1777,7 @@ final class VoiceSession extends ChangeNotifier {
   }
 
   Future<void> leave({String? reason}) async {
+    ++_microphoneGeneration;
     _generation += 1;
     await _disposeRoom(notify: false);
     _channel = null;

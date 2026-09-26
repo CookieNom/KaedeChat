@@ -1237,20 +1237,11 @@ fn submitted_password_kdf_version(body: &Value) -> Result<u8, NativeError> {
     }
 }
 
-fn canonical_base64url_material(value: &str, decoded_length: usize) -> bool {
-    let Ok(mut decoded) = URL_SAFE_NO_PAD.decode(value) else {
-        return false;
-    };
-    let valid = decoded.len() == decoded_length && URL_SAFE_NO_PAD.encode(&decoded) == value;
-    decoded.fill(0);
-    valid
-}
-
 fn submitted_derived_password(body: &Value) -> Result<&str, NativeError> {
     let password = body
         .get("password")
         .and_then(Value::as_str)
-        .filter(|value| value.len() == 43 && canonical_base64url_material(value, 32));
+        .filter(|value| kaede_auth::validate_authentication_secret(value).is_ok());
     password.ok_or_else(|| {
         NativeError::local(
             "INVALID_PASSWORD_PROTOCOL",
@@ -1260,35 +1251,8 @@ fn submitted_derived_password(body: &Value) -> Result<&str, NativeError> {
 }
 
 fn validate_password_kdf(body: &Value, require_vault_salt: bool) -> Result<(), NativeError> {
-    let Some(kdf) = body.get("password_kdf").and_then(Value::as_object) else {
-        return Err(NativeError::local(
-            "INVALID_PASSWORD_PROTOCOL",
-            "This Kaede client did not submit password protection metadata. Update the app and try again.",
-        ));
-    };
-    let expected_fields = if require_vault_salt { 5 } else { 4 };
-    let auth_salt_valid = kdf
-        .get("auth_salt")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.len() == 22 && canonical_base64url_material(value, 16));
-    let vault_salt_valid = !require_vault_salt
-        || kdf
-            .get("vault_salt")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.len() == 22 && canonical_base64url_material(value, 16));
-    if kdf.len() != expected_fields
-        || kdf.get("version").and_then(Value::as_u64) != Some(2)
-        || kdf.get("algorithm").and_then(Value::as_str) != Some("PBKDF2-SHA256")
-        || kdf.get("iterations").and_then(Value::as_u64) != Some(600_000)
-        || !auth_salt_valid
-        || !vault_salt_valid
-    {
-        return Err(NativeError::local(
-            "INVALID_PASSWORD_PROTOCOL",
-            "This Kaede client submitted invalid password protection metadata. Update the app and try again.",
-        ));
-    }
-    Ok(())
+    kaede_auth::validate_password_kdf(&body["password_kdf"], require_vault_salt)
+        .map_err(NativeError::from)
 }
 
 fn validate_native_password_request(
@@ -1405,17 +1369,13 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
     let code = body.get("code").and_then(Value::as_str).ok_or_else(|| {
         NativeError::local("MFA_CODE_REQUIRED", "Enter your authentication code.")
     })?;
-    let pending = state
-        .pending_mfa
-        .lock()
-        .await
-        .take()
-        .ok_or_else(|| {
-            NativeError::local(
-                "MFA_TICKET_INVALID",
-                "Your sign-in attempt expired. Start sign-in again to request a new authentication challenge.",
-            )
-        })?;
+    let mut pending_guard = state.pending_mfa.lock().await;
+    let pending = pending_guard.as_ref().ok_or_else(|| {
+        NativeError::local(
+            "MFA_TICKET_INVALID",
+            "Your sign-in attempt expired. Start sign-in again.",
+        )
+    })?;
     match pending
         .session
         .complete_mfa(&pending.ticket, code, "Kaede Desktop")
@@ -1423,6 +1383,8 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
         .map_err(NativeError::from)?
     {
         LoginOutcome::Authenticated => {
+            let pending = pending_guard.take().expect("verified pending MFA");
+            drop(pending_guard);
             let domain = pending.api.endpoint().domain().clone();
             let remembered_key = pending.account_key.clone();
             activate_account(
@@ -3147,7 +3109,8 @@ async fn leave_active_voice(state: &NativeState) {
     let install_guard = state.voice_install.invalidate().await;
     *state.push_to_talk_sender.lock() = None;
     *state.voice_video.lock().await = None;
-    let voice = state.voice.lock().await.take();
+    let mut voice_guard = state.voice.lock().await;
+    let voice = voice_guard.take();
     *state.voice_target.write().await = None;
     // Mute and deafen belong to the client, so the next call inherits them.
     state.voice_volumes.write().await.clear();
@@ -3155,6 +3118,8 @@ async fn leave_active_voice(state: &NativeState) {
     if let Some(voice) = voice {
         voice.leave().await;
     }
+    // Status readers wait until the old room actually closes.
+    drop(voice_guard);
 }
 
 #[tauri::command]

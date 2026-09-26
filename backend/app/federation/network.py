@@ -285,8 +285,11 @@ class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Any = None,
     ) -> httpcore.AsyncNetworkStream:
-        target = self.address if host == self.hostname else host
-        return await self.backend.connect_tcp(target, port, timeout, local_address, socket_options)
+        if host != self.hostname:
+            raise FederationNetworkError("unexpected hostname for pinned connection")
+        return await self.backend.connect_tcp(
+            self.address, port, timeout, local_address, socket_options
+        )
 
     async def connect_unix_socket(  # noqa: ASYNC109 -- httpcore interface name
         self,

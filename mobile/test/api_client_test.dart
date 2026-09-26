@@ -30,6 +30,28 @@ void main() {
         ))
           ..httpClientAdapter = adapter;
 
+    test('background clients neither rotate nor clear the shared login',
+        () async {
+      var refreshes = 0;
+      final api = KaedeApiClient(
+        vault: vault,
+        allowSessionRefresh: false,
+        httpClient: Dio()
+          ..httpClientAdapter = _JsonAdapter('',
+              respond: (_) async => _response('{}', status: 401)),
+        refreshClient: refreshClient(_JsonAdapter('', respond: (_) async {
+          refreshes++;
+          return _response('{}', status: 401);
+        })),
+      );
+      await api.useTokens(original);
+      await expectLater(
+          api.getJson('/api/v1/users/@me'), throwsA(isA<KaedeException>()));
+      await expectLater(api.refreshTokens(), throwsA(isA<KaedeException>()));
+      expect(refreshes, 0);
+      expect((await vault.read())?.refreshToken, original.refreshToken);
+    });
+
     test('app and notification clients rotate a shared token only once',
         () async {
       var requests = 0;

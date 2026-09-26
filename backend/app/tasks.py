@@ -405,6 +405,27 @@ async def project_message_record(
     message_id: int,
     message_domain: str,
 ) -> int:
+    from app.api.channels import lock_message_delete_access
+    from app.chat.channel_access import ChannelAccess
+
+    message = await session.get(Message, (message_id, message_domain))
+    if message is not None:
+        channel = await session.get(Channel, (message.channel_id, message.channel_domain))
+        if channel is not None:
+            guild = (
+                await session.get(Guild, (channel.guild_id, channel.guild_domain))
+                if channel.guild_id is not None
+                else None
+            )
+            await lock_message_delete_access(
+                session, settings, ChannelAccess(channel=channel, guild=guild, participants=[])
+            )
+        # Match deletion's message-before-projection order.
+        # ponytail: one message per transaction bounds sweep throughput; restore
+        # batching only with ordered message-before-projection row locks.
+        message = await session.get(
+            Message, (message_id, message_domain), with_for_update=True, populate_existing=True
+        )
     projection = await session.scalar(
         select(MessageProjection)
         .where(
@@ -414,27 +435,12 @@ async def project_message_record(
         .with_for_update()
     )
     if projection is None or projection.processed_at is not None:
+        await session.rollback()
         return 0
-    projections = list(
-        await session.scalars(
-            select(MessageProjection)
-            .where(
-                MessageProjection.channel_id == projection.channel_id,
-                MessageProjection.channel_domain == projection.channel_domain,
-                MessageProjection.processed_at.is_(None),
-            )
-            .order_by(MessageProjection.message_id, MessageProjection.message_domain)
-            .limit(100)
-            .with_for_update(skip_locked=True)
-        )
-    )
-    if projection not in projections:
-        projections.append(projection)
+    projections = [projection]
     messages: list[tuple[MessageProjection, Message]] = []
-    for pending in projections:
-        message = await session.get(Message, (pending.message_id, pending.message_domain))
-        if message is not None:
-            messages.append((pending, message))
+    if message is not None and message.deleted_at is None:
+        messages.append((projection, message))
     now = datetime.now(UTC)
     if not messages:
         for pending in projections:
@@ -1335,6 +1341,7 @@ async def poll_expiry_sweep() -> int:
     from app.api.channels import (
         ensure_poll_result_message,
         load_poll_result_channel_access,
+        lock_message_delete_access,
         queue_dm_poll_mutation,
     )
     from app.chat.channel_access import publish_channel_dispatch
@@ -1370,26 +1377,42 @@ async def poll_expiry_sweep() -> int:
                     )
                     .order_by(Poll.expires_at, Poll.message_id, Poll.message_domain)
                     .limit(1)
-                    .with_for_update(skip_locked=True)
                 )
                 candidate = row.one_or_none()
                 if candidate is None:
                     break
                 poll, message, channel = candidate
+                access = await load_poll_result_channel_access(
+                    session, settings, EntityRef(f"{channel.id}@{channel.origin_domain}")
+                )
+                access = await lock_message_delete_access(session, settings, access)
+                # Match foreground finalization: Guild, then Message, then Poll.
+                message = await session.get(
+                    Message,
+                    (message.id, message.origin_domain),
+                    with_for_update=True,
+                    populate_existing=True,
+                )
+                if message is None or message.deleted_at is not None:
+                    continue
+                poll = await session.get(
+                    Poll,
+                    (poll.message_id, poll.message_domain),
+                    with_for_update=True,
+                    populate_existing=True,
+                )
+                if (
+                    poll is None
+                    or poll.finalized_at is not None
+                    or poll.expires_at > datetime.now(UTC)
+                ):
+                    continue
                 poll.finalized_at = datetime.now(UTC)
                 author = await session.get(User, (message.author_id, message.author_domain))
                 if author is None:
                     raise RuntimeError("poll author disappeared before scheduled finalization")
-                guild = (
-                    await session.get(Guild, (channel.guild_id, channel.guild_domain))
-                    if channel.guild_id is not None
-                    else None
-                )
-                access = await load_poll_result_channel_access(
-                    session,
-                    settings,
-                    EntityRef(f"{channel.id}@{channel.origin_domain}"),
-                )
+                guild = access.guild
+                channel = access.channel
                 if guild is not None:
                     await queue_guild_mutation(
                         session,

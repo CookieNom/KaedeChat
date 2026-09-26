@@ -1,6 +1,38 @@
 import { entityKey } from './refs';
 import type { Message } from './types';
 
+/** Only authenticated plaintext is eligible for encrypted message presentation. */
+export function verifiedMessageContent(message: Message): string | null {
+  if (message.deleted_at) return null;
+  return message.e2ee
+    ? message.e2ee_verified === true
+      ? (message.decrypted_content ?? null)
+      : null
+    : message.content;
+}
+
+export function mergeMessageUpdate(
+  message: Message,
+  update: Message,
+  decryptedUpdate = false
+): Message {
+  if (entityKey(message) !== entityKey(update) || message.deleted_at) return message;
+  if (message.edited_at && update.edited_at && message.edited_at > update.edited_at) return message;
+  const merged = { ...message, ...update, e2ee: update.e2ee ?? message.e2ee };
+  // Client verification belongs to this ciphertext, never to a previous edit
+  // or a server-supplied field. Encryption cannot be removed by a dispatch.
+  return merged.e2ee && !decryptedUpdate
+    ? {
+        ...merged,
+        e2ee_verified: false,
+        decrypted_content: null,
+        decrypted_attachments: [],
+        decrypted_allowed_mentions: undefined,
+        decrypted_forward_snapshot: null
+      }
+    : merged;
+}
+
 export interface MessageReferenceTarget {
   id: string;
   origin_domain: string;

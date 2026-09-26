@@ -291,3 +291,17 @@ it.each([false, true])(
     }
   }
 );
+
+it('keeps failed encrypted edits sealed for presentation', async () => {
+  const client = { decryptMessages: vi.fn(async () => [null]) } as unknown as KaedeE2EEClient;
+  const incoming = {
+    e2ee: { ciphertext: 'invalid' },
+    content: 'forged',
+    e2ee_verified: true,
+    decrypted_content: 'forged'
+  } as unknown as Message;
+  const [sealed] = await decryptConversationMessages(client, channel, [incoming]);
+  expect(sealed.e2ee).toEqual(incoming.e2ee);
+  expect(sealed.e2ee_verified).toBe(false);
+  expect(sealed.decrypted_content).toBeNull();
+});

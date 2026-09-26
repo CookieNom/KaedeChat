@@ -164,6 +164,7 @@
     messageDeliveryFailure,
     messageReferenceTarget,
     reconcileMessage,
+    mergeMessageUpdate,
     resolvedReferencedMessage
   } from '$lib/chat/reconcile';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
@@ -2640,7 +2641,7 @@
     scheduleForumRefreshForChannel(update.channel_id, update.channel_domain);
   }
 
-  function applyDispatch(dispatch: Dispatch) {
+  function applyDispatch(dispatch: Dispatch, decryptedUpdate = false) {
     if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
       if (isCurrentChannel(message.channel_id, message.channel_domain)) {
@@ -2721,21 +2722,21 @@
         reconcileReactionMutation('MESSAGE_UPDATE', dispatch.d);
         return;
       }
-      if (update.e2ee && channel && e2eeClient) {
-        void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) =>
-          applyDispatch({ ...dispatch, d: { ...decrypted, e2ee: null } })
-        );
+      if (update.e2ee && channel && e2eeClient && !decryptedUpdate) {
+        const generation = loadGeneration;
+        void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) => {
+          if (generation === loadGeneration) applyDispatch({ ...dispatch, d: decrypted }, true);
+        });
         return;
       }
-      setMessages(
-        messages.map((item) =>
-          entityKey(item) === entityKey(update) ? { ...item, ...update } : item
-        )
+      setMessages(messages.map((item) => mergeMessageUpdate(item, update, decryptedUpdate)));
+      pinnedMessages = pinnedMessages.map((item) =>
+        mergeMessageUpdate(item, update, decryptedUpdate)
       );
       if (channel?.starter_message && entityKey(channel.starter_message) === entityKey(update)) {
         rememberThread({
           ...channel,
-          starter_message: { ...channel.starter_message, ...update }
+          starter_message: mergeMessageUpdate(channel.starter_message, update, decryptedUpdate)
         });
       }
       scheduleForumRefreshForChannel(update.channel_id, update.channel_domain);
@@ -4039,8 +4040,11 @@
         if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
         e2eeClient = client;
         orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
-        pinnedMessages = await decryptConversationMessages(client, loadedChannel, loadedPins);
-        e2eeSafetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
+        const decryptedPins = await decryptConversationMessages(client, loadedChannel, loadedPins);
+        const safetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
+        if (routeGeneration !== loadGeneration || snapshot !== snapshotGeneration) return;
+        pinnedMessages = decryptedPins;
+        e2eeSafetyNumber = safetyNumber;
       } else {
         e2eeClient = null;
         e2eeSafetyNumber = '';
@@ -4902,19 +4906,23 @@
 
   async function changeThreadMembership(joined: boolean) {
     if (!channel || !isThreadChannel(channel) || threadActionBusy) return;
+    const target = channel;
+    const member = currentThreadMember;
+    const generation = loadGeneration;
     threadActionBusy = true;
     error = '';
     try {
       const notificationLevel = currentThreadNotificationLevel;
-      await setThreadMembership(channel, joined, notificationLevel);
+      await setThreadMembership(target, joined, notificationLevel);
+      if (generation !== loadGeneration) return;
       rememberThread({
-        ...channel,
-        member: joined
-          ? { ...(currentThreadMember ?? {}), notification_level: notificationLevel }
-          : null
+        ...target,
+        member: joined ? { ...(member ?? {}), notification_level: notificationLevel } : null
       });
-      threadMembers = await fetchThreadMembers(channel).catch(() => threadMembers);
+      const loaded = await fetchThreadMembers(target);
+      if (generation === loadGeneration) threadMembers = loaded;
     } catch (caught) {
+      if (generation !== loadGeneration) return;
       error = userErrorMessage(
         caught,
         joined
@@ -4922,7 +4930,7 @@
           : $t('ui_could_not_leave_this_thread_5eed10b0')
       );
     } finally {
-      threadActionBusy = false;
+      if (generation === loadGeneration) threadActionBusy = false;
     }
   }
 
@@ -4937,19 +4945,25 @@
       threadActionBusy
     )
       return;
+    const target = channel;
+    const member = currentThreadMember;
+    const generation = loadGeneration;
     threadActionBusy = true;
     error = '';
     try {
-      await setThreadMembership(channel, true, notificationLevel);
+      await setThreadMembership(target, true, notificationLevel);
+      if (generation !== loadGeneration) return;
       rememberThread({
-        ...channel,
-        member: { ...(currentThreadMember ?? {}), notification_level: notificationLevel }
+        ...target,
+        member: { ...(member ?? {}), notification_level: notificationLevel }
       });
-      threadMembers = await fetchThreadMembers(channel).catch(() => threadMembers);
+      const loaded = await fetchThreadMembers(target);
+      if (generation === loadGeneration) threadMembers = loaded;
     } catch (caught) {
+      if (generation !== loadGeneration) return;
       error = userErrorMessage(caught, $t('ui_could_not_update_thread_notifications_912a2dae'));
     } finally {
-      threadActionBusy = false;
+      if (generation === loadGeneration) threadActionBusy = false;
     }
   }
 
@@ -5792,17 +5806,26 @@
 
   async function loadPins() {
     if (!channel || !canReadMessageHistory) return;
+    const target = channel;
+    const client = e2eeClient;
+    const generation = loadGeneration;
     pinsLoading = true;
     pinsError = '';
     try {
-      pinnedMessages = await loadPinnedMessages(entityRef(channel));
+      let loaded = await loadPinnedMessages(entityRef(target));
+      if (generation !== loadGeneration) return;
+      if (client && target.encryption_mode === 'e2ee')
+        loaded = await decryptConversationMessages(client, target, loaded);
+      if (generation !== loadGeneration) return;
+      pinnedMessages = loaded;
     } catch (caught) {
+      if (generation !== loadGeneration) return;
       pinsError = userErrorMessage(
         caught,
         $t('ui_could_not_load_pinned_messages_close_this_pan_7f16cd85')
       );
     } finally {
-      pinsLoading = false;
+      if (generation === loadGeneration) pinsLoading = false;
     }
   }
 

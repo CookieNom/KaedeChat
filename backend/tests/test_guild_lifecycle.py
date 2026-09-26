@@ -743,3 +743,27 @@ async def test_ownership_transfer_rejects_bot_or_disabled_target(
     assert caught.value.status_code == 404
     assert caught.value.detail == {"code": "GUILD_MEMBER_NOT_FOUND"}
     session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_guild_mutation_takes_terminal_fence_before_guild_row(monkeypatch):
+    order = []
+    guild = make_guild()
+
+    async def terminal(*_args):
+        order.append("terminal")
+
+    async def row(_statement):
+        order.append("guild")
+        return guild
+
+    monkeypatch.setattr(guild_lifecycle, "lock_terminal_room", terminal)
+    assert (
+        await guild_lifecycle._locked_guild(
+            SimpleNamespace(scalar=row),
+            SimpleNamespace(domain="chat.example"),
+            EntityRef("10@chat.example"),
+        )
+        is guild
+    )
+    assert order == ["terminal", "guild"]

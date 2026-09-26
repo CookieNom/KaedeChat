@@ -84,6 +84,14 @@ def normalize_preview_url(value: str) -> str:
     hostname = parsed.hostname.rstrip(".").lower()
     if not hostname:
         raise ValueError("Link hostname is invalid")
+    try:
+        hostname = (
+            httpx.URL(urlunsplit((parsed.scheme.lower(), parsed.netloc, "/", "", "")))
+            .raw_host.decode("ascii")
+            .rstrip(".")
+        )
+    except httpx.InvalidURL as exc:
+        raise ValueError("Link hostname is invalid") from exc
     netloc = hostname
     if ":" in hostname and not hostname.startswith("["):
         netloc = f"[{hostname}]"
@@ -130,7 +138,7 @@ def preview_metadata(html: str, final_url: str) -> dict[str, str | None]:
 
 
 async def pinned_client(url: str) -> httpx.AsyncClient:
-    hostname = urlsplit(url).hostname
+    hostname = httpx.URL(url).raw_host.decode("ascii")
     if hostname is None:
         raise FederationNetworkError("preview link has no hostname")
     addresses = await public_addresses(hostname)

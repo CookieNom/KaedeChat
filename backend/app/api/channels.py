@@ -14229,23 +14229,23 @@ async def acknowledge_channel(
     # Pending projections increment later, provided their message is still unread.
     remaining_mentions = (
         select(func.count())
-        .select_from(MessageProjection)
-        .join(
-            Message,
+        .select_from(Message)
+        .outerjoin(
+            MessageProjection,
             and_(
                 Message.id == MessageProjection.message_id,
                 Message.origin_domain == MessageProjection.message_domain,
             ),
         )
         .where(
-            MessageProjection.channel_id == channel.id,
-            MessageProjection.channel_domain == channel.origin_domain,
-            MessageProjection.processed_at.is_not(None),
-            tuple_(MessageProjection.message_id, MessageProjection.message_domain)
-            > (cursor_id, cursor_domain)
+            Message.channel_id == channel.id,
+            Message.channel_domain == channel.origin_domain,
+            Message.deleted_at.is_(None),
+            (MessageProjection.message_id.is_(None) | MessageProjection.processed_at.is_not(None)),
+            tuple_(Message.id, Message.origin_domain) > (cursor_id, cursor_domain)
             if cursor_id is not None
             else literal(True),
-            MessageProjection.mention_user_refs.contains(
+            Message.mention_user_refs.contains(
                 [{"id": str(auth.user.id), "origin_domain": auth.user.origin_domain}]
             ),
             tuple_(Message.author_id, Message.author_domain)

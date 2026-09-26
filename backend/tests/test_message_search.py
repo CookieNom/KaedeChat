@@ -761,3 +761,33 @@ async def test_bot_guild_search_requires_content_intent_and_redacts_attachments(
     assert exc.value.detail == {"code": "BOT_INTENT_REQUIRED", "intent": "message_content"}
 
     search.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_search_claim_is_held_until_external_writes_finish(monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.search import meili
+
+    session = AsyncMock()
+    row = SimpleNamespace(
+        message_id=30, message_domain="chat.example", updated_at=datetime.now(UTC), locked_at=None
+    )
+    session.scalars.return_value = [row]
+    session.get.return_value = object()
+    monkeypatch.setattr(meili, "build_document", AsyncMock(return_value={"id": "30"}))
+    client = SimpleNamespace(ensure_index=AsyncMock(), upsert=AsyncMock(), remove=AsyncMock())
+
+    async def write(_documents):
+        session.commit.assert_not_awaited()
+
+    client.upsert.side_effect = write
+    client.remove.side_effect = write
+    monkeypatch.setattr(meili, "MeiliClient", lambda _settings: client)
+    assert (
+        await meili.process_search_outbox(
+            session, SimpleNamespace(search_enabled=True, search_batch_size=100)
+        )
+        == 1
+    )
+    session.commit.assert_awaited_once()

@@ -725,3 +725,34 @@ async def test_mfa_enable_clears_account_failures_and_pending_setup_on_success(
     assert failure_key not in redis.values
     assert lock_key not in redis.values
     assert auth_api.mfa_setup_key(user) not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_email_confirmation_invalidates_old_mailbox_recovery_before_commit(monkeypatch):
+    from types import SimpleNamespace
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.auth.schemas import TokenRequest
+
+    user = SimpleNamespace(id=42, origin_domain="alpha.test", email="old@example.test")
+    record = SimpleNamespace(id=9, payload={"email_encrypted": "00"})
+    monkeypatch.setattr(auth_api, "consume_one_time_token", AsyncMock(return_value=(record, user)))
+    monkeypatch.setattr(auth_api, "decrypt_secret", lambda *_args, **_kwargs: "new@example.test")
+    session = AsyncMock()
+    operations = []
+    session.execute.side_effect = lambda statement: operations.append(statement)
+    session.commit.side_effect = lambda: operations.append("commit")
+    assert await auth_api.confirm_email_change(
+        TokenRequest(token="confirmation-token"),
+        session,
+        SimpleNamespace(secret_key_bytes=b"k" * 32),
+    ) == {"status": "email_updated"}
+    assert user.email == "new@example.test"
+    sql = str(
+        operations[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "DELETE FROM one_time_tokens" in sql
+    assert "purpose = 'password_reset'" in sql
+    assert "user_id = 42" in sql and "user_domain = 'alpha.test'" in sql
+    assert operations[1] == "commit"

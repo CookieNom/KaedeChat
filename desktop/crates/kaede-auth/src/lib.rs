@@ -32,7 +32,7 @@ fn canonical_base64url_material(value: &str, decoded_length: usize) -> bool {
     valid
 }
 
-fn validate_authentication_secret(value: &str) -> Result<(), AuthError> {
+pub fn validate_authentication_secret(value: &str) -> Result<(), AuthError> {
     if value.len() == 43 && canonical_base64url_material(value, 32) {
         Ok(())
     } else {
@@ -40,7 +40,7 @@ fn validate_authentication_secret(value: &str) -> Result<(), AuthError> {
     }
 }
 
-fn validate_password_kdf(value: &Value, require_vault_salt: bool) -> Result<(), AuthError> {
+pub fn validate_password_kdf(value: &Value, require_vault_salt: bool) -> Result<(), AuthError> {
     let Some(kdf) = value.as_object() else {
         return Err(AuthError::InvalidPasswordProtocol);
     };
@@ -571,6 +571,7 @@ where
     }
 
     pub async fn logout(&self) -> Result<(), AuthError> {
+        let _guard = self.refresh_lock.lock().await;
         let server_result: Result<serde_json::Value, ApiClientError> =
             self.api.post("auth/logout", &serde_json::json!({})).await;
         self.api.set_access_token(None).await;

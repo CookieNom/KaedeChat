@@ -2,6 +2,7 @@
   import { t } from '$lib/ui/locale';
 
   import type { Message } from '$lib/chat/types';
+  import { verifiedMessageContent } from '$lib/chat/reconcile';
   import { entityRef } from '$lib/chat/refs';
   import { preferredLocale } from '$lib/ui/locale';
   import { userDisplayName } from '$lib/chat/users';
@@ -79,7 +80,9 @@
               <span class="pinned-message-content"
                 >{message.deleted_at
                   ? $t('ui_message_removed_e82a13c0')
-                  : message.content || $t('ui_attachment_040d2b36')}</span
+                  : message.e2ee && message.e2ee_verified !== true
+                    ? $t('ui_can_t_decrypt_this_message_on_this_device_77848735')
+                    : verifiedMessageContent(message) || $t('ui_attachment_040d2b36')}</span
               >
             </span>
           </button>

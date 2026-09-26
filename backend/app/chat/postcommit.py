@@ -7,7 +7,7 @@ from typing import Any
 from redis.asyncio import Redis
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from app.chat.events import publish_dispatch
 
@@ -26,18 +26,36 @@ class PostCommitDispatch:
     audience_user_refs: tuple[str, ...] | None = None
 
 
+def _transaction(session: Session) -> SessionTransaction:
+    return session.get_nested_transaction() or session.get_transaction() or session.begin()
+
+
 def _after_commit(session: Session) -> None:
-    pending = session.info.pop(_PENDING_DISPATCHES, [])
-    if pending:
-        session.info.setdefault(_COMMITTED_DISPATCHES, []).extend(pending)
-    federation_wakes = session.info.pop(_PENDING_FEDERATION_WAKES, set())
-    if federation_wakes:
-        session.info.setdefault(_COMMITTED_FEDERATION_WAKES, set()).update(federation_wakes)
+    transaction = _transaction(session)
+    for pending_key, committed_key, factory in (
+        (_PENDING_DISPATCHES, _COMMITTED_DISPATCHES, list),
+        (_PENDING_FEDERATION_WAKES, _COMMITTED_FEDERATION_WAKES, set),
+    ):
+        scopes = session.info.get(pending_key, {})
+        pending = scopes.pop(transaction, factory())
+        if not pending:
+            continue
+        target = (
+            scopes.setdefault(transaction.parent, factory())
+            if transaction.nested
+            else session.info.setdefault(committed_key, factory())
+        )
+        if isinstance(target, list):
+            target.extend(pending)
+        else:
+            target.update(pending)
 
 
-def _after_rollback(session: Session) -> None:
-    session.info.pop(_PENDING_DISPATCHES, None)
-    session.info.pop(_PENDING_FEDERATION_WAKES, None)
+def _after_transaction_end(session: Session, transaction: SessionTransaction) -> None:
+    # Released savepoints were merged by after_commit; rollback/close discards
+    # only the ended scope, preserving events queued by its outer transaction.
+    for key in (_PENDING_DISPATCHES, _PENDING_FEDERATION_WAKES):
+        session.info.get(key, {}).pop(transaction, None)
 
 
 def _sync_session(session: AsyncSession) -> Session | None:
@@ -55,7 +73,7 @@ def _install_listeners(session: AsyncSession) -> Session | None:
     if sync_session.info.get(_LISTENERS_INSTALLED):
         return sync_session
     event.listen(sync_session, "after_commit", _after_commit)
-    event.listen(sync_session, "after_rollback", _after_rollback)
+    event.listen(sync_session, "after_transaction_end", _after_transaction_end)
     sync_session.info[_LISTENERS_INSTALLED] = True
     return sync_session
 
@@ -79,7 +97,9 @@ def queue_postcommit_dispatch(
     if sync_session is None:
         return
     audience = tuple(dict.fromkeys(audience_user_refs)) if audience_user_refs else None
-    sync_session.info.setdefault(_PENDING_DISPATCHES, []).append(
+    sync_session.info.setdefault(_PENDING_DISPATCHES, {}).setdefault(
+        _transaction(sync_session), []
+    ).append(
         PostCommitDispatch(
             topic=topic,
             event_type=event_type,
@@ -98,7 +118,9 @@ def queue_postcommit_federation_wakes(
     sync_session = _install_listeners(session)
     if sync_session is None:
         return
-    sync_session.info.setdefault(_PENDING_FEDERATION_WAKES, set()).update(destinations)
+    sync_session.info.setdefault(_PENDING_FEDERATION_WAKES, {}).setdefault(
+        _transaction(sync_session), set()
+    ).update(destinations)
 
 
 async def publish_committed_dispatches(session: AsyncSession, redis: Redis) -> int:

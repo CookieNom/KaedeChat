@@ -21,6 +21,8 @@ from app.db.models import (
     GuildScheduledEventSubscription,
     User,
 )
+from app.federation.guilds import lock_current_guild
+from app.federation.terminal_rooms import lock_terminal_room
 from app.scheduled_events.recurrence import next_recurrence_start
 from app.voice.rooms import guild_room_name
 from app.voice.state import room_occupants
@@ -310,11 +312,15 @@ async def advance_scheduled_event_lifecycle(
 
     current = now or datetime.now(UTC)
     overdue_channel_start = current - CHANNEL_EVENT_START_GRACE
+    cursor_key = f"scheduled-event:lifecycle:cursor:{settings.domain}"
+    raw_cursor = await redis.get(cursor_key)
+    cursor = int(raw_cursor) if isinstance(raw_cursor, (str, bytes)) else -1
     due = list(
         await session.scalars(
             select(GuildScheduledEvent)
             .where(
                 GuildScheduledEvent.origin_domain == settings.domain,
+                GuildScheduledEvent.id > cursor,
                 (
                     (
                         (GuildScheduledEvent.entity_type == EXTERNAL)
@@ -337,14 +343,34 @@ async def advance_scheduled_event_lifecycle(
                     )
                 ),
             )
-            .order_by(GuildScheduledEvent.scheduled_start_time, GuildScheduledEvent.id)
-            .with_for_update(skip_locked=True)
+            .order_by(GuildScheduledEvent.id)
             .limit(batch_size)
         )
     )
+    if due:
+        await redis.set(cursor_key, str(due[-1].id))
+    else:
+        await redis.delete(cursor_key)
+    candidates = [
+        (event.id, event.origin_domain, event.guild_id, event.guild_domain) for event in due
+    ]
     changed = 0
-    changed_guilds: dict[tuple[int, str], Guild] = {}
-    for event in due:
+    for event_id, event_domain, guild_id, guild_domain in candidates:
+        guild = await session.get(Guild, (guild_id, guild_domain))
+        if guild is None:
+            await session.rollback()
+            continue
+        await lock_terminal_room(session, "guild", guild.id, guild.origin_domain)
+        guild = await lock_current_guild(session, guild)
+        event = await session.get(
+            GuildScheduledEvent,
+            (event_id, event_domain),
+            with_for_update=True,
+            populate_existing=True,
+        )
+        if event is None:
+            await session.rollback()
+            continue
         next_status = scheduled_event_lifecycle_status(event, now=current)
         if next_status is None:
             next_status = await _empty_channel_lifecycle_status(
@@ -354,6 +380,7 @@ async def advance_scheduled_event_lifecycle(
                 now=current,
             )
         if next_status is None:
+            await session.rollback()
             continue
         event.status = next_status
         changed += 1
@@ -381,7 +408,6 @@ async def advance_scheduled_event_lifecycle(
             {"scheduled_event": rendered},
             channel=channel,
         )
-        changed_guilds[(guild.id, guild.origin_domain)] = guild
         queue_postcommit_dispatch(
             session,
             guild_topic(event.guild_domain, event.guild_id),
@@ -401,11 +427,9 @@ async def advance_scheduled_event_lifecycle(
                 channel=channel,
                 after=current,
             )
-    if not changed:
-        await session.rollback()
-        return 0
-    await session.commit()
-    await publish_committed_dispatches(session, redis)
-    for guild in changed_guilds.values():
+        await session.commit()
+        await publish_committed_dispatches(session, redis)
         await wake_queued_guild_federation(guild)
+    if not due:
+        await session.rollback()
     return changed

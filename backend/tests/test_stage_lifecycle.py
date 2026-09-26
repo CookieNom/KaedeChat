@@ -19,7 +19,15 @@ from app.api.stage_instances import (
 from app.core.permissions import Permission
 from app.core.settings import Settings
 from app.core.types import EntityRef
-from app.db.models import Channel, Guild, GuildMember, Message, MessageProjection, User
+from app.db.models import (
+    Channel,
+    Guild,
+    GuildMember,
+    Message,
+    MessageProjection,
+    StageInstance,
+    User,
+)
 from app.voice.permissions import STAGE_INSTANCE_MODERATOR_PERMISSIONS
 from app.voice.schemas import UserVoiceStateUpdate
 from app.voice.stage_lifecycle import (
@@ -452,12 +460,14 @@ def lifecycle_stage(*, empty_since: datetime) -> SimpleNamespace:
 
 def lifecycle_session(stage: SimpleNamespace) -> AsyncMock:
     session = AsyncMock()
-    session.scalar = AsyncMock(side_effect=[stage, None])
     channel = stage_channel()
     current_guild = guild()
     current_actor = actor()
+    session.scalar = AsyncMock(side_effect=[stage, None, current_guild, None])
 
     async def get(model: object, key: object, **_kwargs: object) -> object | None:
+        if model is StageInstance:
+            return stage
         if model is Channel:
             return channel
         if model is Guild:
@@ -535,3 +545,70 @@ async def test_occupancy_recheck_preserving_a_returned_speaker(
     persist.assert_not_awaited()
     session.delete.assert_not_awaited()
     session.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stage_scan_progress_survives_occupied_batches(monkeypatch):
+    from app.voice import stage_lifecycle
+
+    stages = [lifecycle_stage(empty_since=None) for _ in range(3)]
+    for number, stage in enumerate(stages, 1):
+        stage.id = number
+    values = {}
+    redis = AsyncMock()
+    redis.get.side_effect = lambda key: values.get(key)
+    redis.set.side_effect = lambda key, value: values.update({key: value})
+    redis.delete.side_effect = lambda key: values.pop(key, None)
+    session = lifecycle_session(stages[0])
+    session.scalar.side_effect = lambda query: next(
+        (stage for stage in stages if stage.id > query.compile().params["id_1"]), None
+    )
+    original_get = session.get.side_effect
+    inspected = []
+
+    async def get(model, key, **kwargs):
+        if model is StageInstance:
+            inspected.append(key[0])
+            return stages[key[0] - 1]
+        return await original_get(model, key, **kwargs)
+
+    session.get.side_effect = get
+    monkeypatch.setattr(stage_lifecycle, "lock_terminal_room", AsyncMock())
+    monkeypatch.setattr(stage_lifecycle, "lock_current_guild", AsyncMock(return_value=guild()))
+    monkeypatch.setattr(
+        stage_lifecycle,
+        "room_occupants",
+        AsyncMock(return_value=[SimpleNamespace(suppressed=False)]),
+    )
+    for _ in range(2):
+        await advance_stage_instance_lifecycle(session, redis, settings(), Mock(), batch_size=2)
+    assert inspected == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_stage_update_uses_refreshed_authority_before_resource_lock(monkeypatch):
+    from app.api import stage_instances
+
+    original = stage_channel()
+    refreshed = stage_channel()
+    stage = lifecycle_stage(empty_since=None)
+    current_guild = guild()
+    session = AsyncMock()
+    session.get.side_effect = [original, current_guild]
+    locked = False
+
+    async def fence(*_args):
+        nonlocal locked
+        locked = True
+        return SimpleNamespace(channel=refreshed, guild=current_guild)
+
+    async def resource(_statement):
+        assert locked, "resource lock must follow the shared authorization fence"
+        return stage
+
+    session.scalar.side_effect = resource
+    monkeypatch.setattr(stage_instances, "lock_local_channel_mutation", fence)
+    result = await stage_instances.local_stage_instance(
+        session, settings(), EntityRef("30@alpha.localhost"), for_update=True
+    )
+    assert result == (stage, refreshed, current_guild)

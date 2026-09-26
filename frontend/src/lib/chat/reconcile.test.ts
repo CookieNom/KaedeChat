@@ -267,3 +267,38 @@ describe('chat completion races', () => {
     expect(applied.messages[0].retryable).toBeUndefined();
   });
 });
+
+it('does not let late edits resurrect tombstones or replace newer edits', async () => {
+  const { mergeMessageUpdate } = await import('./reconcile');
+  const deleted = { ...message('12'), deleted_at: '2026-09-25T10:00:00Z' };
+  expect(mergeMessageUpdate(deleted, message('12'))).toBe(deleted);
+  const latest = { ...message('12'), edited_at: '2026-09-25T11:00:00Z' };
+  expect(mergeMessageUpdate(latest, { ...message('12'), edited_at: '2026-09-25T10:00:00Z' })).toBe(
+    latest
+  );
+});
+
+it('never inherits verification across encrypted edits or accepts server verification fields', async () => {
+  const { mergeMessageUpdate, verifiedMessageContent } = await import('./reconcile');
+  const original = {
+    ...message('12'),
+    e2ee: { ciphertext: 'old' },
+    e2ee_verified: true,
+    decrypted_content: 'old secret'
+  };
+  const forged = {
+    ...message('12'),
+    e2ee: { ciphertext: 'new' },
+    e2ee_verified: true,
+    decrypted_content: 'forged'
+  };
+  expect(verifiedMessageContent(mergeMessageUpdate(original, forged))).toBeNull();
+  expect(
+    verifiedMessageContent(mergeMessageUpdate(original, { ...forged, e2ee: null }))
+  ).toBeNull();
+  expect(
+    verifiedMessageContent(
+      mergeMessageUpdate(original, { ...forged, decrypted_content: 'verified' }, true)
+    )
+  ).toBe('verified');
+});

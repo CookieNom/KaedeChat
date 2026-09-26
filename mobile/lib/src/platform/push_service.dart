@@ -393,7 +393,8 @@ Future<void> notificationActionBackgroundHandler(
   if (event?.action != SystemCallAction.decline) return;
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
-  final api = KaedeApiClient(vault: const SessionVault());
+  final api =
+      KaedeApiClient(vault: const SessionVault(), allowSessionRefresh: false);
   if (await api.restore() == null) return;
   try {
     await api.sendJson(
@@ -438,7 +439,8 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 }
 
 Future<_PushRedemption> _redeemOpaqueWake(OpaquePushWake wake) async {
-  final api = KaedeApiClient(vault: const SessionVault());
+  final api =
+      KaedeApiClient(vault: const SessionVault(), allowSessionRefresh: false);
   final tokens = await api.restore();
   if (tokens == null) return const _PushRedemption();
   try {

@@ -27,6 +27,7 @@ from app.bots.installations import (
     installation_allows_channel,
 )
 from app.chat.audit import add_audit_entry
+from app.chat.channel_access import ChannelAccess, lock_local_channel_mutation
 from app.chat.events import guild_topic, publish_ephemeral
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.hierarchy import require_can_manage_member
@@ -217,15 +218,19 @@ async def local_stage_instance(
         StageInstance.channel_id == channel_id,
         StageInstance.channel_domain == channel_domain,
     )
-    if for_update:
-        statement = statement.with_for_update()
-    instance = await session.scalar(statement)
     channel = await session.get(Channel, (channel_id, channel_domain))
     guild = (
         await session.get(Guild, (channel.guild_id, channel.guild_domain))
         if channel is not None and channel.guild_id is not None and channel.guild_domain is not None
         else None
     )
+    if for_update and guild is not None and channel is not None:
+        access = await lock_local_channel_mutation(
+            session, settings, ChannelAccess(channel=channel, guild=guild, participants=[])
+        )
+        channel, guild = access.channel, access.guild
+        statement = statement.with_for_update().execution_options(populate_existing=True)
+    instance = await session.scalar(statement)
     if (
         instance is None
         or channel is None

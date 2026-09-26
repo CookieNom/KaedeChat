@@ -59,3 +59,47 @@ async def test_durable_task_wake_failure_is_best_effort() -> None:
             raise ConnectionError("broker unavailable")
 
     assert not await enqueue_best_effort(UnavailableTask(), "destination.example")
+
+
+@pytest.mark.asyncio
+async def test_delayed_projection_does_not_restore_a_deleted_message(monkeypatch):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app import tasks
+    from app.api import channels
+    from app.db.models import Channel, Message
+
+    message = SimpleNamespace(
+        id=30,
+        origin_domain="home.test",
+        channel_id=10,
+        channel_domain="home.test",
+        deleted_at=datetime.now(UTC),
+    )
+    channel = SimpleNamespace(id=10, origin_domain="home.test", guild_id=None)
+    projection = SimpleNamespace(
+        message_id=30,
+        message_domain="home.test",
+        channel_id=10,
+        channel_domain="home.test",
+        processed_at=None,
+    )
+    session = AsyncMock()
+    session.get.side_effect = lambda model, _key, **_kwargs: (
+        message if model is Message else channel if model is Channel else None
+    )
+    session.scalar.return_value = projection
+    monkeypatch.setattr(channels, "lock_message_delete_access", AsyncMock())
+    redis = AsyncMock()
+    assert (
+        await tasks.project_message_record(
+            session, redis, SimpleNamespace(domain="home.test"), 30, "home.test"
+        )
+        == 0
+    )
+    assert projection.processed_at is not None
+    session.execute.assert_not_awaited()
+    redis.eval.assert_not_awaited()
+    assert session.get.await_args.kwargs == {"with_for_update": True, "populate_existing": True}

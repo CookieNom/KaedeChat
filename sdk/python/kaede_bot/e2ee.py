@@ -1233,6 +1233,8 @@ class InteractionE2EEContext:
             raise E2EEProtocolError("encrypted message edit revision is invalid")
         self._message_ciphertexts[digest] = message_ref
         self._message_revisions[message_ref] = (revision, digest)
+        while len(self._message_ciphertexts) > MAX_INTERACTION_REPLAY_ENTRIES:
+            self._message_ciphertexts.pop(next(iter(self._message_ciphertexts)))
         while len(self._message_revisions) > MAX_INTERACTION_REPLAY_ENTRIES:
             expired_ref = next(iter(self._message_revisions))
             _expired_revision, expired_digest = self._message_revisions.pop(expired_ref)
@@ -4986,6 +4988,7 @@ def _validate_message_sender_credential(
     sender_device_id: str,
     author_ref: EntityRef,
     application_ref: EntityRef | None,
+    webhook_ref: EntityRef | None = None,
 ) -> None:
     if sender_device_id.startswith("ked_"):
         _validate_human_credential(credential, author_ref)
@@ -4994,6 +4997,20 @@ def _validate_message_sender_credential(
         parsed = json.loads(credential)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise E2EEProtocolError("encrypted bot sender credential is invalid") from exc
+    if sender_device_id.startswith("kwe_"):
+        if (
+            webhook_ref is None
+            or application_ref is not None
+            or not isinstance(parsed, dict)
+            or parsed != {
+                "account": f"webhook:{webhook_ref}",
+                "credential_type": "kaede-webhook-device-v1",
+                "device_id": sender_device_id,
+                "webhook_ref": str(webhook_ref),
+            }
+        ):
+            raise E2EEProtocolError("encrypted webhook sender credential is invalid")
+        return
     if not isinstance(parsed, dict) or set(parsed) != {
         "account",
         "application_ref",
@@ -5279,6 +5296,7 @@ def decrypt_message(
         sender_device_id=sender_device_id,
         author_ref=author_ref,
         application_ref=message.application_ref,
+        webhook_ref=message.webhook_ref,
     )
     application = _decode(
         result.get("application"),

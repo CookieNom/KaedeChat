@@ -757,3 +757,41 @@ describe('native camera and share frame identity', () => {
     expect(decodeNativeVideoFrame(packet('KVD2').slice(0, 15))).toBeNull();
   });
 });
+
+it.each(['deafen', 'revoke'] as const)(
+  'closes an unmute that finishes after %s',
+  async (action) => {
+    const candidate = new FakeVoiceRoom();
+    const rooms = [new FakeVoiceRoom(), candidate];
+    const voice = new VoiceSession(
+      () => rooms.shift() as unknown as Room,
+      async () => undefined
+    );
+    await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+    await voice.toggleMicrophone();
+    const capture = deferred<void>();
+    candidate.localParticipant.setMicrophoneEnabled.mockImplementation(
+      async (enabled?: boolean) => {
+        if (enabled) await capture.promise;
+      }
+    );
+    const pending = voice.toggleMicrophone();
+    await vi.waitFor(() =>
+      expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(true)
+    );
+    if (action === 'deafen') await voice.toggleDeafen();
+    else
+      await voice.reconcileBrowserPermissions({
+        canConnect: true,
+        canSpeak: false,
+        canStream: true,
+        canUseVad: false
+      });
+    capture.resolve();
+    await pending;
+    expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
+    expect(voice.microphone).toBe(false);
+    if (action === 'deafen') expect(voice.deafened).toBe(true);
+    else expect(voice.canSpeak).toBe(false);
+  }
+);

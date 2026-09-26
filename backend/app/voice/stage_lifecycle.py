@@ -23,7 +23,9 @@ from app.db.models import (
     StageInstance,
     User,
 )
+from app.federation.guilds import lock_current_guild
 from app.federation.replication import profile_from_user
+from app.federation.terminal_rooms import lock_terminal_room
 from app.scheduled_events.service import (
     event_creator,
     materialize_next_recurrence,
@@ -148,7 +150,9 @@ async def advance_stage_instance_lifecycle(
 
     current = (now or datetime.now(UTC)).astimezone(UTC)
     grace = timedelta(seconds=settings.voice_stage_empty_grace_seconds)
-    cursor = -1
+    cursor_key = f"stage:lifecycle:cursor:{settings.domain}"
+    raw_cursor = await redis.get(cursor_key)
+    cursor = int(raw_cursor) if isinstance(raw_cursor, (str, bytes)) else -1
     closed = 0
     for _ in range(batch_size):
         stage = await session.scalar(
@@ -158,15 +162,27 @@ async def advance_stage_instance_lifecycle(
                 StageInstance.id > cursor,
             )
             .order_by(StageInstance.id)
-            .with_for_update(skip_locked=True)
             .limit(1)
         )
         if stage is None:
+            await redis.delete(cursor_key)
             break
         cursor = stage.id
+        await redis.set(cursor_key, str(cursor))
         channel = await session.get(Channel, (stage.channel_id, stage.channel_domain))
         guild = await session.get(Guild, (stage.guild_id, stage.guild_domain))
         if channel is None or guild is None or channel.type != 13:
+            await session.rollback()
+            continue
+        await lock_terminal_room(session, "guild", guild.id, guild.origin_domain)
+        guild = await lock_current_guild(session, guild)
+        stage = await session.get(
+            StageInstance,
+            (stage.id, stage.origin_domain),
+            with_for_update=True,
+            populate_existing=True,
+        )
+        if stage is None:
             await session.rollback()
             continue
         room = guild_room_name(guild.id, channel.id)

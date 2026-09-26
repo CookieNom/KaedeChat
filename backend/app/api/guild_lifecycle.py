@@ -78,6 +78,7 @@ log = structlog.get_logger()
 
 async def _locked_guild(session: AsyncSession, settings: Settings, guild_ref: EntityRef) -> Guild:
     guild_id, guild_domain = guild_ref.resolve(settings.domain)
+    await lock_terminal_room(session, "guild", guild_id, guild_domain)
     guild = await session.scalar(
         select(Guild)
         .where(Guild.id == guild_id, Guild.origin_domain == guild_domain)

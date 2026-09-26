@@ -15,6 +15,7 @@ final class KaedeApiClient {
     required SessionVault vault,
     Dio? httpClient,
     Dio? refreshClient,
+    this.allowSessionRefresh = true,
   })  : _vault = vault,
         _refreshClient = refreshClient,
         _dio = httpClient ?? _defaultHttpClient() {
@@ -35,6 +36,7 @@ final class KaedeApiClient {
     );
   }
 
+  final bool allowSessionRefresh;
   final SessionVault _vault;
   final Dio _dio;
   final Dio? _refreshClient;
@@ -581,7 +583,8 @@ final class KaedeApiClient {
     final requestGeneration = request.extra['kaedeSessionGeneration'] as int?;
     final requestOrigin = request.extra['kaedeRequestOrigin'] as String?;
     final current = _tokens;
-    if (error.response?.statusCode != 401 ||
+    if (!allowSessionRefresh ||
+        error.response?.statusCode != 401 ||
         request.extra['kaedeRetried'] == true ||
         request.path.endsWith('/auth/refresh') ||
         current == null ||
@@ -626,6 +629,12 @@ final class KaedeApiClient {
   }
 
   Future<SessionTokens> _refresh(int generation) async {
+    if (!allowSessionRefresh) {
+      throw const KaedeException(
+          code: 'SESSION_REFRESH_UNAVAILABLE',
+          message: 'Open the app to reconnect.',
+          status: 401);
+    }
     final current = _tokens;
     if (current == null || generation != _sessionGeneration) {
       throw const KaedeException(

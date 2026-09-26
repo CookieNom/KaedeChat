@@ -61,3 +61,27 @@ def test_preview_metadata_never_returns_unsafe_media_schemes() -> None:
     )
     assert result["media_source"] is None
     assert result["media_type"] is None
+
+
+@pytest.mark.asyncio
+async def test_internationalized_preview_pins_the_wire_hostname(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.api import link_previews
+    from app.federation.network import FederationNetworkError, PinnedNetworkBackend
+
+    url = normalize_preview_url("https://bücher.example/article")
+    assert url == "https://xn--bcher-kva.example/article"
+    resolve = AsyncMock(return_value={"93.184.216.34"})
+    monkeypatch.setattr(link_previews, "public_addresses", resolve)
+    async with await link_previews.pinned_client(url) as client:
+        backend = client._transport._pool._network_backend
+        assert isinstance(backend, PinnedNetworkBackend)
+        connect = AsyncMock()
+        backend.backend.connect_tcp = connect
+        await backend.connect_tcp("xn--bcher-kva.example", 443)
+        assert connect.await_args.args[0] == "93.184.216.34"
+        with pytest.raises(FederationNetworkError, match="unexpected hostname"):
+            await backend.connect_tcp("internal.example", 443)
+        assert connect.await_count == 1
+    resolve.assert_awaited_once_with("xn--bcher-kva.example")

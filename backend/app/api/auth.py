@@ -1111,6 +1111,14 @@ async def confirm_email_change(
         await session.rollback()
         raise auth_error("INVALID_TOKEN", "Token is invalid or expired", 400) from exc
     user.email_verified_at = datetime.now(UTC)
+    await session.execute(
+        delete(OneTimeToken).where(
+            OneTimeToken.user_id == user.id,
+            OneTimeToken.user_domain == user.origin_domain,
+            OneTimeToken.purpose == "password_reset",
+            OneTimeToken.consumed_at.is_(None),
+        )
+    )
     try:
         await session.commit()
     except IntegrityError as exc:

@@ -516,3 +516,26 @@ async def test_webhook_encrypted_forum_lifecycle_is_authority_and_device_bound()
     assert calls[3].kwargs["json"]["prepared_vault_revision"] == "3"
     assert calls[4].kwargs["json"]["client_nonce"] == nonce
     assert calls[4].kwargs["json"]["e2ee"]["operation"] == "create"
+
+
+def test_message_sender_accepts_only_the_bound_webhook_device() -> None:
+    from kaede_bot.e2ee import _validate_message_sender_credential
+
+    webhook = EntityRef(30, 'chat.example')
+    key = b'w' * 32
+    credential = webhook_mls_credential(webhook, key)
+    arguments = dict(
+        sender_device_id=webhook_device_protocol_id(webhook, key),
+        author_ref=EntityRef(7, 'chat.example'),
+        application_ref=None,
+        webhook_ref=webhook,
+    )
+    _validate_message_sender_credential(credential, **arguments)
+    for change in (
+        {'webhook_ref': None},
+        {'webhook_ref': EntityRef(31, 'chat.example')},
+        {'sender_device_id': webhook_device_protocol_id(webhook, b'x' * 32)},
+        {'application_ref': EntityRef(9, 'chat.example')},
+    ):
+        with pytest.raises(E2EEProtocolError):
+            _validate_message_sender_credential(credential, **(arguments | change))
