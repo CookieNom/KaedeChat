@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -279,16 +280,36 @@ Future<void> showUserProfile(
   PresenceStatus presence, {
   List<Widget> actions = const <Widget>[],
   String? memberOf,
+  EntityRef? guildRef,
+  DateTime? joinedAt,
 }) =>
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (sheetContext) => UserProfileSheet(
-        user: user,
-        presence: presence,
-        actions: actions,
-        memberOf: memberOf,
+      builder: (sheetContext) => Consumer(
+        builder: (context, ref, child) {
+          final state = ref.watch(mobileControllerProvider);
+          DateTime? guildJoinedAt = joinedAt;
+          for (final member
+              in state.guildMembers[guildRef] ?? const <GuildMember>[]) {
+            if (member.user.ref == user.ref) {
+              guildJoinedAt = member.joinedAt ?? guildJoinedAt;
+            }
+          }
+          return UserProfileSheet(
+            user: user,
+            presence: presence,
+            actions: actions,
+            memberOf: memberOf,
+            joinedAt: guildJoinedAt,
+            friendsSince: guildRef == null &&
+                    memberOf == null &&
+                    user.ref != state.user?.ref
+                ? friendshipStartedAt(user, state.relationships)
+                : null,
+          );
+        },
       ),
     );
 
@@ -299,6 +320,8 @@ final class UserProfileSheet extends StatefulWidget {
     required this.presence,
     this.actions = const <Widget>[],
     this.memberOf,
+    this.joinedAt,
+    this.friendsSince,
     this.applicationLookup,
     this.onAddApplication,
   });
@@ -307,6 +330,8 @@ final class UserProfileSheet extends StatefulWidget {
   final PresenceStatus presence;
   final List<Widget> actions;
   final String? memberOf;
+  final DateTime? joinedAt;
+  final DateTime? friendsSince;
   final Future<MobileBotProfileApplication?> Function(EntityRef bot)?
       applicationLookup;
   final ValueChanged<MobileBotProfileApplication>? onAddApplication;
@@ -369,6 +394,29 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
     final user = widget.user;
     final presence = widget.presence;
     final memberOf = widget.memberOf;
+    final createdAt = user.createdAt;
+    final membershipDate = widget.joinedAt ?? widget.friendsSince;
+    final friendsSince = widget.friendsSince;
+    final friendshipDays = friendsSince == null
+        ? 0
+        : math.max(0, DateTime.now().difference(friendsSince).inDays);
+    final l10n = L10n.of(context);
+    Widget dateEntry(String label, DateTime date, {String? duration}) => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label,
+                style: TextStyle(color: context.kaede.muted, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text(MaterialLocalizations.of(context)
+                .formatShortDate(date.toLocal())),
+            if (duration != null) ...[
+              const SizedBox(height: 4),
+              Text(duration,
+                  style: TextStyle(color: context.kaede.muted, fontSize: 12)),
+            ],
+          ],
+        );
     final actions = <Widget>[
       if (_application case final application?)
         ActionButton(
@@ -550,6 +598,33 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                             child: Text(
                               user.bio!.trim(),
                               style: TextStyle(height: 1.4),
+                            ),
+                          ),
+                        ],
+                        if (createdAt != null || membershipDate != null) ...[
+                          const SizedBox(height: 10),
+                          _ProfileCard(
+                            label: l10n.profile_member_since,
+                            child: Wrap(
+                              spacing: 24,
+                              runSpacing: 12,
+                              children: [
+                                if (createdAt != null)
+                                  dateEntry(
+                                      l10n.profile_account_created, createdAt),
+                                if (membershipDate != null)
+                                  dateEntry(
+                                    widget.joinedAt != null
+                                        ? l10n.profile_joined_guild
+                                        : l10n.profile_friends_since,
+                                    membershipDate,
+                                    duration: widget.joinedAt == null &&
+                                            friendsSince != null
+                                        ? l10n.profile_friends_days(
+                                            friendshipDays)
+                                        : null,
+                                  ),
+                              ],
                             ),
                           ),
                         ],

@@ -4334,6 +4334,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       context,
       user,
       ref.read(mobileControllerProvider.notifier).presenceFor(user),
+      guildRef: channel?.guildRef,
       actions: [
         if (channel != null && commands.isNotEmpty)
           ActionButton(

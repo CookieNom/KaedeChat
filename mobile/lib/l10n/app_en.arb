@@ -9124,5 +9124,11 @@
   "debug_copy": "Copy debug log",
   "debug_clear": "Clear log",
   "debug_cleared": "Debug log cleared.",
-  "debug_action_failed": "Could not complete this action. Try again."
+  "debug_action_failed": "Could not complete this action. Try again.",
+  "profile_member_since": "Member since",
+  "profile_account_created": "Account created",
+  "profile_joined_guild": "Joined guild",
+  "profile_friends_since": "Friends since",
+  "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for # day} other {Friends for # days}}",
+  "@profile_friends_days": {"placeholders": {"days": {"type": "num"}}}
 }

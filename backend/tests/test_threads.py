@@ -1836,7 +1836,7 @@ async def test_remote_thread_actor_is_attested_by_the_local_guild_signer() -> No
     )
     session = SimpleNamespace(
         flush=AsyncMock(),
-        scalar=AsyncMock(side_effect=[guild, owner]),
+        scalar=AsyncMock(side_effect=[None, guild, owner]),
     )
 
     signer = await guild_mutation_signer(

@@ -400,3 +400,89 @@ async def test_channel_event_round_trips_authority_channel_and_guild_versions(
         async with sessions() as cleanup_session:
             await _cleanup(cleanup_session, domains)
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["guild_api", "channel_api", "guild_revision"])
+async def test_guild_mutation_waits_for_room_fence_before_locking_rows(
+    entry_point: str,
+    wait_for_postgres_lock,
+) -> None:
+    from app.api.guilds import local_guild
+    from app.chat.channel_access import ChannelAccess, lock_local_channel_mutation
+    from app.core.types import EntityReference
+    from app.federation.guilds import lock_current_guild
+    from app.federation.terminal_rooms import lock_terminal_room
+
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    authority = "guild-room-lock-it.example"
+    settings = SimpleNamespace(domain=authority)
+    try:
+        async with sessions() as seed_session:
+            await _seed(
+                seed_session,
+                authority=authority,
+                owner_a_domain=authority,
+                owner_b_domain=authority,
+                member_domain=authority,
+            )
+            seed_session.add(
+                Channel(
+                    id=43,
+                    origin_domain=authority,
+                    guild_id=42,
+                    guild_domain=authority,
+                    name="general",
+                    type=0,
+                    created_floor_id=43,
+                )
+            )
+            await seed_session.commit()
+
+        async with sessions() as ingress, sessions() as mutation:
+            # Federation ingress has fenced the room but has not yet locked its guild.
+            await lock_terminal_room(ingress, "guild", 42, authority)
+
+            async def mutate() -> None:
+                if entry_point == "guild_api":
+                    await local_guild(mutation, settings, EntityReference(42), for_update=True)
+                else:
+                    guild = await mutation.get(Guild, (42, authority))
+                    assert guild is not None
+                    if entry_point == "channel_api":
+                        channel = await mutation.get(Channel, (43, authority))
+                        assert channel is not None
+                        await lock_local_channel_mutation(
+                            mutation,
+                            settings,
+                            ChannelAccess(channel=channel, guild=guild, participants=[]),
+                        )
+                    else:
+                        await lock_current_guild(mutation, guild)
+                # queue_event takes this fence when the mutation fans out.
+                await lock_terminal_room(mutation, "guild", 42, authority)
+                await mutation.commit()
+
+            task = asyncio.create_task(mutate())
+            try:
+                await wait_for_postgres_lock(engine, task)
+                # This would fail with the old row -> room ordering: the waiting
+                # API transaction already held the row that ingress needs next.
+                guild = await ingress.scalar(
+                    select(Guild)
+                    .where(Guild.id == 42, Guild.origin_domain == authority)
+                    .with_for_update(nowait=True)
+                )
+                assert guild is not None
+                await ingress.commit()
+                await asyncio.wait_for(task, timeout=5)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        async with sessions() as cleanup_session:
+            await _cleanup(cleanup_session, {authority})
+        await engine.dispose()

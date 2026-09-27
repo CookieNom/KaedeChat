@@ -3860,6 +3860,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                   user: mobile.userProfiles[member.user.ref] ?? member.user,
                   roleIds: member.roleIds,
                   nickname: member.nickname,
+                  joinedAt: member.joinedAt,
                   timeoutUntil: member.timeoutUntil,
                 ),
             ],
@@ -3935,6 +3936,8 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                         user,
                                         controller.presenceFor(user),
                                         memberOf: widget.guild.name,
+                                        guildRef: widget.guild.ref,
+                                        joinedAt: member.joinedAt,
                                         actions: <Widget>[
                                           if (user.profileResolved &&
                                               user.ref != mobile.user?.ref)

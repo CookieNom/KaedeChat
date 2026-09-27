@@ -1062,7 +1062,7 @@ async def test_audit_permission_read_without_update(
 
     assert body == {"target_user_ids": ["30@people.example"]}
 
-    update_session = SimpleNamespace(scalar=AsyncMock(side_effect=[invite, guild]))
+    update_session = SimpleNamespace(scalar=AsyncMock(side_effect=[invite, None, guild]))
     with pytest.raises(HTTPException) as raised:
         await invite_api.local_update_invite_target_users(
             "abcdefgh",

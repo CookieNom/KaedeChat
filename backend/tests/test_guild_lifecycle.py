@@ -551,7 +551,7 @@ async def test_authority_leave_skips_mutations_when_member_is_already_missing(mo
         return None
 
     session.get.side_effect = get_model
-    session.scalar.side_effect = [guild, owner]
+    session.scalar.side_effect = [None, guild, owner]
     queue_revocation = AsyncMock()
     queue_mutation = AsyncMock()
     installation = BotInstallation(

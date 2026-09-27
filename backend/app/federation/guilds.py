@@ -702,8 +702,9 @@ async def remote_destinations_with_channel_access(
 
 
 async def lock_current_guild(session: AsyncSession, guild: Guild) -> Guild:
-    """Flush caller changes, then lock and refresh the authoritative guild row."""
+    """Take the room fence before flushing, locking, and refreshing the guild."""
 
+    await lock_terminal_room(session, "guild", guild.id, guild.origin_domain)
     await session.flush()
     locked = await session.scalar(
         select(Guild)

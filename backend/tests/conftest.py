@@ -99,7 +99,9 @@ def wait_for_postgres_lock():
 
         def query_started(connection, _cursor, statement, _parameters, _context, _many):
             nonlocal backend_pid
-            if asyncio.current_task() is task and "FOR UPDATE" in statement:
+            if asyncio.current_task() is task and (
+                "FOR UPDATE" in statement or "pg_advisory_xact_lock" in statement
+            ):
                 backend_pid = connection.connection.driver_connection.get_server_pid()
                 started.set()
 

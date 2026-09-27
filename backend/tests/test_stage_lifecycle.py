@@ -463,7 +463,7 @@ def lifecycle_session(stage: SimpleNamespace) -> AsyncMock:
     channel = stage_channel()
     current_guild = guild()
     current_actor = actor()
-    session.scalar = AsyncMock(side_effect=[stage, None, current_guild, None])
+    session.scalar = AsyncMock(side_effect=[stage, None, None, current_guild, None])
 
     async def get(model: object, key: object, **_kwargs: object) -> object | None:
         if model is StageInstance:

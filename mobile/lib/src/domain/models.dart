@@ -286,6 +286,15 @@ final class KaedeUser {
   final bool profileResolved;
   final PresenceStatus presence;
 
+  /// Original creation time, including accounts cached from another server.
+  DateTime? get createdAt => profileResolved
+      ? DateTime.fromMillisecondsSinceEpoch(
+          // Kaede uses a 2026 epoch, 10 worker bits and 12 sequence bits.
+          1767225600000 + (BigInt.parse(ref.id.value) >> 22).toInt(),
+          isUtc: true,
+        )
+      : null;
+
   bool get isApplication => accountType == AccountType.bot;
   bool get isSystem => accountType == AccountType.system;
 
@@ -2566,6 +2575,7 @@ final class GuildMember {
       {required this.user,
       required this.roleIds,
       this.nickname,
+      this.joinedAt,
       this.timeoutUntil,
       this.temporary = false});
 
@@ -2576,6 +2586,7 @@ final class GuildMember {
             .map((value) => '$value')
             .toList(),
         nickname: _string(json['nickname']),
+        joinedAt: DateTime.tryParse(_string(json['joined_at']) ?? ''),
         timeoutUntil: _string(json['timeout_until']) == null
             ? null
             : DateTime.parse(json['timeout_until']! as String),
@@ -2585,6 +2596,7 @@ final class GuildMember {
   final KaedeUser user;
   final List<String> roleIds;
   final String? nickname;
+  final DateTime? joinedAt;
   final DateTime? timeoutUntil;
   final bool temporary;
 
@@ -2592,6 +2604,7 @@ final class GuildMember {
         'user': user.toJson(),
         'role_ids': roleIds,
         'nickname': nickname,
+        'joined_at': joinedAt?.toUtc().toIso8601String(),
         'timeout_until': timeoutUntil?.toUtc().toIso8601String(),
         'temporary': temporary,
       };
@@ -2607,6 +2620,7 @@ GuildMember overlayGuildMemberProfile(
     user: user,
     roleIds: member.roleIds,
     nickname: member.nickname,
+    joinedAt: member.joinedAt,
     timeoutUntil: member.timeoutUntil,
     temporary: member.temporary,
   );
@@ -2673,3 +2687,17 @@ bool shouldRetrySelfModerationStatus(
     appActive &&
     conversationPaneVisible &&
     selectedGuild == status.guildRef;
+
+DateTime? friendshipStartedAt(KaedeUser user, List<Json> relationships) {
+  for (final relationship in relationships) {
+    final target = relationship['user'];
+    if (relationship['type'] == 'friend' &&
+        target is Map<Object?, Object?> &&
+        target['id'] == user.ref.id.value &&
+        target['origin_domain'] == user.ref.domain.value) {
+      // Acceptance updates the relationship; creation records the request.
+      return DateTime.tryParse(_string(relationship['updated_at']) ?? '');
+    }
+  }
+  return null;
+}

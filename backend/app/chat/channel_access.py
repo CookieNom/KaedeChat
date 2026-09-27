@@ -123,8 +123,8 @@ async def lock_local_channel_mutation(
 ) -> ChannelAccess:
     """Fence a local guild mutation against membership and permission changes.
 
-    Every local guild structural/moderation mutation takes the Guild row lock
-    first. Channel writes join that same ordering before authorization, then
+    Every local guild structural/moderation mutation takes the room fence then
+    the Guild row lock. Channel writes join that ordering before authorization, then
     refresh the channel after the lock is acquired. A kick, ban, role change,
     overwrite change, or channel deletion therefore commits wholly before or
     after this request instead of racing between its permission check and write.
@@ -133,6 +133,9 @@ async def lock_local_channel_mutation(
     guild = access.guild
     if guild is None or guild.origin_domain != settings.domain:
         return access
+    from app.federation.terminal_rooms import lock_terminal_room
+
+    await lock_terminal_room(session, "guild", guild.id, guild.origin_domain)
     locked_guild = await session.scalar(
         select(Guild)
         .where(

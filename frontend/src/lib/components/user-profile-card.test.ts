@@ -153,3 +153,118 @@ it('shows the system badge without friendship, app installation, or message acti
     false
   );
 });
+
+const member: UserSummary = {
+  ...bot,
+  id: String((BigInt(Date.parse('2026-01-14T12:00:00Z')) - 1_767_225_600_000n) << 22n),
+  account_type: 'human'
+};
+
+it('shows creation and guild join dates without friendship history in guilds', async () => {
+  mocks.api.mockResolvedValue([
+    { type: 'friend', user: member, updated_at: '2026-03-01T12:00:00Z' }
+  ]);
+  component = mount(UserProfileCard, {
+    target: document.body,
+    props: {
+      user: member,
+      profileContext: 'guild',
+      joinedAt: '2026-02-02T12:00:00Z',
+      x: 0,
+      y: 0,
+      onClose: vi.fn()
+    }
+  });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Friends'));
+  expect([...document.querySelectorAll('time')].map((time) => time.dateTime)).toEqual([
+    '2026-01-14T12:00:00.000Z',
+    '2026-02-02T12:00:00.000Z'
+  ]);
+  expect(document.body.textContent).toContain('Account created');
+  expect(document.body.textContent).toContain('Joined guild');
+  expect(document.body.textContent).not.toContain('Friends since');
+});
+
+it('uses acceptance time and matches the full user identity in DMs', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-03-11T12:00:00Z'));
+  mocks.api.mockResolvedValue([
+    {
+      type: 'friend',
+      user: { ...member, origin_domain: 'other.remote' },
+      updated_at: '2026-01-01T12:00:00Z'
+    },
+    {
+      type: 'friend',
+      user: member,
+      created_at: '2026-02-02T12:00:00Z',
+      updated_at: '2026-03-01T12:00:00Z'
+    }
+  ]);
+  component = mount(UserProfileCard, {
+    target: document.body,
+    props: { user: member, x: 0, y: 0, onClose: vi.fn() }
+  });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Friends for 10 days'));
+  expect([...document.querySelectorAll('time')].map((time) => time.dateTime)).toEqual([
+    '2026-01-14T12:00:00.000Z',
+    '2026-03-01T12:00:00.000Z'
+  ]);
+  expect(document.body.textContent).not.toContain('Joined guild');
+});
+
+it.each(['pending_in', 'pending_out', 'blocked'])(
+  'hides friendship duration for %s',
+  async (type) => {
+    mocks.api.mockResolvedValue([{ type, user: member, updated_at: '2026-03-01T12:00:00Z' }]);
+    component = mount(UserProfileCard, {
+      target: document.body,
+      props: { user: member, x: 0, y: 0, onClose: vi.fn() }
+    });
+    await vi.waitFor(() =>
+      expect(
+        button(
+          type === 'pending_in'
+            ? 'Accept friend request'
+            : type === 'pending_out'
+              ? 'Request sent'
+              : 'Blocked'
+        )
+      ).toBeTruthy()
+    );
+    expect(document.body.textContent).not.toContain('Friends since');
+    expect(document.querySelectorAll('time')).toHaveLength(1);
+  }
+);
+
+it('hides unavailable dates instead of inventing membership history', async () => {
+  component = mount(UserProfileCard, {
+    target: document.body,
+    props: {
+      user: { ...member, profile_resolved: false },
+      profileContext: 'guild',
+      joinedAt: 'invalid',
+      x: 0,
+      y: 0,
+      onClose: vi.fn()
+    }
+  });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Profile unavailable'));
+  expect(document.querySelector('.user-popover-membership')).toBeNull();
+});
+
+it('shows friendship history immediately after accepting a request', async () => {
+  const acceptedAt = new Date().toISOString();
+  mocks.api
+    .mockResolvedValueOnce([{ type: 'pending_in', user: member }])
+    .mockResolvedValueOnce({ type: 'friend', user: member, updated_at: acceptedAt });
+  component = mount(UserProfileCard, {
+    target: document.body,
+    props: { user: member, x: 0, y: 0, onClose: vi.fn() }
+  });
+  await vi.waitFor(() => expect(button('Accept friend request')).toBeTruthy());
+  button('Accept friend request').click();
+  await vi.waitFor(() =>
+    expect(document.body.textContent).toContain('Friends for less than a day')
+  );
+  expect([...document.querySelectorAll('time')].at(-1)?.dateTime).toBe(acceptedAt);
+});

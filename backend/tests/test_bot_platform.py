@@ -3158,7 +3158,9 @@ async def test_nonactive_reinstall_removes_stale_role_and_reduces_permissions(
 
     session = SimpleNamespace(
         get=AsyncMock(side_effect=get),
-        scalar=AsyncMock(side_effect=[guild, guild, actor, None, None, installed, existing_member]),
+        scalar=AsyncMock(
+            side_effect=[guild, None, guild, actor, None, None, installed, existing_member]
+        ),
         execute=AsyncMock(side_effect=[invite_result, [], Mock(), [], Mock()]),
         scalars=AsyncMock(side_effect=[[stale_role], []]),
         add=Mock(),
@@ -3220,7 +3222,7 @@ async def test_nonactive_reinstall_removes_stale_role_and_reduces_permissions(
     assert new_role.permissions == 0
     assert new_member_role.role_id == 91
     assert new_member_role.role_id != stale_role.id
-    signer_query = str(session.scalar.await_args_list[2].args[0])
+    signer_query = str(session.scalar.await_args_list[3].args[0])
     assert "users.id" in signer_query
     assert "FOR UPDATE" in signer_query
     invite_query = str(session.execute.await_args_list[0].args[0])
@@ -3330,7 +3332,7 @@ async def test_reinstall_federates_retained_old_role_removal_before_new_role_add
 
     session = SimpleNamespace(
         get=AsyncMock(side_effect=get),
-        scalar=AsyncMock(side_effect=[guild, guild, owner, None, None, installed, member]),
+        scalar=AsyncMock(side_effect=[guild, None, guild, owner, None, None, installed, member]),
         execute=AsyncMock(
             side_effect=[
                 invite_result,
@@ -3492,7 +3494,7 @@ async def test_post_transfer_install_uses_remote_owner_for_local_and_federated_c
 
     session = SimpleNamespace(
         get=AsyncMock(side_effect=get),
-        scalar=AsyncMock(side_effect=[guild, guild, remote_owner, None, None, None, None]),
+        scalar=AsyncMock(side_effect=[guild, None, guild, remote_owner, None, None, None, None]),
         execute=AsyncMock(return_value=invite_result),
         scalars=AsyncMock(return_value=[]),
         add=Mock(side_effect=record_add),
@@ -3548,7 +3550,7 @@ async def test_post_transfer_install_uses_remote_owner_for_local_and_federated_c
         "guild.member.role.add",
     ]
     assert all(call.args[3] is remote_owner for call in queue_mutation.await_args_list)
-    signer_query = str(session.scalar.await_args_list[2].args[0])
+    signer_query = str(session.scalar.await_args_list[3].args[0])
     assert "users.origin_domain" in signer_query
     assert "users.is_local IS true" not in signer_query
     assert "FOR UPDATE" in signer_query
@@ -3631,7 +3633,7 @@ async def test_post_transfer_uninstall_uses_remote_owner_for_local_and_federated
         position=1,
     )
     session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[guild, remote_owner, application, installed]),
+        scalar=AsyncMock(side_effect=[None, guild, remote_owner, application, installed]),
         scalars=AsyncMock(side_effect=[[role], [member]]),
         execute=AsyncMock(side_effect=[[], Mock(), [(role.id, role.origin_domain)]]),
         get=AsyncMock(side_effect=[member, bot] if application_present else [member]),
@@ -3754,7 +3756,7 @@ async def test_uninstall_cannot_remove_a_legacy_bot_guild_owner(
         bot_user_domain=installed.bot_user_domain,
     )
     session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[guild, owner_bot, application, installed]),
+        scalar=AsyncMock(side_effect=[None, guild, owner_bot, application, installed]),
         delete=AsyncMock(),
         flush=AsyncMock(),
         commit=AsyncMock(),

@@ -3041,5 +3041,10 @@
   "screen_audio_source": "Audio to share",
   "screen_audio_choose": "Choose the audio to share",
   "screen_audio_all": "All computer audio",
-  "screen_audio_wayland_hint": "For a window, choose its app here. For a whole display, choose all computer audio. Apps appear while playing sound."
+  "screen_audio_wayland_hint": "For a window, choose its app here. For a whole display, choose all computer audio. Apps appear while playing sound.",
+  "profile_member_since": "Member since",
+  "profile_account_created": "Account created",
+  "profile_joined_guild": "Joined guild",
+  "profile_friends_since": "Friends since",
+  "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for # day} other {Friends for # days}}"
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { t } from '$lib/ui/locale';
+  import { activeLocale, t } from '$lib/ui/locale';
 
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
@@ -12,6 +12,7 @@
   import { entityRef } from '$lib/chat/refs';
   import type { PresenceStatus, Relationship, Role, UserSummary } from '$lib/chat/types';
   import {
+    accountCreatedAt,
     isSystemUser,
     isApplicationUser,
     userDisplayName,
@@ -28,6 +29,8 @@
   let {
     user,
     presence = 'offline',
+    profileContext = 'dm',
+    joinedAt = null,
     x,
     y,
     isSelf = false,
@@ -45,6 +48,8 @@
   }: {
     user: UserSummary;
     presence?: PresenceStatus;
+    profileContext?: 'guild' | 'dm';
+    joinedAt?: string | null;
     x: number;
     y: number;
     isSelf?: boolean;
@@ -66,6 +71,7 @@
   let relationshipType = $state<Relationship['type'] | 'none' | 'loading' | 'unavailable'>(
     'loading'
   );
+  let friendshipSince = $state<string | null>(null);
   let relationshipBusy = $state(false);
   let relationshipError = $state('');
   let roleBusy = $state<string | null>(null);
@@ -92,6 +98,30 @@
   );
   const appContextCommands = $derived(userAppContextCommands(applicationCommands, user));
 
+  const createdAt = $derived(accountCreatedAt(user));
+  const membershipDate = $derived(
+    validDate(profileContext === 'guild' ? joinedAt : friendshipSince)
+  );
+  const friendshipDays = $derived(
+    membershipDate
+      ? Math.max(0, Math.floor((Date.now() - membershipDate.getTime()) / 86_400_000))
+      : 0
+  );
+
+  function validDate(value: string | null): Date | null {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+
+  function formatDate(date: Date): string {
+    return date.toLocaleDateString($activeLocale, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric'
+    });
+  }
+
   function roleIsManageable(role: Role): boolean {
     return (
       !role.managed &&
@@ -111,6 +141,8 @@
   );
 
   $effect(() => {
+    // Friendship history arrives asynchronously and can change the card height.
+    void membershipDate;
     const targetX = x;
     const targetY = y;
     const generation = ++positionGeneration;
@@ -133,6 +165,7 @@
     const generation = ++profileRequestGeneration;
     relationshipMutationGeneration += 1;
     relationshipType = 'loading';
+    friendshipSince = null;
     relationshipError = '';
     relationshipBusy = false;
     profileApplication = null;
@@ -153,6 +186,7 @@
               candidate.user.origin_domain === targetUser.origin_domain
           );
           relationshipType = relationship?.type ?? 'none';
+          friendshipSince = relationship?.type === 'friend' ? relationship.updated_at : null;
         })
         .catch((caught: unknown) => {
           if (controller.signal.aborted || generation !== profileRequestGeneration) return;
@@ -220,6 +254,7 @@
         return;
       }
       relationshipType = relationship.type;
+      friendshipSince = relationship.type === 'friend' ? relationship.updated_at : null;
     } catch (caught) {
       if (generation === relationshipMutationGeneration && entityRef(user) === targetRef) {
         relationshipError = userErrorMessage(
@@ -387,6 +422,35 @@
         <section class="user-popover-about" aria-labelledby="user-popover-about-heading">
           <h3 id="user-popover-about-heading">{$t('ui_about_me_1359ec88')}</h3>
           <p>{user.bio.trim()}</p>
+        </section>
+      {/if}
+
+      {#if createdAt || membershipDate}
+        <section class="user-popover-membership" aria-labelledby="user-popover-membership-heading">
+          <h3 id="user-popover-membership-heading">{$t('profile_member_since')}</h3>
+          <dl>
+            {#if createdAt}
+              <div>
+                <dt>{$t('profile_account_created')}</dt>
+                <dd><time datetime={createdAt.toISOString()}>{formatDate(createdAt)}</time></dd>
+              </div>
+            {/if}
+            {#if membershipDate}
+              <div>
+                <dt>
+                  {$t(
+                    profileContext === 'guild' ? 'profile_joined_guild' : 'profile_friends_since'
+                  )}
+                </dt>
+                <dd>
+                  <time datetime={membershipDate.toISOString()}>{formatDate(membershipDate)}</time>
+                  {#if profileContext === 'dm'}
+                    <small>{$t('profile_friends_days', { days: friendshipDays })}</small>
+                  {/if}
+                </dd>
+              </div>
+            {/if}
+          </dl>
         </section>
       {/if}
 
@@ -758,6 +822,7 @@
     background: #747f8d;
   }
 
+  .user-popover-membership,
   .user-popover-about {
     display: grid;
     gap: 6px;
@@ -766,6 +831,7 @@
     padding-top: 13px;
   }
 
+  .user-popover-membership h3,
   .user-popover-about h3 {
     margin: 0;
     color: var(--text-muted);
@@ -782,6 +848,31 @@
     line-height: 1.5;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+
+  .user-popover-membership dl {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 20px;
+    margin: 2px 0 0;
+  }
+
+  .user-popover-membership dt,
+  .user-popover-membership small {
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    line-height: 1.5;
+  }
+
+  .user-popover-membership dd {
+    margin: 3px 0 0;
+    color: var(--text-soft);
+    font-size: 0.76rem;
+    line-height: 1.5;
+  }
+
+  .user-popover-membership small {
+    display: block;
   }
 
   .user-popover-roles {

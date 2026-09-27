@@ -166,6 +166,63 @@ void main() {
     });
   });
 
+  group('profile dates', () {
+    test('creation time comes from the original account ID', () {
+      final user = KaedeUser.fromJson(<String, Object?>{
+        ..._user().toJson(),
+        'id': '4892236185600000',
+      });
+      expect(user.createdAt, DateTime.utc(2026, 1, 14, 12));
+      expect(
+          KaedeUser.fromJson(<String, Object?>{
+            ...user.toJson(),
+            'profile_resolved': false,
+          }).createdAt,
+          isNull);
+    });
+
+    test('friendship uses acceptance time and the full identity', () {
+      final user = _user();
+      final relationship = <String, Object?>{
+        'type': 'friend',
+        'user': user.toJson(),
+        'created_at': '2026-01-20T12:00:00Z',
+        'updated_at': '2026-02-02T12:00:00Z',
+      };
+      expect(
+          friendshipStartedAt(user, [
+            <String, Object?>{
+              ...relationship,
+              'user': <String, Object?>{
+                ...user.toJson(),
+                'origin_domain': 'other.example',
+              },
+              'updated_at': '2026-01-01T12:00:00Z'
+            },
+            relationship,
+          ]),
+          DateTime.utc(2026, 2, 2, 12));
+      for (final type in ['pending_in', 'pending_out', 'blocked']) {
+        expect(
+            friendshipStartedAt(user, [
+              <String, Object?>{
+                ...relationship,
+                'type': type,
+              }
+            ]),
+            isNull);
+      }
+      expect(
+          friendshipStartedAt(user, [
+            <String, Object?>{
+              ...relationship,
+              'updated_at': 'invalid',
+            }
+          ]),
+          isNull);
+    });
+  });
+
   group('layout holds on small phones', () {
     Future<void> pump(WidgetTester tester, Widget child) async {
       tester.view.physicalSize = const Size(320, 640);
@@ -232,6 +289,7 @@ void main() {
           user: _user(),
           presence: PresenceStatus.dnd,
           memberOf: 'Maple Syrup',
+          joinedAt: DateTime(2026, 2, 2),
           actions: [
             FilledButton(onPressed: () {}, child: const Text('Message')),
           ],
@@ -242,6 +300,28 @@ void main() {
       expect(find.text('Maple'), findsOneWidget);
       expect(find.text('Do not disturb'), findsOneWidget);
       expect(find.text('Message'), findsOneWidget);
+      expect(find.text('Member since'), findsOneWidget);
+      expect(find.text('Account created'), findsOneWidget);
+      expect(find.text('Joined guild'), findsOneWidget);
+      expect(find.text('Feb 2, 2026'), findsOneWidget);
+      expect(find.text('Friends since'), findsNothing);
+    });
+
+    testWidgets('DM profiles show friendship duration on a small phone',
+        (tester) async {
+      await pump(
+          tester,
+          UserProfileSheet(
+            user: _user(),
+            presence: PresenceStatus.online,
+            friendsSince:
+                DateTime.now().subtract(const Duration(days: 10, hours: 12)),
+          ));
+      expect(tester.takeException(), isNull);
+      expect(find.text('Account created'), findsOneWidget);
+      expect(find.text('Friends since'), findsOneWidget);
+      expect(find.text('Friends for 10 days'), findsOneWidget);
+      expect(find.text('Joined guild'), findsNothing);
     });
 
     testWidgets('application profiles expose a trusted APP tag',

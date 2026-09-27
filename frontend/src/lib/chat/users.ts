@@ -48,3 +48,12 @@ export function applyUserProfileToHomeProjections(
 export function isSystemUser(user: UserSummary | null | undefined): boolean {
   return user?.account_type === 'system';
 }
+
+/** Account IDs encode creation time, unlike a remote profile's local cache timestamp. */
+export function accountCreatedAt(user: UserSummary): Date | null {
+  if (user.profile_resolved === false || !/^[1-9]\d{0,18}$/.test(user.id)) return null;
+  const id = BigInt(user.id);
+  if (id > 9_223_372_036_854_775_807n) return null;
+  // Kaede's epoch and 10 worker + 12 sequence bits (backend/app/core/snowflake.py).
+  return new Date(1_767_225_600_000 + Number(id >> 22n));
+}

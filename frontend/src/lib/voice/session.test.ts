@@ -712,13 +712,13 @@ describe('voice media key rotation', () => {
     );
     expect(candidate.localParticipant.publishTrack).toHaveBeenCalledWith(
       microphone,
-      expect.objectContaining({ audioPreset: { maxBitrate: 32_000 } })
+      expect.objectContaining({ audioPreset: { maxBitrate: 32_000, priority: 'high' } })
     );
     expect(candidate.localParticipant.setScreenShareEnabled).toHaveBeenCalledWith(
       true,
       expect.any(Object),
       expect.objectContaining({
-        audioPreset: { maxBitrate: 128_000 },
+        audioPreset: { maxBitrate: 128_000, priority: 'high' },
         screenShareEncoding: { maxBitrate: 4_500_000, maxFramerate: 30 }
       })
     );

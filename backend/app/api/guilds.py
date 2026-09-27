@@ -74,6 +74,7 @@ from app.federation.guild_management import (
     qualified_management_ref,
     require_guild_management_status,
 )
+from app.federation.terminal_rooms import lock_terminal_room
 from app.tracker.service import create_tracker_state
 from app.voice.regions import require_configured_rtc_region
 
@@ -281,6 +282,8 @@ async def local_guild(
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     statement = select(Guild).where(Guild.id == guild_id, Guild.origin_domain == settings.domain)
     if for_update:
+        # Match federation ingress: room fence before the guild row lock.
+        await lock_terminal_room(session, "guild", guild_id, guild_domain)
         statement = statement.with_for_update()
     guild = await session.scalar(statement)
     if guild is None:

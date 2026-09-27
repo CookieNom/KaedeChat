@@ -8321,5 +8321,10 @@
   "debug_copy": "デバッグログをコピー",
   "debug_clear": "ログを消去",
   "debug_cleared": "デバッグログを消去しました。",
-  "debug_action_failed": "操作を完了できませんでした。再試行してください。"
+  "debug_action_failed": "操作を完了できませんでした。再試行してください。",
+  "profile_member_since": "メンバー登録日",
+  "profile_account_created": "アカウント作成日",
+  "profile_joined_guild": "ギルド参加日",
+  "profile_friends_since": "フレンド登録日",
+  "profile_friends_days": "{days, plural, =0 {フレンドになって1日未満} other {フレンドになって#日}}"
 }

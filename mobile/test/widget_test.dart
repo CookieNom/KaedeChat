@@ -1520,6 +1520,7 @@ void main() {
         user: placeholder,
         roleIds: const <String>['7'],
         nickname: 'Captain',
+        joinedAt: DateTime.utc(2026, 2, 2),
         timeoutUntil: DateTime.utc(2026, 8, 13),
       );
 
@@ -1530,6 +1531,9 @@ void main() {
 
       expect(overlaid.user, same(resolved));
       expect(overlaid.nickname, 'Captain');
+      expect(overlaid.joinedAt, DateTime.utc(2026, 2, 2));
+      expect(
+          GuildMember.fromJson(overlaid.toJson()).joinedAt, overlaid.joinedAt);
       expect(overlaid.roleIds, const <String>['7']);
       expect(overlaid.timeoutUntil, DateTime.utc(2026, 8, 13));
     });

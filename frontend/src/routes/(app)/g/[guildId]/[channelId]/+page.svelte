@@ -7858,6 +7858,8 @@
 {#if profile}
   <UserProfileCard
     user={profile.user}
+    profileContext="guild"
+    joinedAt={memberFor(profile.user.id, profile.user.origin_domain)?.joined_at}
     presence={presenceFor(profile.user)}
     x={profile.x}
     y={profile.y}

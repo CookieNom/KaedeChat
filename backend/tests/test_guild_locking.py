@@ -42,6 +42,12 @@ async def test_local_guild_optionally_locks_permission_generation(
     statement = scalar.await_args.args[0]
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert ("FOR UPDATE" in sql) is expected
+    statements = [str(call.args[0]) for call in scalar.await_args_list]
+    if for_update:
+        assert len(statements) == 2
+        assert "pg_advisory_xact_lock" in statements[0]
+    else:
+        assert len(statements) == 1
     assert result is guild
 
 
@@ -63,7 +69,7 @@ async def test_local_channel_mutation_locks_guild_then_refreshes_channel() -> No
         name="general",
         created_floor_id=11,
     )
-    scalar = AsyncMock(side_effect=[guild, channel])
+    scalar = AsyncMock(side_effect=[None, guild, channel])
     session = cast(AsyncSession, SimpleNamespace(scalar=scalar))
     settings = cast(Settings, SimpleNamespace(domain=DOMAIN))
 
@@ -73,8 +79,9 @@ async def test_local_channel_mutation_locks_guild_then_refreshes_channel() -> No
         ChannelAccess(channel=channel, guild=guild, participants=[]),
     )
 
-    guild_statement = scalar.await_args_list[0].args[0]
-    channel_statement = scalar.await_args_list[1].args[0]
+    assert "pg_advisory_xact_lock" in str(scalar.await_args_list[0].args[0])
+    guild_statement = scalar.await_args_list[1].args[0]
+    channel_statement = scalar.await_args_list[2].args[0]
     guild_sql = str(guild_statement.compile(dialect=postgresql.dialect()))
     channel_sql = str(channel_statement.compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in guild_sql
