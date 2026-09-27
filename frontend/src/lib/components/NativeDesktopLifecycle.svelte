@@ -7,6 +7,21 @@
   } from '$lib/platform/desktop-lifecycle.svelte';
   import { isNativeDesktop } from '$lib/platform/native';
   import { onMount } from 'svelte';
+  import { chatEntities } from '$lib/stores/entities.svelte';
+  import { taskbarUnreadCount } from '$lib/notifications/counts';
+  import { setTaskbarUnreadCount } from '$lib/platform/taskbar';
+
+  const unreadCount = $derived(taskbarUnreadCount(chatEntities.readStates.values));
+  let badgeUpdate = Promise.resolve();
+  function updateBadge(count: number) {
+    // Keep read/reset updates behind any in-flight update so an old count cannot win.
+    badgeUpdate = badgeUpdate
+      .then(() => setTaskbarUnreadCount(count))
+      .catch((error) => console.warn('Could not update the taskbar badge', error));
+  }
+  $effect(() => {
+    if (isNativeDesktop()) updateBadge(unreadCount);
+  });
 
   onMount(() => {
     if (!isNativeDesktop()) return;
@@ -15,7 +30,10 @@
       () => void desktopLifecycle.checkForUpdates(false),
       NATIVE_UPDATE_POLL_INTERVAL_MS
     );
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      updateBadge(0);
+    };
   });
 </script>
 

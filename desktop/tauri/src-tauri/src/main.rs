@@ -3497,6 +3497,43 @@ async fn native_notify(
 }
 
 #[tauri::command]
+fn native_set_unread_badge(
+    window: tauri::WebviewWindow,
+    count: u32,
+    rgba: Vec<u8>,
+) -> Result<(), NativeError> {
+    if window.label() != "main" {
+        return Err(NativeError::local(
+            "BADGE_WINDOW",
+            "Only the main window can update the badge.",
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    let result = {
+        let icon = if count == 0 {
+            None
+        } else {
+            if rgba.len() != 32 * 32 * 4 {
+                return Err(NativeError::local(
+                    "BADGE_IMAGE",
+                    "Invalid taskbar badge image.",
+                ));
+            }
+            Some(tauri::image::Image::new_owned(rgba, 32, 32))
+        };
+        window.set_overlay_icon(icon)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let result = {
+        let _ = rgba;
+        window.set_badge_count((count > 0).then_some(i64::from(count)))
+    };
+    result.map_err(|error| {
+        NativeError::operation("BADGE_UPDATE", "Could not update the unread badge.", error)
+    })
+}
+
+#[tauri::command]
 fn native_notifications_prepare() -> Result<(), NativeError> {
     prepare_native_notifications()
 }
@@ -3875,6 +3912,7 @@ fn main() {
             native_hotkey_status,
             native_notifications_prepare,
             native_notify,
+            native_set_unread_badge,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

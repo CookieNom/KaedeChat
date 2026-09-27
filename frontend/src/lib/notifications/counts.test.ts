@@ -5,7 +5,8 @@ import {
   channelUnreadPresentation,
   compactBadgeCount,
   directMessageUnreadCount,
-  guildMentionCount
+  guildMentionCount,
+  taskbarUnreadCount
 } from './counts';
 
 const guild = { id: '1', origin_domain: 'home.test' } as Guild;
@@ -74,6 +75,21 @@ describe('rail notification counts', () => {
         state({ mention_count: 6 })
       ])
     ).toBe(4);
+  });
+
+  it('combines guild mentions and unread private conversations without double counting', () => {
+    const states = [
+      state({ mention_count: 2 }),
+      state({ guild_domain: 'remote.test', mention_count: 3 }),
+      state({ mention_count: 0 }),
+      state({ guild_id: null, guild_domain: null }),
+      state({ guild_id: null, guild_domain: null, mention_count: 4 }),
+      state({ unread: false, mention_count: 8 }),
+      state({ guild_id: null, unread: false, mention_count: 6 })
+    ];
+    expect(taskbarUnreadCount(states)).toBe(10);
+    expect(taskbarUnreadCount(states.map((entry) => ({ ...entry, unread: false })))).toBe(0);
+    expect(taskbarUnreadCount([])).toBe(0);
   });
 
   it('caps crowded badges', () => {

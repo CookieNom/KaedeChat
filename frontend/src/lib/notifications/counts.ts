@@ -33,6 +33,17 @@ export function directMessageUnreadCount(readStates: ReadStateStatus[]): number 
     .reduce((total, state) => total + Math.max(1, state.mention_count), 0);
 }
 
+export function taskbarUnreadCount(readStates: ReadStateStatus[]): number {
+  return (
+    directMessageUnreadCount(readStates) +
+    readStates.reduce(
+      (total, state) =>
+        total + (state.guild_id !== null && state.unread ? Math.max(0, state.mention_count) : 0),
+      0
+    )
+  );
+}
+
 export function compactBadgeCount(count: number): string {
   return count > 99 ? '99+' : String(Math.max(0, count));
 }

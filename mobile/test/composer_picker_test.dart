@@ -493,7 +493,15 @@ void main() {
         .tap(find.byKey(const ValueKey('emoji-section-20@home.example')));
     await tester.pumpAndSettle();
 
-    expect(find.byType(CustomEmojiImage).hitTestable(), findsOneWidget);
+    // The image placeholder need not hit-test itself; the InkWell is the
+    // interactive target, including while the custom image is still loading.
+    final customButton = find
+        .ancestor(
+          of: find.byType(CustomEmojiImage),
+          matching: find.byType(InkWell),
+        )
+        .hitTestable();
+    expect(customButton, findsOneWidget);
     expect(
       find.byWidgetPredicate(
         (widget) =>
@@ -503,8 +511,7 @@ void main() {
       findsWidgets,
     );
 
-    await tester
-        .tapAt(tester.getCenter(find.byType(CustomEmojiImage).hitTestable()));
+    await tester.tap(customButton);
     await tester.pump();
     expect(selected, const <String>[token]);
   });
