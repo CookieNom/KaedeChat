@@ -302,6 +302,33 @@ def run_check(action: str) -> None:
                         test_env,
                     ),
                 )
+        except Exception:
+            if created and kubeconfig.is_file():
+                for namespace in ("kaede-validation", "kaede-alpha", "kaede-beta"):
+                    try:
+                        subprocess.run(
+                            [
+                                "kubectl",
+                                "--kubeconfig",
+                                str(kubeconfig),
+                                "--request-timeout=20s",
+                                "-n",
+                                namespace,
+                                "logs",
+                                "-l",
+                                "app in (api,gateway,worker,scheduler)",
+                                "--all-containers=true",
+                                "--prefix=true",
+                                "--tail=300",
+                            ],
+                            check=False,
+                            timeout=60,
+                        )
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        print(
+                            f"Could not collect {namespace} logs: {error}", flush=True
+                        )
+            raise
         finally:
             if created:
                 subprocess.run(
