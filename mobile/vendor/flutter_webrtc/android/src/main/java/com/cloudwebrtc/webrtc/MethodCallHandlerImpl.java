@@ -1201,6 +1201,8 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
     List<IceServer> iceServers = createIceServers(iceServersArray);
     RTCConfiguration conf = new RTCConfiguration(iceServers);
+    // Allow RTP networkPriority to request DSCP marking; network support varies.
+    conf.enableDscp = true;
     if (map == null) {
       return conf;
     }

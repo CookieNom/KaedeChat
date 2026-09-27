@@ -206,7 +206,11 @@ export function webAudioPublishOptions(
 ): TrackPublishOptions {
   const quality = audioQuality(preferences.audioQuality);
   return {
-    audioPreset: { maxBitrate: Math.min(quality.maxBitrate, channelBitrate) },
+    audioPreset: {
+      maxBitrate: Math.min(quality.maxBitrate, channelBitrate),
+      // Request voice DSCP marking where the browser and network support it.
+      priority: 'high'
+    },
     forceStereo: quality.stereo,
     dtx: preferences.dtx,
     red: true

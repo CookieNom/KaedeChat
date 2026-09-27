@@ -46,6 +46,9 @@ import org.webrtc.VideoTrack;
 
 class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.StreamHandler {
   private final static String TAG = FlutterWebRTCPlugin.TAG;
+  // WebRTC's native priority enum uses this order.
+  private static final List<String> NETWORK_PRIORITIES =
+      Arrays.asList("very-low", "low", "medium", "high");
   private final Map<String, DataChannel> dataChannels = new HashMap<>();
   private final BinaryMessenger messenger;
   private final String id;
@@ -676,6 +679,9 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       encoding.scalabilityMode = (String) parameters.get("scalabilityMode");
     }
 
+    int networkPriority = NETWORK_PRIORITIES.indexOf(parameters.get("networkPriority"));
+    if (networkPriority >= 0) encoding.networkPriority = networkPriority;
+
     return encoding;
   }
 
@@ -740,6 +746,8 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       }
 
       if (currentParams != null) {
+        int networkPriority = NETWORK_PRIORITIES.indexOf(encoding.get("networkPriority"));
+        if (networkPriority >= 0) currentParams.networkPriority = networkPriority;
         Boolean active = (Boolean) encoding.get("active");
         if (active != null) currentParams.active = active;
         Integer maxBitrate = (Integer) encoding.get("maxBitrate");
@@ -784,6 +792,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     for (RtpParameters.Encoding encoding : rtpParameters.encodings) {
       ConstraintsMap map = new ConstraintsMap();
       map.putBoolean("active", encoding.active);
+      map.putString("networkPriority", NETWORK_PRIORITIES.get(encoding.networkPriority));
       if (encoding.rid != null) {
         map.putString("rid", encoding.rid);
       }

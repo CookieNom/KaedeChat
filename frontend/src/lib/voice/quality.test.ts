@@ -94,7 +94,7 @@ describe('media quality preferences', () => {
       maxFramerate: profile.frameRate
     });
     expect(webAudioPublishOptions(preferences)).toMatchObject({
-      audioPreset: { maxBitrate: audioQuality('studio').maxBitrate },
+      audioPreset: { maxBitrate: audioQuality('studio').maxBitrate, priority: 'high' },
       forceStereo: true,
       dtx: false
     });
@@ -112,11 +112,11 @@ describe('media quality preferences', () => {
     expect(
       webAudioPublishOptions({ ...DEFAULT_MEDIA_QUALITY, audioQuality: 'studio' }, 32_000)
         .audioPreset
-    ).toEqual({ maxBitrate: 32_000 });
+    ).toEqual({ maxBitrate: 32_000, priority: 'high' });
     expect(
       webAudioPublishOptions({ ...DEFAULT_MEDIA_QUALITY, audioQuality: 'data_saver' }, 96_000)
         .audioPreset
-    ).toEqual({ maxBitrate: 24_000 });
+    ).toEqual({ maxBitrate: 24_000, priority: 'high' });
   });
 
   it('keeps adaptive and full camera defaults separate from screen-share profiles', () => {

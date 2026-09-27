@@ -2043,6 +2043,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
 - (nonnull RTCConfiguration*)RTCConfiguration:(id)json {
   RTCConfiguration* config = [[RTCConfiguration alloc] init];
+#if TARGET_OS_IPHONE
+  // Allow RTP networkPriority to request DSCP marking; network support varies.
+  config.enableDscp = YES;
+#endif
 
   if (!json) {
     return config;
@@ -2315,6 +2319,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
   for (RTCRtpEncodingParameters* encoding in parameters.encodings) {
     // non-nil values
     NSMutableDictionary* obj = [@{@"active" : @(encoding.isActive)} mutableCopy];
+#if TARGET_OS_IPHONE
+    NSArray* priorities = @[@"very-low", @"low", @"medium", @"high"];
+    obj[@"networkPriority"] = priorities[encoding.networkPriority];
+#endif
     // optional values
     if (encoding.rid != nil)
       [obj setObject:encoding.rid forKey:@"rid"];
@@ -2470,7 +2478,9 @@ static FlutterWebRTCPlugin *sharedSingleton;
   encoding.scaleResolutionDownBy = [NSNumber numberWithDouble:1.0];
   encoding.numTemporalLayers = [NSNumber numberWithInt:1];
 #if TARGET_OS_IPHONE
-  encoding.networkPriority = RTCPriorityLow;
+  NSArray* priorities = @[@"very-low", @"low", @"medium", @"high"];
+  NSUInteger priority = [priorities indexOfObject:map[@"networkPriority"] ?: @"low"];
+  encoding.networkPriority = priority == NSNotFound ? RTCPriorityLow : (RTCPriority)priority;
   encoding.bitratePriority = 1.0;
 #endif
   [encoding setRid:map[@"rid"]];
@@ -2603,6 +2613,12 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
     if (currentParams != nil) {
       // update values
+#if TARGET_OS_IPHONE
+      NSArray* priorities = @[@"very-low", @"low", @"medium", @"high"];
+      NSUInteger priority = [priorities indexOfObject:newParams[@"networkPriority"] ?: @""];
+      if (priority != NSNotFound)
+        currentParams.networkPriority = (RTCPriority)priority;
+#endif
       NSNumber* active = [newParams objectForKey:@"active"];
       if (active != nil)
         currentParams.isActive = [active boolValue];
