@@ -23,6 +23,7 @@ export interface CustomEmojiOption {
   guild_id: string;
   guild_domain: string;
   guild_name?: string;
+  guild_icon_hash?: string | null;
 }
 
 export interface CustomEmojiGroup {

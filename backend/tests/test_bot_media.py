@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import HTTPException
 
 from app.db.bot_models import BotInstallation
 from app.db.models import Attachment, User
@@ -52,18 +53,34 @@ def settings() -> SimpleNamespace:
         media_inflight_limit=4,
         media_inflight_quota_bytes=1024,
         media_user_quota_bytes=4096,
+        media_daily_upload_quota_bytes=0,
         media_upload_ttl_seconds=300,
         media_attachments_bucket="attachments",
     )
 
 
+@pytest.mark.parametrize(
+    "quota,daily,remaining,error_code",
+    [
+        (0, 0, None, None),
+        (16, 0, None, None),
+        (15, 0, None, "USER_STORAGE_QUOTA_EXCEEDED"),
+        (0, 5, 5, None),
+        (0, 4, None, "DAILY_UPLOAD_QUOTA_EXCEEDED"),
+        (0, 5, None, "DAILY_UPLOAD_QUOTA_EXCEEDED"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_bot_ticket_uses_installation_ledger_without_local_user_usage(
     monkeypatch: pytest.MonkeyPatch,
+    quota: int,
+    daily: int,
+    remaining: int | None,
+    error_code: str | None,
 ) -> None:
     ledger = installation()
     session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[ledger, 0]),
+        scalar=AsyncMock(side_effect=[ledger, 0, remaining]),
         add=Mock(),
         flush=AsyncMock(),
     )
@@ -78,16 +95,29 @@ async def test_bot_ticket_uses_installation_ledger_without_local_user_usage(
 
     monkeypatch.setattr(service, "S3Storage", Storage)
 
-    attachment, upload_url = await service.create_upload_ticket(
-        session,
-        settings(),
-        snowflake,
-        bot_user(),
-        filename="photo.png",
-        content_type="image/png",
-        size=5,
-        bot_installation=ledger,
-    )
+    configured = settings()
+    configured.media_user_quota_bytes = quota
+    configured.media_daily_upload_quota_bytes = daily
+
+    async def upload():
+        return await service.create_upload_ticket(
+            session,
+            configured,
+            snowflake,
+            bot_user(),
+            filename="photo.png",
+            content_type="image/png",
+            size=5,
+            bot_installation=ledger,
+        )
+
+    if error_code is not None:
+        with pytest.raises(HTTPException) as error:
+            await upload()
+        assert error.value.detail == {"code": error_code}
+        snowflake.mint.assert_not_awaited()
+        return
+    attachment, upload_url = await upload()
 
     assert attachment.bot_installation_id == ledger.id
     assert attachment.uploader_domain == "apps.example"
@@ -97,9 +127,11 @@ async def test_bot_ticket_uses_installation_ledger_without_local_user_usage(
     session.add.assert_called_once_with(attachment)
 
 
+@pytest.mark.parametrize("quota", [0, 16, 15])
 @pytest.mark.asyncio
 async def test_finalizing_bot_media_moves_bytes_within_installation_ledger(
     monkeypatch: pytest.MonkeyPatch,
+    quota: int,
 ) -> None:
     ledger = installation()
     ledger.media_pending_bytes = 5
@@ -131,7 +163,16 @@ async def test_finalizing_bot_media_moves_bytes_within_installation_ledger(
 
     monkeypatch.setattr(service, "S3Storage", Storage)
 
-    finalized = await service.finalize_attachment(session, settings(), bot_user(), attachment.id)
+    configured = settings()
+    configured.media_user_quota_bytes = quota
+    if quota == 15:
+        with pytest.raises(HTTPException) as error:
+            await service.finalize_attachment(session, configured, bot_user(), attachment.id)
+        assert error.value.detail == {"code": "USER_STORAGE_QUOTA_EXCEEDED"}
+        assert ledger.media_pending_bytes == 5
+        assert ledger.media_bytes_used == 11
+        return
+    finalized = await service.finalize_attachment(session, configured, bot_user(), attachment.id)
 
     assert finalized is attachment
     assert finalized.finalized_at is not None

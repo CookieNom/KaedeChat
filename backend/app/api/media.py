@@ -1260,7 +1260,7 @@ async def available_emojis(
 ) -> list[dict[str, object]]:
     rows = (
         await session.execute(
-            select(Emoji, Guild.name)
+            select(Emoji, Guild.name, Guild.icon_hash)
             .join(
                 Guild,
                 (Guild.id == Emoji.guild_id) & (Guild.origin_domain == Emoji.guild_domain),
@@ -1280,7 +1280,10 @@ async def available_emojis(
             .limit(5000)
         )
     ).tuples()
-    return [{**emoji_payload(emoji), "guild_name": guild_name} for emoji, guild_name in rows]
+    return [
+        {**emoji_payload(emoji), "guild_name": guild_name, "guild_icon_hash": icon_hash}
+        for emoji, guild_name, icon_hash in rows
+    ]
 
 
 @router.post("/api/v1/guilds/{guild_id}/stickers/tickets", status_code=201)

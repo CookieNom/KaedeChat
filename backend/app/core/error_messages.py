@@ -193,6 +193,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "WEBHOOK_THREAD_NAME_UNEXPECTED": "A thread name can only be used when creating a new forum post.",
     "WEBHOOK_THREAD_NOT_FOUND": "The selected webhook thread no longer exists or belongs to another channel.",
     "WEBHOOK_THREAD_TARGET_AMBIGUOUS": "Choose either an existing thread or a new thread name, not both.",
+    "DAILY_UPLOAD_QUOTA_EXCEEDED": "This upload would exceed your daily upload limit. Your allowance resets at midnight UTC.",
     "DEVELOPER_TEAM_NOT_FOUND": "That developer team no longer exists or you cannot access it.",
     "DEVELOPER_TEAM_APPLICATION_LIMIT_REACHED": (
         "That developer team has reached its application limit."

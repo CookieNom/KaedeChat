@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
@@ -194,6 +195,8 @@ final class ComposerCustomEmoji {
     required this.animated,
     required this.mediaHash,
     this.guildRef,
+    this.guildName,
+    this.guildIconHash,
   });
 
   static final _namePattern = RegExp(r'^[A-Za-z0-9_]{2,32}$');
@@ -220,6 +223,8 @@ final class ComposerCustomEmoji {
       return ComposerCustomEmoji(
         ref: ref,
         guildRef: guildRef,
+        guildName: '${json['guild_name'] ?? ''}'.trim(),
+        guildIconHash: '${json['guild_icon_hash'] ?? ''}',
         name: name,
         animated: json['animated'] == true,
         mediaHash: mediaHash,
@@ -231,6 +236,8 @@ final class ComposerCustomEmoji {
 
   final EntityRef ref;
   final EntityRef? guildRef;
+  final String? guildName;
+  final String? guildIconHash;
   final String name;
   final bool animated;
   final String mediaHash;
@@ -1187,20 +1194,37 @@ final class ComposerEmojiPicker extends StatefulWidget {
 
 final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
   final _search = TextEditingController();
+  final _scroll = ScrollController();
+  final _sectionOffsets = <String, double>{};
   List<ComposerCustomEmoji> _custom = const [];
   Object? _error;
   var _loading = true;
-  late String _category;
+  String? _activeSection;
 
   @override
   void initState() {
     super.initState();
-    _category = widget.recent.isNotEmpty
-        ? 'Recent'
-        : widget.categories.containsKey('Smileys')
-            ? 'Smileys'
-            : widget.categories.keys.firstOrNull ?? 'Custom';
+    _scroll.addListener(_trackSection);
     unawaited(_loadCustom());
+  }
+
+  void _trackSection() {
+    if (!_scroll.hasClients || _search.text.isNotEmpty) return;
+    String? active;
+    for (final entry in _sectionOffsets.entries) {
+      if (entry.value <= _scroll.offset + 40) active = entry.key;
+    }
+    if (active != _activeSection) setState(() => _activeSection = active);
+  }
+
+  void _jumpTo(String key) {
+    setState(() => _search.clear());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      _scroll.jumpTo((_sectionOffsets[key] ?? 0)
+          .clamp(0.0, _scroll.position.maxScrollExtent));
+      setState(() => _activeSection = key);
+    });
   }
 
   Future<void> _loadCustom() async {
@@ -1227,6 +1251,7 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
   @override
   void dispose() {
     _search.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -1236,7 +1261,7 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
       padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
       child: _KeyboardResponsivePickerBody(
         expandedBreakpoint: 170,
-        compactBodyHeight: 140,
+        compactBodyHeight: 200,
         header: [
           TextField(
             key: ValueKey('composer-emoji-search'),
@@ -1247,29 +1272,10 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
               prefixIcon: Icon(Icons.search_rounded),
               isDense: true,
             ),
-            onChanged: (_) => setState(() {}),
-          ),
-          SizedBox(height: 8),
-          SizedBox(
-            height: 38,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: widget.categories.length + 1,
-              separatorBuilder: (_, __) => SizedBox(width: 6),
-              itemBuilder: (context, index) {
-                final name = index == widget.categories.length
-                    ? 'Custom'
-                    : widget.categories.keys.elementAt(index);
-                return ChoiceChip(
-                  label: Text(name),
-                  selected: _category == name && _search.text.isEmpty,
-                  onSelected: (_) => setState(() {
-                    _category = name;
-                    _search.clear();
-                  }),
-                );
-              },
-            ),
+            onChanged: (_) {
+              setState(() {});
+              if (_scroll.hasClients) _scroll.jumpTo(0);
+            },
           ),
           SizedBox(height: 8),
         ],
@@ -1282,22 +1288,6 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
 
   Widget _buildChoices(BuildContext context) {
     final query = _search.text.trim().toLowerCase();
-    if (query.isEmpty && _category == 'Custom') {
-      if (_loading) {
-        return _PickerStatus(
-          icon: CircularProgressIndicator(strokeWidth: 2),
-          message: L10n.of(context).ui_loading_custom_emoji_fc000580,
-        );
-      }
-      if (_error case final error?) {
-        return _PickerError(
-          message: userFacingError(error,
-              summary: L10n.of(context).ui_could_not_load_emoji_a6afbb2f),
-          onRetry: _loadCustom,
-        );
-      }
-    }
-
     final customByToken = <String, ComposerCustomEmoji>{
       for (final emoji in _custom) emoji.token: emoji,
     };
@@ -1315,85 +1305,222 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
       return _ComposerEmojiChoice.reaction(parsed);
     }
 
-    final choices = <_ComposerEmojiChoice>[];
-    final choiceValues = <String>{};
-    void addChoices(Iterable<_ComposerEmojiChoice> candidates) {
-      for (final choice in candidates) {
-        if (choiceValues.add(choice.value)) choices.add(choice);
+    final sections = <({
+      String key,
+      String name,
+      IconData icon,
+      ComposerCustomEmoji? server,
+      List<_ComposerEmojiChoice> choices
+    })>[];
+    void addSection(String key, String name, IconData icon,
+        Iterable<_ComposerEmojiChoice> choices,
+        [ComposerCustomEmoji? server]) {
+      final seen = <String>{};
+      final items = choices.where((choice) => seen.add(choice.value)).toList();
+      if (items.isNotEmpty) {
+        sections.add(
+            (key: key, name: name, icon: icon, server: server, choices: items));
       }
     }
 
-    if (query.isNotEmpty) {
-      final unicode = <String>{
-        ...widget.recent,
-        ...widget.categories.values.expand((items) => items),
-      };
-      addChoices(
-        unicode
-            .where((emoji) => emoji.toLowerCase().contains(query))
-            .map(choiceForValue)
-            .whereType<_ComposerEmojiChoice>(),
-      );
-      addChoices(
-        _custom
-            .where((emoji) => emoji.name.toLowerCase().contains(query))
-            .map(_ComposerEmojiChoice.custom),
-      );
-    } else if (_category == 'Custom') {
-      addChoices(_custom.map(_ComposerEmojiChoice.custom));
-    } else {
-      final unicode = _category == 'Recent'
-          ? widget.recent
-          : widget.categories[_category] ?? const <String>[];
-      addChoices(
-        unicode.map(choiceForValue).whereType<_ComposerEmojiChoice>(),
-      );
+    addSection('recent', 'Recent', Icons.history_rounded,
+        widget.recent.map(choiceForValue).whereType<_ComposerEmojiChoice>());
+    final guilds = <String, List<ComposerCustomEmoji>>{};
+    for (final emoji in _custom) {
+      (guilds[emoji.guildRef?.wire ?? 'custom'] ??= []).add(emoji);
     }
+    for (final entry in guilds.entries) {
+      final server = entry.value.first;
+      addSection(
+          entry.key,
+          server.guildName?.isNotEmpty == true
+              ? server.guildName!
+              : server.guildRef?.domain.value ?? 'Custom',
+          Icons.emoji_emotions_outlined,
+          entry.value.map(_ComposerEmojiChoice.custom),
+          server);
+    }
+    const icons = <String, IconData>{
+      'Smileys': Icons.emoji_emotions_outlined,
+      'People': Icons.waving_hand_outlined,
+      'Nature': Icons.pets_outlined,
+      'Food': Icons.restaurant_outlined,
+      'Activities': Icons.sports_esports_outlined,
+      'Symbols': Icons.favorite_border_rounded,
+    };
+    for (final entry in widget.categories.entries) {
+      if (entry.key == 'Recent') continue;
+      addSection(
+          'category:${entry.key}',
+          entry.key,
+          icons[entry.key] ?? Icons.tag_rounded,
+          entry.value.map(choiceForValue).whereType<_ComposerEmojiChoice>());
+    }
+    final visible = sections
+        .map((section) => (
+              key: section.key,
+              name: section.name,
+              choices: section.choices
+                  .where((choice) =>
+                      query.isEmpty ||
+                      choice.label.toLowerCase().contains(query) ||
+                      section.name.toLowerCase().contains(query))
+                  .toList(),
+            ))
+        .where((section) => section.choices.isNotEmpty)
+        .toList();
 
-    if (choices.isEmpty) {
-      return _PickerStatus(
-        icon: Icon(Icons.emoji_emotions_outlined),
-        message: query.isEmpty && _category == 'Recent'
-            ? L10n.of(context).ui_recently_used_emoji_will_appear_here_102e1351
-            : L10n.of(context).ui_no_emoji_found_eb9b8066,
-      );
-    }
     return LayoutBuilder(builder: (context, constraints) {
-      final columns = max(5, min(8, (constraints.maxWidth / 52).floor()));
-      return GridView.builder(
-        key: ValueKey('composer-emoji-grid'),
-        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: columns,
-          mainAxisSpacing: 4,
-          crossAxisSpacing: 4,
-        ),
-        itemCount: choices.length,
-        itemBuilder: (context, index) {
-          final choice = choices[index];
-          return Semantics(
-            button: true,
-            label: L10n.of(context).ui_value0_value1_c1a3651c(
-                (widget.semanticAction).toString(), (choice.label).toString()),
-            child: ExcludeSemantics(
-              child: Tooltip(
-                message: choice.label,
-                child: InkWell(
-                  onTap: () {
-                    if (widget.onSelected case final onSelected?) {
-                      onSelected(choice.value);
-                    } else {
-                      Navigator.pop(context, choice.value);
-                    }
-                  },
-                  borderRadius: BorderRadius.circular(10),
-                  child: Center(child: choice.build()),
-                ),
-              ),
-            ),
-          );
-        },
-      );
+      final columns = max(1, min(8, (constraints.maxWidth / 44).floor()));
+      final cellSize = (constraints.maxWidth - (columns - 1) * 4) / columns;
+      _sectionOffsets.clear();
+      var offset = 0.0;
+      for (final section in visible) {
+        _sectionOffsets[section.key] = offset;
+        final rows = (section.choices.length / columns).ceil();
+        offset += 40 + rows * (cellSize + 4) - 4 + 12;
+      }
+      return Column(children: [
+        Expanded(
+            child: CustomScrollView(
+          key: ValueKey('composer-emoji-grid'),
+          controller: _scroll,
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          slivers: [
+            for (final section in visible) ...[
+              SliverToBoxAdapter(
+                  child: SizedBox(
+                height: 40,
+                child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(section.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge)),
+              )),
+              SliverPadding(
+                  padding: EdgeInsets.only(bottom: 12),
+                  sliver: SliverGrid(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: columns,
+                        mainAxisSpacing: 4,
+                        crossAxisSpacing: 4),
+                    delegate: SliverChildBuilderDelegate((context, index) {
+                      final choice = section.choices[index];
+                      return Semantics(
+                        button: true,
+                        label: L10n.of(context).ui_value0_value1_c1a3651c(
+                            widget.semanticAction, choice.label),
+                        child: ExcludeSemantics(
+                            child: Tooltip(
+                          message: choice.label,
+                          child: InkWell(
+                            onTap: () {
+                              if (widget.onSelected case final onSelected?) {
+                                onSelected(choice.value);
+                              } else {
+                                Navigator.pop(context, choice.value);
+                              }
+                            },
+                            borderRadius: BorderRadius.circular(10),
+                            child: Center(child: choice.build()),
+                          ),
+                        )),
+                      );
+                    }, childCount: section.choices.length),
+                  )),
+            ],
+            if (_loading)
+              SliverToBoxAdapter(
+                  child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Center(
+                          child: CircularProgressIndicator(strokeWidth: 2))))
+            else if (_error case final error?)
+              SliverToBoxAdapter(
+                  child: _PickerError(
+                message: userFacingError(error,
+                    summary: L10n.of(context).ui_could_not_load_emoji_a6afbb2f),
+                onRetry: _loadCustom,
+              ))
+            else if (visible.isEmpty)
+              SliverToBoxAdapter(
+                  child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text(L10n.of(context).ui_no_emoji_found_eb9b8066,
+                          textAlign: TextAlign.center))),
+            if (visible.isNotEmpty && !_loading && _error == null)
+              SliverToBoxAdapter(
+                  child: SizedBox(
+                      height: max(
+                          0.0,
+                          constraints.maxHeight -
+                              57 -
+                              (offset - _sectionOffsets[visible.last.key]!)))),
+          ],
+        )),
+        Divider(height: 1),
+        SizedBox(
+            height: 56,
+            child: ListView.separated(
+              key: ValueKey('composer-emoji-sections'),
+              scrollDirection: Axis.horizontal,
+              padding: EdgeInsets.symmetric(vertical: 6),
+              itemCount: sections.length,
+              separatorBuilder: (_, __) => SizedBox(width: 6),
+              itemBuilder: (context, index) {
+                final section = sections[index];
+                final selected = query.isEmpty &&
+                    (_activeSection ?? sections.first.key) == section.key;
+                final server = section.server;
+                final iconUri = server?.guildRef == null
+                    ? null
+                    : publicAssetUri(
+                        server!.guildRef!.domain, server.guildIconHash,
+                        variant: 'thumbnail_128');
+                final fallback = server == null
+                    ? Icon(section.icon)
+                    : Text(
+                        section.name.characters
+                            .take(2)
+                            .toString()
+                            .toUpperCase(),
+                        style: Theme.of(context).textTheme.labelMedium);
+                return Semantics(
+                    selected: selected,
+                    child: Tooltip(
+                      message: section.name,
+                      child: SizedBox(
+                          width: 44,
+                          child: IconButton(
+                            key: ValueKey('emoji-section-${section.key}'),
+                            onPressed: () => _jumpTo(section.key),
+                            style: IconButton.styleFrom(
+                              padding: EdgeInsets.all(5),
+                              backgroundColor: selected
+                                  ? Theme.of(context)
+                                      .colorScheme
+                                      .secondaryContainer
+                                  : null,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ),
+                            icon: iconUri == null
+                                ? fallback
+                                : ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: CachedNetworkImage(
+                                        imageUrl: iconUri.toString(),
+                                        width: 34,
+                                        height: 34,
+                                        fit: BoxFit.cover,
+                                        errorWidget: (_, __, ___) => fallback),
+                                  ),
+                          )),
+                    ));
+              },
+            )),
+      ]);
     });
   }
 }

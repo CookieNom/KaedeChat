@@ -326,6 +326,8 @@ final class KaedeException implements Exception {
           'This application does not have permission to read command attachments. Ask a guild administrator to update its installation.',
       'FOCUSED_OPTION_INVALID':
           'That command option does not support autocomplete. Refresh the command list and try again.',
+      'DAILY_UPLOAD_QUOTA_EXCEEDED':
+          'This upload would exceed your daily upload limit. Your allowance resets at midnight UTC.',
       'USER_STORAGE_QUOTA_EXCEEDED':
           'Your attachment storage is full. Remove files before uploading another.',
       'MEDIA_STORAGE_UNAVAILABLE':

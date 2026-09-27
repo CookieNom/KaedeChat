@@ -26,6 +26,15 @@ only after you explicitly opt into automatic updates.
 | Updates | Optional source-update schedule and executable backup hook |
 | Capacity | Worker counts, upload limits, host ports, and optional federation/cache quotas |
 
+`KAEDE_MEDIA_DAILY_UPLOAD_QUOTA_BYTES` limits upload bytes per uploader per UTC
+calendar day (default `0`, unlimited). Issued upload tickets reserve their declared
+size; cancellation, expiry, and deletion do not refund the daily allowance.
+The allowance covers media uploads, including encrypted attachments and bot uploads,
+on this server and resets at midnight UTC. Daily accounting starts when enabled.
+`KAEDE_MEDIA_USER_QUOTA_BYTES` caps total stored bytes (default 10 GiB); `0` makes
+it unlimited too. Deleting files still frees stored-byte quota. Per-file and
+concurrent-upload limits remain in effect.
+
 For a new deployment, **Keep recommended defaults** skips individual quota
 questions. On a rerun, **Keep existing limits** preserves custom values.
 **Customize common storage limits** covers the main cache/history byte budgets;

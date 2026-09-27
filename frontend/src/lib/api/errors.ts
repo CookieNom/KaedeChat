@@ -264,6 +264,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   UPLOAD_TICKET_EXPIRED: 'The upload took too long. Choose the file again and retry.',
   UPLOAD_INFLIGHT_LIMIT: 'Too many files are uploading at once. Wait for one to finish.',
   UPLOAD_INFLIGHT_QUOTA_EXCEEDED: 'Your pending uploads exceed this instance’s storage limit.',
+  DAILY_UPLOAD_QUOTA_EXCEEDED:
+    'This upload would exceed your daily upload limit. Your allowance resets at midnight UTC.',
   USER_STORAGE_QUOTA_EXCEEDED: 'Your account has reached its attachment storage limit.',
   MEDIA_STORAGE_UNAVAILABLE: 'Media storage is temporarily unavailable.',
   MEDIA_NOT_AVAILABLE: 'That media is still processing or is no longer available.',

@@ -483,22 +483,28 @@ void main() {
     await tester.pump();
 
     expect(find.text('🔥'), findsOneWidget);
-    expect(find.byType(CustomEmojiImage), findsOneWidget);
+    expect(find.byType(CustomEmojiImage), findsWidgets);
 
-    await tester.tap(find.text('Custom'));
-    await tester.pump();
+    final shortcuts = find.byKey(const ValueKey('composer-emoji-sections'));
+    final grid = find.byKey(const ValueKey('composer-emoji-grid'));
+    expect(tester.getTopLeft(shortcuts).dy,
+        greaterThan(tester.getBottomLeft(grid).dy));
+    await tester
+        .tap(find.byKey(const ValueKey('emoji-section-20@home.example')));
+    await tester.pumpAndSettle();
 
-    expect(find.byType(CustomEmojiImage), findsOneWidget);
+    expect(find.byType(CustomEmojiImage).hitTestable(), findsOneWidget);
     expect(
       find.byWidgetPredicate(
         (widget) =>
             widget is Semantics &&
             widget.properties.label == 'React with :party_blob:',
       ),
-      findsOneWidget,
+      findsWidgets,
     );
 
-    await tester.tapAt(tester.getCenter(find.byType(CustomEmojiImage)));
+    await tester
+        .tapAt(tester.getCenter(find.byType(CustomEmojiImage).hitTestable()));
     await tester.pump();
     expect(selected, const <String>[token]);
   });

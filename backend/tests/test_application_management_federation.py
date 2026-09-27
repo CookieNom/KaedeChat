@@ -1214,6 +1214,7 @@ async def test_remote_asset_media_uses_bounded_quota_without_a_local_user_ledger
         media_inflight_limit=4,
         media_inflight_quota_bytes=1024,
         media_user_quota_bytes=4096,
+        media_daily_upload_quota_bytes=0,
         media_upload_ttl_seconds=300,
         media_attachments_bucket="attachments",
     )

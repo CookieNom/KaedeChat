@@ -9,7 +9,8 @@
     type EmojiOption
   } from '$lib/chat/emojis';
   import type { StickerOption } from '$lib/chat/stickers';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { assetUrl } from '$lib/media/assets';
 
   let {
     inline = false,
@@ -29,34 +30,68 @@
   let mode = $state<'emoji' | 'sticker'>('emoji');
   let query = $state('');
   let stickerQuery = $state('');
-  let category = $state<'custom' | EmojiOption['category']>('people');
+  let activeSection = $state('people');
+  let failedIcons = $state<string[]>([]);
+  let results = $state<HTMLDivElement | null>(null);
+  let preview = $state<{ value: string; name: string; url?: string } | null>(null);
   let searchInput = $state<HTMLInputElement | null>(null);
   let stickerSearchInput = $state<HTMLInputElement | null>(null);
   let unicodeEmojis = $state<EmojiOption[]>([]);
   let loading = $state(true);
   let loadFailed = $state(false);
-  let visibleLimit = $state(240);
   const normalizedQuery = $derived(query.trim().toLowerCase());
   const matchingUnicode = $derived(
     unicodeEmojis.filter(
       (emoji) =>
-        (!normalizedQuery && category !== 'custom' && emoji.category === category) ||
-        (normalizedQuery &&
-          (emoji.name.includes(normalizedQuery) ||
-            emoji.keywords.some((keyword) => keyword.includes(normalizedQuery))))
+        !normalizedQuery ||
+        emoji.name.includes(normalizedQuery) ||
+        emoji.keywords.some((keyword) => keyword.includes(normalizedQuery))
     )
   );
-  const visibleUnicode = $derived(matchingUnicode.slice(0, visibleLimit));
+  const unicodeGroups = $derived(
+    emojiCategories
+      .map((category) => ({
+        ...category,
+        emojis: matchingUnicode.filter((emoji) => emoji.category === category.id)
+      }))
+      .filter((group) => group.emojis.length)
+  );
+  const allCustomGroups = $derived(groupCustomEmojis(customEmojis));
   const matchingCustom = $derived(
     customEmojis.filter(
       (emoji) =>
-        (category === 'custom' || Boolean(normalizedQuery)) &&
-        (!normalizedQuery ||
-          emoji.name.toLowerCase().includes(normalizedQuery) ||
-          emoji.guild_name?.toLowerCase().includes(normalizedQuery))
+        !normalizedQuery ||
+        emoji.name.toLowerCase().includes(normalizedQuery) ||
+        emoji.guild_name?.toLowerCase().includes(normalizedQuery)
     )
   );
   const customEmojiGroups = $derived(groupCustomEmojis(matchingCustom));
+
+  function syncSection() {
+    if (!results || normalizedQuery) return;
+    const top = results.getBoundingClientRect().top;
+    const sections = [...results.querySelectorAll<HTMLElement>('[data-section]')];
+    const current = sections.find((section) => section.getBoundingClientRect().bottom > top + 36);
+    if (current) activeSection = current.dataset.section!;
+  }
+
+  async function jumpTo(key: string) {
+    query = '';
+    await tick();
+    const section = [...(results?.querySelectorAll<HTMLElement>('[data-section]') ?? [])].find(
+      (section) => section.dataset.section === key
+    );
+    if (section && results) {
+      results.scrollTop +=
+        section.getBoundingClientRect().top - results.getBoundingClientRect().top;
+      activeSection = key;
+    }
+  }
+
+  $effect(() => {
+    activeSection = customEmojiGroups[0]?.key ?? 'people';
+    if (results) results.scrollTop = 0;
+  });
   const matchingStickers = $derived(
     stickers.filter((sticker) => {
       const needle = stickerQuery.trim().toLowerCase();
@@ -150,99 +185,116 @@
       <input
         bind:this={searchInput}
         bind:value={query}
-        oninput={() => (visibleLimit = 240)}
         placeholder={$t('ui_search_emoji_87fafa72')}
       />
     </label>
-    <nav aria-label={$t('ui_emoji_categories_fed48f97')}>
-      {#if customEmojis.length}
-        <button
-          class:active={!normalizedQuery && category === 'custom'}
-          class="emoji-custom-tab"
-          type="button"
-          title={$t('ui_custom_emoji_1596e05e')}
-          aria-label={$t('ui_custom_emoji_1596e05e')}
-          onclick={() => {
-            category = 'custom';
-            query = '';
-          }}>✦</button
-        >
-      {/if}
-      {#each emojiCategories as item (item.id)}
-        <button
-          class:active={!normalizedQuery && category === item.id}
-          type="button"
-          title={item.label}
-          aria-label={item.label}
-          onclick={() => {
-            category = item.id;
-            query = '';
-            visibleLimit = 240;
-          }}>{item.icon}</button
-        >
-      {/each}
-    </nav>
-    <div
-      class="emoji-results"
-      role="region"
-      aria-label={$t('ui_emoji_results_de396e53')}
-      aria-live="polite"
-    >
-      {#each customEmojiGroups as group (group.key)}
-        <section class="custom-emoji-group" aria-labelledby={`emoji-guild-${group.key}`}>
-          <h3 id={`emoji-guild-${group.key}`}>{group.name}</h3>
-          <div class="emoji-grid custom-emojis">
-            {#each group.emojis as emoji (`${emoji.id}@${emoji.origin_domain}`)}
-              <button
-                type="button"
-                title={`:${emoji.name}: — ${group.name}`}
-                onclick={() => onSelect(emoji.value)}
-              >
-                <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
-              </button>
-            {/each}
-          </div>
-        </section>
-      {/each}
-      {#if category !== 'custom' || normalizedQuery}
-        <h3>
-          {normalizedQuery
-            ? $t('ui_unicode_results_19133ce2')
-            : emojiCategories.find((item) => item.id === category)?.label}
-        </h3>
-      {/if}
-      {#if loading && category !== 'custom'}
-        <p>{$t('ui_loading_emoji_f35e9103')}</p>
-      {:else if loadFailed && category !== 'custom'}
-        <div role="alert">
-          <p class="form-error">
-            {$t('ui_could_not_load_emoji_data_check_your_connecti_2b4497a8')}
-          </p>
-          <button class="show-more" type="button" onclick={() => void loadEmoji()}
-            >{$t('ui_try_again_d8b8392e')}</button
+    <div class="emoji-browser">
+      <nav aria-label={$t('ui_emoji_categories_fed48f97')}>
+        {#each allCustomGroups as group (group.key)}
+          <button
+            class="server-shortcut"
+            class:active={!normalizedQuery && activeSection === group.key}
+            aria-pressed={!normalizedQuery && activeSection === group.key}
+            type="button"
+            title={group.name}
+            aria-label={group.name}
+            onclick={() => jumpTo(group.key)}
           >
-        </div>
-      {:else if category !== 'custom' || normalizedQuery}
-        <div class="emoji-grid">
-          {#each visibleUnicode as emoji (emoji.value)}
-            <button type="button" title={emoji.name} onclick={() => onSelect(emoji.value)}
-              >{emoji.value}</button
-            >
-          {/each}
-        </div>
-        {#if matchingUnicode.length > visibleUnicode.length}
-          <button class="show-more" type="button" onclick={() => (visibleLimit += 240)}>
-            {$t('ui_show_more_emoji_b5e127ac')}
+            {#if group.emojis[0].guild_icon_hash && !failedIcons.includes(group.key)}
+              <img
+                src={assetUrl(
+                  group.emojis[0].guild_icon_hash,
+                  'thumbnail_128',
+                  group.emojis[0].guild_domain
+                )}
+                alt=""
+                onerror={() => (failedIcons = [...failedIcons, group.key])}
+              />
+            {:else}
+              <span>{group.name.slice(0, 2).toUpperCase()}</span>
+            {/if}
           </button>
+        {/each}
+        {#if allCustomGroups.length}<div class="nav-divider"></div>{/if}
+        {#each emojiCategories as item (item.id)}
+          <button
+            class:active={!normalizedQuery && activeSection === item.id}
+            aria-pressed={!normalizedQuery && activeSection === item.id}
+            disabled={loading || loadFailed}
+            type="button"
+            title={item.label}
+            aria-label={item.label}
+            onclick={() => jumpTo(item.id)}>{item.icon}</button
+          >
+        {/each}
+      </nav>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable results need keyboard access.) -->
+      <div
+        class="emoji-results"
+        bind:this={results}
+        onscroll={syncSection}
+        role="region"
+        aria-label={$t('ui_emoji_results_de396e53')}
+        tabindex="0"
+      >
+        {#each customEmojiGroups as group (group.key)}
+          <section class="custom-emoji-group" data-section={group.key}>
+            <h3>{group.name}</h3>
+            <div class="emoji-grid custom-emojis">
+              {#each group.emojis as emoji (`${emoji.id}@${emoji.origin_domain}`)}
+                <button
+                  type="button"
+                  title={`:${emoji.name}: — ${group.name}`}
+                  onmouseenter={() => (preview = emoji)}
+                  onfocus={() => (preview = emoji)}
+                  onclick={() => onSelect(emoji.value)}
+                >
+                  <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
+                </button>
+              {/each}
+            </div>
+          </section>
+        {/each}
+        {#if loading}
+          <p role="status">{$t('ui_loading_emoji_f35e9103')}</p>
+        {:else if loadFailed}
+          <div role="alert">
+            <p class="form-error">
+              {$t('ui_could_not_load_emoji_data_check_your_connecti_2b4497a8')}
+            </p>
+            <button class="show-more" type="button" onclick={() => void loadEmoji()}
+              >{$t('ui_try_again_d8b8392e')}</button
+            >
+          </div>
+        {:else}
+          {#each unicodeGroups as group (group.id)}
+            <section data-section={group.id}>
+              <h3>{group.label}</h3>
+              <div class="emoji-grid">
+                {#each group.emojis as emoji (emoji.value)}
+                  <button
+                    type="button"
+                    title={emoji.name}
+                    onmouseenter={() => (preview = emoji)}
+                    onfocus={() => (preview = emoji)}
+                    onclick={() => onSelect(emoji.value)}>{emoji.value}</button
+                  >
+                {/each}
+              </div>
+            </section>
+          {/each}
         {/if}
-      {/if}
-      {#if !loading && !loadFailed && !matchingCustom.length && !matchingUnicode.length}
-        <p>{$t('ui_no_emoji_found_d2cab146')}</p>
-      {/if}
+        {#if !loading && !loadFailed && !matchingCustom.length && !matchingUnicode.length}
+          <p role="status">{$t('ui_no_emoji_found_d2cab146')}</p>
+        {/if}
+      </div>
     </div>
     <footer>
-      <span aria-hidden="true">{matchingUnicode[0]?.value ?? '😀'}</span>
-      <small>{matchingUnicode[0]?.name ?? $t('ui_choose_an_emoji_54bc3777')}</small>
+      <span aria-hidden="true"
+        >{#if preview?.url}<img src={preview.url} alt="" />{:else}{preview?.value ??
+            '😀'}{/if}</span
+      >
+      <small>{preview?.name ?? $t('ui_choose_an_emoji_54bc3777')}</small>
     </footer>
   {:else}
     <label class="sticker-search">
@@ -294,7 +346,7 @@
     z-index: 25;
     display: flex;
     flex-direction: column;
-    width: min(390px, calc(100vw - 28px));
+    width: min(420px, calc(100vw - 28px));
     height: min(520px, 65dvh);
     overflow: hidden;
     border: 1px solid var(--line);
@@ -304,7 +356,7 @@
   }
   .emoji-picker.inline {
     position: static;
-    width: min(390px, calc(100vw - 28px));
+    width: min(420px, calc(100vw - 28px));
     height: min(520px, 65dvh);
   }
   header,
@@ -346,50 +398,100 @@
   .sticker-search input {
     width: 100%;
   }
+  .emoji-browser {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    border-top: 1px solid var(--line-soft);
+  }
   nav {
     display: flex;
-    min-width: 0;
-    gap: 3px;
-    overflow-x: auto;
-    padding: 0 12px 9px;
-    border-bottom: 1px solid var(--line-soft);
+    flex-direction: column;
+    flex: 0 0 56px;
+    align-items: center;
+    gap: 6px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 8px 4px;
+    border-right: 1px solid var(--line-soft);
     scrollbar-width: none;
+    overscroll-behavior: contain;
   }
   nav::-webkit-scrollbar {
     display: none;
   }
-  nav button,
-  .emoji-custom-tab {
+  nav button {
     display: grid;
-    width: 38px;
-    height: 36px;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    padding: 4px;
     place-items: center;
-    border: 0;
-    border-radius: 10px;
+    border: 1px solid transparent;
+    border-radius: 12px;
     background: transparent;
-    filter: grayscale(0.5);
+    color: var(--text-muted);
+    font-size: 1.35rem;
+    cursor: pointer;
   }
   nav button:hover,
   nav button.active {
     background: var(--surface-hover);
-    filter: none;
+    color: var(--text);
   }
-  .emoji-custom-tab {
-    color: var(--accent);
-    font-weight: 800;
+  nav button.active {
+    border-color: var(--accent);
+  }
+  nav button:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  nav .server-shortcut {
+    background: var(--surface-hover);
+    font-size: 0.8rem;
+    font-weight: 750;
+    overflow: hidden;
+  }
+  nav img {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    object-fit: cover;
+  }
+  .nav-divider {
+    flex-shrink: 0;
+    width: 28px;
+    height: 1px;
+    background: var(--line);
+    margin: 2px;
+  }
+  button:focus-visible,
+  .emoji-results:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .emoji-results {
     flex: 1;
     min-height: 0;
+    min-width: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 12px 14px;
+    padding: 0 10px 12px;
+    scrollbar-width: thin;
     scrollbar-gutter: stable;
     touch-action: pan-y;
     -webkit-overflow-scrolling: touch;
   }
   .emoji-results h3 {
-    margin: 3px 0 8px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 12px 0 8px;
+    margin: 0;
+    overflow-wrap: anywhere;
+    background: var(--surface-raised);
     color: var(--text-muted);
     font-size: 0.72rem;
     letter-spacing: 0.09em;
@@ -397,12 +499,14 @@
   }
   .emoji-grid {
     display: grid;
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
     gap: 3px;
   }
   .emoji-grid button {
     display: grid;
     aspect-ratio: 1;
+    padding: 0;
+    overflow: hidden;
     min-width: 0;
     place-items: center;
     border: 0;
@@ -414,11 +518,11 @@
     background: var(--surface-hover);
     transform: scale(1.08);
   }
-  .custom-emojis {
-    margin-bottom: 14px;
+  .emoji-results section {
+    padding-bottom: 14px;
   }
-  .custom-emoji-group:last-of-type .custom-emojis {
-    margin-bottom: 0;
+  .emoji-results section:last-child {
+    min-height: 100%;
   }
   .custom-emojis img {
     width: 30px;
@@ -445,7 +549,15 @@
   footer > span {
     font-size: 1.6rem;
   }
+  footer img {
+    width: 30px;
+    height: 30px;
+    object-fit: contain;
+  }
   footer small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--text-muted);
     text-transform: capitalize;
   }
@@ -498,6 +610,29 @@
     white-space: nowrap;
   }
   @media (max-width: 620px) {
+    .emoji-browser {
+      flex-direction: column;
+    }
+    nav {
+      order: 1;
+      flex: 0 0 auto;
+      flex-direction: row;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding: 6px;
+      border-right: 0;
+      border-top: 1px solid var(--line-soft);
+    }
+    .nav-divider {
+      width: 1px;
+      height: 28px;
+    }
+    .emoji-grid {
+      grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+    }
+    footer {
+      display: none;
+    }
     .emoji-picker {
       position: fixed;
       right: 8px;

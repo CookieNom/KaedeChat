@@ -6,7 +6,7 @@ from typing import cast
 
 from fastapi import HTTPException, Response, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import case, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +20,7 @@ from app.db.bot_models import (
     BotInstallation,
     BotUserInstallation,
 )
-from app.db.models import Attachment, User, UserStorageUsage
+from app.db.models import Attachment, User, UserDailyUploadUsage, UserStorageUsage
 from app.media.digest_revocation import (
     DIGEST_REVOCATION_STATUSES,
     try_lock_asset_digest,
@@ -282,6 +282,34 @@ async def locked_bot_dm_capability(
     return capability
 
 
+async def reserve_daily_upload(
+    session: AsyncSession, settings: Settings, user: User, size: int
+) -> None:
+    limit = settings.media_daily_upload_quota_bytes
+    if limit == 0:
+        return
+    exceeded = HTTPException(status_code=413, detail={"code": "DAILY_UPLOAD_QUOTA_EXCEEDED"})
+    if size > limit:
+        raise exceeded
+    day = datetime.now(UTC).date()
+    # One durable row per uploader; an atomic reservation also covers concurrent
+    # uploads across bot installations. Deletion/expiry never refunds daily bytes.
+    # A request delayed across midnight must not reset a newer day backward.
+    used = case((UserDailyUploadUsage.day >= day, UserDailyUploadUsage.bytes_used), else_=0)
+    reserved = await session.scalar(
+        pg_insert(UserDailyUploadUsage)
+        .values(user_id=user.id, user_domain=user.origin_domain, day=day, bytes_used=size)
+        .on_conflict_do_update(
+            index_elements=["user_id", "user_domain"],
+            set_={"day": func.greatest(UserDailyUploadUsage.day, day), "bytes_used": used + size},
+            where=used + size <= limit,
+        )
+        .returning(UserDailyUploadUsage.bytes_used)
+    )
+    if reserved is None:
+        raise exceeded
+
+
 async def create_upload_ticket(
     session: AsyncSession,
     settings: Settings,
@@ -444,8 +472,12 @@ async def create_upload_ticket(
         raise HTTPException(status_code=429, detail={"code": "UPLOAD_INFLIGHT_LIMIT"})
     if pending_bytes + size > settings.media_inflight_quota_bytes:
         raise HTTPException(status_code=413, detail={"code": "UPLOAD_INFLIGHT_QUOTA_EXCEEDED"})
-    if bytes_used + pending_bytes + size > settings.media_user_quota_bytes:
+    if (
+        settings.media_user_quota_bytes > 0
+        and bytes_used + pending_bytes + size > settings.media_user_quota_bytes
+    ):
         raise HTTPException(status_code=413, detail={"code": "USER_STORAGE_QUOTA_EXCEEDED"})
+    await reserve_daily_upload(session, settings, user, size)
     attachment_id = await snowflake.mint()
     expires_at = datetime.now(UTC) + timedelta(seconds=settings.media_upload_ttl_seconds)
     attachment = Attachment(
@@ -633,7 +665,10 @@ async def finalize_attachment(
         bytes_used = user_installation_usage.media_bytes_used
     if pending_bytes < attachment.size:
         raise RuntimeError("pending storage accounting underflow")
-    if bytes_used + attachment.size > settings.media_user_quota_bytes:
+    if (
+        settings.media_user_quota_bytes > 0
+        and bytes_used + attachment.size > settings.media_user_quota_bytes
+    ):
         raise HTTPException(status_code=413, detail={"code": "USER_STORAGE_QUOTA_EXCEEDED"})
     if isinstance(usage, UserStorageUsage):
         usage.pending_bytes -= attachment.size

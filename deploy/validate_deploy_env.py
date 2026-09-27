@@ -397,6 +397,11 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
         raise DeploymentConfigurationError(
             "KAEDE_MEDIA_REMOTE_CACHE_BYTES must be a positive integer number of bytes"
         )
+    for name in ("KAEDE_MEDIA_USER_QUOTA_BYTES", "KAEDE_MEDIA_DAILY_UPLOAD_QUOTA_BYTES"):
+        if not re.fullmatch(r"[0-9]+", values.get(name, "0").strip()):
+            raise DeploymentConfigurationError(
+                f"{name} must be a nonnegative integer number of bytes (0 means unlimited)"
+            )
     maximum_attachment_bytes = values.get(
         "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES", str(MEDIA_MAX_ATTACHMENT_BYTES_DEFAULT)
     ).strip()

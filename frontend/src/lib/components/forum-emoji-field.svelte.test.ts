@@ -51,8 +51,12 @@ it('searches guild emoji, saves custom IDs or Unicode, clears and dismisses', as
     expect(onChange).toHaveBeenLastCalledWith({ emoji_id: '123', emoji_name: null });
     expect(document.activeElement?.getAttribute('aria-label')).toBe('Tag emoji');
     open();
-    await vi.waitFor(() => expect(document.querySelector('.emoji-grid button')).not.toBeNull());
-    const unicode = document.querySelector<HTMLButtonElement>('.emoji-grid button')!;
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-section="people"] .emoji-grid button')).not.toBeNull()
+    );
+    const unicode = document.querySelector<HTMLButtonElement>(
+      '[data-section="people"] .emoji-grid button'
+    )!;
     const value = unicode.textContent;
     flushSync(() => unicode.click());
     expect(onChange).toHaveBeenLastCalledWith({ emoji_id: null, emoji_name: value });

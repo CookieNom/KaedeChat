@@ -186,12 +186,16 @@
       <article>
         <span class="download-icon">{@render deviceIcon(true)}</span>
         <h3>Android</h3>
-        <p>
-          Take your conversations with you. Download the Android app directly from our releases.
-        </p>
-        {@render download('android', 'Download Android APK')}
+        <p>Take your conversations with you. Get Kaede on Google Play for automatic app updates.</p>
+        <a
+          class="primary-button"
+          href="https://play.google.com/store/apps/details?id=chat.kaede.mobile"
+          >Get it on Google Play <Icon name="chevron-right" size={18} /></a
+        >
         <details>
-          <summary>How to install the APK</summary>
+          <summary>Prefer to download the APK?</summary>
+          {@render download('android', 'Download Android APK', true)}
+          <p><strong>How to install it</strong></p>
           <ol>
             <li>Download the APK, then open the file when it finishes.</li>
             <li>

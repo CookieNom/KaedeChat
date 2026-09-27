@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Computed,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -5262,6 +5263,20 @@ class RemoteMediaTombstone(Base):
         ForeignKeyConstraint(["origin_domain"], ["instances.domain"], ondelete="CASCADE"),
         CheckConstraint("attachment_id >= 0", name="nonnegative_attachment_id"),
         Index("ix_remote_media_tombstones_expiry", "expires_at"),
+    )
+
+
+class UserDailyUploadUsage(Base):
+    __tablename__ = "user_daily_upload_usage"
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    day: Mapped[date] = mapped_column(Date)
+    bytes_used: Mapped[int] = mapped_column(BigInteger)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id", "user_domain"], ["users.id", "users.origin_domain"], ondelete="CASCADE"
+        ),
+        CheckConstraint("bytes_used >= 0", name="nonnegative_usage"),
     )
 
 

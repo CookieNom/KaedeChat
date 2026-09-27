@@ -38,6 +38,7 @@ describe('user-facing API errors', () => {
   });
 
   it('formats upload limits supplied by the server', () => {
+    expect(apiErrorMessage('DAILY_UPLOAD_QUOTA_EXCEEDED', 413, {})).toContain('midnight UTC');
     expect(apiErrorMessage('ATTACHMENT_TOO_LARGE', 413, { max_bytes: 5 * 1024 * 1024 })).toContain(
       '5 MiB'
     );

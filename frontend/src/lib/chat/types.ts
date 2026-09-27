@@ -147,6 +147,7 @@ export interface CustomEmoji {
   guild_id: string;
   guild_domain: string;
   guild_name?: string;
+  guild_icon_hash?: string | null;
   name: string;
   animated: boolean;
   media_hash: string | null;

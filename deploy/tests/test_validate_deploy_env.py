@@ -210,6 +210,15 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             ):
                 validate_values(self.production | overrides, observability=False)
 
+    def test_upload_quotas_allow_zero_and_reject_invalid_values(self) -> None:
+        for name in ("KAEDE_MEDIA_USER_QUOTA_BYTES", "KAEDE_MEDIA_DAILY_UPLOAD_QUOTA_BYTES"):
+            validate_values(self.production | {name: "0"}, observability=False)
+            for invalid in ("-1", "many", "1.5"):
+                with self.subTest(name=name, invalid=invalid), self.assertRaises(
+                    DeploymentConfigurationError
+                ):
+                    validate_values(self.production | {name: invalid}, observability=False)
+
     def test_deployment_validator_asset_limits(self) -> None:
         for name, maximum in MEDIA_ASSET_BYTE_LIMITS.items():
             with self.subTest(name=name, boundary="maximum"):

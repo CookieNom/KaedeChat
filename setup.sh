@@ -1126,17 +1126,20 @@ if confirm 'Customize worker counts and media limits?' false; then
   API_WORKERS=$(prompt_text 'API workers (1-64)' "$(old KAEDE_API_WORKERS 4)")
   GATEWAY_WORKERS=$(prompt_text 'Gateway replicas (1-64)' "$(old KAEDE_GATEWAY_WORKERS 2)")
   ATTACHMENT_MIB=$(prompt_text 'Maximum attachment size in MiB' "$(( $(old_uint KAEDE_MEDIA_MAX_ATTACHMENT_BYTES 15728640) / 1048576 ))")
-  USER_QUOTA_MIB=$(prompt_text 'Per-user media quota in MiB' "$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 10737418240) / 1048576 ))")
+  USER_QUOTA_MIB=$(prompt_text 'Per-user storage quota in MiB (0 = unlimited)' "$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 10737418240) / 1048576 ))")
+  DAILY_UPLOAD_MIB=$(prompt_text 'Daily upload allowance per user in MiB (0 = unlimited)' "$(( $(old_uint KAEDE_MEDIA_DAILY_UPLOAD_QUOTA_BYTES 0) / 1048576 ))")
 else
   API_WORKERS=$(old KAEDE_API_WORKERS 4)
   GATEWAY_WORKERS=$(old KAEDE_GATEWAY_WORKERS 2)
   ATTACHMENT_MIB=$(( $(old_uint KAEDE_MEDIA_MAX_ATTACHMENT_BYTES 15728640) / 1048576 ))
   USER_QUOTA_MIB=$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 10737418240) / 1048576 ))
+  DAILY_UPLOAD_MIB=$(( $(old_uint KAEDE_MEDIA_DAILY_UPLOAD_QUOTA_BYTES 0) / 1048576 ))
 fi
 [[ $API_WORKERS =~ ^[0-9]+$ ]] && ((API_WORKERS >= 1 && API_WORKERS <= 64)) || die 'API workers must be 1-64'
 [[ $GATEWAY_WORKERS =~ ^[0-9]+$ ]] && ((GATEWAY_WORKERS >= 1 && GATEWAY_WORKERS <= 64)) || die 'gateway replicas must be 1-64'
 [[ $ATTACHMENT_MIB =~ ^[0-9]+$ ]] && ((ATTACHMENT_MIB >= 1 && ATTACHMENT_MIB <= 10240)) || die 'attachment size must be 1-10240 MiB'
-[[ $USER_QUOTA_MIB =~ ^[0-9]+$ ]] && ((USER_QUOTA_MIB >= ATTACHMENT_MIB)) || die 'user quota must be at least one maximum attachment'
+[[ $USER_QUOTA_MIB =~ ^[0-9]+$ ]] && ((USER_QUOTA_MIB == 0 || USER_QUOTA_MIB >= ATTACHMENT_MIB)) || die 'user quota must be 0 (unlimited) or at least one maximum attachment'
+[[ $DAILY_UPLOAD_MIB =~ ^[0-9]+$ ]] || die 'daily upload allowance must be a nonnegative integer'
 
 # Load every adjustable federation/storage budget before presenting the
 # optional tuning menu. Skipping the menu therefore preserves existing custom
@@ -1421,6 +1424,7 @@ emit() {
   [[ -z $GARAGE_ADMIN ]] || emit GARAGE_ADMIN_TOKEN "$GARAGE_ADMIN"
   emit KAEDE_MEDIA_MAX_ATTACHMENT_BYTES "$((ATTACHMENT_MIB * 1048576))"
   emit KAEDE_MEDIA_USER_QUOTA_BYTES "$((USER_QUOTA_MIB * 1048576))"
+  emit KAEDE_MEDIA_DAILY_UPLOAD_QUOTA_BYTES "$((DAILY_UPLOAD_MIB * 1048576))"
   emit KAEDE_MEDIA_SCAN_ENABLED true
   emit KAEDE_PHOTODNA_ENABLED "$PHOTODNA_ENABLED"
   if [[ $PHOTODNA_ENABLED == true ]]; then

@@ -583,3 +583,10 @@ def test_support_recipient_is_loaded_and_validated(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("KAEDE_LEGAL_CONTACT_EMAIL", "not-an-email")
     with pytest.raises(ValueError, match="legal_contact_email"):
         settings()
+
+
+@pytest.mark.parametrize("name", ["media_user_quota_bytes", "media_daily_upload_quota_bytes"])
+def test_upload_quotas_accept_zero_but_reject_negative(name: str) -> None:
+    assert getattr(settings(**{name: 0}), name) == 0
+    with pytest.raises(ValidationError):
+        settings(**{name: -1})

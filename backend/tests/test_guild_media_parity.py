@@ -11,7 +11,7 @@ from app.api import bots as bot_api
 from app.api import media as media_api
 from app.api import voice as voice_api
 from app.core.types import EntityRef
-from app.db.models import Attachment, User
+from app.db.models import Attachment, Emoji, User
 from app.federation.guild_management import GuildManagementResult
 from app.media.schemas import AssetCommitRequest, UploadTicketRequest
 from app.tasks import federation_deliver, media_local_purge
@@ -324,3 +324,34 @@ async def test_remote_human_voice_management_routes_to_guild_authority(
 
     assert proxy_call.args[:4] == (session, settings, guild_ref, auth.user)
     assert proxy_call.args[5]["reason"] == "reason"
+
+
+@pytest.mark.asyncio
+async def test_available_emojis_include_server_icon_metadata() -> None:
+    emoji = Emoji(
+        id=40,
+        origin_domain="remote.example",
+        guild_id=10,
+        guild_domain="remote.example",
+        name="party",
+        animated=False,
+        media_hash="a" * 64,
+        creator_id=8,
+        creator_domain="remote.example",
+    )
+    icon_hash = "b" * 64
+    session = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(
+                tuples=lambda: [(emoji, "Garden", icon_hash)],
+            )
+        )
+    )
+    auth = SimpleNamespace(user=SimpleNamespace(id=8, origin_domain="home.example"))
+
+    result = await media_api.available_emojis(cast(Any, auth), cast(Any, session))
+
+    assert result[0]["guild_name"] == "Garden"
+    assert result[0]["guild_icon_hash"] == icon_hash
+    assert result[0]["guild_domain"] == "remote.example"
+    assert result[0]["id"] == "40"
