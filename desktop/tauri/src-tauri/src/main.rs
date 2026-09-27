@@ -3497,6 +3497,7 @@ async fn native_notify(
 }
 
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects the window by value; Windows consumes the owned image buffer.
 fn native_set_unread_badge(
     window: tauri::WebviewWindow,
     count: u32,
