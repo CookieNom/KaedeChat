@@ -2025,8 +2025,11 @@ final class KaedeRepository {
             'X-Audit-Log-Reason': reason!.trim(),
         },
       );
-  Future<Map<String, Object?>> startCall(EntityRef channel) =>
-      api.sendJson('POST', '/api/v1/channels/${channel.wire}/calls');
+  Future<Map<String, Object?>> startCall(EntityRef channel) => api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/calls',
+        data: <String, Object?>{'ring': true},
+      );
   Future<Map<String, Object?>> activeCall(EntityRef channel) =>
       api.getJson('/api/v1/channels/${channel.wire}/calls/active');
   Future<Map<String, Object?>> callAction(EntityRef call, String action) =>

@@ -246,6 +246,22 @@ void main() {
     });
   }
 
+  test('starting a DM call sends the required JSON body', () async {
+    final adapter = _JsonAdapter('{"id":"2","state":"ringing"}');
+    final repository = KaedeRepository(KaedeApiClient(
+      vault: const SessionVault(),
+      httpClient: Dio()..httpClientAdapter = adapter,
+    ));
+
+    final call = await repository.startCall(EntityRef.parse('1@chat.example'));
+
+    expect(adapter.request?.method, 'POST');
+    expect(adapter.request?.path, '/api/v1/channels/1@chat.example/calls');
+    expect(adapter.request?.contentType, Headers.jsonContentType);
+    expect(adapter.request?.data, <String, Object?>{'ring': true});
+    expect(call, <String, Object?>{'id': '2', 'state': 'ringing'});
+  });
+
   test('channel reorder accepts the API empty response', () async {
     final adapter = _JsonAdapter('', status: 204);
     final repository = KaedeRepository(KaedeApiClient(

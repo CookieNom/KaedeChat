@@ -28,6 +28,91 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:markdown/markdown.dart' as md;
 
 void main() {
+  for (final size in [const Size(320, 568), const Size(1200, 900)]) {
+    testWidgets('new DM friend search and manual entry at $size',
+        (tester) async {
+      await tester.binding.setSurfaceSize(size);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      var friends = List.generate(
+        20,
+        (index) => KaedeUser(
+          ref: EntityRef.parse('${index + 1}@chat.example'),
+          username: 'friend$index',
+          displayName: 'Maple $index',
+          handle: '@friend$index@chat.example',
+        ),
+      );
+      String? result;
+      await tester.pumpWidget(MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await showNewMessageDialog(context, friends);
+              },
+              child: const Text('Open picker'),
+            ),
+          ),
+        ),
+      ));
+      Future<void> openPicker() async {
+        await tester.tap(find.text('Open picker'));
+        await tester.pumpAndSettle();
+      }
+
+      await openPicker();
+      expect(find.text('Maple 0'), findsOneWidget);
+      await tester.tap(find.text('Start conversation'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('Maple 19'),
+        200,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.tap(find.text('Maple 19'));
+      await tester.pumpAndSettle();
+      expect(result, '@friend19@chat.example');
+
+      await openPicker();
+      await tester.enterText(find.byType(TextField), '  MAPLE 12  ');
+      await tester.pumpAndSettle();
+      expect(find.text('Maple 12'), findsOneWidget);
+      expect(find.text('Maple 0'), findsNothing);
+      await tester.enterText(find.byType(TextField), 'FRIEND13@CHAT.EXAMPLE');
+      await tester.pumpAndSettle();
+      expect(find.text('Maple 13'), findsOneWidget);
+      expect(find.text('Maple 12'), findsNothing);
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      expect(find.text('Maple 0'), findsOneWidget);
+      await tester.enterText(
+          find.byType(TextField), ' @stranger@elsewhere.net ');
+      await tester.pumpAndSettle();
+      expect(
+          find.text('No matching friends. You can still enter a full handle.'),
+          findsOneWidget);
+      await tester.tap(find.text('Start conversation'));
+      await tester.pumpAndSettle();
+      expect(result, '@stranger@elsewhere.net');
+
+      friends = [];
+      await openPicker();
+      expect(
+          find.text('No friends yet. Enter a handle to start a conversation.'),
+          findsOneWidget);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 220);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.enterText(find.byType(TextField), '@manual@chat.example');
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.testTextInput.receiveAction(TextInputAction.go);
+      await tester.pumpAndSettle();
+      expect(result, '@manual@chat.example');
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   test('forum post Back returns to its forum before channel navigation', () {
     KaedeChannel channel(String id, ChannelType type, {EntityRef? parent}) =>
         KaedeChannel(

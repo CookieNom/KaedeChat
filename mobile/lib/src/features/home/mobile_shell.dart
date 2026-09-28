@@ -7425,6 +7425,92 @@ final class _DmAvatar extends StatelessWidget {
   }
 }
 
+Future<String?> showNewMessageDialog(
+  BuildContext context,
+  List<KaedeUser> friends,
+) {
+  var input = '';
+  var submitted = false;
+  return showDialog<String>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setDialogState) {
+        final query = input.trim().toLowerCase();
+        final matches = friends
+            .where((friend) =>
+                friend.name.toLowerCase().contains(query) ||
+                friend.username.toLowerCase().contains(query) ||
+                friend.handle.toLowerCase().contains(query))
+            .toList();
+        void submit(String handle) {
+          if (submitted || handle.trim().isEmpty) return;
+          submitted = true;
+          Navigator.pop(context, handle.trim());
+        }
+
+        return AlertDialog(
+          title: const Text('New message'),
+          content: SizedBox(
+            width: 440,
+            height: 360,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                TextField(
+                  decoration: const InputDecoration(
+                    labelText: 'Search friends or enter a handle',
+                    hintText: '@friend@example.net',
+                  ),
+                  autocorrect: false,
+                  textInputAction: TextInputAction.go,
+                  onChanged: (value) => setDialogState(() => input = value),
+                  onSubmitted: submit,
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: matches.isEmpty
+                      ? Center(
+                          child: Text(friends.isEmpty
+                              ? 'No friends yet. Enter a handle to start a conversation.'
+                              : 'No matching friends. You can still enter a full handle.'),
+                        )
+                      : ListView.builder(
+                          itemCount: matches.length,
+                          itemBuilder: (context, index) {
+                            final friend = matches[index];
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: UserAvatar(user: friend),
+                              title: Text(friend.name,
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                              subtitle: Text(friend.handle,
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                              trailing: const Icon(Icons.chat_bubble_outline),
+                              onTap: () => submit(friend.handle),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            ActionButton(
+              kind: ActionButtonKind.text,
+              onPressed: () => Navigator.pop(context),
+              child: Text(L10n.of(context).ui_cancel_35afca3b),
+            ),
+            ActionButton(
+              onPressed: query.isEmpty ? null : () => submit(input),
+              child: const Text('Start conversation'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
 Future<void> _newConversationAction(
   BuildContext context,
   WidgetRef ref,
@@ -7456,9 +7542,16 @@ Future<void> _newConversationAction(
     ),
   );
   if (!context.mounted || mode == null) return;
+  final friends = state.relationships
+      .where((item) => '${item['type']}' == 'friend' && item['user'] is Map)
+      .map((item) => KaedeUser.fromJson(
+            Map<String, Object?>.from(item['user']! as Map),
+          ))
+      .toList();
   if (mode == 'direct') {
-    await _textAction(context, 'New message', '@friend@example.net',
-        (handle) async {
+    final handle = await showNewMessageDialog(context, friends);
+    if (handle == null || !context.mounted) return;
+    await _runVisibleAction(context, 'Could not start conversation', () async {
       final dm = await ref
           .read(mobileControllerProvider.notifier)
           .repository
@@ -7469,12 +7562,6 @@ Future<void> _newConversationAction(
     });
     return;
   }
-  final friends = state.relationships
-      .where((item) => '${item['type']}' == 'friend' && item['user'] is Map)
-      .map((item) => KaedeUser.fromJson(
-            Map<String, Object?>.from(item['user']! as Map),
-          ))
-      .toList();
   final name = TextEditingController();
   final selected = <EntityRef>{};
   final submitted = await showDialog<bool>(
