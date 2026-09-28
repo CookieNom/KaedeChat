@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:kaede_mobile/src/api/rtc_routing.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
@@ -535,6 +536,7 @@ final class VoiceSession extends ChangeNotifier {
     EntityRef? callRef,
     bool force = false,
     bool takeover = false,
+    String? rtcRegion,
   }) async {
     _mediaQuality = await MobileMediaQuality.load();
     if (!force &&
@@ -601,18 +603,23 @@ final class VoiceSession extends ChangeNotifier {
       if (target.encryptionMode == 'e2ee') {
         e2ee = await _e2eeClient();
       }
+      final routing = await _repository.rtcHints(
+          channel: target.ref, call: callRef, region: rtcRegion);
+      if (generation != _generation) return;
       final grant = callRef == null
           ? await _repository.voiceToken(
               target.ref,
               senderDeviceId: e2ee?.deviceId,
               connectionId: _connectionId!,
               takeover: takeover,
+              routing: routing,
             )
           : await _repository.callVoiceToken(
               callRef,
               senderDeviceId: e2ee?.deviceId,
               connectionId: _connectionId!,
               takeover: takeover,
+              routing: routing,
             );
       if (generation != _generation) return;
       final url = '${grant['url'] ?? ''}';

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:kaede_mobile/src/features/settings/rtc_settings.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +18,7 @@ import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 enum _AdminSection {
   overview('Overview', 'admin.read'),
+  rtc('Voice and video', 'rtc.manage'),
   users('Users', 'admin.read'),
   applications('Applications', 'admin.read'),
   reports('Reports', 'reports.read'),
@@ -110,6 +112,8 @@ final class _InstanceAdministrationScreenState
     });
     try {
       switch (_section) {
+        case _AdminSection.rtc:
+          break;
         case _AdminSection.overview:
           _overview = await repository.administrationOverview();
         case _AdminSection.users:
@@ -764,6 +768,7 @@ final class _InstanceAdministrationScreenState
       );
 
   List<Widget> _sectionWidgets() => switch (_section) {
+        _AdminSection.rtc => [RtcSettings(repository: repository)],
         _AdminSection.overview => _overviewWidgets(),
         _AdminSection.users => _userWidgets(),
         _AdminSection.applications => _applicationWidgets(),

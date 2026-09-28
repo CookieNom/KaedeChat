@@ -76,7 +76,7 @@ from app.federation.guild_management import (
 )
 from app.federation.terminal_rooms import lock_terminal_room
 from app.tracker.service import create_tracker_state
-from app.voice.regions import require_configured_rtc_region
+from app.voice.regions import require_instance_rtc_region
 
 router = APIRouter(prefix="/api/v1", tags=["guilds"])
 log = structlog.get_logger()
@@ -715,7 +715,7 @@ async def create_channel(
     if payload.type == 15 and payload.e2ee_required and not settings.e2ee_activation_enabled:
         raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
     rtc_region = (
-        require_configured_rtc_region(settings, payload.rtc_region)
+        await require_instance_rtc_region(settings, payload.rtc_region)
         if payload.type in GUILD_VOICE_CHANNEL_TYPES
         else None
     )

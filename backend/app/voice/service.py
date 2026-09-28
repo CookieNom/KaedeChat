@@ -27,6 +27,7 @@ from app.voice.e2ee import bot_voice_lineage_metadata
 from app.voice.livekit import LiveKitControl, LiveKitError, mint_join_token
 from app.voice.permissions import STAGE_INSTANCE_MODERATOR_PERMISSIONS
 from app.voice.rooms import guild_room_name, parse_room_name, participant_identity
+from app.voice.rtc import RoutingHints
 from app.voice.schemas import VoiceTokenResponse, normalized_voice_timestamp
 from app.voice.state import (
     Occupant,
@@ -169,9 +170,21 @@ async def effective_voice_user_limit(session: AsyncSession, channel: Channel) ->
     return min(configured, 99) if configured else 99
 
 
-def valid_federated_voice_url(value: str, authority_domain: str) -> bool:
+def valid_federated_voice_url(
+    value: str,
+    authority_domain: str,
+    rtc_provider: str = "builtin",
+) -> bool:
     """Accept only a configured TLS LiveKit endpoint on the signed authority."""
 
+    if rtc_provider == "cinnamon":
+        from app.voice.rtc import endpoint
+
+        try:
+            endpoint(value)
+            return True
+        except ValueError:
+            return False
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -210,7 +223,7 @@ def federated_voice_grant_matches(
     encrypted = channel.encryption_mode == "e2ee"
     if (
         grant.room != expected_room
-        or not valid_federated_voice_url(grant.url, authority_domain)
+        or not valid_federated_voice_url(grant.url, authority_domain, grant.rtc_provider)
         or grant.channel_id != str(channel.id)
         or grant.channel_domain != channel.origin_domain
         or grant.e2ee != encrypted
@@ -392,6 +405,7 @@ async def authoritative_guild_token(
     allow_stream: bool = True,
     self_mute: bool = False,
     self_deaf: bool = False,
+    routing: RoutingHints | None = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     if guild.origin_domain != settings.domain or channel.origin_domain != settings.domain:
@@ -451,7 +465,9 @@ async def authoritative_guild_token(
                 },
             )
     try:
-        await LiveKitControl(settings).ensure_room(room)
+        rtc_settings = await LiveKitControl(settings).ensure_room(
+            room, routing, channel_region=channel.rtc_region
+        )
     except LiveKitError as exc:
         log.warning("voice_home_unavailable", room=room, error_type=type(exc).__name__)
         raise HTTPException(
@@ -545,7 +561,7 @@ async def authoritative_guild_token(
         metadata.update({"e2ee": True, **e2ee_context})
     try:
         token, expires_at = mint_join_token(
-            settings,
+            rtc_settings,
             room=room,
             identity=identity,
             display_name=public_user_display_name(actor),
@@ -579,7 +595,8 @@ async def authoritative_guild_token(
         ) from exc
     return VoiceTokenResponse(
         token=token,
-        url=cast(str, settings.voice_public_url),
+        url=cast(str, rtc_settings.voice_public_url),
+        rtc_provider=rtc_settings._rtc_provider,
         room=room,
         generation=generation,
         connection_id=connection_id,

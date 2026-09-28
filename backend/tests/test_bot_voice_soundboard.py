@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -61,8 +62,20 @@ def test_voice_channel_settings_are_type_scoped_and_normalized() -> None:
         ChannelUpdate.model_validate({"voice_status": "Office hours"})
 
 
+@pytest.fixture
+def builtin_rtc(monkeypatch):
+    from app.voice.rtc import RTCConfig
+
+    @asynccontextmanager
+    async def storage(_settings):
+        yield AsyncMock()
+
+    monkeypatch.setattr("app.voice.rtc.rtc_session", storage)
+    monkeypatch.setattr("app.voice.rtc.configuration", AsyncMock(return_value=RTCConfig()))
+
+
 @pytest.mark.asyncio
-async def test_voice_regions_are_configured_typed_and_selectable() -> None:
+async def test_voice_regions_are_configured_typed_and_selectable(builtin_rtc) -> None:
     principal = SimpleNamespace(require_scope=Mock())
     configured = SimpleNamespace(
         voice_regions=[
@@ -208,6 +221,7 @@ async def test_remote_human_voice_region_override_runs_at_guild_authority(
 
 @pytest.mark.asyncio
 async def test_bot_guild_voice_regions_rechecks_authoritative_installation(
+    builtin_rtc,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authorize = AsyncMock(return_value=(object(), object()))

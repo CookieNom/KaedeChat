@@ -25,7 +25,7 @@ from app.db.bot_models import BotDMCapability, BotInstallation
 from app.db.models import Guild
 from app.voice.e2ee import bot_voice_lineage_metadata
 from app.voice.livekit import LiveKitControl, LiveKitError
-from app.voice.regions import configured_voice_regions
+from app.voice.regions import instance_voice_regions
 from app.voice.rooms import guild_room_name, participant_identity
 from app.voice.schemas import (
     BotVoiceDisconnectRequest,
@@ -82,7 +82,7 @@ async def bot_voice_regions(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> list[VoiceRegion]:
     principal.require_scope("voice.connect")
-    return configured_voice_regions(settings)
+    return await instance_voice_regions(settings)
 
 
 @router.get("/guilds/{guild_ref}/voice/regions", response_model=list[VoiceRegion])
@@ -99,7 +99,7 @@ async def bot_guild_voice_regions(
         guild_ref,
         "voice.connect",
     )
-    return configured_voice_regions(settings)
+    return await instance_voice_regions(settings)
 
 
 @router.post(

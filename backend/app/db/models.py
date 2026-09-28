@@ -51,6 +51,47 @@ class FederatedIdMixin:
     origin_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
 
 
+class RTCConfiguration(Base):
+    __tablename__ = "rtc_configurations"
+    domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    credentials: Mapped[bytes | None] = mapped_column(LargeBinary)
+
+
+class RTCRoomPlacement(Base):
+    __tablename__ = "rtc_room_placements"
+    finished: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    room: Mapped[str] = mapped_column(String(100), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(16))
+    control_url: Mapped[str] = mapped_column(String(2048))
+    connection_url: Mapped[str] = mapped_column(String(2048))
+    credentials: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class RTCWebhookEvent(Base):
+    __tablename__ = "rtc_webhook_events"
+    __table_args__ = (
+        Index(
+            "ix_rtc_webhook_pending",
+            "domain",
+            "retry_at",
+            "accepted_at",
+            postgresql_where=text("processed_at IS NULL"),
+        ),
+    )
+    domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    body: Mapped[str] = mapped_column(Text)
+    body_hash: Mapped[str] = mapped_column(String(64))
+    accepted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Instance(Base, TimestampMixin):
     __tablename__ = "instances"
     domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)

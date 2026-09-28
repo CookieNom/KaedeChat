@@ -1538,13 +1538,13 @@ async def _dispatch_voice(
     request: GuildManagementRequest,
     settings: Settings,
 ) -> GuildManagementResult:
-    from app.voice.regions import configured_voice_regions
+    from app.voice.regions import instance_voice_regions
 
     _Empty.model_validate(request.payload)
     return _result(
         request,
         200,
-        [region.model_dump(mode="json") for region in configured_voice_regions(settings)],
+        [region.model_dump(mode="json") for region in await instance_voice_regions(settings)],
     )
 
 

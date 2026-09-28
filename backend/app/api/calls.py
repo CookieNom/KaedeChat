@@ -21,6 +21,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.api.rtc import fresh_routing
 from app.auth.instance_restrictions import require_remote_user_creation_allowed
 from app.bots.dm_capability import usable_dm_capability
 from app.chat.channel_access import load_channel_access
@@ -48,6 +49,7 @@ from app.voice.cleanup import delete_terminal_call_room
 from app.voice.e2ee import bot_voice_lineage_metadata
 from app.voice.livekit import LiveKitControl, LiveKitError, mint_join_token
 from app.voice.rooms import dm_room_name, parse_participant_identity, participant_identity
+from app.voice.rtc import RoutingHints
 from app.voice.schemas import (
     ActiveCallResponse,
     BotCallResponse,
@@ -857,6 +859,7 @@ async def mint_dm_call_token(
     allow_listen: bool = True,
     allow_speak: bool = True,
     allow_stream: bool = True,
+    routing: RoutingHints | None = None,
 ) -> VoiceTokenResponse:
     if bot_capability is not None:
         require_call_bot_capability(record, bot_capability)
@@ -895,7 +898,7 @@ async def mint_dm_call_token(
         if sender_device_id is not None:
             bot_lineage["bot_e2ee_device_id"] = sender_device_id
     try:
-        await LiveKitControl(settings).ensure_room(room)
+        rtc_settings = await LiveKitControl(settings).ensure_room(room, routing)
     except LiveKitError as exc:
         raise HTTPException(status_code=503, detail={"code": "VOICE_HOME_UNREACHABLE"}) from exc
     claimed, generation, previous_room, previous_client = await claim_voice_connection(
@@ -950,7 +953,7 @@ async def mint_dm_call_token(
         metadata.update({"e2ee": True, **e2ee_context})
     try:
         token, expires_at = mint_join_token(
-            settings,
+            rtc_settings,
             room=room,
             identity=identity,
             display_name=public_user_display_name(user),
@@ -973,7 +976,8 @@ async def mint_dm_call_token(
         raise HTTPException(status_code=503, detail={"code": "VOICE_HOME_UNREACHABLE"}) from exc
     return VoiceTokenResponse(
         token=token,
-        url=cast(str, settings.voice_public_url),
+        url=cast(str, rtc_settings.voice_public_url),
+        rtc_provider=rtc_settings._rtc_provider,
         room=room,
         generation=generation,
         connection_id=connection_id,
@@ -1035,6 +1039,9 @@ async def call_voice_token(
             connection_id=connection_id,
             takeover=takeover,
             client_kind=client_kind,
+            routing=await fresh_routing(
+                redis, settings, auth.user.id, payload.routing if payload else None
+            ),
         )
         await discard_all_federated_voice_home_sessions(redis, identity)
         return grant
@@ -1085,6 +1092,9 @@ async def call_voice_token(
                 "connection_id": connection_id,
                 "takeover": takeover,
                 "client_kind": client_kind,
+                **(
+                    {"routing": payload.routing.model_dump()} if payload and payload.routing else {}
+                ),
             },
             request_timeout=5,
             max_response_bytes=16 * 1024,
@@ -1166,6 +1176,7 @@ async def federation_dm_voice_token(
         connection_id=payload.connection_id,
         takeover=payload.takeover,
         client_kind=payload.client_kind,
+        routing=await fresh_routing(redis, settings, user.id, payload.routing, user.origin_domain),
         move_session_id=payload.move_session_id,
     )
 

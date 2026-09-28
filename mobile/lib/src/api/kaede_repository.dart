@@ -1936,6 +1936,7 @@ final class KaedeRepository {
     String? senderDeviceId,
     required String connectionId,
     bool takeover = false,
+    Map<String, Object?>? routing,
   }) =>
       api.sendJson(
         'POST',
@@ -1945,6 +1946,7 @@ final class KaedeRepository {
           'connection_id': connectionId,
           'takeover': takeover,
           'client_kind': 'mobile',
+          if (routing != null) 'routing': routing,
         },
       );
   Future<Map<String, Object?>> voiceOccupancy(EntityRef channel) =>
@@ -2022,6 +2024,7 @@ final class KaedeRepository {
     String? senderDeviceId,
     required String connectionId,
     bool takeover = false,
+    Map<String, Object?>? routing,
   }) =>
       api.sendJson(
         'POST',
@@ -2031,6 +2034,7 @@ final class KaedeRepository {
           'connection_id': connectionId,
           'takeover': takeover,
           'client_kind': 'mobile',
+          if (routing != null) 'routing': routing,
         },
       );
   Future<KaedeChannel> createGroupDm(List<String> handles,

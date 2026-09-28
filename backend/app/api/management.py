@@ -78,7 +78,7 @@ from app.federation.guild_management import (
     qualified_management_ref,
     require_guild_management_status,
 )
-from app.voice.regions import require_configured_rtc_region
+from app.voice.regions import require_instance_rtc_region
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-management"])
 
@@ -286,7 +286,7 @@ async def update_channel(
             detail={"code": "VOICE_CHANNEL_LIMIT_INVALID", "message": str(exc)},
         ) from exc
     if "rtc_region" in values:
-        values["rtc_region"] = require_configured_rtc_region(settings, payload.rtc_region)
+        values["rtc_region"] = await require_instance_rtc_region(settings, payload.rtc_region)
     if channel.type != 15 and values.keys() & forum_fields:
         raise HTTPException(status_code=400, detail={"code": "FORUM_FIELDS_FORUM_ONLY"})
     if "default_auto_archive_duration" in values and channel.type not in {0, 5, 15}:

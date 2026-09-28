@@ -18,6 +18,7 @@ ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
         {
             "admin.read",
             "operators.manage",
+            "rtc.manage",
             "users.manage",
             "instances.manage",
             "bots.manage",

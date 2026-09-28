@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { measureRegionalLatency, type RegionalProbe } from './rtc-probes';
   import { activeVoice } from './active.svelte';
   import ListeningVolume from './ListeningVolume.svelte';
   import ListeningVolumeMenu from './ListeningVolumeMenu.svelte';
@@ -53,6 +54,30 @@
     startedAt?: number | null;
     headerActions?: Snippet;
   } = $props();
+  interface RTCRouting {
+    provider: 'builtin' | 'cinnamon';
+    default_region: string | null;
+    allow_region_selection: boolean;
+    regions: { id: string; name: string }[];
+    probes: RegionalProbe[];
+    probe_ticket: string | null;
+  }
+  let rtcRouting = $state<RTCRouting | null>(null);
+  let selectedRegion = $state('');
+  let preparingRTC = $state(false);
+  const rtcPath = $derived(
+    '/voice/rtc?' +
+      new URLSearchParams(
+        callRef ? { call_ref: callRef } : channelRef ? { channel_ref: channelRef } : {}
+      )
+  );
+  onMount(() => {
+    void api<RTCRouting>(rtcPath)
+      .then((value) => {
+        rtcRouting = value;
+      })
+      .catch(() => {});
+  });
   const voice = new VoiceSession(undefined, (state) =>
     authenticatedGateway.client.setSelfVoiceState(state.self_mute, state.self_deaf)
   );
@@ -706,7 +731,7 @@
   }
 
   async function join(takeover = false) {
-    if (!mounted) return;
+    if (!mounted || preparingRTC || view.connecting) return;
     if (!canJoinVoice) {
       error = isStageChannel
         ? 'This Stage has not started yet.'
@@ -719,6 +744,7 @@
     joinController = controller;
     error = '';
     takeoverPrompt = null;
+    preparingRTC = true;
     try {
       const channel = selectedChannel();
       if (!channel)
@@ -727,13 +753,30 @@
       const path = callRef
         ? `/calls/${encodeURIComponent(callRef)}/voice/token`
         : `/channels/${encodeURIComponent(channelRef ?? '')}/voice/token`;
+      let routing;
+      try {
+        const current = await api<RTCRouting>(rtcPath, { signal: controller.signal });
+        rtcRouting = current;
+        if (current.provider === 'cinnamon') {
+          const region = current.allow_region_selection ? selectedRegion || null : null;
+          const automatic = region === 'automatic' || (!region && !current.default_region);
+          const latency = automatic
+            ? await measureRegionalLatency({ regions: current.probes, max_age_seconds: 60 })
+            : {};
+          routing = { region, latency, probe_ticket: current.probe_ticket };
+        }
+      } catch {
+        /* Older instances and failed discovery retain default routing. */
+      }
+      if (controller.signal.aborted || !connectionFence.isCurrent(generation)) return;
       const grant = await api<VoiceToken>(path, {
         method: 'POST',
         body: JSON.stringify({
           sender_device_id: deviceId,
           connection_id: connectionId,
           takeover,
-          client_kind: isNativeDesktop() ? 'desktop' : 'web'
+          client_kind: isNativeDesktop() ? 'desktop' : 'web',
+          ...(routing ? { routing } : {})
         }),
         signal: controller.signal
       });
@@ -794,6 +837,7 @@
         }
       }
     } finally {
+      preparingRTC = false;
       if (joinController === controller) joinController = null;
     }
   }
@@ -1126,15 +1170,28 @@
         {/if}
       {/if}
       {#if !view.connected && (!isStageChannel || stageInstance)}
+        {#if rtcRouting?.provider === 'cinnamon' && rtcRouting.allow_region_selection}
+          <label class="rtc-region-choice"
+            >Call region
+            <select bind:value={selectedRegion} disabled={preparingRTC || view.connecting}>
+              <option value="">Instance default</option>
+              <option value="automatic">Automatic</option>
+              {#each rtcRouting.regions as region (region.id)}<option value={region.id}
+                  >{region.name}</option
+                >{/each}
+            </select>
+            <small>Active calls keep their existing region.</small>
+          </label>
+        {/if}
         <button
           class="primary"
-          disabled={view.connecting || !canJoinVoice}
+          disabled={preparingRTC || view.connecting || !canJoinVoice}
           title={!canConnect
             ? $t('ui_you_do_not_have_permission_to_join_this_voice_4875c87d')
             : undefined}
           onclick={() => join()}
         >
-          {view.connecting
+          {preparingRTC || view.connecting
             ? $t('ui_connecting_72021eb7')
             : isStageChannel
               ? $t('ui_join_audience_deb0900c')
@@ -1489,6 +1546,17 @@
 <ScreenShareDialog bind:open={screenShareOpen} onShare={startScreenShare} />
 
 <style>
+  .rtc-region-choice {
+    display: grid;
+    gap: 0.3rem;
+    font-size: 0.85rem;
+  }
+  .rtc-region-choice select {
+    min-height: 2.5rem;
+    max-width: 100%;
+    padding: 0.5rem;
+    border-radius: 0.4rem;
+  }
   .voice-panel {
     display: grid;
     width: 100%;

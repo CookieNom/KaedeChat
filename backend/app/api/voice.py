@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any, cast
 
@@ -18,6 +19,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.api.rtc import fresh_routing
 from app.auth.instance_restrictions import require_remote_user_creation_allowed
 from app.bots.installations import (
     installation_accessible_channel,
@@ -33,7 +35,7 @@ from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
 from app.db.bot_models import BotInstallation, BotWorker
-from app.db.models import Channel, Guild, GuildMember, User
+from app.db.models import Channel, Guild, GuildMember, RTCRoomPlacement, User
 from app.federation.client import signed_request
 from app.federation.guild_management import proxy_remote_guild_management
 from app.federation.network import FederationNetworkError
@@ -50,12 +52,13 @@ from app.voice.e2ee import (
     active_bot_guild_voice_installation,
 )
 from app.voice.livekit import LiveKitControl, LiveKitError, receive_webhook
-from app.voice.regions import configured_voice_regions
+from app.voice.regions import instance_voice_regions
 from app.voice.rooms import (
     parse_participant_identity,
     parse_room_name,
     participant_identity,
 )
+from app.voice.rtc import placement_lock, placement_settings
 from app.voice.schemas import (
     VoiceBrokerRequest,
     VoiceChannelStatusUpdate,
@@ -354,7 +357,7 @@ async def voice_regions(
     settings: Settings = Depends(get_settings),
 ) -> list[VoiceRegion]:
     if guild_ref is None:
-        return configured_voice_regions(settings)
+        return await instance_voice_regions(settings)
 
     proxied = await proxy_remote_guild_management(
         session,
@@ -380,7 +383,7 @@ async def voice_regions(
     )
     if guild is None or guild.unavailable or member is None:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
-    return configured_voice_regions(settings)
+    return await instance_voice_regions(settings)
 
 
 async def publish_voice_channel_start_time(
@@ -518,6 +521,9 @@ async def channel_voice_token(
             connection_id=connection_id,
             takeover=takeover,
             client_kind=client_kind,
+            routing=await fresh_routing(
+                redis, settings, auth.user.id, payload.routing if payload else None
+            ),
         )
         await discard_all_federated_voice_home_sessions(redis, identity)
         return grant
@@ -532,6 +538,7 @@ async def channel_voice_token(
         connection_id=connection_id,
         takeover=takeover,
         client_kind=client_kind,
+        routing=payload.routing if payload else None,
     )
 
 
@@ -572,6 +579,9 @@ async def federation_voice_token(
         connection_id=payload.connection_id,
         takeover=payload.takeover,
         client_kind=payload.client_kind,
+        routing=await fresh_routing(
+            redis, settings, actor.id, payload.routing, actor.origin_domain
+        ),
         allow_listen=payload.allow_listen,
         allow_speak=payload.allow_speak,
         allow_stream=payload.allow_stream,
@@ -1365,10 +1375,22 @@ async def livekit_webhook(
             )
 
     async def completed() -> Response:
+        if str(event.event) == "room_finished":
+            await session.commit()
         if dedupe_key is not None:
             await redis.set(dedupe_key, "done", ex=24 * 60 * 60)
         return Response(status_code=204)
 
+    return await process_livekit_event(event, session, redis, settings, completed)
+
+
+async def process_livekit_event(
+    event: Any,
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    completed: Callable[[], Awaitable[Response]],
+) -> Response:
     event_type = str(event.event)
     room = str(event.room.name) if event.HasField("room") else ""
     if not room:
@@ -1383,6 +1405,21 @@ async def livekit_webhook(
         # open its audio devices. Start the timer only after participant admission.
         return await completed()
     if event_type == "room_finished":
+        # Fence new room creation through all lifecycle effects, including when
+        # a delayed finish event arrives after the same name has been reused.
+        await placement_lock(session, settings.domain, room)
+        placement = await session.get(RTCRoomPlacement, (settings.domain, room))
+        if placement is not None and placement.finished:
+            return await completed()
+        resolved = placement_settings(settings, placement) if placement else settings
+        from livekit import api as livekit_api
+
+        async with LiveKitControl.direct_client(resolved) as client:
+            listed = await client.room.list_rooms(livekit_api.ListRoomsRequest(names=[room]))
+        if listed.rooms:
+            return await completed()
+        if placement is not None:
+            placement.finished = True
         if kind == "g":
             await publish_voice_channel_start_time(
                 redis,

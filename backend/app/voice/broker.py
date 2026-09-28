@@ -14,6 +14,7 @@ from app.db.models import Channel, Guild, User
 from app.federation.client import signed_request
 from app.federation.network import FederationNetworkError, decode_federation_response_json
 from app.voice.rooms import guild_room_name, participant_identity
+from app.voice.rtc import RoutingHints
 from app.voice.schemas import VoiceSelfStateFederationResponse, VoiceTokenResponse
 from app.voice.service import federated_voice_grant_matches, require_e2ee_voice_device
 from app.voice.state import (
@@ -64,6 +65,7 @@ async def request_remote_guild_voice_token(
     connection_id: str,
     takeover: bool,
     client_kind: Literal["web", "desktop", "mobile"],
+    routing: RoutingHints | None = None,
     allow_listen: bool = True,
     allow_speak: bool = True,
     allow_stream: bool = True,
@@ -108,6 +110,7 @@ async def request_remote_guild_voice_token(
                 "connection_id": connection_id,
                 "takeover": takeover,
                 "client_kind": client_kind,
+                **({"routing": routing.model_dump()} if routing else {}),
                 "allow_listen": allow_listen,
                 "allow_speak": allow_speak,
                 "allow_stream": allow_stream,

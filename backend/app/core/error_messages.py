@@ -7,6 +7,13 @@ from http import HTTPStatus
 # what the user can do next without exposing database, storage, or federation
 # implementation details.
 ERROR_MESSAGES: dict[str, str] = {
+    "RTC_CONFIGURATION_REQUIRED": "Enter the Cinnamon project API key, secret, and automatic endpoint before enabling or testing it.",
+    "RTC_REGION_SELECTION_DISABLED": "Region selection is disabled by the instance administrator. Use the instance default.",
+    "RTC_AUTOMATIC_ENDPOINT_REQUIRED": "Ask an instance administrator to configure the automatic RTC endpoint.",
+    "RTC_REGION_INVALID": "Choose an enabled RTC region, or use Automatic.",
+    "RTC_PROBE_DISCOVERY_FAILED": "Probe discovery failed. Check the automatic endpoint, project credentials, and automatic-routing and region permissions on Cinnamon.",
+    "RTC_TEST_BUSY": "An RTC connection test is already running. Wait for it to finish and try again.",
+    "RTC_WEBHOOK_ID_CONFLICT": "This webhook event ID was already accepted with a different body.",
     "ADMIN_AUTHENTICATION_REQUIRED": "Administrator authentication is required for this action.",
     "ADMIN_GRANT_NOT_FOUND": "That administrator grant no longer exists.",
     "ANNOUNCEMENT_CROSSPOST_DELIVERY_FAILED": "The destination server rejected this announcement. Check the followed channel and try publishing again.",

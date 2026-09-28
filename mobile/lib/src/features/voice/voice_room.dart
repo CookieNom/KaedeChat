@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:kaede_mobile/src/api/rtc_routing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -269,6 +270,55 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
     }
   }
 
+  bool _rtcPreparing = false;
+
+  Future<void> _joinWithRegion() async {
+    if (_rtcPreparing) return;
+    setState(() => _rtcPreparing = true);
+    try {
+      final session = ref.read(voiceSessionProvider);
+      if (session.connecting) return;
+      final repository = ref.read(mobileControllerProvider.notifier).repository;
+      String? region;
+      try {
+        final config =
+            await repository.rtcRouting(channel: channel.ref, call: callRef);
+        if (!mounted) return;
+        if (config['provider'] == 'cinnamon' &&
+            config['allow_region_selection'] == true) {
+          final choice = await showDialog<String>(
+              context: context,
+              builder: (context) => SimpleDialog(
+                    title: const Text('Region for a new call'),
+                    contentPadding: const EdgeInsets.all(16),
+                    children: [
+                      SimpleDialogOption(
+                          onPressed: () => Navigator.pop(context, ''),
+                          child: const Text('Instance default')),
+                      SimpleDialogOption(
+                          onPressed: () => Navigator.pop(context, 'automatic'),
+                          child: const Text('Automatic')),
+                      for (final item in (config['regions'] as List? ?? [])
+                          .whereType<Map>())
+                        SimpleDialogOption(
+                            onPressed: () =>
+                                Navigator.pop(context, '${item['id']}'),
+                            child: Text('${item['name']}')),
+                    ],
+                  ));
+          if (choice == null) return;
+          region = choice.isEmpty ? null : choice;
+        }
+      } on Object {
+        /* Use the existing no-hints fallback when discovery fails. */
+      }
+      if (mounted)
+        await session.connect(channel, callRef: callRef, rtcRegion: region);
+    } finally {
+      if (mounted) setState(() => _rtcPreparing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(voiceSessionProvider);
@@ -360,9 +410,10 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     (channel.type != ChannelType.stage ||
                         _stageInstance != null))
                   ActionButton(
-                    onPressed: canConnect && !session.connecting
-                        ? () => session.connect(channel, callRef: callRef)
-                        : null,
+                    onPressed:
+                        canConnect && !session.connecting && !_rtcPreparing
+                            ? _joinWithRegion
+                            : null,
                     icon: session.connecting && thisRoom
                         ? SizedBox.square(
                             dimension: 18,

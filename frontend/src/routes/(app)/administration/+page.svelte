@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RTCSettings from '$lib/admin/RTCSettings.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -14,7 +15,7 @@
   import { onMount } from 'svelte';
 
   type View =
-    'overview' | 'users' | 'applications' | 'reports' | 'instances' | 'operators' | 'audit';
+    'rtc' | 'overview' | 'users' | 'applications' | 'reports' | 'instances' | 'operators' | 'audit';
 
   interface AdminIdentity {
     roles: string[];
@@ -180,6 +181,13 @@
 
   let sections: SectionDefinition[] = $derived([
     {
+      id: 'rtc',
+      label: 'Voice and video',
+      icon: 'server',
+      description: 'Configure RTC providers, routing, and webhooks.',
+      capability: 'rtc.manage'
+    },
+    {
       id: 'overview',
       label: $t('ui_overview_d4b1ea57'),
       icon: 'server',
@@ -286,6 +294,7 @@
   let globalError = $state('');
   let notice = $state('');
   let loading = $state<Record<View, boolean>>({
+    rtc: false,
     overview: false,
     users: false,
     applications: false,
@@ -295,6 +304,7 @@
     audit: false
   });
   let loaded = $state<Record<View, boolean>>({
+    rtc: false,
     overview: false,
     users: false,
     applications: false,
@@ -603,7 +613,9 @@
     loading[section] = true;
     sectionErrors[section] = undefined;
     try {
-      if (section === 'overview') overview = await api('/administration/overview');
+      if (section === 'rtc') {
+        /* RTCSettings owns its form and loading state. */
+      } else if (section === 'overview') overview = await api('/administration/overview');
       else if (section === 'users') users = await api('/administration/users');
       else if (section === 'applications') apps = await api('/administration/applications');
       else if (section === 'reports') {
@@ -1114,6 +1126,8 @@
             <p>{$t('ui_fetching_the_latest_instance_data_19146c34')}</p>
           </div>
         </section>
+      {:else if view === 'rtc'}
+        <RTCSettings />
       {:else if view === 'overview'}
         <div class="metrics">
           {#each overviewCards as [key, label, description] (key)}

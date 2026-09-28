@@ -65,6 +65,7 @@ from app.api.onboarding import router as onboarding_router
 from app.api.push import relay_router as push_relay_router
 from app.api.push import router as push_router
 from app.api.relationships import router as relationships_router
+from app.api.rtc import router as rtc_router
 from app.api.scheduled_events import router as scheduled_events_router
 from app.api.search import router as search_router
 from app.api.soundboard import federation_router as soundboard_federation_router
@@ -100,6 +101,8 @@ from app.federation.identity_storage import FederationIdentityQuotaExceeded
 from app.federation.network import FederationInstanceQuotaExceeded
 from app.federation.security import bounded_request_body
 from app.voice.background import voice_coordinator
+from app.voice.rtc import configure_rtc_sessions
+from app.voice.rtc_webhooks import webhook_worker
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -119,13 +122,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
     lease: WorkerLease | None = None
     voice_task: asyncio.Task[None] | None = None
+    webhook_task: asyncio.Task[None] | None = None
     try:
         lease = await WorkerLease.acquire(redis)
         lease.start_heartbeat()
         app.state.engine = engine
         app.state.sessionmaker = sessionmaker
+        configure_rtc_sessions(sessionmaker)
         app.state.redis = redis
         app.state.snowflake = SnowflakeGenerator(lease)
+        webhook_task = asyncio.create_task(
+            webhook_worker(sessionmaker, redis, settings),
+            name="rtc-webhooks",
+        )
         if settings.voice_enabled:
             voice_task = asyncio.create_task(
                 voice_coordinator(redis, sessionmaker, settings),
@@ -134,12 +143,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("service_started", service="api", domain=settings.domain)
         yield
     finally:
+        if webhook_task is not None:
+            webhook_task.cancel()
+            await asyncio.gather(webhook_task, return_exceptions=True)
         if voice_task is not None:
             voice_task.cancel()
             await asyncio.gather(voice_task, return_exceptions=True)
         if lease is not None:
             await lease.close()
         await redis.aclose()
+        configure_rtc_sessions(None)
         await engine.dispose()
         log.info("service_stopped", service="api")
 
@@ -156,6 +169,8 @@ app.include_router(support_router)
 app.include_router(automod_router)
 app.include_router(admin_router)
 app.include_router(admin_portal_router)
+
+app.include_router(rtc_router)
 app.include_router(report_federation_router)
 app.include_router(applications_router)
 app.include_router(application_directory_router)

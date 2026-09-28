@@ -11,6 +11,41 @@ Administration screens under User Settings.
 
 ## Instance Administration
 
+### Voice and video (RTC)
+
+Built-in LiveKit remains the default. Owners and instance administrators can
+configure the optional Cinnamon provider under **Administration → Voice and video**
+(on mobile, under Instance Administration). No Cinnamon credentials, endpoints,
+or regions are preconfigured.
+
+Enter the **project** API key and secret, an automatic `wss://` endpoint, and the
+regional endpoints your project allows. The administration API encrypts credentials
+using the instance secret key; the saved secret is never returned. Keep the instance
+secret key with your database backups. Use **Save RTC settings**, test Automatic,
+test without hints, and test each enabled region before selecting Cinnamon as the
+provider. Tests create and remove only uniquely named `kaede-rtc-test-…` rooms;
+a cleanup failure reports the exact room to remove.
+
+For Cinnamon project setup, copy the complete receiver URL shown in administration:
+`https://<configured instance domain>/api/v1/voice/cinnamon/webhook`. This is a direct
+public route without a query or redirect. Configure delivery signing with the same
+project API-key identifier shown there, enable the listed region IDs for the project
+and plan, and permit automatic/manual routing. Keep Cinnamon's **required hint**
+policy off: only successful client HTTPS RTT measurements are sent; if all probes
+fail, routing must work without hints. No location information is collected or sent.
+Keep Cinnamon's automatic-routing allowlist consistent with the regions you intend
+to permit; Kaede's disabled regions are excluded from its selector and probes.
+
+Refresh webhook status after a disposable room test to verify delivery acceptance
+and processing. Signature-verified events are committed to PostgreSQL before HTTP
+204; a separate worker retries failures and checks live room/participant state to
+ignore stale lifecycle events. Pending events survive restarts. Apply database
+migrations before starting the updated API workers.
+
+Provider, endpoint, and credential changes apply when creating a new room. Active
+rooms retain their saved connection endpoint and credentials, including moderation
+and reconnects. Keep old project credentials valid until those rooms finish.
+
 ### Granting access
 
 Administrative access belongs to an ordinary local user account. The host grants

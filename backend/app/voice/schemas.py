@@ -9,6 +9,7 @@ from app.core.model_validation import UnambiguousInputModel
 from app.core.settings import VoiceRegionConfiguration
 from app.core.types import EntityRef, WireSnowflake
 from app.federation.schemas import FederationDomain, SnowflakeString
+from app.voice.rtc import RoutingHints
 
 
 class StrictVoiceModel(UnambiguousInputModel):
@@ -16,6 +17,7 @@ class StrictVoiceModel(UnambiguousInputModel):
 
 
 class VoiceTokenRequest(StrictVoiceModel):
+    routing: RoutingHints | None = None
     model_config = ConfigDict(extra="forbid")
 
     sender_device_id: str | None = Field(
@@ -141,6 +143,7 @@ class SoundboardPlayRequest(StrictVoiceModel):
 
 
 class VoiceTokenResponse(StrictVoiceModel):
+    rtc_provider: Literal["builtin", "cinnamon"] = "builtin"
     model_config = ConfigDict(extra="forbid")
 
     token: str = Field(min_length=20, max_length=4096)
@@ -339,6 +342,7 @@ class VoiceMoveFederationRequest(StrictVoiceModel):
 
 
 class VoiceBrokerRequest(StrictVoiceModel):
+    routing: RoutingHints | None = None
     model_config = ConfigDict(extra="forbid")
 
     guild_id: SnowflakeString
@@ -375,6 +379,7 @@ class VoiceBrokerRequest(StrictVoiceModel):
 
 
 class DMVoiceBrokerRequest(StrictVoiceModel):
+    routing: RoutingHints | None = None
     model_config = ConfigDict(extra="forbid")
 
     call_id: SnowflakeString

@@ -16,6 +16,7 @@ from pydantic import (
     ConfigDict,
     EmailStr,
     Field,
+    PrivateAttr,
     SecretStr,
     field_validator,
     model_validator,
@@ -96,6 +97,7 @@ class VoiceRegionConfiguration(BaseModel):
 
 
 class Settings(BaseSettings):
+    _rtc_provider: Literal["builtin", "cinnamon"] = PrivateAttr(default="builtin")
     model_config = SettingsConfigDict(
         env_prefix="KAEDE_",
         env_file=".env",
