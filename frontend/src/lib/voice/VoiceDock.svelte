@@ -75,6 +75,7 @@
     void api<RTCRouting>(rtcPath)
       .then((value) => {
         rtcRouting = value;
+        selectedRegion = value.default_region ?? 'automatic';
       })
       .catch(() => {});
   });
@@ -756,6 +757,7 @@
       let routing;
       try {
         const current = await api<RTCRouting>(rtcPath, { signal: controller.signal });
+        if (!selectedRegion) selectedRegion = current.default_region ?? 'automatic';
         rtcRouting = current;
         if (current.provider === 'cinnamon') {
           const region = current.allow_region_selection ? selectedRegion || null : null;
@@ -1174,7 +1176,6 @@
           <label class="rtc-region-choice"
             >Call region
             <select bind:value={selectedRegion} disabled={preparingRTC || view.connecting}>
-              <option value="">Instance default</option>
               <option value="automatic">Automatic</option>
               {#each rtcRouting.regions as region (region.id)}<option value={region.id}
                   >{region.name}</option
