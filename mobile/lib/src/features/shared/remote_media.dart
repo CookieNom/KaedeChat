@@ -282,42 +282,75 @@ Future<void> showUserProfile(
   String? memberOf,
   EntityRef? guildRef,
   DateTime? joinedAt,
-}) =>
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      builder: (sheetContext) => Consumer(
-        builder: (context, ref, child) {
-          final state = ref.watch(mobileControllerProvider);
-          DateTime? guildJoinedAt = joinedAt;
-          for (final member
-              in state.guildMembers[guildRef] ?? const <GuildMember>[]) {
-            if (member.user.ref == user.ref) {
-              guildJoinedAt = member.joinedAt ?? guildJoinedAt;
-            }
+}) {
+  final controller = ProviderScope.containerOf(context)
+      .read(mobileControllerProvider.notifier);
+  final profile = user.profileResolved
+      ? controller.repository.lookupUser(user.handle).then((resolved) {
+          if (resolved.ref != user.ref) return user;
+          return resolved;
+        })
+      : null;
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) => Consumer(
+      builder: (context, ref, child) {
+        final state = ref.watch(mobileControllerProvider);
+        DateTime? guildJoinedAt = joinedAt;
+        for (final member
+            in state.guildMembers[guildRef] ?? const <GuildMember>[]) {
+          if (member.user.ref == user.ref) {
+            guildJoinedAt = member.joinedAt ?? guildJoinedAt;
           }
-          return UserProfileSheet(
-            user: user,
-            presence: presence,
-            actions: actions,
-            memberOf: memberOf,
-            joinedAt: guildJoinedAt,
-            friendsSince: guildRef == null &&
-                    memberOf == null &&
-                    user.ref != state.user?.ref
-                ? friendshipStartedAt(user, state.relationships)
-                : null,
-          );
-        },
-      ),
-    );
+        }
+        return UserProfileSheet(
+          user: state.userProfiles[user.ref] ?? user,
+          profile: profile,
+          presence: presence,
+          actions: [
+            ...actions,
+            if (state.user != null &&
+                user.ref != state.user?.ref &&
+                !user.isSystem &&
+                user.profileResolved)
+              ActionButton(
+                kind: ActionButtonKind.outlined,
+                icon: Icon(state.isBlocked(user)
+                    ? Icons.lock_open_rounded
+                    : Icons.block),
+                label: Text(state.isBlocked(user)
+                    ? L10n.of(context).ui_unblock_987c7d5f
+                    : L10n.of(context).profile_block),
+                tooltip: L10n.of(context).profile_block_help,
+                onPressed: () async {
+                  await ref
+                      .read(mobileControllerProvider.notifier)
+                      .setUserBlocked(user, !state.isBlocked(user));
+                  if (context.mounted) Navigator.pop(context);
+                },
+              ),
+          ],
+          memberOf: memberOf,
+          joinedAt: guildJoinedAt,
+          friendsSince: guildRef == null &&
+                  memberOf == null &&
+                  user.ref != state.user?.ref
+              ? friendshipStartedAt(user, state.relationships)
+              : null,
+        );
+      },
+    ),
+  );
+}
 
 final class UserProfileSheet extends StatefulWidget {
   const UserProfileSheet({
     super.key,
     required this.user,
     required this.presence,
+    this.profile,
     this.actions = const <Widget>[],
     this.memberOf,
     this.joinedAt,
@@ -327,6 +360,7 @@ final class UserProfileSheet extends StatefulWidget {
   });
 
   final KaedeUser user;
+  final Future<KaedeUser>? profile;
   final PresenceStatus presence;
   final List<Widget> actions;
   final String? memberOf;
@@ -390,8 +424,18 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final user = widget.user;
+  Widget build(BuildContext context) => FutureBuilder<KaedeUser>(
+        future: widget.profile,
+        builder: (context, snapshot) => _buildProfile(
+          context,
+          snapshot.data ?? widget.user,
+          loading: snapshot.connectionState == ConnectionState.waiting,
+          failed: snapshot.hasError,
+        ),
+      );
+
+  Widget _buildProfile(BuildContext context, KaedeUser user,
+      {required bool loading, required bool failed}) {
     final presence = widget.presence;
     final memberOf = widget.memberOf;
     final createdAt = user.createdAt;
@@ -445,6 +489,12 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
               controller: scrollController,
               padding: EdgeInsets.zero,
               children: [
+                if (loading) const LinearProgressIndicator(),
+                if (failed)
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(L10n.of(context).profile_load_failed),
+                  ),
                 SizedBox(
                   height: 124,
                   child: Stack(

@@ -1,4 +1,7 @@
 {
+  "profile_block": "ユーザーをブロック",
+  "profile_block_help": "ブロックすると相手のメッセージが非表示になり、フレンドから削除されます。",
+
   "attachmentPhotosAndVideos": "写真と動画",
   "attachmentFiles": "ファイル",
   "@@locale": "ja",
@@ -2227,11 +2230,11 @@
   "@ui_verify_your_email_50ec3767": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
-  "ui_we_sent_a_verification_link_to_your_email_ope_284a8624": "確認用リンクをメールで送信しました。リンクを開くか、そのトークンを以下に貼り付けてください。",
+  "ui_we_sent_a_verification_link_to_your_email_ope_284a8624": "メールのリンクを開いて確認し、アプリに戻ってログインしてください。または、確認コードかリンク全体を以下に貼り付けてください。",
   "@ui_we_sent_a_verification_link_to_your_email_ope_284a8624": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
-  "ui_verification_token_0c70a2ef": "確認用トークン",
+  "ui_verification_token_0c70a2ef": "確認コードまたはリンク",
   "@ui_verification_token_0c70a2ef": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
@@ -2239,7 +2242,7 @@
   "@ui_resend_121c8c1e": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
-  "ui_verify_later_2b8bfe56": "後で確認",
+  "ui_verify_later_2b8bfe56": "ログインに戻る",
   "@ui_verify_later_2b8bfe56": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
@@ -8326,5 +8329,7 @@
   "profile_account_created": "アカウント作成日",
   "profile_joined_guild": "ギルド参加日",
   "profile_friends_since": "フレンド登録日",
-  "profile_friends_days": "{days, plural, =0 {フレンドになって1日未満} other {フレンドになって#日}}"
+  "profile_friends_days": "{days, plural, =0 {フレンドになって1日未満} other {フレンドになって#日}}",
+  "profile_load_failed": "プロフィールを更新できませんでした。閉じてからもう一度お試しください。",
+  "message_retrying": "自動的に再試行します。"
 }

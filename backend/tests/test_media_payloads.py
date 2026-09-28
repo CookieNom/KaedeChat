@@ -5,9 +5,11 @@ from datetime import UTC, datetime
 import pytest
 
 from app.chat.payloads import attachment_payload as chat_attachment_payload
+from app.core.federation import canonical_json
 from app.db.models import Attachment
 from app.media.payloads import (
     attachment_update_payload,
+    federation_attachment_payload,
     public_scan_status,
     terminal_attachment_update_payload,
 )
@@ -80,3 +82,23 @@ def test_encrypted_tombstone_projects_rejected_without_invalid_stored_state() ->
 
     assert item.scan_status == "encrypted"
     assert payload["attachment"]["scan_status"] == "rejected"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "duration, expected", [(None, None), (0.3, 1), (2.0, 2), (2.25, 3), (1200.0, 1200)]
+)
+@pytest.mark.parametrize(
+    "render", [chat_attachment_payload, service_attachment_payload, federation_attachment_payload]
+)
+def test_voice_attachment_projection_can_be_signed(duration, expected, render):
+    item = attachment("pending")
+    item.filename = "voice.m4a"
+    item.content_type = "audio/mp4"
+    item.duration_secs = duration
+    item.waveform = "AA==" if duration is not None else None
+    payload = render(item)
+    assert payload["duration_secs"] == expected
+    assert payload["duration_secs"] is None or type(payload["duration_secs"]) is int
+    assert canonical_json({"message": {"attachments": [payload]}})
+    # Display/signing precision must not modify the stored recording metadata.
+    assert item.duration_secs == duration

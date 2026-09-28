@@ -182,6 +182,7 @@ final class MessageSearchScreen extends StatefulWidget {
     required this.channel,
     required this.accountRef,
     this.historyAvailable = true,
+    this.isMessageBlocked,
     this.channels = const <KaedeChannel>[],
     this.users = const <KaedeUser>[],
     required this.onJump,
@@ -195,6 +196,7 @@ final class MessageSearchScreen extends StatefulWidget {
   final List<KaedeChannel> channels;
   final EntityRef? accountRef;
   final bool historyAvailable;
+  final bool Function(KaedeMessage message)? isMessageBlocked;
   final List<KaedeUser> users;
   final Future<void> Function(MessageSearchResult result) onJump;
 
@@ -1159,8 +1161,11 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                               textAlign: TextAlign.center,
                             ),
                           ),
-                        for (final result
-                            in _page?.results ?? const <MessageSearchResult>[])
+                        for (final result in (_page?.results ??
+                                const <MessageSearchResult>[])
+                            .where((result) =>
+                                widget.isMessageBlocked?.call(result.message) !=
+                                true))
                           _resultTile(context, result),
                         if (_page?.nextCursor != null)
                           ActionButton(

@@ -2,6 +2,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import UserProfileCard from './UserProfileCard.svelte';
+import PinnedMessagesPanel from './PinnedMessagesPanel.svelte';
 import type { Role, UserSummary } from '$lib/chat/types';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn() }));
@@ -32,8 +33,13 @@ const role: Role = {
   mentionable: false
 };
 let component: ReturnType<typeof mount>;
+let preview: ReturnType<typeof mount> | undefined;
 afterEach(async () => {
   if (component) await unmount(component);
+  if (preview) {
+    await unmount(preview);
+    preview = undefined;
+  }
   document.body.innerHTML = '';
   vi.restoreAllMocks();
   vi.resetAllMocks();
@@ -267,4 +273,89 @@ it('shows friendship history immediately after accepting a request', async () =>
     expect(document.body.textContent).toContain('Friends for less than a day')
   );
   expect([...document.querySelectorAll('time')].at(-1)?.dateTime).toBe(acceptedAt);
+});
+
+it('blocks a friend immediately, prevents duplicate requests, and unblocks without restoring friendship', async () => {
+  const { chatEntities } = await import('$lib/stores/entities.svelte');
+  const user = { ...bot, account_type: 'human' as const };
+  const relationship = {
+    type: 'friend' as const,
+    user,
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01'
+  };
+  chatEntities.relationships.replace([relationship]);
+  preview = mount(PinnedMessagesPanel, {
+    target: document.body,
+    props: {
+      messages: [
+        {
+          id: '9',
+          origin_domain: user.origin_domain,
+          channel_id: '3',
+          channel_domain: 'home.example',
+          author_id: user.id,
+          author_domain: user.origin_domain,
+          author: user,
+          content: 'Message from blocked friend',
+          message_type: 0,
+          flags: 0,
+          client_nonce: null,
+          referenced_message_id: null,
+          referenced_message_domain: null,
+          mention_user_refs: [],
+          edited_at: null,
+          deleted_at: null,
+          created_at: '2026-09-28T00:00:00Z'
+        }
+      ],
+      onClose: vi.fn(),
+      onJump: vi.fn()
+    }
+  });
+  mocks.api.mockResolvedValueOnce([relationship]);
+  component = mount(UserProfileCard, {
+    target: document.body,
+    props: { user, x: 0, y: 0, onClose: vi.fn() }
+  });
+  await vi.waitFor(() => expect(button('Block user').disabled).toBe(false));
+  let finish!: () => void;
+  mocks.api.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      })
+  );
+  button('Block user').click();
+  await vi.waitFor(() => expect(button('Block user').disabled).toBe(true));
+  button('Block user').click();
+  expect(mocks.api).toHaveBeenCalledTimes(2);
+  finish();
+  await vi.waitFor(() => expect(button('Unblock').disabled).toBe(false));
+  expect(document.body.textContent).not.toContain('Message from blocked friend');
+  expect(chatEntities.isBlocked(user)).toBe(true);
+  expect(
+    chatEntities.isMessageBlocked({
+      author_id: user.id,
+      author_domain: user.origin_domain
+    } as import('$lib/chat/types').Message)
+  ).toBe(true);
+  expect(chatEntities.relationships.values.some((item) => item.type === 'friend')).toBe(false);
+  expect(chatEntities.isBlocked({ ...user, origin_domain: 'other.example' })).toBe(false);
+  expect(mocks.api).toHaveBeenLastCalledWith('/users/@me/relationships/7%40apps.remote/block', {
+    method: 'PUT'
+  });
+  mocks.api.mockRejectedValueOnce(new Error('offline'));
+  button('Unblock').click();
+  await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).toBeTruthy());
+  expect(chatEntities.isBlocked(user)).toBe(true);
+  mocks.api.mockResolvedValueOnce(undefined);
+  button('Unblock').click();
+  await vi.waitFor(() => expect(button('Add friend').disabled).toBe(false));
+  expect(document.body.textContent).toContain('Message from blocked friend');
+  expect(chatEntities.isBlocked(user)).toBe(false);
+  expect(chatEntities.relationships.values).toEqual([]);
+  expect(mocks.api).toHaveBeenLastCalledWith('/users/@me/relationships/7%40apps.remote/block', {
+    method: 'DELETE'
+  });
 });

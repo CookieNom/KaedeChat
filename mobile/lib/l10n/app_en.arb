@@ -1,4 +1,7 @@
 {
+  "profile_block": "Block user",
+  "profile_block_help": "Blocking hides their messages and removes them as a friend.",
+
   "attachmentPhotosAndVideos": "Photos and videos",
   "attachmentFiles": "Files",
   "chat_jump_to_read": "Jump to where you left off",
@@ -4241,11 +4244,11 @@
   "@ui_verify_your_email_50ec3767": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
-  "ui_we_sent_a_verification_link_to_your_email_ope_284a8624": "We sent a verification link to your email. Open it, or paste its token below.",
+  "ui_we_sent_a_verification_link_to_your_email_ope_284a8624": "Open the link in your email to verify, then return to sign in. Or paste the verification code or full link below.",
   "@ui_we_sent_a_verification_link_to_your_email_ope_284a8624": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
-  "ui_verification_token_0c70a2ef": "Verification token",
+  "ui_verification_token_0c70a2ef": "Verification code or link",
   "@ui_verification_token_0c70a2ef": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
@@ -4253,7 +4256,7 @@
   "@ui_resend_121c8c1e": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
-  "ui_verify_later_2b8bfe56": "Verify later",
+  "ui_verify_later_2b8bfe56": "Back to sign in",
   "@ui_verify_later_2b8bfe56": {
     "description": "Interface text in lib/src/features/auth/auth_screen.dart"
   },
@@ -9130,5 +9133,7 @@
   "profile_joined_guild": "Joined guild",
   "profile_friends_since": "Friends since",
   "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for # day} other {Friends for # days}}",
-  "@profile_friends_days": {"placeholders": {"days": {"type": "num"}}}
+  "@profile_friends_days": {"placeholders": {"days": {"type": "num"}}},
+  "profile_load_failed": "Could not refresh this profile. Close it and try again.",
+  "message_retrying": "Will retry automatically."
 }

@@ -1,4 +1,8 @@
 {
+  "profile_block": "ユーザーをブロック",
+  "profile_block_help": "ブロックすると相手のメッセージが非表示になり、フレンドから削除されます。",
+  "profile_block_failed": "ブロックを更新できませんでした。もう一度お試しください。",
+
   "language_name": "日本語",
   "language_settings": "言語",
   "language_description": "Kaedeの画面、日付、数値に使用する言語を選択します。",

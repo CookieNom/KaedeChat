@@ -9,6 +9,7 @@
     type DirectoryBotProfileApplication
   } from '$lib/chat/application-directory';
   import { userAppContextCommands } from '$lib/chat/context-commands';
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { entityRef } from '$lib/chat/refs';
   import type { PresenceStatus, Relationship, Role, UserSummary } from '$lib/chat/types';
   import {
@@ -226,6 +227,44 @@
       controller.abort();
     };
   });
+
+  async function toggleBlock() {
+    if (
+      isSelf ||
+      isSystemUser(user) ||
+      relationshipBusy ||
+      ['loading', 'unavailable'].includes(relationshipType)
+    )
+      return;
+    const target = user;
+    const targetRef = entityRef(target);
+    const blocking = relationshipType !== 'blocked';
+    const generation = ++relationshipMutationGeneration;
+    relationshipBusy = true;
+    relationshipError = '';
+    try {
+      await api(`/users/@me/relationships/${encodeURIComponent(targetRef)}/block`, {
+        method: blocking ? 'PUT' : 'DELETE'
+      });
+      if (blocking)
+        chatEntities.relationships.upsert({
+          type: 'blocked',
+          user: target,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        });
+      else chatEntities.relationships.remove(targetRef);
+      if (generation !== relationshipMutationGeneration || entityRef(user) !== targetRef) return;
+      relationshipType = blocking ? 'blocked' : 'none';
+      friendshipSince = null;
+    } catch (caught) {
+      if (generation === relationshipMutationGeneration) {
+        relationshipError = userErrorMessage(caught, $t('profile_block_failed'));
+      }
+    } finally {
+      if (generation === relationshipMutationGeneration) relationshipBusy = false;
+    }
+  }
 
   async function updateFriendship() {
     if (
@@ -546,7 +585,12 @@
             <span>{$t('ui_edit_profile_15c4aa13')}</span>
           </a>
         {:else if onMessage && !isSystemUser(user) && user.profile_resolved !== false}
-          <button type="button" class="user-popover-primary" onclick={() => onMessage?.(user)}>
+          <button
+            type="button"
+            class="user-popover-primary"
+            disabled={relationshipBusy || relationshipType === 'blocked'}
+            onclick={() => onMessage?.(user)}
+          >
             <Icon name="message" size={17} />
             <span>{$t('ui_message_2f77668a')}</span>
           </button>
@@ -599,6 +643,22 @@
             <Icon name={feedback === 'Username copied' ? 'check' : 'copy'} size={17} />
             <span>{actionLabel('Username copied', 'Copy username')}</span>
           </button>
+        {/if}
+        {#if !isSelf && !isSystemUser(user) && !isApplicationUser(user) && user.profile_resolved !== false}
+          <button
+            type="button"
+            class:danger-action={relationshipType !== 'blocked'}
+            disabled={relationshipBusy || ['loading', 'unavailable'].includes(relationshipType)}
+            onclick={toggleBlock}
+          >
+            <Icon name="shield" size={17} />
+            <span
+              >{relationshipType === 'blocked'
+                ? $t('ui_unblock_712da631')
+                : $t('profile_block')}</span
+            >
+          </button>
+          <small class="block-help">{$t('profile_block_help')}</small>
         {/if}
         {#if developerMode.enabled}
           <button type="button" onclick={() => copyValue(entityRef(user), 'User ID copied')}>
@@ -1027,6 +1087,12 @@
 
   .user-role-picker p {
     padding: 10px 8px;
+  }
+
+  .block-help {
+    grid-column: 1 / -1;
+    color: var(--text-muted);
+    line-height: 1.4;
   }
 
   .user-popover-actions {

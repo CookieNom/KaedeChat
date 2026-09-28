@@ -590,7 +590,8 @@ final class _EmailVerificationDialogState
   Future<void> _verify() => _run(() async {
         final value = widget.token.text.trim();
         if (value.isEmpty) {
-          throw UserInputException('Enter the verification token.');
+          throw UserInputException(
+              'Enter the verification code or link from your email.');
         }
         await widget.repository.verifyEmail(value);
         if (mounted) Navigator.pop(context);
@@ -598,6 +599,7 @@ final class _EmailVerificationDialogState
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+        scrollable: true,
         title: Text(L10n.of(context).ui_verify_your_email_50ec3767),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -610,6 +612,8 @@ final class _EmailVerificationDialogState
             SizedBox(height: 14),
             TextField(
               controller: widget.token,
+              autocorrect: false,
+              enableSuggestions: false,
               enabled: !_busy,
               decoration: InputDecoration(
                   labelText: L10n.of(context).ui_verification_token_0c70a2ef),

@@ -16,6 +16,7 @@ def _action_email(
     action_url: str,
     expiry: str,
     ignore_message: str,
+    verification_code: str | None = None,
 ) -> OutboundEmail:
     safe_subject = escape(subject)
     safe_eyebrow = escape(eyebrow)
@@ -30,6 +31,15 @@ def _action_email(
         f"Kaede Chat\n\n{heading}\n\n{message}\n\n"
         f"{button_label}: {action_url}\n\n{expiry}\n\n{ignore_message}"
     )
+    code_html = ""
+    if verification_code is not None:
+        text += f"\n\nVerification code (paste into the mobile app):\n{verification_code}"
+        code_html = (
+            '<p style="margin:24px 0 0;font-size:14px;line-height:1.6;">'
+            "Verification code (paste into the mobile app):<br>"
+            '<code style="word-break:break-all;user-select:all;">'
+            f"{escape(verification_code)}</code></p>"
+        )
     html = f"""\
 <!doctype html>
 <html lang="en">
@@ -83,6 +93,7 @@ def _action_email(
                     </td>
                   </tr>
                 </table>
+                {code_html}
                 <p style="margin:24px 0 0;color:#756c63;font-size:13px;
                   line-height:1.6;">{safe_expiry}</p>
                 <p style="margin:12px 0 0;color:#756c63;font-size:13px;line-height:1.6;">
@@ -115,6 +126,7 @@ def verification_email(
 ) -> OutboundEmail:
     return _action_email(
         to=to,
+        verification_code=token,
         subject="Verify your Kaede Chat account",
         eyebrow="Email verification",
         heading="Finish creating your account.",

@@ -229,6 +229,23 @@ void main() {
     );
   });
 
+  for (final input in [
+    '  kc1_ot_secret  ',
+    'https://chat.example/verify#token=kc1_ot_secret',
+    'https://chat.example/verify?token=kc1_ot_secret',
+  ]) {
+    test('email verification accepts a code or email link: $input', () async {
+      final adapter = _JsonAdapter('{}');
+      final repository = KaedeRepository(KaedeApiClient(
+        vault: const SessionVault(),
+        httpClient: Dio()..httpClientAdapter = adapter,
+      ));
+      await repository.verifyEmail(input);
+      expect(adapter.request?.path, '/api/v1/auth/verify-email');
+      expect(adapter.request?.data, {'token': 'kc1_ot_secret'});
+    });
+  }
+
   test('channel reorder accepts the API empty response', () async {
     final adapter = _JsonAdapter('', status: 204);
     final repository = KaedeRepository(KaedeApiClient(

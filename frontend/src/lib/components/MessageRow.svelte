@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { verifiedMessageContent } from '$lib/chat/reconcile';
   import { t } from '$lib/ui/locale';
 
@@ -251,7 +252,8 @@
   );
   const threadCreatedNotice = $derived(message.message_type === 18);
   const pinnableMessage = $derived([0, 19, 20, 23].includes(message.message_type));
-  const resolvedReference = $derived(referencedMessage ?? message.referenced_message ?? null);
+  const reference = $derived(referencedMessage ?? message.referenced_message ?? null);
+  const resolvedReference = $derived(chatEntities.isMessageBlocked(reference) ? null : reference);
   const presentedMessage = $derived(
     message.message_type === 21 && resolvedReference ? resolvedReference : message
   );
@@ -838,987 +840,996 @@
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
 
-<article
-  bind:this={rowElement}
-  class:sending={message.pending ||
-    message.delivery_status === 'pending' ||
-    message.delivery_status === 'retrying'}
-  class:failed={message.failed || message.delivery_status === 'failed'}
-  class:compact
-  class:group-system-notice={groupSystemNotice}
-  class:menu-open={menuOpen}
-  class="message-row"
-  id={`${domIdPrefix}-${entityRef(message)}`}
-  oncontextmenu={openContextMenu}
->
-  <span class="visually-hidden" role="status" aria-live="polite">{feedback}</span>
-  {#if menuAvailable}
-    <button
-      class="visually-hidden"
-      type="button"
-      aria-label={`Open actions for message from ${authorName()} at ${accessibleTime()}`}
-      aria-haspopup="menu"
-      aria-expanded={menuOpen}
-      aria-controls={menuOpen ? `${domIdPrefix}-actions-${entityRef(message)}` : undefined}
-      onclick={openKeyboardMenu}
-    >
-      {$t('ui_message_actions_f532ee1f')}
-    </button>
-  {/if}
-  {#if !groupSystemNotice && (onForward || forwardUnavailableReason) && !message.deleted_at && menuAvailable}
-    <div class="message-hover-toolbar" aria-label={$t('ui_message_quick_actions_a394f823')}>
-      <button
-        type="button"
-        title={forwardUnavailableReason ?? $t('ui_forward_f1c65e14')}
-        aria-label={forwardUnavailableReason ?? $t('ui_forward_message_c3922b22')}
-        disabled={!onForward}
-        onclick={onForward ? forwardMessage : undefined}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="m14 5 6 7-6 7v-4H8a5 5 0 0 0-4 2c.5-5.5 3.3-9 10-9V5Z" />
-        </svg>
-      </button>
-    </div>
-  {/if}
-  <button
-    class="message-avatar"
-    class:profile-trigger={Boolean(
-      message.author?.profile_resolved !== false &&
-      message.author &&
-      !message.webhook &&
-      onViewProfile
-    )}
-    type="button"
-    disabled={message.author?.profile_resolved === false ||
-      !message.author ||
-      Boolean(message.webhook) ||
-      !onViewProfile}
-    aria-label={message.author
-      ? `View ${authorName()}'s profile`
-      : $t('ui_unknown_author_d5edd2d1')}
-    onclick={viewProfile}
+{#if !chatEntities.isMessageBlocked(message)}
+  <article
+    bind:this={rowElement}
+    class:sending={message.pending ||
+      message.delivery_status === 'pending' ||
+      message.delivery_status === 'retrying'}
+    class:failed={message.failed || message.delivery_status === 'failed'}
+    class:compact
+    class:group-system-notice={groupSystemNotice}
+    class:menu-open={menuOpen}
+    class="message-row"
+    id={`${domIdPrefix}-${entityRef(message)}`}
+    oncontextmenu={openContextMenu}
   >
-    {#if !compact && (message.webhook?.avatar_hash || message.author?.avatar_hash)}
-      <img
-        src={assetUrl(
-          message.webhook?.avatar_hash ?? message.author?.avatar_hash ?? '',
-          'thumbnail_128',
-          message.author?.origin_domain ?? message.origin_domain
-        )}
-        alt=""
-      />
-    {:else}
-      {compact
-        ? ''
-        : message.author?.profile_resolved === false
-          ? '•'
-          : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}
-    {/if}
-    {#if !compact && message.author && !message.webhook}
-      <i class={`presence-dot presence-${presence}`} aria-hidden="true"></i>
-    {/if}
-  </button>
-  <div class="message-body">
-    {#if hasMessageReference}
+    <span class="visually-hidden" role="status" aria-live="polite">{feedback}</span>
+    {#if menuAvailable}
       <button
-        class="message-reply-reference"
+        class="visually-hidden"
         type="button"
-        aria-label={$t('ui_jump_to_replied_message_7c430f3e')}
-        disabled={!onJumpToReference}
-        onclick={jumpToReference}
+        aria-label={`Open actions for message from ${authorName()} at ${accessibleTime()}`}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        aria-controls={menuOpen ? `${domIdPrefix}-actions-${entityRef(message)}` : undefined}
+        onclick={openKeyboardMenu}
       >
-        <span aria-hidden="true">↪</span>
-        {#if resolvedReference}
-          <strong
-            >{resolvedReference.author
-              ? userDisplayName(resolvedReference.author)
-              : $t('ui_unknown_author_d5edd2d1')}</strong
-          >
-          <span>{replyReferencePreview(resolvedReference)}</span>
-        {:else}
-          <span>{$t('ui_referenced_message_fe2c9054')}</span>
-        {/if}
+        {$t('ui_message_actions_f532ee1f')}
       </button>
     {/if}
-    {#if interactionAttribution}
-      <div class="message-interaction-attribution" aria-label={interactionAttribution}>
-        <span aria-hidden="true">↳</span>
-        <span>{interactionAttribution}</span>
-      </div>
-    {/if}
-    {#if !compact}
-      <header>
-        {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
-          <button
-            class="message-author"
-            style:color={authorColor}
-            type="button"
-            onclick={viewProfile}>{authorName()}</button
-          >
-        {:else}
-          <strong style:color={authorColor}>{authorName()}</strong>
-        {/if}
-        {#if authorIconRole?.icon_hash}
-          <img
-            class="message-role-icon"
-            src={assetUrl(authorIconRole.icon_hash, 'thumbnail_128', authorIconRole.origin_domain)}
-            alt={`${authorIconRole.name} role icon`}
-            title={authorIconRole.name}
-          />
-        {/if}
-        {#if message.webhook}<small class="webhook-badge">{$t('ui_webhook_47e276fc')}</small>{/if}
-        {#if isSystemUser(message.author)}<small
-            class="app-badge"
-            title="Official notice from this instance">SYSTEM</small
-          >{:else if isApplicationUser(message.author)}<small class="app-badge"
-            >{$t('ui_app_b7179fe7')}</small
-          >{/if}
-        {#if !presentedMessage.content_unavailable}<time
-            datetime={message.created_at}
-            title={accessibleTime()}>{visibleTime()}</time
-          >{/if}
-      </header>
-    {:else}
-      <span class="visually-hidden">{authorName()}, {accessibleTime()}</span>
-    {/if}
-    {#if presentedMessage.content_unavailable}
-      <p class="message-removed">{$t('ui_original_message_is_no_longer_available_eea619a3')}</p>
-    {:else if stageSystemNotice}
-      <div class="group-system-message stage-system-message">
-        <span class="group-system-icon" aria-hidden="true">🎙️</span>
-        <span>{stageSystemText}</span>
-        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
-      </div>
-    {:else if threadCreatedNotice}
-      <div class="group-system-message thread-created-message">
-        <span class="group-system-icon" aria-hidden="true">🧵</span>
-        <span>
-          <strong>{authorName()}</strong>
-          {$t('ui_started_a_thread_423d0b20')}
-          {#if message.thread && onOpenThread}
-            <button type="button" onclick={openProjectedThread}
-              >{message.thread.name ?? renderedContent ?? $t('ui_thread_5373c7f8')}</button
-            >
-          {:else}
-            <strong>{message.thread?.name ?? renderedContent ?? $t('ui_thread_5373c7f8')}</strong>
-          {/if}.
-          {#if onOpenThreads}
-            <button type="button" onclick={openThreadDirectory}
-              >{$t('ui_see_all_threads_5c483895')}</button
-            >
-          {/if}
-        </span>
-        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
-      </div>
-    {:else if pinSystemNotice}
-      <div class="group-system-message pin-system-message">
-        <span class="group-system-icon" aria-hidden="true">📌</span>
-        <span
-          ><strong>{authorName()}</strong>
-          {$t('ui_pinned_a_message_to_this_channel_670c145e')}</span
-        >
-        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
-      </div>
-    {:else if channelFollowSystemNotice}
-      <div class="group-system-message channel-follow-system-message">
-        <span class="group-system-icon" aria-hidden="true">📣</span>
-        <span>{channelFollowSystemText}</span>
-        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
-      </div>
-    {:else if groupSystemNotice}
-      <div class="group-system-message">
-        <span class="group-system-icon" aria-hidden="true">✦</span>
-        <span>{renderedContent}</span>
-        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
-      </div>
-    {:else if presentedMessage.deleted_at}
-      <p class="message-removed">{$t('ui_message_removed_e82a13c0')}</p>
-    {:else if presentedMessage.e2ee && presentedMessage.e2ee_verified !== true}
-      <div class="encrypted-message-unavailable" role="status">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="5" y="10" width="14" height="10" rx="2" />
-          <path d="M8 10V7a4 4 0 0 1 8 0v3" />
-        </svg>
-        <span>
-          <strong>{$t('ui_can_t_decrypt_this_message_on_this_device_77848735')}</strong>
-          {$t('ui_verify_or_recover_this_device_s_encryption_ke_fcf8e11d')}
-        </span>
-      </div>
-    {:else if gifUrl}
-      <div class="klipy-gif-wrap">
-        <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
-          <img src={gifUrl} alt={$t('ui_gif_shared_from_klipy_b69af59d')} loading="lazy" />
-          <small>{$t('ui_powered_by_klipy_e4105eb0')}</small>
-        </a>
+    {#if !groupSystemNotice && (onForward || forwardUnavailableReason) && !message.deleted_at && menuAvailable}
+      <div class="message-hover-toolbar" aria-label={$t('ui_message_quick_actions_a394f823')}>
         <button
-          class:active={gifFavorited}
-          class="sent-gif-favorite"
           type="button"
-          aria-label={gifFavorited
-            ? $t('ui_remove_gif_from_favorites_5a9d9b81')
-            : $t('ui_add_gif_to_favorites_11db6fd4')}
-          aria-pressed={gifFavorited}
-          onclick={favoriteGif}>★</button
+          title={forwardUnavailableReason ?? $t('ui_forward_f1c65e14')}
+          aria-label={forwardUnavailableReason ?? $t('ui_forward_message_c3922b22')}
+          disabled={!onForward}
+          onclick={onForward ? forwardMessage : undefined}
         >
-      </div>
-    {:else if renderedContent && !legacySticker}
-      <Markdown content={renderedContent} {mentionUsers} {mentionRoles} />
-      {#each inviteReferences as reference (reference)}
-        <InviteEmbed {reference} />
-      {/each}
-      {#each botInviteReferences as reference (`${reference.applicationRef}/${reference.templateSlug}`)}
-        <BotInviteEmbed {reference} />
-      {/each}
-      {#each directoryProductReferences as reference (reference.applicationRef)}
-        <DirectoryApplicationEmbed {reference} />
-      {/each}
-      {#if linkPreviewUrl && (presentedMessage.flags & 4) === 0}
-        <LinkPreview url={linkPreviewUrl} />
-      {/if}
-    {/if}
-    {#if !presentedMessage.deleted_at && richPresentationVerified && (stickerItems.length || legacySticker)}
-      <div class="message-stickers" aria-label={$t('ui_message_stickers_1daee018')}>
-        {#each stickerItems as item (`${item.id}@${item.origin_domain}`)}
-          <a
-            class="message-sticker"
-            href={stickerUrl(item.id, item.origin_domain)}
-            aria-label={`Sticker: ${item.name}`}
-          >
-            <img src={stickerUrl(item.id, item.origin_domain)} alt={item.name} loading="lazy" />
-          </a>
-        {:else}
-          {#if legacySticker}
-            <a
-              class="message-sticker"
-              href={stickerUrl(legacySticker.id, legacySticker.domain)}
-              aria-label={`Sticker: ${legacySticker.name}`}
-            >
-              <img
-                src={stickerUrl(legacySticker.id, legacySticker.domain)}
-                alt={legacySticker.name}
-                loading="lazy"
-              />
-            </a>
-          {/if}
-        {/each}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m14 5 6 7-6 7v-4H8a5 5 0 0 0-4 2c.5-5.5 3.3-9 10-9V5Z" />
+          </svg>
+        </button>
       </div>
     {/if}
-    {#if !presentedMessage.deleted_at && richPresentationVerified && hasForwardedSnapshot}
-      <ForwardedMessage
-        message={presentedMessage}
-        {mentionUsers}
-        {mentionRoles}
-        allowExternalMedia={!presentedMessage.e2ee}
-        allowEncryptedManifests={Boolean(
-          presentedMessage.e2ee && presentedMessage.e2ee_verified === true
-        )}
-      />
-    {/if}
-    {#if !presentedMessage.deleted_at && presentedMessage.message_type === 46}
-      {#if pollResult}
-        <MessagePollResult result={pollResult} />
+    <button
+      class="message-avatar"
+      class:profile-trigger={Boolean(
+        message.author?.profile_resolved !== false &&
+        message.author &&
+        !message.webhook &&
+        onViewProfile
+      )}
+      type="button"
+      disabled={message.author?.profile_resolved === false ||
+        !message.author ||
+        Boolean(message.webhook) ||
+        !onViewProfile}
+      aria-label={message.author
+        ? `View ${authorName()}'s profile`
+        : $t('ui_unknown_author_d5edd2d1')}
+      onclick={viewProfile}
+    >
+      {#if !compact && (message.webhook?.avatar_hash || message.author?.avatar_hash)}
+        <img
+          src={assetUrl(
+            message.webhook?.avatar_hash ?? message.author?.avatar_hash ?? '',
+            'thumbnail_128',
+            message.author?.origin_domain ?? message.origin_domain
+          )}
+          alt=""
+        />
       {:else}
-        <div class="encrypted-message-unavailable" role="status">
-          <span
-            ><strong>{$t('ui_poll_results_are_unavailable_06974d65')}</strong>
-            {$t('ui_the_result_could_not_be_verified_ea97f4c6')}</span
-          >
+        {compact
+          ? ''
+          : message.author?.profile_resolved === false
+            ? '•'
+            : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}
+      {/if}
+      {#if !compact && message.author && !message.webhook}
+        <i class={`presence-dot presence-${presence}`} aria-hidden="true"></i>
+      {/if}
+    </button>
+    <div class="message-body">
+      {#if hasMessageReference}
+        <button
+          class="message-reply-reference"
+          type="button"
+          aria-label={$t('ui_jump_to_replied_message_7c430f3e')}
+          disabled={!onJumpToReference}
+          onclick={jumpToReference}
+        >
+          <span aria-hidden="true">↪</span>
+          {#if resolvedReference}
+            <strong
+              >{resolvedReference.author
+                ? userDisplayName(resolvedReference.author)
+                : $t('ui_unknown_author_d5edd2d1')}</strong
+            >
+            <span>{replyReferencePreview(resolvedReference)}</span>
+          {:else}
+            <span>{$t('ui_referenced_message_fe2c9054')}</span>
+          {/if}
+        </button>
+      {/if}
+      {#if interactionAttribution}
+        <div class="message-interaction-attribution" aria-label={interactionAttribution}>
+          <span aria-hidden="true">↳</span>
+          <span>{interactionAttribution}</span>
         </div>
       {/if}
-    {/if}
-    {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.message_type !== 46 && presentedMessage.embeds?.length}
-      <div class="message-embeds">
-        {#each presentedMessage.embeds as embed, index (`${index}:${embed.title ?? ''}`)}
-          <RichEmbed
-            {embed}
-            attachments={presentedMessage.attachments ?? []}
-            {mentionUsers}
-            {mentionRoles}
-            allowExternalMedia={!presentedMessage.e2ee}
-          />
-        {/each}
-      </div>
-    {/if}
-    {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.poll}
-      <MessagePoll
-        poll={presentedMessage.poll}
-        channelRef={`${presentedMessage.channel_id}@${presentedMessage.channel_domain}`}
-        messageRef={`${presentedMessage.id}@${presentedMessage.origin_domain}`}
-        disabled={!actionsEnabled}
-        canClose={canClosePoll}
-        onUpdated={onMessageUpdate}
-      />
-    {/if}
-    {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.components?.length}
-      <MessageComponents
-        message={presentedMessage}
-        users={mentionUsers}
-        roles={mentionRoles}
-        channels={componentChannels}
-        guildRef={componentGuildRef}
-        disabled={!actionsEnabled}
-        allowExternalMedia={!presentedMessage.e2ee}
-        {resolveInteractionRequest}
-      />
-    {/if}
-    {#if message.thread && !threadCreatedNotice}
-      <button class="thread-preview-card" type="button" onclick={openProjectedThread}>
-        <span>
-          <strong>{message.thread.name ?? $t('ui_thread_5373c7f8')}</strong>
-          <b>
-            {message.thread.message_count ?? 0}
-            {(message.thread.message_count ?? 0) === 1
-              ? $t('ui_message_2f77668a')
-              : $t('ui_messages_04d7b483')} ›
-          </b>
-        </span>
-        <small>
-          {#if message.thread.last_message?.author}
-            <strong>{userDisplayName(message.thread.last_message.author)}</strong>
-          {/if}
-          {message.thread.last_message?.e2ee
-            ? $t('ui_encrypted_message_4cc7138f')
-            : (message.thread.last_message?.content ?? $t('ui_open_thread_a901aa25'))}
-        </small>
-      </button>
-    {/if}
-    {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.attachments?.length}
-      <div class="message-attachments">
-        {#each presentedMessage.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
-          {#if attachment.encryption_mode !== 'e2ee'}
-            <div
-              class="attachment-reportable"
-              class:media-reportable={attachment.content_type.startsWith('image/') ||
-                attachment.content_type.startsWith('video/')}
-              role="group"
-              aria-label={$t('ui_attachment_040d2b36')}
-              oncontextmenu={(event) =>
-                openAttachmentContextMenu(attachment, attachment.filename, event)}
+      {#if !compact}
+        <header>
+          {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
+            <button
+              class="message-author"
+              style:color={authorColor}
+              type="button"
+              onclick={viewProfile}>{authorName()}</button
             >
-              <AttachmentSpoiler
-                filename={attachment.filename}
-                identity={`${message.id}@${message.origin_domain}:${attachmentKey(attachment)}`}
+          {:else}
+            <strong style:color={authorColor}>{authorName()}</strong>
+          {/if}
+          {#if authorIconRole?.icon_hash}
+            <img
+              class="message-role-icon"
+              src={assetUrl(
+                authorIconRole.icon_hash,
+                'thumbnail_128',
+                authorIconRole.origin_domain
+              )}
+              alt={`${authorIconRole.name} role icon`}
+              title={authorIconRole.name}
+            />
+          {/if}
+          {#if message.webhook}<small class="webhook-badge">{$t('ui_webhook_47e276fc')}</small>{/if}
+          {#if isSystemUser(message.author)}<small
+              class="app-badge"
+              title="Official notice from this instance">SYSTEM</small
+            >{:else if isApplicationUser(message.author)}<small class="app-badge"
+              >{$t('ui_app_b7179fe7')}</small
+            >{/if}
+          {#if !presentedMessage.content_unavailable}<time
+              datetime={message.created_at}
+              title={accessibleTime()}>{visibleTime()}</time
+            >{/if}
+        </header>
+      {:else}
+        <span class="visually-hidden">{authorName()}, {accessibleTime()}</span>
+      {/if}
+      {#if presentedMessage.content_unavailable}
+        <p class="message-removed">{$t('ui_original_message_is_no_longer_available_eea619a3')}</p>
+      {:else if stageSystemNotice}
+        <div class="group-system-message stage-system-message">
+          <span class="group-system-icon" aria-hidden="true">🎙️</span>
+          <span>{stageSystemText}</span>
+          <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+        </div>
+      {:else if threadCreatedNotice}
+        <div class="group-system-message thread-created-message">
+          <span class="group-system-icon" aria-hidden="true">🧵</span>
+          <span>
+            <strong>{authorName()}</strong>
+            {$t('ui_started_a_thread_423d0b20')}
+            {#if message.thread && onOpenThread}
+              <button type="button" onclick={openProjectedThread}
+                >{message.thread.name ?? renderedContent ?? $t('ui_thread_5373c7f8')}</button
               >
-                {#if attachment.scan_status === 'pending'}
-                  <span class="attachment-file"
-                    >{$t('ui_scanning_value0_e879a8a2', {
-                      value0: String(attachment.filename)
-                    })}</span
-                  >
-                {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
-                  <span class="attachment-file"
-                    >{$t('ui_attachment_rejected_during_server_processing_8353b663')}</span
-                  >
-                {:else if attachment.scan_status === 'failed'}
-                  <span class="attachment-file"
-                    >{$t('ui_attachment_processing_unavailable_675a0424')}</span
-                  >
-                {:else if attachment.content_type.startsWith('image/')}
-                  {#if mediaFailures[attachmentKey(attachment)]}
-                    <div class="attachment-load-error" role="alert">
-                      <span>{mediaFailures[attachmentKey(attachment)]}</span>
-                      <button type="button" onclick={() => retryMedia(attachment)}
-                        >{$t('ui_try_again_d8b8392e')}</button
-                      >
-                    </div>
-                  {:else}
-                    {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
-                      <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
-                      <button
-                        class="attachment-preview-button"
-                        type="button"
-                        aria-label={`Open ${attachment.filename}`}
-                        onclick={() => (mediaViewer = attachment)}
-                      >
-                        <img
-                          use:authenticatedMedia={{
-                            path: attachmentMediaPath(
-                              attachment.origin_domain,
-                              attachment.id,
-                              'thumbnail_512',
-                              attachment.history_media_url
-                            ),
-                            contentType: attachment.content_type
-                          }}
-                          onerror={(event) => markMediaFailed(attachment, event)}
-                          alt={attachment.filename}
-                          width={attachment.width ?? 512}
-                          height={attachment.height ?? 320}
-                        />
-                      </button>
-                    {/key}
-                  {/if}
-                {:else if attachment.content_type.startsWith('video/')}
-                  {#if mediaFailures[attachmentKey(attachment)]}
-                    <div class="attachment-load-error" role="alert">
-                      <span>{mediaFailures[attachmentKey(attachment)]}</span>
-                      <button type="button" onclick={() => retryMedia(attachment)}
-                        >{$t('ui_try_again_d8b8392e')}</button
-                      >
-                    </div>
-                  {:else}
-                    {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
-                      <div class="attachment-video">
-                        <video
-                          use:authenticatedMedia={{
-                            path: attachmentMediaPath(
-                              attachment.origin_domain,
-                              attachment.id,
-                              'original',
-                              attachment.history_media_url
-                            ),
-                            contentType: attachment.content_type
-                          }}
-                          onerror={(event) => markMediaFailed(attachment, event)}
-                          controls
-                          playsinline
-                          preload="metadata"
-                        >
-                          <track kind="captions" />
-                        </video>
-                        <button type="button" onclick={() => (mediaViewer = attachment)}
-                          >{$t('ui_open_viewer_59afcc39')}</button
+            {:else}
+              <strong>{message.thread?.name ?? renderedContent ?? $t('ui_thread_5373c7f8')}</strong>
+            {/if}.
+            {#if onOpenThreads}
+              <button type="button" onclick={openThreadDirectory}
+                >{$t('ui_see_all_threads_5c483895')}</button
+              >
+            {/if}
+          </span>
+          <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+        </div>
+      {:else if pinSystemNotice}
+        <div class="group-system-message pin-system-message">
+          <span class="group-system-icon" aria-hidden="true">📌</span>
+          <span
+            ><strong>{authorName()}</strong>
+            {$t('ui_pinned_a_message_to_this_channel_670c145e')}</span
+          >
+          <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+        </div>
+      {:else if channelFollowSystemNotice}
+        <div class="group-system-message channel-follow-system-message">
+          <span class="group-system-icon" aria-hidden="true">📣</span>
+          <span>{channelFollowSystemText}</span>
+          <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+        </div>
+      {:else if groupSystemNotice}
+        <div class="group-system-message">
+          <span class="group-system-icon" aria-hidden="true">✦</span>
+          <span>{renderedContent}</span>
+          <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+        </div>
+      {:else if presentedMessage.deleted_at}
+        <p class="message-removed">{$t('ui_message_removed_e82a13c0')}</p>
+      {:else if presentedMessage.e2ee && presentedMessage.e2ee_verified !== true}
+        <div class="encrypted-message-unavailable" role="status">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="10" width="14" height="10" rx="2" />
+            <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+          </svg>
+          <span>
+            <strong>{$t('ui_can_t_decrypt_this_message_on_this_device_77848735')}</strong>
+            {$t('ui_verify_or_recover_this_device_s_encryption_ke_fcf8e11d')}
+          </span>
+        </div>
+      {:else if gifUrl}
+        <div class="klipy-gif-wrap">
+          <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
+            <img src={gifUrl} alt={$t('ui_gif_shared_from_klipy_b69af59d')} loading="lazy" />
+            <small>{$t('ui_powered_by_klipy_e4105eb0')}</small>
+          </a>
+          <button
+            class:active={gifFavorited}
+            class="sent-gif-favorite"
+            type="button"
+            aria-label={gifFavorited
+              ? $t('ui_remove_gif_from_favorites_5a9d9b81')
+              : $t('ui_add_gif_to_favorites_11db6fd4')}
+            aria-pressed={gifFavorited}
+            onclick={favoriteGif}>★</button
+          >
+        </div>
+      {:else if renderedContent && !legacySticker}
+        <Markdown content={renderedContent} {mentionUsers} {mentionRoles} />
+        {#each inviteReferences as reference (reference)}
+          <InviteEmbed {reference} />
+        {/each}
+        {#each botInviteReferences as reference (`${reference.applicationRef}/${reference.templateSlug}`)}
+          <BotInviteEmbed {reference} />
+        {/each}
+        {#each directoryProductReferences as reference (reference.applicationRef)}
+          <DirectoryApplicationEmbed {reference} />
+        {/each}
+        {#if linkPreviewUrl && (presentedMessage.flags & 4) === 0}
+          <LinkPreview url={linkPreviewUrl} />
+        {/if}
+      {/if}
+      {#if !presentedMessage.deleted_at && richPresentationVerified && (stickerItems.length || legacySticker)}
+        <div class="message-stickers" aria-label={$t('ui_message_stickers_1daee018')}>
+          {#each stickerItems as item (`${item.id}@${item.origin_domain}`)}
+            <a
+              class="message-sticker"
+              href={stickerUrl(item.id, item.origin_domain)}
+              aria-label={`Sticker: ${item.name}`}
+            >
+              <img src={stickerUrl(item.id, item.origin_domain)} alt={item.name} loading="lazy" />
+            </a>
+          {:else}
+            {#if legacySticker}
+              <a
+                class="message-sticker"
+                href={stickerUrl(legacySticker.id, legacySticker.domain)}
+                aria-label={`Sticker: ${legacySticker.name}`}
+              >
+                <img
+                  src={stickerUrl(legacySticker.id, legacySticker.domain)}
+                  alt={legacySticker.name}
+                  loading="lazy"
+                />
+              </a>
+            {/if}
+          {/each}
+        </div>
+      {/if}
+      {#if !presentedMessage.deleted_at && richPresentationVerified && hasForwardedSnapshot}
+        <ForwardedMessage
+          message={presentedMessage}
+          {mentionUsers}
+          {mentionRoles}
+          allowExternalMedia={!presentedMessage.e2ee}
+          allowEncryptedManifests={Boolean(
+            presentedMessage.e2ee && presentedMessage.e2ee_verified === true
+          )}
+        />
+      {/if}
+      {#if !presentedMessage.deleted_at && presentedMessage.message_type === 46}
+        {#if pollResult}
+          <MessagePollResult result={pollResult} />
+        {:else}
+          <div class="encrypted-message-unavailable" role="status">
+            <span
+              ><strong>{$t('ui_poll_results_are_unavailable_06974d65')}</strong>
+              {$t('ui_the_result_could_not_be_verified_ea97f4c6')}</span
+            >
+          </div>
+        {/if}
+      {/if}
+      {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.message_type !== 46 && presentedMessage.embeds?.length}
+        <div class="message-embeds">
+          {#each presentedMessage.embeds as embed, index (`${index}:${embed.title ?? ''}`)}
+            <RichEmbed
+              {embed}
+              attachments={presentedMessage.attachments ?? []}
+              {mentionUsers}
+              {mentionRoles}
+              allowExternalMedia={!presentedMessage.e2ee}
+            />
+          {/each}
+        </div>
+      {/if}
+      {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.poll}
+        <MessagePoll
+          poll={presentedMessage.poll}
+          channelRef={`${presentedMessage.channel_id}@${presentedMessage.channel_domain}`}
+          messageRef={`${presentedMessage.id}@${presentedMessage.origin_domain}`}
+          disabled={!actionsEnabled}
+          canClose={canClosePoll}
+          onUpdated={onMessageUpdate}
+        />
+      {/if}
+      {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.components?.length}
+        <MessageComponents
+          message={presentedMessage}
+          users={mentionUsers}
+          roles={mentionRoles}
+          channels={componentChannels}
+          guildRef={componentGuildRef}
+          disabled={!actionsEnabled}
+          allowExternalMedia={!presentedMessage.e2ee}
+          {resolveInteractionRequest}
+        />
+      {/if}
+      {#if message.thread && !threadCreatedNotice}
+        <button class="thread-preview-card" type="button" onclick={openProjectedThread}>
+          <span>
+            <strong>{message.thread.name ?? $t('ui_thread_5373c7f8')}</strong>
+            <b>
+              {message.thread.message_count ?? 0}
+              {(message.thread.message_count ?? 0) === 1
+                ? $t('ui_message_2f77668a')
+                : $t('ui_messages_04d7b483')} ›
+            </b>
+          </span>
+          <small>
+            {#if message.thread.last_message?.author}
+              <strong>{userDisplayName(message.thread.last_message.author)}</strong>
+            {/if}
+            {message.thread.last_message?.e2ee
+              ? $t('ui_encrypted_message_4cc7138f')
+              : (message.thread.last_message?.content ?? $t('ui_open_thread_a901aa25'))}
+          </small>
+        </button>
+      {/if}
+      {#if !presentedMessage.deleted_at && richPresentationVerified && presentedMessage.attachments?.length}
+        <div class="message-attachments">
+          {#each presentedMessage.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
+            {#if attachment.encryption_mode !== 'e2ee'}
+              <div
+                class="attachment-reportable"
+                class:media-reportable={attachment.content_type.startsWith('image/') ||
+                  attachment.content_type.startsWith('video/')}
+                role="group"
+                aria-label={$t('ui_attachment_040d2b36')}
+                oncontextmenu={(event) =>
+                  openAttachmentContextMenu(attachment, attachment.filename, event)}
+              >
+                <AttachmentSpoiler
+                  filename={attachment.filename}
+                  identity={`${message.id}@${message.origin_domain}:${attachmentKey(attachment)}`}
+                >
+                  {#if attachment.scan_status === 'pending'}
+                    <span class="attachment-file"
+                      >{$t('ui_scanning_value0_e879a8a2', {
+                        value0: String(attachment.filename)
+                      })}</span
+                    >
+                  {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
+                    <span class="attachment-file"
+                      >{$t('ui_attachment_rejected_during_server_processing_8353b663')}</span
+                    >
+                  {:else if attachment.scan_status === 'failed'}
+                    <span class="attachment-file"
+                      >{$t('ui_attachment_processing_unavailable_675a0424')}</span
+                    >
+                  {:else if attachment.content_type.startsWith('image/')}
+                    {#if mediaFailures[attachmentKey(attachment)]}
+                      <div class="attachment-load-error" role="alert">
+                        <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                        <button type="button" onclick={() => retryMedia(attachment)}
+                          >{$t('ui_try_again_d8b8392e')}</button
                         >
                       </div>
-                    {/key}
-                  {/if}
-                {:else if attachment.content_type.startsWith('audio/')}
-                  {#if mediaFailures[attachmentKey(attachment)]}
-                    <div class="attachment-load-error" role="alert">
-                      <span>{mediaFailures[attachmentKey(attachment)]}</span>
-                      <button type="button" onclick={() => retryMedia(attachment)}
-                        >{$t('ui_try_again_d8b8392e')}</button
-                      >
-                    </div>
+                    {:else}
+                      {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                        <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
+                        <button
+                          class="attachment-preview-button"
+                          type="button"
+                          aria-label={`Open ${attachment.filename}`}
+                          onclick={() => (mediaViewer = attachment)}
+                        >
+                          <img
+                            use:authenticatedMedia={{
+                              path: attachmentMediaPath(
+                                attachment.origin_domain,
+                                attachment.id,
+                                'thumbnail_512',
+                                attachment.history_media_url
+                              ),
+                              contentType: attachment.content_type
+                            }}
+                            onerror={(event) => markMediaFailed(attachment, event)}
+                            alt={attachment.filename}
+                            width={attachment.width ?? 512}
+                            height={attachment.height ?? 320}
+                          />
+                        </button>
+                      {/key}
+                    {/if}
+                  {:else if attachment.content_type.startsWith('video/')}
+                    {#if mediaFailures[attachmentKey(attachment)]}
+                      <div class="attachment-load-error" role="alert">
+                        <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                        <button type="button" onclick={() => retryMedia(attachment)}
+                          >{$t('ui_try_again_d8b8392e')}</button
+                        >
+                      </div>
+                    {:else}
+                      {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                        <div class="attachment-video">
+                          <video
+                            use:authenticatedMedia={{
+                              path: attachmentMediaPath(
+                                attachment.origin_domain,
+                                attachment.id,
+                                'original',
+                                attachment.history_media_url
+                              ),
+                              contentType: attachment.content_type
+                            }}
+                            onerror={(event) => markMediaFailed(attachment, event)}
+                            controls
+                            playsinline
+                            preload="metadata"
+                          >
+                            <track kind="captions" />
+                          </video>
+                          <button type="button" onclick={() => (mediaViewer = attachment)}
+                            >{$t('ui_open_viewer_59afcc39')}</button
+                          >
+                        </div>
+                      {/key}
+                    {/if}
+                  {:else if attachment.content_type.startsWith('audio/')}
+                    {#if mediaFailures[attachmentKey(attachment)]}
+                      <div class="attachment-load-error" role="alert">
+                        <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                        <button type="button" onclick={() => retryMedia(attachment)}
+                          >{$t('ui_try_again_d8b8392e')}</button
+                        >
+                      </div>
+                    {:else}
+                      {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                        <VoiceMessagePlayer
+                          {attachment}
+                          onError={(event) => markMediaFailed(attachment, event)}
+                        />
+                      {/key}
+                    {/if}
                   {:else}
-                    {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
-                      <VoiceMessagePlayer
-                        {attachment}
-                        onError={(event) => markMediaFailed(attachment, event)}
-                      />
-                    {/key}
+                    <button
+                      type="button"
+                      class="attachment-file"
+                      onclick={() => void downloadAttachment(attachment)}
+                    >
+                      📎 {attachment.filename}
+                    </button>
                   {/if}
+                </AttachmentSpoiler>
+              </div>
+            {/if}
+          {/each}
+        </div>
+        {#if attachmentActionError}
+          <p class="form-error" role="alert">{attachmentActionError}</p>
+        {/if}
+      {/if}
+      {#if !presentedMessage.deleted_at && presentedMessage.e2ee && presentedMessage.e2ee_verified === true && presentedMessage.decrypted_attachments?.length}
+        <div class="message-attachments encrypted-attachments">
+          {#each presentedMessage.decrypted_attachments as manifest (manifest.file_id)}
+            {@const encryptedAttachment = attachmentForManifest(manifest)}
+            <div
+              class="attachment-reportable"
+              role="group"
+              aria-label={$t('ui_encrypted_attachment_2e68f4d8')}
+              oncontextmenu={(event) =>
+                encryptedAttachment &&
+                openAttachmentContextMenu(encryptedAttachment, manifest.filename, event, manifest)}
+            >
+              <AttachmentSpoiler
+                filename={manifest.filename}
+                identity={`${message.id}@${message.origin_domain}:${manifest.file_id}`}
+              >
+                {#if manifest.duration_millis !== undefined && manifest.waveform !== undefined}
+                  <EncryptedVoiceMessagePlayer
+                    {manifest}
+                    attachment={encryptedAttachment}
+                    onError={(caught) =>
+                      (attachmentActionError = userErrorMessage(
+                        caught,
+                        'Could not decrypt this voice message on this device.'
+                      ))}
+                  />
                 {:else}
                   <button
                     type="button"
                     class="attachment-file"
-                    onclick={() => void downloadAttachment(attachment)}
+                    onclick={() => void downloadDecryptedAttachment(manifest)}
                   >
-                    📎 {attachment.filename}
+                    {$t('ui_value0_value1_kb_9babfc33', {
+                      value0: String(manifest.filename),
+                      value1: String(Math.max(1, Math.ceil(manifest.plaintext_size / 1024)))
+                    })}
                   </button>
                 {/if}
               </AttachmentSpoiler>
             </div>
+          {/each}
+        </div>
+        {#if attachmentActionError}
+          <p class="form-error" role="alert">{attachmentActionError}</p>
+        {/if}
+      {/if}
+      {#if isPublishedAnnouncement(message) || message.edited_at || message.failed || message.delivery_status === 'failed' || message.delivery_status === 'retrying' || message.queued}
+        <div class="message-meta-actions">
+          {#if isPublishedAnnouncement(message)}<small>{$t('ui_published_9729bcba')}</small>{/if}
+          {#if message.edited_at}<small>{$t('ui_edited_de44febe')}</small>{/if}
+          {#if message.failed || message.delivery_status === 'failed'}
+            <small class="delivery-failed" role="status">
+              {message.failure_reason ?? $t('ui_message_not_delivered_fcbc0d08')}
+            </small>
           {/if}
-        {/each}
-      </div>
-      {#if attachmentActionError}
-        <p class="form-error" role="alert">{attachmentActionError}</p>
-      {/if}
-    {/if}
-    {#if !presentedMessage.deleted_at && presentedMessage.e2ee && presentedMessage.e2ee_verified === true && presentedMessage.decrypted_attachments?.length}
-      <div class="message-attachments encrypted-attachments">
-        {#each presentedMessage.decrypted_attachments as manifest (manifest.file_id)}
-          {@const encryptedAttachment = attachmentForManifest(manifest)}
-          <div
-            class="attachment-reportable"
-            role="group"
-            aria-label={$t('ui_encrypted_attachment_2e68f4d8')}
-            oncontextmenu={(event) =>
-              encryptedAttachment &&
-              openAttachmentContextMenu(encryptedAttachment, manifest.filename, event, manifest)}
-          >
-            <AttachmentSpoiler
-              filename={manifest.filename}
-              identity={`${message.id}@${message.origin_domain}:${manifest.file_id}`}
+          {#if message.delivery_status === 'retrying'}
+            <small role="status">
+              {message.failure_reason ??
+                $t('ui_the_receiving_instance_is_temporarily_at_capa_ba03d730')}
+            </small>
+          {/if}
+          {#if (message.failed || message.delivery_status === 'failed') && onRetry && message.retryable !== false}
+            <button type="button" onclick={() => onRetry?.(message)}
+              >{$t('ui_retry_942087cc')}</button
             >
-              {#if manifest.duration_millis !== undefined && manifest.waveform !== undefined}
-                <EncryptedVoiceMessagePlayer
-                  {manifest}
-                  attachment={encryptedAttachment}
-                  onError={(caught) =>
-                    (attachmentActionError = userErrorMessage(
-                      caught,
-                      'Could not decrypt this voice message on this device.'
-                    ))}
-                />
-              {:else}
-                <button
-                  type="button"
-                  class="attachment-file"
-                  onclick={() => void downloadDecryptedAttachment(manifest)}
-                >
-                  {$t('ui_value0_value1_kb_9babfc33', {
-                    value0: String(manifest.filename),
-                    value1: String(Math.max(1, Math.ceil(manifest.plaintext_size / 1024)))
-                  })}
-                </button>
-              {/if}
-            </AttachmentSpoiler>
-          </div>
-        {/each}
-      </div>
-      {#if attachmentActionError}
-        <p class="form-error" role="alert">{attachmentActionError}</p>
+          {:else if message.queued}
+            <small>{$t('ui_queued_for_the_guild_home_aada1e2c')}</small>
+          {/if}
+        </div>
       {/if}
-    {/if}
-    {#if isPublishedAnnouncement(message) || message.edited_at || message.failed || message.delivery_status === 'failed' || message.delivery_status === 'retrying' || message.queued}
-      <div class="message-meta-actions">
-        {#if isPublishedAnnouncement(message)}<small>{$t('ui_published_9729bcba')}</small>{/if}
-        {#if message.edited_at}<small>{$t('ui_edited_de44febe')}</small>{/if}
-        {#if message.failed || message.delivery_status === 'failed'}
-          <small class="delivery-failed" role="status">
-            {message.failure_reason ?? $t('ui_message_not_delivered_fcbc0d08')}
-          </small>
-        {/if}
-        {#if message.delivery_status === 'retrying'}
-          <small role="status">
-            {message.failure_reason ??
-              $t('ui_the_receiving_instance_is_temporarily_at_capa_ba03d730')}
-          </small>
-        {/if}
-        {#if (message.failed || message.delivery_status === 'failed') && onRetry && message.retryable !== false}
-          <button type="button" onclick={() => onRetry?.(message)}>{$t('ui_retry_942087cc')}</button
-          >
-        {:else if message.queued}
-          <small>{$t('ui_queued_for_the_guild_home_aada1e2c')}</small>
-        {/if}
-      </div>
-    {/if}
-  </div>
-  {#if !message.deleted_at && (reactionEntries.length || showPostFooter)}
-    <div class:post-footer={showPostFooter} class="message-footer-actions">
-      <div class="message-reactions" aria-label={$t('ui_message_reactions_db75b1a3')}>
-        {#each reactionEntries as [emoji, count] (emoji)}
-          <button
-            class:active={messageHasOwnReaction(message, emoji)}
-            type="button"
-            disabled={!onToggleReaction ||
-              reactionBusy ||
-              (!canReact && !canReactToExisting && !messageHasOwnReaction(message, emoji))}
-            aria-label={`${messageHasOwnReaction(message, emoji) ? $t('ui_remove_c3812fc4') : $t('ui_add_9fd728c6')} ${emoji} reaction, ${count}`}
-            onclick={(event) => void toggleReaction(emoji, event)}
-          >
-            <ReactionEmoji value={emoji} /><span>{count}</span>
-          </button>
-        {/each}
-        {#if showPostFooter && canReact && onToggleReaction}
-          <button
-            class:labeled={!reactionEntries.length}
-            class="add-reaction"
-            type="button"
-            disabled={reactionBusy}
-            aria-label={reactionEntries.length
-              ? $t('ui_add_reaction_d97239a6')
-              : $t('ui_react_to_post_5f4e5260')}
-            title={reactionEntries.length
-              ? $t('ui_add_reaction_d97239a6')
-              : $t('ui_react_to_post_5f4e5260')}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen && reactionPickerOpen}
-            aria-controls={menuOpen ? `${domIdPrefix}-actions-${entityRef(message)}` : undefined}
-            onclick={openInlineReactionPicker}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
-            </svg>
-            {#if !reactionEntries.length}<span>{$t('ui_react_to_post_5f4e5260')}</span>{/if}
-          </button>
-        {/if}
-      </div>
-      {#if showPostFooter}
-        <div class="post-footer-controls">
-          {#if onPostFollow}
+    </div>
+    {#if !message.deleted_at && (reactionEntries.length || showPostFooter)}
+      <div class:post-footer={showPostFooter} class="message-footer-actions">
+        <div class="message-reactions" aria-label={$t('ui_message_reactions_db75b1a3')}>
+          {#each reactionEntries as [emoji, count] (emoji)}
             <button
-              class="post-follow-action"
+              class:active={messageHasOwnReaction(message, emoji)}
               type="button"
-              disabled={postFollowDisabled}
-              aria-pressed={postFollowing}
-              onclick={() => void onPostFollow?.(!postFollowing)}
+              disabled={!onToggleReaction ||
+                reactionBusy ||
+                (!canReact && !canReactToExisting && !messageHasOwnReaction(message, emoji))}
+              aria-label={`${messageHasOwnReaction(message, emoji) ? $t('ui_remove_c3812fc4') : $t('ui_add_9fd728c6')} ${emoji} reaction, ${count}`}
+              onclick={(event) => void toggleReaction(emoji, event)}
+            >
+              <ReactionEmoji value={emoji} /><span>{count}</span>
+            </button>
+          {/each}
+          {#if showPostFooter && canReact && onToggleReaction}
+            <button
+              class:labeled={!reactionEntries.length}
+              class="add-reaction"
+              type="button"
+              disabled={reactionBusy}
+              aria-label={reactionEntries.length
+                ? $t('ui_add_reaction_d97239a6')
+                : $t('ui_react_to_post_5f4e5260')}
+              title={reactionEntries.length
+                ? $t('ui_add_reaction_d97239a6')
+                : $t('ui_react_to_post_5f4e5260')}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen && reactionPickerOpen}
+              aria-controls={menuOpen ? `${domIdPrefix}-actions-${entityRef(message)}` : undefined}
+              onclick={openInlineReactionPicker}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+                <circle cx="12" cy="12" r="9" />
+                <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
               </svg>
-              <span>{postFollowing ? $t('ui_following_344b4271') : $t('ui_follow_641d1ef6')}</span>
+              {#if !reactionEntries.length}<span>{$t('ui_react_to_post_5f4e5260')}</span>{/if}
+            </button>
+          {/if}
+        </div>
+        {#if showPostFooter}
+          <div class="post-footer-controls">
+            {#if onPostFollow}
+              <button
+                class="post-follow-action"
+                type="button"
+                disabled={postFollowDisabled}
+                aria-pressed={postFollowing}
+                onclick={() => void onPostFollow?.(!postFollowing)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+                </svg>
+                <span>{postFollowing ? $t('ui_following_344b4271') : $t('ui_follow_641d1ef6')}</span
+                >
+              </button>
+            {/if}
+            <button
+              class="post-link-action"
+              type="button"
+              aria-label={$t('ui_copy_post_link_5e22f684')}
+              title={$t('ui_copy_post_link_5e22f684')}
+              onclick={(event) => void copy(postLink(), event)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2" />
+                <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+      </div>
+    {/if}
+    {#if menuOpen}
+      <div
+        use:portal
+        bind:this={menuElement}
+        id={`${domIdPrefix}-actions-${entityRef(message)}`}
+        class="message-context-menu"
+        role="menu"
+        tabindex="-1"
+        aria-label={contextAttachment
+          ? `Attachment actions for ${contextAttachment.label}`
+          : $t('ui_message_actions_f532ee1f')}
+        onkeydown={menuKeydown}
+      >
+        {#if reactionPickerOpen}
+          <ReactionPicker
+            {customEmojis}
+            onSelect={(value) => void toggleReaction(value)}
+            onClose={() => {
+              if (reactionPickerOnly) closeMenu(true);
+              else reactionPickerOpen = false;
+            }}
+          />
+        {:else}
+          {#if !groupSystemNotice}
+            {#if canReact && onToggleReaction && !message.deleted_at}
+              <div class="quick-reactions" aria-label={$t('ui_recent_reactions_2c92d9b5')}>
+                {#each recentReactionValues as emoji (emoji)}
+                  <button
+                    class:active={messageHasOwnReaction(message, emoji)}
+                    type="button"
+                    role="menuitem"
+                    tabindex="-1"
+                    title={`React with ${emoji}`}
+                    onclick={(event) => void toggleReaction(emoji, event)}
+                    ><ReactionEmoji value={emoji} /></button
+                  >
+                {/each}
+              </div>
+              <button type="button" role="menuitem" tabindex="-1" onclick={openReactionPicker}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+                </svg>
+                <span>{$t('ui_add_reaction_d97239a6')}</span>
+              </button>
+            {/if}
+            {#if Object.keys(message.reaction_counts ?? {}).length > 0}
+              <button type="button" role="menuitem" tabindex="-1" onclick={openReactionViewer}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="9" cy="9" r="3" />
+                  <circle cx="17" cy="10" r="2.5" />
+                  <path d="M3.5 19c.6-3.2 2.4-5 5.5-5s4.9 1.8 5.5 5M14 15c2.9-.7 5.1.6 6 3" />
+                </svg>
+                <span>{$t('ui_view_reactions_28a6c34e')}</span>
+              </button>
+            {/if}
+            {#if onMessageAuthor && message.author && !message.deleted_at}
+              <button type="button" role="menuitem" tabindex="-1" onclick={messageAuthor}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 15a4 4 0 0 1-4 4H8l-4 2V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8Z" />
+                </svg>
+                <span
+                  >{$t('ui_message_value0_ddd26fd6', {
+                    value0: String(userDisplayName(message.author))
+                  })}</span
+                >
+              </button>
+            {/if}
+            {#if onMarkRead && !message.deleted_at}
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                disabled={markingRead}
+                onclick={() => {
+                  closeMenu();
+                  void onMarkRead?.();
+                }}
+              >
+                <span>{$t('chat_mark_read')}</span>
+              </button>
+            {/if}
+            {#if onMarkUnread && !message.deleted_at}
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={() => {
+                  closeMenu();
+                  onMarkUnread?.(message);
+                }}
+              >
+                <span>{$t('chat_mark_unread')}</span>
+              </button>
+            {/if}
+            {#if onReply && !message.deleted_at}
+              <button type="button" role="menuitem" tabindex="-1" onclick={replyToMessage}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m9 8-5 4 5 4v-3h4c3.5 0 5.8 1.4 7 4-.2-5.8-3.3-9-9-9H9Z" />
+                </svg>
+                <span>{$t('ui_reply_c253f451')}</span>
+              </button>
+            {/if}
+            {#if (onForward || forwardUnavailableReason) && !contextAttachment && !message.deleted_at}
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                title={forwardUnavailableReason ?? $t('ui_forward_f1c65e14')}
+                disabled={!onForward}
+                onclick={onForward ? forwardMessage : undefined}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m14 5 6 7-6 7v-4H8a5 5 0 0 0-4 2c.5-5.5 3.3-9 10-9V5Z" />
+                </svg>
+                <span>{$t('ui_forward_f1c65e14')}</span>
+              </button>
+            {/if}
+            {#if publishAvailable && !contextAttachment}
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                disabled={publishing}
+                onclick={publishMessage}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 13V9l12-5v14L4 13Z" />
+                  <path d="M8 14v5h4v-3M19 8c1.3 1 1.3 7 0 8" />
+                </svg>
+                <span
+                  >{publishing
+                    ? $t('ui_publishing_582e0f1a')
+                    : $t('ui_publish_message_891eaa99')}</span
+                >
+              </button>
+            {/if}
+            {#if !contextAttachment && onApplicationCommand && !message.deleted_at}
+              <AppContextCommandMenu
+                id={`${domIdPrefix}-apps-${entityRef(message)}`}
+                entries={appContextCommands}
+                accountRef={contextCommandAccountRef}
+                onSelect={runApplicationCommand}
+                menuItem
+              />
+            {/if}
+            {#if onCreateThread && !message.deleted_at}
+              <button type="button" role="menuitem" tabindex="-1" onclick={createThread}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 3v12a4 4 0 0 0 4 4h8M3 7h8M15 15l4 4-4 4" />
+                </svg>
+                <span>{$t('ui_create_thread_4ce9bbfd')}</span>
+              </button>
+            {/if}
+            {#if onTogglePin && pinnableMessage && !message.deleted_at}
+              <button type="button" role="menuitem" tabindex="-1" onclick={togglePin}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m9 3 6 6-2 2 4 4-2 2-4-4-2 2-6-6 6-6Z" />
+                  <path d="m9 15-5 5" />
+                </svg>
+                <span
+                  >{pinned ? $t('ui_unpin_message_be8d20ff') : $t('ui_pin_message_b936d778')}</span
+                >
+              </button>
+            {/if}
+            {#if gifUrl}
+              <button type="button" role="menuitem" tabindex="-1" onclick={favoriteGif}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"
+                  />
+                </svg>
+                <span
+                  >{gifFavorited
+                    ? $t('ui_remove_from_gif_favorites_8c58e715')
+                    : $t('ui_add_to_gif_favorites_302aa406')}</span
+                >
+              </button>
+            {/if}
+            {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
+              <button type="button" role="menuitem" tabindex="-1" onclick={viewProfile}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 21a8 8 0 0 1 16 0" />
+                </svg>
+                <span>{$t('ui_view_profile_d4788f25')}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={(event) => {
+                  const handle = message.author ? userPublicHandle(message.author) : null;
+                  if (handle) void copy(`@${handle}`, event);
+                }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M16 8a4 4 0 1 1-4-4c4 0 7 3 7 7v1a3 3 0 0 1-6 0V8" />
+                  <path d="M19 19a9 9 0 1 1 2-4" />
+                </svg>
+                <span>{$t('ui_copy_username_7ba3cdab')}</span>
+              </button>
+              {#if developerMode.enabled}
+                <button
+                  type="button"
+                  role="menuitem"
+                  tabindex="-1"
+                  onclick={(event) => copy(`${message.author_id}@${message.author_domain}`, event)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
+                  </svg>
+                  <span>{$t('ui_copy_technical_user_id_8b1326bb')}</span>
+                </button>
+              {/if}
+            {/if}
+            {#if message.author && moderationActions.length && onModerate}
+              {#each moderationActions as action, index (action.id)}
+                <button
+                  class:menu-separator={index === 0}
+                  class:danger-item={action.id === 'kick' || action.id === 'ban'}
+                  type="button"
+                  role="menuitem"
+                  tabindex="-1"
+                  onclick={(event) => moderateAuthor(action.id, event)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    {#if action.id === 'timeout'}
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M12 7v5l3 2" />
+                    {:else}
+                      <path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z" />
+                    {/if}
+                  </svg>
+                  <span>{action.label} {userDisplayName(message.author)}</span>
+                </button>
+              {/each}
+            {/if}
+            {#if !message.deleted_at && (renderedContent || presentedMessage.attachments?.length || (presentedMessage.e2ee && presentedMessage.e2ee_verified === true && presentedMessage.decrypted_attachments?.length))}
+              <button type="button" role="menuitem" tabindex="-1" onclick={reportMessageFromMenu}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 21V4m0 1h11l-2 4 2 4H5" />
+                </svg>
+                <span>{$t('ui_report_message_0a1e3c52')}</span>
+              </button>
+            {/if}
+            {#if contextAttachment?.attachment.content_type.startsWith('image/')}
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={(event) => copyImage(contextAttachment!.attachment, event)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="4" width="18" height="16" rx="2" />
+                  <circle cx="9" cy="10" r="2" />
+                  <path d="m5 18 4-4 3 3 2-2 5 3" />
+                </svg>
+                <span>{$t('ui_copy_image_3cb27ae0')}</span>
+              </button>
+            {/if}
+            {#if editAvailable}
+              <button
+                class:menu-separator={Boolean(onMessageAuthor && message.author)}
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={editMessage}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m4 16-.8 4.8L8 20l11-11-4-4L4 16Z" />
+                  <path d="m13.5 6.5 4 4" />
+                </svg>
+                <span>{$t('ui_edit_message_9757ccd5')}</span>
+                <kbd>↑</kbd>
+              </button>
+            {/if}
+          {/if}
+          {#if deleteAvailable}
+            {#if confirmingDelete}
+              <div
+                class="message-delete-confirmation"
+                role="group"
+                aria-label={$t('ui_confirm_deletion_fa57243d')}
+              >
+                <p>{$t('ui_delete_this_message_8f6e2cda')}</p>
+                <div>
+                  <button type="button" role="menuitem" tabindex="-1" onclick={cancelDelete}>
+                    {$t('ui_cancel_19766ed6')}
+                  </button>
+                  <button
+                    bind:this={deleteConfirmationButton}
+                    class="danger-item"
+                    type="button"
+                    role="menuitem"
+                    tabindex="-1"
+                    onclick={deleteMessage}
+                  >
+                    {$t('ui_delete_e2d0a549')}
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <button
+                class="danger-item"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={requestDelete}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6" />
+                </svg>
+                <span>{$t('ui_delete_message_87e7176a')}</span>
+              </button>
+            {/if}
+          {/if}
+          {#if !groupSystemNotice && renderedContent && !message.deleted_at}
+            <button
+              class:menu-separator={editAvailable || Boolean(onMessageAuthor)}
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={(event) => copy(renderedContent ?? '', event)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 8h11v12H8z" />
+                <path d="M16 8V4H4v12h4" />
+              </svg>
+              <span>{$t('ui_copy_text_b0ac9cea')}</span>
             </button>
           {/if}
           <button
-            class="post-link-action"
             type="button"
-            aria-label={$t('ui_copy_post_link_5e22f684')}
-            title={$t('ui_copy_post_link_5e22f684')}
-            onclick={(event) => void copy(postLink(), event)}
+            role="menuitem"
+            tabindex="-1"
+            onclick={(event) => copy(messageLink(), event)}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2" />
               <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" />
             </svg>
+            <span>{$t('ui_copy_message_link_abf4d193')}</span>
           </button>
-        </div>
-      {/if}
-    </div>
-  {/if}
-  {#if menuOpen}
-    <div
-      use:portal
-      bind:this={menuElement}
-      id={`${domIdPrefix}-actions-${entityRef(message)}`}
-      class="message-context-menu"
-      role="menu"
-      tabindex="-1"
-      aria-label={contextAttachment
-        ? `Attachment actions for ${contextAttachment.label}`
-        : $t('ui_message_actions_f532ee1f')}
-      onkeydown={menuKeydown}
-    >
-      {#if reactionPickerOpen}
-        <ReactionPicker
-          {customEmojis}
-          onSelect={(value) => void toggleReaction(value)}
-          onClose={() => {
-            if (reactionPickerOnly) closeMenu(true);
-            else reactionPickerOpen = false;
-          }}
-        />
-      {:else}
-        {#if !groupSystemNotice}
-          {#if canReact && onToggleReaction && !message.deleted_at}
-            <div class="quick-reactions" aria-label={$t('ui_recent_reactions_2c92d9b5')}>
-              {#each recentReactionValues as emoji (emoji)}
-                <button
-                  class:active={messageHasOwnReaction(message, emoji)}
-                  type="button"
-                  role="menuitem"
-                  tabindex="-1"
-                  title={`React with ${emoji}`}
-                  onclick={(event) => void toggleReaction(emoji, event)}
-                  ><ReactionEmoji value={emoji} /></button
-                >
-              {/each}
-            </div>
-            <button type="button" role="menuitem" tabindex="-1" onclick={openReactionPicker}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
-              </svg>
-              <span>{$t('ui_add_reaction_d97239a6')}</span>
-            </button>
-          {/if}
-          {#if Object.keys(message.reaction_counts ?? {}).length > 0}
-            <button type="button" role="menuitem" tabindex="-1" onclick={openReactionViewer}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="9" cy="9" r="3" />
-                <circle cx="17" cy="10" r="2.5" />
-                <path d="M3.5 19c.6-3.2 2.4-5 5.5-5s4.9 1.8 5.5 5M14 15c2.9-.7 5.1.6 6 3" />
-              </svg>
-              <span>{$t('ui_view_reactions_28a6c34e')}</span>
-            </button>
-          {/if}
-          {#if onMessageAuthor && message.author && !message.deleted_at}
-            <button type="button" role="menuitem" tabindex="-1" onclick={messageAuthor}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20 15a4 4 0 0 1-4 4H8l-4 2V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8Z" />
-              </svg>
-              <span
-                >{$t('ui_message_value0_ddd26fd6', {
-                  value0: String(userDisplayName(message.author))
-                })}</span
-              >
-            </button>
-          {/if}
-          {#if onMarkRead && !message.deleted_at}
+          {#if developerMode.enabled}
             <button
               type="button"
               role="menuitem"
               tabindex="-1"
-              disabled={markingRead}
-              onclick={() => {
-                closeMenu();
-                void onMarkRead?.();
-              }}
-            >
-              <span>{$t('chat_mark_read')}</span>
-            </button>
-          {/if}
-          {#if onMarkUnread && !message.deleted_at}
-            <button
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              onclick={() => {
-                closeMenu();
-                onMarkUnread?.(message);
-              }}
-            >
-              <span>{$t('chat_mark_unread')}</span>
-            </button>
-          {/if}
-          {#if onReply && !message.deleted_at}
-            <button type="button" role="menuitem" tabindex="-1" onclick={replyToMessage}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m9 8-5 4 5 4v-3h4c3.5 0 5.8 1.4 7 4-.2-5.8-3.3-9-9-9H9Z" />
-              </svg>
-              <span>{$t('ui_reply_c253f451')}</span>
-            </button>
-          {/if}
-          {#if (onForward || forwardUnavailableReason) && !contextAttachment && !message.deleted_at}
-            <button
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              title={forwardUnavailableReason ?? $t('ui_forward_f1c65e14')}
-              disabled={!onForward}
-              onclick={onForward ? forwardMessage : undefined}
+              onclick={(event) => copy(entityRef(message), event)}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m14 5 6 7-6 7v-4H8a5 5 0 0 0-4 2c.5-5.5 3.3-9 10-9V5Z" />
+                <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
               </svg>
-              <span>{$t('ui_forward_f1c65e14')}</span>
-            </button>
-          {/if}
-          {#if publishAvailable && !contextAttachment}
-            <button
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              disabled={publishing}
-              onclick={publishMessage}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 13V9l12-5v14L4 13Z" />
-                <path d="M8 14v5h4v-3M19 8c1.3 1 1.3 7 0 8" />
-              </svg>
-              <span
-                >{publishing
-                  ? $t('ui_publishing_582e0f1a')
-                  : $t('ui_publish_message_891eaa99')}</span
-              >
-            </button>
-          {/if}
-          {#if !contextAttachment && onApplicationCommand && !message.deleted_at}
-            <AppContextCommandMenu
-              id={`${domIdPrefix}-apps-${entityRef(message)}`}
-              entries={appContextCommands}
-              accountRef={contextCommandAccountRef}
-              onSelect={runApplicationCommand}
-              menuItem
-            />
-          {/if}
-          {#if onCreateThread && !message.deleted_at}
-            <button type="button" role="menuitem" tabindex="-1" onclick={createThread}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M7 3v12a4 4 0 0 0 4 4h8M3 7h8M15 15l4 4-4 4" />
-              </svg>
-              <span>{$t('ui_create_thread_4ce9bbfd')}</span>
-            </button>
-          {/if}
-          {#if onTogglePin && pinnableMessage && !message.deleted_at}
-            <button type="button" role="menuitem" tabindex="-1" onclick={togglePin}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m9 3 6 6-2 2 4 4-2 2-4-4-2 2-6-6 6-6Z" />
-                <path d="m9 15-5 5" />
-              </svg>
-              <span>{pinned ? $t('ui_unpin_message_be8d20ff') : $t('ui_pin_message_b936d778')}</span
-              >
-            </button>
-          {/if}
-          {#if gifUrl}
-            <button type="button" role="menuitem" tabindex="-1" onclick={favoriteGif}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"
-                />
-              </svg>
-              <span
-                >{gifFavorited
-                  ? $t('ui_remove_from_gif_favorites_8c58e715')
-                  : $t('ui_add_to_gif_favorites_302aa406')}</span
-              >
-            </button>
-          {/if}
-          {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
-            <button type="button" role="menuitem" tabindex="-1" onclick={viewProfile}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="8" r="4" />
-                <path d="M4 21a8 8 0 0 1 16 0" />
-              </svg>
-              <span>{$t('ui_view_profile_d4788f25')}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              onclick={(event) => {
-                const handle = message.author ? userPublicHandle(message.author) : null;
-                if (handle) void copy(`@${handle}`, event);
-              }}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M16 8a4 4 0 1 1-4-4c4 0 7 3 7 7v1a3 3 0 0 1-6 0V8" />
-                <path d="M19 19a9 9 0 1 1 2-4" />
-              </svg>
-              <span>{$t('ui_copy_username_7ba3cdab')}</span>
-            </button>
-            {#if developerMode.enabled}
-              <button
-                type="button"
-                role="menuitem"
-                tabindex="-1"
-                onclick={(event) => copy(`${message.author_id}@${message.author_domain}`, event)}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
-                </svg>
-                <span>{$t('ui_copy_technical_user_id_8b1326bb')}</span>
-              </button>
-            {/if}
-          {/if}
-          {#if message.author && moderationActions.length && onModerate}
-            {#each moderationActions as action, index (action.id)}
-              <button
-                class:menu-separator={index === 0}
-                class:danger-item={action.id === 'kick' || action.id === 'ban'}
-                type="button"
-                role="menuitem"
-                tabindex="-1"
-                onclick={(event) => moderateAuthor(action.id, event)}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  {#if action.id === 'timeout'}
-                    <circle cx="12" cy="12" r="9" />
-                    <path d="M12 7v5l3 2" />
-                  {:else}
-                    <path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z" />
-                  {/if}
-                </svg>
-                <span>{action.label} {userDisplayName(message.author)}</span>
-              </button>
-            {/each}
-          {/if}
-          {#if !message.deleted_at && (renderedContent || presentedMessage.attachments?.length || (presentedMessage.e2ee && presentedMessage.e2ee_verified === true && presentedMessage.decrypted_attachments?.length))}
-            <button type="button" role="menuitem" tabindex="-1" onclick={reportMessageFromMenu}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 21V4m0 1h11l-2 4 2 4H5" />
-              </svg>
-              <span>{$t('ui_report_message_0a1e3c52')}</span>
-            </button>
-          {/if}
-          {#if contextAttachment?.attachment.content_type.startsWith('image/')}
-            <button
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              onclick={(event) => copyImage(contextAttachment!.attachment, event)}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="4" width="18" height="16" rx="2" />
-                <circle cx="9" cy="10" r="2" />
-                <path d="m5 18 4-4 3 3 2-2 5 3" />
-              </svg>
-              <span>{$t('ui_copy_image_3cb27ae0')}</span>
-            </button>
-          {/if}
-          {#if editAvailable}
-            <button
-              class:menu-separator={Boolean(onMessageAuthor && message.author)}
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              onclick={editMessage}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m4 16-.8 4.8L8 20l11-11-4-4L4 16Z" />
-                <path d="m13.5 6.5 4 4" />
-              </svg>
-              <span>{$t('ui_edit_message_9757ccd5')}</span>
-              <kbd>↑</kbd>
+              <span>{$t('ui_copy_message_id_39aa2abb')}</span>
             </button>
           {/if}
         {/if}
-        {#if deleteAvailable}
-          {#if confirmingDelete}
-            <div
-              class="message-delete-confirmation"
-              role="group"
-              aria-label={$t('ui_confirm_deletion_fa57243d')}
-            >
-              <p>{$t('ui_delete_this_message_8f6e2cda')}</p>
-              <div>
-                <button type="button" role="menuitem" tabindex="-1" onclick={cancelDelete}>
-                  {$t('ui_cancel_19766ed6')}
-                </button>
-                <button
-                  bind:this={deleteConfirmationButton}
-                  class="danger-item"
-                  type="button"
-                  role="menuitem"
-                  tabindex="-1"
-                  onclick={deleteMessage}
-                >
-                  {$t('ui_delete_e2d0a549')}
-                </button>
-              </div>
-            </div>
-          {:else}
-            <button
-              class="danger-item"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              onclick={requestDelete}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6" />
-              </svg>
-              <span>{$t('ui_delete_message_87e7176a')}</span>
-            </button>
-          {/if}
-        {/if}
-        {#if !groupSystemNotice && renderedContent && !message.deleted_at}
-          <button
-            class:menu-separator={editAvailable || Boolean(onMessageAuthor)}
-            type="button"
-            role="menuitem"
-            tabindex="-1"
-            onclick={(event) => copy(renderedContent ?? '', event)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 8h11v12H8z" />
-              <path d="M16 8V4H4v12h4" />
-            </svg>
-            <span>{$t('ui_copy_text_b0ac9cea')}</span>
-          </button>
-        {/if}
-        <button
-          type="button"
-          role="menuitem"
-          tabindex="-1"
-          onclick={(event) => copy(messageLink(), event)}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2" />
-            <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" />
-          </svg>
-          <span>{$t('ui_copy_message_link_abf4d193')}</span>
-        </button>
-        {#if developerMode.enabled}
-          <button
-            type="button"
-            role="menuitem"
-            tabindex="-1"
-            onclick={(event) => copy(entityRef(message), event)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
-            </svg>
-            <span>{$t('ui_copy_message_id_39aa2abb')}</span>
-          </button>
-        {/if}
-      {/if}
-    </div>
-  {/if}
-</article>
+      </div>
+    {/if}
+  </article>
+{/if}
 {#if reactionViewerOpen}
   <ReactionViewer
     {message}

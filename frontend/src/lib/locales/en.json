@@ -1,4 +1,8 @@
 {
+  "profile_block": "Block user",
+  "profile_block_help": "Blocking hides their messages and removes them as a friend.",
+  "profile_block_failed": "Could not update the block. Try again.",
+
   "chat_jump_to_read": "Jump to where you left off",
   "chat_jump_to_latest": "Jump to latest",
   "language_name": "English",

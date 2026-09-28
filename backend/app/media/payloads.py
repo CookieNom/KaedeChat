@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from app.db.models import Attachment
 
 INTERNAL_REJECTED_SCAN_STATUSES = frozenset({"infected", "quarantined", "rejected"})
@@ -24,7 +26,11 @@ def attachment_payload(
         "size": attachment.size,
         "width": attachment.width,
         "height": attachment.height,
-        "duration_secs": attachment.duration_secs,
+        # These projections also enter signed federation messages, whose JSON
+        # permits integers only. Round up so a short recording never becomes 0.
+        "duration_secs": (
+            math.ceil(attachment.duration_secs) if attachment.duration_secs is not None else None
+        ),
         "waveform": attachment.waveform,
         "blurhash": attachment.blurhash,
         "scan_status": public_scan_status(attachment.scan_status),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
@@ -305,6 +307,55 @@ void main() {
       expect(find.text('Joined guild'), findsOneWidget);
       expect(find.text('Feb 2, 2026'), findsOneWidget);
       expect(find.text('Friends since'), findsNothing);
+    });
+
+    testWidgets(
+        'profile loads full details while preserving its initial identity',
+        (tester) async {
+      final profile = Completer<KaedeUser>();
+      await pump(
+          tester,
+          UserProfileSheet(
+            user: _user(),
+            presence: PresenceStatus.online,
+            profile: profile.future,
+          ));
+      expect(find.text('Maple'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      profile.complete(KaedeUser.fromJson({
+        ..._user().toJson(),
+        'bio': 'Hello from my full profile',
+        'custom_status': 'Making tea',
+      }));
+      await tester.pumpAndSettle();
+      expect(find.text('Hello from my full profile'), findsOneWidget);
+      expect(find.text('Making tea'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(tester.takeException(), isNull);
+      tester.view.physicalSize = const Size(1280, 900);
+      await tester.pump();
+      expect(find.text('Hello from my full profile'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('profile refresh failure retains the available profile',
+        (tester) async {
+      final profile = Completer<KaedeUser>();
+      await pump(
+          tester,
+          UserProfileSheet(
+            user: _user(),
+            presence: PresenceStatus.online,
+            profile: profile.future,
+          ));
+      profile.completeError(StateError('offline'));
+      await tester.pumpAndSettle();
+      expect(find.text('Maple'), findsOneWidget);
+      expect(
+          find.text('Could not refresh this profile. Close it and try again.'),
+          findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('DM profiles show friendship duration on a small phone',

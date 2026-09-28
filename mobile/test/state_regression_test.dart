@@ -18,6 +18,40 @@ import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:web_socket_channel/io.dart';
 
 void main() {
+  test(
+      'blocks use the full account identity and unblock does not restore friendship',
+      () {
+    final user = KaedeUser(
+        ref: EntityRef.parse('30@remote.example'),
+        username: 'member',
+        handle: 'member@remote.example');
+    final other = KaedeUser(
+        ref: EntityRef.parse('30@other.example'),
+        username: 'other',
+        handle: 'other@other.example');
+    final blocked = MobileState(relationships: [
+      {'type': 'blocked', 'user': user.toJson()}
+    ]);
+    expect(blocked.isBlocked(user), isTrue);
+    expect(blocked.isBlocked(other), isFalse);
+    expect(blocked.isBlocked(null), isFalse);
+    final message = KaedeMessage.fromJson({
+      'id': '40',
+      'origin_domain': 'remote.example',
+      'channel_id': '50',
+      'channel_domain': 'home.example',
+      'author_id': '30',
+      'author_domain': 'remote.example',
+      'created_at': '2026-09-28T00:00:00Z',
+    });
+    expect(message.author, isNull);
+    expect(blocked.isMessageBlocked(message), isTrue);
+    final unblocked = blocked.copyWith(relationships: []);
+    expect(unblocked.isMessageBlocked(message), isFalse);
+    expect(unblocked.isBlocked(user), isFalse);
+    expect(unblocked.relationships, isEmpty);
+  });
+
   group('guild access revocation', () {
     test('canonical delete payload purges every retained guild projection', () {
       final guildRef = EntityRef.parse('10@guild.example');

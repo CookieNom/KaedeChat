@@ -461,11 +461,24 @@ final class KaedeRepository {
     }
   }
 
-  Future<void> verifyEmail(String token) => api.sendJson(
-        'POST',
-        '/api/v1/auth/verify-email',
-        data: <String, Object?>{'token': token},
-      );
+  Future<void> verifyEmail(String token) {
+    var value = token.trim();
+    final link = Uri.tryParse(value);
+    if (link != null && (link.scheme == 'https' || link.scheme == 'http')) {
+      value = Uri.splitQueryString(link.fragment)['token'] ??
+          link.queryParameters['token'] ??
+          '';
+    }
+    if (value.isEmpty) {
+      throw const FormatException(
+          'Enter the verification code or link from your email.');
+    }
+    return api.sendJson(
+      'POST',
+      '/api/v1/auth/verify-email',
+      data: <String, Object?>{'token': value},
+    );
+  }
 
   Future<void> resendVerification(String email) => api.sendJson(
         'POST',

@@ -623,7 +623,9 @@ class AuthenticatedGatewayRuntime {
     const dispatch = (event as CustomEvent<Dispatch>).detail;
     applyEntityDispatch(dispatch);
     if (dispatch.t === 'MESSAGE_CREATE') {
-      browserNotifications.notifyMessage(dispatch.d as Message);
+      if (!chatEntities.isMessageBlocked(dispatch.d as Message)) {
+        browserNotifications.notifyMessage(dispatch.d as Message);
+      }
     }
     if (dispatch.t === 'READ_STATE_UPDATE') this.#readStateSync?.postMessage(dispatch.d);
   };

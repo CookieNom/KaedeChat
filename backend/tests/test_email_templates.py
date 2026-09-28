@@ -16,10 +16,13 @@ def test_verification_email_has_branded_html_and_plain_text_fallback() -> None:
     expected_url = "https://chat.example.com/verify#token=kc1_ot_secret"
     assert message.subject.strip()
     assert expected_url in message.text
+    assert "Verification code (paste into the mobile app):\nkc1_ot_secret" in message.text
     assert "48 hours" in message.text
     assert message.html is not None
     assert "Kaede Chat" in message.html
     assert expected_url in message.html
+    assert "Verification code (paste into the mobile app):" in message.html
+    assert ">kc1_ot_secret</code>" in message.html
     assert "<img" not in message.html
 
 

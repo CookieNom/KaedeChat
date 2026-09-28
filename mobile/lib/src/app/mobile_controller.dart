@@ -616,6 +616,21 @@ final class MobileState {
       ? const <GuildMember>[]
       : guildMembers[selectedGuild] ?? const <GuildMember>[];
 
+  bool isBlocked(KaedeUser? user) => _isBlockedRef(user?.ref);
+
+  bool isMessageBlocked(KaedeMessage? message) =>
+      _isBlockedRef(message?.authorRef);
+
+  bool _isBlockedRef(EntityRef? user) =>
+      user != null &&
+      relationships.any((item) {
+        final target = item['user'];
+        return item['type'] == 'blocked' &&
+            target is Map &&
+            '${target['id']}' == user.id.value &&
+            target['origin_domain'] == user.domain.value;
+      });
+
   List<KaedeMessage> get messages => selectedChannel == null
       ? const <KaedeMessage>[]
       : messageStore[selectedChannel] ?? const <KaedeMessage>[];
@@ -2733,6 +2748,26 @@ final class MobileController extends StateNotifier<MobileState> {
         state = state.copyWith(error: _message(error));
       }
     }
+  }
+
+  Future<void> setUserBlocked(KaedeUser user, bool blocked) async {
+    if (user.ref == state.user?.ref) return;
+    final accountKey = api.tokens?.accountKey;
+    if (blocked) {
+      await repository.block(user.ref);
+    } else {
+      await repository.unblock(user.ref);
+    }
+    if (accountKey != api.tokens?.accountKey) return;
+    final relationships = state.relationships.where((item) {
+      final target = item['user'];
+      return target is! Map ||
+          '${target['id']}' != user.ref.id.value ||
+          target['origin_domain'] != user.ref.domain.value;
+    }).toList();
+    if (blocked) relationships.add({'type': 'blocked', 'user': user.toJson()});
+    state = state.copyWith(relationships: relationships);
+    _scheduleMetadataCache(const <String>{'relationships'});
   }
 
   Future<void> _refreshRelationships() async {
@@ -5127,6 +5162,20 @@ final class MobileController extends StateNotifier<MobileState> {
         final relationship = event.data['relationship'];
         if (relationship is Map) {
           final detail = Map<String, Object?>.from(relationship);
+          final target = detail['user'];
+          if (target is Map &&
+              target['id'] != null &&
+              target['origin_domain'] != null) {
+            final relationships = state.relationships.where((item) {
+              final user = item['user'];
+              return user is! Map ||
+                  user['id'] != target['id'] ||
+                  user['origin_domain'] != target['origin_domain'];
+            }).toList();
+            if (detail['type'] != 'none') relationships.add(detail);
+            state = state.copyWith(relationships: relationships);
+            _scheduleMetadataCache(const <String>{'relationships'});
+          }
           final errorCode = detail['error_code'];
           if (errorCode is String && errorCode.isNotEmpty) {
             state = state.copyWith(
@@ -6303,6 +6352,7 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _notifyFor(KaedeMessage message) async {
+    if (state.isMessageBlocked(message)) return;
     final self = state.user;
     if (self == null) return;
 

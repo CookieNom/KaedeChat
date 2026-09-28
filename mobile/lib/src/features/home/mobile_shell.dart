@@ -996,6 +996,7 @@ final class _ConversationScreenState
             final historyAvailable = active?.ref == widget.channel.ref &&
                 canReadRetainedChannelHistory(active!);
             return MessageSearchScreen(
+              isMessageBlocked: state.isMessageBlocked,
               repository:
                   routeRef.read(mobileControllerProvider.notifier).repository,
               scope: widget.channel.guildRef == null ? 'channel' : 'guild',
@@ -4755,34 +4756,39 @@ final class _DirectMessageBrowser extends ConsumerWidget {
   void _openSearch(BuildContext context, WidgetRef ref) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (searchContext) => MessageSearchScreen(
-          repository: ref.read(mobileControllerProvider.notifier).repository,
-          scope: 'dms',
-          scopeRef: null,
-          channel: null,
-          accountRef:
-              ref.read(mobileControllerProvider.notifier).api.tokens?.userRef,
-          users: messageSearchUserCandidates(<KaedeUser?>[
-            state.user,
-            ...state.userProfiles.values,
-            for (final channel in state.dms) ...channel.recipients,
-          ]),
-          onJump: (result) async {
-            final controller = ref.read(mobileControllerProvider.notifier);
-            final opened = await controller.selectAndJumpToMessage(
-              result.channel,
-              result.message.ref,
-              shouldContinue: () => messageSearchRouteCanDismiss(searchContext),
-            );
-            if (!searchContext.mounted ||
-                !opened ||
-                !messageSearchRouteCanDismiss(searchContext)) {
-              return;
-            }
-            Navigator.of(searchContext).pop();
-            onOpenChannel();
-          },
-        ),
+        builder: (searchContext) => Consumer(builder: (context, routeRef, _) {
+          final state = routeRef.watch(mobileControllerProvider);
+          return MessageSearchScreen(
+            isMessageBlocked: state.isMessageBlocked,
+            repository: ref.read(mobileControllerProvider.notifier).repository,
+            scope: 'dms',
+            scopeRef: null,
+            channel: null,
+            accountRef:
+                ref.read(mobileControllerProvider.notifier).api.tokens?.userRef,
+            users: messageSearchUserCandidates(<KaedeUser?>[
+              state.user,
+              ...state.userProfiles.values,
+              for (final channel in state.dms) ...channel.recipients,
+            ]),
+            onJump: (result) async {
+              final controller = ref.read(mobileControllerProvider.notifier);
+              final opened = await controller.selectAndJumpToMessage(
+                result.channel,
+                result.message.ref,
+                shouldContinue: () =>
+                    messageSearchRouteCanDismiss(searchContext),
+              );
+              if (!searchContext.mounted ||
+                  !opened ||
+                  !messageSearchRouteCanDismiss(searchContext)) {
+                return;
+              }
+              Navigator.of(searchContext).pop();
+              onOpenChannel();
+            },
+          );
+        }),
       ),
     );
   }
@@ -5162,6 +5168,7 @@ final class _GuildBrowser extends ConsumerWidget {
                                       .any(canReadRetainedChannelHistory) ==
                                   true;
                               return MessageSearchScreen(
+                                isMessageBlocked: routeState.isMessageBlocked,
                                 repository: routeRef
                                     .read(mobileControllerProvider.notifier)
                                     .repository,
@@ -7214,8 +7221,7 @@ final class _RelationshipTile extends ConsumerWidget {
                             ref,
                             () => ref
                                 .read(mobileControllerProvider.notifier)
-                                .repository
-                                .unblock(user.ref)),
+                                .setUserBlocked(user, false)),
                         child: Text(L10n.of(context).ui_unblock_987c7d5f),
                       ),
                     _ => ActionButton(
@@ -7294,22 +7300,9 @@ Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
 
 Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
     String relationshipType, VoidCallback onOpenChat) async {
-  var resolved = user;
-  if (user.profileResolved) {
-    try {
-      resolved = await ref
-          .read(mobileControllerProvider.notifier)
-          .repository
-          .lookupUser(user.handle);
-    } on Object {
-      // The relationship snapshot remains usable while a remote instance is
-      // temporarily unavailable.
-    }
-  }
-  if (!context.mounted) return;
   final presence =
-      ref.read(mobileControllerProvider.notifier).presenceFor(resolved);
-  final profile = resolved;
+      ref.read(mobileControllerProvider.notifier).presenceFor(user);
+  final profile = user;
   await showUserProfile(
     context,
     profile,
@@ -7364,22 +7357,6 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
           ),
           icon: Icon(Icons.person_remove_alt_1_rounded),
           label: Text(L10n.of(context).ui_remove_friend_1b6055cb),
-        ),
-      if (relationshipType == 'blocked')
-        ActionButton(
-          kind: ActionButtonKind.outlined,
-          onPressed: () {
-            Navigator.pop(context);
-            _relationshipAction(
-                context,
-                ref,
-                () => ref
-                    .read(mobileControllerProvider.notifier)
-                    .repository
-                    .unblock(profile.ref));
-          },
-          icon: Icon(Icons.lock_open_rounded),
-          label: Text(L10n.of(context).ui_unblock_987c7d5f),
         ),
     ],
   );

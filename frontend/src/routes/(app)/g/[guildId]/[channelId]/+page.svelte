@@ -170,6 +170,7 @@
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
   import { interactionResponses } from '$lib/chat/interaction-responses.svelte';
   import { buildTimeline, withInteractionResponses } from '$lib/chat/timeline';
+  import { loadMessageHistory } from '$lib/chat/message-history';
   import { createTypingState } from '$lib/chat/typing';
   import type {
     Attachment,
@@ -1074,7 +1075,11 @@
   }
   const timeline = $derived(
     withInteractionResponses(
-      buildTimeline(messages, visitReadRef, visitReadInclusive),
+      buildTimeline(
+        messages.filter((message) => !entities.isMessageBlocked(message)),
+        visitReadRef,
+        visitReadInclusive
+      ),
       Object.values(interactionResponses.byResponse),
       channel ? entityRef(channel) : ''
     )
@@ -3797,7 +3802,7 @@
       );
       const [
         loadedGuilds,
-        loadedMessages,
+        loadedHistory,
         loadedReadStates,
         loadedCurrentUser,
         loadedEmojis,
@@ -3808,10 +3813,8 @@
       ] = await Promise.all([
         api<Guild[]>('/users/@me/guilds'),
         trackerRoute || !historyAccessible
-          ? Promise.resolve([] as Message[])
-          : api<Message[]>(
-              `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
-            ),
+          ? Promise.resolve({ messages: [] as Message[], hasLater: false })
+          : loadMessageHistory(targetChannel, targetAround),
         api<ReadStateStatus[]>('/users/@me/read-states'),
         api<UserSummary>('/users/@me'),
         trackerRoute
@@ -3842,6 +3845,7 @@
               next_cursor: null
             })
       ]);
+      const loadedMessages = loadedHistory.messages;
       if (
         routeGeneration !== loadGeneration ||
         snapshot !== snapshotGeneration ||
@@ -3900,16 +3904,15 @@
         historyTarget = targetAround;
         if (!targetAround && state?.unread && visitReadRef && historyAccessible && !trackerRoute) {
           targetAround = entityRef(visitReadRef);
-          const history = await api<Message[]>(
-            `/channels/${encodeURIComponent(targetChannel)}/messages?around=${encodeURIComponent(targetAround)}`
-          );
+          const history = await loadMessageHistory(targetChannel, targetAround);
           if (
             routeGeneration !== loadGeneration ||
             snapshot !== snapshotGeneration ||
             targetChannel !== channelId
           )
             return;
-          loadedMessages.splice(0, loadedMessages.length, ...history);
+          loadedMessages.splice(0, loadedMessages.length, ...history.messages);
+          loadedHistory.hasLater = history.hasLater;
           historyTarget = targetAround;
         }
       }
@@ -3931,7 +3934,7 @@
           ? loadedMessages.length > 0
           : loadedMessages.length === 50
         : false;
-      hasLater = Boolean(historyAccessible && targetAround && loadedMessages.length > 0);
+      hasLater = loadedHistory.hasLater;
       if (historyAccessible && loadedChannel && isForumChannel(loadedChannel)) {
         forumLoading = true;
         try {
@@ -6360,9 +6363,8 @@
     const generation = loadGeneration;
     jumpingHistory = true;
     try {
-      let history = await api<Message[]>(
-        `/channels/${encodeURIComponent(entityRef(targetChannel))}/messages${reference ? `?around=${encodeURIComponent(reference)}` : ''}`
-      );
+      const page = await loadMessageHistory(entityRef(targetChannel), reference);
+      let history = page.messages;
       if (generation !== loadGeneration) return;
       if (targetChannel.encryption_mode === 'e2ee' && e2eeClient)
         history = await decryptConversationMessages(e2eeClient, targetChannel, history);
@@ -6370,7 +6372,7 @@
       historyTarget = reference;
       timelineAtBottom = false;
       hasEarlier = reference ? history.length > 0 : history.length === 50;
-      hasLater = Boolean(reference && history.length);
+      hasLater = page.hasLater;
       setMessages(history.sort(compareMessages));
       historyRevision += 1;
     } catch (caught) {

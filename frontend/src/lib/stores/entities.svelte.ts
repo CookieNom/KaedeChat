@@ -272,6 +272,16 @@ export class ChatEntityStore {
     }
   }
 
+  isBlocked(user: Pick<UserSummary, 'id' | 'origin_domain'> | null | undefined): boolean {
+    return !!user && this.relationships.get(entityKey(user))?.type === 'blocked';
+  }
+
+  isMessageBlocked(message: Message | null | undefined): boolean {
+    return (
+      !!message && this.isBlocked({ id: message.author_id, origin_domain: message.author_domain })
+    );
+  }
+
   messagesFor(channelId: string, channelDomain: string): Message[] {
     return this.messages.values.filter(
       (message) => message.channel_id === channelId && message.channel_domain === channelDomain

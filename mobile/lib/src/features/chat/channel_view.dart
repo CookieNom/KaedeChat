@@ -461,6 +461,14 @@ List<KaedeMessage> threadTimelineMessages(
   return List<KaedeMessage>.unmodifiable(<KaedeMessage>[starter, ...messages]);
 }
 
+List<KaedeMessage> _visibleChannelMessages(
+        MobileState state, KaedeChannel channel) =>
+    (canReadRetainedChannelHistory(channel)
+            ? threadTimelineMessages(channel, state.messages)
+            : state.messages)
+        .where((message) => !state.isMessageBlocked(message))
+        .toList();
+
 /// Discord type-21 thread starters carry the source message only in
 /// `referenced_message`. A missing projection is a deliberate unavailable
 /// state, never an empty message.
@@ -1219,13 +1227,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                 : channel.allows(Permission.sendMessages)));
     final canReadHistory = canReadRetainedChannelHistory(channel);
     final stateMessages = state.messages;
-    final messages = canReadHistory
-        ? threadTimelineMessages(channel, stateMessages)
-        : stateMessages;
-    final detachedStarter =
-        !canReadHistory || messages.length == stateMessages.length
-            ? null
-            : channel.starterMessage;
+    final messages = _visibleChannelMessages(state, channel);
+    final detachedStarter = !canReadHistory ||
+            state.isMessageBlocked(channel.starterMessage) ||
+            messages.length == stateMessages.length
+        ? null
+        : channel.starterMessage;
     final pending = state.pendingMessages;
     final jump = state.messageJump;
     final channelChanged = _renderedChannel != channel.ref;
@@ -2739,21 +2746,24 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
           continue;
         }
         final state = ref.read(mobileControllerProvider);
-        final targetIndex = state.messages.indexWhere(
+        final channel = state.activeChannel;
+        if (channel == null) return;
+        final messages = _visibleChannelMessages(state, channel);
+        final targetIndex = messages.indexWhere(
           (message) => message.ref == request.message,
         );
         if (targetIndex < 0) return;
         final targetItem = messageListItemIndex(
-          messageCount: state.messages.length,
+          messageCount: messages.length,
           messageIndex: targetIndex,
           pendingCount: state.pendingMessages.length,
         );
         final builtItems = <int>[];
-        for (var index = 0; index < state.messages.length; index++) {
-          final message = state.messages[index];
+        for (var index = 0; index < messages.length; index++) {
+          final message = messages[index];
           if (_messageKeys[message.ref.wire]?.currentContext != null) {
             builtItems.add(messageListItemIndex(
-              messageCount: state.messages.length,
+              messageCount: messages.length,
               messageIndex: index,
               pendingCount: state.pendingMessages.length,
             ));
@@ -2762,8 +2772,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         final position = _scroll.position;
         double next;
         if (builtItems.isEmpty || attempt == 0) {
-          final totalItems =
-              state.messages.length + state.pendingMessages.length;
+          final totalItems = messages.length + state.pendingMessages.length;
           next = totalItems <= 1
               ? position.minScrollExtent
               : position.maxScrollExtent * targetItem / (totalItems - 1);
@@ -5881,6 +5890,7 @@ final class _PendingMessageTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final failed = item.state == 'failed';
+    final retrying = item.state == 'retry';
     final content = '${item.payload['content'] ?? ''}'.trim();
     return Padding(
       padding: EdgeInsets.fromLTRB(_messageGutter, 4, 12, 4),
@@ -5914,7 +5924,10 @@ final class _PendingMessageTile extends StatelessWidget {
                         ? userFacingError(
                             item.lastError ?? 'Message could not be sent.',
                           )
-                        : L10n.of(context).ui_sending_e946e7bf,
+                        : retrying
+                            ? '${userFacingError(item.lastError ?? 'Message could not be sent.')} '
+                                '${L10n.of(context).message_retrying}'
+                            : L10n.of(context).ui_sending_e946e7bf,
                     style: TextStyle(
                       color:
                           failed ? context.kaede.danger : context.kaede.muted,
@@ -6905,6 +6918,7 @@ final class _MessageTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (state.isMessageBlocked(message)) return const SizedBox.shrink();
     if (message.messageType == 18) {
       return _ThreadCreatedRow(
         message: message,
@@ -6922,6 +6936,9 @@ final class _MessageTile extends StatelessWidget {
       );
     }
     final displayedMessage = threadStarterDisplayMessage(message);
+    if (state.isMessageBlocked(displayedMessage)) {
+      return const SizedBox.shrink();
+    }
     final reactionCounts = canonicalReactionCounts(
       displayedMessage.reactionCounts,
     );
@@ -6993,7 +7010,9 @@ final class _MessageTile extends StatelessWidget {
                 children: [
                   if (message.reference != null)
                     _ReplyReference(
-                      referenced: referenced,
+                      referenced: state.isMessageBlocked(referenced)
+                          ? null
+                          : referenced,
                       onTap: onJump,
                     ),
                   if (interactionAttribution != null)

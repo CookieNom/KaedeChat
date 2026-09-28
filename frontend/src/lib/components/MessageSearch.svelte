@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
@@ -912,7 +913,7 @@
               {#if response.results.length === 0}<p class="empty">
                   {$t('ui_no_messages_matched_those_filters_e2e6b23d')}
                 </p>{/if}
-              {#each response.results as result (entityRef(result.message))}
+              {#each response.results.filter((result) => !chatEntities.isMessageBlocked(result.message)) as result (entityRef(result.message))}
                 <article class="result">
                   <button class="result-context" type="button" onclick={() => jump(result)}>
                     <span

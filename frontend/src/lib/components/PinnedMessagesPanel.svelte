@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { t } from '$lib/ui/locale';
 
   import type { Message } from '$lib/chat/types';
@@ -57,7 +58,7 @@
         <p>{$t('ui_pinned_messages_stay_easy_to_find_here_a8a94032')}</p>
       </div>
     {:else}
-      {#each messages as message (entityRef(message))}
+      {#each messages.filter((message) => !chatEntities.isMessageBlocked(message)) as message (entityRef(message))}
         <div class="pinned-message-card">
           <button class="pinned-message-jump" type="button" onclick={() => onJump(message)}>
             <span class="pinned-message-avatar" aria-hidden="true"

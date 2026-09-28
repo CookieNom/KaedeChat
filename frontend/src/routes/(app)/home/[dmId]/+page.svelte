@@ -96,6 +96,7 @@
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
   import { interactionResponses } from '$lib/chat/interaction-responses.svelte';
   import { buildTimeline, withInteractionResponses } from '$lib/chat/timeline';
+  import { loadMessageHistory } from '$lib/chat/message-history';
   import { createTypingState } from '$lib/chat/typing';
   import type {
     Attachment,
@@ -423,7 +424,11 @@
 
   const timeline = $derived(
     withInteractionResponses(
-      buildTimeline(messages, visitReadRef, visitReadInclusive),
+      buildTimeline(
+        messages.filter((message) => !entities.isMessageBlocked(message)),
+        visitReadRef,
+        visitReadInclusive
+      ),
       Object.values(interactionResponses.byResponse),
       channel ? entityRef(channel) : ''
     )
@@ -1104,7 +1109,7 @@
       const [
         loadedDms,
         loadedGuilds,
-        loadedMessages,
+        loadedHistory,
         loadedReadStates,
         loadedCurrentUser,
         loadedCall,
@@ -1115,9 +1120,7 @@
       ] = await Promise.all([
         api<Channel[]>('/users/@me/channels'),
         api<Guild[]>('/users/@me/guilds'),
-        api<Message[]>(
-          `/channels/${encodeURIComponent(targetRef)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
-        ),
+        loadMessageHistory(targetRef, targetAround),
         api<ReadStateStatus[]>('/users/@me/read-states'),
         api<UserSummary>('/users/@me'),
         api<ActiveCallState>(`/channels/${encodeURIComponent(targetRef)}/calls/active`).catch(
@@ -1133,6 +1136,7 @@
           .then(parseApplicationCommands)
           .catch(() => [])
       ]);
+      const loadedMessages = loadedHistory.messages;
       if (
         routeGeneration !== loadGeneration ||
         snapshot !== snapshotGeneration ||
@@ -1173,16 +1177,15 @@
         historyTarget = targetAround;
         if (!targetAround && state?.unread && visitReadRef) {
           targetAround = entityRef(visitReadRef);
-          const history = await api<Message[]>(
-            `/channels/${encodeURIComponent(targetRef)}/messages?around=${encodeURIComponent(targetAround)}`
-          );
+          const history = await loadMessageHistory(targetRef, targetAround);
           if (
             routeGeneration !== loadGeneration ||
             snapshot !== snapshotGeneration ||
             targetRef !== dmId
           )
             return;
-          loadedMessages.splice(0, loadedMessages.length, ...history);
+          loadedMessages.splice(0, loadedMessages.length, ...history.messages);
+          loadedHistory.hasLater = history.hasLater;
           historyTarget = targetAround;
         }
       }
@@ -1249,7 +1252,7 @@
             oldestLoaded?.history_page_error_code === 'FEDERATED_DM_HISTORY_UNAVAILABLE') &&
         !oldestLoaded?.history_page_complete &&
         !reachesRetainedHistoryStart(loadedChannel, oldestLoaded);
-      hasLater = Boolean(targetAround && loadedMessages.length > 0);
+      hasLater = loadedHistory.hasLater;
       let orderedMessages = loadedMessages.reverse().sort(compareMessages);
       if (loadedChannel?.encryption_mode === 'e2ee') {
         if (
@@ -2714,9 +2717,8 @@
     const generation = loadGeneration;
     jumpingHistory = true;
     try {
-      let history = await api<Message[]>(
-        `/channels/${encodeURIComponent(entityRef(targetChannel))}/messages${reference ? `?around=${encodeURIComponent(reference)}` : ''}`
-      );
+      const page = await loadMessageHistory(entityRef(targetChannel), reference);
+      let history = page.messages;
       if (generation !== loadGeneration) return;
       if (targetChannel.encryption_mode === 'e2ee' && e2eeClient)
         history = await decryptConversationMessages(e2eeClient, targetChannel, history);
@@ -2730,7 +2732,7 @@
         !authorityHistoryComplete && !reachesRetainedHistoryStart(targetChannel, oldest);
       if (oldest?.history_page_error_code === 'FEDERATED_DM_HISTORY_UNAVAILABLE')
         error = $t('ui_older_messages_are_temporarily_unavailable_fr_1936e561');
-      hasLater = Boolean(reference && history.length);
+      hasLater = page.hasLater;
       setMessages(history.sort(compareMessages));
       historyRevision += 1;
     } catch (caught) {
