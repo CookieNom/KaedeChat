@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { measureRegionalLatency, type RegionalProbe } from './rtc-probes';
+  import { recentRegionalLatency, type RegionalProbe } from './rtc-probes';
   import { activeVoice } from './active.svelte';
   import ListeningVolume from './ListeningVolume.svelte';
   import ListeningVolumeMenu from './ListeningVolumeMenu.svelte';
@@ -76,6 +76,9 @@
       .then((value) => {
         rtcRouting = value;
         selectedRegion = value.default_region ?? 'automatic';
+        if (value.provider === 'cinnamon' && !value.default_region) {
+          void recentRegionalLatency({ regions: value.probes, max_age_seconds: 60 });
+        }
       })
       .catch(() => {});
   });
@@ -763,7 +766,7 @@
           const region = current.allow_region_selection ? selectedRegion || null : null;
           const automatic = region === 'automatic' || (!region && !current.default_region);
           const latency = automatic
-            ? await measureRegionalLatency({ regions: current.probes, max_age_seconds: 60 })
+            ? await recentRegionalLatency({ regions: current.probes, max_age_seconds: 60 })
             : {};
           routing = { region, latency, probe_ticket: current.probe_ticket };
         }

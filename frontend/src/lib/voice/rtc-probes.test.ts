@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { measureRegionalLatency } from './rtc-probes';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { measureRegionalLatency, recentRegionalLatency } from './rtc-probes';
 
 describe('RTC latency hints', () => {
   it('omits failed and unsafe probes, requires the probe marker, and sends no credentials', async () => {
@@ -30,6 +30,42 @@ describe('RTC latency hints', () => {
     );
     expect(Object.keys(result)).toEqual(['west']);
     expect(result.west).toBeGreaterThan(0);
+    expect(fetcher).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe('recent RTC latency measurements', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('shares background work, expires measurements, and remeasures changed targets', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
+    const fetcher = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 204,
+          headers: { 'X-Cinnamon-RTC-Probe': '1' }
+        })
+    );
+    vi.stubGlobal('fetch', fetcher);
+    const discovery = {
+      regions: [{ region: 'east', probe_url: 'https://east.example.com/rtc-probe' }],
+      max_age_seconds: 60
+    };
+    const background = recentRegionalLatency(discovery);
+    expect(recentRegionalLatency(discovery)).toBe(background);
+    await background;
+    await recentRegionalLatency(discovery);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    clock.mockReturnValue(47000);
+    await recentRegionalLatency(discovery);
+    expect(fetcher).toHaveBeenCalledTimes(8);
+    await recentRegionalLatency({
+      ...discovery,
+      regions: [{ region: 'east', probe_url: 'https://replacement.example.com/rtc-probe' }]
+    });
     expect(fetcher).toHaveBeenCalledTimes(12);
   });
 });

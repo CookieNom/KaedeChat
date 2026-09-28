@@ -59,14 +59,12 @@ export async function measureRegionalLatency(
             signal: controller.signal
           });
           const elapsed = performance.now() - start;
-          if (
-            sample > 0 &&
-            response.status === 204 &&
-            response.headers.get('x-cinnamon-rtc-probe') === '1'
-          )
-            samples.push(elapsed);
+          if (response.status !== 204 || response.headers.get('x-cinnamon-rtc-probe') !== '1')
+            break;
+          if (sample > 0) samples.push(elapsed);
         } catch {
-          /* No measurement: never substitute zero for a failed request. */
+          /* Stop retrying an unreachable target on the join path. */
+          break;
         } finally {
           clearTimeout(timer);
         }
@@ -82,4 +80,26 @@ export async function measureRegionalLatency(
   }
   await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
   return results;
+}
+
+// Reuse only recent browser measurements; callers still obtain fresh probe tickets.
+let recent:
+  | {
+      key: string;
+      expires: number;
+      result: Promise<Record<string, number>>;
+    }
+  | undefined;
+
+export function recentRegionalLatency(discovery: ProbeDiscovery): Promise<Record<string, number>> {
+  const key = JSON.stringify(discovery.regions);
+  const now = performance.now();
+  if (recent?.key === key && now < recent.expires) return recent.result;
+  const result = measureRegionalLatency(discovery);
+  recent = {
+    key,
+    expires: now + Math.min(45, Math.max(0, discovery.max_age_seconds)) * 1000,
+    result
+  };
+  return result;
 }
