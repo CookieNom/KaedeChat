@@ -70,7 +70,10 @@ void main() {
         200,
         scrollable: find.byType(Scrollable).last,
       );
-      await tester.tap(find.text('Maple 19'));
+      // ensureVisible updates the scroll offset; lay out the new position before tapping.
+      await tester.pumpAndSettle();
+      expect(find.text('Maple 19').hitTestable(), findsOneWidget);
+      await tester.tap(find.text('Maple 19').hitTestable());
       await tester.pumpAndSettle();
       expect(result, '@friend19@chat.example');
 
@@ -1219,6 +1222,7 @@ void main() {
                       .byKey(const ValueKey('message-search-member-picker')),
                   matching: find.byType(Scrollable))
               .first);
+      await tester.pumpAndSettle();
       await tester.tap(member);
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('message-search-member-picker')),
@@ -1262,6 +1266,7 @@ void main() {
       final mention = find.byKey(const ValueKey('search-mention'));
       await tester.scrollUntilVisible(mention, 100,
           scrollable: find.byType(Scrollable).last);
+      await tester.pumpAndSettle();
       await tester.tap(mention);
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('message-search-member-picker')),
