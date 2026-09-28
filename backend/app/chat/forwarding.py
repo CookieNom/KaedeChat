@@ -532,7 +532,11 @@ def build_forward_snapshot(
             "components": list(source.components or []),
             "attachments": [
                 attachment_payload(item, include_lifecycle=False)
-                | {"plaintext_sha256": _plaintext_sha256_b64(item.content_sha256)}
+                | {
+                    "plaintext_sha256": _plaintext_sha256_b64(item.content_sha256),
+                    # Forward proofs bind milliseconds, not the rounded public duration.
+                    "duration_secs": item.duration_secs,
+                }
                 for item in attachments
             ],
             "mention_user_refs": list(source.mention_user_refs or []),
@@ -884,7 +888,8 @@ def rebind_forward_snapshot_attachments(
     rebound: list[ForwardSnapshotAttachment] = []
     for source, destination in zip(snapshot.attachments, attachments, strict=True):
         destination_payload = attachment_payload(destination, include_lifecycle=False) | {
-            "plaintext_sha256": _plaintext_sha256_b64(destination.content_sha256)
+            "plaintext_sha256": _plaintext_sha256_b64(destination.content_sha256),
+            "duration_secs": destination.duration_secs,
         }
         destination_payload["variants"] = destination_payload.get("variants") or {}
         candidate = ForwardSnapshotAttachment.model_validate(destination_payload)

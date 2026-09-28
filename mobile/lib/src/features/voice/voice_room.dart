@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'package:kaede_mobile/src/api/rtc_routing.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/guild_admin_repository.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/rtc_routing.dart';
 import 'package:kaede_mobile/src/api/stage_instances_repository.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
@@ -299,7 +300,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                           onPressed: () => Navigator.pop(context, 'automatic'),
                           child: const Text('Automatic')),
                       for (final item in (config['regions'] as List? ?? [])
-                          .whereType<Map>())
+                          .whereType<Map<Object?, Object?>>())
                         SimpleDialogOption(
                             onPressed: () =>
                                 Navigator.pop(context, '${item['id']}'),
@@ -312,8 +313,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
       } on Object {
         /* Use the existing no-hints fallback when discovery fails. */
       }
-      if (mounted)
+      if (mounted) {
         await session.connect(channel, callRef: callRef, rtcRegion: region);
+      }
     } finally {
       if (mounted) setState(() => _rtcPreparing = false);
     }

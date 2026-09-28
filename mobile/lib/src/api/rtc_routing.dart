@@ -29,7 +29,9 @@ Future<Map<String, int>> measureRtcLatency(List<Object?> targets) async {
             url.port != 443 ||
             url.path != '/rtc-probe' ||
             url.hasQuery ||
-            url.hasFragment) continue;
+            url.hasFragment) {
+          continue;
+        }
         final samples = <int>[];
         for (var sample = 0;
             sample < 4 && deadline.elapsedMilliseconds < 8000;

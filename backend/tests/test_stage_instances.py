@@ -520,7 +520,9 @@ async def test_stage_join_defaults_a_non_moderator_to_audience(
     guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
     session = AsyncMock()
     session.get.return_value = SimpleNamespace(voice_flags=0)
-    control = SimpleNamespace(ensure_room=AsyncMock(), remove_participant=AsyncMock())
+    control = SimpleNamespace(
+        ensure_room=AsyncMock(return_value=settings()), remove_participant=AsyncMock()
+    )
     captured: dict[str, object] = {}
 
     def mint(*_args: object, **kwargs: object) -> tuple[str, datetime]:

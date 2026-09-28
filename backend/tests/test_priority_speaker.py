@@ -248,7 +248,9 @@ async def test_authoritative_grant_computes_priority_speaking_fail_closed(
     guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
     session = AsyncMock()
     session.get.return_value = SimpleNamespace(voice_flags=voice_flags)
-    control = SimpleNamespace(ensure_room=AsyncMock(), remove_participant=AsyncMock())
+    control = SimpleNamespace(
+        ensure_room=AsyncMock(return_value=settings()), remove_participant=AsyncMock()
+    )
     captured: dict[str, object] = {}
 
     def mint(*_args: object, **kwargs: object) -> tuple[str, datetime]:

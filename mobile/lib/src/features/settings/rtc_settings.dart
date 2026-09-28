@@ -43,7 +43,7 @@ class _RtcSettingsState extends State<RtcSettings> {
     _regions
       ..clear()
       ..addAll((config['regions'] as List? ?? [])
-          .whereType<Map>()
+          .whereType<Map<Object?, Object?>>()
           .map((r) => Map<String, Object?>.from(r)));
     _dirty = false;
   }
@@ -83,13 +83,14 @@ class _RtcSettingsState extends State<RtcSettings> {
         'default_region': _config!['default_region'],
         'allow_region_selection': _config!['allow_region_selection'],
       });
-      if (mounted)
+      if (mounted) {
         setState(() {
           _apply(config);
           _results.clear();
           _message =
               'Settings saved. Active calls keep their current placement.';
         });
+      }
     } on Object catch (error) {
       if (mounted) setState(() => _error = userFacingError(error));
     } finally {
@@ -116,9 +117,10 @@ class _RtcSettingsState extends State<RtcSettings> {
       }
       final result = await widget.repository.api
           .sendJson('POST', '/api/v1/administration/rtc/test', data: routing);
-      if (mounted)
+      if (mounted) {
         setState(() => _results[region] =
             '${result['ok'] == true ? 'Passed' : 'Failed'}: ${result['message']}');
+      }
     } on Object catch (error) {
       if (mounted) setState(() => _error = userFacingError(error));
     } finally {

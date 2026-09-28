@@ -459,6 +459,8 @@ describe('saved unread navigation', () => {
           ];
         if (path === `${room}/messages`) return [latest];
         if (path.startsWith(`${room}/messages?around=`)) return [saved];
+        if (path === `${room}/messages?after=9007199254741010%40remote.example&limit=1`)
+          return [latest];
         if (path.startsWith(`${room}/messages?`)) return [];
         return base(path);
       });

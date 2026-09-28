@@ -207,8 +207,9 @@ def run_check(action: str) -> None:
                 "TEST_REDIS_URL": values["KAEDE_DRAGONFLY_URL"],
                 "KAEDE_SERVICE_ROLE": "api",
             }
-            if action in {"chat-check", "media-check"}:
+            if action in {"chat-check", "media-check", "voice-check"}:
                 job(cfg, jobs["migrate"])
+            if action in {"chat-check", "media-check"}:
                 job(cfg, jobs["storage-init"])
             if action == "chat-check":
                 worker = next(

@@ -17,6 +17,7 @@ from app.api import channels as channels_api
 from app.chat.forwarding import (
     FORWARD_SOURCE_AUTHORIZATION_EVENT,
     authority_attested_forward_source,
+    build_forward_snapshot,
     build_forward_source_authorization_content,
     forward_snapshot_custom_emoji_tokens,
     forward_snapshot_matches_attachments,
@@ -210,6 +211,7 @@ def test_plaintext_forward_rebinds_authoritative_snapshot_to_fresh_media() -> No
         detected_content_type="audio/ogg",
         size=len(plaintext),
         object_key="attachments/999",
+        variants={},
         duration_secs=1.2,
         waveform="AQIDBA==",
         scan_status="clean",
@@ -218,10 +220,25 @@ def test_plaintext_forward_rebinds_authoritative_snapshot_to_fresh_media() -> No
         content_sha256=plaintext_hex,
     )
 
+    source = Message(
+        content="immutable body",
+        message_type=0,
+        flags=1 << 13,
+        created_at=datetime(2026, 8, 28, tzinfo=UTC),
+    )
+    built = build_forward_snapshot(source, [destination])
+    assert forward_snapshot_matches_attachments(built, [destination])
+    assert forward_snapshot_projection_digest(built) == forward_snapshot_projection_digest(value)
+
     rebound = rebind_forward_snapshot_attachments(value, [destination])
     assert rebound["attachments"][0]["id"] == "999"  # type: ignore[index]
     assert forward_snapshot_projection_digest(rebound) == forward_snapshot_projection_digest(value)
     assert forward_snapshot_matches_attachments(rebound, [destination])
+
+    destination.duration_secs = 1.3
+    with pytest.raises(ValueError, match="bytes or metadata"):
+        rebind_forward_snapshot_attachments(value, [destination])
+    destination.duration_secs = 1.2
 
     destination.content_sha256 = "00" * 32
     with pytest.raises(ValueError, match="bytes or metadata"):
