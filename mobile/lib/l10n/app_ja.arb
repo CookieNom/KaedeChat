@@ -8329,7 +8329,7 @@
   "profile_account_created": "アカウント作成日",
   "profile_joined_guild": "ギルド参加日",
   "profile_friends_since": "フレンド登録日",
-  "profile_friends_days": "{days, plural, =0 {フレンドになって1日未満} other {フレンドになって#日}}",
+  "profile_friends_days": "{days, plural, =0 {フレンドになって1日未満} other {フレンドになって{days}日}}",
   "profile_load_failed": "プロフィールを更新できませんでした。閉じてからもう一度お試しください。",
   "message_retrying": "自動的に再試行します。"
 }

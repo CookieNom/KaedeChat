@@ -13,13 +13,46 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kubernetes"))
 import manage
 import update_notices
-from dev import development_values, instances
+from dev import development_values, import_images, instances
 from stack import ROOT, read_env_file, render
 
 
 class KubernetesTests(unittest.TestCase):
     def setUp(self):
         self.values = read_env_file(ROOT / "deploy/.env.schema")
+
+    def test_image_import_verifies_every_image_in_the_node(self):
+        with patch("dev.run") as run:
+            import_images("test", ["backend:test", "frontend:test"])
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [
+                "k3d",
+                "image",
+                "import",
+                "--mode",
+                "direct",
+                "--cluster",
+                "test",
+                "backend:test",
+                "frontend:test",
+            ],
+        )
+        self.assertEqual(
+            [call.args[0][-1] for call in run.call_args_list[1:]],
+            ["backend:test", "frontend:test"],
+        )
+        self.assertTrue(
+            all(call.kwargs.get("capture") for call in run.call_args_list[1:])
+        )
+
+    def test_image_import_rejects_false_success_when_image_is_missing(self):
+        error = subprocess.CalledProcessError(1, ["crictl", "inspecti"])
+        with (
+            patch("dev.run", side_effect=["", error]),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            import_images("test", ["backend:test"])
 
     def test_update_notice_maintenance_classification(self):
         previous = {"schema": "same-schema", "infrastructure": "same-infra"}

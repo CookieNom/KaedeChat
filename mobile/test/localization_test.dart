@@ -12,6 +12,22 @@ void main() {
     appLanguage.value = 'en-US';
   });
 
+  test('friendship durations interpolate counts in each language', () async {
+    for (final entry in {
+      'en': [
+        'Friends for less than a day',
+        'Friends for 1 day',
+        'Friends for 10 days'
+      ],
+      'ja': ['フレンドになって1日未満', 'フレンドになって1日', 'フレンドになって10日'],
+    }.entries) {
+      final l10n = await AppLocalizations.delegate.load(Locale(entry.key));
+      expect([
+        for (final days in [0, 1, 10]) l10n.profile_friends_days(days)
+      ], entry.value);
+    }
+  });
+
   test('English devices never receive the suggestion', () {
     for (final locale in [
       const Locale('en'),

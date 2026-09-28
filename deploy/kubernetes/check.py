@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from dev import K3S_IMAGE, api_address, instances
+from dev import K3S_IMAGE, api_address, import_images, instances
 from manage import apply, job, kubectl, run, wait_workload
 from stack import ROOT, config_volume, read_env_file, render, resource, workload
 
@@ -159,7 +159,7 @@ def run_check(action: str) -> None:
                 if action in {"check", "test", "audit"}
                 else [backend]
             )
-            run(["k3d", "image", "import", "--cluster", name, *images])
+            import_images(name, images)
             if action.startswith("federation"):
                 federation(cfg, backend, action.endswith("tls-check"), Path(temporary))
                 return

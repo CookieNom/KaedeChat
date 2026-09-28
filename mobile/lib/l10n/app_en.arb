@@ -9132,7 +9132,7 @@
   "profile_account_created": "Account created",
   "profile_joined_guild": "Joined guild",
   "profile_friends_since": "Friends since",
-  "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for # day} other {Friends for # days}}",
+  "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for {days} day} other {Friends for {days} days}}",
   "@profile_friends_days": {"placeholders": {"days": {"type": "num"}}},
   "profile_load_failed": "Could not refresh this profile. Close it and try again.",
   "message_retrying": "Will retry automatically."

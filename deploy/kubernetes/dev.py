@@ -18,6 +18,25 @@ from stack import ROOT, digest, read_env_file, render
 K3S_IMAGE = "rancher/k3s:v1.36.4-k3s1"
 
 
+def import_images(name: str, images: list[str]) -> None:
+    # The tools-node importer can lose its shared tarball and still exit zero.
+    run(["k3d", "image", "import", "--mode", "direct", "--cluster", name, *images])
+    # Both development and acceptance clusters have a single server, no agents.
+    # Verify containerd actually has each image before starting workloads.
+    for image in images:
+        run(
+            [
+                "docker",
+                "exec",
+                f"k3d-{name}-server-0",
+                "crictl",
+                "inspecti",
+                image,
+            ],
+            capture=True,
+        )
+
+
 def api_address() -> str:
     # k3d records a literal :0 in kubeconfig; reserve a real ephemeral port.
     with socket.socket() as listener:
@@ -224,7 +243,7 @@ def main() -> None:
                 }:
                     command += ["--build-arg", f"{key}={value}"]
         run([*command, str(ROOT / args.service)])
-        run(["k3d", "image", "import", "--cluster", name, image])
+        import_images(name, [image])
     elif args.action == "render":
         print(
             json.dumps(

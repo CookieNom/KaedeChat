@@ -302,7 +302,7 @@ void main() {
       expect(find.text('Maple'), findsOneWidget);
       expect(find.text('Do not disturb'), findsOneWidget);
       expect(find.text('Message'), findsOneWidget);
-      expect(find.text('Member since'), findsOneWidget);
+      expect(find.text('MEMBER SINCE'), findsOneWidget);
       expect(find.text('Account created'), findsOneWidget);
       expect(find.text('Joined guild'), findsOneWidget);
       expect(find.text('Feb 2, 2026'), findsOneWidget);
