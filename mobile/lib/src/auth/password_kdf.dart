@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 
 const mobilePasswordKdfVersion = 2;
@@ -187,12 +188,12 @@ SecretKeyData _passwordMaterial(String password) {
 }
 
 void _validatePassword(String password, {bool newCredential = false}) {
-  if (password.isEmpty) throw ArgumentError('Enter your password.');
+  if (password.isEmpty) throw const UserInputException('Enter your password.');
   if (password.length > 256) {
-    throw ArgumentError('Password must be at most 256 characters.');
+    throw const UserInputException('Password must be at most 256 characters.');
   }
   if (newCredential && password.length < 10) {
-    throw ArgumentError('Password must be at least 10 characters.');
+    throw const UserInputException('Password must be at least 10 characters.');
   }
 }
 

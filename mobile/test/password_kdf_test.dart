@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/auth/password_kdf.dart';
 import 'package:kaede_mobile/src/auth/password_vault.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -83,11 +84,27 @@ void main() {
     test('enforces the original password policy before deriving', () async {
       await expectLater(
         prepareMobileRegistrationPassword('too-short', instance),
-        throwsArgumentError,
+        throwsA(isA<UserInputException>().having(
+          userFacingError,
+          'displayed message',
+          'Password must be at least 10 characters.',
+        )),
       );
       await expectLater(
         prepareMobileResetPassword('x' * 257, instance),
-        throwsArgumentError,
+        throwsA(isA<UserInputException>().having(
+          userFacingError,
+          'displayed message',
+          'Password must be at most 256 characters.',
+        )),
+      );
+      await expectLater(
+        prepareMobilePassword('', context, instance),
+        throwsA(isA<UserInputException>().having(
+          userFacingError,
+          'displayed message',
+          'Enter your password.',
+        )),
       );
       final reset = await prepareMobileResetPassword(' ten chars ', instance);
       expect(
