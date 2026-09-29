@@ -145,7 +145,7 @@
           <textarea
             bind:value={message}
             rows="2"
-            maxlength="4000"
+            maxlength="3000"
             disabled={busy || !canSendStarter}
             placeholder={canSendStarter
               ? $t('ui_type_the_first_message_in_your_thread_dc3d4661')

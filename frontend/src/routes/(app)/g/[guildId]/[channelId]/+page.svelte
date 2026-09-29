@@ -278,7 +278,7 @@
       name: 'message',
       description: $t('ui_type_the_first_message_in_your_thread_dc3d4661'),
       required: true,
-      max_length: 4000
+      max_length: 3000
     }
   ]);
 
@@ -3522,7 +3522,7 @@
     const start = composerInput?.selectionStart ?? composerCursor;
     const end = composerInput?.selectionEnd ?? start;
     const next = `${content.slice(0, start)}${value}${content.slice(end)}`;
-    if (next.length > 4000) return;
+    if (next.length > 3000) return;
     content = next;
     composerCursor = start + value.length;
     emojiPickerOpen = false;
@@ -5791,6 +5791,7 @@
   }
 
   function startReply(message: Message) {
+    if (!canSendMessages || timeoutGuidance) return;
     if (editingMessage) finishEditing();
     replyingMessage = message;
     replyNotify = Boolean(
@@ -7471,7 +7472,7 @@
                         : undefined}
                       onRetry={retryMessage}
                       onViewProfile={openMessageProfile}
-                      onReply={startReply}
+                      onReply={canSendMessages && !timeoutGuidance ? startReply : undefined}
                       onForward={forwardDestinations.length &&
                       forwardUnavailableReason(item.message) === null
                         ? requestForward
@@ -7664,7 +7665,7 @@
                         ? $t('ui_use_to_choose_an_app_command_e83ca31e')
                         : $t('ui_use_thread_to_create_a_thread_3987e965')}
                     rows="1"
-                    maxlength="4000"
+                    maxlength="3000"
                   ></textarea>
                 {/if}
                 {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !nativeThreadComposer && !selectedApplicationCommand}
@@ -7714,7 +7715,7 @@
                     title={$t('ui_slow_mode_is_active_25db08b6')}>⏱ {slowmodeRemaining}s</small
                   >
                 {:else}
-                  <small class="composer-count">{content.length}/4000</small>
+                  <small class="composer-count">{content.length}/3000</small>
                 {/if}
                 <button
                   class="send-button"

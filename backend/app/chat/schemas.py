@@ -504,7 +504,7 @@ class OverwritePut(RequestModel):
 
 
 class MessageCreate(RequestModel):
-    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    content: str | None = Field(default=None, min_length=1, max_length=3000)
     e2ee: dict[str, object] | None = None
     tts: bool = False
     voice_message: bool = False
@@ -665,7 +665,7 @@ class MessageCreate(RequestModel):
 
 
 class MessageEdit(RequestModel):
-    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    content: str | None = Field(default=None, min_length=1, max_length=3000)
     e2ee: dict[str, object] | None = None
     embeds: list[Embed] | None = Field(default=None, max_length=10)
     components: list[MessageLayoutComponent] | None = Field(default=None, max_length=40)
@@ -777,7 +777,7 @@ class PreparedMessageForwardDestination(RequestModel):
 
 class MessageForwardCreate(RequestModel):
     destination_channel_ids: list[EntityRef] = Field(default_factory=list, max_length=5)
-    content: str | None = Field(default=None, min_length=1, max_length=4_000)
+    content: str | None = Field(default=None, min_length=1, max_length=3_000)
     destinations: list[PreparedMessageForwardDestination] = Field(
         default_factory=list,
         max_length=5,

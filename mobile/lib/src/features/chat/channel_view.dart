@@ -22,6 +22,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/announcements.dart';
 import 'package:kaede_mobile/src/domain/application_commands.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
+import 'package:kaede_mobile/src/domain/message_permissions.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/domain/reaction_management.dart';
@@ -442,7 +443,7 @@ NativeThreadCommand? parseNativeThreadCommand(String input) {
   if (name.isEmpty ||
       name.length > 100 ||
       message.isEmpty ||
-      message.length > 4000) {
+      message.length > 3000) {
     return null;
   }
   return NativeThreadCommand(name: name, message: message);
@@ -1216,15 +1217,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
             ))
         .toList(growable: false);
     final systemConversation = channel.recipients.any((user) => user.isSystem);
-    final canSend = !systemConversation &&
+    final canSend = canReplyInChannel(channel) &&
         !encryptedPaused &&
-        (!channel.locked || canManageThreads(channel)) &&
-        moderationStatus == null &&
-        (channel.type == ChannelType.dm ||
-            channel.type == ChannelType.groupDm ||
-            (channel.isThread
-                ? canSendInThread(channel)
-                : channel.allows(Permission.sendMessages)));
+        moderationStatus == null;
     final canReadHistory = canReadRetainedChannelHistory(channel);
     final stateMessages = state.messages;
     final messages = _visibleChannelMessages(state, channel);
@@ -1700,6 +1695,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                                       child: SwipeToReply(
                                         enabled: !detached &&
                                             canSend &&
+                                            message.messageType != 12 &&
                                             message.deletedAt == null,
                                         onReply: reply,
                                         child: tile,
@@ -2934,7 +2930,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
   }
 
   void _insertComposerText(String insertion) {
-    final next = insertComposerText(_composer.value, insertion);
+    final next =
+        insertComposerText(_composer.value, insertion, maxLength: null);
     if (next == null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(L10n.of(context)
@@ -3220,7 +3217,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
   }
 
   Future<void> _send() async {
-    if (_sending) return;
+    if (_sending || _composer.text.length > 3000) return;
     final state = ref.read(mobileControllerProvider);
     final channel = state.activeChannel;
     if (channel == null || _composerChannel != channel.ref) return;
@@ -4247,7 +4244,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                     children: [
                       TextField(
                         controller: note,
-                        maxLength: 4000,
+                        maxLength: 3000,
                         minLines: 1,
                         maxLines: 3,
                         decoration: InputDecoration(
@@ -4401,11 +4398,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       return;
     }
     try {
-      if (!mobileApplicationCommandAllowedByChannelPermissions(
-        command,
-        canUseApplicationCommands(channel),
-        _canSendUserContextCommands(channel),
-      )) {
+      channel = current.activeChannel!;
+      if (channel.archived ||
+          !mobileApplicationCommandAllowedByChannelPermissions(
+            command,
+            canUseApplicationCommands(channel),
+            _canSendUserContextCommands(channel),
+          )) {
         throw UserInputException(
           'This guild-installed command is unavailable in this channel.',
         );
@@ -4489,9 +4488,6 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     final canReact = !systemConversation &&
         !channelFollowNotice &&
         canAddMessageReaction(channel, emojiExists: false);
-    final canManage = channel.type == ChannelType.dm ||
-        channel.type == ChannelType.groupDm ||
-        channel.allows(Permission.manageMessages);
     final canPublish = !channelFollowNotice &&
         !_publishingMessages.contains(message.ref) &&
         mobileState.activeGuild != null &&
@@ -4507,8 +4503,14 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     final canPin = !systemConversation &&
         canReadRetainedChannelHistory(channel) &&
         canPinMessage(channel, message);
-    final canDelete = (message.authorRef == me || canManage) &&
-        (!channel.archived || !channel.locked || canManageThreads(channel));
+    final canDelete = canDeleteMessage(channel, message, me);
+    final canEdit = canEditMessage(channel, message, me) &&
+        !channelEncryptionPaused(channel) &&
+        mobileState.activeModerationStatus == null;
+    final canReply = !channelFollowNotice &&
+        canReplyInChannel(channel) &&
+        !channelEncryptionPaused(channel) &&
+        mobileState.activeModerationStatus == null;
     final canStartThread =
         !channelFollowNotice && canStartThreadFromMessage(channel);
     final forwardUnavailable = forwardMessageUnavailableReason(message);
@@ -4516,8 +4518,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         ? forwardDestinationChannels(mobileState, channel)
         : const <KaedeChannel>[];
     final poll = channelFollowNotice ? null : message.poll;
-    final canEndPoll =
-        poll != null && !poll.isClosed() && message.authorRef == me;
+    final canEndPoll = poll != null &&
+        !poll.isClosed() &&
+        message.authorRef == me &&
+        mobileState.activeModerationStatus == null;
     final recent = canReact ? await _recentReactions(me) : const <String>[];
     final sentGif =
         channelFollowNotice ? null : composerGifFromMessage(message.content);
@@ -4619,7 +4623,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                 title: Text(L10n.of(context).chat_mark_unread),
                 onTap: () => Navigator.pop(context, 'mark-unread'),
               ),
-              if (!systemConversation && !channelFollowNotice)
+              if (canReply)
                 ListTile(
                     leading: Icon(Icons.reply_rounded),
                     title: Text(L10n.of(context).ui_reply_d1ca83c7),
@@ -4715,11 +4719,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                         ? L10n.of(context).ui_unpin_message_122b93fa
                         : L10n.of(context).ui_pin_message_6e68281b),
                     onTap: () => Navigator.pop(context, 'pin')),
-              if (!channel.archived &&
-                  (!channel.locked || canManageThreads(channel)) &&
-                  !channelFollowNotice &&
-                  message.authorRef == me &&
-                  message.clientContentAvailable)
+              if (canEdit)
                 ListTile(
                     leading: Icon(Icons.edit_outlined),
                     title: Text(L10n.of(context).ui_edit_message_bfeb2eea),
@@ -4769,6 +4769,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
           await controller.markMessageUnread(message);
           break;
         case 'reply':
+          final current = ref.read(mobileControllerProvider);
+          final currentChannel = current.activeChannel;
+          if (currentChannel == null ||
+              currentChannel.ref != message.channelRef ||
+              !canReplyInChannel(currentChannel) ||
+              channelEncryptionPaused(currentChannel) ||
+              current.activeModerationStatus != null) {
+            break;
+          }
           setState(() {
             _reply = message;
             _notifyReply =
@@ -12674,7 +12683,6 @@ final class _Composer extends StatelessWidget {
                       focusNode: focusNode,
                       minLines: 1,
                       maxLines: 5,
-                      maxLength: 4000,
                       textCapitalization: TextCapitalization.sentences,
                       keyboardType: TextInputType.multiline,
                       textInputAction: TextInputAction.newline,
@@ -12710,6 +12718,29 @@ final class _Composer extends StatelessWidget {
                     onSend: onSend,
                   ),
                 ],
+              ),
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: controller,
+                builder: (context, value, _) {
+                  final remaining = 3000 - value.text.length;
+                  if (remaining > 200) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        '$remaining',
+                        style: TextStyle(
+                          color: remaining < 0
+                              ? context.kaede.danger
+                              : context.kaede.muted,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -12786,7 +12817,10 @@ final class _ComposerSend extends StatelessWidget {
                 ? Padding(
                     padding: EdgeInsets.fromLTRB(2, 0, 5, 5),
                     child: IconButton.filled(
-                      tooltip: L10n.of(context).ui_send_message_d97db31c,
+                      tooltip: value.text.length > 3000
+                          ? L10n.of(context)
+                              .ui_messages_can_contain_at_most_4_000_characters_779f2f0d
+                          : L10n.of(context).ui_send_message_d97db31c,
                       constraints: BoxConstraints.tightFor(
                         width: 38,
                         height: 38,
@@ -12798,7 +12832,9 @@ final class _ComposerSend extends StatelessWidget {
                         disabledBackgroundColor: context.kaede.hover,
                         disabledForegroundColor: context.kaede.muted,
                       ),
-                      onPressed: sending || !enabled ? null : onSend,
+                      onPressed: sending || !enabled || value.text.length > 3000
+                          ? null
+                          : onSend,
                       icon: sending
                           ? SizedBox.square(
                               dimension: 16,

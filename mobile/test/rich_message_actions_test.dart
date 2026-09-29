@@ -7,11 +7,75 @@ import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/message_permissions.dart';
+import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
+import 'package:kaede_mobile/src/domain/voice_messages.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart';
 
 void main() {
+  test(
+      'message mutation permissions respect authorship, kinds and thread state',
+      () {
+    final actor = EntityRef.parse('7@chat.example');
+    final channel = KaedeChannel(
+      ref: EntityRef.parse('2@chat.example'),
+      guildRef: EntityRef.parse('1@chat.example'),
+      type: ChannelType.publicThread,
+      position: 0,
+      permissions: BigInt.from(Permission.viewChannel),
+    );
+    KaedeChannel withPermissions(KaedeChannel value, int bits) =>
+        KaedeChannel.fromJson({...value.toJson(), 'permissions': '$bits'});
+    final own = KaedeMessage(
+      ref: EntityRef.parse('10@chat.example'),
+      channelRef: channel.ref,
+      authorRef: actor,
+      content: 'My message',
+      createdAt: DateTime.utc(2026),
+    );
+    final other = KaedeMessage(
+      ref: EntityRef.parse('11@chat.example'),
+      channelRef: channel.ref,
+      authorRef: EntityRef.parse('7@other.example'),
+      createdAt: DateTime.utc(2026),
+    );
+    expect(canDeleteMessage(channel, own, actor), isTrue);
+    expect(canDeleteMessage(channel, other, actor), isFalse);
+    expect(canDeleteMessage(channel, own, null), isFalse);
+    expect(canEditMessage(channel, other, actor), isFalse);
+    expect(canEditMessage(channel, own, actor), isTrue);
+    for (final type in [6, 12, 46]) {
+      expect(canEditMessage(channel, own.copyWith(messageType: type), actor),
+          isFalse);
+    }
+    expect(
+        canEditMessage(
+            channel, own.copyWith(flags: messageFlagIsVoiceMessage), actor),
+        isFalse);
+    final poll = KaedeMessage.fromJson(_messageJson(poll: _pollJson()));
+    expect(canEditMessage(channel, poll, poll.authorRef), isFalse);
+    final archived = channel.copyWith(archived: true);
+    expect(canDeleteMessage(archived, own, actor), isTrue);
+    expect(canEditMessage(archived, own, actor), isFalse);
+    final locked = archived.copyWith(locked: true);
+    expect(canDeleteMessage(locked, own, actor), isFalse);
+    expect(
+        canDeleteMessage(
+            withPermissions(
+                locked, Permission.viewChannel | Permission.manageThreads),
+            own,
+            actor),
+        isTrue);
+    expect(canReplyInChannel(channel), isFalse);
+    final writable = withPermissions(
+        channel, Permission.viewChannel | Permission.sendMessagesInThreads);
+    expect(canReplyInChannel(writable), isTrue);
+    expect(canReplyInChannel(writable.copyWith(locked: true)), isFalse);
+  });
+
   test('Stage lifecycle messages use Discord timeline wording', () {
     expect(
       stageSystemMessageText(27, 'Mina', 'Town Hall'),

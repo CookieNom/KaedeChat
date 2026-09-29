@@ -59,6 +59,7 @@
     recentReactions,
     rememberReaction
   } from '$lib/chat/reactions';
+  import { MESSAGE_FLAG_IS_VOICE_MESSAGE } from '$lib/chat/voice-messages';
   import { stageSystemMessageText } from '$lib/chat/stage-messages';
   import { stickerFromToken, stickerUrl } from '$lib/chat/stickers';
   import { placeContextMenu } from '$lib/ui/context-menu';
@@ -297,6 +298,9 @@
   const editAvailable = $derived(
     !groupSystemNotice &&
       canEdit &&
+      !message.poll &&
+      !(message.flags & MESSAGE_FLAG_IS_VOICE_MESSAGE) &&
+      ![6, 12, 46].includes(message.message_type) &&
       (!message.e2ee || message.e2ee_verified === true) &&
       !message.deleted_at &&
       !message.pending &&
@@ -305,7 +309,7 @@
   const deleteAvailable = $derived(
     (!groupSystemNotice || channelFollowSystemNotice) &&
       Boolean(onDelete) &&
-      (editAvailable || canDelete) &&
+      canDelete &&
       !message.deleted_at &&
       !message.pending &&
       !message.queued
@@ -537,6 +541,7 @@
   }
 
   function editMessage(event: MouseEvent) {
+    if (!editAvailable) return;
     event.stopPropagation();
     closeMenu(true);
     onEdit?.(message);
@@ -676,6 +681,7 @@
   }
 
   function requestDelete(event: MouseEvent) {
+    if (!deleteAvailable) return;
     event.stopPropagation();
     confirmingDelete = true;
     void tick().then(() => deleteConfirmationButton?.focus());
@@ -692,6 +698,7 @@
   }
 
   function deleteMessage(event: MouseEvent) {
+    if (!deleteAvailable) return;
     event.stopPropagation();
     closeMenu(true);
     onDelete?.(message);

@@ -5488,6 +5488,11 @@ final class MobileE2EEClient {
   }) =>
       _synchronized(
         () async {
+          if (content.length > 3000) {
+            throw const FormatException(
+              'Messages can contain at most 3,000 characters.',
+            );
+          }
           await _syncControlLog(channel);
           return _encryptMessage(
             channel,

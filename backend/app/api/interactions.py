@@ -1181,7 +1181,7 @@ class InteractionCallback(StrictInteractionModel):
 class InteractionResponseEdit(StrictInteractionModel):
     model_config = ConfigDict(extra="forbid")
 
-    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    content: str | None = Field(default=None, min_length=1, max_length=3000)
     e2ee: dict[str, object] | None = None
     embeds: list[Embed] | None = Field(default=None, max_length=10)
     components: list[MessageLayoutComponent] | None = Field(default=None, max_length=40)

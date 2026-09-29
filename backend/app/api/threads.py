@@ -167,7 +167,7 @@ class ThreadCreate(RequestModel):
 
     # Flat compatibility keeps the web/mobile composer thin while the nested
     # form remains the canonical bot/slash-command contract.
-    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    content: str | None = Field(default=None, min_length=1, max_length=3000)
     e2ee: dict[str, object] | None = None
     client_nonce: str | None = Field(default=None, min_length=1, max_length=64)
     referenced_message_id: EntityRef | None = None

@@ -4791,6 +4791,9 @@ def encrypt_message(
 
     context.require_current()
     normalized = _message_rich_data(data)
+    content = normalized.get("content")
+    if isinstance(content, str) and len(content) > 3000:
+        raise ValueError("Messages can contain at most 3,000 characters.")
     operation: Literal["create", "edit"] = (
         "edit" if message_ref is not None else "create"
     )

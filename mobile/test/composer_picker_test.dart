@@ -24,18 +24,25 @@ void main() {
       expect(next?.selection, const TextSelection.collapsed(offset: 8));
     });
 
-    test('appends for an invalid selection and enforces 4,000 characters', () {
+    test('appends for an invalid selection and enforces 3,000 characters', () {
       final invalidSelection = TextEditingValue(
         text: 'hello',
         selection: const TextSelection.collapsed(offset: -1),
       );
 
       expect(insertComposerText(invalidSelection, '!')?.text, 'hello!');
+      final oversized = 'a' * 3001;
+      expect(
+        insertComposerText(TextEditingValue(text: oversized), '😀',
+                maxLength: null)
+            ?.text,
+        '$oversized😀',
+      );
       expect(
         insertComposerText(
           TextEditingValue(
-            text: List<String>.filled(4000, 'a').join(),
-            selection: const TextSelection.collapsed(offset: 4000),
+            text: List<String>.filled(3000, 'a').join(),
+            selection: const TextSelection.collapsed(offset: 3000),
           ),
           '😀',
         ),

@@ -996,7 +996,7 @@
     const start = composerInput?.selectionStart ?? composerCursor;
     const end = composerInput?.selectionEnd ?? start;
     const next = `${content.slice(0, start)}${value}${content.slice(end)}`;
-    if (next.length > 4000) return;
+    if (next.length > 3000) return;
     content = next;
     composerCursor = start + value.length;
     emojiPickerOpen = false;
@@ -3196,6 +3196,8 @@
                     : 'offline'}
                   canEdit={item.message.author_id === currentUser?.id &&
                     item.message.author_domain === currentUser?.origin_domain}
+                  canDelete={item.message.author_id === currentUser?.id &&
+                    item.message.author_domain === currentUser?.origin_domain}
                   onEdit={startEditing}
                   onDelete={deleteMessage}
                   onRetry={retryMessage}
@@ -3364,7 +3366,7 @@
               aria-label={$t('ui_direct_message_cd3e1605')}
               placeholder={`Message ${conversationTitle}`}
               rows="1"
-              maxlength="4000"
+              maxlength="3000"
             ></textarea>
           {/if}
           {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !selectedApplicationCommand}
@@ -3400,7 +3402,7 @@
             >
           {/if}
           <small class="composer-count"
-            >{selectedApplicationCommand ? '' : `${content.length}/4000`}</small
+            >{selectedApplicationCommand ? '' : `${content.length}/3000`}</small
           >
           <button
             class="send-button"

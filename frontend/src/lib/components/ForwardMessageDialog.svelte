@@ -124,7 +124,7 @@
       {$t('ui_add_a_note_322c0e13')} <span>{$t('ui_optional_59be7133')}</span>
       <textarea
         bind:value={note}
-        maxlength="4000"
+        maxlength="3000"
         rows="3"
         placeholder={$t('ui_say_something_about_this_message_8d64d127')}
         disabled={busy}

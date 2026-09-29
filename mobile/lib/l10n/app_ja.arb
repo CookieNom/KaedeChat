@@ -1122,7 +1122,7 @@
   "@ui_could_not_create_the_poll_57023a37": {
     "description": "Interface text in lib/src/features/chat/channel_view.dart"
   },
-  "ui_messages_can_contain_at_most_4_000_characters_779f2f0d": "メッセージは4,000文字以内にしてください。",
+  "ui_messages_can_contain_at_most_4_000_characters_779f2f0d": "メッセージは3,000文字以内にしてください。",
   "@ui_messages_can_contain_at_most_4_000_characters_779f2f0d": {
     "description": "Interface text in lib/src/features/chat/channel_view.dart"
   },

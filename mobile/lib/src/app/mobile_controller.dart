@@ -18,6 +18,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/client_preferences.dart';
 import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
+import 'package:kaede_mobile/src/domain/message_permissions.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/domain/reaction_management.dart';
@@ -3602,6 +3603,15 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<KaedeMessage> finalizePoll(KaedeMessage source) async {
+    final channel = _channel(source.channelRef);
+    if (channel == null ||
+        !canReadRetainedChannelHistory(channel) ||
+        source.authorRef != state.user?.ref ||
+        source.poll == null ||
+        source.poll!.isClosed() ||
+        state.selfModerationByGuild[channel.guildRef]?.activeAt() == true) {
+      throw StateError('You cannot end this poll.');
+    }
     final message = await repository.finalizePoll(
       channel: source.channelRef,
       message: source.ref,
@@ -3656,8 +3666,7 @@ final class MobileController extends StateNotifier<MobileState> {
   void setDraft(EntityRef channel, String content) {
     final tokens = api.tokens;
     if (tokens == null || state.phase != SessionPhase.ready) return;
-    final normalized =
-        content.length <= 4000 ? content : content.substring(0, 4000);
+    final normalized = content;
     final drafts = Map<EntityRef, String>.of(state.drafts);
     if (normalized.isEmpty) {
       drafts.remove(channel);
@@ -3704,6 +3713,10 @@ final class MobileController extends StateNotifier<MobileState> {
     }
     final channel = _channel(message.channelRef);
     if (channel == null) throw StateError('This conversation is unavailable.');
+    if (!canEditMessage(channel, message, state.user?.ref) ||
+        state.selfModerationByGuild[channel.guildRef]?.activeAt() == true) {
+      throw StateError('You cannot edit this message.');
+    }
     if (channelEncryptionPaused(channel)) {
       throw StateError(
         'End-to-end encryption must finish before messages can be edited.',
@@ -3774,6 +3787,11 @@ final class MobileController extends StateNotifier<MobileState> {
     if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
       return;
     }
+    final channel = _channel(message.channelRef);
+    if (channel == null ||
+        !canDeleteMessage(channel, message, state.user?.ref)) {
+      throw StateError('You cannot delete this message.');
+    }
     await repository.deleteMessage(message.channelRef, message.ref);
     if (!_sessionIsCurrent(accountKey, generation)) return;
     final messages = state.messageStore[message.channelRef];
@@ -3819,6 +3837,10 @@ final class MobileController extends StateNotifier<MobileState> {
     final generation = _sessionLoadGeneration;
     if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
       return;
+    }
+    final channel = _channel(message.channelRef);
+    if (channel == null || !canClearMessageReactions(channel)) {
+      throw StateError('You cannot clear reactions in this conversation.');
     }
     if (emoji == null) {
       await repository.clearReactions(message.channelRef, message.ref);

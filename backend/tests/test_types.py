@@ -7,6 +7,8 @@ from app.chat.schemas import (
     ChannelCreate,
     ChannelPositionBatch,
     InviteCreate,
+    MessageCreate,
+    MessageEdit,
     OverwritePut,
     RoleCreate,
 )
@@ -229,3 +231,10 @@ def test_channel_position_batch_accepts_discord_partial_patch_shapes() -> None:
                 ]
             }
         )
+
+
+@pytest.mark.parametrize("model", [MessageCreate, MessageEdit])
+def test_message_content_limit(model: type[BaseModel]) -> None:
+    assert model(content="a" * 3000).content == "a" * 3000
+    with pytest.raises(ValueError):
+        model(content="a" * 3001)

@@ -4648,6 +4648,7 @@ export class KaedeE2EEClient {
     content: string,
     options: MessageEncryptionOptions = {}
   ): Promise<MlsEnvelope> {
+    if (content.length > 3000) throw new Error('Messages can contain at most 3,000 characters.');
     return this.#synchronized(async () => {
       await this.#syncControlLogUnlocked(channel);
       return this.#encryptMessageUnlocked(channel, content, options);

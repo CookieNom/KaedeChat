@@ -165,7 +165,7 @@ typedef ComposerGifLoader = Future<Map<String, Object?>> Function({
 TextEditingValue? insertComposerText(
   TextEditingValue current,
   String insertion, {
-  int maxLength = 4000,
+  int? maxLength = 3000,
 }) {
   var start = current.selection.start;
   var end = current.selection.end;
@@ -178,7 +178,7 @@ TextEditingValue? insertComposerText(
     end = start;
   }
   final nextText = current.text.replaceRange(start, end, insertion);
-  if (nextText.length > maxLength) return null;
+  if (maxLength != null && nextText.length > maxLength) return null;
   return TextEditingValue(
     text: nextText,
     selection: TextSelection.collapsed(offset: start + insertion.length),

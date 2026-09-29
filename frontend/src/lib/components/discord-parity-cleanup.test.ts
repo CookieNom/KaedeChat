@@ -42,6 +42,90 @@ const button = (label: string) =>
   )!;
 
 describe('Discord parity interactions', () => {
+  it.each([
+    { kind: 'ordinary', flags: 0, poll: undefined, canEdit: true, canDelete: true, edit: true },
+    { kind: 'voice', flags: 1 << 13, poll: undefined, canEdit: true, canDelete: true, edit: false },
+    {
+      kind: 'poll',
+      flags: 0,
+      poll: {
+        question: { text: 'Question' },
+        answers: [],
+        expiry: '2027-01-01T00:00:00Z',
+        results: { is_finalized: false, answer_counts: [] }
+      },
+      canEdit: true,
+      canDelete: true,
+      edit: false
+    },
+    {
+      kind: 'other author',
+      flags: 0,
+      poll: undefined,
+      canEdit: false,
+      canDelete: false,
+      edit: false
+    },
+    { kind: 'moderator', flags: 0, poll: undefined, canEdit: false, canDelete: true, edit: false },
+    {
+      kind: 'delete denied',
+      flags: 0,
+      poll: undefined,
+      canEdit: true,
+      canDelete: false,
+      edit: true
+    }
+  ])(
+    'limits $kind message menu mutations independently',
+    async ({ flags, poll, canEdit, canDelete, edit }) => {
+      const onDelete = vi.fn();
+      const message = {
+        id: '3',
+        origin_domain: 'chat.example',
+        channel_id: '2',
+        channel_domain: 'chat.example',
+        content: 'Message',
+        flags,
+        poll,
+        message_type: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        author_id: '7',
+        author_domain: 'chat.example',
+        author: { id: '7', origin_domain: 'chat.example', username: 'author' },
+        attachments: [],
+        embeds: [],
+        components: [],
+        sticker_items: [],
+        reactions: []
+      } as unknown as Message;
+      component = createClassComponent({
+        component: MessageRow,
+        target: document.body,
+        props: { message, canEdit, canDelete, onEdit: vi.fn(), onDelete }
+      });
+      flushSync();
+      document
+        .querySelector('.message-row')!
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await tick();
+      await tick();
+      expect(
+        [...document.querySelectorAll('button span')].some(
+          (span) => span.textContent === 'Edit message'
+        )
+      ).toBe(edit);
+      expect(Boolean(button('Delete message'))).toBe(canDelete);
+      if (canDelete) {
+        button('Delete message').click();
+        await tick();
+        component.$set({ canDelete: false });
+        await tick();
+        expect(button('Delete')).toBeUndefined();
+        expect(onDelete).not.toHaveBeenCalled();
+      }
+    }
+  );
+
   it('dismisses the Threads panel on outside pointer presses and Escape', async () => {
     component = createClassComponent({
       component: ThreadsPanel,
