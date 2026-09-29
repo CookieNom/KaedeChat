@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
@@ -29,6 +30,12 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final user = fixtureUser();
       final controller = await fixtureController(fixtureGuild(user), user, []);
+      await controller.api.useTokens(SessionTokens(
+        instance: Domain('chat.example'),
+        userRef: user.ref,
+        accessToken: 'access',
+        refreshToken: 'refresh',
+      ));
       final channel = KaedeChannel(
         ref: EntityRef.parse('2@chat.example'),
         type: ChannelType.text,
@@ -64,7 +71,7 @@ void main() {
       await tester.pump();
       expect(tester.widget<TextField>(input).controller!.text.length, 3001);
       controller.setDraft(channel.ref, 'a' * 3001);
-      expect(controller.state.drafts[channel.ref]!.length, 3001);
+      expect(controller.state.drafts[channel.ref], 'a' * 3001);
       await tester.enterText(input, 'a' * 3000);
       await tester.pumpAndSettle();
       expect(find.text('0'), findsOneWidget);
