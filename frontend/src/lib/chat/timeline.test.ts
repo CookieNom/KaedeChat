@@ -26,6 +26,23 @@ function message(id: string, author = '1', createdAt = '2026-07-20T10:00:00Z'): 
 }
 
 describe('buildTimeline', () => {
+  it('omits deleted messages without leaving dividers or interrupting grouping', () => {
+    const deleted = {
+      ...message('11', '2'),
+      deleted_at: '2026-07-20T10:01:00Z'
+    };
+    const first = message('10');
+    const last = message('12', '1', '2026-07-20T10:02:00Z');
+    const deletedNextDay = { ...deleted, id: '13', created_at: '2026-07-21T10:00:00Z' };
+    expect(buildTimeline([deleted, deletedNextDay], first)).toEqual([]);
+    expect(buildTimeline([first, deleted, last, deletedNextDay])).toEqual(
+      buildTimeline([first, last])
+    );
+    expect(buildTimeline([first, deleted, last], deleted)).toEqual(
+      buildTimeline([first, last], deleted)
+    );
+  });
+
   it('omits MLS setup records without hiding undecryptable user messages', () => {
     const controls = ['welcome', 'commit'].map((operation, index) => ({
       ...message(String(10 + index)),

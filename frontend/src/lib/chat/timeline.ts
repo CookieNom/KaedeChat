@@ -36,6 +36,7 @@ export function buildTimeline(
   let addedNewDivider = false;
 
   for (const message of messages) {
+    if (message.deleted_at) continue;
     // MLS setup records remain in history for key synchronization, not chat display.
     if (
       message.message_type === 7 &&

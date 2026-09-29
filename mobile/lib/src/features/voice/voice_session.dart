@@ -605,7 +605,9 @@ final class VoiceSession extends ChangeNotifier {
         e2ee = await _e2eeClient();
       }
       final routing = await _repository.rtcHints(
-          channel: target.ref, call: callRef, region: rtcRegion);
+          channel: target.ref,
+          call: callRef,
+          region: callRef != null ? 'automatic' : rtcRegion);
       if (generation != _generation) return;
       final grant = callRef == null
           ? await _repository.voiceToken(

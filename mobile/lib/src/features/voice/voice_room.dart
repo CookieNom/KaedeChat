@@ -205,6 +205,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
   @override
   void initState() {
     super.initState();
+    if (callRef != null) Future<void>.microtask(_joinWithRegion);
     if (channel.type == ChannelType.voice) {
       Future<void>.microtask(_loadVoiceStatus);
     }
@@ -274,11 +275,15 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
   bool _rtcPreparing = false;
 
   Future<void> _joinWithRegion() async {
-    if (_rtcPreparing) return;
+    if (!mounted || _rtcPreparing) return;
     setState(() => _rtcPreparing = true);
     try {
       final session = ref.read(voiceSessionProvider);
       if (session.connecting) return;
+      if (callRef != null) {
+        await session.connect(channel, callRef: callRef);
+        return;
+      }
       final repository = ref.read(mobileControllerProvider.notifier).repository;
       String? region;
       try {
@@ -341,11 +346,13 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         ? 'Loading Stage…'
         : channel.type == ChannelType.stage && _stageInstance == null
             ? 'The Stage has not started'
-            : connected
-                ? '${participants.length} connected'
-                : reconnecting
-                    ? 'Reconnecting… your place in the call is being kept'
-                    : 'Join to talk, listen, and share video';
+            : _rtcPreparing || (thisRoom && session.connecting)
+                ? L10n.of(context).ui_connecting_4d2cf951
+                : connected
+                    ? '${participants.length} connected'
+                    : reconnecting
+                        ? 'Reconnecting… your place in the call is being kept'
+                        : 'Join to talk, listen, and share video';
     final roomSummaryWithElapsed = voiceElapsed == null ||
             (channel.type == ChannelType.stage && _stageInstance == null)
         ? roomSummary
@@ -422,11 +429,14 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : Icon(Icons.call_rounded),
-                    label: Text(session.connecting && thisRoom
-                        ? L10n.of(context).ui_connecting_4d2cf951
-                        : channel.type == ChannelType.stage
-                            ? L10n.of(context).ui_join_audience_49b9c9c9
-                            : L10n.of(context).ui_join_voice_f86abe8f),
+                    label:
+                        Text(_rtcPreparing || (session.connecting && thisRoom)
+                            ? L10n.of(context).ui_connecting_4d2cf951
+                            : callRef != null
+                                ? L10n.of(context).ui_retry_8036af59
+                                : channel.type == ChannelType.stage
+                                    ? L10n.of(context).ui_join_audience_49b9c9c9
+                                    : L10n.of(context).ui_join_voice_f86abe8f),
                   ),
               ],
             ),
@@ -458,7 +468,9 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                 icon: Icons.videocam_outlined, text: session.videoNotice!),
           Expanded(
             child: !joined
-                ? _VoiceEmpty(canConnect: canConnect)
+                ? _rtcPreparing || (thisRoom && session.connecting)
+                    ? const Center(child: CircularProgressIndicator())
+                    : _VoiceEmpty(canConnect: canConnect)
                 : reconnecting
                     ? Center(
                         child: Column(
@@ -1198,17 +1210,18 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     'Audio',
                     () => _showAudioRoutes(context, session),
                   )),
-                  Expanded(
-                    child: _control(
-                      context,
-                      Icons.call_end_rounded,
-                      channel.type == ChannelType.stage
-                          ? 'Exit quietly'
-                          : 'Leave',
-                      () => session.leave(),
-                      destructive: true,
+                  if (callRef == null)
+                    Expanded(
+                      child: _control(
+                        context,
+                        Icons.call_end_rounded,
+                        channel.type == ChannelType.stage
+                            ? 'Exit quietly'
+                            : 'Leave',
+                        () => session.leave(),
+                        destructive: true,
+                      ),
                     ),
-                  ),
                 ],
               ),
               if (session.canSpeak && (session.pushToTalk || session.canUseVad))

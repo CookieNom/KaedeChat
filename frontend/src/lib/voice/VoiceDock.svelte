@@ -75,8 +75,8 @@
     void api<RTCRouting>(rtcPath)
       .then((value) => {
         rtcRouting = value;
-        selectedRegion = value.default_region ?? 'automatic';
-        if (value.provider === 'cinnamon' && !value.default_region) {
+        selectedRegion = callRef ? 'automatic' : (value.default_region ?? 'automatic');
+        if (value.provider === 'cinnamon' && (callRef || !value.default_region)) {
           void recentRegionalLatency({ regions: value.probes, max_age_seconds: 60 });
         }
       })
@@ -673,6 +673,7 @@
     document.addEventListener('visibilitychange', releasePushToTalkWhenHidden);
     if (audioHost) detachAudio = voice.attachAudio(audioHost);
     if (selectedChannel()?.type === 13) void loadStageInstance();
+    if (callRef) void join();
   });
 
   async function mediaKey(grant: VoiceToken, channel: Channel): Promise<ArrayBuffer | undefined> {
@@ -763,7 +764,11 @@
         if (!selectedRegion) selectedRegion = current.default_region ?? 'automatic';
         rtcRouting = current;
         if (current.provider === 'cinnamon') {
-          const region = current.allow_region_selection ? selectedRegion || null : null;
+          const region = current.allow_region_selection
+            ? callRef
+              ? 'automatic'
+              : selectedRegion || null
+            : null;
           const automatic = region === 'automatic' || (!region && !current.default_region);
           const latency = automatic
             ? await recentRegionalLatency({ regions: current.probes, max_age_seconds: 60 })
@@ -1175,7 +1180,7 @@
         {/if}
       {/if}
       {#if !view.connected && (!isStageChannel || stageInstance)}
-        {#if rtcRouting?.provider === 'cinnamon' && rtcRouting.allow_region_selection}
+        {#if !callRef && rtcRouting?.provider === 'cinnamon' && rtcRouting.allow_region_selection}
           <label class="rtc-region-choice"
             >Call region
             <select bind:value={selectedRegion} disabled={preparingRTC || view.connecting}>
@@ -1197,9 +1202,11 @@
         >
           {preparingRTC || view.connecting
             ? $t('ui_connecting_72021eb7')
-            : isStageChannel
-              ? $t('ui_join_audience_deb0900c')
-              : $t('ui_join_voice_201f8c4e')}
+            : callRef
+              ? $t('ui_retry_942087cc')
+              : isStageChannel
+                ? $t('ui_join_audience_deb0900c')
+                : $t('ui_join_voice_201f8c4e')}
         </button>
       {/if}
       {@render headerActions?.()}
@@ -1534,15 +1541,19 @@
           {/if}
         </div>
       {/if}
-      <span class="control-divider" aria-hidden="true"></span>
-      <button
-        class="control-button danger"
-        aria-label={isStageChannel ? $t('ui_exit_quietly_407e6c8b') : $t('ui_leave_voice_ecb0fa25')}
-        title={isStageChannel ? $t('ui_exit_quietly_407e6c8b') : $t('ui_leave_voice_ecb0fa25')}
-        onclick={() => safely(leave)}
-      >
-        <Icon name="phone-off" size={21} />
-      </button>
+      {#if !callRef}
+        <span class="control-divider" aria-hidden="true"></span>
+        <button
+          class="control-button danger"
+          aria-label={isStageChannel
+            ? $t('ui_exit_quietly_407e6c8b')
+            : $t('ui_leave_voice_ecb0fa25')}
+          title={isStageChannel ? $t('ui_exit_quietly_407e6c8b') : $t('ui_leave_voice_ecb0fa25')}
+          onclick={() => safely(leave)}
+        >
+          <Icon name="phone-off" size={21} />
+        </button>
+      {/if}
     </footer>
   {/if}
 </section>

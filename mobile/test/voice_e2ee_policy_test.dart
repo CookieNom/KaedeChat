@@ -32,6 +32,34 @@ void main() {
     'video_quality_mode': 1,
   };
 
+  test('accepts DM call defaults while enforcing room and encryption policy',
+      () {
+    for (final type in [ChannelType.dm, ChannelType.groupDm]) {
+      final dm = KaedeChannel(
+        ref: channel.ref,
+        type: type,
+        position: 0,
+        permissions: BigInt.zero,
+        encryptionMode: channel.encryptionMode,
+        encryptionState: channel.encryptionState,
+        encryptionPolicyGeneration: channel.encryptionPolicyGeneration,
+        encryptionEpoch: channel.encryptionEpoch,
+      );
+      expect(voiceGrantMatchesChannelPolicy(grant, dm), isTrue);
+      for (final changed in <Map<String, Object?>>[
+        {...grant, 'channel_id': '3'},
+        {...grant, 'e2ee': false},
+        {...grant, 'encryption_epoch': '8'},
+        {...grant, 'bitrate': 32000},
+        {...grant, 'user_limit': 2},
+        {...grant, 'rtc_region': 'other'},
+        {...grant, 'video_quality_mode': 2},
+      ]) {
+        expect(voiceGrantMatchesChannelPolicy(changed, dm), isFalse);
+      }
+    }
+  });
+
   test('rejects an old media grant after a channel epoch rotation', () {
     expect(voiceGrantMatchesChannelPolicy(grant, channel), isTrue);
     for (final policy in [(5, 7), (4, 8)]) {

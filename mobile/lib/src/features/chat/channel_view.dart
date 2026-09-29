@@ -467,7 +467,8 @@ List<KaedeMessage> _visibleChannelMessages(
     (canReadRetainedChannelHistory(channel)
             ? threadTimelineMessages(channel, state.messages)
             : state.messages)
-        .where((message) => !state.isMessageBlocked(message))
+        .where((message) =>
+            message.deletedAt == null && !state.isMessageBlocked(message))
         .toList();
 
 /// Discord type-21 thread starters carry the source message only in

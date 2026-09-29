@@ -141,6 +141,42 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it('automatically joins DM calls with automatic routing and no region picker', async () => {
+  chatEntities.channels.upsert({ ...channel, type: 1, encryption_mode: 'plaintext' });
+  mocks.request.mockImplementation(async (path: string) => {
+    if (path.startsWith('/voice/rtc?'))
+      return {
+        provider: 'cinnamon',
+        default_region: 'us-east',
+        allow_region_selection: true,
+        regions: [{ id: 'us-east', name: 'US East' }],
+        probes: [],
+        probe_ticket: 'ticket'
+      };
+    throw new Error('Connection failed');
+  });
+  component = createClassComponent({
+    component: VoiceDock,
+    target: document.body,
+    props: { channelRef: '2@guild.example', callRef: '9@guild.example' }
+  });
+  flushSync();
+  await vi.waitFor(() =>
+    expect(mocks.request).toHaveBeenCalledWith(
+      '/calls/9%40guild.example/voice/token',
+      expect.objectContaining({ method: 'POST', body: expect.any(String) })
+    )
+  );
+  const request = mocks.request.mock.calls.find(([path]) => path.endsWith('/voice/token'))!;
+  expect(JSON.parse(request[1].body).routing).toEqual({
+    region: 'automatic',
+    latency: {},
+    probe_ticket: 'ticket'
+  });
+  expect(document.querySelector('.rtc-region-choice')).toBeNull();
+  expect(document.querySelector('button[aria-label="Leave voice"]')).toBeNull();
+});
+
 describe('browser voice-activity permission UI', () => {
   it('renders an enforced pointer-and-keyboard hold-to-talk control for no-VAD grants', async () => {
     await render();

@@ -54,6 +54,9 @@ VoiceMediaPolicy? voiceMediaPolicyFromGrant(Map<String, Object?> grant) {
 }
 
 VoiceMediaPolicy? _voiceMediaPolicyFromChannel(KaedeChannel channel) {
+  if (channel.type == ChannelType.dm || channel.type == ChannelType.groupDm) {
+    return VoiceMediaPolicy.defaults;
+  }
   final policy = <String, Object?>{
     'bitrate': channel.bitrate,
     'user_limit': channel.userLimit,
