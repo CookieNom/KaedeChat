@@ -43,7 +43,7 @@ jobs:
             uv run --project sdk/python --no-sync python -I -c 'import kaede_bot; from importlib.resources import files; assert files("kaede_bot").joinpath("py.typed").is_file()'
             uv run --project sdk/python --no-sync pytest -q sdk/python/tests
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/upload-artifact
         with:
           name: python-sdk-distributions
           path: sdk/python/dist/*

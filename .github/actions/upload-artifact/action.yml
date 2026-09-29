@@ -1,0 +1,50 @@
+name: Upload artifact with bounded retries
+description: Retry transient artifact-storage failures without rebuilding packages.
+inputs:
+  name:
+    description: Unique artifact name within this workflow run.
+    required: true
+  path:
+    description: Files to upload.
+    required: true
+  if-no-files-found:
+    description: Behavior when the input files are missing.
+    default: error
+  retention-days:
+    description: Retention period; zero uses the repository default.
+    default: "0"
+runs:
+  using: composite
+  steps:
+    - id: first
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+    - if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      shell: bash
+      run: sleep 10
+    - id: second
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+        overwrite: true
+    - if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      shell: bash
+      run: sleep 30
+    - if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+        overwrite: true

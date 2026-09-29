@@ -55,7 +55,7 @@ jobs:
         run: python3 mobile/tool/build_webrtc.py "${{ inputs.platform }}" --work-dir "$RUNNER_TEMP/kaede-webrtc"
       - name: Preserve framework symlinks
         run: tar -cf "$RUNNER_TEMP/webrtc-${{ inputs.platform }}.tar" -C mobile/native/webrtc .
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/upload-artifact
         with:
           name: kaede-webrtc-${{ inputs.platform }}
           path: ${{ runner.temp }}/webrtc-${{ inputs.platform }}.tar

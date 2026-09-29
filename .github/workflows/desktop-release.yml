@@ -157,7 +157,7 @@ jobs:
             (cd release-assets && sha256sum "$name" > "$name.sha256")
           done
       - name: Upload Linux release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-artifact
         with:
           name: kaede-chat-linux-x86_64
           path: release-assets/*
@@ -228,7 +228,7 @@ jobs:
               if grep -q "not found" /tmp/linked-libraries; then exit 1; fi
             '
       - name: Upload RPM release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-artifact
         with:
           name: kaede-chat-linux-rpm-x86_64
           path: release-assets/*
@@ -361,7 +361,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $installerDestination).Hash.ToLowerInvariant()
           "$hash  $installerName" | Set-Content "$installerDestination.sha256" -Encoding ascii
       - name: Upload Windows release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-artifact
         with:
           name: kaede-chat-windows-x86_64
           path: release-assets/*
@@ -506,7 +506,7 @@ jobs:
             (cd release-assets && shasum -a 256 "$name" > "$name.sha256")
           done
       - name: Upload macOS release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-artifact
         with:
           name: kaede-chat-macos-${{ matrix.arch }}
           path: release-assets/*
@@ -651,7 +651,7 @@ jobs:
           (cd release-assets && sha256sum "$apk" > "$apk.sha256")
           (cd release-assets && sha256sum "$bundle" > "$bundle.sha256")
       - name: Upload Android release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-artifact
         with:
           name: kaede-chat-android
           path: mobile/release-assets/*
@@ -794,7 +794,7 @@ jobs:
           cp "$ipa" "$destination"
           (cd release-assets && shasum -a 256 "$(basename "$destination")" > "$(basename "$destination").sha256")
       - name: Upload iOS release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-artifact
         with:
           name: kaede-chat-ios
           path: mobile/release-assets/*
