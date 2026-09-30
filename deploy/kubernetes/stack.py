@@ -401,6 +401,9 @@ def render(
             obj["spec"]["template"]["spec"].setdefault("securityContext", {})[
                 "supplementalGroups"
             ] = [int(values.get("OPERATOR_ENV_GID", "1000"))]
+        if role in {"api", "gateway", "worker", "scheduler"}:
+            # A briefly started process must not evict healthy old replicas.
+            obj["spec"]["minReadySeconds"] = 10
         app_objects[role] = obj
         container = obj["spec"]["template"]["spec"]["containers"][0]
         if ports:

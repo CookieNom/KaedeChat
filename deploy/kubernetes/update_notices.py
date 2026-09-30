@@ -13,6 +13,7 @@ from pathlib import Path
 
 import manage
 from stack import ROOT, read_env_file
+from migration_safety import online_revisions
 from validate_deploy_env import validate_file_permissions
 
 
@@ -28,24 +29,42 @@ def git(*args: str) -> str:
     return result.stdout.decode()
 
 
-def target_schema(revision: str) -> str:
+def target_sources(revision: str) -> dict[str, str]:
     paths = git(
         "ls-tree", "-r", "--name-only", revision, "--", "backend/migrations"
     ).splitlines()
+    return {
+        path: git("show", f"{revision}:{path}")
+        for path in sorted(paths)
+        if path.endswith(".py")
+    }
+
+
+def target_schema(revision: str, files: dict[str, str] | None = None) -> str:
     digest = hashlib.sha256()
-    for path in sorted(paths):
-        if path.endswith(".py"):
-            digest.update(path.encode())
-            digest.update(git("show", f"{revision}:{path}").encode())
+    for path, source in sorted(
+        (files if files is not None else target_sources(revision)).items()
+    ):
+        digest.update(path.encode())
+        digest.update(source.encode())
     return digest.hexdigest()
 
 
 def classify_update(
-    previous: dict, schema: str, infrastructure: str, paths: list[str] | None
+    previous: dict,
+    schema: str,
+    infrastructure: str,
+    paths: list[str] | None,
+    files: dict[str, str] | None = None,
 ) -> tuple[str, list[str]]:
     reasons = []
     if previous.get("schema") and previous["schema"] != schema:
-        reasons.append("database")
+        try:
+            if files is None:
+                raise ValueError("unverified migrations")
+            online_revisions(previous.get("migration_manifest"), files)
+        except ValueError:
+            reasons.append("database")
     if previous.get("infrastructure") and previous["infrastructure"] != infrastructure:
         reasons.append("infrastructure")
     if reasons:
@@ -125,11 +144,13 @@ def check_updates(env_file: Path, config: Path) -> None:
     objects = manage.deployment(cfg, values, manage.image_names(cfg, values, target))[
         "items"
     ]
+    files = target_sources(target)
     maintenance, reasons = classify_update(
         previous,
-        target_schema(target),
+        target_schema(target, files),
         manage.infrastructure_digest(objects),
         paths,
+        files,
     )
     report = {
         "revision": target,

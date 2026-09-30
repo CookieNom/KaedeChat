@@ -204,7 +204,7 @@ run_update() {
 
   [[ -z $(git -C "$ROOT" status --porcelain --untracked-files=no) ]] || \
     die "the updated checkout unexpectedly contains tracked modifications; inspect 'git -C $ROOT status --short' and deploy manually after resolving them"
-  log 'building and rolling out the new application; schema/infrastructure changes require manual maintenance'
+  log 'building and rolling out the new application; unrecognized schema changes and infrastructure changes require maintenance'
   KAEDE_UPDATE_FROM="${deployed:-$current}" KAEDE_UPDATE_TO="$target" KAEDE_ROOT="$ROOT" \
     python3 "$ROOT/deploy/kubernetes/manage.py" deploy --update-only --env-file "$ENV_FILE" --revision "$target" || \
     die 'Kubernetes deployment failed or requires maintenance; inspect the preceding error and make status. The deployed commit has not been advanced'

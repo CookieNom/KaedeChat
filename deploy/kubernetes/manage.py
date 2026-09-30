@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from stack import ROOT, digest, read_env_file, render, resource
+from migration_safety import manifest, online_revisions, sources
 from validate_deploy_env import validate_file_permissions, validate_values
 
 
@@ -273,12 +274,19 @@ def deploy(
         )
     schema = schema_digest()
     requires_migration = previous.get("schema") != schema
-    if previous and requires_migration and not maintenance:
-        raise ValueError(
-            "Database migrations changed. Automatic rolling update refused.\n"
-            "Back up the instance, then run:\n\n"
-            "    make deploy MAINTENANCE=1\n"
-        )
+    migration_files = sources(ROOT)
+    approved = []
+    online = bool(previous and requires_migration and not maintenance)
+    if online:
+        try:
+            approved = online_revisions(
+                previous.get("migration_manifest"), migration_files
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Database migrations changed: {exc}.\n"
+                "Back up the instance, then run make deploy MAINTENANCE=1"
+            ) from exc
     infra = infrastructure_digest(objects)
     if previous and previous.get("infrastructure") != infra and not maintenance:
         raise ValueError(
@@ -357,6 +365,17 @@ def deploy(
     for obj in stateful:
         wait_workload(cfg, obj)
     if requires_migration:
+        if online:
+            # Do not run bootstrap's application writes alongside old code.
+            jobs["migrate"]["spec"]["template"]["spec"]["containers"][0]["command"] = [
+                "alembic",
+                "-x",
+                "online=true",
+                "-x",
+                "approved=" + ",".join(approved),
+                "upgrade",
+                "head",
+            ]
         job(cfg, jobs["migrate"])
     job(cfg, jobs["storage-init"])
     apps = [o for o in objects if o["kind"] == "Deployment"]
@@ -376,11 +395,14 @@ def deploy(
     try:
         # Maintenance patches own replicas as Update operations, separately from
         # Apply even with the same manager name. Reclaim the desired app specs.
-        apply(cfg, apps, force_conflicts=maintenance)
-        for obj in apps:
+        # Upgrade consumers before producers enqueue work with a new payload.
+        # Frontend goes last so new controls reach users after the API is ready.
+        order = {"worker": 0, "api": 1, "gateway": 2, "scheduler": 3, "frontend": 5}
+        for obj in sorted(apps, key=lambda o: order.get(o["metadata"]["name"], 4)):
+            apply(cfg, [obj], force_conflicts=maintenance)
             wait_workload(cfg, obj)
     except subprocess.CalledProcessError:
-        if previous and not maintenance and not requires_migration:
+        if previous and not maintenance:
             print(
                 "Rollout failed; restoring the previous application specifications",
                 file=sys.stderr,
@@ -404,6 +426,7 @@ def deploy(
                 data={
                     "revision": revision,
                     "schema": schema,
+                    "migration_manifest": manifest(migration_files),
                     "infrastructure": infra,
                     "backend": images[0],
                     "frontend": images[1],

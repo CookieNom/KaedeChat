@@ -478,9 +478,24 @@ jobs:
           trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
           umask 077
           printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY_BASE64" | base64 -D > "$APPLE_API_KEY_PATH"
-          bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" cargo +"$RUST_VERSION" tauri build \
-            --config src-tauri/tauri.conf.json \
-            --bundles app,dmg -- --locked
+          # Tauri hides disk-image command output unless verbose logging is enabled.
+          # Retry only DMG-script failures; compilation/signing failures remain fatal.
+          dmg_log="$(mktemp)"
+          trap 'rm -f "$APPLE_API_KEY_PATH" "$dmg_log"' EXIT
+          for attempt in 1 2 3; do
+            if bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" cargo +"$RUST_VERSION" tauri build --verbose \
+              --config src-tauri/tauri.conf.json \
+              --bundles app,dmg -- --locked 2>&1 | tee "$dmg_log"; then
+              break
+            else
+              status=${PIPESTATUS[0]}
+            fi
+            if [[ "$attempt" == 3 ]] || ! grep -Fq 'error running bundle_dmg.sh' "$dmg_log"; then
+              exit "$status"
+            fi
+            echo "DMG packaging failed; retrying in $((attempt * 10)) seconds ($attempt/3)." >&2
+            sleep "$((attempt * 10))"
+          done
       - name: Collect macOS release files
         run: |
           set -euo pipefail

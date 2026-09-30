@@ -95,6 +95,7 @@ from app.core.logging import configure_logging
 from app.core.metrics import render_metrics
 from app.core.settings import get_settings
 from app.core.snowflake import SnowflakeGenerator, WorkerLease
+from app.db.schema_compatibility import assert_schema_compatible
 from app.db.session import create_engine_and_sessionmaker
 from app.federation.delivery import FederationOutboxCapacityExceeded
 from app.federation.identity_storage import FederationIdentityQuotaExceeded
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     voice_task: asyncio.Task[None] | None = None
     webhook_task: asyncio.Task[None] | None = None
     try:
+        await assert_schema_compatible(engine)
         lease = await WorkerLease.acquire(redis)
         lease.start_heartbeat()
         app.state.engine = engine

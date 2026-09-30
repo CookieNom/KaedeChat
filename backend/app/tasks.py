@@ -107,6 +107,7 @@ from app.db.models import (
     UserSettings,
 )
 from app.db.partitions import ensure_message_partitions
+from app.db.schema_compatibility import assert_schema_compatible
 from app.db.session import create_engine_and_sessionmaker
 from app.email.outbox import cleanup_email_outbox, drain_email_outbox
 from app.federation.delivery import (
@@ -230,6 +231,11 @@ async def acquire_worker_snowflake(_state: TaskiqState) -> None:
 
     global _worker_snowflake, _worker_snowflake_lease, _worker_snowflake_redis
     settings = get_settings()
+    engine, _ = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        await assert_schema_compatible(engine)
+    finally:
+        await engine.dispose()
     redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
     try:
         lease = await WorkerLease.acquire(redis)

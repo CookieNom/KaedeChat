@@ -83,6 +83,27 @@ class KubernetesTests(unittest.TestCase):
             classify({}, "same-schema", "same-infra", []), ("unknown", ["unverified"])
         )
 
+    def test_update_notice_recognizes_safe_pending_chain(self):
+        from migration_safety import manifest, sources
+
+        files = sources(ROOT)
+        latest = next(p for p in files if "9e4a1c3d6f82_" in p)
+        previous = {
+            "schema": "old",
+            "infrastructure": "same",
+            "migration_manifest": manifest(
+                {p: s for p, s in files.items() if p != latest}
+            ),
+        }
+        self.assertEqual(
+            update_notices.classify_update(previous, "new", "same", [latest], files),
+            ("not_required", []),
+        )
+        self.assertEqual(
+            update_notices.classify_update(previous, "new", "changed", [latest], files),
+            ("required", ["infrastructure"]),
+        )
+
     def test_update_check_reads_upstream_without_checking_out_or_executing_it(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -185,6 +206,7 @@ class KubernetesTests(unittest.TestCase):
                 obj["spec"]["strategy"]["rollingUpdate"]["maxUnavailable"], 0
             )
             pod = obj["spec"]["template"]["spec"]
+            self.assertGreaterEqual(obj["spec"]["minReadySeconds"], 10)
             self.assertFalse(pod["automountServiceAccountToken"])
             self.assertEqual(
                 pod["containers"][0]["readinessProbe"]["httpGet"]["path"],
@@ -359,6 +381,119 @@ class KubernetesTests(unittest.TestCase):
             restored = next(event for event in events if event[:2] == ("restore", name))
             self.assertGreater(restored[2], 0)
             self.assertGreater(events.index(restored), migration)
+
+    def test_online_migration_failure_and_rollout_recovery(self):
+        from migration_safety import manifest, sources
+
+        files = sources(ROOT)
+        latest = next(p for p in files if "9e4a1c3d6f82_" in p)
+        baseline = manifest({p: source for p, source in files.items() if p != latest})
+        for failure in (None, "migration", "rollout"):
+            with self.subTest(failure=failure):
+                cfg = {"namespace": "kaede-test", "context": "test"}
+                objects = manage.deployment(
+                    cfg, self.values, ("backend:new", "frontend:new")
+                )["items"]
+                saved = [copy.deepcopy(o) for o in objects if o["kind"] == "Deployment"]
+                for obj in saved:
+                    obj["spec"]["template"]["spec"]["containers"][0]["image"] = (
+                        "old-image"
+                    )
+                previous = {
+                    "data": {
+                        "schema": "old-schema",
+                        "migration_manifest": baseline,
+                        "infrastructure": manage.infrastructure_digest(objects),
+                    }
+                }
+                events = []
+
+                def kubectl(_cfg, *args, **kwargs):
+                    self.assertNotIn("patch", args)
+                    return json.dumps(
+                        previous
+                        if "configmap" in args
+                        else {"items": copy.deepcopy(saved)}
+                    )
+
+                def job(_cfg, obj):
+                    name = obj["metadata"]["name"]
+                    events.append(("job", name))
+                    if name == "migrate":
+                        command = obj["spec"]["template"]["spec"]["containers"][0][
+                            "command"
+                        ]
+                        self.assertIn("online=true", command)
+                        self.assertIn("approved=9e4a1c3d6f82", command)
+                        self.assertNotIn("bootstrap", " ".join(command))
+                        if failure == "migration":
+                            raise ValueError("migration failed")
+
+                failed = False
+
+                def wait(_cfg, obj):
+                    nonlocal failed
+                    if obj["kind"] == "Deployment":
+                        events.append(("ready", obj["metadata"]["name"]))
+                        if failure == "rollout" and not failed:
+                            failed = True
+                            raise subprocess.CalledProcessError(1, "rollout")
+
+                with (
+                    patch("manage.verify_cluster"),
+                    patch("manage.kubectl", side_effect=kubectl),
+                    patch("manage.job", side_effect=job),
+                    patch("manage.wait_workload", side_effect=wait),
+                    patch("manage.apply") as apply,
+                ):
+                    if failure:
+                        with self.assertRaises(
+                            (ValueError, subprocess.CalledProcessError)
+                        ):
+                            manage.deploy(
+                                cfg,
+                                self.values,
+                                "new",
+                                ("backend:new", "frontend:new"),
+                                False,
+                            )
+                    else:
+                        manage.deploy(
+                            cfg,
+                            self.values,
+                            "new",
+                            ("backend:new", "frontend:new"),
+                            False,
+                        )
+                    applied = [o for call in apply.call_args_list for o in call.args[1]]
+                    releases = [
+                        o for o in applied if o["metadata"]["name"] == "kaede-release"
+                    ]
+                    if failure:
+                        self.assertFalse(releases)
+                    else:
+                        self.assertEqual(
+                            releases[0]["data"]["migration_manifest"], manifest(files)
+                        )
+                        self.assertLess(
+                            events.index(("job", "migrate")),
+                            events.index(("ready", "worker")),
+                        )
+                        self.assertLess(
+                            events.index(("ready", "worker")),
+                            events.index(("ready", "api")),
+                        )
+                    if not failure:
+                        self.assertEqual(
+                            [event for event in events if event[0] == "ready"][-1],
+                            ("ready", "frontend"),
+                        )
+                    if failure == "migration":
+                        self.assertFalse(
+                            any(o["kind"] == "Deployment" for o in applied)
+                        )
+                    if failure == "rollout":
+                        self.assertEqual(apply.call_args.args[1], saved)
 
     def test_apply_conflict_takeover_is_explicit(self):
         items = [{"apiVersion": "apps/v1", "kind": "Deployment"}]

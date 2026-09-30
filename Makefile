@@ -13,7 +13,7 @@ KUBE_ARGS := --env-file "$(ENV_FILE)" $(if $(KUBE_CONFIG),--config "$(KUBE_CONFI
 help:
 	@echo "setup                 Configure production Kubernetes, storage, and host nginx"
 	@echo "tools                 Install pinned kubectl, k3d, and Tilt into this checkout (no sudo)"
-	@echo "deploy                Build/import images and deploy (MAINTENANCE=1 permits migrations)"
+	@echo "deploy                Build/import images and deploy (MAINTENANCE=1 permits incompatible migrations)"
 	@echo "status / logs         Show production status / logs (SERVICE=api)"
 	@echo "exec                  Run a production command (SERVICE=worker COMMAND='...')"
 	@echo "dev / dev-down        Start Tilt in background / stop Tilt and cluster, retaining data"

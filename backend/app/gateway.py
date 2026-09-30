@@ -73,6 +73,7 @@ from app.db.models import (
     UserSettings,
 )
 from app.db.models import Session as AuthSession
+from app.db.schema_compatibility import assert_schema_compatible
 from app.db.session import create_engine_and_sessionmaker
 from app.federation.dm_storage import (
     dm_authority_history_available,
@@ -752,6 +753,11 @@ async def presence_reaper(redis: Redis, sessionmaker: async_sessionmaker[AsyncSe
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        await assert_schema_compatible(engine)
+    except Exception:
+        await engine.dispose()
+        raise
     redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
     app.state.engine = engine
     app.state.sessionmaker = sessionmaker

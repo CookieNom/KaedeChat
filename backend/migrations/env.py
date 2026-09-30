@@ -4,7 +4,8 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from alembic.script import ScriptDirectory
+from sqlalchemy import Connection, pool, text
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.settings import get_settings
@@ -51,14 +52,32 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def do_run_migrations(connection: object) -> None:
+def do_run_migrations(connection: Connection) -> None:
+    options = context.get_x_argument(as_dictionary=True)
+    online = options.get("online") == "true"
+    if online:
+        # Session lock survives per-revision commits; released on disconnect.
+        if not connection.execute(text("SELECT pg_try_advisory_lock(1262572613, 1)")).scalar():
+            raise RuntimeError("Another online migration is running")
+        connection.execute(text("SET lock_timeout = '1s'"))
+        connection.execute(text("SET statement_timeout = '30s'"))
+        connection.commit()
     context.configure(
         connection=connection,
+        transaction_per_migration=online,
         target_metadata=target_metadata,
         compare_type=True,
         compare_server_default=True,
         include_object=include_object,
     )
+    if online:
+        approved = set(filter(None, options.get("approved", "").split(",")))
+        current = context.get_context().get_current_heads()
+        script = ScriptDirectory.from_config(config)
+        pending = {r.revision for r in script.iterate_revisions("heads", current)}
+        if not pending <= approved:
+            raise RuntimeError("Database revision differs from the approved online migration chain")
+        connection.commit()
     with context.begin_transaction():
         context.run_migrations()
 
@@ -69,9 +88,11 @@ async def run_async_migrations() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():

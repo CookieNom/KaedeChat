@@ -149,8 +149,8 @@ guide for lingering, logs, failure handling, and a cron fallback.
 
 On the first `make deploy`, the migration Job creates the database schema and
 bootstraps the instance before application writers start. Later deployments
-with changed migration files require explicit maintenance. Preflight and
-storage-init failures stop deployment before new applications are started.
+with recognized additive migrations can roll out online; unrecognized migration
+changes require explicit maintenance. Preflight and storage-init failures stop deployment before new applications are started.
 
 If a host nginx file was generated, install it manually in nginx's `http`
 context, run `nginx -t`, and reload nginx yourself. The internal edge stays on

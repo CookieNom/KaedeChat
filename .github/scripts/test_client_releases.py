@@ -48,6 +48,43 @@ class ClientReleaseTests(unittest.TestCase):
             result = subprocess.run([sys.executable, "-c", script], cwd=directory, env=env, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
 
+    @unittest.skipIf(os.name == "nt", "macOS packaging uses POSIX shell")
+    def test_dmg_retry_preserves_failures(self):
+        block = WORKFLOW.read_text().split("      - name: Build, sign, and notarize macOS packages\n")[1]
+        script = textwrap.dedent(block.split("        run: |\n")[1].split("      - name:")[0])
+        script = "set -euo pipefail\n" + script[script.index('dmg_log="$(mktemp)"'):]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cargo").write_text("""#!/bin/bash
+count=$(cat "$TEST_ROOT/count")
+count=$((count + 1))
+echo "$count" > "$TEST_ROOT/count"
+if (( count <= TEST_FAILURES )); then
+  echo "$TEST_MESSAGE" >&2
+  exit 7
+fi
+""")
+            (root / "sleep").write_text("#!/bin/bash\nexit 0\n")
+            for name in ("cargo", "sleep"):
+                (root / name).chmod(0o755)
+            for failures, message, expected_attempts, expected_status in (
+                (0, "", 1, 0),
+                (1, "error running bundle_dmg.sh", 2, 0),
+                (9, "error running bundle_dmg.sh", 3, 7),
+                (1, "code signing failed", 1, 7),
+                (1, "compilation failed", 1, 7),
+            ):
+                with self.subTest(message=message, failures=failures):
+                    (root / "count").write_text("0")
+                    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                        env=os.environ | {"PATH": f"{root}:{os.environ['PATH']}",
+                            "TEST_ROOT": str(root), "TEST_FAILURES": str(failures),
+                            "TEST_MESSAGE": message, "RUST_VERSION": "test",
+                            "APPLE_API_KEY_PATH": str(root / "key.p8"),
+                            "GITHUB_WORKSPACE": str(WORKFLOW.parents[2])})
+                    self.assertEqual(result.returncode, expected_status, result.stderr)
+                    self.assertEqual(int((root / "count").read_text()), expected_attempts)
+
     def test_paths(self):
         cases = {
             "frontend/src/routes/+page.svelte": {"desktop"},

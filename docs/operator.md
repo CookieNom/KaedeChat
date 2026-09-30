@@ -599,12 +599,35 @@ reconnect/resume. Load balancing directs new connections to ready pods; it canno
 move an established WebSocket. This reduces update disruption but does not make
 single-node hardware, storage upgrades, or LiveKit replacement highly available.
 
-Changed migrations or stateful/host-network infrastructure configuration refuse
-an unattended update. The checkout may already be newer, but the deployed commit
-is recorded only after all workloads become ready. Compatible failed application
-rollouts restore previous Deployment specifications; the release marker remains
+Unattended updates automatically accept recognized additive migrations: new tables
+(and indexes on those new tables), nullable columns, and columns with constant
+server defaults. No migration annotation is needed. Every pending revision must
+qualify, including when skipping releases. Changed/deleted migration history,
+unrecognized Python or SQL, data backfills, existing-table indexes, constraint
+changes, and stateful/host-network infrastructure still require maintenance.
+The first deployment installing this migration runner requires maintenance to
+establish a trusted migration-file manifest; later releases use that baseline.
+The checkout may already be newer, but the deployed commit is recorded only after
+all workloads become ready. Compatible failed application rollouts restore previous Deployment specifications; the release marker remains
 unchanged. Inspect `make status`, `make logs SERVICE=api`, and Job logs before
 retrying. Schema changes are never automatically downgraded.
+
+Online upgrades use a 1-second lock timeout, a 30-second statement timeout, and
+one transaction per revision.
+A failed migration leaves running workloads intact; earlier additive revisions
+may already have committed. Fix the cause and retry the same release. The runner
+checks actual database revisions against the approved chain before executing it.
+Online migration Jobs do not run bootstrap alongside the old application.
+
+Workers roll out before API producers, and the frontend rolls out last. API,
+gateway, and workers check for required tables/columns at startup; extra columns
+are accepted so an older application can run against an expanded schema. These
+checks do not prove semantic compatibility: developers must keep queue payloads
+and stored values readable by the previous release. Introduce new enforcement
+rules or data formats through a compatible intermediate release before enabling
+them. A new nullable column alone does not make a consent/privacy change safe to
+activate while old handlers still run. Keep irreversible feature activation
+outside the application rollback window.
 
 Enable or inspect scheduling with:
 
@@ -629,7 +652,8 @@ plaintext; ordinary encrypted conversations are unaffected. Delivery receipts
 prevent repeat notices after retries or message deletion.
 
 Checks compare the configured Git branch with the cluster's completed release.
-Changed migration content or current infrastructure requires maintenance. Changed
+Unrecognized migration changes or current infrastructure require maintenance. Safe
+additive migrations use the same classifier as deployment. Changed
 deployment code, or an unverifiable baseline, is reported as requiring review;
 the checker never executes code from the candidate update. Notification failures
 do not block scheduled installation. The first deployment introducing system
