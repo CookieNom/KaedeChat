@@ -478,7 +478,9 @@ final class _DeveloperTeamsScreenState
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              ActionButton(
+              SaveButton(
+                controllers: [input],
+                hasChanges: () => input.text.trim().isNotEmpty,
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_add_9dc3aa14),
               ),
@@ -999,7 +1001,11 @@ final class _DeveloperApplicationScreenState
               onPressed: () => Navigator.pop(context, false),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            ActionButton(
+            SaveButton(
+              controllers: [name, publicKey],
+              hasChanges: () =>
+                  name.text.trim().isNotEmpty &&
+                  publicKey.text.trim().isNotEmpty,
               onPressed: () => Navigator.pop(context, true),
               child: Text(L10n.of(context).ui_enroll_8c14fe85),
             ),
@@ -1100,7 +1106,10 @@ final class _DeveloperApplicationScreenState
                 onPressed: () => Navigator.pop(dialogContext, false),
                 child: Text(L10n.of(context).ui_cancel_35afca3b),
               ),
-              ActionButton(
+              SaveButton(
+                controllers: [slug, name],
+                hasChanges: () =>
+                    slug.text.trim().isNotEmpty && name.text.trim().isNotEmpty,
                 onPressed: () => Navigator.pop(dialogContext, true),
                 child: Text(L10n.of(context).ui_create_link_7d72271b),
               ),
@@ -1323,6 +1332,7 @@ final class _DeveloperApplicationScreenState
               _permissionBits
             ],
             hasChanges: () => _settingsDraft != _savedSettings,
+            isValid: () => _name.text.trim().isNotEmpty,
             kind: ActionButtonKind.text,
             onPressed: application == null || _busy ? null : _saveApplication,
             child: Text(L10n.of(context).ui_save_4d2d5d68),
@@ -1544,6 +1554,7 @@ final class _DeveloperApplicationScreenState
                           _permissionBits
                         ],
                         hasChanges: () => _settingsDraft != _savedSettings,
+                        isValid: () => _name.text.trim().isNotEmpty,
                         onPressed: _busy ? null : _saveApplication,
                         icon: const Icon(Icons.save_outlined),
                         label: Text(L10n.of(context)

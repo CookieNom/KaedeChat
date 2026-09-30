@@ -1275,6 +1275,13 @@ Future<ScheduledEventEditorResult?> showScheduledEventEditor(
                       SizedBox(width: 8),
                       SaveButton(
                         controllers: [name, description, location],
+                        isValid: () =>
+                            name.text.trim().isNotEmpty &&
+                            (endTime == null || endTime!.isAfter(startTime)) &&
+                            (entityType == ScheduledEventEntityType.external
+                                ? location.text.trim().isNotEmpty &&
+                                    endTime != null
+                                : channelRef != null),
                         hasChanges: () =>
                             event == null ||
                             draftState() != savedDraft ||

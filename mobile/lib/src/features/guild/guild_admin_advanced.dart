@@ -828,6 +828,7 @@ final class _AutoModRuleDialogState extends State<_AutoModRuleDialog> {
           ),
           SaveButton(
               controllers: [_name, _keywords, _regex, _allow, _blockMessage],
+              isValid: () => autoModDraftValidationMessage(_draft()) == null,
               hasChanges: () =>
                   widget.existing == null ||
                   jsonEncode(_draft().toJson()) != _savedDraft,

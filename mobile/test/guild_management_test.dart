@@ -134,10 +134,20 @@ void main() {
       tester.view.viewInsets = const FakeViewPadding(bottom: 900);
       await tester.pumpAndSettle();
 
+      final saveControl = find.descendant(
+          of: find.byKey(const ValueKey('save-channel-button')),
+          matching: find.byType(FilledButton));
+      expect(tester.widget<FilledButton>(saveControl).onPressed, isNull);
+      await tester.enterText(
+          find.byKey(const ValueKey('channel-name-field')), '   ');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(saveControl).onPressed, isNull);
       expect(find.byKey(const ValueKey('channel-name-field')), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.enterText(
           find.byKey(const ValueKey('channel-name-field')), 'mobile-room');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(saveControl).onPressed, isNotNull);
       final saveButton = find.byKey(const ValueKey('save-channel-button'));
       await tester.tap(saveButton);
       await tester.pumpAndSettle();

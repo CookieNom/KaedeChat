@@ -949,7 +949,12 @@ class _TrackerAttachmentLinkDialogState
               kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel')),
-          ActionButton(
+          SaveButton(
+              controllers: [name, url],
+              hasChanges: () => true,
+              isValid: () =>
+                  name.text.trim().isNotEmpty &&
+                  trackerSafeUrl(url.text.trim()),
               onPressed: () {
                 if (form.currentState?.validate() == true) {
                   Navigator.pop(context, <String, Object?>{

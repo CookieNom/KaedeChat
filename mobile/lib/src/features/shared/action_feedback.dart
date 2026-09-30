@@ -151,6 +151,8 @@ class SaveButton extends StatefulWidget {
   const SaveButton(
       {super.key,
       required this.hasChanges,
+      this.isValid,
+      this.style,
       required this.onPressed,
       this.controllers = const [],
       this.child,
@@ -159,6 +161,8 @@ class SaveButton extends StatefulWidget {
       this.kind = ActionButtonKind.filled});
 
   final bool Function() hasChanges;
+  final bool Function()? isValid;
+  final ButtonStyle? style;
   final FutureOr<void> Function()? onPressed;
   final List<TextEditingController> controllers;
   final Widget? child, label, icon;
@@ -170,7 +174,11 @@ class SaveButton extends StatefulWidget {
 
 class _SaveButtonState extends State<SaveButton> {
   Future<void> _save() async {
-    if (widget.onPressed == null || !widget.hasChanges()) return;
+    if (widget.onPressed == null ||
+        !widget.hasChanges() ||
+        widget.isValid?.call() == false) {
+      return;
+    }
     try {
       await widget.onPressed!();
     } finally {
@@ -182,8 +190,12 @@ class _SaveButtonState extends State<SaveButton> {
   Widget build(BuildContext context) => ListenableBuilder(
         listenable: Listenable.merge(widget.controllers),
         builder: (context, _) => ActionButton(
-          onPressed:
-              widget.onPressed == null || !widget.hasChanges() ? null : _save,
+          onPressed: widget.onPressed == null ||
+                  !widget.hasChanges() ||
+                  widget.isValid?.call() == false
+              ? null
+              : _save,
+          style: widget.style,
           kind: widget.kind,
           label: widget.label,
           icon: widget.icon,

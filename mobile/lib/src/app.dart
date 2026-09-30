@@ -13,6 +13,7 @@ import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
 import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/auth/session_lock.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
+import 'package:kaede_mobile/src/features/shared/keyboard_dismissal.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/l10n/language_suggestion.dart';
@@ -169,7 +170,8 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
           L10n.current = AppLocalizations.of(context);
           final voice = ref.watch(voiceSessionProvider);
           final pipTrack = voice.pipTrack;
-          return Stack(children: [
+          return KeyboardDismissal(
+              child: Stack(children: [
             AnnotatedRegion<SystemUiOverlayStyle>(
               value: kaedeSystemOverlayFor(Theme.of(context).brightness),
               child: SessionLock(
@@ -187,7 +189,7 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
                       child: pipTrack == null
                           ? const SizedBox.shrink()
                           : VideoTrackRenderer(pipTrack))),
-          ]);
+          ]));
         },
       ),
     );

@@ -841,6 +841,10 @@ final class _ApplicationAssetEditorDialogState
                 !widget.isEditing ||
                 _name.text.trim() != widget.initial.name ||
                 _kind != widget.initial.kind,
+            isValid: () =>
+                ApplicationAssetDraft(name: _name.text, kind: _kind)
+                    .validationMessage ==
+                null,
             key: Key('save-application-asset'),
             onPressed: _save,
             child: Text(widget.action),
@@ -926,6 +930,9 @@ final class _ApplicationEmojiEditorDialogState
             controllers: [_name],
             hasChanges: () =>
                 !widget.isEditing || _name.text.trim() != widget.initial.name,
+            isValid: () =>
+                ApplicationEmojiDraft(name: _name.text).validationMessage ==
+                null,
             key: Key('save-application-emoji'),
             onPressed: _save,
             child: Text(widget.action),

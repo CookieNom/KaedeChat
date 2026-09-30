@@ -1835,7 +1835,13 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            ActionButton(
+            SaveButton(
+              controllers: controllers.values.toList(),
+              hasChanges: () => true,
+              isValid: () => fields.every((field) => (field.obscure
+                      ? controllers[field.key]!.text
+                      : controllers[field.key]!.text.trim())
+                  .isNotEmpty),
               style: destructive
                   ? FilledButton.styleFrom(
                       backgroundColor: context.kaede.danger)
@@ -1921,7 +1927,10 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               onPressed: () => Navigator.pop(dialogContext),
               child: Text(L10n.of(context).ui_cancel_35afca3b),
             ),
-            ActionButton(
+            SaveButton(
+              controllers: [controller],
+              hasChanges: () => true,
+              isValid: () => controller.text.trim().length >= 6,
               onPressed: () {
                 final code = controller.text.trim();
                 if (code.length < 6) {

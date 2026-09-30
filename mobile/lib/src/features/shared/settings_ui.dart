@@ -132,38 +132,47 @@ Future<String?> showSettingsTextDialog(
   int? maxLength,
 }) async {
   final input = TextEditingController(text: initialValue);
-  try {
-    return await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: input,
-          autofocus: true,
-          maxLength: maxLength,
-          decoration: InputDecoration(
-            labelText: useHint ? null : label,
-            hintText: useHint ? label : null,
+  final navigator = Navigator.of(context, rootNavigator: true);
+  final route = DialogRoute<String>(
+    context: context,
+    themes: InheritedTheme.capture(from: context, to: navigator.context),
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: TextField(
+        controller: input,
+        autofocus: true,
+        maxLength: maxLength,
+        decoration: InputDecoration(
+          labelText: useHint ? null : label,
+          hintText: useHint ? label : null,
+        ),
+      ),
+      actions: [
+        ActionButton(
+          kind: ActionButtonKind.text,
+          onPressed: () => Navigator.pop(dialogContext),
+          child: Text(L10n.of(context).ui_cancel_35afca3b),
+        ),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: input,
+          builder: (context, value, child) => ActionButton(
+            onPressed: value.text.trim().isEmpty
+                ? null
+                : () {
+                    FocusScope.of(dialogContext).unfocus();
+                    Navigator.pop(dialogContext, value.text.trim());
+                  },
+            child: Text(actionLabel),
           ),
         ),
-        actions: [
-          ActionButton(
-            kind: ActionButtonKind.text,
-            onPressed: () => Navigator.pop(dialogContext),
-            child: Text(L10n.of(context).ui_cancel_35afca3b),
-          ),
-          ValueListenableBuilder<TextEditingValue>(
-            valueListenable: input,
-            builder: (context, value, child) => ActionButton(
-              onPressed: value.text.trim().isEmpty
-                  ? null
-                  : () => Navigator.pop(dialogContext, value.text.trim()),
-              child: Text(actionLabel),
-            ),
-          ),
-        ],
-      ),
-    );
+      ],
+    ),
+  );
+  try {
+    final result = await navigator.push(route);
+    // The popped future completes before the closing animation removes the field.
+    await route.completed;
+    return result;
   } finally {
     input.dispose();
   }

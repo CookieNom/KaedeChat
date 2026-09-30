@@ -63,6 +63,7 @@ void main() {
             body: SaveButton(
           controllers: [input],
           hasChanges: () => input.text.trim() != saved,
+          isValid: () => input.text.trim().isNotEmpty,
           onPressed: () async {
             calls++;
             final submitted = input.text.trim();
@@ -75,6 +76,9 @@ void main() {
       bool enabled() =>
           tester.widget<FilledButton>(find.byType(FilledButton)).onPressed !=
           null;
+      expect(enabled(), isFalse);
+      input.text = '   ';
+      await tester.pump();
       expect(enabled(), isFalse);
       input.text = 'Edited';
       await tester.pump();
@@ -106,6 +110,50 @@ void main() {
       await tester.pumpAndSettle();
       expect(saved, 'Another edit');
       expect(enabled(), isTrue);
+    });
+
+    testWidgets('text dialogs close safely with a keyboard on $platform',
+        (tester) async {
+      addTearDown(tester.view.resetViewInsets);
+      String? result;
+      await tester.pumpWidget(MaterialApp(
+        theme: kaedeTheme().copyWith(platform: platform),
+        home: Builder(
+            builder: (context) => Scaffold(
+                  body: FilledButton(
+                    onPressed: () async {
+                      result = await showSettingsTextDialog(context,
+                          title: 'Create a guild',
+                          label: 'Guild name',
+                          actionLabel: 'Continue');
+                    },
+                    child: const Text('Open'),
+                  ),
+                )),
+      ));
+      for (var attempt = 0; attempt < 2; attempt++) {
+        result = null;
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        final submit = find.widgetWithText(FilledButton, 'Continue');
+        expect(tester.widget<FilledButton>(submit).onPressed, isNull);
+        await tester.enterText(find.byType(TextField), '   ');
+        await tester.pump();
+        expect(tester.widget<FilledButton>(submit).onPressed, isNull);
+        await tester.enterText(find.byType(TextField), 'Guild $attempt');
+        tester.view.viewInsets = const FakeViewPadding(bottom: 240);
+        await tester.pumpAndSettle();
+        await tester.tap(submit);
+        await tester.pump();
+        // Rebuild the departing field while the route is animating out.
+        tester.view.viewInsets = const FakeViewPadding(bottom: 120);
+        await tester.pump(const Duration(milliseconds: 40));
+        expect(result, isNull);
+        tester.view.resetViewInsets();
+        await tester.pumpAndSettle();
+        expect(result, 'Guild $attempt');
+        expect(tester.takeException(), isNull);
+      }
     });
 
     testWidgets('settings switch and choice await their changes on $platform',

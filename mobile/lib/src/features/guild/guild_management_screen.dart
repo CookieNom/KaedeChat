@@ -1230,6 +1230,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
               width: double.infinity,
               child: SaveButton(
                   controllers: [_name, _description],
+                  isValid: () => _name.text.trim().isNotEmpty,
                   hasChanges: () =>
                       _name.text.trim() != _guild.name ||
                       _description.text.trim() != (_guild.description ?? '') ||
@@ -6213,6 +6214,7 @@ final class _WebhookSettingsEditorDialogState
             hasChanges: () =>
                 _name.text.trim() != widget.initialName ||
                 _channel.ref != widget.initialChannel.ref,
+            isValid: () => _name.text.trim().isNotEmpty,
             key: Key('save-webhook-settings'),
             onPressed: _save,
             child: Text(L10n.of(context).ui_save_webhook_f889ec79),
@@ -9480,6 +9482,12 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
           controllers: [_name, _topic, _defaultReaction, _trackerPrefix],
           hasChanges: () =>
               widget.channel == null || _draftState != _savedDraft,
+          isValid: () =>
+              _name.text.trim().isNotEmpty &&
+              (_type != ChannelType.tracker ||
+                  widget.channel != null ||
+                  RegExp(r'^[A-Za-z][A-Za-z0-9]{1,9}$')
+                      .hasMatch(_trackerPrefix.text.trim())),
           key: ValueKey('save-channel-button'),
           onPressed: _save,
           icon: Icon(
@@ -9490,9 +9498,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
         ),
       ),
     );
-    return AnimatedPadding(
-      duration: Duration(milliseconds: 180),
-      curve: Curves.easeOut,
+    return Padding(
       padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: media.size.height * .88),
@@ -10300,6 +10306,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
 
   void _save() {
     if (_formKey.currentState?.validate() != true) return;
+    FocusScope.of(context).unfocus();
     final parent = widget.channels
         .where((channel) => channel.ref.wire == _parent)
         .firstOrNull

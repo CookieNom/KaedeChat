@@ -314,6 +314,13 @@ void main() {
       'release-plan',
     );
     await tester.enterText(
+        find.byKey(const ValueKey('tracker-key-prefix-field')), '1');
+    await tester.pump();
+    final saveControl = find.descendant(
+        of: find.byKey(const ValueKey('save-channel-button')),
+        matching: find.byType(FilledButton));
+    expect(tester.widget<FilledButton>(saveControl).onPressed, isNull);
+    await tester.enterText(
       find.byKey(const ValueKey('tracker-key-prefix-field')),
       'REL',
     );
@@ -994,10 +1001,16 @@ void main() {
     await tester
         .tap(find.descendant(of: dialog, matching: find.text('Add link')));
     await tester.pumpAndSettle();
-    expect(find.text('Enter a name'), findsOneWidget);
+    final addLink =
+        find.descendant(of: dialog, matching: find.byType(FilledButton));
+    expect(tester.widget<FilledButton>(addLink).onPressed, isNull);
+    expect(values, isEmpty);
     final inputs =
         find.descendant(of: dialog, matching: find.byType(TextFormField));
     await tester.enterText(inputs.first, 'Design review');
+    await tester.enterText(inputs.last, 'not-a-link');
+    await tester.pump();
+    expect(tester.widget<FilledButton>(addLink).onPressed, isNull);
     await tester.enterText(inputs.last, 'https://example.org/design.mp4');
     await tester.tap(find.byType(DropdownButtonFormField<String>));
     await tester.pumpAndSettle();

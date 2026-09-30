@@ -2225,6 +2225,7 @@ final class _TrackerTaskEditorSheetState extends State<TrackerTaskEditorSheet> {
                         controllers: [_title, _description],
                         hasChanges: () =>
                             widget.task == null || _draftState != _savedDraft,
+                        isValid: () => _title.text.trim().isNotEmpty,
                         key: ValueKey('tracker-task-save'),
                         onPressed: _busy || _conflict ? null : _save,
                         icon: Icon(widget.task == null
@@ -2426,6 +2427,7 @@ final class _TrackerLaneEditorSheetState extends State<TrackerLaneEditorSheet> {
                       _color != widget.lane!.color ||
                       _kind != widget.lane!.kind ||
                       _completed != widget.lane!.completed,
+                  isValid: () => _name.text.trim().isNotEmpty,
                   key: ValueKey('tracker-lane-save'),
                   onPressed: _save,
                   icon: Icon(widget.lane == null

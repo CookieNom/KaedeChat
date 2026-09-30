@@ -323,6 +323,9 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                               padding: const EdgeInsets.all(16),
                               child: SaveButton(
                                   controllers: [_prefix],
+                                  isValid: () =>
+                                      RegExp(r'^[A-Za-z][A-Za-z0-9]{1,9}$')
+                                          .hasMatch(_prefix.text.trim()),
                                   hasChanges: () =>
                                       _prefix.text.trim().toUpperCase() !=
                                           _board.keyPrefix ||
@@ -335,8 +338,7 @@ class _TrackerFieldSettingsSheetState extends State<TrackerFieldSettingsSheet> {
                                   onPressed:
                                       _saving || _conflict ? null : _save,
                                   icon: const Icon(Icons.save_outlined),
-                                  label: Text(
-                                      _saving ? 'Saving…' : 'Save settings')))),
+                                  label: Text(_saving ? 'Saving…' : 'Save settings')))),
                     ])),
           )));
 }
@@ -356,6 +358,34 @@ class _TrackerFieldEditorSheetState extends State<TrackerFieldEditorSheet> {
   late final _options =
       TextEditingController(text: widget.field?.options.join('\n') ?? '');
   late String _type = widget.field?.type ?? 'text';
+  String? _nameError(String? v) {
+    final name = v?.trim() ?? '';
+    if (name.isEmpty) return 'Enter a field name';
+    if (widget.fields.any((f) =>
+        f.id != widget.field?.id &&
+        f.name.toLowerCase() == name.toLowerCase())) {
+      return 'A field already has this name';
+    }
+    return null;
+  }
+
+  String? _optionsError(String? v) {
+    final options = (v ?? '')
+        .split('\n')
+        .map((o) => o.trim())
+        .where((o) => o.isNotEmpty)
+        .toList();
+    if (options.isEmpty ||
+        options.length > 100 ||
+        options.any((o) => o.length > 100)) {
+      return 'Add 1–100 choices, each up to 100 characters';
+    }
+    if (options.toSet().length != options.length) {
+      return 'Each choice must be unique';
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     _name.dispose();
@@ -396,17 +426,7 @@ class _TrackerFieldEditorSheetState extends State<TrackerFieldEditorSheet> {
                                     TextCapitalization.sentences,
                                 decoration: const InputDecoration(
                                     labelText: 'Field name'),
-                                validator: (v) {
-                                  final name = v?.trim() ?? '';
-                                  if (name.isEmpty) return 'Enter a field name';
-                                  if (widget.fields.any((f) =>
-                                      f.id != widget.field?.id &&
-                                      f.name.toLowerCase() ==
-                                          name.toLowerCase())) {
-                                    return 'A field already has this name';
-                                  }
-                                  return null;
-                                }),
+                                validator: _nameError),
                             const SizedBox(height: 12),
                             DropdownButtonFormField<String>(
                                 isExpanded: true,
@@ -440,23 +460,7 @@ class _TrackerFieldEditorSheetState extends State<TrackerFieldEditorSheet> {
                                       helperText:
                                           'One choice per line. Up to 100 unique choices.',
                                       alignLabelWithHint: true),
-                                  validator: (v) {
-                                    final options = (v ?? '')
-                                        .split('\n')
-                                        .map((o) => o.trim())
-                                        .where((o) => o.isNotEmpty)
-                                        .toList();
-                                    if (options.isEmpty ||
-                                        options.length > 100 ||
-                                        options.any((o) => o.length > 100)) {
-                                      return 'Add 1–100 choices, each up to 100 characters';
-                                    }
-                                    if (options.toSet().length !=
-                                        options.length) {
-                                      return 'Each choice must be unique';
-                                    }
-                                    return null;
-                                  }),
+                                  validator: _optionsError),
                               if (widget.field != null)
                                 const Text(
                                     'Choices used by existing tasks cannot be removed. Change those tasks first.'),
@@ -466,7 +470,14 @@ class _TrackerFieldEditorSheetState extends State<TrackerFieldEditorSheet> {
                       top: false,
                       child: Padding(
                           padding: const EdgeInsets.all(16),
-                          child: ActionButton(
+                          child: SaveButton(
+                              controllers: [_name, _options],
+                              hasChanges: () => true,
+                              isValid: () =>
+                                  _nameError(_name.text) == null &&
+                                  ((_type != 'select' &&
+                                          _type != 'multiselect') ||
+                                      _optionsError(_options.text) == null),
                               onPressed: () {
                                 if (_form.currentState?.validate() != true) {
                                   return;

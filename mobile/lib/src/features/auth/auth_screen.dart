@@ -48,8 +48,16 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     super.dispose();
   }
 
+  bool get _canSubmit =>
+      instance.text.trim().isNotEmpty &&
+      password.text.isNotEmpty &&
+      (register
+          ? username.text.trim().isNotEmpty &&
+              password.text == confirmation.text
+          : identifier.text.trim().isNotEmpty);
+
   Future<void> submit() async {
-    if (_submitting) return;
+    if (_submitting || !_canSubmit) return;
     setState(() => _submitting = true);
     FocusScope.of(context).unfocus();
     try {
@@ -298,7 +306,11 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
               kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          ActionButton(
+          SaveButton(
+              controllers: [controller],
+              hasChanges: () => true,
+              isValid: () => (secret ? controller.text : controller.text.trim())
+                  .isNotEmpty,
               onPressed: () {
                 final value = secret ? controller.text : controller.text.trim();
                 if (value.isEmpty) {
@@ -496,7 +508,17 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     ),
                   ],
                   SizedBox(height: 26),
-                  ActionButton(
+                  SaveButton(
+                    controllers: [
+                      instance,
+                      identifier,
+                      password,
+                      username,
+                      email,
+                      confirmation
+                    ],
+                    hasChanges: () => true,
+                    isValid: () => _canSubmit,
                     onPressed: state.phase == SessionPhase.authenticating ||
                             _submitting
                         ? null
@@ -641,7 +663,10 @@ final class _EmailVerificationDialogState
             onPressed: _busy ? null : () => Navigator.pop(context),
             child: Text(L10n.of(context).ui_verify_later_2b8bfe56),
           ),
-          ActionButton(
+          SaveButton(
+            controllers: [widget.token],
+            hasChanges: () => true,
+            isValid: () => widget.token.text.trim().isNotEmpty,
             onPressed: _busy ? null : _verify,
             child: Text(L10n.of(context).ui_verify_2d5c0c44),
           ),
@@ -689,7 +714,10 @@ final class _MfaDialogState extends State<_MfaDialog> {
               kind: ActionButtonKind.text,
               onPressed: () => Navigator.pop(context),
               child: Text(L10n.of(context).ui_cancel_35afca3b)),
-          ActionButton(
+          SaveButton(
+              controllers: [controller],
+              hasChanges: () => true,
+              isValid: () => controller.text.trim().isNotEmpty,
               onPressed: () {
                 final value = controller.text.trim();
                 if (value.isEmpty) {
