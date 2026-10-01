@@ -14,6 +14,7 @@ from app.chat.payloads import user_payload
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.bot_models import InstanceAdminGrant
 from app.db.models import Channel, Instance, Message, SystemUpdateNotice, User
+from app.db.partitions import ensure_message_partitions
 from app.federation.replication import profile_from_user, upsert_remote_user
 from app.federation.schemas import RemoteUserProfile
 
@@ -103,7 +104,9 @@ def test_notice_rejects_untrusted_text_and_never_calls_unknown_safe():
 async def test_delivery_receipts_owner_selection_and_database_locality(postgres_schema, migrate_to):
     await migrate_to("head")
     cfg = settings()
-    now = datetime.now(UTC)
+    # Exercise delivery beyond the initial migration partitions, including a year rollover.
+    now = datetime(2027, 1, 1, tzinfo=UTC)
+    await ensure_message_partitions(postgres_schema, now=now)
     base = (int(now.timestamp() * 1000) - EPOCH_MS) << (WORKER_BITS + SEQUENCE_BITS)
     snowflake = SimpleNamespace(mint=AsyncMock(side_effect=iter(range(base, base + 100))))
     async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
