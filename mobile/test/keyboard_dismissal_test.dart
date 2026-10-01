@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/features/shared/keyboard_dismissal.dart';
@@ -7,8 +6,6 @@ void main() {
   for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
     testWidgets('outside taps dismiss without swallowing controls on $platform',
         (tester) async {
-      debugDefaultTargetPlatformOverride = platform;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       final first = FocusNode();
       final second = FocusNode();
       addTearDown(first.dispose);
@@ -24,7 +21,11 @@ void main() {
           ),
         ),
         FilledButton(onPressed: () => presses++, child: const Text('Action')),
-        const SizedBox(key: ValueKey('outside'), height: 48, width: 200),
+        const ColoredBox(
+          key: ValueKey('outside'),
+          color: Colors.transparent,
+          child: SizedBox(height: 48, width: 200),
+        ),
       ]);
       Future<void> checkTaps() async {
         await tester.tap(find.byType(TextField).first);
@@ -72,6 +73,6 @@ void main() {
         await checkTaps();
         await tester.pumpWidget(const SizedBox.shrink());
       }
-    });
+    }, variant: TargetPlatformVariant.only(platform));
   }
 }

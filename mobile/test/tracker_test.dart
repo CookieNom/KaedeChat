@@ -324,6 +324,8 @@ void main() {
       find.byKey(const ValueKey('tracker-key-prefix-field')),
       'REL',
     );
+    await tester.pump();
+    expect(tester.widget<FilledButton>(saveControl).onPressed, isNotNull);
     await tester
         .ensureVisible(find.byKey(const ValueKey('save-channel-button')));
     await tester.tap(find.byKey(const ValueKey('save-channel-button')));
@@ -502,6 +504,16 @@ void main() {
     await tester.enterText(
       find.byKey(const ValueKey('tracker-task-title')),
       'Prepare runbook',
+    );
+    await tester.pump();
+    expect(
+      tester
+          .widget<FilledButton>(find.descendant(
+            of: find.byKey(const ValueKey('tracker-task-save')),
+            matching: find.byType(FilledButton),
+          ))
+          .onPressed,
+      isNotNull,
     );
     await tester.ensureVisible(find.byKey(const ValueKey('tracker-task-save')));
     await tester.tap(find.byKey(const ValueKey('tracker-task-save')));
@@ -946,7 +958,7 @@ void main() {
   });
 
   testWidgets(
-      'field settings validate names and choices on a phone keyboard layout',
+      'field settings disable invalid names and choices on a phone keyboard layout',
       (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(360, 800);
@@ -963,9 +975,12 @@ void main() {
                 ])))));
     await tester.enterText(
         find.byKey(const ValueKey('tracker-field-name')), 'Reviewer');
-    await tester.tap(find.text('Add field'));
+    await tester.pump();
+    final addField = find.widgetWithText(FilledButton, 'Add field');
+    expect(tester.widget<FilledButton>(addField).onPressed, isNull);
+    await tester.tap(addField);
     await tester.pumpAndSettle();
-    expect(find.text('A field already has this name'), findsOneWidget);
+    expect(find.byType(TrackerFieldEditorSheet), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.enterText(
         find.byKey(const ValueKey('tracker-field-name')), 'Status');
@@ -973,10 +988,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Dropdown').last);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Add field'));
-    await tester.pumpAndSettle();
-    expect(find.text('Add 1–100 choices, each up to 100 characters'),
-        findsOneWidget);
+    expect(tester.widget<FilledButton>(addField).onPressed, isNull);
+    final choices = find.byType(TextFormField).last;
+    await tester.enterText(choices, 'Open\nOpen');
+    await tester.pump();
+    expect(tester.widget<FilledButton>(addField).onPressed, isNull);
+    await tester.enterText(choices, 'Open\nDone');
+    await tester.pump();
+    expect(tester.widget<FilledButton>(addField).onPressed, isNotNull);
     expect(tester.takeException(), isNull);
   });
   testWidgets(
