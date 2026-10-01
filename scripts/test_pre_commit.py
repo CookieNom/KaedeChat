@@ -21,6 +21,9 @@ class PreCommitTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.write("bin/uv", "#!/bin/sh\nexit 0\n", executable=True)
         self.git("init", "-q")
+        # Disposable repos need no background writers racing TemporaryDirectory cleanup.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         self.git("config", "core.hooksPath", ".githooks")
         self.write(".githooks/pre-commit", HOOK.read_text(), executable=True)
         self.git("add", ".githooks")
