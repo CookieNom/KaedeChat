@@ -5,7 +5,7 @@ CONFIG_GUARD := test ! -e .kaede-setup.in-progress || { echo 'setup transaction 
 KUBE := python3 deploy/kubernetes/manage.py
 KUBE_ARGS := --env-file "$(ENV_FILE)" $(if $(KUBE_CONFIG),--config "$(KUBE_CONFIG)",)
 
-.PHONY: dev-logs dev-federation-logs
+.PHONY: dev-logs dev-federation-logs dev-prune dev-federation-prune
 .PHONY: help setup tools deploy status logs exec dev dev-cluster dev-down dev-federation dev-federation-down kubernetes-check env-check legacy-down
 .PHONY: hooks lock generate search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check update-notices
 .PHONY: check test audit migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check nginx-check
@@ -17,6 +17,8 @@ help:
 	@echo "status / logs         Show production status / logs (SERVICE=api)"
 	@echo "exec                  Run a production command (SERVICE=worker COMMAND='...')"
 	@echo "dev / dev-down        Start Tilt in background / stop Tilt and cluster, retaining data"
+	@echo "dev-prune             Remove unused images from this checkout's running dev node"
+	@echo "dev-federation-prune  Remove unused images from the alpha/beta dev node"
 	@echo "dev-logs              Follow development logs (Ctrl-C stops following)"
 	@echo "dev-federation-logs   Follow alpha/beta logs"
 	@echo "dev-federation        Start the separate alpha/beta development cluster"
@@ -103,6 +105,12 @@ dev-federation-logs:
 
 dev-cluster:
 	python3 deploy/kubernetes/dev.py cluster --env-file "$(ENV_FILE)"
+
+dev-prune:
+	python3 deploy/kubernetes/dev.py prune
+
+dev-federation-prune:
+	python3 deploy/kubernetes/dev.py prune --federation
 
 dev-down:
 	python3 deploy/kubernetes/dev.py down

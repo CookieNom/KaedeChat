@@ -16,7 +16,8 @@ if k8s_context() != metadata['context']:
 allow_k8s_contexts(metadata['context'])
 analytics_settings(False)
 disable_snapshots()
-# Other applications share this Docker daemon; never prune their images.
+# This pruner only handles host Docker, not the dev node's containerd images.
+# Keep the shared daemon untouched; use make dev-prune with Tilt idle.
 docker_prune_settings(disable=True)
 update_settings(max_parallel_updates=1)
 

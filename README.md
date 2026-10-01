@@ -465,6 +465,17 @@ PATH="$PWD/.kaede-tools/bin:$PATH" python3 deploy/kubernetes/dev.py up --foregro
 `make dev-down` releases its CPU and RAM; do not delete the cluster or use `tilt down` to stop it, because that
 can delete persistent data.
 
+Run `make dev-prune` (or `make dev-federation-prune`) with the dev cluster running
+and Tilt idle, after builds and rollouts finish, to reclaim unused containerd
+images, including old `tilt-build-*` images. This uses `crictl rmi --prune` inside
+this checkout's dev node and removes all unused images there, not just Tilt
+images; images used by containers are retained. Dev Deployments retain two old
+ReplicaSets; that limit does not itself remove images. Pruning can remove images
+needed for old revisions, so rebuild with Tilt instead of rolling back to a
+pruned local image. Live Update/hot reload is unchanged. Production, host Docker
+images, and persistent data are untouched; never delete containerd or overlay2
+files manually.
+
 The default single-instance edge is `http://dev.localhost:28081`; an existing
 `.env` uses its configured domain and `KAEDE_CADDY_HOST_PORT` with host nginx.
 Alpha/beta use `http://alpha.localhost:28081` and

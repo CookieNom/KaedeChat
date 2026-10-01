@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kubernetes"))
+import dev
 import manage
 import update_notices
 from dev import development_values, import_images, instances
@@ -53,6 +54,29 @@ class KubernetesTests(unittest.TestCase):
             self.assertRaises(subprocess.CalledProcessError),
         ):
             import_images("test", ["backend:test"])
+
+    def test_prune_targets_only_this_checkouts_selected_dev_node(self):
+        for federation in (False, True):
+            with self.subTest(federation=federation):
+                argv = ["dev.py", "prune"] + (["--federation"] if federation else [])
+                with patch.object(sys, "argv", argv), patch("dev.run") as run:
+                    dev.main()
+                run.assert_called_once_with(
+                    [
+                        "docker",
+                        "exec",
+                        f"k3d-{dev.cluster_name(federation)}-server-0",
+                        "crictl",
+                        "rmi",
+                        "--prune",
+                    ]
+                )
+        with (
+            patch.object(sys, "argv", ["dev.py", "prune"]),
+            patch("dev.run", side_effect=subprocess.CalledProcessError(1, "docker")),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            dev.main()
 
     def test_update_notice_maintenance_classification(self):
         previous = {"schema": "same-schema", "infrastructure": "same-infra"}
@@ -220,6 +244,8 @@ class KubernetesTests(unittest.TestCase):
         )
         self.assertEqual(index[("Job", "migrate")]["spec"]["backoffLimit"], 0)
         for obj in items:
+            if obj["kind"] == "Deployment":
+                self.assertNotIn("revisionHistoryLimit", obj["spec"])
             if obj["kind"] in {"Deployment", "StatefulSet", "Job"}:
                 self.assertFalse(obj["spec"]["template"]["spec"]["enableServiceLinks"])
             if obj["kind"] == "Service":
@@ -277,6 +303,8 @@ class KubernetesTests(unittest.TestCase):
             development=True,
         )["items"]
         for obj in items:
+            if obj["kind"] == "Deployment":
+                self.assertEqual(obj["spec"]["revisionHistoryLimit"], 2)
             if obj["kind"] == "Deployment" and obj["metadata"]["name"] in {
                 "api",
                 "gateway",

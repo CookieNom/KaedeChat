@@ -154,6 +154,8 @@ def workload(
         spec["serviceName"] = name
         result.append(resource("StatefulSet", name, namespace, spec=spec))
     else:
+        if development:
+            spec["revisionHistoryLimit"] = 2
         spec["strategy"] = (
             {"type": "Recreate"}
             if name == "scheduler"

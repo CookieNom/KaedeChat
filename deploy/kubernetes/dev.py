@@ -213,7 +213,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=["up", "down", "logs", "render", "metadata", "cluster", "build-image"],
+        choices=[
+            "up",
+            "down",
+            "logs",
+            "render",
+            "metadata",
+            "cluster",
+            "build-image",
+            "prune",
+        ],
     )
     parser.add_argument("--federation", action="store_true")
     parser.add_argument("--service", choices=["backend", "frontend"])
@@ -264,6 +273,9 @@ def main() -> None:
                 }
             )
         )
+    elif args.action == "prune":
+        # Only this checkout's single dev node; never use the active kubecontext.
+        run(["docker", "exec", f"k3d-{name}-server-0", "crictl", "rmi", "--prune"])
     elif args.action == "logs":
         run(["journalctl", "--user", "--unit", unit, "--follow", "--lines=100"])
     elif args.action == "down":
