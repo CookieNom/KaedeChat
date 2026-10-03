@@ -99,6 +99,15 @@ fi
             (1, "failed to copy: httpReadSeeker: failed open: unexpected status code "
              "https://registry-1.docker.io/v2/docker/dockerfile/manifests/sha256:abc: "
              "502 Bad Gateway", 2, 0),
+            (1, "failed to copy: httpReadSeeker: failed open: unexpected status code "
+             "https://ghcr.io/v2/astral-sh/uv/manifests/sha256:abc: "
+             "429 Too Many Requests - Server message: toomanyrequests: "
+             "retry-after: 173.926µs, allowed: 44000/minute", 2, 0),
+            (10, "unexpected status code https://ghcr.io/v2/astral-sh/uv/manifests/sha256:abc: "
+             "429 Too Many Requests", 4, 7),
+            (1, "curl: (22) The requested URL returned error: 429", 2, 0),
+            (10, "unexpected status code https://ghcr.io/v2/astral-sh/uv: 401 Unauthorized", 1, 7),
+            (10, "unexpected status code https://ghcr.io/v2/astral-sh/uv: 403 Forbidden", 1, 7),
             (10, "Dockerfile: unknown instruction: RUNN", 1, 7),
         ):
             with self.subTest(message=message):
