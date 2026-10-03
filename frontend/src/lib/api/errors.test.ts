@@ -17,6 +17,26 @@ describe('user-facing API errors', () => {
     expect(conflict).not.toBe('Conflict');
   });
 
+  it.each([
+    [
+      'GUILD_OWNER',
+      'You still own one or more guilds. Transfer ownership of each guild to another member, or delete those guilds, before deleting your account. You do not need to leave guilds you do not own.'
+    ],
+    [
+      'APPLICATION_OWNER',
+      'You still own a developer team or application. Transfer ownership or delete the teams and applications you own before deleting your account.'
+    ],
+    [
+      'DELETION_IN_PROGRESS',
+      'Your content is already being deleted. Wait for cleanup to finish before requesting another deletion. You can close the app while it continues.'
+    ]
+  ])('preserves the server recovery instructions for %s', (code, message) => {
+    const formatted = apiErrorMessage(code, 409, { message });
+    expect(userErrorMessage(new ApiError(code, formatted, 409), 'Could not start deletion.')).toBe(
+      message
+    );
+  });
+
   it('includes retry timing returned by the server', () => {
     expect(apiErrorMessage('RATE_LIMITED', 429, { retry_after_ms: 2_100 })).toContain('3 seconds');
   });

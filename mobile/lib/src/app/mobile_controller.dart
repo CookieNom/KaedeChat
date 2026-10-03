@@ -5174,11 +5174,11 @@ final class MobileController extends StateNotifier<MobileState> {
         break;
       case 'CALL_ACCEPT':
         _scheduleNavigationRefresh();
-        _finishIncomingCall(event.data, active: true);
+        applyCallUpdate(event.data, active: true);
         break;
       case 'CALL_DECLINE' || 'CALL_END':
         _scheduleNavigationRefresh();
-        _finishIncomingCall(event.data);
+        applyCallUpdate(event.data);
         break;
       case 'USER_UPDATE':
         final relationship = event.data['relationship'];
@@ -6197,17 +6197,28 @@ final class MobileController extends StateNotifier<MobileState> {
     );
   }
 
-  void _finishIncomingCall(
+  @visibleForTesting
+  void applyCallUpdate(
     Map<String, Object?> data, {
     bool active = false,
   }) {
+    final String callId;
+    try {
+      callId = EntityRef(
+        Snowflake('${data['id']}'),
+        Domain('${data['authority_domain']}'),
+      ).wire;
+    } on Object {
+      return;
+    }
     final incoming = state.incomingCall;
-    if (incoming == null || '${data['id']}' != incoming.call.id.value) return;
-    state = state.copyWith(clearIncomingCall: true);
-    unawaited(push.dismissCall(incoming.call.wire));
-    unawaited(active
-        ? systemCalls.setActive(incoming.call.wire)
-        : systemCalls.end(incoming.call.wire));
+    if (incoming?.call.wire == callId) {
+      state = state.copyWith(clearIncomingCall: true);
+    }
+    // Answering clears incomingCall; terminal events must still release the
+    // native connection and any notification created by the background isolate.
+    unawaited(push.dismissCall(callId));
+    unawaited(active ? systemCalls.setActive(callId) : systemCalls.end(callId));
   }
 
   Future<void> answerIncomingCall() async {

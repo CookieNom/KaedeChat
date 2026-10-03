@@ -1,0 +1,15 @@
+name: kaede_system_calls
+description: Android call bridge shared by foreground and background Flutter engines.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: chat.kaede.kaede_mobile
+        pluginClass: KaedeSystemCallsPlugin

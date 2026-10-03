@@ -29,6 +29,8 @@ dependencies:
   go_router: ^15.1.2
   image_picker: ^1.1.2
   intl: ^0.20.2
+  kaede_system_calls:
+    path: vendor/kaede_system_calls
   livekit_client:
     path: vendor/livekit_client
   local_auth: ^2.3.0

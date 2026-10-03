@@ -36,6 +36,14 @@ final class SystemCallService {
   Future<void> showIncoming({
     required String callId,
     required String callerName,
+  }) =>
+      showIncomingNative(callId: callId, callerName: callerName);
+
+  // Static entry points do not replace the foreground event handler when a
+  // background push isolate only needs to display or dismiss a native call.
+  static Future<void> showIncomingNative({
+    required String callId,
+    required String callerName,
   }) async {
     try {
       await _channel.invokeMethod<void>('showIncoming', <String, Object?>{
@@ -58,7 +66,9 @@ final class SystemCallService {
     }
   }
 
-  Future<void> end(String callId) async {
+  Future<void> end(String callId) => endNative(callId);
+
+  static Future<void> endNative(String callId) async {
     try {
       await _channel.invokeMethod<void>(
         'end',

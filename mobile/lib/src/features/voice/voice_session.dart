@@ -38,10 +38,23 @@ final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
       selfDeaf: selfDeaf,
     ),
   );
+  EntityRef? previousCall;
+  session.addListener(() {
+    final endedCall = previousCall;
+    previousCall = session.callRef;
+    if (endedCall != null && endedCall != previousCall) {
+      unawaited(controller.systemCalls.end(endedCall.wire));
+      unawaited(controller.push.dismissCall(endedCall.wire));
+    }
+  });
   final soundboardSubscription = controller.soundboardEvents.listen(
     (event) => unawaited(session.playSoundboardEvent(event)),
   );
   ref.onDispose(() {
+    if (session.callRef case final call?) {
+      unawaited(controller.systemCalls.end(call.wire));
+      unawaited(controller.push.dismissCall(call.wire));
+    }
     unawaited(soundboardSubscription.cancel());
   });
   return session;

@@ -82,15 +82,6 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="microphone|mediaPlayback|mediaProjection" />
-        <service
-            android:name=".KaedeConnectionService"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
-            <intent-filter>
-                <action android:name="android.telecom.ConnectionService" />
-            </intent-filter>
-        </service>
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
             android:exported="false" />

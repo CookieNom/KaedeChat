@@ -1,7 +1,8 @@
 package chat.kaede.kaede_mobile
 
 import android.net.Uri
-import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.telecom.Connection
 import android.telecom.ConnectionRequest
 import android.telecom.ConnectionService
@@ -15,6 +16,9 @@ class KaedeConnectionService : ConnectionService() {
         const val EXTRA_CALL_ID = "chat.kaede.mobile.call.ID"
         const val EXTRA_CALLER_NAME = "chat.kaede.mobile.call.CALLER"
 
+        private val pendingCalls = mutableSetOf<String>()
+        private val handler = Handler(Looper.getMainLooper())
+        private val expiry = mutableMapOf<String, Runnable>()
         private val connections = ConcurrentHashMap<String, KaedeConnection>()
         @Volatile private var eventSink: ((String, String) -> Unit)? = null
         private val pendingEvents = mutableListOf<Pair<String, String>>()
@@ -36,9 +40,25 @@ class KaedeConnectionService : ConnectionService() {
             }
         }
 
-        fun setActive(callId: String) = connections[callId]?.setActive()
+        fun begin(callId: String): Boolean {
+            if (connections.containsKey(callId) || !pendingCalls.add(callId)) return false
+            val timeout = Runnable {
+                end(callId)
+                emit("ended", callId)
+            }
+            expiry[callId] = timeout
+            handler.postDelayed(timeout, 60_000)
+            return true
+        }
+
+        fun setActive(callId: String) {
+            expiry.remove(callId)?.let { handler.removeCallbacks(it) }
+            connections[callId]?.setActive()
+        }
 
         fun end(callId: String) {
+            pendingCalls.remove(callId)
+            expiry.remove(callId)?.let { handler.removeCallbacks(it) }
             connections.remove(callId)?.disconnect(DisconnectCause.LOCAL)
         }
     }
@@ -51,13 +71,17 @@ class KaedeConnectionService : ConnectionService() {
         if (callId.isBlank()) return Connection.createFailedConnection(
             DisconnectCause(DisconnectCause.ERROR, "Missing Kaede call identifier"),
         )
+        // end() can arrive while Telecom is still creating the connection.
+        if (!pendingCalls.remove(callId)) return Connection.createFailedConnection(
+            DisconnectCause(DisconnectCause.CANCELED),
+        )
         val callerName = request.extras.getString(EXTRA_CALLER_NAME) ?: "Kaede caller"
         return KaedeConnection(callId).apply {
             setAddress(Uri.fromParts("kaede", callId, null), TelecomManager.PRESENTATION_RESTRICTED)
             setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
             connectionProperties = Connection.PROPERTY_SELF_MANAGED
             setAudioModeIsVoip(true)
-            setRinging()
+            if (expiry.containsKey(callId)) setRinging() else setActive()
             connections[callId] = this
         }
     }
@@ -66,25 +90,30 @@ class KaedeConnectionService : ConnectionService() {
         connectionManagerPhoneAccount: PhoneAccountHandle?,
         request: ConnectionRequest,
     ) {
-        request.extras.getString(EXTRA_CALL_ID)?.let { emit("decline", it) }
+        request.extras.getString(EXTRA_CALL_ID)?.let {
+            end(it)
+            emit("decline", it)
+        }
     }
 }
 
 private class KaedeConnection(private val callId: String) : Connection() {
     override fun onAnswer() {
-        setActive()
+        // The controller marks the call active after the home accepts it.
         KaedeConnectionService.emit("answer", callId)
     }
 
     override fun onReject() {
-        disconnect(DisconnectCause.REJECTED)
+        KaedeConnectionService.end(callId)
         KaedeConnectionService.emit("decline", callId)
     }
 
     override fun onDisconnect() {
-        disconnect(DisconnectCause.LOCAL)
+        KaedeConnectionService.end(callId)
         KaedeConnectionService.emit("ended", callId)
     }
+
+    override fun onAbort() = onDisconnect()
 
     fun disconnect(cause: Int) {
         setDisconnected(DisconnectCause(cause))

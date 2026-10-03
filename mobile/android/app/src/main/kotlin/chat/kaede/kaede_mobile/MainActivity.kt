@@ -1,15 +1,10 @@
 package chat.kaede.kaede_mobile
 
-import android.content.ComponentName
-import android.os.Bundle
 import android.os.Build
 import android.app.PictureInPictureParams
 import android.content.res.Configuration
 import android.content.pm.PackageManager
 import android.util.Rational
-import android.telecom.PhoneAccount
-import android.telecom.PhoneAccountHandle
-import android.telecom.TelecomManager
 import androidx.lifecycle.Lifecycle
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -106,63 +101,10 @@ class MainActivity : FlutterFragmentActivity() {
                 systemCallChannel.invokeMethod(action, mapOf("callId" to callId))
             }
         }
-        systemCallChannel.setMethodCallHandler { call, result ->
-            val callId = call.argument<String>("callId")
-            if (callId.isNullOrBlank()) {
-                result.error("INVALID_CALL", "A call identifier is required.", null)
-                return@setMethodCallHandler
-            }
-            try {
-                when (call.method) {
-                    "showIncoming" -> {
-                        showIncomingSystemCall(
-                            callId,
-                            call.argument<String>("callerName") ?: "Kaede caller",
-                        )
-                        result.success(null)
-                    }
-                    "setActive" -> {
-                        KaedeConnectionService.setActive(callId)
-                        result.success(null)
-                    }
-                    "end" -> {
-                        KaedeConnectionService.end(callId)
-                        result.success(null)
-                    }
-                    else -> result.notImplemented()
-                }
-            } catch (error: Exception) {
-                result.error(
-                    "SYSTEM_CALL_FAILED",
-                    error.message ?: "Could not update the Android system call.",
-                    null,
-                )
-            }
-        }
     }
 
     override fun onDestroy() {
         KaedeConnectionService.attach(null)
         super.onDestroy()
-    }
-
-    private fun showIncomingSystemCall(callId: String, callerName: String) {
-        val telecom = getSystemService(TelecomManager::class.java)
-        val account = PhoneAccountHandle(
-            ComponentName(this, KaedeConnectionService::class.java),
-            "kaede_calls",
-        )
-        telecom.registerPhoneAccount(
-            PhoneAccount.builder(account, "Kaede Chat")
-                .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
-                .build(),
-        )
-        telecom.addNewIncomingCall(
-            account,
-            Bundle().apply {
-                putString(KaedeConnectionService.EXTRA_CALL_ID, callId)
-                putString(KaedeConnectionService.EXTRA_CALLER_NAME, callerName)
-            },
-        )
     }
 }

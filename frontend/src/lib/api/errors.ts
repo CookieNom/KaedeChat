@@ -223,7 +223,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   TRACKER_LANE_LIMIT_REACHED: 'This tracker has reached its status limit.',
   TRACKER_LANE_NOT_EMPTY: 'Move or delete every task in this status before deleting it.',
   TRACKER_LANE_NOT_FOUND: 'That status no longer exists. The tracker may have changed elsewhere.',
-  TRACKER_LAST_LANE: 'A tracker must keep at least one status.',
+  TRACKER_LAST_LANE:
+    'A tracker needs at least one status. Add another status before deleting this one.',
   TRACKER_NOT_FOUND: 'This task tracker no longer exists or you cannot view it.',
   TRACKER_POSITION_INVALID:
     'That position is no longer available. Refresh the tracker and try again.',
@@ -233,7 +234,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     'This tracker changed somewhere else. The latest version will be loaded before you retry.',
   TRACKER_FIELD_INVALID: 'A custom field value is invalid. Check the fields and try again.',
   TRACKER_FIELD_TYPE_IMMUTABLE: 'Create a new field to use a different field type.',
-  TRACKER_FIELD_IN_USE: 'A choice you removed is still used by a task. Update those tasks first.',
+  TRACKER_FIELD_IN_USE:
+    'Existing tasks have values that do not fit this field change. Update those task values first, or keep the current field settings.',
   TRACKER_FIELD_CHANNEL_INVALID: 'Choose a channel from this server.',
   TRACKER_ATTACHMENT_INVALID: 'An attachment is unavailable. Upload it again and retry.',
   TRACKER_VERSION_REQUIRED: 'Reload this tracker before changing it.',

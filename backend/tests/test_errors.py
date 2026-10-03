@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
@@ -67,6 +68,34 @@ def test_code_only_errors_receive_clear_actionable_messages() -> None:
         request(), HTTPException(403, detail={"code": "MISSING_PERMISSIONS"})
     )
     assert response_body(response)["message"] == ERROR_MESSAGES["MISSING_PERMISSIONS"]
+
+
+@pytest.mark.parametrize(
+    ("code", "phrases"),
+    [
+        ("CHANNEL_NOT_EMPTY", ("messages or threads", "contents")),
+        ("GUILD_HAS_ANNOUNCEMENT_DEPENDENCIES", ("announcement", "Remove", "deliveries")),
+        ("THREAD_ARCHIVED", ("archived", "Reopen")),
+        ("THREAD_LOCKED", ("locked", "moderator")),
+        ("ACTIVE_THREAD_LIMIT", ("limit", "Archive")),
+        ("FORUM_TAG_REQUIRED", ("Choose", "tag")),
+        ("RULES_ACCEPTANCE_REQUIRED", ("Read", "accept", "rules")),
+        ("VOICE_CHANNEL_FULL", ("full", "Wait", "different")),
+        ("VOICE_ACTIVE_ELSEWHERE", ("another device", "Disconnect")),
+        ("E2EE_DM_CONSENT_REQUIRED", ("other person", "agree", "request")),
+        ("TRACKER_LAST_LANE", ("at least one", "Add another")),
+        ("TRACKER_LANE_NOT_EMPTY", ("tasks", "Move", "delete")),
+        ("TRACKER_FIELD_IN_USE", ("task values", "field settings")),
+    ],
+)
+def test_prerequisite_errors_explain_the_blocker_and_next_step(code, phrases) -> None:
+    response = http_exception_response(request(), HTTPException(409, detail={"code": code}))
+    message = response_body(response)["message"]
+    assert isinstance(message, str)
+    assert all(phrase in message for phrase in phrases)
+    assert "could not be processed" not in message
+    if code == "CHANNEL_NOT_EMPTY":
+        assert "category" not in message
 
 
 def test_machine_code_is_not_reflected_as_the_user_message() -> None:

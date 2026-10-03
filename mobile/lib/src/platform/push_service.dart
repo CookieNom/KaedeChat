@@ -393,13 +393,14 @@ Future<void> notificationActionBackgroundHandler(
   if (event?.action != SystemCallAction.decline) return;
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+  await SystemCallService.endNative(event!.callId);
   final api =
       KaedeApiClient(vault: const SessionVault(), allowSessionRefresh: false);
   if (await api.restore() == null) return;
   try {
     await api.sendJson(
       'POST',
-      '/api/v1/calls/${event!.callId}',
+      '/api/v1/calls/${event.callId}',
       data: const <String, Object?>{'action': 'decline'},
     ).timeout(const Duration(seconds: 8));
   } on Object {
@@ -796,6 +797,7 @@ final class PushService {
       if (notification != null) {
         _reportHealth(null);
         if (_appActive &&
+            notification.kind != NotificationKind.call &&
             notification.destination?.channel == _visibleChannel) {
           return;
         }
@@ -1039,6 +1041,17 @@ Future<void> _displayRedeemedNotification(
     senderKey: notification.senderRef?.wire,
     sentAt: notification.sentAt,
   );
+  if (Platform.isAndroid && callPayload != null) {
+    try {
+      await SystemCallService.showIncomingNative(
+        callId: callPayload.call.wire,
+        callerName: callPayload.callerName,
+      );
+    } on PlatformException {
+      // Telecom may deny a call (for example, during an emergency call).
+      // The actionable notification remains available.
+    }
+  }
   final avatarPath = await _notificationAvatar(notification.senderAvatarUri);
   if (avatarPath == null) return;
   await _showLocalNotification(
@@ -1246,6 +1259,7 @@ Future<void> _showLocalNotification(
             : sender == null
                 ? null
                 : AndroidNotificationCategory.message,
+        importance: channel.importance,
         priority: callPayload == null ? Priority.defaultPriority : Priority.max,
         fullScreenIntent: callPayload != null,
         autoCancel: callPayload == null,
@@ -1253,7 +1267,7 @@ Future<void> _showLocalNotification(
         timeoutAfter: callPayload == null ? null : 60000,
         audioAttributesUsage: callPayload == null
             ? AudioAttributesUsage.notification
-            : AudioAttributesUsage.voiceCommunicationSignalling,
+            : AudioAttributesUsage.notificationRingtone,
         actions: callPayload == null
             ? null
             : const <AndroidNotificationAction>[

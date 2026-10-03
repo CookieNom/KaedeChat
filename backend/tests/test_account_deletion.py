@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ from app.api import account_deletion as api
 from app.auth.account_status import account_is_banned
 from app.auth.deletion import erase_message_body
 from app.auth.schemas import MfaSetupRequest
+from app.core.errors import http_exception_response
 from app.db.models import User
 
 
@@ -88,7 +90,9 @@ async def test_delete_reserves_identity_erases_credentials_and_revokes_sessions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guard", ["password", "mfa", "owner", "pending", "session"])
+@pytest.mark.parametrize(
+    "guard", ["password", "mfa", "owner", "application_owner", "pending", "session"]
+)
 async def test_guards_prevent_destructive_changes(deletion_request, guard):
     user, session = deletion_request
     if guard == "password":
@@ -97,12 +101,34 @@ async def test_guards_prevent_destructive_changes(deletion_request, guard):
         user.totp_secret_encrypted = b"secret"
     elif guard == "owner":
         session.scalar.side_effect = [user, 99]
+    elif guard == "application_owner":
+        session.scalar.side_effect = [user, None, 99]
     elif guard == "pending":
         user.content_deletion = {"status": "pending"}
     else:
         api.lock_current_session.return_value = False
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as caught:
         await call_delete(user, session)
+    # Verify the actual public response, not just the endpoint's detail text:
+    # the shared handler previously replaced the useful deletion instructions.
+    guidance = {
+        "owner": (
+            "GUILD_OWNER",
+            ("own", "Transfer ownership", "delete", "before deleting your account"),
+        ),
+        "application_owner": (
+            "APPLICATION_OWNER",
+            ("developer team", "application", "before deleting your account"),
+        ),
+        "pending": ("DELETION_IN_PROGRESS", ("already being deleted", "Wait", "cleanup")),
+    }
+    if guard in guidance:
+        request = Request({"type": "http", "method": "DELETE", "path": "/", "headers": []})
+        body = json.loads(http_exception_response(request, caught.value).body)
+        code, phrases = guidance[guard]
+        assert body["code"] == code
+        assert all(phrase in body["message"] for phrase in phrases)
+
     session.commit.assert_not_awaited()
     assert user.deleted_at is None
     assert user.password_hash == "old-hash"

@@ -263,7 +263,7 @@ final class KaedeException implements Exception {
           'Only existing friends can be added to a group conversation.',
       'CANNOT_FRIEND_SELF': 'You cannot send a friend request to yourself.',
       'CHANNEL_NOT_EMPTY':
-          'Move or delete the channels inside this category first.',
+          'This channel cannot be deleted while it contains messages or threads. Remove its contents first. If deletion is still blocked, contact a server administrator.',
       'CHANNEL_SET_CHANGED':
           'The channel list changed somewhere else. Refresh and try again.',
       'ROLE_STATE_CHANGED':
