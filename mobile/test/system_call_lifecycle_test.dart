@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -43,6 +44,8 @@ void main() {
   test('call end releases native call after acceptance cleared incoming state',
       () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    // Unit tests do not run Android's generated plugin registrant.
+    AndroidFlutterLocalNotificationsPlugin.registerWith();
     final native = <MethodCall>[];
     final notifications = <MethodCall>[];
     final messenger =
