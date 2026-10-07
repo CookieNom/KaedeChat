@@ -339,6 +339,7 @@ class KubernetesTests(unittest.TestCase):
 
     def test_maintenance_stops_writers_before_migration_and_restores_replicas(self):
         cfg = {"namespace": "kaede-test", "context": "test"}
+        self.values["AUTO_UPDATE_WAIT_TIMEOUT_SECONDS"] = "420"
         writers = ["api", "gateway", "scheduler", "worker"]
         events = []
 
@@ -397,7 +398,7 @@ class KubernetesTests(unittest.TestCase):
                         "pod",
                         "-l",
                         f"app={name}",
-                        "--timeout=120s",
+                        "--timeout=420s",
                     )
                     for name in writers
                 ],

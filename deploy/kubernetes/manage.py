@@ -335,7 +335,7 @@ def deploy(
                 "pod",
                 "-l",
                 f"app={name}",
-                "--timeout=120s",
+                f"--timeout={cfg['wait_seconds']}s",
             )
     if maintenance:
         for kind in ("Deployment", "StatefulSet"):
