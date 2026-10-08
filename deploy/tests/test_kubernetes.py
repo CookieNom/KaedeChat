@@ -398,6 +398,7 @@ class KubernetesTests(unittest.TestCase):
                         "pod",
                         "-l",
                         f"app={name}",
+                        "--field-selector=status.phase!=Succeeded,status.phase!=Failed",
                         "--timeout=420s",
                     )
                     for name in writers

@@ -328,6 +328,7 @@ def deploy(
                 "--field-manager=kaede",
             )
         for name in sorted(writers):
+            # Finished pods can remain as records after scale-down (e.g. Evicted).
             kubectl(
                 cfg,
                 "wait",
@@ -335,6 +336,7 @@ def deploy(
                 "pod",
                 "-l",
                 f"app={name}",
+                "--field-selector=status.phase!=Succeeded,status.phase!=Failed",
                 f"--timeout={cfg['wait_seconds']}s",
             )
     if maintenance:
