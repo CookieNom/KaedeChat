@@ -14,6 +14,7 @@ from app.bots.dm_capability import fence_bot_dm_capabilities_for_pair
 from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import relationship_payload, user_payload
+from app.chat.presence import publish_cached_presence
 from app.chat.privacy import blocked_between, lock_relationship_pair, relationship
 from app.chat.schemas import RelationshipRequest
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
@@ -65,6 +66,8 @@ async def notify_relationship(
         "USER_UPDATE",
         {"relationship": {"type": relation_type, "user": user_payload(target)}},
     )
+    if relation_type == "friend":
+        await publish_cached_presence(redis, target, [user_topic(owner.origin_domain, owner.id)])
     if notify_push and relation_type in {"pending_in", "friend"}:
         name = target.display_name or target.username
         await enqueue_best_effort(

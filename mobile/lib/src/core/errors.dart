@@ -100,6 +100,7 @@ final class KaedeException implements Exception {
       return _withRetryInstruction(known, retryAfter);
     }
     if (maxBytes != null && known != null) return known;
+    if (code == 'USER_NOT_FOUND' || code == 'INVALID_HANDLE') return known!;
 
     final safeSupplied = _safeServerMessage(supplied, status);
     if (safeSupplied != null) return safeSupplied;
@@ -220,6 +221,10 @@ final class KaedeException implements Exception {
           'The guild’s home instance returned invalid timeout details. Sending is still checked by the guild home.',
       'FEDERATED_MODERATION_STATUS_UNAVAILABLE':
           'Your timeout details are temporarily unavailable from the guild’s home instance. Sending is still checked by the guild home.',
+      'USER_NOT_FOUND':
+          'No user was found with that username. Check the spelling, or use username@server for someone on another server.',
+      'INVALID_HANDLE':
+          'Enter a username on your home server, or a full address such as cookie@kaede.chat.',
       'RELATIONSHIP_BLOCKED':
           'That action is unavailable because one of you blocked the other.',
       'DM_PRIVACY_REJECTED':
@@ -564,7 +569,9 @@ String userFacingError(Object error, {String? summary}) {
   String? traceId;
   if (error is KaedeException) {
     reason = _sentence(error.message);
-    traceId = _safeTraceId(error.traceId);
+    if (error.code != 'USER_NOT_FOUND' && error.code != 'INVALID_HANDLE') {
+      traceId = _safeTraceId(error.traceId);
+    }
   } else if (error is UserInputException) {
     reason = _sentence(error.message);
   } else if (error is FormatException && _isUserInputMessage(error.message)) {

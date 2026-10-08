@@ -370,3 +370,49 @@ def test_federated_presence_rejects_undocumented_bot_activity_fields() -> None:
             observed_at=1_000_000_000,
             expires_at=1_090,
         )
+
+
+@pytest.mark.asyncio
+async def test_presence_worker_notifies_local_friends_without_shared_guilds(monkeypatch):
+    from inspect import unwrap
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app import tasks
+    from app.chat.presence import encode_presence_state
+
+    user = User(id=7, origin_domain="home.test", is_local=True, username="maple")
+    session = AsyncMock()
+    session.get.return_value = user
+    session.scalars.return_value = [8]
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__.return_value = session
+    engine = SimpleNamespace(dispose=AsyncMock())
+    redis = AsyncMock()
+    state = encode_presence_state("online", [], None, False, generation=4, expires_at=9999999999)
+    redis.get.side_effect = ["4", state, state]
+    publish = AsyncMock()
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            domain="home.test",
+            database_url=SimpleNamespace(get_secret_value=lambda: "unused"),
+            dragonfly_url=SimpleNamespace(get_secret_value=lambda: "unused"),
+        ),
+    )
+    monkeypatch.setattr(tasks, "create_engine_and_sessionmaker", lambda _: (engine, sessionmaker))
+    monkeypatch.setattr(tasks.Redis, "from_url", lambda *args, **kwargs: redis)
+    monkeypatch.setattr("app.chat.presence.publish_presence", publish)
+    monkeypatch.setattr(tasks, "fanout_presence", AsyncMock())
+    assert (
+        await unwrap(tasks.federation_presence_fanout.original_func)(7, "home.test", "online", 4)
+        == 1
+    )
+    assert publish.await_args.args[1] == "user:home.test:8"
+    assert publish.await_args.args[2]["status"] == "online"
+    assert set(session.scalars.await_args.args[0].compile().params.values()) == {
+        "home.test",
+        7,
+        "friend",
+    }

@@ -288,7 +288,7 @@ async def test_fresh_ready_hydrates_history_statuses(
 
     monkeypatch.setattr(gateway, "current_presence_preference", presence)
     monkeypatch.setattr(gateway, "guild_history_sync_statuses", statuses)
-    monkeypatch.setattr(gateway, "dm_presence_snapshot", presences)
+    monkeypatch.setattr(gateway, "contact_presence_snapshot", presences)
     monkeypatch.setattr(gateway, "ready_payload", payload)
 
     result = await gateway.hydrated_ready_payload(
@@ -1297,3 +1297,28 @@ async def test_remote_channel_info_request_is_authority_computed(
 
     assert proxy.await_args.args[0] is session
     assert proxy.await_args.args[2:4] == ("42@guild.example", user)
+
+
+@pytest.mark.asyncio
+async def test_contact_presence_snapshot_includes_friends_without_dms(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    result = MagicMock()
+    result.all.return_value = [(9, "remote.test")]
+    session.execute.return_value = result
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__.return_value = session
+    snapshot = AsyncMock(return_value=[])
+    monkeypatch.setattr(gateway, "dm_presence_snapshot", snapshot)
+    user = User(id=7, origin_domain="alpha.test", username="maple", is_local=True)
+    redis = object()
+    await gateway.contact_presence_snapshot(sessionmaker, redis, user, [])
+    snapshot.assert_awaited_once_with(
+        redis, [{"recipients": [{"id": "9", "origin_domain": "remote.test"}]}]
+    )
+    assert set(session.execute.await_args.args[0].compile().params.values()) == {
+        7,
+        "alpha.test",
+        "friend",
+    }

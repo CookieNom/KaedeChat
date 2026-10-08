@@ -644,6 +644,14 @@ final class GatewayClient {
       _sessionReadyWatchdog = null;
       _setHealth(const GatewayHealth(GatewayConnectionPhase.connected));
     }
+    if (name == 'READY' || name == 'RESUMED') {
+      final preference = data['presence_preference'];
+      updatePresence(
+        const {'online', 'idle', 'dnd', 'invisible'}.contains(preference)
+            ? preference! as String
+            : 'online',
+      );
+    }
     _events.add(GatewayEvent(name, data, sequence));
   }
 

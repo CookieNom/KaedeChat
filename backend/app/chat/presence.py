@@ -245,3 +245,28 @@ async def broadcast_presence_preference(
             generation=generation,
         )
     return visible_status, generation
+
+
+async def publish_cached_presence(redis: Redis, user: User, topics: Iterable[str]) -> None:
+    """Seed a friend's presence without exposing the account's invisible preference."""
+    state = decode_presence_state(await redis.get(f"presence:{user.origin_domain}:{user.id}"))
+    if state is None:
+        return
+    status, generation, activities, since, afk = state
+    visible = "offline" if status == "invisible" else status
+    for topic in topics:
+        await publish_presence(
+            redis,
+            topic,
+            {
+                "user_id": str(user.id),
+                "user_domain": user.origin_domain,
+                "status": visible,
+                "activities": activities if visible != "offline" else [],
+                "since": since if visible != "offline" else None,
+                "afk": afk if visible != "offline" else False,
+            },
+            user_domain=user.origin_domain,
+            user_id=user.id,
+            generation=generation,
+        )

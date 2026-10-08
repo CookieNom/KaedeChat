@@ -28,6 +28,23 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:markdown/markdown.dart' as md;
 
 void main() {
+  test('friend lookup errors explain how to correct the username', () {
+    final request = RequestOptions(path: '/users/@me/relationships');
+    final error = KaedeException.fromDio(DioException(
+      requestOptions: request,
+      type: DioExceptionType.badResponse,
+      response:
+          Response<Object?>(requestOptions: request, statusCode: 404, data: {
+        'code': 'USER_NOT_FOUND',
+        'message': 'That user could not be found or is no longer available.',
+        'trace_id': 'trace-1234'
+      }),
+    ));
+    expect(userFacingError(error), contains('Check the spelling'));
+    expect(userFacingError(error), contains('username@server'));
+    expect(userFacingError(error), isNot(contains('Reference:')));
+  });
+
   for (final size in [const Size(320, 568), const Size(1200, 900)]) {
     testWidgets('new DM friend search and manual entry at $size',
         (tester) async {

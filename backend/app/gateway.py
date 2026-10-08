@@ -171,6 +171,35 @@ async def current_presence_preference(
     return "online"
 
 
+async def contact_presence_snapshot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    redis: Redis,
+    user: User,
+    dm_channels: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    async with sessionmaker() as session:
+        friends = (
+            await session.execute(
+                select(Relationship.target_id, Relationship.target_domain).where(
+                    Relationship.user_id == user.id,
+                    Relationship.user_domain == user.origin_domain,
+                    Relationship.type == "friend",
+                )
+            )
+        ).all()
+    return await dm_presence_snapshot(
+        redis,
+        [
+            *dm_channels,
+            {
+                "recipients": [
+                    {"id": str(friend_id), "origin_domain": domain} for friend_id, domain in friends
+                ]
+            },
+        ],
+    )
+
+
 async def dm_presence_snapshot(
     redis: Redis, dm_channels: list[dict[str, object]]
 ) -> list[dict[str, object]]:
@@ -180,7 +209,7 @@ async def dm_presence_snapshot(
     session needs one bounded snapshot after its pub/sub barrier has been
     established. Otherwise a client that connects after a peer's last
     PRESENCE_UPDATE incorrectly renders that peer offline until the next
-    update. Only recipients already exposed by READY are sampled.
+    update. The caller supplies only authorized DM recipients and friends.
     """
 
     refs: set[tuple[str, str]] = set()
@@ -1129,7 +1158,7 @@ async def hydrated_ready_payload(
     """Build READY with optional projections that must not break login."""
     presence_preference = await current_presence_preference(sessionmaker, redis, user)
     history_statuses = await guild_history_sync_statuses(redis, user, guilds)
-    presences = await dm_presence_snapshot(redis, dm_channels)
+    presences = await contact_presence_snapshot(sessionmaker, redis, user, dm_channels)
     return ready_payload(
         user,
         guilds,
@@ -2754,7 +2783,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
             )
             sequence += 1
             presence_preference = await current_presence_preference(sessionmaker, redis, user)
-            presences = await dm_presence_snapshot(redis, dm_channels)
+            presences = await contact_presence_snapshot(sessionmaker, redis, user, dm_channels)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,

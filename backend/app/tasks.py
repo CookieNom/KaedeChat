@@ -54,7 +54,7 @@ from app.chat.payloads import (
 )
 from app.chat.permissions import get_permissions
 from app.chat.postcommit import publish_committed_dispatches
-from app.chat.presence import decode_presence_state
+from app.chat.presence import decode_presence_state, publish_cached_presence
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
 from app.core.metrics import observed_job
@@ -100,6 +100,7 @@ from app.db.models import (
     PushRelaySubscription,
     PushWakeOutbox,
     ReadState,
+    Relationship,
     RemoteMediaTombstone,
     Session,
     ThreadMember,
@@ -361,6 +362,19 @@ async def federation_presence_fanout(
             user = await session.get(User, (user_id, user_domain))
             if user is None or not user.is_local:
                 return 0
+            local_friends = list(
+                await session.scalars(
+                    select(Relationship.user_id).where(
+                        Relationship.user_domain == settings.domain,
+                        Relationship.target_id == user.id,
+                        Relationship.target_domain == user.origin_domain,
+                        Relationship.type == "friend",
+                    )
+                )
+            )
+        await publish_cached_presence(
+            redis, user, [user_topic(settings.domain, friend_id) for friend_id in local_friends]
+        )
         activities, since, afk = projection
         await fanout_presence(
             sessionmaker,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PresenceIndicator from '$lib/components/PresenceIndicator.svelte';
   let saveNotice = $state('');
   import Toast from '$lib/components/Toast.svelte';
   import { draftKey, readDraft, writeDraft } from '$lib/chat/local-drafts';
@@ -2865,7 +2866,7 @@
           aria-current={matchesEntityRef(dmId, item, localDomain) ? 'page' : undefined}
           onclick={() => closeMobileNavigation(false)}
         >
-          <span class="avatar avatar-small">
+          <span class="avatar avatar-small presence-avatar">
             {#if isGroupDm(item)}
               <Icon name="users" size={16} />
             {:else if itemRecipient?.avatar_hash}
@@ -2877,6 +2878,9 @@
               {itemRecipient?.profile_resolved === false
                 ? '•'
                 : (itemRecipient?.username.slice(0, 1).toUpperCase() ?? '?')}
+            {/if}
+            {#if itemRecipient && !isGroupDm(item)}
+              <PresenceIndicator user={itemRecipient} />
             {/if}
           </span>
           <strong>{dmTitle(item)}</strong>

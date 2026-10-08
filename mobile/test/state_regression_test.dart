@@ -432,6 +432,64 @@ void main() {
       refreshToken: 'refresh-token',
     );
 
+    test('announces presence on READY and RESUMED using the account preference',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      WebSocket? socket;
+      final statuses = <String>[];
+      final complete = Completer<void>();
+      server.listen((request) async {
+        socket = await WebSocketTransformer.upgrade(request);
+        socket!.listen((raw) {
+          final frame = jsonDecode(raw as String) as Map<String, Object?>;
+          if (frame['op'] == GatewayOp.identify.value) {
+            socket!.add(jsonEncode({
+              'op': GatewayOp.dispatch.value,
+              't': 'READY',
+              's': 0,
+              'd': {
+                'session_id': 'presence-session',
+                'presence_preference': 'invisible'
+              },
+            }));
+          } else if (frame['op'] == GatewayOp.heartbeat.value) {
+            socket!.add(
+                jsonEncode({'op': GatewayOp.heartbeatAck.value, 'd': null}));
+          } else if (frame['op'] == GatewayOp.presenceUpdate.value) {
+            statuses.add(
+                (frame['d']! as Map<String, Object?>)['status']! as String);
+            if (statuses.length == 1) {
+              socket!.add(jsonEncode({
+                'op': GatewayOp.dispatch.value,
+                't': 'RESUMED',
+                's': 1,
+                'd': {'presence_preference': 'online'},
+              }));
+            } else if (!complete.isCompleted) {
+              complete.complete();
+            }
+          }
+        });
+        socket!.add(jsonEncode({
+          'op': GatewayOp.hello.value,
+          'd': {'heartbeat_interval': 41250}
+        }));
+      });
+      final client = GatewayClient(
+        tokens: (_) async => tokens,
+        socketConnector: (_) => IOWebSocketChannel.connect(
+            Uri.parse('ws://127.0.0.1:${server.port}')),
+      );
+      addTearDown(() async {
+        await client.close();
+        await socket?.close();
+        await server.close(force: true);
+      });
+      await client.connect(tokens);
+      await complete.future.timeout(const Duration(seconds: 5));
+      expect(statuses, ['invisible', 'online']);
+    });
+
     test('accepts validated hello and ready envelopes', () {
       final hello = decodeGatewayEnvelope(jsonEncode(<String, Object?>{
         'op': GatewayOp.hello.value,

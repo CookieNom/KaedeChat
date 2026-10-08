@@ -934,7 +934,7 @@ class InstanceBanCreate(RequestModel):
 
 
 class RelationshipRequest(RequestModel):
-    handle: str = Field(min_length=4, max_length=286)
+    handle: str = Field(min_length=2, max_length=286)
 
 
 class ProfilePatch(RequestModel):

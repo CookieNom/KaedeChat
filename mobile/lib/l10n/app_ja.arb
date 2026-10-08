@@ -3630,7 +3630,7 @@
   "@ui_could_not_create_the_invite_3b4edd17": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },
-  "ui_friends_live_on_their_own_home_server_use_the_ac7f516d": "フレンドのアカウントは、それぞれのホームサーバーにあります。@maple@kaede.chatのような完全なアドレスを使用してください。",
+  "ui_friends_live_on_their_own_home_server_use_the_ac7f516d": "同じホームサーバーの相手にはユーザー名を、別のサーバーの相手には maple@kaede.chat のような完全なアドレスを入力してください。",
   "@ui_friends_live_on_their_own_home_server_use_the_ac7f516d": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },

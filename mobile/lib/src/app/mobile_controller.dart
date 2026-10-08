@@ -4510,6 +4510,12 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   void _applyGateway(GatewayEvent event) {
+    if (event.name == 'READY' || event.name == 'RESUMED') {
+      final preference = event.data['presence_preference'];
+      if (const {'online', 'idle', 'dnd', 'invisible'}.contains(preference)) {
+        state = state.copyWith(presencePreference: _presence(preference));
+      }
+    }
     switch (event.name) {
       case 'READY':
         state = state.copyWith(clearGatewayProtocolWarning: true);

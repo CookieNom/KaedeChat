@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.chat.schemas import ProfilePatch
+from app.chat.schemas import ProfilePatch, RelationshipRequest
 from app.core.dm import dm_pair_key
 from app.db.models import Relationship, User
 from app.federation.delivery import (
@@ -45,6 +45,36 @@ from .test_settings import settings
 def test_federated_handle_accepts_display_and_wire_forms() -> None:
     assert split_handle("turtle@example.test") == ("turtle", "example.test")
     assert split_handle("@Turtle@Example.Test") == ("turtle", "example.test")
+
+
+@pytest.mark.parametrize(
+    "handle", ["cookie", " Cookie ", "@cookie", "cookie@local.example", "@Cookie@Local.Example"]
+)
+@pytest.mark.asyncio
+async def test_home_username_lookup_accepts_short_and_full_handles(handle: str) -> None:
+    user = User(id=7, origin_domain="local.example", username="cookie", is_local=True)
+    session = AsyncMock()
+    session.scalar.return_value = user
+    redis = AsyncMock()
+    assert (
+        await resolve_handle(session, settings(domain="local.example"), redis, "requester", handle)
+        is user
+    )
+    query = session.scalar.await_args.args[0].compile().params
+    assert set(query.values()) == {"local.example", "cookie"}
+    assert not redis.mock_calls
+    assert RelationshipRequest(handle="ab").handle == "ab"
+
+
+@pytest.mark.parametrize(
+    "handle",
+    ["", "@", "cookie@", "cookie@@example.test", "cookie name", "a", "cookie@https://example.test"],
+)
+def test_invalid_handles_explain_the_required_format(handle: str) -> None:
+    with pytest.raises(HTTPException) as error:
+        split_handle(handle, "local.example")
+    assert error.value.status_code == 400
+    assert error.value.detail == {"code": "INVALID_HANDLE"}
 
 
 def test_profile_patch_trims_text_and_allows_explicit_clearing() -> None:
@@ -1054,6 +1084,8 @@ async def test_relationship_notifications_queue_mobile_push_only_for_incoming_ac
     target = User(id=42, origin_domain=target_domain, username="maple", display_name="Maple")
     publish = AsyncMock()
     enqueue = AsyncMock()
+    presence = AsyncMock()
+    monkeypatch.setattr(relationships, "publish_cached_presence", presence)
     monkeypatch.setattr(relationships, "publish_dispatch", publish)
     monkeypatch.setattr(relationships, "enqueue_best_effort", enqueue)
     monkeypatch.setattr(relationships, "user_payload", lambda user: {"id": str(user.id)})
@@ -1064,6 +1096,7 @@ async def test_relationship_notifications_queue_mobile_push_only_for_incoming_ac
         "USER_UPDATE",
         {"relationship": {"type": relation_type, "user": {"id": "42"}}},
     )
+    assert presence.await_count == int(relation_type == "friend")
     assert enqueue.await_count == int(expected_push)
     if expected_push:
         args = enqueue.await_args.args

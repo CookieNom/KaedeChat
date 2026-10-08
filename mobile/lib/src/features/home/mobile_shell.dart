@@ -6994,7 +6994,8 @@ final class _FriendsPage extends ConsumerWidget {
         children: [
           ActionButton(
             onPressed: () => _textAction(
-                context, 'Add a friend', '@friend@example.net', (value) async {
+                context, 'Add a friend', 'Username or username@server',
+                (value) async {
               await ref
                   .read(mobileControllerProvider.notifier)
                   .repository

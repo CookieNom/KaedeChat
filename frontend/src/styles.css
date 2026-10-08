@@ -708,6 +708,15 @@ progress {
   object-fit: cover;
 }
 
+.presence-avatar {
+  position: relative;
+  overflow: visible;
+}
+
+.presence-avatar img {
+  border-radius: inherit;
+}
+
 .avatar-small {
   width: 34px;
   height: 34px;

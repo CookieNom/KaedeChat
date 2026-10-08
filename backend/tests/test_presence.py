@@ -93,3 +93,31 @@ async def test_account_presence_broadcast_includes_private_preference_only(
     assert {topic: (data, generation) for topic, data, generation in published} == {
         topic: (data, generation) for topic, data, generation in expected
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["online", "idle", "dnd", "invisible"])
+async def test_cached_friend_presence_preserves_status_and_hides_invisible(monkeypatch, status):
+    from unittest.mock import AsyncMock
+
+    redis = AsyncMock()
+    redis.get.return_value = account_presence.encode_presence_state(
+        status,
+        generation=17,
+        expires_at=9999999999,
+        activities=[{"name": "Private activity", "type": 0}],
+        since=123,
+        afk=True,
+    )
+    publish = AsyncMock()
+    monkeypatch.setattr(account_presence, "publish_presence", publish)
+    user = User(id=7, origin_domain="alpha.test", username="maple", is_local=True)
+    await account_presence.publish_cached_presence(redis, user, ["user:alpha.test:8"])
+    data = publish.await_args.args[2]
+    assert data["status"] == ("offline" if status == "invisible" else status)
+    assert "preference" not in data
+    assert publish.await_args.kwargs["generation"] == 17
+    if status == "invisible":
+        assert data["activities"] == []
+        assert data["since"] is None
+        assert data["afk"] is False

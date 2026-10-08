@@ -8993,7 +8993,7 @@
   "@ui_add_friend_6a7bbb34": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },
-  "ui_friends_live_on_their_own_home_server_use_the_ac7f516d": "Friends live on their own home server. Use their full address, like @maple@kaede.chat.",
+  "ui_friends_live_on_their_own_home_server_use_the_ac7f516d": "Use a username for someone on your home server, or their full address, like maple@kaede.chat.",
   "@ui_friends_live_on_their_own_home_server_use_the_ac7f516d": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },

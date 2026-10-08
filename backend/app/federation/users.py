@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.auth.schemas import USERNAME_RE
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.payloads import user_payload
 from app.core.settings import Settings
@@ -338,15 +339,17 @@ async def refresh_remote_user_by_ref(
     return resolved
 
 
-def split_handle(handle: str) -> tuple[str, str]:
-    username, separator, raw_domain = handle.strip().lower().rpartition("@")
-    username = username.removeprefix("@")
-    if not separator or not username:
-        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+def split_handle(handle: str, default_domain: str | None = None) -> tuple[str, str]:
+    value = handle.strip().lower().removeprefix("@")
+    username, separator, raw_domain = value.partition("@")
+    if not separator:
+        raw_domain = default_domain or ""
+    if not USERNAME_RE.fullmatch(username) or not raw_domain:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_HANDLE"})
     try:
         return username, normalize_domain(raw_domain)
     except FederationNetworkError:
-        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"}) from None
+        raise HTTPException(status_code=400, detail={"code": "INVALID_HANDLE"}) from None
 
 
 async def resolve_handle(
@@ -356,7 +359,7 @@ async def resolve_handle(
     requester_key: str,
     handle: str,
 ) -> User:
-    username, domain = split_handle(handle)
+    username, domain = split_handle(handle, settings.domain)
     user = await session.scalar(
         select(User).where(
             User.origin_domain == domain,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PresenceIndicator from '$lib/components/PresenceIndicator.svelte';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -560,7 +561,7 @@
 
 {#snippet relationshipRow(relationship: Relationship)}
   <article>
-    <span class="avatar avatar-medium">
+    <span class="avatar avatar-medium presence-avatar">
       {#if relationship.type === 'friend' && relationship.user.avatar_hash}
         <img
           src={assetUrl(relationship.user.avatar_hash, 'thumbnail_128', relationship.user)}
@@ -571,6 +572,9 @@
         {relationship.user.profile_resolved === false
           ? '•'
           : relationship.user.username.slice(0, 1).toUpperCase()}
+      {/if}
+      {#if relationship.type === 'friend'}
+        <PresenceIndicator user={relationship.user} />
       {/if}
     </span>
     <span class="relationship-copy">
@@ -718,7 +722,7 @@
       {#each directMessages as channel (entityKey(channel))}
         {@const recipient = channel.recipients?.[0]}
         <a href={directMessagePath(channel)} onclick={() => closeNavigation(false)}>
-          <span class="avatar avatar-small">
+          <span class="avatar avatar-small presence-avatar">
             {#if isGroupDm(channel)}
               <Icon name="users" size={16} />
             {:else if recipient?.avatar_hash}
@@ -727,6 +731,9 @@
               {recipient?.profile_resolved === false
                 ? '•'
                 : (recipient?.username.slice(0, 1).toUpperCase() ?? '?')}
+            {/if}
+            {#if recipient && !isGroupDm(channel)}
+              <PresenceIndicator user={recipient} />
             {/if}
           </span>
           <strong>{dmTitle(channel)}</strong>
@@ -1001,8 +1008,8 @@
           <span class="friend-add-icon"><Icon name="users" size={22} /></span>
           <div>
             <p class="eyebrow">{$t('ui_add_a_friend_33275c37')}</p>
-            <h2>{$t('ui_connect_by_federated_username_40da2a8f')}</h2>
-            <p>{$t('ui_use_a_full_username_such_as_19fc14e6')} <code>@friend@example.net</code>.</p>
+            <h2>{$t('friend_connect_by_username')}</h2>
+            <p>{$t('friend_username_help')}</p>
           </div>
           <form
             class="friend-add-form"
@@ -1012,15 +1019,15 @@
             }}
           >
             <label class="form-field compact-field">
-              <span>{$t('ui_federated_username_bbdea5c4')}</span>
+              <span>{$t('friend_username_label')}</span>
               <input
                 bind:value={friendHandle}
-                placeholder={`@friend@${currentUser?.origin_domain ?? 'example.net'}`}
+                placeholder={`friend or friend@${currentUser?.origin_domain ?? 'example.net'}`}
                 autocomplete="off"
                 required
               />
             </label>
-            <button class="primary-button" disabled={busy}>
+            <button class="primary-button" disabled={busy || !friendHandle.trim()}>
               {busy ? $t('ui_sending_b8ed5279') : $t('ui_send_request_3a69f897')}
             </button>
           </form>
