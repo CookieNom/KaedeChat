@@ -160,6 +160,9 @@ jobs:
             ~/.pub-cache/hosted
             ~/.pub-cache/git
           key: dart-pub-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: Install Flutter Android NDK
+        timeout-minutes: 10
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/install-android-ndk.sh" "$RUNNER_TEMP/flutter"
       - name: Install pinned Rust Android targets
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" rustup toolchain install "$RUST_VERSION" --profile minimal

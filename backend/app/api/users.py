@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from redis.asyncio import Redis
-from sqlalchemy import and_, exists, func, or_, select, tuple_
+from sqlalchemy import and_, delete, exists, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ from app.db.models import (
     GuildNotificationSetting,
     InboxDismissal,
     Message,
+    MessageBookmark,
     MessageProjection,
     ReadState,
     User,
@@ -695,4 +696,139 @@ async def dismiss_inbox_mention(
         "INBOX_MENTION_DISMISS",
         {"message_id": str(message.message_id), "message_domain": message.message_domain},
     )
+    return Response(status_code=204)
+
+
+@router.get("/@me/inbox/bookmarks")
+async def inbox_bookmarks(
+    before: EntityRef | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> list[dict[str, object]]:
+    states = await list_read_states(auth, session, redis)
+    visible = {
+        (int(str(state["channel_id"])), str(state["channel_domain"])): state
+        for state in states
+        if state.get("can_read_history")
+    }
+    if not visible:
+        return []
+    statement = (
+        select(Message)
+        .join(
+            MessageBookmark,
+            and_(
+                MessageBookmark.message_id == Message.id,
+                MessageBookmark.message_domain == Message.origin_domain,
+            ),
+        )
+        .join(
+            Channel,
+            and_(Channel.id == Message.channel_id, Channel.origin_domain == Message.channel_domain),
+        )
+        .where(
+            Message.id >= Channel.created_floor_id,
+            MessageBookmark.user_id == auth.user.id,
+            MessageBookmark.user_domain == auth.user.origin_domain,
+            Message.deleted_at.is_(None),
+            tuple_(Message.channel_id, Message.channel_domain).in_(visible),
+        )
+    )
+    if before is not None:
+        cursor = await session.get(
+            MessageBookmark, (auth.user.id, auth.user.origin_domain, before.id, before.domain)
+        )
+        if cursor is None:
+            raise HTTPException(
+                status_code=400, detail="Bookmark cursor expired. Refresh the inbox."
+            )
+        statement = statement.where(
+            tuple_(MessageBookmark.saved_at, Message.id, Message.origin_domain)
+            < (cursor.saved_at, before.id, before.domain)
+        )
+    messages = await session.scalars(
+        statement.order_by(
+            MessageBookmark.saved_at.desc(), Message.id.desc(), Message.origin_domain.desc()
+        ).limit(limit)
+    )
+    return [
+        {
+            **visible[(message.channel_id, message.channel_domain)],
+            "message_id": str(message.id),
+            "message_domain": message.origin_domain,
+            "created_at": message.created_at.isoformat(),
+        }
+        for message in messages
+    ]
+
+
+@router.get("/@me/inbox/bookmarks/{message_ref}")
+async def bookmark_status(
+    message_ref: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    bookmark = await session.get(
+        MessageBookmark, (auth.user.id, auth.user.origin_domain, message_ref.id, message_ref.domain)
+    )
+    return {"bookmarked": bookmark is not None}
+
+
+@router.put("/@me/inbox/bookmarks/{message_ref}", status_code=204)
+async def save_bookmark(
+    message_ref: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    from app.chat.channel_access import load_channel_access
+
+    message = await session.get(Message, (message_ref.id, message_ref.domain))
+    if message is None or message.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    access = await load_channel_access(
+        session, settings, auth.user, EntityReference(message.channel_id, message.channel_domain)
+    )
+    if message.id < access.channel.created_floor_id:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if access.guild is not None:
+        permissions = await get_permissions(
+            session, redis, access.guild, auth.user, channel=access.channel
+        )
+        required = Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
+        if permissions & required != required:
+            raise HTTPException(status_code=404, detail="Message not found")
+    await session.execute(
+        pg_insert(MessageBookmark)
+        .values(
+            user_id=auth.user.id,
+            user_domain=auth.user.origin_domain,
+            user_is_local=True,
+            message_id=message.id,
+            message_domain=message.origin_domain,
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.delete("/@me/inbox/bookmarks/{message_ref}", status_code=204)
+async def remove_bookmark(
+    message_ref: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    await session.execute(
+        delete(MessageBookmark).where(
+            MessageBookmark.user_id == auth.user.id,
+            MessageBookmark.user_domain == auth.user.origin_domain,
+            MessageBookmark.message_id == message_ref.id,
+            MessageBookmark.message_domain == message_ref.domain,
+        )
+    )
+    await session.commit()
     return Response(status_code=204)

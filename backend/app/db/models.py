@@ -3892,6 +3892,22 @@ class InboxDismissal(Base, LocalUserMixin):
     )
 
 
+class MessageBookmark(Base, LocalUserMixin):
+    __tablename__ = "message_bookmarks"
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "user_domain", "message_id", "message_domain"),
+        *LocalUserMixin.locality_constraints("message_bookmarks"),
+        ForeignKeyConstraint(
+            ["message_id", "message_domain"],
+            ["messages.id", "messages.origin_domain"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
 class ReadState(Base, LocalUserMixin):
     __tablename__ = "read_states"
     channel_id: Mapped[int] = mapped_column(BigInteger)

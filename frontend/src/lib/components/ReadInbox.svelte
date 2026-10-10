@@ -21,6 +21,7 @@
     message_domain?: string;
   };
   let dialog: HTMLDialogElement;
+  const tabs = ['unreads', 'mentions', 'bookmarks'];
   let tab = $state('unreads');
   let guild = $state('');
   let everyone = $state(true);
@@ -54,12 +55,12 @@
       if (append && last?.message_id)
         query.set('before', `${last.message_id}@${last.message_domain}`);
       const values = await api<Entry[]>(
-        tab === 'mentions' ? `/users/@me/inbox/mentions?${query}` : '/users/@me/read-states',
+        tab !== 'unreads' ? `/users/@me/inbox/${tab}?${query}` : '/users/@me/read-states',
         { signal: request.signal }
       );
       if (request.signal.aborted) return;
       entries = append ? [...entries, ...values] : values;
-      more = tab === 'mentions' && values.length === 50;
+      more = tab !== 'unreads' && values.length === 50;
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not load inbox. Try again.');
     } finally {
@@ -80,12 +81,19 @@
     }
   }
   async function dismiss(entry: Entry) {
+    if (busy) return;
     busy = true;
+    error = '';
     try {
-      await api('/users/@me/inbox/dismiss', {
-        method: 'POST',
-        body: JSON.stringify({ message_id: `${entry.message_id}@${entry.message_domain}` })
-      });
+      if (tab === 'bookmarks') {
+        await api(`/users/@me/inbox/bookmarks/${encodeURIComponent(target(entry)!)}`, {
+          method: 'DELETE'
+        });
+      } else
+        await api('/users/@me/inbox/dismiss', {
+          method: 'POST',
+          body: JSON.stringify({ message_id: `${entry.message_id}@${entry.message_domain}` })
+        });
       entries = entries.filter((item) => item !== entry);
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not dismiss mention. Try again.');
@@ -118,8 +126,8 @@
   const visible = $derived(
     entries.filter(
       (entry) =>
-        (tab === 'mentions' || (entry.unread && (showMuted || !entry.muted))) &&
-        (!guild || `${entry.guild_id}@${entry.guild_domain}` === guild)
+        (tab !== 'unreads' || (entry.unread && (showMuted || !entry.muted))) &&
+        (tab === 'bookmarks' || !guild || `${entry.guild_id}@${entry.guild_domain}` === guild)
     )
   );
 </script>
@@ -133,25 +141,28 @@
   }}
   aria-label={$t('chat_inbox')}
   class="read-inbox"
+  class:bookmark-inbox={tab === 'bookmarks'}
 >
   <header class="inbox-header">
     <h2><Icon name="inbox" size={24} />{$t('chat_inbox')}</h2>
     <div class="inbox-actions">
-      <button
-        class="icon-action"
-        disabled={busy}
-        onclick={() => void mark()}
-        title={$t('chat_mark_all_read')}
-        aria-label={$t('chat_mark_all_read')}><Icon name="check" /></button
-      >
-      <button
-        class="icon-action"
-        class:active={filtersOpen}
-        aria-expanded={filtersOpen}
-        title={$t('chat_inbox_filter')}
-        aria-label={$t('chat_inbox_filter')}
-        onclick={() => (filtersOpen = !filtersOpen)}><Icon name="settings" /></button
-      >
+      {#if tab !== 'bookmarks'}
+        <button
+          class="icon-action"
+          disabled={busy}
+          onclick={() => void mark()}
+          title={$t('chat_mark_all_read')}
+          aria-label={$t('chat_mark_all_read')}><Icon name="check" /></button
+        >
+        <button
+          class="icon-action"
+          class:active={filtersOpen}
+          aria-expanded={filtersOpen}
+          title={$t('chat_inbox_filter')}
+          aria-label={$t('chat_inbox_filter')}
+          onclick={() => (filtersOpen = !filtersOpen)}><Icon name="settings" /></button
+        >
+      {/if}
       <button
         class="icon-action"
         onclick={onClose}
@@ -161,7 +172,7 @@
     </div>
   </header>
   <div class="inbox-tabs" role="tablist" aria-label={$t('chat_inbox')}>
-    {#each ['unreads', 'mentions'] as name (name)}
+    {#each tabs as name (name)}
       <button
         role="tab"
         id={`inbox-tab-${name}`}
@@ -170,6 +181,8 @@
         disabled={busy}
         onclick={() => {
           tab = name;
+          entries = [];
+          more = false;
           void refresh();
         }}
         onkeydown={(event) => {
@@ -178,20 +191,28 @@
             if (busy) return;
             tab =
               event.key === 'Home'
-                ? 'unreads'
+                ? tabs[0]
                 : event.key === 'End'
-                  ? 'mentions'
-                  : tab === 'unreads'
-                    ? 'mentions'
-                    : 'unreads';
+                  ? tabs.at(-1)!
+                  : tabs[
+                      (tabs.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) %
+                        tabs.length
+                    ];
+            entries = [];
+            more = false;
             dialog.querySelector<HTMLButtonElement>(`#inbox-tab-${tab}`)?.focus();
             void refresh();
           }
-        }}>{name === 'unreads' ? $t('chat_unreads') : $t('chat_mentions')}</button
+        }}
+        >{name === 'bookmarks'
+          ? 'Bookmarks'
+          : name === 'unreads'
+            ? $t('chat_unreads')
+            : $t('chat_mentions')}</button
       >
     {/each}
   </div>
-  {#if filtersOpen}
+  {#if filtersOpen && tab !== 'bookmarks'}
     <div class="inbox-filters">
       <select
         aria-label={$t('chat_inbox_filter')}
@@ -274,10 +295,17 @@
           <button
             class="icon-action"
             disabled={busy}
-            onclick={() => (tab === 'mentions' ? void dismiss(entry) : void mark(entry))}
-            title={tab === 'mentions' ? $t('chat_dismiss') : $t('chat_mark_read')}
-            aria-label={tab === 'mentions' ? $t('chat_dismiss') : $t('chat_mark_read')}
-            ><Icon name={tab === 'mentions' ? 'x' : 'check'} /></button
+            onclick={() => (tab !== 'unreads' ? void dismiss(entry) : void mark(entry))}
+            title={tab === 'bookmarks'
+              ? 'Remove Bookmark'
+              : tab === 'mentions'
+                ? $t('chat_dismiss')
+                : $t('chat_mark_read')}
+            aria-label={tab === 'bookmarks'
+              ? 'Remove Bookmark'
+              : tab === 'mentions'
+                ? $t('chat_dismiss')
+                : $t('chat_mark_read')}><Icon name={tab !== 'unreads' ? 'x' : 'check'} /></button
           >
           <button
             class="collapse-action"
@@ -293,23 +321,69 @@
               <InboxMessagePreview
                 channel={`${entry.channel_id}@${entry.channel_domain}`}
                 target={target(entry)}
-                mention={tab === 'mentions'}
+                mention={tab !== 'unreads'}
               />
             {/key}
           {/if}
           <button class="inbox-open" onclick={() => void jump(entry)}
-            >{$t(tab === 'mentions' ? 'chat_jump_to_mention' : 'chat_jump_to_read')}<Icon
+            >{tab === 'bookmarks'
+              ? 'Jump to Message'
+              : $t(tab === 'mentions' ? 'chat_jump_to_mention' : 'chat_jump_to_read')}<Icon
               name="chevron-right"
               size={16}
             /></button
           >
         {/if}
       </article>
-    {:else}<div class="inbox-empty">
-        <Icon name="inbox" size={40} /><strong
-          >{busy ? $t('chat_loading') : $t('chat_caught_up')}</strong
-        >
-      </div>{/each}
+    {:else}
+      {#if tab === 'bookmarks' && !busy && !error}
+        <div class="bookmark-empty">
+          <svg class="bookmark-book" viewBox="0 0 160 110" aria-hidden="true">
+            <path fill="#7256ce" d="m9 67 60 29 78-26-18-39-60 19L26 29Z" />
+            <path
+              fill="#b4adff"
+              stroke="#7b69dd"
+              stroke-width="3"
+              d="M20 25q30-6 53 18 25-27 54-22l19 47q-41 2-67 20Q52 69 12 67Z"
+            />
+            <path
+              fill="#ddd9ff"
+              d="M28 22q26-2 45 21l6 38Q57 61 23 59Zm49 21q20-22 48-22l12 36q-34 4-54 23Z"
+            />
+            <path
+              fill="none"
+              stroke="#9e90f5"
+              stroke-width="3"
+              d="m32 33 19 7m-15 3 22 9m-19 2 24 9m29-17 28-12m-25 21 29-12m-26 21 30-12"
+            />
+            <path fill="#d793ff" d="M88 27q8-13 16-8l11 24-12-3-5 11Z" />
+          </svg>
+          <h3>Collect your favorite memories</h3>
+          <p>
+            Right-click any message and pick <b>Bookmark Message</b>. Find it here, for your eyes
+            only.
+          </p>
+          <div class="bookmark-example" aria-hidden="true">
+            <span class="example-avatar">✦</span>
+            <div>
+              <b>Kaede</b><small>7:41 PM</small>
+              <p>Concert tickets go on sale Friday at 10am!</p>
+              <p>wait, did you see this</p>
+              <p>the setlist for tonight looks unreal</p>
+            </div>
+            <span class="example-menu"
+              ><svg width="14" height="16" viewBox="0 0 24 24"
+                ><path fill="currentColor" d="M6 3h12v18l-6-4-6 4V3Z" /></svg
+              >Bookmark Message</span
+            >
+          </div>
+        </div>
+      {:else}<div class="inbox-empty">
+          <Icon name="inbox" size={40} /><strong
+            >{busy ? $t('chat_loading') : $t('chat_caught_up')}</strong
+          >
+        </div>{/if}
+    {/each}
     {#if more}<button class="load-more" disabled={busy} onclick={() => void refresh(true)}
         >{$t('chat_load_more')}</button
       >{/if}
@@ -317,6 +391,120 @@
 </dialog>
 
 <style>
+  .bookmark-empty {
+    padding: 44px 0 40px;
+    text-align: center;
+  }
+  .bookmark-book {
+    width: 150px;
+    height: 110px;
+    margin: 0 auto 20px;
+  }
+  .bookmark-inbox .inbox-header {
+    padding-block: 10px;
+  }
+  .bookmark-inbox {
+    --surface: light-dark(#fffdf9, #0b0b0d);
+    --surface-subtle: light-dark(#f8f4ee, #080809);
+    --surface-hover: light-dark(#eee8df, #252529);
+    --line: light-dark(#d2c9bd, #27272b);
+    --text: light-dark(#28231f, #d6d6da);
+    --text-soft: light-dark(#5f574f, #c8c8cc);
+    --text-muted: light-dark(#756c63, #94949c);
+    --purple: light-dark(#6b52a3, #8070ff);
+  }
+
+  .bookmark-empty h3 {
+    font-family: inherit;
+    font-size: 23px;
+    margin: 0 0 10px;
+  }
+  .bookmark-empty > p {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 0 12px 30px;
+  }
+  .bookmark-example {
+    position: relative;
+    display: flex;
+    gap: 14px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    text-align: left;
+    background: var(--surface-subtle);
+    font-size: 14px;
+  }
+  .example-avatar {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: #7653c5;
+    color: #d7ccff;
+    flex-shrink: 0;
+    font-size: 26px;
+  }
+  .bookmark-example > div {
+    min-width: 0;
+  }
+  .bookmark-example small {
+    display: inline;
+    margin-left: 8px;
+  }
+  .bookmark-example p {
+    margin: 6px 0;
+    color: var(--text-soft);
+  }
+  .example-menu {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: absolute;
+    bottom: -8px;
+    right: 16px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-hover);
+    font-size: 12px;
+    font-weight: 600;
+    box-shadow: 0 4px 12px #0004;
+  }
+  @media (max-width: 420px) {
+    .bookmark-empty {
+      padding: 28px 0 44px;
+    }
+    .bookmark-inbox .inbox-header {
+      padding-block: 10px;
+    }
+    :global([data-theme='dark']) .bookmark-inbox {
+      --surface: #0b0b0d;
+      --surface-subtle: #080809;
+      --surface-hover: #252529;
+      --line: #27272b;
+      --text: #d6d6da;
+      --text-soft: #c8c8cc;
+      --text-muted: #94949c;
+      --purple: #8070ff;
+    }
+    .bookmark-empty h3 {
+      font-family: inherit;
+      font-size: 20px;
+    }
+    .bookmark-example {
+      padding: 12px;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .example-avatar {
+      width: 30px;
+      height: 30px;
+    }
+  }
+
   .read-inbox {
     position: fixed;
     inset: calc(var(--app-utility-height, 36px) + 6px) 12px auto auto;
@@ -392,6 +580,8 @@
   }
   .inbox-tabs button {
     flex: 1;
+    min-width: 0;
+    font-size: 13px;
     border: 0;
     border-bottom: 3px solid transparent;
     border-radius: 0;
@@ -402,6 +592,10 @@
   .inbox-tabs button[aria-selected='true'] {
     border-bottom-color: var(--accent);
     color: var(--accent-text);
+  }
+  #inbox-tab-bookmarks[aria-selected='true'] {
+    color: var(--purple);
+    border-bottom-color: var(--purple);
   }
   .inbox-filters {
     display: flex;

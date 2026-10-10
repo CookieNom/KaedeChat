@@ -363,6 +363,7 @@ async def erase_private_account_state(
         m.GuildNotificationSetting,
         m.ReadState,
         m.InboxDismissal,
+        m.MessageBookmark,
         m.AuthEvent,
         m.Session,
         m.DMParticipant,

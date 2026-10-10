@@ -17,7 +17,7 @@
   import { t } from '$lib/ui/locale';
 
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
-  import { userErrorMessage } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import type { ApplicationCommand } from '$lib/chat/application-commands';
   import {
     messageAppContextCommands,
@@ -217,6 +217,42 @@
   let confirmingDelete = $state(false);
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
   let feedback = $state('');
+  let bookmarked = $state(false);
+  let bookmarkBusy = $state(false);
+  let bookmarkError = $state('');
+  async function loadBookmark() {
+    bookmarkBusy = true;
+    bookmarkError = '';
+    try {
+      const status = await api<{ bookmarked: boolean }>(
+        `/users/@me/inbox/bookmarks/${encodeURIComponent(entityRef(message))}`
+      );
+      bookmarked = status.bookmarked;
+    } catch (error) {
+      bookmarkError = userErrorMessage(error, 'Could not load bookmark. Reopen the menu to retry.');
+    } finally {
+      bookmarkBusy = false;
+    }
+  }
+  async function toggleBookmark() {
+    if (bookmarkBusy || bookmarkError) return;
+    bookmarkBusy = true;
+    try {
+      await api(`/users/@me/inbox/bookmarks/${encodeURIComponent(entityRef(message))}`, {
+        method: bookmarked ? 'DELETE' : 'PUT'
+      });
+      bookmarked = !bookmarked;
+      closeMenu();
+    } catch (error) {
+      bookmarkError = userErrorMessage(
+        error,
+        'Could not update bookmark. Reopen the menu to retry.'
+      );
+    } finally {
+      bookmarkBusy = false;
+    }
+  }
+
   let reportNotice = $state('');
   let mediaViewer = $state<Attachment | null>(null);
   let reactionPickerOpen = $state(false);
@@ -490,6 +526,7 @@
     reactionPickerOpen = pickerOnly;
     reactionPickerOnly = pickerOnly;
     menuOpen = true;
+    if (!pickerOnly && !message.deleted_at) void loadBookmark();
     addMenuListeners();
     void tick().then(() => {
       recentReactionValues = recentReactions(reactionUserKey);
@@ -1628,6 +1665,26 @@
                 </svg>
                 <span>{$t('ui_create_thread_4ce9bbfd')}</span>
               </button>
+            {/if}
+            {#if !message.deleted_at && !contextAttachment}
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                disabled={bookmarkBusy || !!bookmarkError}
+                onclick={() => void toggleBookmark()}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4V3Z" /></svg
+                >
+                <span
+                  >{bookmarkBusy
+                    ? 'Loading…'
+                    : bookmarked
+                      ? 'Remove Bookmark'
+                      : 'Bookmark Message'}</span
+                >
+              </button>
+              {#if bookmarkError}<p role="alert" class="bookmark-error">{bookmarkError}</p>{/if}
             {/if}
             {#if onTogglePin && pinnableMessage && !message.deleted_at}
               <button type="button" role="menuitem" tabindex="-1" onclick={togglePin}>

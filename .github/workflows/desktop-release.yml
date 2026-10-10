@@ -552,6 +552,9 @@ jobs:
         with:
           path: ${{ runner.temp }}/flutter/bin/cache
           key: flutter-android-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}
+      - name: Install Flutter Android NDK
+        timeout-minutes: 10
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/install-android-ndk.sh" "$RUNNER_TEMP/flutter"
       - name: Install pinned Rust Android targets
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/retry-network.sh" rustup toolchain install "$RUST_VERSION" --profile minimal

@@ -4471,13 +4471,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
     }
   }
 
+  final Set<EntityRef> _bookmarkUpdates = {};
+
   Future<void> _showMessageActions(
     KaedeMessage message, {
     KaedeAttachment? attachment,
     Map<String, Object?>? attachmentManifest,
     File? decryptedAttachment,
   }) async {
-    if (message.deletedAt != null) return;
+    if (message.deletedAt != null || _bookmarkUpdates.contains(message.ref)) {
+      return;
+    }
     final displayedAttachment = attachment == null
         ? null
         : _manifestAttachment(attachment, attachmentManifest);
@@ -4540,6 +4544,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                 )))
         : const <MobileApplicationCommand>[];
     if (!mounted) return;
+    final bookmarkStatus = ref.read(mobileControllerProvider.notifier).api.getJson(
+        '/api/v1/users/@me/inbox/bookmarks/${Uri.encodeComponent(message.ref.wire)}');
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -4711,6 +4717,28 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                   trailing: Icon(Icons.chevron_right_rounded),
                   onTap: () => Navigator.pop(context, 'app-command'),
                 ),
+              FutureBuilder<Map<String, Object?>>(
+                future: bookmarkStatus,
+                builder: (context, snapshot) {
+                  final saved = snapshot.data?['bookmarked'] == true;
+                  return ListTile(
+                    enabled: snapshot.hasData,
+                    leading:
+                        Icon(saved ? Icons.bookmark : Icons.bookmark_border),
+                    title: Text(saved ? 'Remove Bookmark' : 'Bookmark Message'),
+                    subtitle: snapshot.hasError
+                        ? const Text(
+                            'Could not load bookmark. Reopen the menu to retry.')
+                        : !snapshot.hasData
+                            ? const Text('Loading…')
+                            : null,
+                    onTap: snapshot.hasData
+                        ? () => Navigator.pop(context,
+                            saved ? 'bookmark-remove' : 'bookmark-save')
+                        : null,
+                  );
+                },
+              ),
               if (canPin)
                 ListTile(
                     leading: Icon(message.pinned
@@ -4768,6 +4796,23 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       switch (action) {
         case 'mark-unread':
           await controller.markMessageUnread(message);
+          break;
+        case 'bookmark-save':
+        case 'bookmark-remove':
+          if (!_bookmarkUpdates.add(message.ref)) break;
+          try {
+            await controller.api.sendJson(
+                action == 'bookmark-save' ? 'PUT' : 'DELETE',
+                '/api/v1/users/@me/inbox/bookmarks/${Uri.encodeComponent(message.ref.wire)}');
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(action == 'bookmark-save'
+                      ? 'Message bookmarked. Find it in your inbox.'
+                      : 'Bookmark removed.')));
+            }
+          } finally {
+            _bookmarkUpdates.remove(message.ref);
+          }
           break;
         case 'reply':
           final current = ref.read(mobileControllerProvider);
