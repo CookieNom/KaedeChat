@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from manage import run
@@ -19,22 +20,31 @@ K3S_IMAGE = "rancher/k3s:v1.36.4-k3s1"
 
 
 def import_images(name: str, images: list[str]) -> None:
-    # The tools-node importer can lose its shared tarball and still exit zero.
-    run(["k3d", "image", "import", "--mode", "direct", "--cluster", name, *images])
-    # Both development and acceptance clusters have a single server, no agents.
-    # Verify containerd actually has each image before starting workloads.
-    for image in images:
-        run(
-            [
-                "docker",
-                "exec",
-                f"k3d-{name}-server-0",
-                "crictl",
-                "inspecti",
-                image,
-            ],
-            capture=True,
-        )
+    for attempt in range(3):
+        try:
+            # The tools-node importer can lose its shared tarball and still exit zero.
+            run(["k3d", "image", "import", "--mode", "direct", "--cluster", name, *images])
+            # Both development and acceptance clusters have a single server, no agents.
+            # Verify containerd actually has each image before starting workloads.
+            for image in images:
+                run(
+                    [
+                        "docker",
+                        "exec",
+                        f"k3d-{name}-server-0",
+                        "crictl",
+                        "inspecti",
+                        image,
+                    ],
+                    capture=True,
+                )
+            return
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            delay = 5 * (attempt + 1)
+            print(f"Image import or verification failed; retrying in {delay}s.", flush=True)
+            time.sleep(delay)
 
 
 def api_address() -> str:

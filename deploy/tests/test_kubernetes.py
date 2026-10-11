@@ -50,10 +50,29 @@ class KubernetesTests(unittest.TestCase):
     def test_image_import_rejects_false_success_when_image_is_missing(self):
         error = subprocess.CalledProcessError(1, ["crictl", "inspecti"])
         with (
-            patch("dev.run", side_effect=["", error]),
+            patch("dev.run", side_effect=["", error] * 3) as run,
+            patch("dev.time.sleep") as sleep,
             self.assertRaises(subprocess.CalledProcessError),
         ):
             import_images("test", ["backend:test"])
+        self.assertEqual(run.call_count, 6)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 10])
+
+    def test_image_import_recovers_from_missing_image_or_import_failure(self):
+        error = subprocess.CalledProcessError(1, ["crictl", "inspecti"])
+        for outcomes in (["", error, "", "", ""], [error, "", "", ""]):
+            with (
+                self.subTest(outcomes=outcomes),
+                patch("dev.run", side_effect=outcomes) as run,
+                patch("dev.time.sleep") as sleep,
+            ):
+                import_images("test", ["backend:test", "frontend:test"])
+                self.assertEqual(run.call_count, len(outcomes))
+                self.assertEqual(
+                    [call.args[0][-1] for call in run.call_args_list[-2:]],
+                    ["backend:test", "frontend:test"],
+                )
+                sleep.assert_called_once_with(5)
 
     def test_prune_targets_only_this_checkouts_selected_dev_node(self):
         for federation in (False, True):
