@@ -6,8 +6,23 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kubernetes"))
-from migration_safety import PREFIX, manifest, online_revisions, safe_upgrade, sources
+from migration_safety import PREFIX, manifest, metadata, online_revisions, safe_upgrade, sources
 from stack import ROOT
+
+
+def sources_through(revision):
+    """Keep historical migration scenarios independent of newly added revisions."""
+    files = sources(ROOT)
+    history = {}
+    selected = {p: s for p, s in files.items() if not p.startswith(PREFIX + "versions/")}
+    for path, source in files.items():
+        if path.startswith(PREFIX + "versions/"):
+            info = metadata(ast.parse(source))
+            history[info["revision"]] = (info["down_revision"], path, source)
+    while revision is not None:
+        revision, path, source = history[revision]
+        selected[path] = source
+    return selected
 
 
 def migration(revision, parent, body):
@@ -96,7 +111,7 @@ class MigrationSafetyTests(unittest.TestCase):
                     online_revisions(previous, candidate)
 
     def test_real_additive_chain_and_backfill_refusal(self):
-        files = sources(ROOT)
+        files = sources_through("9e4a1c3d6f82")
         latest = next(p for p in files if "9e4a1c3d6f82_" in p)
         daily = next(p for p in files if "8d3f0b2c5e71_" in p)
         baseline = {p: s for p, s in files.items() if p not in {latest, daily}}

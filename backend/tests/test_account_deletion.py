@@ -229,7 +229,7 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
     from app.auth.deletion import erase_content_batch
     from app.db import models as m
 
-    connection = await migrate_to("a6e2d4f80931")
+    connection = await migrate_to("head")
     monkeypatch.setattr(
         "app.api.channels.queue_dm_authority_mutation", AsyncMock(return_value=set())
     )

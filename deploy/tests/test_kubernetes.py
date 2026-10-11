@@ -108,9 +108,10 @@ class KubernetesTests(unittest.TestCase):
         )
 
     def test_update_notice_recognizes_safe_pending_chain(self):
-        from migration_safety import manifest, sources
+        from migration_safety import manifest
+        from test_migration_safety import sources_through
 
-        files = sources(ROOT)
+        files = sources_through("9e4a1c3d6f82")
         latest = next(p for p in files if "9e4a1c3d6f82_" in p)
         previous = {
             "schema": "old",
@@ -413,9 +414,10 @@ class KubernetesTests(unittest.TestCase):
             self.assertGreater(events.index(restored), migration)
 
     def test_online_migration_failure_and_rollout_recovery(self):
-        from migration_safety import manifest, sources
+        from migration_safety import manifest
+        from test_migration_safety import sources_through
 
-        files = sources(ROOT)
+        files = sources_through("9e4a1c3d6f82")
         latest = next(p for p in files if "9e4a1c3d6f82_" in p)
         baseline = manifest({p: source for p, source in files.items() if p != latest})
         for failure in (None, "migration", "rollout"):
@@ -471,6 +473,7 @@ class KubernetesTests(unittest.TestCase):
 
                 with (
                     patch("manage.verify_cluster"),
+                    patch("manage.sources", return_value=files),
                     patch("manage.kubectl", side_effect=kubectl),
                     patch("manage.job", side_effect=job),
                     patch("manage.wait_workload", side_effect=wait),
