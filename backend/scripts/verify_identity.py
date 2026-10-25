@@ -8,8 +8,9 @@ import pyotp
 from sqlalchemy import select
 
 import app.api.auth as auth_api
+from app.auth.security import token_hash
 from app.core.settings import get_settings
-from app.db.models import EmailOutbox, User
+from app.db.models import EmailOutbox, Session, User
 from app.email.backends import OutboundEmail
 from app.email.outbox import drain_email_outbox
 from app.main import app
@@ -290,16 +291,45 @@ async def verify() -> None:
                 json={"refresh_token": old_refresh},
             )
             require(rotated.status_code == 200, f"refresh failed: {rotated.text}")
-            rotated_access = rotated.json()["access_token"]
+            retried = await client.post(
+                "/api/v1/auth/refresh",
+                headers={"X-Kaede-Client": "mobile"},
+                json={"refresh_token": old_refresh},
+            )
+            require(
+                retried.status_code == 200,
+                f"refresh retry within the grace period failed: {retried.text}",
+            )
+            retried_access = retried.json()["access_token"]
+            retry_session = await client.get(
+                "/api/v1/users/@me",
+                headers={"Authorization": f"Bearer {retried_access}"},
+            )
+            require(retry_session.status_code == 200, "refresh retry did not issue a valid session")
+
+            # Expire the grace period in the disposable database without sleeping.
+            async with app.state.sessionmaker() as database_session:
+                refresh_session = await database_session.scalar(
+                    select(Session).where(Session.previous_token_hash == token_hash(old_refresh))
+                )
+                if refresh_session is None:
+                    raise VerificationFailure("refresh retry lost the superseded token")
+                refresh_session.last_used_at = datetime.now(UTC) - timedelta(
+                    seconds=settings.refresh_reuse_grace_seconds + 1
+                )
+                await database_session.commit()
+
             reused = await client.post(
                 "/api/v1/auth/refresh",
                 headers={"X-Kaede-Client": "mobile"},
                 json={"refresh_token": old_refresh},
             )
-            require(reused.status_code == 401, "refresh reuse was not rejected")
+            require(
+                reused.status_code == 401, "refresh reuse after the grace period was not rejected"
+            )
             revoked = await client.get(
                 "/api/v1/users/@me",
-                headers={"Authorization": f"Bearer {rotated_access}"},
+                headers={"Authorization": f"Bearer {retried_access}"},
             )
             require(revoked.status_code == 401, "reuse did not revoke the session")
 

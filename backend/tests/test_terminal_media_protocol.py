@@ -975,6 +975,7 @@ async def test_staged_attachment_only_history_is_dropped_after_terminal_fence(
         id=9,
         origin_domain=ORIGIN_DOMAIN,
         last_event_seq=20,
+        replica_evicted_through_id=None,
         permission_generation=3,
         history_policy_generation=4,
     )
